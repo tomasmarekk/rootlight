@@ -1,0 +1,66 @@
+//! Repository tooling for Rootlight's architecture and evidence contracts.
+//!
+//! `cargo xtask` keeps checks in Rust so the same behavior runs on every
+//! supported developer and CI platform.
+
+#![forbid(unsafe_code)]
+
+mod architecture;
+
+use std::{env, process::ExitCode};
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), XtaskError> {
+    let mut args = env::args().skip(1);
+    match args.next().as_deref() {
+        Some("architecture-check") | Some("architecture") => {
+            let fixture_root = parse_fixture_root(&mut args)?;
+            architecture::check(fixture_root.as_deref())?;
+        }
+        Some(command) => return Err(XtaskError::UnknownCommand(command.to_owned())),
+        None => return Err(XtaskError::MissingCommand),
+    }
+
+    if let Some(unexpected) = args.next() {
+        return Err(XtaskError::UnexpectedArgument(unexpected));
+    }
+
+    Ok(())
+}
+
+fn parse_fixture_root(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<Option<std::path::PathBuf>, XtaskError> {
+    match args.next() {
+        None => Ok(None),
+        Some(flag) if flag == "--fixture-root" => args
+            .next()
+            .map(std::path::PathBuf::from)
+            .map(Some)
+            .ok_or(XtaskError::MissingFixtureRoot),
+        Some(argument) => Err(XtaskError::UnexpectedArgument(argument)),
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum XtaskError {
+    #[error("usage: cargo xtask <architecture-check>")]
+    MissingCommand,
+    #[error("unknown xtask command: {0}")]
+    UnknownCommand(String),
+    #[error("unexpected argument: {0}")]
+    UnexpectedArgument(String),
+    #[error("--fixture-root requires a path")]
+    MissingFixtureRoot,
+    #[error(transparent)]
+    Architecture(#[from] architecture::ArchitectureError),
+}

@@ -1,0 +1,8 @@
+schema_version = "1.0"
+workspace_members = ["xtask"]
+dev_only_members = ["xtask"]
+
+[[crates]]
+name = "xtask"
+allowed_internal_dependencies = []
+allow_build_script = false
