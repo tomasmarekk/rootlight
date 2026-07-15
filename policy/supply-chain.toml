@@ -22,6 +22,7 @@ allowed_build_scripts = [
   "io-extras@0.18.4",
   "io-lifetimes@2.0.4",
   "libc@0.2.186",
+  "libsqlite3-sys@0.38.1",
   "num-traits@0.2.19",
   "parking_lot_core@0.9.12",
   "prettyplease@0.2.37",
@@ -67,6 +68,7 @@ allowed_proc_macros = [
 
 # Cargo's `links` metadata is used as the conservative native boundary signal.
 allowed_native_links = [
+  "libsqlite3-sys@0.38.1:sqlite3",
   "prettyplease@0.2.37:prettyplease02",
   "wasm-bindgen-shared@0.2.126:wasm_bindgen",
 ]

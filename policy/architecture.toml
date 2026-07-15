@@ -7,6 +7,7 @@ workspace_members = [
   "rootlight-ids",
   "rootlight-ir",
   "rootlight-mcp-contract",
+  "rootlight-operations",
   "rootlight-protocol",
   "rootlight-vfs",
   "xtask",
@@ -51,6 +52,15 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-mcp-contract"
 allowed_internal_dependencies = ["rootlight-error", "rootlight-ids", "rootlight-ir"]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-operations"
+allowed_internal_dependencies = [
+  "rootlight-cancel",
+  "rootlight-error",
+  "rootlight-ids",
+]
 allow_build_script = false
 
 [[crates]]
