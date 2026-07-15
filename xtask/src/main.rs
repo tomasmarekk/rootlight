@@ -8,6 +8,7 @@
 mod architecture;
 mod ids;
 mod policy;
+mod protobuf_compatibility;
 mod schemas;
 
 use std::{env, process::ExitCode};

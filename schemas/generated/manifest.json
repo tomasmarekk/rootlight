@@ -9,58 +9,6 @@
   },
   "inputs": [
     {
-      "path": "Cargo.lock",
-      "blake3": "84a69eb5d17847d10b0bee3e83cbe6a0e8ad08db33a64147d8e53acb7c6d44a9"
-    },
-    {
-      "path": "Cargo.toml",
-      "blake3": "d51b446ed5f8c157e4d3a11b6e042997035ed6e583e1a9455c748f9e7944ec96"
-    },
-    {
-      "path": "crates/rootlight-config/Cargo.toml",
-      "blake3": "7e8c7073dae4c69427f6862212d2fff40747c300b309dc9a53b793ae0d554fbc"
-    },
-    {
-      "path": "crates/rootlight-config/src/lib.rs",
-      "blake3": "3e27887a5fc47d3f439a838da18cf0851cd1f77ca89563edf839ebc990b4f410"
-    },
-    {
-      "path": "crates/rootlight-error/Cargo.toml",
-      "blake3": "e919b483cb344e2ec67737de5b48f183112cbc923ad5c1475e03e9a41d97f1db"
-    },
-    {
-      "path": "crates/rootlight-error/src/lib.rs",
-      "blake3": "61d246d0547340e2bbb7875ad54c9b43218c82985bd901e9ba19dc1d4442a0b1"
-    },
-    {
-      "path": "crates/rootlight-ids/Cargo.toml",
-      "blake3": "c6725374a18f6519f5bbb27aab8400c319b3554f36019701986498bb6ac25c9e"
-    },
-    {
-      "path": "crates/rootlight-ids/src/lib.rs",
-      "blake3": "ef966247fd79b92052c0d8d9b6935017e979420ebb83fa671a3dba27cf4322a2"
-    },
-    {
-      "path": "crates/rootlight-ir/Cargo.toml",
-      "blake3": "912ee0e756c4259302d4e42c4501e08baf1b20b1edcccf7e37b8cd674f139276"
-    },
-    {
-      "path": "crates/rootlight-ir/src/lib.rs",
-      "blake3": "b235704b1844609d00d02e40a213712cb8557d72ea417f4a3ab2fa89b252c34e"
-    },
-    {
-      "path": "crates/rootlight-mcp-contract/Cargo.toml",
-      "blake3": "861453f16069a3a25a4b9e6d9af94bae8d78b831c9b0645c739e077a1e33d4e4"
-    },
-    {
-      "path": "crates/rootlight-mcp-contract/src/lib.rs",
-      "blake3": "5e22e06e46e5b7e348afff7fbfe6a4a5d127133f4a9973c86d4afcd5363e59a5"
-    },
-    {
-      "path": "crates/rootlight-protocol/Cargo.toml",
-      "blake3": "d56853a77f9875d15919562b7a1ff3be8745da7a9a2a64c8b4de64ae4be22d71"
-    },
-    {
       "path": "proto/adapter_v1.proto",
       "blake3": "43fe7a21ed61a79460b765500009ceded42de0c666c191eabcd1301421d574c3"
     },
@@ -73,12 +21,36 @@
       "blake3": "4b86a96322a27ef14ec3567f45da89dc05acd20f050ab08f1c493a5679d10c79"
     },
     {
-      "path": "xtask/Cargo.toml",
-      "blake3": "245c6880b3d5024ad380cb112d2935153906d8fd80f6cfd419e7dcdb6a8af17f"
+      "path": "tests/fixtures/compatibility/contract-0.1.json",
+      "blake3": "9b22581f6df7985a5849770c72da4e2476e0c5860dd9f3a9f827862395d31af8"
     },
     {
-      "path": "xtask/src/schemas.rs",
-      "blake3": "5e89d43bf9e0792b4268aecde4f51acf5066c1bcd314018d1fcf179cf69747a9"
+      "path": "tests/fixtures/compatibility/contract-0.2.json",
+      "blake3": "60be23886a74b7b58a6dfb44fa16cde54314bdb42d46161f6f1f269b3a67c952"
+    },
+    {
+      "path": "tests/fixtures/compatibility/contract-1.0.json",
+      "blake3": "48fecf19b132b9f6bbd2ca2f56f4a2328c403b1352781746aea973dcdc9f142b"
+    },
+    {
+      "path": "tests/fixtures/compatibility/contract-2.0-rejected.json",
+      "blake3": "35944c64bab7bfb0a413b4581a82d8b1d834f15c288e5dedf55d62f719902cc7"
+    },
+    {
+      "path": "tests/fixtures/compatibility/ir/1.0/document.json",
+      "blake3": "f59ca69f01b2c9be2d62f687e2a2ffac6bcc726ce30bdfd28f478bcbdcc01d7d"
+    },
+    {
+      "path": "tests/fixtures/compatibility/protobuf/1.0/contract-version.bin",
+      "blake3": "8d51dfa93db52b10f98b12fa72c69841f9cd4a015d862cf2cd2de1b4b6fda540"
+    },
+    {
+      "path": "tests/fixtures/compatibility/protobuf/1.0/contract-version.json",
+      "blake3": "77e3c2cfa29c0eeadd8739e1562ea857510090354a161f6959698160f8ac979f"
+    },
+    {
+      "path": "tests/fixtures/compatibility/protobuf/1.0/rootlight.desc",
+      "blake3": "bd81513e2a4612fd1fe0f03de05aa135716530643b7d399c92763626baa94043"
     }
   ],
   "artifacts": [

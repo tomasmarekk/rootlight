@@ -1,0 +1,10 @@
+{
+  "fixture_version": "1.0",
+  "message": "rootlight.common.v1.ContractVersion",
+  "wire_hex": "08011007",
+  "blake3": "8d51dfa93db52b10f98b12fa72c69841f9cd4a015d862cf2cd2de1b4b6fda540",
+  "expected": {
+    "major": 1,
+    "minor": 7
+  }
+}

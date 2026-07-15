@@ -4,5 +4,22 @@
   "disposition": "unsupported_major",
   "configuration": {
     "version": "2.0"
+  },
+  "ir": {
+    "version": {
+      "major": 2,
+      "minor": 0
+    },
+    "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+    "producer": {
+      "name": "rootlight-fixture",
+      "version": "2.0",
+      "configuration_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+    },
+    "build_context": {
+      "digest": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+    },
+    "coverage": "complete",
+    "evidence": "syntax"
   }
 }

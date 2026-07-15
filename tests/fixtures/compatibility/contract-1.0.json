@@ -22,5 +22,10 @@
     "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
     "coverage": "complete",
     "trust": "untrusted_repository_data"
+  },
+  "ir_document": "ir/1.0/document.json",
+  "protobuf": {
+    "descriptor": "protobuf/1.0/rootlight.desc",
+    "wire_fixture": "protobuf/1.0/contract-version.json"
   }
 }

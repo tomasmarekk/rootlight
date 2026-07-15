@@ -11,6 +11,7 @@ use std::{
 
 use cargo_metadata::MetadataCommand;
 use prost::Message;
+use prost_types::FileDescriptorSet;
 use rootlight_config::ConfigDocumentSchema;
 use rootlight_ir::IrDocumentSchema;
 use rootlight_mcp_contract::{ErrorResponse, ResponseMetadata};
@@ -33,6 +34,12 @@ const COMPATIBILITY_FILES: [&str; 4] = [
     "contract-0.2.json",
     "contract-1.0.json",
     "contract-2.0-rejected.json",
+];
+const COMPATIBILITY_BASELINES: [&str; 4] = [
+    "ir/1.0/document.json",
+    "protobuf/1.0/contract-version.bin",
+    "protobuf/1.0/contract-version.json",
+    "protobuf/1.0/rootlight.desc",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +98,7 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
                         version: fixture.contract_version,
                     });
                 }
-                let configuration = fixture.configuration.ok_or_else(|| {
+                let configuration = fixture.configuration.as_ref().ok_or_else(|| {
                     SchemaError::CompatibilityMissingConfiguration {
                         version: fixture.contract_version.clone(),
                     }
@@ -115,24 +122,27 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
                 validate_configuration_schema(
                     &workspace_root,
                     &fixture.contract_version,
-                    &configuration,
+                    configuration,
                     true,
                 )?;
-                validate_configuration_semantics(&fixture.contract_version, &configuration)?;
-                let metadata = fixture.mcp_response_metadata.ok_or_else(|| {
+                validate_configuration_semantics(&fixture.contract_version, configuration)?;
+                let metadata = fixture.mcp_response_metadata.as_ref().ok_or_else(|| {
                     SchemaError::CompatibilityMissingMcpMetadata {
                         version: fixture.contract_version.clone(),
                     }
                 })?;
-                serde_json::from_value::<ResponseMetadata>(metadata).map_err(|source| {
+                serde_json::from_value::<ResponseMetadata>(metadata.clone()).map_err(|source| {
                     SchemaError::CompatibilityMcpRejected {
-                        version: fixture.contract_version,
+                        version: fixture.contract_version.clone(),
                         source,
                     }
                 })?;
+                if fixture.disposition == FixtureDisposition::Production {
+                    validate_production_baselines(&workspace_root, &fixture)?;
+                }
             }
             FixtureDisposition::UnsupportedMajor => {
-                let configuration = fixture.configuration.ok_or_else(|| {
+                let configuration = fixture.configuration.as_ref().ok_or_else(|| {
                     SchemaError::CompatibilityMissingConfiguration {
                         version: fixture.contract_version.clone(),
                     }
@@ -146,7 +156,7 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
                 validate_configuration_schema(
                     &workspace_root,
                     &fixture.contract_version,
-                    &configuration,
+                    configuration,
                     false,
                 )?;
                 let parsed = rootlight_config::ContractVersion::parse(version)
@@ -154,12 +164,21 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
                 if parsed.require_supported().is_ok() {
                     return Err(SchemaError::CompatibilityExpectedMajorRejection);
                 }
+                let ir = fixture
+                    .ir
+                    .ok_or(SchemaError::CompatibilityMissingIrDocument {
+                        version: fixture.contract_version.clone(),
+                    })?;
+                validate_ir_document(&workspace_root, &fixture.contract_version, &ir, false)?;
             }
         }
     }
 
-    validate_protobuf_unknown_field()?;
-    println!("compatibility fixtures verified");
+    validate_protobuf_unknown_field_skip()?;
+    println!("compatibility: configuration and MCP fixtures verified");
+    println!("compatibility: frozen protobuf descriptor is a compatible subset");
+    println!("compatibility: frozen protobuf wire semantics verified");
+    println!("compatibility: frozen IR document and major rejection verified");
     Ok(())
 }
 
@@ -249,7 +268,128 @@ fn toml_scalar(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn validate_protobuf_unknown_field() -> Result<(), SchemaError> {
+fn validate_production_baselines(
+    workspace_root: &Path,
+    fixture: &CompatibilityFixture,
+) -> Result<(), SchemaError> {
+    let ir_path = fixture.ir_document.as_deref().ok_or_else(|| {
+        SchemaError::CompatibilityMissingIrDocument {
+            version: fixture.contract_version.clone(),
+        }
+    })?;
+    let ir = read_json_value(&workspace_root.join(COMPATIBILITY_ROOT).join(ir_path))?;
+    validate_ir_document(workspace_root, &fixture.contract_version, &ir, true)?;
+
+    let protobuf =
+        fixture
+            .protobuf
+            .as_ref()
+            .ok_or_else(|| SchemaError::CompatibilityMissingProtobuf {
+                version: fixture.contract_version.clone(),
+            })?;
+    validate_descriptor_baseline(workspace_root, &protobuf.descriptor)?;
+    validate_wire_baseline(workspace_root, &protobuf.wire_fixture)
+}
+
+fn validate_ir_document(
+    workspace_root: &Path,
+    fixture_version: &str,
+    document: &serde_json::Value,
+    expected_valid: bool,
+) -> Result<(), SchemaError> {
+    let path = workspace_root
+        .join(SCHEMA_ROOT)
+        .join("json/ir-1.0.schema.json");
+    let schema: serde_json::Value = serde_json::from_slice(&read_bytes(&path)?)
+        .map_err(|source| SchemaError::ParseGeneratedJson { path, source })?;
+    let validator = jsonschema::draft202012::new(&schema).map_err(|source| {
+        SchemaError::CompileGeneratedSchema {
+            name: "ir-1.0.schema.json".to_owned(),
+            detail: source.to_string(),
+        }
+    })?;
+    let schema_valid = validator.is_valid(document);
+    let decode_valid = serde_json::from_value::<IrDocumentSchema>(document.clone()).is_ok();
+    if schema_valid != expected_valid || decode_valid != expected_valid {
+        return Err(SchemaError::CompatibilityIrValidity {
+            version: fixture_version.to_owned(),
+            expected_valid,
+            schema_valid,
+            decode_valid,
+        });
+    }
+    Ok(())
+}
+
+fn validate_descriptor_baseline(
+    workspace_root: &Path,
+    descriptor_relative: &str,
+) -> Result<(), SchemaError> {
+    let historical_path = workspace_root
+        .join(COMPATIBILITY_ROOT)
+        .join(descriptor_relative);
+    let current_path = workspace_root
+        .join(SCHEMA_ROOT)
+        .join("protobuf/rootlight.desc");
+    let historical = FileDescriptorSet::decode(read_bytes(&historical_path)?.as_slice())
+        .map_err(SchemaError::CompatibilityDescriptorDecode)?;
+    let current = FileDescriptorSet::decode(read_bytes(&current_path)?.as_slice())
+        .map_err(SchemaError::CompatibilityDescriptorDecode)?;
+    crate::protobuf_compatibility::require_compatible(&historical, &current)
+        .map_err(SchemaError::CompatibilityDescriptor)
+}
+
+fn validate_wire_baseline(
+    workspace_root: &Path,
+    fixture_relative: &str,
+) -> Result<(), SchemaError> {
+    let fixture_path = workspace_root
+        .join(COMPATIBILITY_ROOT)
+        .join(fixture_relative);
+    let fixture: ProtobufWireFixture = serde_json::from_value(read_json_value(&fixture_path)?)
+        .map_err(|source| SchemaError::ParseCompatibilityFixture {
+            path: fixture_path.clone(),
+            source,
+        })?;
+    if fixture.fixture_version != MANIFEST_VERSION
+        || fixture.message != "rootlight.common.v1.ContractVersion"
+    {
+        return Err(SchemaError::CompatibilityProtobufFixture);
+    }
+    let wire_relative = Path::new(fixture_relative).with_file_name("contract-version.bin");
+    let wire_path = workspace_root.join(COMPATIBILITY_ROOT).join(wire_relative);
+    let wire = read_bytes(&wire_path)?;
+    if hex(&wire) != fixture.wire_hex || blake3::hash(&wire).to_hex().as_str() != fixture.blake3 {
+        return Err(SchemaError::CompatibilityProtobufFixture);
+    }
+    let decoded = ProtocolContractVersion::decode(wire.as_slice())
+        .map_err(SchemaError::CompatibilityProtobufDecode)?;
+    if decoded.major != fixture.expected.major || decoded.minor != fixture.expected.minor {
+        return Err(SchemaError::CompatibilityProtobufSemantics);
+    }
+    Ok(())
+}
+
+fn read_json_value(path: &Path) -> Result<serde_json::Value, SchemaError> {
+    serde_json::from_slice(&read_bytes(path)?).map_err(|source| {
+        SchemaError::ParseCompatibilityFixture {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn validate_protobuf_unknown_field_skip() -> Result<(), SchemaError> {
     let mut encoded = ProtocolContractVersion { major: 1, minor: 0 }.encode_to_vec();
     encoded.extend_from_slice(&[0x98, 0x06, 0x07]);
     let decoded = ProtocolContractVersion::decode(encoded.as_slice())
@@ -582,23 +722,16 @@ fn generation_inputs(workspace_root: &Path) -> Result<Vec<ArtifactRecord>, Schem
         .iter()
         .map(|name| format!("proto/{name}"))
         .collect();
-    paths.extend([
-        "Cargo.lock".to_owned(),
-        "Cargo.toml".to_owned(),
-        "crates/rootlight-config/Cargo.toml".to_owned(),
-        "crates/rootlight-config/src/lib.rs".to_owned(),
-        "crates/rootlight-error/Cargo.toml".to_owned(),
-        "crates/rootlight-error/src/lib.rs".to_owned(),
-        "crates/rootlight-ids/Cargo.toml".to_owned(),
-        "crates/rootlight-ids/src/lib.rs".to_owned(),
-        "crates/rootlight-ir/Cargo.toml".to_owned(),
-        "crates/rootlight-ir/src/lib.rs".to_owned(),
-        "crates/rootlight-mcp-contract/Cargo.toml".to_owned(),
-        "crates/rootlight-mcp-contract/src/lib.rs".to_owned(),
-        "crates/rootlight-protocol/Cargo.toml".to_owned(),
-        "xtask/Cargo.toml".to_owned(),
-        "xtask/src/schemas.rs".to_owned(),
-    ]);
+    paths.extend(
+        COMPATIBILITY_FILES
+            .iter()
+            .map(|name| format!("{COMPATIBILITY_ROOT}/{name}")),
+    );
+    paths.extend(
+        COMPATIBILITY_BASELINES
+            .iter()
+            .map(|name| format!("{COMPATIBILITY_ROOT}/{name}")),
+    );
     paths.sort();
     paths
         .into_iter()
@@ -765,6 +898,33 @@ struct CompatibilityFixture {
     disposition: FixtureDisposition,
     configuration: Option<serde_json::Value>,
     mcp_response_metadata: Option<serde_json::Value>,
+    ir_document: Option<String>,
+    ir: Option<serde_json::Value>,
+    protobuf: Option<ProtobufBaselines>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtobufBaselines {
+    descriptor: String,
+    wire_fixture: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtobufWireFixture {
+    fixture_version: String,
+    message: String,
+    wire_hex: String,
+    blake3: String,
+    expected: ProtocolVersionFixture,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtocolVersionFixture {
+    major: u32,
+    minor: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -855,7 +1015,26 @@ pub(crate) enum SchemaError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("COMPAT_PROTOBUF_DECODE: additive protobuf field fixture failed to decode")]
+    #[error("COMPAT_IR_MISSING: fixture {version} has no normalized IR contract")]
+    CompatibilityMissingIrDocument { version: String },
+    #[error(
+        "COMPAT_IR_VALIDITY: fixture {version} expected valid={expected_valid}, schema={schema_valid}, decode={decode_valid}"
+    )]
+    CompatibilityIrValidity {
+        version: String,
+        expected_valid: bool,
+        schema_valid: bool,
+        decode_valid: bool,
+    },
+    #[error("COMPAT_PROTOBUF_MISSING: fixture {version} has no protobuf baseline")]
+    CompatibilityMissingProtobuf { version: String },
+    #[error("COMPAT_PROTOBUF_DESCRIPTOR_DECODE: frozen descriptor failed to decode")]
+    CompatibilityDescriptorDecode(#[source] prost::DecodeError),
+    #[error("COMPAT_PROTOBUF_DESCRIPTOR: frozen descriptor is incompatible: {0}")]
+    CompatibilityDescriptor(#[source] crate::protobuf_compatibility::CompatibilityError),
+    #[error("COMPAT_PROTOBUF_FIXTURE: frozen wire fixture metadata or digest is invalid")]
+    CompatibilityProtobufFixture,
+    #[error("COMPAT_PROTOBUF_DECODE: protobuf wire fixture failed to decode")]
     CompatibilityProtobufDecode(#[source] prost::DecodeError),
     #[error("COMPAT_PROTOBUF_SEMANTICS: additive protobuf field changed known values")]
     CompatibilityProtobufSemantics,
@@ -917,5 +1096,32 @@ mod tests {
         assert_eq!(outputs.len(), artifacts.len() + 1);
         assert!(outputs.contains(&format!("{SCHEMA_ROOT}/manifest.json")));
         assert!(!artifacts.contains(&format!("{SCHEMA_ROOT}/manifest.json")));
+    }
+
+    #[test]
+    fn manifest_inputs_are_declarative_contracts_and_frozen_baselines() {
+        let root = workspace_root().expect("workspace metadata is available");
+        let observed: Vec<String> = generation_inputs(&root)
+            .expect("manifest inputs digest")
+            .into_iter()
+            .map(|record| record.path)
+            .collect();
+        let mut expected: Vec<String> = PROTO_FILES
+            .iter()
+            .map(|name| format!("proto/{name}"))
+            .chain(
+                COMPATIBILITY_FILES
+                    .iter()
+                    .map(|name| format!("{COMPATIBILITY_ROOT}/{name}")),
+            )
+            .chain(
+                COMPATIBILITY_BASELINES
+                    .iter()
+                    .map(|name| format!("{COMPATIBILITY_ROOT}/{name}")),
+            )
+            .collect();
+        expected.sort();
+
+        assert_eq!(observed, expected);
     }
 }
