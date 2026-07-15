@@ -15,4 +15,80 @@ message ServerHello {
   rootlight.common.v1.ContractVersion selected_protocol = 1;
   repeated string capabilities = 2;
   optional rootlight.common.v1.PublicError error = 3;
+  bytes instance_nonce = 4;
+}
+
+// Bounded request envelope for one local daemon operation.
+message RequestEnvelope {
+  uint64 request_id = 1;
+  bytes instance_nonce = 2;
+  oneof request {
+    HealthRequest health = 10;
+    OperationStatusRequest operation_status = 11;
+    OperationCancelRequest operation_cancel = 12;
+  }
+}
+
+// Bounded response envelope paired with one request identifier.
+message ResponseEnvelope {
+  uint64 request_id = 1;
+  oneof response {
+    HealthResponse health = 10;
+    OperationStatusResponse operation_status = 11;
+    OperationCancelResponse operation_cancel = 12;
+    rootlight.common.v1.PublicError error = 20;
+  }
+}
+
+// Source-free daemon health request.
+message HealthRequest {}
+
+// Source-free daemon health and readiness response.
+message HealthResponse {
+  bool ready = 1;
+  uint32 active_operations = 2;
+  uint32 admitted_operations = 3;
+  string protocol_version = 4;
+}
+
+// Durable operation lifecycle state.
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  QUEUED = 1;
+  RUNNING = 2;
+  CANCELLING = 3;
+  SUCCEEDED = 4;
+  FAILED = 5;
+  INTERRUPTED = 6;
+}
+
+// Durable operation status safe for local clients.
+message OperationStatus {
+  rootlight.common.v1.OperationId operation = 1;
+  OperationState state = 2;
+  uint64 revision = 3;
+  uint32 completed_units = 4;
+  uint32 total_units = 5;
+  optional rootlight.common.v1.PublicError error = 6;
+}
+
+// Requests the latest durable state for one operation.
+message OperationStatusRequest {
+  rootlight.common.v1.OperationId operation = 1;
+}
+
+// Returns one durable operation state.
+message OperationStatusResponse {
+  OperationStatus operation = 1;
+}
+
+// Requests cooperative cancellation for one operation.
+message OperationCancelRequest {
+  rootlight.common.v1.OperationId operation = 1;
+}
+
+// Reports whether cancellation was newly requested.
+message OperationCancelResponse {
+  OperationStatus operation = 1;
+  bool accepted = 2;
 }

@@ -25,4 +25,187 @@ pub struct ServerHello {
     #[prost(message, optional, tag = "3")]
     #[allow(missing_docs)]
     pub error: ::core::option::Option<super::super::common::v1::PublicError>,
+    #[prost(bytes = "vec", tag = "4")]
+    #[allow(missing_docs)]
+    pub instance_nonce: ::prost::alloc::vec::Vec<u8>,
+}
+/// Bounded request envelope for one local daemon operation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RequestEnvelope {
+    #[prost(uint64, tag = "1")]
+    #[allow(missing_docs)]
+    pub request_id: u64,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub instance_nonce: ::prost::alloc::vec::Vec<u8>,
+    #[prost(oneof = "request_envelope::Request", tags = "10, 11, 12")]
+    #[allow(missing_docs)]
+    pub request: ::core::option::Option<request_envelope::Request>,
+}
+/// Nested message and enum types in `RequestEnvelope`.
+pub mod request_envelope {
+    #[allow(missing_docs)]
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Request {
+        #[prost(message, tag = "10")]
+        #[allow(missing_docs)]
+        Health(super::HealthRequest),
+        #[prost(message, tag = "11")]
+        #[allow(missing_docs)]
+        OperationStatus(super::OperationStatusRequest),
+        #[prost(message, tag = "12")]
+        #[allow(missing_docs)]
+        OperationCancel(super::OperationCancelRequest),
+    }
+}
+/// Bounded response envelope paired with one request identifier.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ResponseEnvelope {
+    #[prost(uint64, tag = "1")]
+    #[allow(missing_docs)]
+    pub request_id: u64,
+    #[prost(oneof = "response_envelope::Response", tags = "10, 11, 12, 20")]
+    #[allow(missing_docs)]
+    pub response: ::core::option::Option<response_envelope::Response>,
+}
+/// Nested message and enum types in `ResponseEnvelope`.
+pub mod response_envelope {
+    #[allow(missing_docs)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Response {
+        #[prost(message, tag = "10")]
+        #[allow(missing_docs)]
+        Health(super::HealthResponse),
+        #[prost(message, tag = "11")]
+        #[allow(missing_docs)]
+        OperationStatus(super::OperationStatusResponse),
+        #[prost(message, tag = "12")]
+        #[allow(missing_docs)]
+        OperationCancel(super::OperationCancelResponse),
+        #[prost(message, tag = "20")]
+        #[allow(missing_docs)]
+        Error(super::super::super::common::v1::PublicError),
+    }
+}
+/// Source-free daemon health request.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HealthRequest {}
+/// Source-free daemon health and readiness response.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HealthResponse {
+    #[prost(bool, tag = "1")]
+    #[allow(missing_docs)]
+    pub ready: bool,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub active_operations: u32,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub admitted_operations: u32,
+    #[prost(string, tag = "4")]
+    #[allow(missing_docs)]
+    pub protocol_version: ::prost::alloc::string::String,
+}
+/// Durable operation status safe for local clients.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OperationStatus {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub operation: ::core::option::Option<super::super::common::v1::OperationId>,
+    #[prost(enumeration = "OperationState", tag = "2")]
+    #[allow(missing_docs)]
+    pub state: i32,
+    #[prost(uint64, tag = "3")]
+    #[allow(missing_docs)]
+    pub revision: u64,
+    #[prost(uint32, tag = "4")]
+    #[allow(missing_docs)]
+    pub completed_units: u32,
+    #[prost(uint32, tag = "5")]
+    #[allow(missing_docs)]
+    pub total_units: u32,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub error: ::core::option::Option<super::super::common::v1::PublicError>,
+}
+/// Requests the latest durable state for one operation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OperationStatusRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub operation: ::core::option::Option<super::super::common::v1::OperationId>,
+}
+/// Returns one durable operation state.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OperationStatusResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub operation: ::core::option::Option<OperationStatus>,
+}
+/// Requests cooperative cancellation for one operation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OperationCancelRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub operation: ::core::option::Option<super::super::common::v1::OperationId>,
+}
+/// Reports whether cancellation was newly requested.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OperationCancelResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub operation: ::core::option::Option<OperationStatus>,
+    #[prost(bool, tag = "2")]
+    #[allow(missing_docs)]
+    pub accepted: bool,
+}
+/// Durable operation lifecycle state.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum OperationState {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    Queued = 1,
+    #[allow(missing_docs)]
+    Running = 2,
+    #[allow(missing_docs)]
+    Cancelling = 3,
+    #[allow(missing_docs)]
+    Succeeded = 4,
+    #[allow(missing_docs)]
+    Failed = 5,
+    #[allow(missing_docs)]
+    Interrupted = 6,
+}
+impl OperationState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "OPERATION_STATE_UNSPECIFIED",
+            Self::Queued => "QUEUED",
+            Self::Running => "RUNNING",
+            Self::Cancelling => "CANCELLING",
+            Self::Succeeded => "SUCCEEDED",
+            Self::Failed => "FAILED",
+            Self::Interrupted => "INTERRUPTED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "OPERATION_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "QUEUED" => Some(Self::Queued),
+            "RUNNING" => Some(Self::Running),
+            "CANCELLING" => Some(Self::Cancelling),
+            "SUCCEEDED" => Some(Self::Succeeded),
+            "FAILED" => Some(Self::Failed),
+            "INTERRUPTED" => Some(Self::Interrupted),
+            _ => None,
+        }
+    }
 }
