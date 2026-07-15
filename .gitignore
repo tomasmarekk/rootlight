@@ -1,0 +1,5 @@
+# Local overrides
+/development-docs/
+AGENTS.md
+.agents/
+.codebook/
