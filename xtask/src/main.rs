@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod architecture;
+mod ids;
 
 use std::{env, process::ExitCode};
 
@@ -26,6 +27,7 @@ fn run() -> Result<(), XtaskError> {
             let fixture_root = parse_fixture_root(&mut args)?;
             architecture::check(fixture_root.as_deref())?;
         }
+        Some("id-vectors") => ids::print_vectors()?,
         Some(command) => return Err(XtaskError::UnknownCommand(command.to_owned())),
         None => return Err(XtaskError::MissingCommand),
     }
@@ -63,4 +65,6 @@ enum XtaskError {
     MissingFixtureRoot,
     #[error(transparent)]
     Architecture(#[from] architecture::ArchitectureError),
+    #[error(transparent)]
+    IdVectors(#[from] ids::IdVectorError),
 }
