@@ -7,6 +7,7 @@
 
 mod architecture;
 mod ids;
+mod schemas;
 
 use std::{env, process::ExitCode};
 
@@ -28,6 +29,11 @@ fn run() -> Result<(), XtaskError> {
             architecture::check(fixture_root.as_deref())?;
         }
         Some("id-vectors") => ids::print_vectors()?,
+        Some("generate") | Some("schemas") => {
+            let mode = parse_generate_mode(&mut args)?;
+            schemas::generate(mode)?;
+        }
+        Some("compatibility-check") | Some("compatibility") => schemas::check_compatibility()?,
         Some(command) => return Err(XtaskError::UnknownCommand(command.to_owned())),
         None => return Err(XtaskError::MissingCommand),
     }
@@ -37,6 +43,16 @@ fn run() -> Result<(), XtaskError> {
     }
 
     Ok(())
+}
+
+fn parse_generate_mode(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<schemas::GenerateMode, XtaskError> {
+    match args.next() {
+        None => Ok(schemas::GenerateMode::Update),
+        Some(flag) if flag == "--check" => Ok(schemas::GenerateMode::Check),
+        Some(argument) => Err(XtaskError::UnexpectedArgument(argument)),
+    }
 }
 
 fn parse_fixture_root(
@@ -55,7 +71,9 @@ fn parse_fixture_root(
 
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
-    #[error("usage: cargo xtask <architecture-check>")]
+    #[error(
+        "usage: cargo xtask <architecture-check|compatibility-check|id-vectors|generate [--check]>"
+    )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
     UnknownCommand(String),
@@ -67,4 +85,6 @@ enum XtaskError {
     Architecture(#[from] architecture::ArchitectureError),
     #[error(transparent)]
     IdVectors(#[from] ids::IdVectorError),
+    #[error(transparent)]
+    Schemas(#[from] schemas::SchemaError),
 }

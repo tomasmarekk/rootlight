@@ -48,5 +48,12 @@ allow_build_script = false
 
 [[crates]]
 name = "xtask"
-allowed_internal_dependencies = ["rootlight-ids"]
+allowed_internal_dependencies = [
+  "rootlight-config",
+  "rootlight-error",
+  "rootlight-ids",
+  "rootlight-ir",
+  "rootlight-mcp-contract",
+  "rootlight-protocol",
+]
 allow_build_script = false

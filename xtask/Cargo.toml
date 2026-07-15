@@ -7,10 +7,23 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+blake3.workspace = true
 cargo_metadata.workspace = true
-rootlight-ids = { path = "../crates/rootlight-ids" }
+jsonschema.workspace = true
+prost.workspace = true
+prost-build.workspace = true
+prost-types.workspace = true
+protoc-bin-vendored.workspace = true
+rootlight-config = { path = "../crates/rootlight-config", features = ["schema"] }
+rootlight-error = { path = "../crates/rootlight-error", features = ["schema"] }
+rootlight-ids = { path = "../crates/rootlight-ids", features = ["schema"] }
+rootlight-ir = { path = "../crates/rootlight-ir", features = ["schema"] }
+rootlight-mcp-contract = { path = "../crates/rootlight-mcp-contract" }
+rootlight-protocol = { path = "../crates/rootlight-protocol" }
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 

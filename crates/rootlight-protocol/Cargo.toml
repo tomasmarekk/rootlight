@@ -7,8 +7,12 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+prost.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+prost-types.workspace = true
 
 [lints]
 workspace = true

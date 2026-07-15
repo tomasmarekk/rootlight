@@ -18,6 +18,7 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Stable public error families shared by all Rootlight boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[non_exhaustive]
 pub enum ErrorCode {
@@ -57,8 +58,15 @@ pub enum ErrorCode {
 
 /// A validated key for a bounded public error detail.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
-pub struct DetailKey(String);
+pub struct DetailKey(
+    #[cfg_attr(
+        feature = "schema",
+        schemars(length(min = 1, max = 64), regex(pattern = r"^[a-z0-9_]+$"))
+    )]
+    String,
+);
 
 impl DetailKey {
     /// Parses a key containing only lowercase ASCII letters, digits, and `_`.
@@ -94,8 +102,15 @@ impl fmt::Debug for DetailKey {
 
 /// A short source-free label permitted in public diagnostics.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
-pub struct SafeLabel(String);
+pub struct SafeLabel(
+    #[cfg_attr(
+        feature = "schema",
+        schemars(length(min = 1, max = 128), regex(pattern = r"^[A-Za-z0-9_.:-]+$"))
+    )]
+    String,
+);
 
 impl SafeLabel {
     /// Parses an ASCII label that cannot contain paths, whitespace, or controls.
@@ -131,7 +146,13 @@ impl fmt::Debug for SafeLabel {
 
 /// Bounded primitive values permitted in public error details.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(
+    deny_unknown_fields,
+    tag = "type",
+    content = "value",
+    rename_all = "snake_case"
+)]
 #[non_exhaustive]
 pub enum PublicValue {
     /// A boolean property.
@@ -152,7 +173,8 @@ pub enum PublicValue {
 
 /// Stable remediation hints generated from a closed set of templates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields, tag = "action", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum NextAction {
     /// Correct one named input field.
@@ -173,16 +195,22 @@ pub enum NextAction {
 }
 
 /// A stable source-redacted failure safe to serialize across public boundaries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct PublicError {
     code: ErrorCode,
-    message: &'static str,
+    #[cfg_attr(feature = "schema", schemars(length(max = 1_024)))]
+    message: String,
     retryable: bool,
+    #[cfg_attr(feature = "schema", schemars(range(max = 86_400_000)))]
     retry_after_ms: Option<u64>,
     repository: Option<RepositoryId>,
     operation: Option<OperationId>,
     generation: Option<GenerationId>,
+    #[cfg_attr(feature = "schema", schemars(length(max = 32)))]
     details: BTreeMap<DetailKey, PublicValue>,
+    #[cfg_attr(feature = "schema", schemars(length(max = 8)))]
     next_actions: Vec<NextAction>,
 }
 
@@ -200,8 +228,8 @@ impl PublicError {
 
     /// Returns the source-free display template.
     #[must_use]
-    pub const fn message(&self) -> &'static str {
-        self.message
+    pub fn message(&self) -> &str {
+        &self.message
     }
 
     /// Reports whether an unchanged request may succeed when retried.
@@ -262,7 +290,7 @@ impl PublicErrorBuilder {
         Self {
             error: PublicError {
                 code,
-                message,
+                message: message.to_owned(),
                 retryable: false,
                 retry_after_ms: None,
                 repository: None,

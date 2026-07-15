@@ -1,0 +1,26 @@
+{
+  "fixture_version": "1.0",
+  "contract_version": "1.0",
+  "disposition": "production",
+  "configuration": {
+    "version": "1.2",
+    "security": {
+      "network": "deny",
+      "repository_execution": "deny",
+      "in_process_native_plugins": "deny"
+    },
+    "resources": {
+      "max_source_bytes": 65536,
+      "max_results": 50
+    },
+    "analysis": {
+      "default_tier": "structural"
+    }
+  },
+  "mcp_response_metadata": {
+    "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+    "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+    "coverage": "complete",
+    "trust": "untrusted_repository_data"
+  }
+}

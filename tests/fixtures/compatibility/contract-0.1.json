@@ -1,0 +1,17 @@
+{
+  "fixture_version": "1.0",
+  "contract_version": "0.1",
+  "disposition": "draft_legacy",
+  "configuration": {
+    "version": "1.0",
+    "security": {
+      "network": "deny"
+    }
+  },
+  "mcp_response_metadata": {
+    "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+    "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+    "coverage": "unknown",
+    "trust": "untrusted_repository_data"
+  }
+}

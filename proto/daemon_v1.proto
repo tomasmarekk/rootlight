@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package rootlight.daemon.v1;
+
+import "common.proto";
+
+// Client-supported protocol range and optional capability names.
+message ClientHello {
+  rootlight.common.v1.VersionRange supported_protocols = 1;
+  repeated string capabilities = 2;
+}
+
+// Server-selected protocol and the bounded negotiation result.
+message ServerHello {
+  rootlight.common.v1.ContractVersion selected_protocol = 1;
+  repeated string capabilities = 2;
+  optional rootlight.common.v1.PublicError error = 3;
+}

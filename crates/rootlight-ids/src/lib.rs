@@ -92,12 +92,27 @@ pub fn collision_disposition(
 }
 
 macro_rules! define_stable_id {
-    ($name:ident, $size:expr, $prefix:literal, $summary:literal) => {
+    ($name:ident, $size:expr, $prefix:literal, $pattern:literal, $summary:literal) => {
         #[doc = $summary]
         #[repr(transparent)]
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-        pub struct $name(#[cfg_attr(feature = "schema", schemars(with = "String"))] [u8; $size]);
+        pub struct $name([u8; $size]);
+
+        #[cfg(feature = "schema")]
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn json_schema(
+                _generator: &mut schemars::SchemaGenerator,
+            ) -> schemars::Schema {
+                schemars::json_schema!({
+                    "type": "string",
+                    "pattern": $pattern,
+                })
+            }
+        }
 
         impl $name {
             /// Creates the identifier from canonical binary bytes.
@@ -161,42 +176,49 @@ define_stable_id!(
     RepositoryId,
     16,
     "repo1_",
+    "^repo1_[a-z2-7]{32}$",
     "A stable repository identity independent of mutable remote URLs."
 );
 define_stable_id!(
     GenerationId,
     20,
     "gen1_",
+    "^gen1_[a-z2-7]{39}$",
     "An immutable generation identity derived from all semantic build inputs."
 );
 define_stable_id!(
     SymbolId,
     20,
     "sym1_",
+    "^sym1_[a-z2-7]{39}$",
     "A semantic symbol identity independent of storage and parser-local IDs."
 );
 define_stable_id!(
     FileId,
     20,
     "file1_",
+    "^file1_[a-z2-7]{39}$",
     "A repository-scoped identity for a canonical path identity policy."
 );
 define_stable_id!(
     FactId,
     20,
     "fact1_",
+    "^fact1_[a-z2-7]{39}$",
     "A deterministic identity for a canonical semantic fact payload."
 );
 define_stable_id!(
     OperationId,
     16,
     "op1_",
+    "^op1_[a-z2-7]{32}$",
     "An opaque operation handle encoded with the stable public ID codec."
 );
 define_stable_id!(
     ContentHash,
     32,
     "b3_",
+    "^b3_[a-z2-7]{58}$",
     "A full BLAKE3 digest for immutable content."
 );
 

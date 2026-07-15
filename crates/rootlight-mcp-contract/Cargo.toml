@@ -7,9 +7,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-rootlight-error = { path = "../rootlight-error" }
-rootlight-ids = { path = "../rootlight-ids" }
-rootlight-ir = { path = "../rootlight-ir" }
+rootlight-error = { path = "../rootlight-error", features = ["schema"] }
+rootlight-ids = { path = "../rootlight-ids", features = ["schema"] }
+rootlight-ir = { path = "../rootlight-ir", features = ["schema"] }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

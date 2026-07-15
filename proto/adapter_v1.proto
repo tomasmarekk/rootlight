@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package rootlight.adapter.v1;
+
+import "common.proto";
+
+// Source-bound identity of one isolated adapter implementation.
+message AdapterIdentity {
+  string name = 1;
+  string version = 2;
+  bytes source_digest = 3;
+}
+
+// Adapter protocol range, capabilities, and extension declarations.
+message CapabilityAdvertisement {
+  AdapterIdentity adapter = 1;
+  rootlight.common.v1.VersionRange supported_protocols = 2;
+  repeated string capabilities = 3;
+  repeated rootlight.common.v1.ExtensionDescriptor extensions = 4;
+}

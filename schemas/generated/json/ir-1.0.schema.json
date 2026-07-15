@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IrDocumentSchema",
+  "description": "Versioned P0 envelope for normalized IR contract fixtures.",
+  "type": "object",
+  "properties": {
+    "build_context": {
+      "description": "Build context used to interpret conditional source.",
+      "$ref": "#/$defs/BuildContextIdentity"
+    },
+    "coverage": {
+      "description": "Declared completeness of the document.",
+      "$ref": "#/$defs/CoverageStatus"
+    },
+    "evidence": {
+      "description": "Evidence class supporting the document.",
+      "$ref": "#/$defs/EvidenceKind"
+    },
+    "generation": {
+      "description": "Immutable repository generation owning every source reference.",
+      "$ref": "#/$defs/GenerationId"
+    },
+    "producer": {
+      "description": "Producer identity for the contained facts.",
+      "$ref": "#/$defs/ProducerIdentity"
+    },
+    "version": {
+      "description": "IR contract version used by the document.",
+      "$ref": "#/$defs/IrVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "generation",
+    "producer",
+    "build_context",
+    "coverage",
+    "evidence"
+  ],
+  "$defs": {
+    "BuildContextIdentity": {
+      "description": "Stable digest identifying one build-context interpretation.",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/ContentHash"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "digest"
+      ]
+    },
+    "ContentHash": {
+      "type": "string",
+      "pattern": "^b3_[a-z2-7]{58}$"
+    },
+    "CoverageStatus": {
+      "description": "Completeness of a bounded fact or result set.",
+      "oneOf": [
+        {
+          "description": "The declared domain was completely analyzed.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "A documented bound truncated the domain.",
+          "type": "string",
+          "const": "bounded"
+        },
+        {
+          "description": "A representative sample was analyzed.",
+          "type": "string",
+          "const": "sampled"
+        },
+        {
+          "description": "Completeness could not be established.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "EvidenceKind": {
+      "description": "Evidence class supporting a normalized fact.",
+      "oneOf": [
+        {
+          "description": "Direct syntax declaration or occurrence.",
+          "type": "string",
+          "const": "syntax"
+        },
+        {
+          "description": "Compiler or precise index evidence.",
+          "type": "string",
+          "const": "compiler"
+        },
+        {
+          "description": "Language-server evidence.",
+          "type": "string",
+          "const": "language_server"
+        },
+        {
+          "description": "Imported SCIP evidence.",
+          "type": "string",
+          "const": "scip"
+        },
+        {
+          "description": "Bounded deterministic derivation from base facts.",
+          "type": "string",
+          "const": "derived"
+        }
+      ]
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "IrVersion": {
+      "description": "Major/minor version for the normalized IR contract.",
+      "type": "object",
+      "properties": {
+        "major": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "minor": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "major",
+        "minor"
+      ]
+    },
+    "ProducerIdentity": {
+      "description": "Stable identity of the component that produced facts.",
+      "type": "object",
+      "properties": {
+        "configuration_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.+-]+$"
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.+-]+$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "configuration_hash"
+      ]
+    }
+  }
+}

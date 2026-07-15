@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Rootlight configuration 1.0",
+  "description": "Strict external shape of the versioned configuration document.",
+  "type": "object",
+  "properties": {
+    "analysis": {
+      "description": "Optional analysis defaults.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PartialAnalysisConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "extensions": {
+      "description": "Namespaced extensions keyed by their stable namespace.",
+      "$ref": "#/$defs/ExtensionMap",
+      "default": {}
+    },
+    "resources": {
+      "description": "Optional resource limit overrides.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PartialResourceConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "security": {
+      "description": "Optional security policy overrides.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PartialSecurityConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "version": {
+      "description": "Canonical contract version selected by the document.",
+      "$ref": "#/$defs/ContractVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version"
+  ],
+  "$defs": {
+    "AnalysisTier": {
+      "description": "The initial analysis depth selected by configuration.",
+      "oneOf": [
+        {
+          "description": "Syntax and structural facts without compiler execution.",
+          "type": "string",
+          "const": "structural"
+        },
+        {
+          "description": "Isolated deep analysis when capability and policy permit it.",
+          "type": "string",
+          "const": "deep"
+        }
+      ]
+    },
+    "ContractVersion": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)$"
+    },
+    "ExtensionMap": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/WireExtension"
+      },
+      "propertyNames": {
+        "pattern": "^[a-z0-9.-]{1,64}$"
+      }
+    },
+    "NativePluginPolicy": {
+      "description": "Closed in-process native plugin policy.",
+      "oneOf": [
+        {
+          "description": "Native third-party plugins cannot load into the core process.",
+          "type": "string",
+          "const": "deny"
+        }
+      ]
+    },
+    "NetworkPolicy": {
+      "description": "Closed network policy supported by the core configuration.",
+      "oneOf": [
+        {
+          "description": "No inbound or outbound network behavior.",
+          "type": "string",
+          "const": "deny"
+        },
+        {
+          "description": "Authenticated loopback transport only.",
+          "type": "string",
+          "const": "loopback"
+        }
+      ]
+    },
+    "PartialAnalysisConfig": {
+      "type": "object",
+      "properties": {
+        "default_tier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalysisTier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PartialResourceConfig": {
+      "type": "object",
+      "properties": {
+        "max_results": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "maximum": 10000,
+          "minimum": 1
+        },
+        "max_source_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 16777216,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "PartialSecurityConfig": {
+      "type": "object",
+      "properties": {
+        "in_process_native_plugins": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NativePluginPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "network": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repository_execution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepositoryExecutionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RepositoryExecutionPolicy": {
+      "description": "Closed repository execution policy.",
+      "oneOf": [
+        {
+          "description": "Repository-controlled programs are not executed.",
+          "type": "string",
+          "const": "deny"
+        },
+        {
+          "description": "A separately consented operation may execute a fixed command.",
+          "type": "string",
+          "const": "explicit_consent"
+        }
+      ]
+    },
+    "WireExtension": {
+      "type": "object",
+      "properties": {
+        "critical": {
+          "type": "boolean"
+        },
+        "data": {
+          "default": {}
+        },
+        "version": {
+          "$ref": "#/$defs/ContractVersion"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "critical"
+      ]
+    }
+  }
+}

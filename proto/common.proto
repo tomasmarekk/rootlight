@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package rootlight.common.v1;
+
+// Major/minor version for a public protocol contract.
+message ContractVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+// Inclusive protocol range advertised during capability negotiation.
+message VersionRange {
+  ContractVersion minimum = 1;
+  ContractVersion maximum = 2;
+}
+
+// Binary repository identity using the canonical Rootlight ID bytes.
+message RepositoryId {
+  bytes value = 1;
+}
+
+// Binary immutable generation identity using canonical Rootlight ID bytes.
+message GenerationId {
+  bytes value = 1;
+}
+
+// Binary operation handle using canonical Rootlight ID bytes.
+message OperationId {
+  bytes value = 1;
+}
+
+// Closed stable error families shared by all public boundaries.
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  INVALID_ARGUMENT = 1;
+  NOT_FOUND = 2;
+  CONFLICT = 3;
+  STALE_GENERATION = 4;
+  UNSUPPORTED_CAPABILITY = 5;
+  INCOMPLETE_COVERAGE = 6;
+  BUDGET_EXCEEDED = 7;
+  RESOURCE_EXHAUSTED = 8;
+  CANCELLED = 9;
+  ADAPTER_FAILED = 10;
+  INDEX_CORRUPT = 11;
+  MIGRATION_REQUIRED = 12;
+  PERMISSION_DENIED = 13;
+  PROTOCOL_MISMATCH = 14;
+  BUSY = 15;
+  INTERNAL = 16;
+}
+
+// Bounded typed value permitted in a public error detail.
+message PublicValue {
+  oneof value {
+    bool boolean = 1;
+    sint64 integer = 2;
+    uint64 unsigned = 3;
+    RepositoryId repository = 4;
+    GenerationId generation = 5;
+    OperationId operation = 6;
+    string label = 7;
+  }
+}
+
+// Closed remediation hint safe to expose across public boundaries.
+message NextAction {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    CORRECT_FIELD = 1;
+    RETRY = 2;
+    SELECT_SUPPORTED_VERSION = 3;
+    INSPECT_OPERATION = 4;
+    REBUILD_REPOSITORY = 5;
+    COLLECT_SUPPORT_BUNDLE = 6;
+  }
+
+  Kind kind = 1;
+  optional string field = 2;
+}
+
+// Source-redacted error envelope shared by local process boundaries.
+message PublicError {
+  ErrorCode code = 1;
+  string message = 2;
+  bool retryable = 3;
+  optional uint64 retry_after_ms = 4;
+  RepositoryId repository = 5;
+  OperationId operation = 6;
+  GenerationId generation = 7;
+  map<string, PublicValue> details = 8;
+  repeated NextAction next_actions = 9;
+}
+
+// Namespaced extension declaration with explicit compatibility criticality.
+message ExtensionDescriptor {
+  string namespace = 1;
+  ContractVersion version = 2;
+  bool critical = 3;
+}

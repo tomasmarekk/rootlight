@@ -14,6 +14,8 @@ pub const IR_VERSION: IrVersion = IrVersion::new(1, 0);
 
 /// Major/minor version for the normalized IR contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct IrVersion {
     major: u16,
     minor: u16,
@@ -41,6 +43,7 @@ impl IrVersion {
 
 /// A validated half-open source byte span within one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SourceSpan {
     file: FileId,
     start_byte: u64,
@@ -85,6 +88,7 @@ impl SourceSpan {
 
 /// A validated one-based inclusive source line range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LineRange {
     start_line: u64,
     end_line: u64,
@@ -122,6 +126,7 @@ impl LineRange {
 
 /// A generation-bound reference to immutable repository source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SourceRef {
     repository: RepositoryId,
     generation: GenerationId,
@@ -182,6 +187,7 @@ impl SourceRef {
 
 /// Evidence class supporting a normalized fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum EvidenceKind {
@@ -199,6 +205,7 @@ pub enum EvidenceKind {
 
 /// Declared language-analysis tier for one producer or result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AnalysisTier {
@@ -214,7 +221,8 @@ pub enum AnalysisTier {
 
 /// Fixed-point confidence from 0 through 1000 inclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Confidence(u16);
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Confidence(#[cfg_attr(feature = "schema", schemars(range(max = 1_000)))] u16);
 
 impl Confidence {
     /// Creates a checked fixed-point confidence.
@@ -239,6 +247,7 @@ impl Confidence {
 
 /// Completeness of a bounded fact or result set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CoverageStatus {
@@ -254,8 +263,18 @@ pub enum CoverageStatus {
 
 /// Stable identity of the component that produced facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct ProducerIdentity {
+    #[cfg_attr(
+        feature = "schema",
+        schemars(length(min = 1, max = 128), regex(pattern = r"^[A-Za-z0-9_.+-]+$"))
+    )]
     name: String,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(length(min = 1, max = 128), regex(pattern = r"^[A-Za-z0-9_.+-]+$"))
+    )]
     version: String,
     configuration_hash: ContentHash,
 }
@@ -303,6 +322,8 @@ impl ProducerIdentity {
 
 /// Stable digest identifying one build-context interpretation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct BuildContextIdentity {
     digest: ContentHash,
 }
@@ -319,6 +340,25 @@ impl BuildContextIdentity {
     pub const fn digest(self) -> ContentHash {
         self.digest
     }
+}
+
+/// Versioned P0 envelope for normalized IR contract fixtures.
+#[cfg(feature = "schema")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IrDocumentSchema {
+    /// IR contract version used by the document.
+    pub version: IrVersion,
+    /// Immutable repository generation owning every source reference.
+    pub generation: GenerationId,
+    /// Producer identity for the contained facts.
+    pub producer: ProducerIdentity,
+    /// Build context used to interpret conditional source.
+    pub build_context: BuildContextIdentity,
+    /// Declared completeness of the document.
+    pub coverage: CoverageStatus,
+    /// Evidence class supporting the document.
+    pub evidence: EvidenceKind,
 }
 
 fn valid_label(value: &str) -> bool {

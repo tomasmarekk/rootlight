@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResponseMetadata",
+  "description": "Foundation metadata included by future bounded MCP read responses.",
+  "type": "object",
+  "properties": {
+    "coverage": {
+      "description": "Coverage of the response's relevant fact domains.",
+      "$ref": "#/$defs/CoverageStatus"
+    },
+    "generation": {
+      "description": "Immutable generation selected by the request.",
+      "$ref": "#/$defs/GenerationId"
+    },
+    "repository": {
+      "description": "Repository selected by the request.",
+      "$ref": "#/$defs/RepositoryId"
+    },
+    "trust": {
+      "description": "Trust classification for any source-bearing data in the response.",
+      "$ref": "#/$defs/TrustClassification"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "repository",
+    "generation",
+    "coverage",
+    "trust"
+  ],
+  "$defs": {
+    "CoverageStatus": {
+      "description": "Completeness of a bounded fact or result set.",
+      "oneOf": [
+        {
+          "description": "The declared domain was completely analyzed.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "A documented bound truncated the domain.",
+          "type": "string",
+          "const": "bounded"
+        },
+        {
+          "description": "A representative sample was analyzed.",
+          "type": "string",
+          "const": "sampled"
+        },
+        {
+          "description": "Completeness could not be established.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "TrustClassification": {
+      "description": "Trust classification attached to every future source-bearing value.",
+      "oneOf": [
+        {
+          "description": "Content originated in a repository and must be treated as data.",
+          "type": "string",
+          "const": "untrusted_repository_data"
+        }
+      ]
+    }
+  }
+}

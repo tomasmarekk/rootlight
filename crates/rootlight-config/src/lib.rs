@@ -87,6 +87,20 @@ impl std::fmt::Display for ContractVersion {
     }
 }
 
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for ContractVersion {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ContractVersion".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": "^1\\.(0|[1-9][0-9]*)$",
+        })
+    }
+}
+
 /// Authority of one configuration layer, ordered from strongest to weakest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,6 +119,7 @@ pub enum ConfigSource {
 
 /// Closed network policy supported by the core configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkPolicy {
     /// No inbound or outbound network behavior.
@@ -115,6 +130,7 @@ pub enum NetworkPolicy {
 
 /// Closed repository execution policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryExecutionPolicy {
     /// Repository-controlled programs are not executed.
@@ -125,6 +141,7 @@ pub enum RepositoryExecutionPolicy {
 
 /// Closed in-process native plugin policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum NativePluginPolicy {
     /// Native third-party plugins cannot load into the core process.
@@ -133,6 +150,7 @@ pub enum NativePluginPolicy {
 
 /// The initial analysis depth selected by configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AnalysisTier {
     /// Syntax and structural facts without compiler execution.
@@ -143,6 +161,7 @@ pub enum AnalysisTier {
 
 /// Security configuration whose denials cannot be weakened by lower authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
     /// Network access policy.
@@ -165,11 +184,14 @@ impl Default for SecurityConfig {
 
 /// Bounded resource configuration for contract-level operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ResourceConfig {
     /// Maximum source bytes one contract operation may request.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 16_777_216)))]
     pub max_source_bytes: u64,
     /// Maximum result records one contract operation may return.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 10_000)))]
     pub max_results: u32,
 }
 
@@ -184,6 +206,7 @@ impl Default for ResourceConfig {
 
 /// Analysis defaults that do not widen security policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AnalysisConfig {
     /// Default requested analysis tier.
@@ -530,21 +553,55 @@ fn canonical_extension(data: &toml::Value) -> Result<Vec<u8>, ConfigError> {
     serde_json::to_vec(&canonicalize(data)?).map_err(|source| ConfigError::Canonicalize { source })
 }
 
-#[derive(Debug, Deserialize)]
+/// Namespaced extension map with a closed namespace policy.
+#[cfg(feature = "schema")]
+struct ExtensionMapSchema;
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for ExtensionMapSchema {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ExtensionMap".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let extension = generator.subschema_for::<WireExtension>();
+        schemars::json_schema!({
+            "type": "object",
+            "propertyNames": {
+                "pattern": "^[a-z0-9.-]{1,64}$"
+            },
+            "additionalProperties": extension
+        })
+    }
+}
+
+/// Strict external shape of the versioned configuration document.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "Rootlight configuration 1.0"))]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct WireConfig {
+pub struct ConfigDocumentSchema {
+    /// Canonical contract version selected by the document.
     version: ContractVersion,
+    /// Optional security policy overrides.
     #[serde(default)]
     security: Option<PartialSecurityConfig>,
+    /// Optional resource limit overrides.
     #[serde(default)]
     resources: Option<PartialResourceConfig>,
+    /// Optional analysis defaults.
     #[serde(default)]
     analysis: Option<PartialAnalysisConfig>,
+    /// Namespaced extensions keyed by their stable namespace.
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "ExtensionMapSchema"))]
     extensions: BTreeMap<String, WireExtension>,
 }
 
-#[derive(Debug, Deserialize)]
+type WireConfig = ConfigDocumentSchema;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct PartialSecurityConfig {
     network: Option<NetworkPolicy>,
@@ -552,25 +609,31 @@ struct PartialSecurityConfig {
     in_process_native_plugins: Option<NativePluginPolicy>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct PartialResourceConfig {
+    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 16_777_216)))]
     max_source_bytes: Option<u64>,
+    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 10_000)))]
     max_results: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct PartialAnalysisConfig {
     default_tier: Option<AnalysisTier>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct WireExtension {
     version: ContractVersion,
     critical: bool,
     #[serde(default = "empty_extension_data")]
+    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
     data: toml::Value,
 }
 
@@ -831,5 +894,18 @@ critical = true
         }])
         .expect_err("major two is unsupported");
         assert_eq!(error.to_public().code(), ErrorCode::ProtocolMismatch);
+    }
+
+    #[test]
+    fn accepts_additive_minor_versions_and_omitted_optional_sections() {
+        let snapshot = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: "version = \"1.2\"",
+        }])
+        .expect("minor versions are additive");
+
+        assert_eq!(snapshot.version(), CONFIG_VERSION);
+        assert_eq!(snapshot.security(), SecurityConfig::default());
+        assert_eq!(snapshot.resources(), ResourceConfig::default());
     }
 }
