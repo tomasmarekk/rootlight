@@ -378,9 +378,25 @@ struct CanonicalEncoder {
 
 impl CanonicalEncoder {
     fn bytes(&mut self, value: &[u8]) -> &mut Self {
-        let length = u32::try_from(value.len()).unwrap_or(u32::MAX);
-        self.bytes.extend_from_slice(&length.to_be_bytes());
+        self.length(value.len());
         self.bytes.extend_from_slice(value);
+        self
+    }
+
+    fn length(&mut self, value: usize) -> &mut Self {
+        match u32::try_from(value) {
+            Ok(value) if value < u32::MAX => {
+                self.bytes.extend_from_slice(&value.to_be_bytes());
+            }
+            _ => {
+                // UINT32_MAX is an escape marker so oversized adjacent fields cannot
+                // collapse onto the same byte stream through a saturated prefix.
+                self.bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+                let value =
+                    u64::try_from(value).expect("supported Rust targets have at most 64-bit usize");
+                self.bytes.extend_from_slice(&value.to_be_bytes());
+            }
+        }
         self
     }
 
@@ -567,6 +583,29 @@ mod tests {
             build_context_discriminator: b"",
         });
         assert_ne!(first.digest(), second.digest());
+    }
+
+    #[test]
+    fn extended_length_marker_is_unambiguous() {
+        let mut maximum_inline = CanonicalEncoder::default();
+        maximum_inline.length(u32::MAX as usize - 1);
+        let mut first_extended = CanonicalEncoder::default();
+        first_extended.length(u32::MAX as usize);
+
+        assert_ne!(maximum_inline.as_bytes(), first_extended.as_bytes());
+        assert_eq!(maximum_inline.as_bytes().len(), 4);
+        assert_eq!(first_extended.as_bytes().len(), 12);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn extended_length_prefixes_do_not_saturate() {
+        let mut first = CanonicalEncoder::default();
+        first.length(u32::MAX as usize);
+        let mut second = CanonicalEncoder::default();
+        second.length(u32::MAX as usize + 1);
+
+        assert_ne!(first.as_bytes(), second.as_bytes());
     }
 
     #[test]
