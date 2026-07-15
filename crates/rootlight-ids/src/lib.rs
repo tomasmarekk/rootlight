@@ -451,10 +451,17 @@ fn decode_text<const N: usize>(prefix: &str, input: &str) -> Result<[u8; N], IdP
     let encoded = input
         .strip_prefix(prefix)
         .ok_or_else(|| classify_prefix(prefix, input))?;
+    let expected_length = N + CHECKSUM_BYTES;
+    let expected_encoded_length = (expected_length * 8).div_ceil(5);
+    if encoded.len() != expected_encoded_length {
+        return Err(IdParseError::InvalidEncodedLength {
+            expected: expected_encoded_length,
+            actual: encoded.len(),
+        });
+    }
     let payload = BASE32_NOPAD
         .decode(encoded.to_ascii_uppercase().as_bytes())
         .map_err(|_| IdParseError::InvalidAlphabet)?;
-    let expected_length = N + CHECKSUM_BYTES;
     if payload.len() != expected_length {
         return Err(IdParseError::InvalidLength {
             expected: expected_length,
@@ -518,6 +525,14 @@ pub enum IdParseError {
     /// The encoded payload contains characters outside the base32 alphabet.
     #[error("identifier encoding uses an invalid alphabet")]
     InvalidAlphabet,
+    /// The encoded payload has the wrong fixed width.
+    #[error("invalid identifier encoded length: expected {expected}, got {actual}")]
+    InvalidEncodedLength {
+        /// Required unpadded base32 character count.
+        expected: usize,
+        /// Observed encoded character count.
+        actual: usize,
+    },
     /// The decoded payload has the wrong length.
     #[error("invalid identifier payload length: expected {expected}, got {actual}")]
     InvalidLength {
@@ -626,6 +641,27 @@ mod tests {
         assert_eq!(
             text.replacen("repo1_", "repo2_", 1).parse::<RepositoryId>(),
             Err(IdParseError::UnsupportedVersion)
+        );
+    }
+
+    #[test]
+    fn fixed_width_is_checked_before_base32_decode() {
+        let short = "repo1_a";
+        assert_eq!(
+            short.parse::<RepositoryId>(),
+            Err(IdParseError::InvalidEncodedLength {
+                expected: 32,
+                actual: 1,
+            })
+        );
+
+        let long = format!("repo1_{}", "a".repeat(1_000_000));
+        assert_eq!(
+            long.parse::<RepositoryId>(),
+            Err(IdParseError::InvalidEncodedLength {
+                expected: 32,
+                actual: 1_000_000,
+            })
         );
     }
 

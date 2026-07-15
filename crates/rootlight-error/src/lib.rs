@@ -57,7 +57,7 @@ pub enum ErrorCode {
 }
 
 /// A validated key for a bounded public error detail.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct DetailKey(
@@ -100,8 +100,18 @@ impl fmt::Debug for DetailKey {
     }
 }
 
+impl<'de> Deserialize<'de> for DetailKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
 /// A short source-free label permitted in public diagnostics.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct SafeLabel(
@@ -141,6 +151,16 @@ impl SafeLabel {
 impl fmt::Debug for SafeLabel {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_tuple("SafeLabel").field(&self.0).finish()
+    }
+}
+
+impl<'de> Deserialize<'de> for SafeLabel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -435,6 +455,30 @@ mod tests {
                 Err(PublicErrorBuildError::InvalidSafeLabel)
             );
         }
+    }
+
+    #[test]
+    fn deserialization_preserves_detail_key_invariants() {
+        assert!(serde_json::from_str::<DetailKey>(r#""repository_id""#).is_ok());
+        assert!(serde_json::from_str::<DetailKey>(r#""Repository/Path""#).is_err());
+        assert!(
+            serde_json::from_str::<NextAction>(
+                r#"{"action":"correct_field","field":"Repository/Path"}"#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn deserialization_preserves_safe_label_invariants() {
+        assert!(serde_json::from_str::<SafeLabel>(r#""adapter:v1""#).is_ok());
+        assert!(serde_json::from_str::<SafeLabel>(r#""/home/person/secret.rs""#).is_err());
+        assert!(
+            serde_json::from_str::<PublicValue>(
+                r#"{"type":"label","value":"/home/person/secret.rs"}"#,
+            )
+            .is_err()
+        );
     }
 
     #[test]

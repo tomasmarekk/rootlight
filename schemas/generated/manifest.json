@@ -30,7 +30,7 @@
     },
     {
       "path": "crates/rootlight-error/src/lib.rs",
-      "blake3": "381a69c2ae5fea027ecf7ec53b85bc17b890199b219b8803b6bfd62b30c93610"
+      "blake3": "61d246d0547340e2bbb7875ad54c9b43218c82985bd901e9ba19dc1d4442a0b1"
     },
     {
       "path": "crates/rootlight-ids/Cargo.toml",
@@ -38,7 +38,7 @@
     },
     {
       "path": "crates/rootlight-ids/src/lib.rs",
-      "blake3": "aca7619436d76ac953b90ab8ac1217eabd8950724e6ebfa013682d5394116ef0"
+      "blake3": "ef966247fd79b92052c0d8d9b6935017e979420ebb83fa671a3dba27cf4322a2"
     },
     {
       "path": "crates/rootlight-ir/Cargo.toml",
