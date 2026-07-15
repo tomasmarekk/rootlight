@@ -1,0 +1,20 @@
+[package]
+name = "rootlight-vfs"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+cap-fs-ext.workspace = true
+cap-std.workspace = true
+rootlight-ids = { path = "../rootlight-ids" }
+rootlight-ir = { path = "../rootlight-ir" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -2,11 +2,13 @@ schema_version = "1.0"
 workspace_members = [
   "rootlight-cancel",
   "rootlight-config",
+  "rootlight-discovery",
   "rootlight-error",
   "rootlight-ids",
   "rootlight-ir",
   "rootlight-mcp-contract",
   "rootlight-protocol",
+  "rootlight-vfs",
   "xtask",
 ]
 dev_only_members = ["xtask"]
@@ -19,6 +21,16 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-config"
 allowed_internal_dependencies = ["rootlight-error", "rootlight-ids"]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-discovery"
+allowed_internal_dependencies = [
+  "rootlight-cancel",
+  "rootlight-config",
+  "rootlight-ids",
+  "rootlight-vfs",
+]
 allow_build_script = false
 
 [[crates]]
@@ -44,6 +56,11 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-protocol"
 allowed_internal_dependencies = []
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-vfs"
+allowed_internal_dependencies = ["rootlight-ids", "rootlight-ir"]
 allow_build_script = false
 
 [[crates]]
