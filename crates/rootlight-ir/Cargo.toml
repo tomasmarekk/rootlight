@@ -16,5 +16,8 @@ thiserror.workspace = true
 default = []
 schema = ["dep:schemars", "rootlight-ids/schema"]
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

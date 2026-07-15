@@ -14,7 +14,6 @@ pub const IR_VERSION: IrVersion = IrVersion::new(1, 0);
 
 /// Major/minor version for the normalized IR contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct IrVersion {
     major: u16,
@@ -39,10 +38,46 @@ impl IrVersion {
     pub const fn minor(self) -> u16 {
         self.minor
     }
+
+    /// Ensures the version belongs to the supported production major.
+    ///
+    /// Additive minor versions under major 1 are accepted so newer producers
+    /// can emit compatible documents without changing the decoding boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IrValidationError::UnsupportedMajor`] when the major differs
+    /// from [`IR_VERSION`].
+    pub const fn require_supported(self) -> Result<Self, IrValidationError> {
+        if self.major == IR_VERSION.major {
+            Ok(self)
+        } else {
+            Err(IrValidationError::UnsupportedMajor { major: self.major })
+        }
+    }
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for IrVersion {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "IrVersion".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "major": { "type": "integer", "const": 1 },
+                "minor": { "type": "integer", "minimum": 0, "maximum": 65_535 }
+            },
+            "required": ["major", "minor"],
+            "additionalProperties": false
+        })
+    }
 }
 
 /// A validated half-open source byte span within one file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SourceSpan {
     file: FileId,
@@ -86,11 +121,30 @@ impl SourceSpan {
     }
 }
 
+impl<'de> Deserialize<'de> for SourceSpan {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireSourceSpan {
+            file: FileId,
+            start_byte: u64,
+            end_byte: u64,
+        }
+
+        let wire = WireSourceSpan::deserialize(deserializer)?;
+        Self::new(wire.file, wire.start_byte, wire.end_byte).map_err(serde::de::Error::custom)
+    }
+}
+
 /// A validated one-based inclusive source line range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LineRange {
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     start_line: u64,
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     end_line: u64,
 }
 
@@ -121,6 +175,22 @@ impl LineRange {
     #[must_use]
     pub const fn end_line(self) -> u64 {
         self.end_line
+    }
+}
+
+impl<'de> Deserialize<'de> for LineRange {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireLineRange {
+            start_line: u64,
+            end_line: u64,
+        }
+
+        let wire = WireLineRange::deserialize(deserializer)?;
+        Self::new(wire.start_line, wire.end_line).map_err(serde::de::Error::custom)
     }
 }
 
@@ -220,7 +290,7 @@ pub enum AnalysisTier {
 }
 
 /// Fixed-point confidence from 0 through 1000 inclusive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Confidence(#[cfg_attr(feature = "schema", schemars(range(max = 1_000)))] u16);
 
@@ -245,6 +315,16 @@ impl Confidence {
     }
 }
 
+impl<'de> Deserialize<'de> for Confidence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = u16::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Completeness of a bounded fact or result set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -262,7 +342,7 @@ pub enum CoverageStatus {
 }
 
 /// Stable identity of the component that produced facts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ProducerIdentity {
@@ -320,6 +400,25 @@ impl ProducerIdentity {
     }
 }
 
+impl<'de> Deserialize<'de> for ProducerIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireProducerIdentity {
+            name: String,
+            version: String,
+            configuration_hash: ContentHash,
+        }
+
+        let wire = WireProducerIdentity::deserialize(deserializer)?;
+        Self::new(&wire.name, &wire.version, wire.configuration_hash)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Stable digest identifying one build-context interpretation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -344,21 +443,115 @@ impl BuildContextIdentity {
 
 /// Versioned P0 envelope for normalized IR contract fixtures.
 #[cfg(feature = "schema")]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IrDocumentSchema {
     /// IR contract version used by the document.
-    pub version: IrVersion,
+    version: IrVersion,
     /// Immutable repository generation owning every source reference.
-    pub generation: GenerationId,
+    generation: GenerationId,
     /// Producer identity for the contained facts.
-    pub producer: ProducerIdentity,
+    producer: ProducerIdentity,
     /// Build context used to interpret conditional source.
-    pub build_context: BuildContextIdentity,
+    build_context: BuildContextIdentity,
     /// Declared completeness of the document.
-    pub coverage: CoverageStatus,
+    coverage: CoverageStatus,
     /// Evidence class supporting the document.
-    pub evidence: EvidenceKind,
+    evidence: EvidenceKind,
+}
+
+#[cfg(feature = "schema")]
+impl IrDocumentSchema {
+    /// Creates a checked normalized-IR contract envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IrValidationError::UnsupportedMajor`] when `version` is not in
+    /// the supported production major.
+    pub fn new(
+        version: IrVersion,
+        generation: GenerationId,
+        producer: ProducerIdentity,
+        build_context: BuildContextIdentity,
+        coverage: CoverageStatus,
+        evidence: EvidenceKind,
+    ) -> Result<Self, IrValidationError> {
+        let version = version.require_supported()?;
+        Ok(Self {
+            version,
+            generation,
+            producer,
+            build_context,
+            coverage,
+            evidence,
+        })
+    }
+
+    /// Returns the compatible IR contract version.
+    #[must_use]
+    pub const fn version(&self) -> IrVersion {
+        self.version
+    }
+
+    /// Returns the immutable repository generation.
+    #[must_use]
+    pub const fn generation(&self) -> GenerationId {
+        self.generation
+    }
+
+    /// Returns the producer identity.
+    #[must_use]
+    pub const fn producer(&self) -> &ProducerIdentity {
+        &self.producer
+    }
+
+    /// Returns the build-context identity.
+    #[must_use]
+    pub const fn build_context(&self) -> BuildContextIdentity {
+        self.build_context
+    }
+
+    /// Returns the declared coverage status.
+    #[must_use]
+    pub const fn coverage(&self) -> CoverageStatus {
+        self.coverage
+    }
+
+    /// Returns the evidence class.
+    #[must_use]
+    pub const fn evidence(&self) -> EvidenceKind {
+        self.evidence
+    }
+}
+
+#[cfg(feature = "schema")]
+impl<'de> Deserialize<'de> for IrDocumentSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireIrDocument {
+            version: IrVersion,
+            generation: GenerationId,
+            producer: ProducerIdentity,
+            build_context: BuildContextIdentity,
+            coverage: CoverageStatus,
+            evidence: EvidenceKind,
+        }
+
+        let wire = WireIrDocument::deserialize(deserializer)?;
+        Self::new(
+            wire.version,
+            wire.generation,
+            wire.producer,
+            wire.build_context,
+            wire.coverage,
+            wire.evidence,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 fn valid_label(value: &str) -> bool {
@@ -372,6 +565,12 @@ fn valid_label(value: &str) -> bool {
 /// Validation failures for normalized IR primitives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum IrValidationError {
+    /// The document uses an unsupported IR major version.
+    #[error("unsupported IR major version {major}")]
+    UnsupportedMajor {
+        /// Unsupported major component.
+        major: u16,
+    },
     /// A byte span was inverted.
     #[error("source span start exceeds end")]
     InvalidSourceSpan,
@@ -418,5 +617,78 @@ mod tests {
             SourceRef::new(repository, generation, span, content_hash(b"fixture"), None);
         assert_eq!(reference.repository(), repository);
         assert_eq!(reference.generation(), generation);
+    }
+
+    #[test]
+    fn deserialization_preserves_primitive_invariants() {
+        let file = FileId::from_bytes([3; 20]).to_string();
+        assert!(
+            serde_json::from_value::<SourceSpan>(serde_json::json!({
+                "file": file,
+                "start_byte": 12,
+                "end_byte": 11
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<LineRange>(serde_json::json!({
+                "start_line": 0,
+                "end_line": 1
+            }))
+            .is_err()
+        );
+        assert!(serde_json::from_value::<Confidence>(serde_json::json!(1_001)).is_err());
+        assert!(
+            serde_json::from_value::<ProducerIdentity>(serde_json::json!({
+                "name": "path/shaped",
+                "version": "1.0",
+                "configuration_hash": content_hash(b"configuration")
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn nested_source_reference_deserialization_is_checked() {
+        let repository = derive_repository(b"repository").id();
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let invalid = serde_json::json!({
+            "repository": repository,
+            "generation": generation,
+            "span": {"file": file, "start_byte": 8, "end_byte": 7},
+            "content_hash": content_hash(b"fixture"),
+            "line_hint": {"start_line": 0, "end_line": 1}
+        });
+
+        assert!(serde_json::from_value::<SourceRef>(invalid).is_err());
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn document_accepts_additive_minors_and_rejects_other_majors() {
+        let generation = GenerationId::from_bytes([2; 20]);
+        let hash = content_hash(b"fixture");
+        let document = |major, minor| {
+            serde_json::json!({
+                "version": {"major": major, "minor": minor},
+                "generation": generation,
+                "producer": {
+                    "name": "fixture",
+                    "version": "1.0",
+                    "configuration_hash": hash
+                },
+                "build_context": {"digest": hash},
+                "coverage": "complete",
+                "evidence": "syntax"
+            })
+        };
+
+        let decoded: IrDocumentSchema =
+            serde_json::from_value(document(1, u16::MAX)).expect("additive minor is supported");
+        assert_eq!(decoded.version(), IrVersion::new(1, u16::MAX));
+        for major in [0, 2] {
+            assert!(serde_json::from_value::<IrDocumentSchema>(document(major, 0)).is_err());
+        }
     }
 }

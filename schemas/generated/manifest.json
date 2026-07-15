@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "9534c05a9badc2404d7f6ecdd0e401e8bc473ce477351dff1b4e302ad4809d9f"
+      "blake3": "84a69eb5d17847d10b0bee3e83cbe6a0e8ad08db33a64147d8e53acb7c6d44a9"
     },
     {
       "path": "Cargo.toml",
@@ -42,11 +42,11 @@
     },
     {
       "path": "crates/rootlight-ir/Cargo.toml",
-      "blake3": "1a0bab43733544c9b5bcff8ef728fad024480d56fe745ae725b473204d19389e"
+      "blake3": "912ee0e756c4259302d4e42c4501e08baf1b20b1edcccf7e37b8cd674f139276"
     },
     {
       "path": "crates/rootlight-ir/src/lib.rs",
-      "blake3": "a00496a4cc4ee1d84441a7bb91136fa85a7ac811d8251a41c361c1ad3981963c"
+      "blake3": "b235704b1844609d00d02e40a213712cb8557d72ea417f4a3ab2fa89b252c34e"
     },
     {
       "path": "crates/rootlight-mcp-contract/Cargo.toml",
@@ -78,7 +78,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "ad9d39c8ab7277269c4af8f35a5b100c71227c8a97a1f81e5b1d202aa4465da8"
+      "blake3": "5e89d43bf9e0792b4268aecde4f51acf5066c1bcd314018d1fcf179cf69747a9"
     }
   ],
   "artifacts": [
@@ -104,7 +104,7 @@
     },
     {
       "path": "schemas/generated/json/ir-1.0.schema.json",
-      "blake3": "c1095fed1f1d2b25c46bf772ad04a2734ace218f4bed9c2130601cd2bc405ad1"
+      "blake3": "1585261fd729028f453dd3a9d2b83891e2584c3b13662e1a62c74e93e00b2085"
     },
     {
       "path": "schemas/generated/json/mcp-error-response-1.0.schema.json",

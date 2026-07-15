@@ -1094,6 +1094,7 @@ dependencies = [
  "rootlight-ids",
  "schemars",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

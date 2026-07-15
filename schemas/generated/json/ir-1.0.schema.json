@@ -116,18 +116,14 @@
       "pattern": "^gen1_[a-z2-7]{39}$"
     },
     "IrVersion": {
-      "description": "Major/minor version for the normalized IR contract.",
       "type": "object",
       "properties": {
         "major": {
           "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "const": 1
         },
         "minor": {
           "type": "integer",
-          "format": "uint16",
           "maximum": 65535,
           "minimum": 0
         }

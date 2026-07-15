@@ -364,103 +364,164 @@ fn write_schema<T: JsonSchema>(path: &Path) -> Result<(), SchemaError> {
 
 fn validate_generated_json_schemas(staged_root: &Path) -> Result<(), SchemaError> {
     let schema_root = staged_root.join(SCHEMA_ROOT).join("json");
+    let ir_document = |major: u64, minor: u64| {
+        serde_json::json!({
+            "version": {"major": major, "minor": minor},
+            "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+            "producer": {
+                "name": "fixture",
+                "version": "1.0",
+                "configuration_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+            },
+            "build_context": {
+                "digest": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+            },
+            "coverage": "complete",
+            "evidence": "syntax"
+        })
+    };
     let cases = [
-        (
+        SchemaSemanticCase::valid(
             "config-1.0.schema.json",
+            "minimal supported configuration",
             serde_json::json!({"version": "1.0"}),
+        ),
+        SchemaSemanticCase::invalid(
+            "config-1.0.schema.json",
+            "malformed configuration version",
             serde_json::json!({"version": "invalid"}),
         ),
-        (
+        SchemaSemanticCase::valid(
             "ir-1.0.schema.json",
-            serde_json::json!({
-                "version": {"major": 1, "minor": 0},
-                "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
-                "producer": {
-                    "name": "fixture",
-                    "version": "1.0",
-                    "configuration_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
-                },
-                "build_context": {
-                    "digest": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
-                },
-                "coverage": "complete",
-                "evidence": "syntax"
-            }),
-            serde_json::json!({
-                "version": {"major": 1, "minor": 0},
-                "generation": "invalid",
-                "producer": {
-                    "name": "fixture",
-                    "version": "1.0",
-                    "configuration_hash": "invalid"
-                },
-                "build_context": {"digest": "invalid"},
-                "coverage": "anything",
-                "evidence": "syntax"
-            }),
+            "production IR version",
+            ir_document(1, 0),
         ),
-        (
+        SchemaSemanticCase::valid(
+            "ir-1.0.schema.json",
+            "additive IR minor",
+            ir_document(1, u64::from(u16::MAX)),
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-1.0.schema.json",
+            "unsupported IR major zero",
+            ir_document(0, 0),
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-1.0.schema.json",
+            "unsupported IR major two",
+            ir_document(2, 0),
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-1.0.schema.json",
+            "overflowing IR minor",
+            ir_document(1, u64::from(u16::MAX) + 1),
+        ),
+        SchemaSemanticCase::invalid("ir-1.0.schema.json", "unsafe producer label", {
+            let mut value = ir_document(1, 0);
+            value["producer"]["name"] = serde_json::json!("path/shaped");
+            value
+        }),
+        SchemaSemanticCase::valid(
             "mcp-response-metadata-1.0.schema.json",
+            "valid response metadata",
             serde_json::json!({
                 "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
                 "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
                 "coverage": "complete",
                 "trust": "untrusted_repository_data"
             }),
+        ),
+        SchemaSemanticCase::invalid(
+            "mcp-response-metadata-1.0.schema.json",
+            "invalid repository identifier",
             serde_json::json!({
                 "repository": "not-an-id",
-                "generation": "not-an-id",
-                "coverage": "anything",
+                "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                "coverage": "complete",
                 "trust": "untrusted_repository_data"
             }),
         ),
-        (
+        SchemaSemanticCase::valid(
             "mcp-error-response-1.0.schema.json",
-            serde_json::json!({
-                "error": {
-                    "code": "INTERNAL",
-                    "message": "internal operation failed",
-                    "retryable": false,
-                    "retry_after_ms": null,
-                    "repository": null,
-                    "operation": null,
-                    "generation": null,
-                    "details": {},
-                    "next_actions": []
-                }
-            }),
-            serde_json::json!({
-                "error": {
-                    "code": "INTERNAL",
-                    "message": "internal operation failed",
-                    "retryable": false,
-                    "retry_after_ms": null,
-                    "repository": null,
-                    "operation": null,
-                    "generation": null,
-                    "details": {},
-                    "next_actions": [],
-                    "secret": "must be rejected"
-                }
-            }),
+            "bounded public error",
+            public_error_fixture(),
+        ),
+        SchemaSemanticCase::invalid(
+            "mcp-error-response-1.0.schema.json",
+            "unknown public error field",
+            {
+                let mut value = public_error_fixture();
+                value["error"]["secret"] = serde_json::json!("must be rejected");
+                value
+            },
         ),
     ];
 
-    for (name, valid, invalid) in cases {
-        let path = schema_root.join(name);
+    for case in cases {
+        let path = schema_root.join(case.schema);
         let schema: serde_json::Value = serde_json::from_slice(&read_bytes(&path)?)
             .map_err(|source| SchemaError::ParseGeneratedJson { path, source })?;
         let validator = jsonschema::draft202012::new(&schema).map_err(|source| {
             SchemaError::CompileGeneratedSchema {
-                name: name.to_owned(),
+                name: case.schema.to_owned(),
                 detail: source.to_string(),
             }
         })?;
-        if !validator.is_valid(&valid) || validator.is_valid(&invalid) {
-            return Err(SchemaError::GeneratedSchemaSemantics(name.to_owned()));
+        if validator.is_valid(&case.instance) != case.expected_valid {
+            return Err(SchemaError::GeneratedSchemaSemantics(format!(
+                "{}: {}",
+                case.schema, case.description
+            )));
         }
     }
     Ok(())
+}
+
+struct SchemaSemanticCase {
+    schema: &'static str,
+    description: &'static str,
+    instance: serde_json::Value,
+    expected_valid: bool,
+}
+
+impl SchemaSemanticCase {
+    fn valid(schema: &'static str, description: &'static str, instance: serde_json::Value) -> Self {
+        Self {
+            schema,
+            description,
+            instance,
+            expected_valid: true,
+        }
+    }
+
+    fn invalid(
+        schema: &'static str,
+        description: &'static str,
+        instance: serde_json::Value,
+    ) -> Self {
+        Self {
+            schema,
+            description,
+            instance,
+            expected_valid: false,
+        }
+    }
+}
+
+fn public_error_fixture() -> serde_json::Value {
+    serde_json::json!({
+        "error": {
+            "code": "INTERNAL",
+            "message": "internal operation failed",
+            "retryable": false,
+            "retry_after_ms": null,
+            "repository": null,
+            "operation": null,
+            "generation": null,
+            "details": {},
+            "next_actions": []
+        }
+    })
 }
 
 fn generate_manifest(workspace_root: &Path, staged_root: &Path) -> Result<(), SchemaError> {
