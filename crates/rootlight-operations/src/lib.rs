@@ -7,9 +7,9 @@
 
 use std::{
     collections::BTreeMap,
-    fs::{File, OpenOptions},
-    io::{self, Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    fs::{File, OpenOptions, TryLockError},
+    io::{self, Seek, SeekFrom, Write},
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -453,50 +453,38 @@ impl OperationJournal {
     }
 }
 
-/// Exclusive catalog-writer lock with stale-owner recovery.
+/// Exclusive operating-system lock for the writable catalog.
+///
+/// The lock file may remain after shutdown. Ownership follows the file handle,
+/// so process termination releases the lock without PID probing or stale deletion.
 #[derive(Debug)]
 pub struct CatalogWriterLock {
-    path: PathBuf,
     file: File,
     nonce: [u8; 16],
 }
 
 impl CatalogWriterLock {
-    /// Acquires one catalog writer using create-new arbitration.
-    ///
-    /// Existing locks are recovered only when the recorded process is proven not
-    /// alive. The nonce prevents a stale owner's cleanup from deleting a new lock.
+    /// Acquires the exclusive catalog writer and records the instance nonce.
     ///
     /// # Errors
     ///
     /// Returns [`OperationError::WriterBusy`] while another process owns the lock
-    /// or a typed IO/corruption error.
+    /// or [`OperationError::LockIo`] for filesystem and locking failures.
     pub fn acquire(path: &Path, nonce: [u8; 16]) -> Result<Self, OperationError> {
-        for _attempt in 0..2 {
-            match OpenOptions::new().write(true).create_new(true).open(path) {
-                Ok(mut file) => {
-                    write_lock_record(&mut file, std::process::id(), nonce)?;
-                    return Ok(Self {
-                        path: path.to_path_buf(),
-                        file,
-                        nonce,
-                    });
-                }
-                Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
-                    let (pid, _) = read_lock_record(path)?;
-                    if process_is_alive(pid) {
-                        return Err(OperationError::WriterBusy);
-                    }
-                    match std::fs::remove_file(path) {
-                        Ok(()) => continue,
-                        Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
-                        Err(source) => return Err(OperationError::LockIo(source)),
-                    }
-                }
-                Err(source) => return Err(OperationError::LockIo(source)),
-            }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(OperationError::LockIo)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Err(OperationError::WriterBusy),
+            Err(TryLockError::Error(source)) => return Err(OperationError::LockIo(source)),
         }
-        Err(OperationError::WriterBusy)
+        write_lock_record(&mut file, std::process::id(), nonce)?;
+        Ok(Self { file, nonce })
     }
 
     /// Returns the instance nonce recorded for endpoint authentication.
@@ -508,13 +496,8 @@ impl CatalogWriterLock {
 
 impl Drop for CatalogWriterLock {
     fn drop(&mut self) {
-        let owned = read_lock_record(&self.path)
-            .ok()
-            .is_some_and(|(_, nonce)| nonce == self.nonce);
-        if owned {
-            let _ = std::fs::remove_file(&self.path);
-        }
         let _ = self.file.flush();
+        let _ = self.file.unlock();
     }
 }
 
@@ -568,50 +551,6 @@ fn write_lock_record(file: &mut File, pid: u32, nonce: [u8; 16]) -> Result<(), O
     file.sync_all().map_err(OperationError::LockIo)
 }
 
-fn read_lock_record(path: &Path) -> Result<(u32, [u8; 16]), OperationError> {
-    let mut contents = String::new();
-    File::open(path)
-        .map_err(OperationError::LockIo)?
-        .take(128)
-        .read_to_string(&mut contents)
-        .map_err(OperationError::LockIo)?;
-    let mut lines = contents.lines();
-    let pid = lines
-        .next()
-        .ok_or(OperationError::CorruptLock)?
-        .parse()
-        .map_err(|_| OperationError::CorruptLock)?;
-    let encoded = lines.next().ok_or(OperationError::CorruptLock)?;
-    if encoded.len() != 32 {
-        return Err(OperationError::CorruptLock);
-    }
-    let mut nonce = [0_u8; 16];
-    for (index, byte) in nonce.iter_mut().enumerate() {
-        let offset = index * 2;
-        *byte = u8::from_str_radix(&encoded[offset..offset + 2], 16)
-            .map_err(|_| OperationError::CorruptLock)?;
-    }
-    Ok((pid, nonce))
-}
-
-#[cfg(unix)]
-fn process_is_alive(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
-}
-
-#[cfg(windows)]
-fn process_is_alive(pid: u32) -> bool {
-    std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .creation_flags(0x0800_0000)
-        .output()
-        .ok()
-        .is_some_and(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
-}
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt as _;
-
 /// Typed operation and catalog failures.
 #[derive(Debug, thiserror::Error)]
 pub enum OperationError {
@@ -659,9 +598,6 @@ pub enum OperationError {
     /// Another process currently owns the catalog writer lock.
     #[error("catalog writer is already active")]
     WriterBusy,
-    /// The writer lock record was malformed.
-    #[error("catalog writer lock is corrupt")]
-    CorruptLock,
     /// A public error could not be serialized for durable recovery.
     #[error("operation public error serialization failed")]
     SerializePublicError(#[source] serde_json::Error),
@@ -784,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_writer_lock_is_exclusive_and_recovers_stale_records() {
+    fn catalog_writer_lock_is_exclusive_and_reuses_persistent_record() {
         let temporary = tempdir().expect("temporary directory is available");
         let path = temporary.path().join("writer.lock");
         let first = CatalogWriterLock::acquire(&path, [1; 16]).expect("first lock succeeds");
@@ -793,6 +729,8 @@ mod tests {
             Err(OperationError::WriterBusy)
         ));
         drop(first);
+        assert!(path.exists());
+
         let second = CatalogWriterLock::acquire(&path, [2; 16]).expect("second lock succeeds");
         assert_eq!(second.nonce(), [2; 16]);
     }
