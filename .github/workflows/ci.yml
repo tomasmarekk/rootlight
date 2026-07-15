@@ -1,0 +1,224 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fast:
+    name: fast / pinned / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
+      - name: Tests
+        run: cargo test --workspace --all-features --locked
+      - name: Architecture and contracts
+        run: |
+          cargo run --locked --quiet --package xtask -- architecture-check
+          cargo run --locked --quiet --package xtask -- generate --check
+          cargo run --locked --quiet --package xtask -- compatibility-check
+          cargo run --locked --quiet --package xtask -- policy-check
+          cargo run --locked --quiet --package xtask -- id-vectors > target/id-vectors.actual.json
+          cmp tests/fixtures/id-vectors.json target/id-vectors.actual.json
+      - name: Clean generated tree
+        run: git diff --exit-code
+
+  msrv:
+    name: msrv / 1.90.0 / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install MSRV
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --component clippy,rustfmt
+          rustup default 1.90.0
+      - name: MSRV quality suite
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo check --workspace --all-targets --all-features --locked
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-features --locked
+          cargo doc --workspace --all-features --no-deps --locked
+          cargo run --locked --quiet --package xtask -- architecture-check
+          cargo run --locked --quiet --package xtask -- generate --check
+          cargo run --locked --quiet --package xtask -- compatibility-check
+          cargo run --locked --quiet --package xtask -- policy-check
+
+  current-stable:
+    name: current stable / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install current stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+      - name: Current-stable quality canary
+        run: |
+          cargo check --workspace --all-targets --all-features --locked
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-features --locked
+
+  platform:
+    name: platform / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, macos-15]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup show active-toolchain
+      - name: Platform contract suite
+        shell: bash
+        run: |
+          cargo check --workspace --all-targets --all-features --locked
+          cargo test --workspace --all-features --locked
+          cargo run --locked --quiet --package xtask -- architecture-check
+          cargo run --locked --quiet --package xtask -- generate --check
+          cargo run --locked --quiet --package xtask -- compatibility-check
+          cargo run --locked --quiet --package xtask -- policy-check
+          cargo run --locked --quiet --package xtask -- id-vectors > target/id-vectors.actual.json
+      - name: Compare identifier vectors
+        shell: pwsh
+        run: |
+          $expected = (Get-Content tests/fixtures/id-vectors.json -Raw).Replace("`r`n", "`n")
+          $actual = (Get-Content target/id-vectors.actual.json -Raw).Replace("`r`n", "`n")
+          if ($actual -cne $expected) {
+            throw "identifier vectors differ from the committed fixture"
+          }
+      - name: Clean generated tree
+        shell: bash
+        run: git diff --exit-code
+
+  supply-chain:
+    name: supply chain / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Install checksum-verified policy tools
+        run: bash scripts/install-policy-tools.sh "$HOME/.local/bin"
+      - name: Acquire audit inputs
+        run: |
+          cargo fetch --locked
+          bash scripts/download-rustsec-database.sh artifacts/rustsec-db
+          bash scripts/download-osv-database.sh artifacts/osv-db
+      - name: Dependency, license, source, and advisory policy
+        run: |
+          cargo deny check bans licenses sources
+          cargo audit --db artifacts/rustsec-db --no-fetch -D warnings
+          OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$PWD/artifacts/osv-db" \
+            osv-scanner scan source --offline --format json --lockfile Cargo.lock \
+            > artifacts/osv-report.json
+      - name: Secret scan
+        run: gitleaks git --redact=100 --no-banner --no-color --log-level warn .
+      - name: Security negative controls
+        run: bash scripts/policy-negative-controls.sh
+      - name: Unsafe inventory
+        shell: bash
+        run: bash scripts/run-geiger.sh artifacts/geiger
+      - name: Generate deterministic SBOM inputs
+        run: |
+          bash scripts/generate-sbom.sh artifacts/sbom-first
+          bash scripts/generate-sbom.sh artifacts/sbom-second
+          diff -ru artifacts/sbom-first artifacts/sbom-second
+      - name: Reject host paths in generated evidence
+        run: |
+          if grep --recursive --fixed-strings --binary-files=without-match "$PWD" \
+            artifacts/sbom-first artifacts/sbom-second artifacts/osv-report.json; then
+            echo "supply-chain evidence contains the checkout path" >&2
+            exit 1
+          fi
+
+  offline:
+    name: offline / blocked egress / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Fetch locked inputs without compiling project code
+        run: bash scripts/prepare-offline.sh
+      - name: Build and test after kernel-enforced egress denial
+        run: |
+          sudo RUNNER_HOME="$HOME" RUNNER_PATH="$PATH" \
+            bash scripts/run-in-network-namespace.sh scripts/run-offline-tests.sh
+
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [fast, msrv, current-stable, platform, supply-chain, offline]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every P0 gate
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failures = {
+              name: result.get("result")
+              for name, result in needs.items()
+              if result.get("result") != "success"
+          }
+          if failures:
+              print(f"required CI jobs did not succeed: {failures}", file=sys.stderr)
+              raise SystemExit(1)
+          print("all required P0 CI jobs succeeded")
+          PY
