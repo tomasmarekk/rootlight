@@ -1,0 +1,56 @@
+# Pinned external verification tools used by CI.
+# Release binaries and source-built tool inputs are checksum-verified before execution.
+
+schema_version = "1.0"
+
+[[inputs]]
+name = "rustsec-advisory-db"
+revision = "9f3e138091487e69144f536d36976e427a7a3307"
+url = "https://github.com/RustSec/advisory-db/archive/9f3e138091487e69144f536d36976e427a7a3307.tar.gz"
+sha256 = "b0eb048042adf7d7c06ad426195ebd7a8c2dd946eb53fde658cb45a3bc82f265"
+
+[[inputs]]
+name = "osv-crates.io-database"
+generation = "1784055228546157"
+updated = "2026-07-14T18:53:48.656Z"
+url = "https://storage.googleapis.com/download/storage/v1/b/osv-vulnerabilities/o/crates.io%2Fall.zip?generation=1784055228546157&alt=media"
+sha256 = "d53bbd8a1a90fb78a803ad2877b7295dc175e6f121e5970e5646cd7a3f7e9d90"
+
+[[tools]]
+name = "cargo-deny"
+version = "0.20.2"
+url = "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz"
+sha256 = "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+
+[[tools]]
+name = "cargo-audit"
+version = "0.22.2"
+url = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz"
+sha256 = "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428"
+
+[[tools]]
+name = "cargo-cyclonedx"
+version = "0.5.9"
+url = "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-0.5.9/cargo-cyclonedx-x86_64-unknown-linux-gnu.tar.xz"
+sha256 = "fb8dbee9f182173e062a64a387b21a0badc6fab8b2abf9294973f012972bf6d8"
+
+[[tools]]
+name = "gitleaks"
+version = "8.30.1"
+url = "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz"
+sha256 = "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+[[tools]]
+name = "osv-scanner"
+version = "2.4.0"
+url = "https://github.com/google/osv-scanner/releases/download/v2.4.0/osv-scanner_linux_amd64"
+sha256 = "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0"
+
+[[tools]]
+name = "cargo-geiger"
+version = "0.13.0"
+url = "https://static.crates.io/crates/cargo-geiger/cargo-geiger-0.13.0.crate"
+sha256 = "f36131e0c6e5b9464ca742a88c697b07b3a387e72fc05ff50850279ba52d8879"
+lockfile = "scripts/cargo-geiger-0.13.0.lock"
+lockfile_sha256 = "e87104c9738f274e7f20e294027c863556bc9e41a4f60044f8b68898ba97a477"
+install = "verify and unpack the crate archive, replace its lockfile with the reviewed lock, then cargo install --locked --path"

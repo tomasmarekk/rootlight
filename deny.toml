@@ -1,0 +1,71 @@
+# Dependency policy for every resolved target and feature profile.
+# Version-specific exceptions are reviewed lockfile facts and become stale loudly.
+
+[graph]
+targets = []
+all-features = true
+
+[advisories]
+ignore = []
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "Unicode-3.0",
+]
+exceptions = [
+  { crate = "arrayref@0.3.9", allow = ["BSD-2-Clause"] },
+  { crate = "borrow-or-share@0.2.4", allow = ["MIT-0"] },
+  { crate = "foldhash@0.1.5", allow = ["Zlib"] },
+  { crate = "foldhash@0.2.0", allow = ["Zlib"] },
+]
+confidence-threshold = 0.93
+include-dev = true
+include-build = true
+unused-allowed-license = "deny"
+unused-license-exception = "deny"
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow-workspace = true
+skip = [
+  { crate = "foldhash@0.1.5", reason = "tooling-only duplicate via prost-build 0.14.4; owner @tomasmarekk; review by 2026-10-15" },
+  { crate = "hashbrown@0.15.5", reason = "tooling-only duplicate via petgraph 0.8.3; owner @tomasmarekk; review by 2026-10-15" },
+]
+
+[[bans.features]]
+crate = "jsonschema@0.47.0"
+deny = [
+  "default",
+  "resolve-http",
+  "resolve-async",
+  "resolve-file",
+  "reqwest",
+  "tls-aws-lc-rs",
+  "tls-ring",
+]
+
+[[bans.features]]
+crate = "blake3@1.8.5"
+allow = ["pure", "std"]
+exact = true
+
+[bans.workspace-dependencies]
+duplicates = "deny"
+include-path-dependencies = false
+unused = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -7,6 +7,7 @@
 
 mod architecture;
 mod ids;
+mod policy;
 mod schemas;
 
 use std::{env, process::ExitCode};
@@ -34,6 +35,11 @@ fn run() -> Result<(), XtaskError> {
             schemas::generate(mode)?;
         }
         Some("compatibility-check") | Some("compatibility") => schemas::check_compatibility()?,
+        Some("policy-check") | Some("policy") => policy::check()?,
+        Some("unsafe-check") => {
+            let fixture_root = parse_required_fixture_root(&mut args)?;
+            policy::check_unsafe_fixture(&fixture_root)?;
+        }
         Some(command) => return Err(XtaskError::UnknownCommand(command.to_owned())),
         None => return Err(XtaskError::MissingCommand),
     }
@@ -69,10 +75,16 @@ fn parse_fixture_root(
     }
 }
 
+fn parse_required_fixture_root(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<std::path::PathBuf, XtaskError> {
+    parse_fixture_root(args)?.ok_or(XtaskError::MissingFixtureRoot)
+}
+
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|compatibility-check|id-vectors|generate [--check]>"
+        "usage: cargo xtask <architecture-check|compatibility-check|id-vectors|generate [--check]|policy-check|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -85,6 +97,8 @@ enum XtaskError {
     Architecture(#[from] architecture::ArchitectureError),
     #[error(transparent)]
     IdVectors(#[from] ids::IdVectorError),
+    #[error(transparent)]
+    Policy(#[from] policy::PolicyError),
     #[error(transparent)]
     Schemas(#[from] schemas::SchemaError),
 }

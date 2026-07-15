@@ -1,8 +1,11 @@
 # Rust build and coverage outputs
 /target/
 /artifacts/
+*.cdx.json
 *.profraw
 *.profdata
+__pycache__/
+*.pyc
 
 # Local operating context
 /development-docs/

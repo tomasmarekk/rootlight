@@ -1,0 +1,8 @@
+# Third-party actions are accepted only at these immutable commits.
+
+schema_version = "1.0"
+
+[[actions]]
+repository = "actions/checkout"
+commit = "df4cb1c069e1874edd31b4311f1884172cec0e10"
+release = "v6.0.3"
