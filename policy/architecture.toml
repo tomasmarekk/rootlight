@@ -5,6 +5,7 @@ workspace_members = [
   "rootlight-discovery",
   "rootlight-error",
   "rootlight-ids",
+  "rootlight-ipc",
   "rootlight-ir",
   "rootlight-mcp-contract",
   "rootlight-operations",
@@ -42,6 +43,11 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-ids"
 allowed_internal_dependencies = []
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-ipc"
+allowed_internal_dependencies = ["rootlight-protocol"]
 allow_build_script = false
 
 [[crates]]

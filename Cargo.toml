@@ -4,6 +4,7 @@ members = [
     "crates/rootlight-config",
     "crates/rootlight-error",
     "crates/rootlight-ids",
+    "crates/rootlight-ipc",
     "crates/rootlight-ir",
     "crates/rootlight-discovery",
     "crates/rootlight-mcp-contract",
@@ -27,6 +28,7 @@ cap-std = { version = "3.4.5", default-features = false }
 cargo_metadata = { version = "0.23.1", default-features = false }
 data-encoding = { version = "2.9.0", default-features = false, features = ["std"] }
 ignore = { version = "0.4.29", default-features = false }
+interprocess = { version = "=2.2.3", default-features = false }
 jsonschema = { version = "0.47.0", default-features = false }
 proptest = { version = "1.9.0", default-features = false, features = ["std"] }
 prost = { version = "0.14.4", default-features = false, features = ["derive", "std"] }
@@ -41,6 +43,7 @@ sha2 = { version = "0.11.0", default-features = false }
 tempfile = "3.23.0"
 thiserror = { version = "2.0.18", default-features = false, features = ["std"] }
 toml = { version = "1.1.3", default-features = false, features = ["parse", "serde", "std"] }
+widestring = { version = "1.2.1", default-features = false, features = ["std"] }
 yaml-rust2 = { version = "0.10.4", default-features = false }
 
 [workspace.lints.rust]

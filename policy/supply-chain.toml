@@ -52,6 +52,7 @@ allowed_build_scripts = [
 ]
 
 allowed_proc_macros = [
+  "doctest-file@1.1.1",
   "displaydoc@0.2.6",
   "prost-derive@0.14.4",
   "ref-cast-impl@1.0.25",
