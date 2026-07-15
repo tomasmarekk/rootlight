@@ -22,7 +22,7 @@
     },
     {
       "path": "crates/rootlight-config/src/lib.rs",
-      "blake3": "94602920e19ff2522367e2084a7e1c8cb778189d28826f648f03a8f9219fe66d"
+      "blake3": "3e27887a5fc47d3f439a838da18cf0851cd1f77ca89563edf839ebc990b4f410"
     },
     {
       "path": "crates/rootlight-error/Cargo.toml",
@@ -78,7 +78,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "fb431893ba7eca9caf2b03d284078c191565c9dd1574e0f782aaaf03ad2fa72c"
+      "blake3": "ad9d39c8ab7277269c4af8f35a5b100c71227c8a97a1f81e5b1d202aa4465da8"
     }
   ],
   "artifacts": [
@@ -100,7 +100,7 @@
     },
     {
       "path": "schemas/generated/json/config-1.0.schema.json",
-      "blake3": "fd94ab01ca6a4cac7d89b2d74ce0db3bf1ac03c276ee9b6499058c6c713bc89e"
+      "blake3": "8467cf5c6e098ec5906e7ec08e23114d8cd12c42a622edea5583838cc3780537"
     },
     {
       "path": "schemas/generated/json/ir-1.0.schema.json",

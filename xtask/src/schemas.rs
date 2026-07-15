@@ -112,11 +112,11 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
                         version: fixture.contract_version.clone(),
                     }
                 })?;
-                serde_json::from_value::<ConfigDocumentSchema>(configuration.clone()).map_err(
-                    |source| SchemaError::CompatibilityConfigurationDecode {
-                        version: fixture.contract_version.clone(),
-                        source,
-                    },
+                validate_configuration_schema(
+                    &workspace_root,
+                    &fixture.contract_version,
+                    &configuration,
+                    true,
                 )?;
                 validate_configuration_semantics(&fixture.contract_version, &configuration)?;
                 let metadata = fixture.mcp_response_metadata.ok_or_else(|| {
@@ -143,6 +143,12 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
                     .ok_or_else(|| SchemaError::CompatibilityMissingConfiguration {
                         version: fixture.contract_version.clone(),
                     })?;
+                validate_configuration_schema(
+                    &workspace_root,
+                    &fixture.contract_version,
+                    &configuration,
+                    false,
+                )?;
                 let parsed = rootlight_config::ContractVersion::parse(version)
                     .map_err(|_| SchemaError::CompatibilityExpectedMajorRejection)?;
                 if parsed.require_supported().is_ok() {
@@ -154,6 +160,32 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
 
     validate_protobuf_unknown_field()?;
     println!("compatibility fixtures verified");
+    Ok(())
+}
+
+fn validate_configuration_schema(
+    workspace_root: &Path,
+    fixture_version: &str,
+    configuration: &serde_json::Value,
+    expected_valid: bool,
+) -> Result<(), SchemaError> {
+    let path = workspace_root
+        .join(SCHEMA_ROOT)
+        .join("json/config-1.0.schema.json");
+    let schema: serde_json::Value = serde_json::from_slice(&read_bytes(&path)?)
+        .map_err(|source| SchemaError::ParseGeneratedJson { path, source })?;
+    let validator = jsonschema::draft202012::new(&schema).map_err(|source| {
+        SchemaError::CompileGeneratedSchema {
+            name: "config-1.0.schema.json".to_owned(),
+            detail: source.to_string(),
+        }
+    })?;
+    if validator.is_valid(configuration) != expected_valid {
+        return Err(SchemaError::CompatibilityConfigurationSchema {
+            version: fixture_version.to_owned(),
+            expected_valid,
+        });
+    }
     Ok(())
 }
 
@@ -745,14 +777,15 @@ pub(crate) enum SchemaError {
     CompatibilityMissingConfiguration { version: String },
     #[error("COMPAT_CONFIG_REJECTED: supported fixture {version} was rejected")]
     CompatibilityConfigurationRejected { version: String },
+    #[error(
+        "COMPAT_CONFIG_SCHEMA: fixture {version} schema validity did not match expected {expected_valid}"
+    )]
+    CompatibilityConfigurationSchema {
+        version: String,
+        expected_valid: bool,
+    },
     #[error("COMPAT_EXTENSION_FIXTURE: fixture {version} uses unsupported extension payloads")]
     CompatibilityExtensionFixtureUnsupported { version: String },
-    #[error("COMPAT_CONFIG_DECODE: configuration fixture {version} violates the wire contract")]
-    CompatibilityConfigurationDecode {
-        version: String,
-        #[source]
-        source: serde_json::Error,
-    },
     #[error("COMPAT_MCP_MISSING: fixture {version} has no MCP metadata contract")]
     CompatibilityMissingMcpMetadata { version: String },
     #[error("COMPAT_MCP_REJECTED: MCP metadata fixture {version} was rejected")]

@@ -13,6 +13,18 @@ use serde::{Deserialize, Serialize};
 
 /// The initial production configuration contract version.
 pub const CONFIG_VERSION: ContractVersion = ContractVersion::new(1, 0);
+/// Maximum number of explicit configuration layers in one resolution.
+pub const MAX_CONFIG_LAYERS: usize = 16;
+/// Maximum UTF-8 bytes accepted for one configuration layer.
+pub const MAX_CONFIG_LAYER_BYTES: usize = 256 * 1024;
+/// Maximum aggregate UTF-8 bytes accepted across all layers.
+pub const MAX_CONFIG_TOTAL_BYTES: usize = 1024 * 1024;
+/// Maximum nesting depth accepted in one extension payload.
+pub const MAX_EXTENSION_DEPTH: usize = 32;
+/// Maximum scalar, array, table, and member nodes in one extension payload.
+pub const MAX_EXTENSION_NODES: usize = 8_192;
+/// Maximum canonical JSON bytes retained for one extension payload.
+pub const MAX_EXTENSION_BYTES: usize = 64 * 1024;
 
 /// A checked major/minor version for public contracts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -96,12 +108,15 @@ impl schemars::JsonSchema for ContractVersion {
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "pattern": "^1\\.(0|[1-9][0-9]*)$",
+            "pattern": "^1\\.(0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$",
         })
     }
 }
 
-/// Authority of one configuration layer, ordered from strongest to weakest.
+/// Configuration layer, ordered from baseline to highest normal value precedence.
+///
+/// Explicit denials use separate sticky authority and cannot be weakened by a
+/// later layer even though ordinary values follow this ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigSource {
@@ -285,6 +300,7 @@ pub struct ConfigSnapshot {
     analysis: AnalysisConfig,
     extensions: BTreeMap<String, ExtensionSnapshot>,
     provenance: BTreeMap<String, ConfigSource>,
+    hard_denial_provenance: BTreeMap<String, ConfigSource>,
     canonical: Vec<u8>,
     hash: ContentHash,
 }
@@ -297,6 +313,7 @@ impl ConfigSnapshot {
     /// Returns [`ConfigError`] for malformed TOML, unsupported versions,
     /// unknown fields, invalid bounds, or unknown critical extensions.
     pub fn resolve(layers: &[ConfigLayer<'_>]) -> Result<Self, ConfigError> {
+        validate_layer_bounds(layers)?;
         let mut state = EffectiveConfig::defaults();
         let mut ordered = layers.to_vec();
         ordered.sort_by_key(|layer| layer.source);
@@ -339,10 +356,18 @@ impl ConfigSnapshot {
         &self.extensions
     }
 
-    /// Returns per-field configuration provenance.
+    /// Returns the source that supplied each effective configuration value.
     #[must_use]
     pub const fn provenance(&self) -> &BTreeMap<String, ConfigSource> {
         &self.provenance
+    }
+
+    /// Returns explicit sticky denials and their highest-authority sources.
+    ///
+    /// Safe fallback denials from compiled defaults are intentionally omitted.
+    #[must_use]
+    pub const fn hard_denial_provenance(&self) -> &BTreeMap<String, ConfigSource> {
+        &self.hard_denial_provenance
     }
 
     /// Returns the canonical serialized configuration bytes.
@@ -374,6 +399,7 @@ struct EffectiveConfig {
     analysis: AnalysisConfig,
     extensions: BTreeMap<String, ExtensionSnapshot>,
     provenance: BTreeMap<String, ConfigSource>,
+    hard_denial_provenance: BTreeMap<String, ConfigSource>,
 }
 
 impl EffectiveConfig {
@@ -395,21 +421,17 @@ impl EffectiveConfig {
             analysis: AnalysisConfig::default(),
             extensions: BTreeMap::new(),
             provenance,
+            hard_denial_provenance: BTreeMap::new(),
         }
     }
 
     fn apply(&mut self, source: ConfigSource, wire: WireConfig) -> Result<(), ConfigError> {
         if let Some(security) = wire.security {
             if let Some(network) = security.network {
-                self.security.network = merge_network(self.security.network, network);
-                self.provenance
-                    .insert("security.network".to_owned(), source);
+                self.apply_network_policy(source, network)?;
             }
             if let Some(execution) = security.repository_execution {
-                self.security.repository_execution =
-                    merge_execution(self.security.repository_execution, execution);
-                self.provenance
-                    .insert("security.repository_execution".to_owned(), source);
+                self.apply_execution_policy(source, execution)?;
             }
             if security.in_process_native_plugins.is_some() {
                 self.security.in_process_native_plugins = NativePluginPolicy::Deny;
@@ -455,9 +477,6 @@ impl EffectiveConfig {
             let canonical = canonical_extension(&extension.data)?;
             let bytes =
                 u64::try_from(canonical.len()).map_err(|_| ConfigError::ExtensionTooLarge)?;
-            if bytes > 64 * 1024 {
-                return Err(ConfigError::ExtensionTooLarge);
-            }
             let snapshot = ExtensionSnapshot {
                 namespace: namespace.clone(),
                 version: extension.version,
@@ -468,6 +487,52 @@ impl EffectiveConfig {
             self.extensions.insert(namespace.clone(), snapshot);
             self.provenance
                 .insert(format!("extensions.{namespace}"), source);
+        }
+        Ok(())
+    }
+
+    fn apply_network_policy(
+        &mut self,
+        source: ConfigSource,
+        requested: NetworkPolicy,
+    ) -> Result<(), ConfigError> {
+        const FIELD: &str = "security.network";
+        if source == ConfigSource::Repository && requested == NetworkPolicy::Loopback {
+            return Err(ConfigError::RepositorySecurityEscalation { field: FIELD });
+        }
+        if self.hard_denial_provenance.contains_key(FIELD) {
+            return Ok(());
+        }
+        self.security.network = requested;
+        self.provenance.insert(FIELD.to_owned(), source);
+        if requested == NetworkPolicy::Deny && source != ConfigSource::Defaults {
+            self.hard_denial_provenance
+                .entry(FIELD.to_owned())
+                .or_insert(source);
+        }
+        Ok(())
+    }
+
+    fn apply_execution_policy(
+        &mut self,
+        source: ConfigSource,
+        requested: RepositoryExecutionPolicy,
+    ) -> Result<(), ConfigError> {
+        const FIELD: &str = "security.repository_execution";
+        if source == ConfigSource::Repository
+            && requested == RepositoryExecutionPolicy::ExplicitConsent
+        {
+            return Err(ConfigError::RepositorySecurityEscalation { field: FIELD });
+        }
+        if self.hard_denial_provenance.contains_key(FIELD) {
+            return Ok(());
+        }
+        self.security.repository_execution = requested;
+        self.provenance.insert(FIELD.to_owned(), source);
+        if requested == RepositoryExecutionPolicy::Deny && source != ConfigSource::Defaults {
+            self.hard_denial_provenance
+                .entry(FIELD.to_owned())
+                .or_insert(source);
         }
         Ok(())
     }
@@ -490,29 +555,39 @@ impl EffectiveConfig {
             analysis: self.analysis,
             extensions: self.extensions,
             provenance: self.provenance,
+            hard_denial_provenance: self.hard_denial_provenance,
             canonical,
             hash,
         })
     }
 }
 
-fn merge_network(current: NetworkPolicy, requested: NetworkPolicy) -> NetworkPolicy {
-    if current == NetworkPolicy::Deny || requested == NetworkPolicy::Deny {
-        NetworkPolicy::Deny
-    } else {
-        NetworkPolicy::Loopback
+fn validate_layer_bounds(layers: &[ConfigLayer<'_>]) -> Result<(), ConfigError> {
+    if layers.len() > MAX_CONFIG_LAYERS {
+        return Err(ConfigError::TooManyLayers {
+            maximum: MAX_CONFIG_LAYERS,
+        });
     }
-}
-
-fn merge_execution(
-    current: RepositoryExecutionPolicy,
-    requested: RepositoryExecutionPolicy,
-) -> RepositoryExecutionPolicy {
-    if current == RepositoryExecutionPolicy::Deny || requested == RepositoryExecutionPolicy::Deny {
-        RepositoryExecutionPolicy::Deny
-    } else {
-        RepositoryExecutionPolicy::ExplicitConsent
+    let mut total = 0_usize;
+    for layer in layers {
+        let bytes = layer.contents.len();
+        if bytes > MAX_CONFIG_LAYER_BYTES {
+            return Err(ConfigError::LayerTooLarge {
+                maximum: MAX_CONFIG_LAYER_BYTES,
+            });
+        }
+        total = total
+            .checked_add(bytes)
+            .ok_or(ConfigError::TotalLayersTooLarge {
+                maximum: MAX_CONFIG_TOTAL_BYTES,
+            })?;
+        if total > MAX_CONFIG_TOTAL_BYTES {
+            return Err(ConfigError::TotalLayersTooLarge {
+                maximum: MAX_CONFIG_TOTAL_BYTES,
+            });
+        }
     }
+    Ok(())
 }
 
 fn validate_namespace(namespace: &str) -> Result<(), ConfigError> {
@@ -529,28 +604,89 @@ fn validate_namespace(namespace: &str) -> Result<(), ConfigError> {
 }
 
 fn canonical_extension(data: &toml::Value) -> Result<Vec<u8>, ConfigError> {
-    fn canonicalize(value: &toml::Value) -> Result<serde_json::Value, ConfigError> {
+    let mut encoder = ExtensionEncoder::default();
+    encoder.write_value(data, 0)?;
+    Ok(encoder.output)
+}
+
+#[derive(Debug, Default)]
+struct ExtensionEncoder {
+    output: Vec<u8>,
+    nodes: usize,
+}
+
+impl ExtensionEncoder {
+    fn write_value(&mut self, value: &toml::Value, depth: usize) -> Result<(), ConfigError> {
+        if depth > MAX_EXTENSION_DEPTH {
+            return Err(ConfigError::ExtensionTooDeep);
+        }
+        self.nodes = self
+            .nodes
+            .checked_add(1)
+            .ok_or(ConfigError::ExtensionTooManyNodes)?;
+        if self.nodes > MAX_EXTENSION_NODES {
+            return Err(ConfigError::ExtensionTooManyNodes);
+        }
         match value {
-            toml::Value::String(value) => Ok(serde_json::Value::String(value.clone())),
-            toml::Value::Integer(value) => Ok(serde_json::Value::Number((*value).into())),
-            toml::Value::Boolean(value) => Ok(serde_json::Value::Bool(*value)),
-            toml::Value::Array(values) => values
-                .iter()
-                .map(canonicalize)
-                .collect::<Result<Vec<_>, _>>()
-                .map(serde_json::Value::Array),
-            toml::Value::Table(values) => values
-                .iter()
-                .map(|(key, value)| Ok((key.clone(), canonicalize(value)?)))
-                .collect::<Result<serde_json::Map<_, _>, ConfigError>>()
-                .map(serde_json::Value::Object),
+            toml::Value::String(value) => self.write_json(value),
+            toml::Value::Integer(value) => self.write_bytes(value.to_string().as_bytes()),
+            toml::Value::Boolean(value) => {
+                self.write_bytes(if *value { b"true" } else { b"false" })
+            }
+            toml::Value::Array(values) => {
+                self.write_byte(b'[')?;
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        self.write_byte(b',')?;
+                    }
+                    self.write_value(value, depth + 1)?;
+                }
+                self.write_byte(b']')
+            }
+            toml::Value::Table(values) => {
+                self.write_byte(b'{')?;
+                for (index, (key, value)) in values.iter().enumerate() {
+                    if index > 0 {
+                        self.write_byte(b',')?;
+                    }
+                    self.write_json(key)?;
+                    self.write_byte(b':')?;
+                    self.write_value(value, depth + 1)?;
+                }
+                self.write_byte(b'}')
+            }
             toml::Value::Float(_) | toml::Value::Datetime(_) => {
                 Err(ConfigError::UnsupportedExtensionValue)
             }
         }
     }
 
-    serde_json::to_vec(&canonicalize(data)?).map_err(|source| ConfigError::Canonicalize { source })
+    fn write_json(&mut self, value: &str) -> Result<(), ConfigError> {
+        let encoded =
+            serde_json::to_vec(value).map_err(|source| ConfigError::Canonicalize { source })?;
+        self.write_bytes(&encoded)
+    }
+
+    fn write_byte(&mut self, byte: u8) -> Result<(), ConfigError> {
+        if self.output.len() == MAX_EXTENSION_BYTES {
+            return Err(ConfigError::ExtensionTooLarge);
+        }
+        self.output.push(byte);
+        Ok(())
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), ConfigError> {
+        let new_length = self
+            .output
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(ConfigError::ExtensionTooLarge)?;
+        if new_length > MAX_EXTENSION_BYTES {
+            return Err(ConfigError::ExtensionTooLarge);
+        }
+        self.output.extend_from_slice(bytes);
+        Ok(())
+    }
 }
 
 /// Namespaced extension map with a closed namespace policy.
@@ -575,30 +711,41 @@ impl schemars::JsonSchema for ExtensionMapSchema {
     }
 }
 
-/// Strict external shape of the versioned configuration document.
+/// JSON Schema marker for the strict versioned configuration document.
+///
+/// Layer source and semantic validation are applied only by
+/// [`ConfigSnapshot::resolve`]; this marker intentionally has no Serde decoder.
+#[derive(Debug)]
+pub struct ConfigDocumentSchema;
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for ConfigDocumentSchema {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ConfigDocumentSchema".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = generator.subschema_for::<WireConfig>();
+        schema.insert("title".to_owned(), "Rootlight configuration 1.0".into());
+        schema
+    }
+}
+
+#[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "schema", schemars(title = "Rootlight configuration 1.0"))]
-#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ConfigDocumentSchema {
-    /// Canonical contract version selected by the document.
+struct WireConfig {
     version: ContractVersion,
-    /// Optional security policy overrides.
     #[serde(default)]
     security: Option<PartialSecurityConfig>,
-    /// Optional resource limit overrides.
     #[serde(default)]
     resources: Option<PartialResourceConfig>,
-    /// Optional analysis defaults.
     #[serde(default)]
     analysis: Option<PartialAnalysisConfig>,
-    /// Namespaced extensions keyed by their stable namespace.
     #[serde(default)]
     #[cfg_attr(feature = "schema", schemars(with = "ExtensionMapSchema"))]
     extensions: BTreeMap<String, WireExtension>,
 }
-
-type WireConfig = ConfigDocumentSchema;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -626,15 +773,27 @@ struct PartialAnalysisConfig {
     default_tier: Option<AnalysisTier>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct WireExtension {
     version: ContractVersion,
     critical: bool,
     #[serde(default = "empty_extension_data")]
-    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+    #[cfg_attr(feature = "schema", schemars(with = "ExtensionDataSchema"))]
     data: toml::Value,
+}
+
+#[cfg(feature = "schema")]
+#[allow(dead_code, reason = "variants define the generated recursive schema")]
+#[derive(schemars::JsonSchema)]
+#[serde(untagged)]
+enum ExtensionDataSchema {
+    String(String),
+    Integer(i64),
+    Boolean(bool),
+    Array(Vec<ExtensionDataSchema>),
+    Object(BTreeMap<String, ExtensionDataSchema>),
 }
 
 fn empty_extension_data() -> toml::Value {
@@ -669,6 +828,30 @@ pub enum ConfigError {
         /// Unsupported major component.
         major: u16,
     },
+    /// Too many explicit layers were supplied.
+    #[error("configuration has too many layers; maximum is {maximum}")]
+    TooManyLayers {
+        /// Maximum accepted layer count.
+        maximum: usize,
+    },
+    /// One layer exceeded the pre-parse byte limit.
+    #[error("configuration layer exceeds its byte limit; maximum is {maximum}")]
+    LayerTooLarge {
+        /// Maximum accepted UTF-8 bytes per layer.
+        maximum: usize,
+    },
+    /// The aggregate layer bytes exceeded the pre-parse limit.
+    #[error("configuration layers exceed their aggregate byte limit; maximum is {maximum}")]
+    TotalLayersTooLarge {
+        /// Maximum accepted UTF-8 bytes across all layers.
+        maximum: usize,
+    },
+    /// Repository-controlled configuration attempted to enable a protected capability.
+    #[error("repository configuration cannot widen {field}")]
+    RepositorySecurityEscalation {
+        /// Stable source-free field name.
+        field: &'static str,
+    },
     /// A resource field was outside its declared hard bounds.
     #[error("configuration resource limit is out of range: {field}")]
     ResourceLimitOutOfRange {
@@ -687,6 +870,12 @@ pub enum ConfigError {
     /// Extension data exceeded its bounded canonical representation.
     #[error("configuration extension exceeds its byte limit")]
     ExtensionTooLarge,
+    /// Extension data exceeded its nesting-depth limit.
+    #[error("configuration extension exceeds its nesting-depth limit")]
+    ExtensionTooDeep,
+    /// Extension data exceeded its node-count limit.
+    #[error("configuration extension exceeds its node-count limit")]
+    ExtensionTooManyNodes,
     /// Float and datetime extension values are not canonicalized in P0.
     #[error("configuration extension uses an unsupported value type")]
     UnsupportedExtensionValue,
@@ -790,6 +979,31 @@ credential = "gho_fake_secret"
     }
 
     #[test]
+    fn trusted_permissions_override_fallback_denials() {
+        let snapshot = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::System,
+            contents: r#"
+version = "1.0"
+[security]
+network = "loopback"
+repository_execution = "explicit_consent"
+"#,
+        }])
+        .expect("trusted permissions resolve");
+
+        assert_eq!(snapshot.security().network, NetworkPolicy::Loopback);
+        assert_eq!(
+            snapshot.security().repository_execution,
+            RepositoryExecutionPolicy::ExplicitConsent
+        );
+        assert_eq!(
+            snapshot.provenance().get("security.network"),
+            Some(&ConfigSource::System)
+        );
+        assert!(snapshot.hard_denial_provenance().is_empty());
+    }
+
+    #[test]
     fn hard_denials_cannot_be_weakened() {
         let snapshot = ConfigSnapshot::resolve(&[
             ConfigLayer {
@@ -799,17 +1013,15 @@ version = "1.0"
 [security]
 network = "deny"
 repository_execution = "deny"
-in_process_native_plugins = "deny"
 "#,
             },
             ConfigLayer {
-                source: ConfigSource::Repository,
+                source: ConfigSource::User,
                 contents: r#"
 version = "1.0"
 [security]
 network = "loopback"
 repository_execution = "explicit_consent"
-in_process_native_plugins = "deny"
 "#,
             },
         ])
@@ -820,6 +1032,80 @@ in_process_native_plugins = "deny"
             snapshot.security().repository_execution,
             RepositoryExecutionPolicy::Deny
         );
+        assert_eq!(
+            snapshot.provenance().get("security.network"),
+            Some(&ConfigSource::System)
+        );
+        assert_eq!(
+            snapshot
+                .hard_denial_provenance()
+                .get("security.repository_execution"),
+            Some(&ConfigSource::System)
+        );
+    }
+
+    #[test]
+    fn repository_cannot_enable_protected_capabilities() {
+        for (field, contents) in [
+            (
+                "security.network",
+                "version = \"1.0\"\n[security]\nnetwork = \"loopback\"\n",
+            ),
+            (
+                "security.repository_execution",
+                "version = \"1.0\"\n[security]\nrepository_execution = \"explicit_consent\"\n",
+            ),
+        ] {
+            assert!(matches!(
+                ConfigSnapshot::resolve(&[ConfigLayer {
+                    source: ConfigSource::Repository,
+                    contents,
+                }]),
+                Err(ConfigError::RepositorySecurityEscalation { field: observed })
+                    if observed == field
+            ));
+        }
+    }
+
+    #[test]
+    fn repository_denial_blocks_operation_permission() {
+        let snapshot = ConfigSnapshot::resolve(&[
+            ConfigLayer {
+                source: ConfigSource::Repository,
+                contents: "version = \"1.0\"\n[security]\nnetwork = \"deny\"\n",
+            },
+            ConfigLayer {
+                source: ConfigSource::Operation,
+                contents: "version = \"1.0\"\n[security]\nnetwork = \"loopback\"\n",
+            },
+        ])
+        .expect("repository denial remains effective");
+
+        assert_eq!(snapshot.security().network, NetworkPolicy::Deny);
+        assert_eq!(
+            snapshot.hard_denial_provenance().get("security.network"),
+            Some(&ConfigSource::Repository)
+        );
+    }
+
+    #[test]
+    fn provenance_does_not_change_canonical_identity() {
+        let defaults = ConfigSnapshot::resolve(&[]).expect("defaults resolve");
+        let explicit = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::System,
+            contents: r#"
+version = "1.0"
+[security]
+network = "deny"
+repository_execution = "deny"
+"#,
+        }])
+        .expect("explicit denials resolve");
+
+        assert_eq!(defaults.canonical_bytes(), explicit.canonical_bytes());
+        assert_eq!(defaults.hash(), explicit.hash());
+        assert!(defaults.hard_denial_provenance().is_empty());
+        assert!(!explicit.hard_denial_provenance().is_empty());
     }
 
     #[test]
@@ -867,6 +1153,101 @@ mode = "fixture"
         assert!(debug.contains("ExtensionSnapshot"));
         assert!(!debug.contains("gho_fake_secret"));
         assert!(!debug.contains("fixture"));
+    }
+
+    #[test]
+    fn configuration_input_bounds_fail_before_parsing() {
+        let too_many = vec![
+            ConfigLayer {
+                source: ConfigSource::User,
+                contents: "version = \"1.0\"",
+            };
+            MAX_CONFIG_LAYERS + 1
+        ];
+        assert!(matches!(
+            ConfigSnapshot::resolve(&too_many),
+            Err(ConfigError::TooManyLayers { .. })
+        ));
+
+        let oversized = "x".repeat(MAX_CONFIG_LAYER_BYTES + 1);
+        assert!(matches!(
+            ConfigSnapshot::resolve(&[ConfigLayer {
+                source: ConfigSource::User,
+                contents: &oversized,
+            }]),
+            Err(ConfigError::LayerTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn extension_canonicalization_enforces_type_and_byte_bounds() {
+        let exact_value = "x".repeat(MAX_EXTENSION_BYTES - 2);
+        let exact = format!(
+            "version = \"1.0\"\n[extensions.example]\nversion = \"1.0\"\ncritical = false\ndata = {exact_value:?}\n"
+        );
+        let snapshot = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: &exact,
+        }])
+        .expect("exact canonical extension limit is accepted");
+        assert_eq!(
+            snapshot.extensions()["example"].bytes(),
+            MAX_EXTENSION_BYTES as u64
+        );
+
+        let oversized_value = "x".repeat(MAX_EXTENSION_BYTES - 1);
+        let oversized = format!(
+            "version = \"1.0\"\n[extensions.example]\nversion = \"1.0\"\ncritical = false\ndata = {oversized_value:?}\n"
+        );
+        assert!(matches!(
+            ConfigSnapshot::resolve(&[ConfigLayer {
+                source: ConfigSource::User,
+                contents: &oversized,
+            }]),
+            Err(ConfigError::ExtensionTooLarge)
+        ));
+
+        assert!(matches!(
+            ConfigSnapshot::resolve(&[ConfigLayer {
+                source: ConfigSource::User,
+                contents: "version = \"1.0\"\n[extensions.example]\nversion = \"1.0\"\ncritical = false\ndata = 1.5\n",
+            }]),
+            Err(ConfigError::UnsupportedExtensionValue)
+        ));
+    }
+
+    #[test]
+    fn extension_canonicalization_enforces_depth_and_node_bounds() {
+        let mut nested = toml::Value::String("leaf".to_owned());
+        for _ in 0..=MAX_EXTENSION_DEPTH {
+            nested = toml::Value::Array(vec![nested]);
+        }
+        assert!(matches!(
+            canonical_extension(&nested),
+            Err(ConfigError::ExtensionTooDeep)
+        ));
+
+        let many = toml::Value::Array(
+            (0..MAX_EXTENSION_NODES)
+                .map(|_| toml::Value::Boolean(true))
+                .collect(),
+        );
+        assert!(matches!(
+            canonical_extension(&many),
+            Err(ConfigError::ExtensionTooManyNodes)
+        ));
+    }
+
+    #[test]
+    fn contract_version_enforces_u16_minor_boundary() {
+        let parsed = ContractVersion::parse("1.65535").expect("maximum minor is valid");
+        assert_eq!(parsed, ContractVersion::new(1, 65_535));
+        for invalid in ["1.65536", "1.01", "1", "1.0.0"] {
+            assert!(matches!(
+                ContractVersion::parse(invalid),
+                Err(ConfigError::InvalidVersion)
+            ));
+        }
     }
 
     #[test]
