@@ -1,5 +1,16 @@
-# Local overrides
+# Rust build and coverage outputs
+/target/
+/artifacts/
+*.profraw
+*.profdata
+
+# Local operating context
 /development-docs/
+/docs/
 AGENTS.md
 .agents/
 .codebook/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
