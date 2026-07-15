@@ -11,5 +11,8 @@ rootlight-ids = { path = "../rootlight-ids" }
 serde.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

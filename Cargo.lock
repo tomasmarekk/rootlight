@@ -322,6 +322,7 @@ version = "0.1.0"
 dependencies = [
  "rootlight-ids",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 
