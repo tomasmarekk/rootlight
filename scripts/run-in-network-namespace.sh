@@ -32,5 +32,10 @@ exec unshare --net -- \
         env \
             HOME="$runner_home" \
             PATH="$runner_path" \
+            CARGO_HOME="$runner_home/.cargo" \
+            RUSTUP_HOME="$runner_home/.rustup" \
+            CARGO_NET_OFFLINE=true \
+            CARGO_HTTP_TIMEOUT=1 \
+            CARGO_NET_RETRY=0 \
             REQUIRE_BLOCKED_EGRESS=1 \
             bash "$@"
