@@ -38,7 +38,7 @@
     },
     {
       "path": "crates/rootlight-ids/src/lib.rs",
-      "blake3": "98b7b6e7c35f5f68d54ebdc5ab6153b5b61a36e4fba6e51cbc15952fb2bcf456"
+      "blake3": "aca7619436d76ac953b90ab8ac1217eabd8950724e6ebfa013682d5394116ef0"
     },
     {
       "path": "crates/rootlight-ir/Cargo.toml",
