@@ -14,7 +14,24 @@ const MAX_MESSAGE_BYTES: usize = 1_024;
 const MAX_DETAILS: usize = 32;
 const MAX_DETAIL_KEY_BYTES: usize = 64;
 const MAX_NEXT_ACTIONS: usize = 8;
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_RETRY_AFTER_MS: u64 = 24 * 60 * 60 * 1_000;
+const MAX_RETRY_AFTER: Duration = Duration::from_millis(MAX_RETRY_AFTER_MS);
+
+const fn is_safe_message_template(message: &str) -> bool {
+    let bytes = message.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_MESSAGE_BYTES {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b' ' | b'-')) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
 
 /// Stable public error families shared by all Rootlight boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +251,69 @@ pub struct PublicError {
     next_actions: Vec<NextAction>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicErrorWire {
+    code: ErrorCode,
+    message: String,
+    retryable: bool,
+    retry_after_ms: Option<u64>,
+    repository: Option<RepositoryId>,
+    operation: Option<OperationId>,
+    generation: Option<GenerationId>,
+    details: BTreeMap<DetailKey, PublicValue>,
+    next_actions: Vec<NextAction>,
+}
+
+impl<'de> Deserialize<'de> for PublicError {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PublicErrorWire::deserialize(deserializer)?;
+        if !is_safe_message_template(&wire.message) {
+            return Err(serde::de::Error::custom(
+                "public error message violates the safe template policy",
+            ));
+        }
+        if wire.details.len() > MAX_DETAILS {
+            return Err(serde::de::Error::custom(
+                "public error has too many details",
+            ));
+        }
+        if wire.next_actions.len() > MAX_NEXT_ACTIONS {
+            return Err(serde::de::Error::custom(
+                "public error has too many next actions",
+            ));
+        }
+        if wire
+            .retry_after_ms
+            .is_some_and(|delay| delay > MAX_RETRY_AFTER_MS)
+        {
+            return Err(serde::de::Error::custom(
+                "public error retry delay exceeds its limit",
+            ));
+        }
+        if wire.retry_after_ms.is_some() && !wire.retryable {
+            return Err(serde::de::Error::custom(
+                "public error retry delay requires retryable state",
+            ));
+        }
+
+        Ok(Self {
+            code: wire.code,
+            message: wire.message,
+            retryable: wire.retryable,
+            retry_after_ms: wire.retry_after_ms,
+            repository: wire.repository,
+            operation: wire.operation,
+            generation: wire.generation,
+            details: wire.details,
+            next_actions: wire.next_actions,
+        })
+    }
+}
+
 impl PublicError {
     /// Starts a checked public error using a static source-free message template.
     pub fn builder(code: ErrorCode, message: &'static str) -> PublicErrorBuilder {
@@ -305,8 +385,8 @@ pub struct PublicErrorBuilder {
 
 impl PublicErrorBuilder {
     fn new(code: ErrorCode, message: &'static str) -> Self {
-        let build_error =
-            (message.len() > MAX_MESSAGE_BYTES).then_some(PublicErrorBuildError::MessageTooLong);
+        let build_error = (!is_safe_message_template(message))
+            .then_some(PublicErrorBuildError::InvalidMessageTemplate);
         Self {
             error: PublicError {
                 code,
@@ -400,9 +480,9 @@ impl PublicErrorBuilder {
 /// Failures encountered while constructing safe public diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PublicErrorBuildError {
-    /// The static message template exceeds the public bound.
-    #[error("public error message exceeds its byte limit")]
-    MessageTooLong,
+    /// The static message is empty, oversized, or outside the safe template alphabet.
+    #[error("public error message violates the safe template policy")]
+    InvalidMessageTemplate,
     /// A detail key violates the public allow-list.
     #[error("invalid public error detail key")]
     InvalidDetailKey,
@@ -487,6 +567,45 @@ mod tests {
             .retry_after(Duration::from_secs(24 * 60 * 60 + 1))
             .build();
         assert_eq!(result, Err(PublicErrorBuildError::RetryDelayTooLong));
+    }
+
+    #[test]
+    fn public_error_round_trips_through_checked_deserialization() {
+        let expected = PublicError::builder(ErrorCode::Busy, "repository is busy")
+            .retry_after(Duration::from_millis(250))
+            .build()
+            .expect("bounded fixture builds");
+        let json = serde_json::to_string(&expected).expect("public error serializes");
+        let actual: PublicError = serde_json::from_str(&json).expect("public error deserializes");
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn public_error_deserialization_rejects_unchecked_bounds() {
+        let oversized_message = "x".repeat(MAX_MESSAGE_BYTES + 1);
+        let json = format!(
+            r#"{{"code":"INTERNAL","message":"{oversized_message}","retryable":false,"retry_after_ms":null,"repository":null,"operation":null,"generation":null,"details":{{}},"next_actions":[]}}"#
+        );
+        assert!(serde_json::from_str::<PublicError>(&json).is_err());
+
+        let inconsistent_retry = r#"{"code":"BUSY","message":"repository is busy","retryable":false,"retry_after_ms":1,"repository":null,"operation":null,"generation":null,"details":{},"next_actions":[]}"#;
+        assert!(serde_json::from_str::<PublicError>(inconsistent_retry).is_err());
+
+        let path_shaped_message = r#"{"code":"INTERNAL","message":"C:\\Users\\person\\secret.rs","retryable":false,"retry_after_ms":null,"repository":null,"operation":null,"generation":null,"details":{},"next_actions":[]}"#;
+        assert!(serde_json::from_str::<PublicError>(path_shaped_message).is_err());
+    }
+
+    #[test]
+    fn construction_rejects_source_shaped_message_templates() {
+        assert_eq!(
+            PublicError::builder(ErrorCode::Internal, "/home/person/secret.rs").build(),
+            Err(PublicErrorBuildError::InvalidMessageTemplate)
+        );
+        assert_eq!(
+            PublicError::builder(ErrorCode::Internal, "token=gho_example_secret").build(),
+            Err(PublicErrorBuildError::InvalidMessageTemplate)
+        );
     }
 
     #[test]

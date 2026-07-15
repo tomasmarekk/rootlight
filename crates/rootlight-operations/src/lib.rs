@@ -231,7 +231,10 @@ impl OperationJournal {
         {
             return Err(OperationError::InvalidTerminalError);
         }
-        let has_error = error.is_some();
+        let error_json = error
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(OperationError::SerializePublicError)?;
         let revision = current
             .revision
             .checked_add(1)
@@ -245,7 +248,7 @@ impl OperationJournal {
                 params![
                     next.as_str(),
                     i64::try_from(revision).map_err(|_| OperationError::RevisionOverflow)?,
-                    has_error.then_some("present"),
+                    error_json,
                     operation.as_bytes().as_slice(),
                     i64::try_from(current.revision)
                         .map_err(|_| OperationError::RevisionOverflow)?,
@@ -367,7 +370,17 @@ impl OperationJournal {
         drop(connection);
         let revision = u64::try_from(record.1).map_err(|_| OperationError::CorruptState)?;
         let has_persisted_error = record.4.is_some();
-        let error = self.lock_errors()?.get(&operation).cloned();
+        let persisted_error = record
+            .4
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(OperationError::DeserializePublicError)?;
+        let error = self
+            .lock_errors()?
+            .get(&operation)
+            .cloned()
+            .or(persisted_error);
         Ok(OperationRecord {
             operation,
             state: OperationState::parse(&record.0)?,
@@ -649,6 +662,12 @@ pub enum OperationError {
     /// The writer lock record was malformed.
     #[error("catalog writer lock is corrupt")]
     CorruptLock,
+    /// A public error could not be serialized for durable recovery.
+    #[error("operation public error serialization failed")]
+    SerializePublicError(#[source] serde_json::Error),
+    /// A persisted public error failed checked decoding.
+    #[error("operation public error is corrupt")]
+    DeserializePublicError(#[source] serde_json::Error),
     /// SQLite operation failed.
     #[error("operation journal storage failed")]
     Sqlite(#[source] rusqlite::Error),
@@ -740,6 +759,28 @@ mod tests {
             .transition(operation(4), OperationState::Failed, Some(&error))
             .expect("operation fails");
         assert_eq!(failed.error, Some(error));
+    }
+
+    #[test]
+    fn failed_public_error_survives_journal_restart() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let expected = PublicError::builder(ErrorCode::Internal, "operation failed")
+            .operation(operation(5))
+            .build()
+            .expect("public error builds");
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            journal.enqueue(operation(5)).expect("operation enqueues");
+            journal
+                .transition(operation(5), OperationState::Failed, Some(&expected))
+                .expect("operation fails");
+        }
+
+        let reopened = OperationJournal::open(&path).expect("journal reopens");
+        let actual = reopened.status(operation(5)).expect("status loads");
+        assert_eq!(actual.error, Some(expected));
+        assert!(actual.has_persisted_error);
     }
 
     #[test]

@@ -1315,6 +1315,7 @@ dependencies = [
  "rootlight-error",
  "rootlight-ids",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

@@ -11,6 +11,7 @@ rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-error = { path = "../rootlight-error" }
 rootlight-ids = { path = "../rootlight-ids" }
 rusqlite.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
