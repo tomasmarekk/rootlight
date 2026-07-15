@@ -24,7 +24,7 @@ exec unshare --net -- \
     setpriv \
         --reuid "$SUDO_UID" \
         --regid "$SUDO_GID" \
-        --init-groups \
+        --clear-groups \
         --bounding-set=-all \
         --inh-caps=-all \
         --ambient-caps=-all \

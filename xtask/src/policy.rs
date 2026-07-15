@@ -6,7 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use cargo_metadata::{Metadata, MetadataCommand, Package, TargetKind};
@@ -211,6 +211,11 @@ fn validate_action_pins(root: &Path, policy: &ActionPolicy) -> Result<(), Policy
         path: workflows.clone(),
         source,
     })?;
+    let canonical_root = fs::canonicalize(root).map_err(|source| PolicyError::Read {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let mut inspected = BTreeSet::new();
     let mut used = BTreeSet::new();
 
     for entry in entries {
@@ -240,7 +245,14 @@ fn validate_action_pins(root: &Path, policy: &ActionPolicy) -> Result<(), Policy
                 count: documents.len(),
             });
         }
-        inspect_workflow_node(&documents[0], &path, &approved, &mut used)?;
+        inspect_workflow_node(
+            &canonical_root,
+            &documents[0],
+            &path,
+            &approved,
+            &mut used,
+            &mut inspected,
+        )?;
     }
 
     let unused: Vec<String> = approved
@@ -256,10 +268,12 @@ fn validate_action_pins(root: &Path, policy: &ActionPolicy) -> Result<(), Policy
 }
 
 fn inspect_workflow_node(
+    root: &Path,
     node: &Yaml,
     path: &Path,
     approved: &BTreeMap<&str, &str>,
     used: &mut BTreeSet<String>,
+    inspected: &mut BTreeSet<PathBuf>,
 ) -> Result<(), PolicyError> {
     match node {
         Yaml::Hash(mapping) => {
@@ -277,16 +291,18 @@ fn inspect_workflow_node(
                             key: key.to_owned(),
                         });
                     }
-                    "uses" => validate_action_reference(value, path, approved, used)?,
+                    "uses" => {
+                        validate_action_reference(root, value, path, approved, used, inspected)?
+                    }
                     "permissions" => validate_permissions(value, path)?,
                     _ => {}
                 }
-                inspect_workflow_node(value, path, approved, used)?;
+                inspect_workflow_node(root, value, path, approved, used, inspected)?;
             }
         }
         Yaml::Array(values) => {
             for value in values {
-                inspect_workflow_node(value, path, approved, used)?;
+                inspect_workflow_node(root, value, path, approved, used, inspected)?;
             }
         }
         Yaml::Alias(_) => return Err(PolicyError::WorkflowAlias(path.to_path_buf())),
@@ -301,16 +317,18 @@ fn inspect_workflow_node(
 }
 
 fn validate_action_reference(
+    root: &Path,
     value: &Yaml,
     path: &Path,
     approved: &BTreeMap<&str, &str>,
     used: &mut BTreeSet<String>,
+    inspected: &mut BTreeSet<PathBuf>,
 ) -> Result<(), PolicyError> {
     let Some(action_ref) = value.as_str() else {
         return Err(PolicyError::WorkflowActionType(path.to_path_buf()));
     };
     if action_ref.starts_with("./") {
-        return Ok(());
+        return validate_local_action(root, action_ref, approved, used, inspected);
     }
     let Some((repository, commit)) = action_ref.rsplit_once('@') else {
         return Err(PolicyError::UnpinnedAction {
@@ -336,6 +354,73 @@ fn validate_action_reference(
         }),
         None => Err(PolicyError::UnapprovedAction(repository.to_owned())),
     }
+}
+
+fn validate_local_action(
+    root: &Path,
+    action_ref: &str,
+    approved: &BTreeMap<&str, &str>,
+    used: &mut BTreeSet<String>,
+    inspected: &mut BTreeSet<PathBuf>,
+) -> Result<(), PolicyError> {
+    let relative = action_ref
+        .strip_prefix("./")
+        .expect("local action references are checked before validation");
+    let relative = Path::new(relative);
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(PolicyError::InvalidLocalActionReference(
+            action_ref.to_owned(),
+        ));
+    }
+    let action_root =
+        fs::canonicalize(root.join(relative)).map_err(|source| PolicyError::Read {
+            path: root.join(relative),
+            source,
+        })?;
+    if !action_root.starts_with(root) {
+        return Err(PolicyError::InvalidLocalActionReference(
+            action_ref.to_owned(),
+        ));
+    }
+    let candidates = [
+        action_root.join("action.yml"),
+        action_root.join("action.yaml"),
+    ];
+    let Some(path) = candidates.iter().find(|candidate| candidate.is_file()) else {
+        return Err(PolicyError::LocalActionMetadata(action_root));
+    };
+    let path = fs::canonicalize(path).map_err(|source| PolicyError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !path.starts_with(root) {
+        return Err(PolicyError::InvalidLocalActionReference(
+            action_ref.to_owned(),
+        ));
+    }
+    if !inspected.insert(path.clone()) {
+        return Ok(());
+    }
+    let text = fs::read_to_string(&path).map_err(|source| PolicyError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let documents =
+        YamlLoader::load_from_str(&text).map_err(|source| PolicyError::WorkflowYaml {
+            path: path.to_path_buf(),
+            detail: source.to_string(),
+        })?;
+    if documents.len() != 1 {
+        return Err(PolicyError::WorkflowDocumentCount {
+            path: path.to_path_buf(),
+            count: documents.len(),
+        });
+    }
+    inspect_workflow_node(root, &documents[0], &path, approved, used, inspected)
 }
 
 fn validate_permissions(value: &Yaml, path: &Path) -> Result<(), PolicyError> {
@@ -538,12 +623,53 @@ fn skip_block_comment(bytes: &[u8], mut index: usize) -> usize {
 
 fn quoted_literal_start(bytes: &[u8], index: usize) -> Option<(usize, u8)> {
     match bytes.get(index).copied()? {
-        quote @ (b'"' | b'\'') => Some((index, quote)),
-        b'b' if matches!(bytes.get(index + 1), Some(b'"' | b'\'')) => {
-            Some((index + 1, bytes[index + 1]))
+        b'"' => Some((index, b'"')),
+        b'\'' if is_character_literal(bytes, index) => Some((index, b'\'')),
+        b'b' if bytes.get(index + 1) == Some(&b'"') => Some((index + 1, b'"')),
+        b'b' if bytes.get(index + 1) == Some(&b'\'') && is_character_literal(bytes, index + 1) => {
+            Some((index + 1, b'\''))
         }
         b'c' if bytes.get(index + 1) == Some(&b'"') => Some((index + 1, b'"')),
         _ => None,
+    }
+}
+
+fn is_character_literal(bytes: &[u8], quote_index: usize) -> bool {
+    let mut index = quote_index + 1;
+    if bytes.get(index) == Some(&b'\\') {
+        index += 1;
+        match bytes.get(index).copied() {
+            Some(b'x') => index += 3,
+            Some(b'u') if bytes.get(index + 1) == Some(&b'{') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'}' {
+                    index += 1;
+                }
+                index += usize::from(index < bytes.len());
+            }
+            Some(_) => index += 1,
+            None => return false,
+        }
+    } else {
+        let Some(first) = bytes.get(index).copied() else {
+            return false;
+        };
+        let width = utf8_width(first);
+        if width == 0 || index + width > bytes.len() {
+            return false;
+        }
+        index += width;
+    }
+    bytes.get(index) == Some(&b'\'')
+}
+
+fn utf8_width(first: u8) -> usize {
+    match first {
+        0x00..=0x7f => 1,
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => 0,
     }
 }
 
@@ -710,6 +836,10 @@ pub(crate) enum PolicyError {
     WorkflowAlias(PathBuf),
     #[error("POLICY_WORKFLOW_ACTION: {0} contains a non-string uses value")]
     WorkflowActionType(PathBuf),
+    #[error("POLICY_ACTION_LOCAL_REFERENCE: invalid local action reference {0}")]
+    InvalidLocalActionReference(String),
+    #[error("POLICY_ACTION_LOCAL_METADATA: local action at {0} has no action.yml or action.yaml")]
+    LocalActionMetadata(PathBuf),
     #[error("POLICY_ACTION_UNPINNED: {path} uses mutable action reference {action}")]
     UnpinnedAction { path: PathBuf, action: String },
     #[error("POLICY_ACTION_UNAPPROVED: workflow uses unapproved action {0}")]
@@ -785,6 +915,22 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_scan_does_not_treat_labels_as_character_literals() {
+        let directory = tempdir().expect("temporary directory is available");
+        let source = directory.path().join("unsafe.rs");
+        fs::write(
+            &source,
+            "fn fixture() { 'scan: loop { unsafe { core::hint::unreachable_unchecked() } break 'scan; } }\n",
+        )
+        .expect("fixture writes");
+
+        assert!(matches!(
+            scan_rust_file(&source),
+            Err(PolicyError::UnsafeToken { line: 1, .. })
+        ));
+    }
+
+    #[test]
     fn unsafe_scan_closes_comments_before_code() {
         let directory = tempdir().expect("temporary directory is available");
         let source = directory.path().join("unsafe.rs");
@@ -807,14 +953,17 @@ mod tests {
         )
         .expect("fixture parses");
         let approved = BTreeMap::new();
+        let mut inspected = BTreeSet::new();
         let mut used = BTreeSet::new();
 
         assert!(matches!(
             inspect_workflow_node(
+                Path::new("."),
                 &documents[0],
                 Path::new("fixture.yml"),
                 &approved,
-                &mut used
+                &mut used,
+                &mut inspected,
             ),
             Err(PolicyError::UnsafeWorkflowTrigger(_))
         ));
@@ -822,21 +971,65 @@ mod tests {
 
     #[test]
     fn workflow_parser_accepts_local_and_pinned_actions() {
+        let directory = tempdir().expect("temporary directory is available");
+        let local_action = directory.path().join("local-action");
+        fs::create_dir(&local_action).expect("local action directory creates");
         let commit = "0123456789abcdef0123456789abcdef01234567";
+        fs::write(
+            local_action.join("action.yml"),
+            format!(
+                "name: fixture\nruns:\n  using: composite\n  steps:\n    - uses: vendor/action@{commit}\n"
+            ),
+        )
+        .expect("local action metadata writes");
         let documents = YamlLoader::load_from_str(&format!(
             "permissions: {{ contents: read }}\njobs:\n  local:\n    uses: ./local-action\n  external:\n    uses : vendor/action@{commit}\n"
         ))
         .expect("fixture parses");
         let approved = BTreeMap::from([("vendor/action", commit)]);
+        let root = fs::canonicalize(directory.path()).expect("temporary root canonicalizes");
+        let mut inspected = BTreeSet::new();
         let mut used = BTreeSet::new();
 
         inspect_workflow_node(
+            &root,
             &documents[0],
             Path::new("fixture.yml"),
             &approved,
             &mut used,
+            &mut inspected,
         )
         .expect("approved actions pass");
         assert_eq!(used, BTreeSet::from(["vendor/action".to_owned()]));
+    }
+
+    #[test]
+    fn workflow_parser_rejects_mutable_actions_in_local_composites() {
+        let directory = tempdir().expect("temporary directory is available");
+        let local_action = directory.path().join("local-action");
+        fs::create_dir(&local_action).expect("local action directory creates");
+        fs::write(
+            local_action.join("action.yml"),
+            "name: fixture\nruns:\n  using: composite\n  steps:\n    - uses: vendor/action@main\n",
+        )
+        .expect("local action metadata writes");
+        let documents = YamlLoader::load_from_str("jobs:\n  local:\n    uses: ./local-action\n")
+            .expect("fixture parses");
+        let approved = BTreeMap::new();
+        let root = fs::canonicalize(directory.path()).expect("temporary root canonicalizes");
+        let mut inspected = BTreeSet::new();
+        let mut used = BTreeSet::new();
+
+        assert!(matches!(
+            inspect_workflow_node(
+                &root,
+                &documents[0],
+                Path::new("fixture.yml"),
+                &approved,
+                &mut used,
+                &mut inspected,
+            ),
+            Err(PolicyError::UnpinnedAction { .. })
+        ));
     }
 }
