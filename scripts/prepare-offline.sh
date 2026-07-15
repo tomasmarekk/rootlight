@@ -3,7 +3,6 @@
 
 set -euo pipefail
 
-cargo fetch --locked --target x86_64-unknown-linux-gnu
-cargo fetch --locked --target aarch64-apple-darwin
-cargo fetch --locked --target x86_64-apple-darwin
-cargo fetch --locked --target x86_64-pc-windows-msvc
+# Cargo metadata resolves the complete lockfile graph, including dependencies that
+# are inactive on the runner target, so target-filtered fetches are insufficient.
+cargo fetch --locked
