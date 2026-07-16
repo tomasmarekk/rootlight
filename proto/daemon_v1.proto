@@ -30,6 +30,7 @@ message RequestEnvelope {
     OperationStatusRequest operation_status = 11;
     OperationCancelRequest operation_cancel = 12;
     OperationSubmitRequest operation_submit = 13;
+    OperationLeaseRenewRequest operation_lease_renew = 14;
   }
 }
 
@@ -41,6 +42,7 @@ message ResponseEnvelope {
     OperationStatusResponse operation_status = 11;
     OperationCancelResponse operation_cancel = 12;
     OperationSubmitResponse operation_submit = 13;
+    OperationLeaseRenewResponse operation_lease_renew = 14;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -155,9 +157,22 @@ message OperationSubmitRequest {
   bytes plan_hash = 3;
   bool detached = 4;
   optional uint64 timeout_ms = 5;
+  optional uint64 deadline_unix_ms = 6;
+  optional uint64 lease_expires_unix_ms = 7;
 }
 
 // Returns the newly queued durable operation.
 message OperationSubmitResponse {
+  OperationStatus operation = 1;
+}
+
+// Extends one attached operation lease for its authenticated owner.
+message OperationLeaseRenewRequest {
+  rootlight.common.v1.OperationId operation = 1;
+  uint64 lease_expires_unix_ms = 2;
+}
+
+// Returns the durable operation after lease renewal.
+message OperationLeaseRenewResponse {
   OperationStatus operation = 1;
 }

@@ -94,6 +94,51 @@ fn execute_client(
                 Some(Duration::from_millis(parse_timeout_ms(timeout_ms)?)),
             )?),
         ),
+        ("operation-submit", [operation, flag, deadline_unix_ms])
+            if flag == "--deadline-unix-ms" =>
+        {
+            Ok(CommandResult::OperationSubmit(
+                client.operation_submit_detached(
+                    parse_operation(operation)?,
+                    Some(parse_timestamp_ms(deadline_unix_ms)?),
+                )?,
+            ))
+        }
+        (
+            "operation-submit",
+            [
+                operation,
+                deadline_flag,
+                deadline_unix_ms,
+                lease_flag,
+                lease_expires_unix_ms,
+            ],
+        ) if deadline_flag == "--deadline-unix-ms" && lease_flag == "--lease-expires-unix-ms" => {
+            Ok(CommandResult::OperationSubmit(
+                client.operation_submit_attached(
+                    parse_operation(operation)?,
+                    Some(parse_timestamp_ms(deadline_unix_ms)?),
+                    parse_timestamp_ms(lease_expires_unix_ms)?,
+                )?,
+            ))
+        }
+        ("operation-submit", [operation, lease_flag, lease_expires_unix_ms])
+            if lease_flag == "--lease-expires-unix-ms" =>
+        {
+            Ok(CommandResult::OperationSubmit(
+                client.operation_submit_attached(
+                    parse_operation(operation)?,
+                    None,
+                    parse_timestamp_ms(lease_expires_unix_ms)?,
+                )?,
+            ))
+        }
+        ("operation-renew-lease", [operation, lease_expires_unix_ms]) => Ok(
+            CommandResult::OperationStatus(client.operation_renew_lease(
+                parse_operation(operation)?,
+                parse_timestamp_ms(lease_expires_unix_ms)?,
+            )?),
+        ),
         ("operation-status", [operation]) => Ok(CommandResult::OperationStatus(
             client.operation_status(parse_operation(operation)?)?,
         )),
@@ -238,7 +283,8 @@ fn response_to_result(response: ControlResponse) -> Result<CommandResult, CliErr
         ControlResponse::OperationSubmit(operation) => Ok(CommandResult::OperationSubmit(
             operation_from_domain(operation),
         )),
-        ControlResponse::OperationStatus(operation) => Ok(CommandResult::OperationStatus(
+        ControlResponse::OperationStatus(operation)
+        | ControlResponse::OperationLeaseRenew(operation) => Ok(CommandResult::OperationStatus(
             operation_from_domain(operation),
         )),
         ControlResponse::OperationCancel {
@@ -329,12 +375,20 @@ fn parse_operation(value: &std::ffi::OsString) -> Result<OperationId, CliError> 
 }
 
 fn parse_timeout_ms(value: &std::ffi::OsString) -> Result<u64, CliError> {
+    let milliseconds = parse_timestamp_ms(value)?;
+    if u32::try_from(milliseconds).is_err() {
+        return Err(CliError::InvalidTimeout);
+    }
+    Ok(milliseconds)
+}
+
+fn parse_timestamp_ms(value: &std::ffi::OsString) -> Result<u64, CliError> {
     let milliseconds = value
         .to_str()
         .ok_or(CliError::InvalidTimeout)?
         .parse::<u64>()
         .map_err(|_| CliError::InvalidTimeout)?;
-    if milliseconds == 0 || u32::try_from(milliseconds).is_err() {
+    if milliseconds == 0 {
         return Err(CliError::InvalidTimeout);
     }
     Ok(milliseconds)
@@ -441,7 +495,7 @@ impl ExitFamily {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: rootlight [--standalone] health|operation-submit <id> [--timeout-ms <ms>]|operation-status <id>|operation-cancel <id>"
+        "usage: rootlight [--standalone] health|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-renew-lease <id> <lease-unix-ms>|operation-status <id>|operation-cancel <id>"
     )]
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]

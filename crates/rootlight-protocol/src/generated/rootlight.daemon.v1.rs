@@ -47,7 +47,7 @@ pub struct RequestEnvelope {
     #[prost(uint32, optional, tag = "3")]
     #[allow(missing_docs)]
     pub timeout_ms: ::core::option::Option<u32>,
-    #[prost(oneof = "request_envelope::Request", tags = "10, 11, 12, 13")]
+    #[prost(oneof = "request_envelope::Request", tags = "10, 11, 12, 13, 14")]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
 }
@@ -68,6 +68,9 @@ pub mod request_envelope {
         #[prost(message, tag = "13")]
         #[allow(missing_docs)]
         OperationSubmit(super::OperationSubmitRequest),
+        #[prost(message, tag = "14")]
+        #[allow(missing_docs)]
+        OperationLeaseRenew(super::OperationLeaseRenewRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -76,7 +79,7 @@ pub struct ResponseEnvelope {
     #[prost(uint64, tag = "1")]
     #[allow(missing_docs)]
     pub request_id: u64,
-    #[prost(oneof = "response_envelope::Response", tags = "10, 11, 12, 13, 20")]
+    #[prost(oneof = "response_envelope::Response", tags = "10, 11, 12, 13, 14, 20")]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
 }
@@ -97,6 +100,9 @@ pub mod response_envelope {
         #[prost(message, tag = "13")]
         #[allow(missing_docs)]
         OperationSubmit(super::OperationSubmitResponse),
+        #[prost(message, tag = "14")]
+        #[allow(missing_docs)]
+        OperationLeaseRenew(super::OperationLeaseRenewResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -240,10 +246,33 @@ pub struct OperationSubmitRequest {
     #[prost(uint64, optional, tag = "5")]
     #[allow(missing_docs)]
     pub timeout_ms: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub deadline_unix_ms: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub lease_expires_unix_ms: ::core::option::Option<u64>,
 }
 /// Returns the newly queued durable operation.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OperationSubmitResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub operation: ::core::option::Option<OperationStatus>,
+}
+/// Extends one attached operation lease for its authenticated owner.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OperationLeaseRenewRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub operation: ::core::option::Option<super::super::common::v1::OperationId>,
+    #[prost(uint64, tag = "2")]
+    #[allow(missing_docs)]
+    pub lease_expires_unix_ms: u64,
+}
+/// Returns the durable operation after lease renewal.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OperationLeaseRenewResponse {
     #[prost(message, optional, tag = "1")]
     #[allow(missing_docs)]
     pub operation: ::core::option::Option<OperationStatus>,

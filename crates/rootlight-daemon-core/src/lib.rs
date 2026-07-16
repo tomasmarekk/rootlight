@@ -45,6 +45,7 @@ pub const MAX_CAPABILITY_BYTES: usize = 64;
 const CAPABILITIES: &[&str] = &[
     "health",
     "operation.cancel",
+    "operation.lease.renew",
     "operation.lifecycle.v1",
     "operation.status",
     "operation.submit",
@@ -275,6 +276,12 @@ enum JournalCommand {
         submission: OperationSubmission,
         reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
+    RenewLease {
+        operation: OperationId,
+        owner: ClientInstanceId,
+        expiry_unix_ms: u64,
+        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
+    },
     CancellationToken {
         operation: OperationId,
         reply: tokio::sync::oneshot::Sender<
@@ -381,6 +388,33 @@ impl JournalActorHandle {
         self.try_send(
             JournalLane::Control,
             JournalCommand::RetryStatus { submission, reply },
+        )?;
+        receiver
+            .await
+            .map_err(|_| ServiceError::ChannelClosed)?
+            .map_err(ServiceError::Operations)
+    }
+
+    /// Renews an attached operation lease on the high-priority lane.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, ownership, expiry, actor, or journal failure.
+    pub async fn renew_lease(
+        &self,
+        operation: OperationId,
+        owner: ClientInstanceId,
+        expiry_unix_ms: u64,
+    ) -> Result<OperationRecord, ServiceError> {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Control,
+            JournalCommand::RenewLease {
+                operation,
+                owner,
+                expiry_unix_ms,
+                reply,
+            },
         )?;
         receiver
             .await
@@ -727,6 +761,14 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
         JournalCommand::RetryStatus { submission, reply } => {
             let _ = reply.send(journal.retry_status(submission));
         }
+        JournalCommand::RenewLease {
+            operation,
+            owner,
+            expiry_unix_ms,
+            reply,
+        } => {
+            let _ = reply.send(journal.renew_lease(operation, owner, expiry_unix_ms));
+        }
         JournalCommand::CancellationToken { operation, reply } => {
             let _ = reply.send(journal.cancellation_token(operation));
         }
@@ -832,6 +874,13 @@ fn execute_journal_request(
         ControlRequest::OperationStatus(operation) => journal
             .status(operation)
             .map(ControlResponse::OperationStatus),
+        ControlRequest::OperationLeaseRenew {
+            operation,
+            owner,
+            expiry_unix_ms,
+        } => journal
+            .renew_lease(operation, owner, expiry_unix_ms)
+            .map(ControlResponse::OperationLeaseRenew),
         ControlRequest::OperationCancel(operation) => {
             journal.cancel(operation).map(|(accepted, operation)| {
                 ControlResponse::OperationCancel {
@@ -881,6 +930,15 @@ pub enum ControlRequest {
     OperationSubmit(OperationSubmission),
     /// Read one durable operation status.
     OperationStatus(OperationId),
+    /// Extend one attached operation lease for its authenticated owner.
+    OperationLeaseRenew {
+        /// Stable operation identifier.
+        operation: OperationId,
+        /// Authenticated owner from the negotiated client hello.
+        owner: ClientInstanceId,
+        /// New absolute lease expiry.
+        expiry_unix_ms: u64,
+    },
     /// Request cooperative cancellation.
     OperationCancel(OperationId),
 }
@@ -894,6 +952,8 @@ pub enum ControlResponse {
     OperationSubmit(OperationRecord),
     /// Durable operation status.
     OperationStatus(OperationRecord),
+    /// Durable operation after attached lease renewal.
+    OperationLeaseRenew(OperationRecord),
     /// Cancellation acknowledgement and resulting state.
     OperationCancel {
         /// Whether this request first set the cancellation token.
@@ -1493,6 +1553,16 @@ impl ControlService {
                     ControlResponse::Error(operation_error_to_public(&error, Some(operation)))
                 }
             },
+            ControlRequest::OperationLeaseRenew {
+                operation,
+                owner,
+                expiry_unix_ms,
+            } => match self.journal.renew_lease(operation, owner, expiry_unix_ms) {
+                Ok(record) => ControlResponse::OperationLeaseRenew(record),
+                Err(error) => {
+                    ControlResponse::Error(operation_error_to_public(&error, Some(operation)))
+                }
+            },
             ControlRequest::OperationCancel(operation) => match self.journal.cancel(operation) {
                 Ok((accepted, operation)) => ControlResponse::OperationCancel {
                     accepted,
@@ -1508,13 +1578,14 @@ impl ControlService {
     /// Validates and executes one protobuf request envelope.
     #[must_use]
     pub fn dispatch(&self, envelope: daemon::RequestEnvelope) -> daemon::ResponseEnvelope {
-        self.dispatch_for_client(envelope, ClientInstanceId::SYSTEM)
+        self.dispatch_for_client(envelope, ClientInstanceId::SYSTEM, PROTOCOL_MINOR)
     }
 
     fn dispatch_for_client(
         &self,
         envelope: daemon::RequestEnvelope,
         client_instance_id: ClientInstanceId,
+        selected_protocol_minor: u32,
     ) -> daemon::ResponseEnvelope {
         let request_id = envelope.request_id;
         let response = if envelope.timeout_ms == Some(0) {
@@ -1526,7 +1597,11 @@ impl ControlService {
                 "daemon instance nonce does not match",
             )))
         } else {
-            match request_from_wire(envelope.request, client_instance_id) {
+            match request_from_wire(
+                envelope.request,
+                client_instance_id,
+                selected_protocol_minor,
+            ) {
                 Ok(request) => response_to_wire(self.execute(request)),
                 Err(error) => {
                     daemon::response_envelope::Response::Error(public_error_to_wire(&error))
@@ -1557,6 +1632,10 @@ pub fn handle_connection(
     let hello = read_client_hello(codec, stream)?;
     let response = service.negotiate(&hello);
     let accepted = response.error.is_none();
+    let selected_protocol_minor = response
+        .selected_protocol
+        .as_ref()
+        .map_or(PROTOCOL_MINOR, |version| version.minor);
     write_server_hello(codec, stream, &response)?;
     if !accepted {
         return Ok(());
@@ -1567,7 +1646,7 @@ pub fn handle_connection(
     write_response(
         codec,
         stream,
-        &service.dispatch_for_client(request, client_instance_id),
+        &service.dispatch_for_client(request, client_instance_id, selected_protocol_minor),
     )?;
     Ok(())
 }
@@ -1590,6 +1669,10 @@ pub async fn handle_connection_async(
     let hello = read_client_hello_async(codec, stream).await?;
     let response = service.negotiate(&hello);
     let accepted = response.error.is_none();
+    let selected_protocol_minor = response
+        .selected_protocol
+        .as_ref()
+        .map_or(PROTOCOL_MINOR, |version| version.minor);
     write_server_hello_async(codec, stream, &response).await?;
     if !accepted {
         return Ok(());
@@ -1603,6 +1686,7 @@ pub async fn handle_connection_async(
         &submissions,
         envelope,
         client_instance_id,
+        selected_protocol_minor,
     )
     .await;
     write_response_async(codec, stream, &response).await?;
@@ -1615,6 +1699,7 @@ async fn dispatch_async(
     submissions: &tokio::sync::mpsc::Sender<OperationAdmission>,
     envelope: daemon::RequestEnvelope,
     client_instance_id: ClientInstanceId,
+    selected_protocol_minor: u32,
 ) -> daemon::ResponseEnvelope {
     let request_id = envelope.request_id;
     let response = if envelope.timeout_ms == Some(0) {
@@ -1626,7 +1711,11 @@ async fn dispatch_async(
             "daemon instance nonce does not match",
         )))
     } else {
-        match request_from_wire(envelope.request, client_instance_id) {
+        match request_from_wire(
+            envelope.request,
+            client_instance_id,
+            selected_protocol_minor,
+        ) {
             Ok(ControlRequest::Health) => {
                 response_to_wire(ControlResponse::Health(service.health()))
             }
@@ -1667,6 +1756,23 @@ async fn dispatch_async(
                     Ok(ControlResponse::OperationSubmit(operation))
                 };
                 await_journal_response(service, response, timeout_ms).await
+            }
+            Ok(ControlRequest::OperationLeaseRenew {
+                operation,
+                owner,
+                expiry_unix_ms,
+            }) => {
+                await_journal_response(
+                    service,
+                    async {
+                        journal
+                            .renew_lease(operation, owner, expiry_unix_ms)
+                            .await
+                            .map(ControlResponse::OperationLeaseRenew)
+                    },
+                    envelope.timeout_ms,
+                )
+                .await
             }
             Ok(request) => {
                 await_journal_response(service, journal.control(request), envelope.timeout_ms).await
@@ -1768,11 +1874,12 @@ fn validate_client_hello(
 fn request_from_wire(
     request: Option<daemon::request_envelope::Request>,
     client_instance_id: ClientInstanceId,
+    selected_protocol_minor: u32,
 ) -> Result<ControlRequest, Box<PublicError>> {
     match request {
         Some(daemon::request_envelope::Request::Health(_)) => Ok(ControlRequest::Health),
         Some(daemon::request_envelope::Request::OperationSubmit(request)) => {
-            operation_submission_from_wire(request, client_instance_id)
+            operation_submission_from_wire(request, client_instance_id, selected_protocol_minor)
                 .map(ControlRequest::OperationSubmit)
         }
         Some(daemon::request_envelope::Request::OperationStatus(request)) => {
@@ -1781,6 +1888,23 @@ fn request_from_wire(
         Some(daemon::request_envelope::Request::OperationCancel(request)) => {
             parse_operation(request.operation).map(ControlRequest::OperationCancel)
         }
+        Some(daemon::request_envelope::Request::OperationLeaseRenew(request)) => {
+            if selected_protocol_minor < 2 {
+                return Err(Box::new(protocol_mismatch(
+                    "operation lease renewal needs protocol minor two",
+                )));
+            }
+            if request.lease_expires_unix_ms == 0 {
+                return Err(Box::new(invalid_argument(
+                    "operation lease expiry is invalid",
+                )));
+            }
+            Ok(ControlRequest::OperationLeaseRenew {
+                operation: parse_operation(request.operation)?,
+                owner: client_instance_id,
+                expiry_unix_ms: request.lease_expires_unix_ms,
+            })
+        }
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
     }
 }
@@ -1788,6 +1912,7 @@ fn request_from_wire(
 fn operation_submission_from_wire(
     request: daemon::OperationSubmitRequest,
     owner: ClientInstanceId,
+    selected_protocol_minor: u32,
 ) -> Result<OperationSubmission, Box<PublicError>> {
     if daemon::OperationKind::try_from(request.kind).ok()
         != Some(daemon::OperationKind::ControlProbe)
@@ -1801,14 +1926,43 @@ fn operation_submission_from_wire(
         return Err(Box::new(invalid_argument("operation timeout is invalid")));
     }
     let operation = parse_operation(request.operation)?;
-    if !request.detached && owner != ClientInstanceId::SYSTEM {
+    if selected_protocol_minor < 2 {
+        if request.deadline_unix_ms.is_some() || request.lease_expires_unix_ms.is_some() {
+            return Err(Box::new(protocol_mismatch(
+                "absolute operation timing needs protocol minor two",
+            )));
+        }
+        if !request.detached && owner != ClientInstanceId::SYSTEM {
+            return Err(Box::new(protocol_mismatch(
+                "attached operations need protocol minor two",
+            )));
+        }
+    }
+    if request.timeout_ms.is_some() && request.deadline_unix_ms.is_some() {
         return Err(Box::new(invalid_argument(
-            "attached operations are unsupported",
+            "operation deadline is ambiguous",
         )));
     }
-    let detached = true;
-    let lease_expires_unix_ms = None;
-    let deadline_unix_ms = request.timeout_ms.map(operation_deadline).transpose()?;
+    let deadline_unix_ms = match request.deadline_unix_ms {
+        Some(0) => return Err(Box::new(invalid_argument("operation deadline is invalid"))),
+        Some(deadline) => Some(deadline),
+        None => request.timeout_ms.map(operation_deadline).transpose()?,
+    };
+    let detached = request.detached;
+    let lease_expires_unix_ms = match (detached, request.lease_expires_unix_ms) {
+        (true, None) => None,
+        (true, Some(_)) => {
+            return Err(Box::new(invalid_argument(
+                "detached operation lease is invalid",
+            )));
+        }
+        (false, Some(0) | None) => {
+            return Err(Box::new(invalid_argument(
+                "attached operation lease is invalid",
+            )));
+        }
+        (false, Some(expiry)) => Some(expiry),
+    };
     OperationSubmission::new(
         operation,
         OperationKind::ControlProbe,
@@ -1882,6 +2036,13 @@ fn response_to_wire(response: ControlResponse) -> daemon::response_envelope::Res
             daemon::response_envelope::Response::OperationStatus(daemon::OperationStatusResponse {
                 operation: Some(operation_record_to_wire(&operation)),
             })
+        }
+        ControlResponse::OperationLeaseRenew(operation) => {
+            daemon::response_envelope::Response::OperationLeaseRenew(
+                daemon::OperationLeaseRenewResponse {
+                    operation: Some(operation_record_to_wire(&operation)),
+                },
+            )
         }
         ControlResponse::OperationCancel {
             accepted,
@@ -2784,21 +2945,40 @@ mod tests {
     }
 
     #[test]
-    fn operation_submission_rejects_attached_work_without_lease_renewal() {
-        let error = operation_submission_from_wire(
-            daemon::OperationSubmitRequest {
-                operation: Some(common::OperationId { value: vec![8; 16] }),
-                kind: daemon::OperationKind::ControlProbe as i32,
-                plan_hash: CONTROL_PROBE_PLAN_HASH.to_vec(),
-                detached: false,
-                timeout_ms: None,
-            },
-            ClientInstanceId::new([9; 16]).expect("client identity is valid"),
-        )
-        .expect_err("attached operation is rejected");
+    fn operation_submission_requires_minor_two_for_stable_timing_and_leases() {
+        let owner = ClientInstanceId::new([9; 16]).expect("client identity is valid");
+        let request = daemon::OperationSubmitRequest {
+            operation: Some(common::OperationId { value: vec![8; 16] }),
+            kind: daemon::OperationKind::ControlProbe as i32,
+            plan_hash: CONTROL_PROBE_PLAN_HASH.to_vec(),
+            detached: false,
+            timeout_ms: None,
+            deadline_unix_ms: Some(100),
+            lease_expires_unix_ms: Some(200),
+        };
+        let error = operation_submission_from_wire(request.clone(), owner, 1)
+            .expect_err("minor one cannot submit attached work");
+        assert_eq!(error.code(), ErrorCode::ProtocolMismatch);
 
+        let submission = operation_submission_from_wire(request, owner, 2)
+            .expect("minor two accepts attached work");
+        assert!(!submission.detached);
+        assert_eq!(submission.deadline_unix_ms, Some(100));
+        assert_eq!(submission.lease_expires_unix_ms, Some(200));
+
+        let ambiguous = daemon::OperationSubmitRequest {
+            operation: Some(common::OperationId { value: vec![8; 16] }),
+            kind: daemon::OperationKind::ControlProbe as i32,
+            plan_hash: CONTROL_PROBE_PLAN_HASH.to_vec(),
+            detached: true,
+            timeout_ms: Some(10),
+            deadline_unix_ms: Some(100),
+            lease_expires_unix_ms: None,
+        };
+        let error = operation_submission_from_wire(ambiguous, owner, 2)
+            .expect_err("relative and absolute deadlines conflict");
         assert_eq!(error.code(), ErrorCode::InvalidArgument);
-        assert_eq!(error.message(), "attached operations are unsupported");
+        assert_eq!(error.message(), "operation deadline is ambiguous");
     }
 
     #[test]
@@ -2815,6 +2995,8 @@ mod tests {
                     plan_hash: CONTROL_PROBE_PLAN_HASH.to_vec(),
                     detached: false,
                     timeout_ms: None,
+                    deadline_unix_ms: None,
+                    lease_expires_unix_ms: None,
                 },
             )),
         });

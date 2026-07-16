@@ -27,6 +27,7 @@ use rootlight_runtime::RuntimePaths;
 const CLIENT_CAPABILITIES: &[&str] = &[
     "health",
     "operation.cancel",
+    "operation.lease.renew",
     "operation.lifecycle.v1",
     "operation.status",
     "operation.submit",
@@ -262,7 +263,7 @@ impl Client {
             &client_hello(self.instance_nonce, self.client_instance_id),
         )?;
         let hello = read_server_hello(self.codec, &mut stream)?;
-        validate_server_hello(&hello, self.instance_nonce)
+        validate_server_hello(&hello, self.instance_nonce).map(|_| ())
     }
 
     /// Reads daemon health.
@@ -303,6 +304,9 @@ impl Client {
 
     /// Submits one durable operation with an optional execution deadline.
     ///
+    /// The absolute deadline is derived once before transport so a retry with the
+    /// same request remains identical at the durable journal boundary.
+    ///
     /// # Errors
     ///
     /// Returns [`ClientError`] for a reused identifier, invalid timeout, or invalid daemon response.
@@ -311,7 +315,74 @@ impl Client {
         operation: OperationId,
         timeout: Option<Duration>,
     ) -> Result<OperationStatus, ClientError> {
-        let request = operation_submit_request(operation, timeout)?;
+        let deadline_unix_ms = timeout.map(operation_deadline).transpose()?;
+        self.operation_submit_detached(operation, deadline_unix_ms)
+    }
+
+    /// Submits detached work with an explicit retry-stable absolute deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for a zero deadline, reused identifier, or invalid response.
+    pub fn operation_submit_detached(
+        &self,
+        operation: OperationId,
+        deadline_unix_ms: Option<u64>,
+    ) -> Result<OperationStatus, ClientError> {
+        let request = operation_submit_request(operation, true, deadline_unix_ms, None)?;
+        self.submit_operation_request(request)
+    }
+
+    /// Submits work attached to this authenticated client lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for zero timing values, reused identifiers, or invalid responses.
+    pub fn operation_submit_attached(
+        &self,
+        operation: OperationId,
+        deadline_unix_ms: Option<u64>,
+        lease_expires_unix_ms: u64,
+    ) -> Result<OperationStatus, ClientError> {
+        let request = operation_submit_request(
+            operation,
+            false,
+            deadline_unix_ms,
+            Some(lease_expires_unix_ms),
+        )?;
+        self.submit_operation_request(request)
+    }
+
+    /// Extends one attached operation lease owned by this authenticated client.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for a zero expiry, foreign ownership, stale renewal, or invalid response.
+    pub fn operation_renew_lease(
+        &self,
+        operation: OperationId,
+        lease_expires_unix_ms: u64,
+    ) -> Result<OperationStatus, ClientError> {
+        if lease_expires_unix_ms == 0 {
+            return Err(ClientError::InvalidOperationLease);
+        }
+        match self.request(daemon::request_envelope::Request::OperationLeaseRenew(
+            daemon::OperationLeaseRenewRequest {
+                operation: Some(operation_to_wire(operation)),
+                lease_expires_unix_ms,
+            },
+        ))? {
+            daemon::response_envelope::Response::OperationLeaseRenew(response) => {
+                parse_operation_status(response.operation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    fn submit_operation_request(
+        &self,
+        request: daemon::OperationSubmitRequest,
+    ) -> Result<OperationStatus, ClientError> {
         match self.request(daemon::request_envelope::Request::OperationSubmit(request))? {
             daemon::response_envelope::Response::OperationSubmit(response) => {
                 parse_operation_status(response.operation)
@@ -375,7 +446,8 @@ impl Client {
             &client_hello(self.instance_nonce, self.client_instance_id),
         )?;
         let hello = read_server_hello(self.codec, &mut stream)?;
-        validate_server_hello(&hello, self.instance_nonce)?;
+        let selected_protocol_minor = validate_server_hello(&hello, self.instance_nonce)?;
+        ensure_request_supported(&request, selected_protocol_minor)?;
         write_request(
             self.codec,
             &mut stream,
@@ -630,7 +702,7 @@ fn client_hello(instance_nonce: [u8; 16], client_instance_id: [u8; 16]) -> daemo
 fn validate_server_hello(
     hello: &daemon::ServerHello,
     expected_nonce: [u8; 16],
-) -> Result<(), ClientError> {
+) -> Result<u32, ClientError> {
     if !nonce_matches(&hello.instance_nonce, expected_nonce) {
         return Err(ClientError::NonceMismatch);
     }
@@ -646,7 +718,29 @@ fn validate_server_hello(
     {
         return Err(ClientError::ProtocolMismatch);
     }
-    Ok(())
+    Ok(selected.minor)
+}
+
+fn ensure_request_supported(
+    request: &daemon::request_envelope::Request,
+    selected_protocol_minor: u32,
+) -> Result<(), ClientError> {
+    let needs_minor_two = match request {
+        daemon::request_envelope::Request::OperationLeaseRenew(_) => true,
+        daemon::request_envelope::Request::OperationSubmit(request) => {
+            request.deadline_unix_ms.is_some()
+                || request.lease_expires_unix_ms.is_some()
+                || !request.detached
+        }
+        daemon::request_envelope::Request::Health(_)
+        | daemon::request_envelope::Request::OperationStatus(_)
+        | daemon::request_envelope::Request::OperationCancel(_) => false,
+    };
+    if needs_minor_two && selected_protocol_minor < 2 {
+        Err(ClientError::ProtocolFeatureUnavailable)
+    } else {
+        Ok(())
+    }
 }
 
 fn parse_daemon_lifecycle(value: i32) -> Result<DaemonLifecycle, ClientError> {
@@ -740,29 +834,43 @@ fn operation_to_wire(operation: OperationId) -> common::OperationId {
 
 fn operation_submit_request(
     operation: OperationId,
-    timeout: Option<Duration>,
+    detached: bool,
+    deadline_unix_ms: Option<u64>,
+    lease_expires_unix_ms: Option<u64>,
 ) -> Result<daemon::OperationSubmitRequest, ClientError> {
+    if deadline_unix_ms == Some(0)
+        || lease_expires_unix_ms == Some(0)
+        || detached == lease_expires_unix_ms.is_some()
+    {
+        return Err(ClientError::InvalidOperationTiming);
+    }
     Ok(daemon::OperationSubmitRequest {
         operation: Some(operation_to_wire(operation)),
         kind: daemon::OperationKind::ControlProbe as i32,
         plan_hash: CONTROL_PROBE_PLAN_HASH.to_vec(),
-        // One-request CLI connections cannot renew leases, so submitted work must be detached.
-        detached: true,
-        timeout_ms: operation_timeout_ms(timeout)?,
+        detached,
+        timeout_ms: None,
+        deadline_unix_ms,
+        lease_expires_unix_ms,
     })
 }
 
-fn operation_timeout_ms(timeout: Option<Duration>) -> Result<Option<u64>, ClientError> {
-    timeout
-        .map(|value| {
-            let milliseconds =
-                u64::try_from(value.as_millis()).map_err(|_| ClientError::InvalidRequestTimeout)?;
-            if milliseconds == 0 {
-                return Err(ClientError::InvalidRequestTimeout);
-            }
-            Ok(milliseconds)
-        })
-        .transpose()
+fn operation_deadline(timeout: Duration) -> Result<u64, ClientError> {
+    let milliseconds =
+        u64::try_from(timeout.as_millis()).map_err(|_| ClientError::InvalidRequestTimeout)?;
+    if milliseconds == 0 {
+        return Err(ClientError::InvalidRequestTimeout);
+    }
+    unix_time_ms()?
+        .checked_add(milliseconds)
+        .ok_or(ClientError::InvalidRequestTimeout)
+}
+
+fn unix_time_ms() -> Result<u64, ClientError> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| ClientError::InvalidSystemClock)?;
+    u64::try_from(elapsed.as_millis()).map_err(|_| ClientError::InvalidSystemClock)
 }
 
 fn parse_public_error(error: common::PublicError) -> Result<PublicError, ClientError> {
@@ -909,6 +1017,9 @@ pub enum ClientError {
     /// Negotiation selected an unsupported protocol.
     #[error("daemon protocol is unsupported")]
     ProtocolMismatch,
+    /// The negotiated compatible minor predates the requested operation feature.
+    #[error("daemon protocol feature is unavailable")]
+    ProtocolFeatureUnavailable,
     /// Response request ID did not match the request.
     #[error("daemon response request identifier does not match")]
     MismatchedRequestId,
@@ -942,6 +1053,15 @@ pub enum ClientError {
     /// Relative request timeout could not be represented.
     #[error("daemon request timeout is invalid")]
     InvalidRequestTimeout,
+    /// Absolute operation deadline and lease fields were inconsistent.
+    #[error("daemon operation timing is invalid")]
+    InvalidOperationTiming,
+    /// Attached operation lease expiry was zero.
+    #[error("daemon operation lease is invalid")]
+    InvalidOperationLease,
+    /// The system wall clock could not provide a supported Unix timestamp.
+    #[error("system clock is invalid")]
+    InvalidSystemClock,
     /// Binary identifier length was invalid.
     #[error("daemon identifier is invalid")]
     InvalidIdentifier,
@@ -1018,27 +1138,57 @@ mod tests {
     }
 
     #[test]
-    fn operation_submit_requests_detached_ownership() {
-        let request = operation_submit_request(OperationId::from_bytes([7; 16]), None)
-            .expect("submission request builds");
+    fn operation_submit_requests_encode_stable_timing_and_ownership() {
+        let detached =
+            operation_submit_request(OperationId::from_bytes([7; 16]), true, Some(100), None)
+                .expect("detached submission request builds");
+        assert!(detached.detached);
+        assert_eq!(detached.deadline_unix_ms, Some(100));
+        assert_eq!(detached.timeout_ms, None);
 
-        assert!(request.detached);
+        let attached = operation_submit_request(
+            OperationId::from_bytes([8; 16]),
+            false,
+            Some(200),
+            Some(300),
+        )
+        .expect("attached submission request builds");
+        assert!(!attached.detached);
+        assert_eq!(attached.deadline_unix_ms, Some(200));
+        assert_eq!(attached.lease_expires_unix_ms, Some(300));
+
+        assert!(matches!(
+            operation_submit_request(OperationId::from_bytes([9; 16]), false, None, None),
+            Err(ClientError::InvalidOperationTiming)
+        ));
     }
 
     #[test]
     fn operation_timeout_conversion_is_checked() {
-        assert_eq!(
-            operation_timeout_ms(Some(Duration::from_millis(25))).expect("timeout converts"),
-            Some(25)
-        );
+        assert!(operation_deadline(Duration::from_millis(25)).is_ok());
         assert!(matches!(
-            operation_timeout_ms(Some(Duration::from_nanos(1))),
+            operation_deadline(Duration::from_nanos(1)),
             Err(ClientError::InvalidRequestTimeout)
         ));
-        assert_eq!(
-            operation_timeout_ms(None).expect("absence remains absent"),
-            None
+    }
+
+    #[test]
+    fn request_features_follow_the_negotiated_minor() {
+        let attached = daemon::request_envelope::Request::OperationSubmit(
+            operation_submit_request(OperationId::from_bytes([6; 16]), false, None, Some(100))
+                .expect("attached request builds"),
         );
+        assert!(matches!(
+            ensure_request_supported(&attached, 1),
+            Err(ClientError::ProtocolFeatureUnavailable)
+        ));
+        assert!(ensure_request_supported(&attached, 2).is_ok());
+
+        let status =
+            daemon::request_envelope::Request::OperationStatus(daemon::OperationStatusRequest {
+                operation: Some(operation_to_wire(OperationId::from_bytes([6; 16]))),
+            });
+        assert!(ensure_request_supported(&status, 1).is_ok());
     }
 
     #[test]
