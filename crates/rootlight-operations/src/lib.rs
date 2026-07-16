@@ -1,27 +1,239 @@
 //! Durable bounded operation lifecycle and catalog-writer arbitration.
 //!
-//! This crate owns monotonic operation state, progress revisions, cancellation,
-//! restart classification, SQLite health checks, and the one-writer catalog lock.
+//! This crate owns immutable submission metadata, monotonic lifecycle updates,
+//! restart classification, bounded SQLite retention, and one-writer locking.
 
 #![forbid(unsafe_code)]
 
 use std::{
     collections::BTreeMap,
-    fs::{File, OpenOptions, TryLockError},
-    io::{self, Seek, SeekFrom, Write},
+    fs::{File, TryLockError},
+    io,
     path::Path,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
-use rootlight_cancel::{Cancellation, CancellationReason};
+pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_error::PublicError;
 use rootlight_ids::OperationId;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-/// Maximum operation records retained after pruning.
+/// Maximum terminal operation records retained after pruning.
 pub const MAX_OPERATION_HISTORY: usize = 10_000;
+/// Maximum serialized public error retained for one terminal operation.
+pub const MAX_PUBLIC_ERROR_BYTES: usize = 16 * 1024;
 /// Minimum bundled SQLite version required by the P1 catalog.
 pub const MIN_SQLITE_VERSION_NUMBER: i32 = 3_051_003;
+/// Current operation-journal schema version.
+pub const OPERATION_SCHEMA_VERSION: u32 = 1;
+
+const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
+const SYSTEM_CLIENT_INSTANCE_ID: [u8; 16] = [0; 16];
+
+/// Checked identity for one authenticated client process instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ClientInstanceId([u8; 16]);
+
+impl ClientInstanceId {
+    /// Reserved identity used only for internal legacy and standalone work.
+    pub const SYSTEM: Self = Self(SYSTEM_CLIENT_INSTANCE_ID);
+
+    /// Creates an authenticated client identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::InvalidClientInstanceId`] for the reserved zero value.
+    pub fn new(bytes: [u8; 16]) -> Result<Self, OperationError> {
+        if bytes == SYSTEM_CLIENT_INSTANCE_ID {
+            return Err(OperationError::InvalidClientInstanceId);
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Reconstructs an identity, including the reserved internal identity.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the stable binary representation.
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
+/// Canonical digest of immutable operation-plan inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PlanHash([u8; 32]);
+
+impl PlanHash {
+    /// Creates a plan hash from its canonical digest bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the canonical digest bytes.
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+/// Durable operation kind supported by the M04 infrastructure slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OperationKind {
+    /// Deterministic infrastructure work used to prove lifecycle behavior.
+    ControlProbe,
+}
+
+impl OperationKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ControlProbe => "control_probe",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, OperationError> {
+        match value {
+            "control_probe" => Ok(Self::ControlProbe),
+            _ => Err(OperationError::CorruptState),
+        }
+    }
+}
+
+/// Monotonic stage within an operation kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OperationStage {
+    /// The operation is durably accepted.
+    Accepted,
+    /// The operation owns execution capacity.
+    Executing,
+    /// The operation is releasing temporary resources.
+    Cleanup,
+}
+
+impl OperationStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Executing => "executing",
+            Self::Cleanup => "cleanup",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, OperationError> {
+        match value {
+            "accepted" => Ok(Self::Accepted),
+            "executing" => Ok(Self::Executing),
+            "cleanup" => Ok(Self::Cleanup),
+            _ => Err(OperationError::CorruptState),
+        }
+    }
+}
+
+/// Stable recovery classification assigned to terminal interrupted work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecoveryClass {
+    /// Recovery classification does not apply.
+    NotApplicable,
+    /// Nonterminal work was interrupted by restart or shutdown.
+    InterruptedByRestart,
+    /// The submitted deadline elapsed.
+    DeadlineElapsed,
+    /// An attached-client lease elapsed.
+    LeaseExpired,
+}
+
+impl RecoveryClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotApplicable => "not_applicable",
+            Self::InterruptedByRestart => "interrupted_by_restart",
+            Self::DeadlineElapsed => "deadline_elapsed",
+            Self::LeaseExpired => "lease_expired",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, OperationError> {
+        match value {
+            "not_applicable" => Ok(Self::NotApplicable),
+            "interrupted_by_restart" => Ok(Self::InterruptedByRestart),
+            "deadline_elapsed" => Ok(Self::DeadlineElapsed),
+            "lease_expired" => Ok(Self::LeaseExpired),
+            _ => Err(OperationError::CorruptState),
+        }
+    }
+}
+
+/// Immutable metadata accepted with one durable operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperationSubmission {
+    /// Stable operation handle.
+    pub operation: OperationId,
+    /// Bounded operation kind.
+    pub kind: OperationKind,
+    /// Canonical plan digest.
+    pub plan_hash: PlanHash,
+    /// Authenticated submitting client identity.
+    pub owner: ClientInstanceId,
+    /// Whether work may outlive the submitting client lease.
+    pub detached: bool,
+    /// Optional wall-clock deadline used for admission and recovery.
+    pub deadline_unix_ms: Option<u64>,
+    /// Required wall-clock lease expiry for attached work.
+    pub lease_expires_unix_ms: Option<u64>,
+}
+
+impl OperationSubmission {
+    /// Creates a checked immutable submission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::InvalidSubmission`] when detached and lease
+    /// metadata disagree or an explicit timestamp is zero.
+    pub fn new(
+        operation: OperationId,
+        kind: OperationKind,
+        plan_hash: PlanHash,
+        owner: ClientInstanceId,
+        detached: bool,
+        deadline_unix_ms: Option<u64>,
+        lease_expires_unix_ms: Option<u64>,
+    ) -> Result<Self, OperationError> {
+        if deadline_unix_ms == Some(0)
+            || lease_expires_unix_ms == Some(0)
+            || detached == lease_expires_unix_ms.is_some()
+        {
+            return Err(OperationError::InvalidSubmission);
+        }
+        Ok(Self {
+            operation,
+            kind,
+            plan_hash,
+            owner,
+            detached,
+            deadline_unix_ms,
+            lease_expires_unix_ms,
+        })
+    }
+
+    /// Creates the internal legacy control-probe submission.
+    #[must_use]
+    pub const fn control_probe(operation: OperationId) -> Self {
+        Self {
+            operation,
+            kind: OperationKind::ControlProbe,
+            plan_hash: PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
+            owner: ClientInstanceId::SYSTEM,
+            detached: true,
+            deadline_unix_ms: None,
+            lease_expires_unix_ms: None,
+        }
+    }
+}
 
 /// Durable lifecycle state for one long-running operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -36,6 +248,8 @@ pub enum OperationState {
     Succeeded,
     /// Work failed with a stable public error.
     Failed,
+    /// Cooperative cancellation completed before publication commit.
+    Cancelled,
     /// Work did not reach a valid terminal result before restart or shutdown.
     Interrupted,
 }
@@ -44,7 +258,10 @@ impl OperationState {
     /// Reports whether no further state transition is legal.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Interrupted)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
     }
 
     fn as_str(self) -> &'static str {
@@ -54,6 +271,7 @@ impl OperationState {
             Self::Cancelling => "cancelling",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
             Self::Interrupted => "interrupted",
         }
     }
@@ -65,6 +283,7 @@ impl OperationState {
             "cancelling" => Ok(Self::Cancelling),
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
             "interrupted" => Ok(Self::Interrupted),
             _ => Err(OperationError::CorruptState),
         }
@@ -99,16 +318,75 @@ impl Progress {
 pub struct OperationRecord {
     /// Stable operation handle.
     pub operation: OperationId,
+    /// Submitted operation kind.
+    pub kind: OperationKind,
+    /// Canonical operation-plan digest.
+    pub plan_hash: PlanHash,
+    /// Authenticated submitting client identity.
+    pub owner: ClientInstanceId,
+    /// Whether work may outlive its submitting client.
+    pub detached: bool,
+    /// Optional durable wall-clock deadline.
+    pub deadline_unix_ms: Option<u64>,
+    /// Optional attached-client lease expiry.
+    pub lease_expires_unix_ms: Option<u64>,
     /// Current lifecycle state.
     pub state: OperationState,
-    /// Monotonically increasing state or progress revision.
+    /// Current monotonic operation stage.
+    pub stage: OperationStage,
+    /// Whether cancellation durably won the request race.
+    pub cancellation_requested: bool,
+    /// First durable cancellation reason.
+    pub cancellation_reason: Option<CancellationReason>,
+    /// Restart or expiry classification.
+    pub recovery_class: RecoveryClass,
+    /// Monotonically increasing state, stage, or progress revision.
     pub revision: u64,
     /// Monotonic progress snapshot.
     pub progress: Progress,
-    /// Stable public failure envelope retained for the current process.
+    /// Stable public terminal failure.
     pub error: Option<PublicError>,
     /// Reports that a persisted failure envelope exists after restart.
     pub has_persisted_error: bool,
+}
+
+/// Result of retry-safe durable submission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmissionOutcome {
+    /// Whether this call inserted the durable record.
+    pub inserted: bool,
+    /// Durable state after submission.
+    pub operation: OperationRecord,
+}
+
+/// Result of a durable cancellation request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancellationOutcome {
+    /// Whether this call first established durable cancellation.
+    pub accepted: bool,
+    /// Durable record after the request.
+    pub operation: OperationRecord,
+}
+
+/// Bounded operation counts for source-free health reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperationCounts {
+    /// Operations waiting for execution capacity.
+    pub queued: u32,
+    /// Operations currently executing.
+    pub running: u32,
+    /// Operations completing cancellation cleanup.
+    pub cancelling: u32,
+}
+
+impl OperationCounts {
+    /// Returns all durable nonterminal records.
+    #[must_use]
+    pub const fn active(self) -> u32 {
+        self.queued
+            .saturating_add(self.running)
+            .saturating_add(self.cancelling)
+    }
 }
 
 /// Durable SQLite operation journal.
@@ -124,11 +402,10 @@ impl OperationJournal {
     ///
     /// # Errors
     ///
-    /// Returns [`OperationError`] for SQLite version, compile-option, schema,
-    /// integrity, or recovery failures.
+    /// Returns [`OperationError`] for SQLite version, schema, integrity, or recovery failures.
     pub fn open(path: &Path) -> Result<Self, OperationError> {
         let connection = Connection::open(path).map_err(OperationError::Sqlite)?;
-        Self::initialize(connection)
+        Self::initialize(connection, unix_time_ms()?)
     }
 
     /// Opens an isolated in-memory journal for standalone composition and tests.
@@ -138,81 +415,103 @@ impl OperationJournal {
     /// Returns [`OperationError`] for SQLite setup failures.
     pub fn open_in_memory() -> Result<Self, OperationError> {
         let connection = Connection::open_in_memory().map_err(OperationError::Sqlite)?;
-        Self::initialize(connection)
+        Self::initialize(connection, unix_time_ms()?)
     }
 
-    fn initialize(connection: Connection) -> Result<Self, OperationError> {
+    fn initialize(mut connection: Connection, now_unix_ms: u64) -> Result<Self, OperationError> {
         verify_sqlite(&connection)?;
         connection
-            .execute_batch(
-                "PRAGMA foreign_keys = ON;
-                 PRAGMA journal_mode = WAL;
-                 CREATE TABLE IF NOT EXISTS operations (
-                     operation BLOB PRIMARY KEY NOT NULL CHECK(length(operation) = 16),
-                     state TEXT NOT NULL,
-                     revision INTEGER NOT NULL CHECK(revision >= 1),
-                     completed INTEGER NOT NULL CHECK(completed >= 0),
-                     total INTEGER NOT NULL CHECK(total >= 0),
-                     error_json TEXT,
-                     sequence INTEGER NOT NULL UNIQUE
-                 );",
-            )
+            .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
             .map_err(OperationError::Sqlite)?;
-        connection
-            .execute(
-                "UPDATE operations
-                 SET state = 'interrupted', revision = revision + 1
-                 WHERE state IN ('queued', 'running', 'cancelling')",
-                [],
-            )
-            .map_err(OperationError::Sqlite)?;
-        Ok(Self {
+        migrate_schema(&mut connection)?;
+        let journal = Self {
             connection: Mutex::new(connection),
             cancellations: Mutex::new(BTreeMap::new()),
             errors: Mutex::new(BTreeMap::new()),
+        };
+        journal.recover_nonterminal(now_unix_ms)?;
+        journal.prune_to(MAX_OPERATION_HISTORY)?;
+        Ok(journal)
+    }
+
+    /// Submits immutable operation metadata with retry-safe idempotency.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::SubmissionConflict`] when the operation ID is
+    /// reused with different immutable metadata, or a typed storage error.
+    pub fn submit(
+        &self,
+        submission: OperationSubmission,
+    ) -> Result<SubmissionOutcome, OperationError> {
+        validate_submission(submission)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+        if let Some(existing) = load_record(&transaction, submission.operation)? {
+            if submission_matches(&existing, submission) {
+                transaction.commit().map_err(OperationError::Sqlite)?;
+                return Ok(SubmissionOutcome {
+                    inserted: false,
+                    operation: existing,
+                });
+            }
+            return Err(OperationError::SubmissionConflict);
+        }
+        let sequence = next_sequence(&transaction)?;
+        transaction
+            .execute(
+                "INSERT INTO operations (
+                    operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                    lease_expires_unix_ms, state, stage, cancellation_requested,
+                    cancellation_reason, recovery_class, revision, completed, total,
+                    error_json, sequence
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 'accepted', 0,
+                           NULL, 'not_applicable', 1, 0, 0, NULL, ?8)",
+                params![
+                    submission.operation.as_bytes().as_slice(),
+                    submission.kind.as_str(),
+                    submission.plan_hash.as_bytes().as_slice(),
+                    submission.owner.as_bytes().as_slice(),
+                    bool_to_i64(submission.detached),
+                    optional_u64_to_i64(submission.deadline_unix_ms)?,
+                    optional_u64_to_i64(submission.lease_expires_unix_ms)?,
+                    sequence,
+                ],
+            )
+            .map_err(OperationError::Sqlite)?;
+        transaction.commit().map_err(OperationError::Sqlite)?;
+        let cancellation = cancellation_for_submission(submission)?;
+        self.lock_cancellations()?
+            .insert(submission.operation, cancellation);
+        drop(connection);
+        self.prune_to(MAX_OPERATION_HISTORY)?;
+        Ok(SubmissionOutcome {
+            inserted: true,
+            operation: self.status(submission.operation)?,
         })
     }
 
-    /// Inserts a new queued operation and returns its cancellation token.
+    /// Inserts a legacy internal control probe and returns its cancellation token.
     ///
     /// # Errors
     ///
-    /// Returns [`OperationError::AlreadyExists`] for a reused operation ID or a
-    /// typed SQLite failure.
+    /// Returns [`OperationError::AlreadyExists`] for any reused operation ID.
     pub fn enqueue(&self, operation: OperationId) -> Result<Cancellation, OperationError> {
-        let connection = self.lock_connection()?;
-        let next_sequence: i64 = connection
-            .query_row(
-                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM operations",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(OperationError::Sqlite)?;
-        let inserted = connection
-            .execute(
-                "INSERT OR IGNORE INTO operations
-                 (operation, state, revision, completed, total, error_json, sequence)
-                 VALUES (?1, 'queued', 1, 0, 0, NULL, ?2)",
-                params![operation.as_bytes().as_slice(), next_sequence],
-            )
-            .map_err(OperationError::Sqlite)?;
-        drop(connection);
-        if inserted == 0 {
+        if self.status(operation).is_ok() {
             return Err(OperationError::AlreadyExists);
         }
-        let cancellation = Cancellation::new();
-        self.lock_cancellations()?
-            .insert(operation, cancellation.clone());
-        self.prune()?;
-        Ok(cancellation)
+        match self.submit(OperationSubmission::control_probe(operation)) {
+            Ok(_) => self.cancellation_token(operation),
+            Err(OperationError::SubmissionConflict) => Err(OperationError::AlreadyExists),
+            Err(error) => Err(error),
+        }
     }
 
-    /// Applies one legal monotonic state transition.
+    /// Applies one legal revision-guarded state transition.
     ///
     /// # Errors
     ///
-    /// Returns [`OperationError::IllegalTransition`] for invalid state changes,
-    /// [`OperationError::NotFound`] for unknown operations, or a storage error.
+    /// Returns a typed error for invalid, cancelled, stale, or unknown work.
     pub fn transition(
         &self,
         operation: OperationId,
@@ -220,6 +519,12 @@ impl OperationJournal {
         error: Option<&PublicError>,
     ) -> Result<OperationRecord, OperationError> {
         let current = self.status(operation)?;
+        if current.state == OperationState::Interrupted && next == OperationState::Succeeded {
+            return Ok(current);
+        }
+        if current.cancellation_requested && matches!(next, OperationState::Succeeded) {
+            return Err(OperationError::CancellationWon);
+        }
         if !legal_transition(current.state, next) {
             return Err(OperationError::IllegalTransition {
                 from: current.state,
@@ -231,32 +536,34 @@ impl OperationJournal {
         {
             return Err(OperationError::InvalidTerminalError);
         }
-        let error_json = error
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(OperationError::SerializePublicError)?;
-        let revision = current
-            .revision
-            .checked_add(1)
-            .ok_or(OperationError::RevisionOverflow)?;
-        let connection = self.lock_connection()?;
-        let updated = connection
-            .execute(
-                "UPDATE operations
-                 SET state = ?1, revision = ?2, error_json = ?3
-                 WHERE operation = ?4 AND revision = ?5",
-                params![
-                    next.as_str(),
-                    i64::try_from(revision).map_err(|_| OperationError::RevisionOverflow)?,
-                    error_json,
-                    operation.as_bytes().as_slice(),
-                    i64::try_from(current.revision)
-                        .map_err(|_| OperationError::RevisionOverflow)?,
-                ],
-            )
-            .map_err(OperationError::Sqlite)?;
-        drop(connection);
+        let error_json = error.map(serialize_public_error).transpose()?;
+        let revision = next_revision(current.revision)?;
+        let updated = {
+            let connection = self.lock_connection()?;
+            connection
+                .execute(
+                    "UPDATE operations
+                     SET state = ?1, revision = ?2, error_json = ?3
+                     WHERE operation = ?4 AND revision = ?5
+                       AND NOT (?1 = 'succeeded' AND cancellation_requested = 1)",
+                    params![
+                        next.as_str(),
+                        u64_to_i64(revision)?,
+                        error_json,
+                        operation.as_bytes().as_slice(),
+                        u64_to_i64(current.revision)?,
+                    ],
+                )
+                .map_err(OperationError::Sqlite)?
+        };
         if updated != 1 {
+            let observed = self.status(operation)?;
+            if observed.state == OperationState::Interrupted && next == OperationState::Succeeded {
+                return Ok(observed);
+            }
+            if observed.cancellation_requested && next == OperationState::Succeeded {
+                return Err(OperationError::CancellationWon);
+            }
             return Err(OperationError::ConcurrentUpdate);
         }
         if let Some(error) = error {
@@ -266,6 +573,51 @@ impl OperationJournal {
         }
         if next.is_terminal() {
             self.lock_cancellations()?.remove(&operation);
+            self.prune_to(MAX_OPERATION_HISTORY)?;
+        }
+        self.status(operation)
+    }
+
+    /// Advances the monotonic operation stage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::InvalidStage`] for regression, terminal work, or
+    /// a stage that does not agree with the lifecycle state.
+    pub fn update_stage(
+        &self,
+        operation: OperationId,
+        stage: OperationStage,
+    ) -> Result<OperationRecord, OperationError> {
+        let current = self.status(operation)?;
+        if current.state.is_terminal()
+            || stage <= current.stage
+            || stage == OperationStage::Executing && current.state != OperationState::Running
+            || stage == OperationStage::Cleanup
+                && !matches!(
+                    current.state,
+                    OperationState::Running | OperationState::Cancelling
+                )
+        {
+            return Err(OperationError::InvalidStage);
+        }
+        let revision = next_revision(current.revision)?;
+        let connection = self.lock_connection()?;
+        let updated = connection
+            .execute(
+                "UPDATE operations SET stage = ?1, revision = ?2
+                 WHERE operation = ?3 AND revision = ?4",
+                params![
+                    stage.as_str(),
+                    u64_to_i64(revision)?,
+                    operation.as_bytes().as_slice(),
+                    u64_to_i64(current.revision)?,
+                ],
+            )
+            .map_err(OperationError::Sqlite)?;
+        drop(connection);
+        if updated != 1 {
+            return Err(OperationError::ConcurrentUpdate);
         }
         self.status(operation)
     }
@@ -281,32 +633,175 @@ impl OperationJournal {
         progress: Progress,
     ) -> Result<OperationRecord, OperationError> {
         let current = self.status(operation)?;
-        if current.state.is_terminal() || progress.completed < current.progress.completed {
-            return Err(OperationError::InvalidProgress);
+        if current.state == OperationState::Interrupted {
+            return Ok(current);
         }
-        if current.progress.total != 0
-            && progress.total != 0
-            && current.progress.total != progress.total
+        if current.state.is_terminal()
+            || progress.completed < current.progress.completed
+            || current.progress.total != 0
+                && progress.total != 0
+                && current.progress.total != progress.total
         {
             return Err(OperationError::InvalidProgress);
         }
-        let revision = current
-            .revision
-            .checked_add(1)
-            .ok_or(OperationError::RevisionOverflow)?;
+        let revision = next_revision(current.revision)?;
         let connection = self.lock_connection()?;
         let updated = connection
             .execute(
-                "UPDATE operations
-                 SET revision = ?1, completed = ?2, total = ?3
+                "UPDATE operations SET revision = ?1, completed = ?2, total = ?3
                  WHERE operation = ?4 AND revision = ?5",
                 params![
-                    i64::try_from(revision).map_err(|_| OperationError::RevisionOverflow)?,
+                    u64_to_i64(revision)?,
                     progress.completed,
                     progress.total,
                     operation.as_bytes().as_slice(),
-                    i64::try_from(current.revision)
-                        .map_err(|_| OperationError::RevisionOverflow)?,
+                    u64_to_i64(current.revision)?,
+                ],
+            )
+            .map_err(OperationError::Sqlite)?;
+        drop(connection);
+        if updated != 1 {
+            let observed = self.status(operation)?;
+            if observed.state == OperationState::Interrupted {
+                return Ok(observed);
+            }
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        self.status(operation)
+    }
+
+    /// Durably requests cancellation before signalling in-memory workers.
+    ///
+    /// Queued work becomes terminal immediately; running work enters cleanup.
+    /// Repeated or terminal requests are idempotent and return `accepted = false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for unknown work, unsupported reasons, or storage failure.
+    pub fn request_cancellation(
+        &self,
+        operation: OperationId,
+        reason: CancellationReason,
+    ) -> Result<CancellationOutcome, OperationError> {
+        let reason_text = cancellation_reason_as_str(reason)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+        let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if current.state.is_terminal() || current.cancellation_requested {
+            transaction.commit().map_err(OperationError::Sqlite)?;
+            return Ok(CancellationOutcome {
+                accepted: false,
+                operation: current,
+            });
+        }
+        let next_state = match current.state {
+            OperationState::Queued => OperationState::Cancelled,
+            OperationState::Running => OperationState::Cancelling,
+            OperationState::Cancelling => OperationState::Cancelling,
+            OperationState::Succeeded
+            | OperationState::Failed
+            | OperationState::Cancelled
+            | OperationState::Interrupted => unreachable!("terminal states returned above"),
+        };
+        let revision = next_revision(current.revision)?;
+        let updated = transaction
+            .execute(
+                "UPDATE operations
+                 SET state = ?1, cancellation_requested = 1,
+                     cancellation_reason = ?2, revision = ?3
+                 WHERE operation = ?4 AND revision = ?5
+                   AND cancellation_requested = 0
+                   AND state IN ('queued', 'running', 'cancelling')",
+                params![
+                    next_state.as_str(),
+                    reason_text,
+                    u64_to_i64(revision)?,
+                    operation.as_bytes().as_slice(),
+                    u64_to_i64(current.revision)?,
+                ],
+            )
+            .map_err(OperationError::Sqlite)?;
+        if updated != 1 {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        transaction.commit().map_err(OperationError::Sqlite)?;
+        drop(connection);
+        let token = self.cancellation_token(operation)?;
+        let _ = token.cancel(reason);
+        if next_state.is_terminal() {
+            self.lock_cancellations()?.remove(&operation);
+            self.prune_to(MAX_OPERATION_HISTORY)?;
+        }
+        Ok(CancellationOutcome {
+            accepted: true,
+            operation: self.status(operation)?,
+        })
+    }
+
+    /// Requests client cancellation and returns acknowledgement plus state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed journal error.
+    pub fn cancel(
+        &self,
+        operation: OperationId,
+    ) -> Result<(bool, OperationRecord), OperationError> {
+        let outcome = self.request_cancellation(operation, CancellationReason::ClientRequest)?;
+        Ok((outcome.accepted, outcome.operation))
+    }
+
+    /// Returns the in-memory cancellation notification for active work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::NotFound`] when no active token exists.
+    pub fn cancellation_token(
+        &self,
+        operation: OperationId,
+    ) -> Result<Cancellation, OperationError> {
+        self.lock_cancellations()?
+            .get(&operation)
+            .cloned()
+            .ok_or(OperationError::NotFound)
+    }
+
+    /// Renews an attached operation lease for its authenticated owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for detached, terminal, stale, foreign-owner, or zero expiry.
+    pub fn renew_lease(
+        &self,
+        operation: OperationId,
+        owner: ClientInstanceId,
+        expiry_unix_ms: u64,
+    ) -> Result<OperationRecord, OperationError> {
+        if expiry_unix_ms == 0 {
+            return Err(OperationError::InvalidLease);
+        }
+        let current = self.status(operation)?;
+        if current.detached || current.state.is_terminal() || current.owner != owner {
+            return Err(OperationError::LeaseOwnerMismatch);
+        }
+        if current
+            .lease_expires_unix_ms
+            .is_some_and(|existing| expiry_unix_ms <= existing)
+        {
+            return Err(OperationError::InvalidLease);
+        }
+        let revision = next_revision(current.revision)?;
+        let connection = self.lock_connection()?;
+        let updated = connection
+            .execute(
+                "UPDATE operations SET lease_expires_unix_ms = ?1, revision = ?2
+                 WHERE operation = ?3 AND revision = ?4 AND detached = 0 AND owner = ?5",
+                params![
+                    u64_to_i64(expiry_unix_ms)?,
+                    u64_to_i64(revision)?,
+                    operation.as_bytes().as_slice(),
+                    u64_to_i64(current.revision)?,
+                    owner.as_bytes().as_slice(),
                 ],
             )
             .map_err(OperationError::Sqlite)?;
@@ -317,115 +812,231 @@ impl OperationJournal {
         self.status(operation)
     }
 
-    /// Requests cooperative cancellation and persists the cancelling state.
+    /// Interrupts active work after its process-local deadline elapses.
+    ///
+    /// This is the authoritative live deadline transition; persisted wall-clock
+    /// timestamps remain for admission audit and restart classification only.
     ///
     /// # Errors
     ///
-    /// Returns a typed error for unknown or terminal operations.
-    pub fn cancel(
+    /// Returns a typed storage or concurrency error.
+    pub fn interrupt_deadline(
         &self,
         operation: OperationId,
-    ) -> Result<(bool, OperationRecord), OperationError> {
-        let current = self.status(operation)?;
+    ) -> Result<OperationRecord, OperationError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+        let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
         if current.state.is_terminal() {
-            return Ok((false, current));
+            transaction.commit().map_err(OperationError::Sqlite)?;
+            return Ok(current);
         }
-        let accepted = self
-            .lock_cancellations()?
-            .get(&operation)
-            .is_some_and(|token| token.cancel(CancellationReason::ClientRequest));
-        let updated = if current.state == OperationState::Cancelling {
-            current
-        } else {
-            self.transition(operation, OperationState::Cancelling, None)?
-        };
-        Ok((accepted, updated))
+        let updated = update_interrupted(&transaction, operation, RecoveryClass::DeadlineElapsed)?;
+        if updated != 1 {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        transaction.commit().map_err(OperationError::Sqlite)?;
+        self.lock_cancellations()?.remove(&operation);
+        drop(connection);
+        self.prune_to(MAX_OPERATION_HISTORY)?;
+        self.status(operation)
+    }
+
+    /// Expires at most `max_records` due deadlines or attached leases.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed storage or bound error.
+    pub fn expire_due(&self, now_unix_ms: u64, max_records: usize) -> Result<u32, OperationError> {
+        if max_records == 0 {
+            return Ok(0);
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+        let interruptions = classify_due(&transaction, now_unix_ms, max_records)?;
+        let mut cancellations = self.lock_cancellations()?;
+        transaction.commit().map_err(OperationError::Sqlite)?;
+        for interruption in &interruptions {
+            if let Some(token) = cancellations.remove(&interruption.operation) {
+                let _ = token.cancel(interruption.reason);
+            }
+        }
+        drop(cancellations);
+        drop(connection);
+        self.prune_to(MAX_OPERATION_HISTORY)?;
+        u32::try_from(interruptions.len()).map_err(|_| OperationError::CorruptState)
+    }
+
+    /// Interrupts at most `max_records` remaining nonterminal operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed storage or bound error.
+    pub fn interrupt_nonterminal(&self, max_records: usize) -> Result<u32, OperationError> {
+        if max_records == 0 {
+            return Ok(0);
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+        let ids = select_operation_ids(
+            &transaction,
+            "state IN ('queued', 'running', 'cancelling')",
+            max_records,
+            &[],
+        )?;
+        let mut interruptions = Vec::with_capacity(ids.len());
+        for operation in ids {
+            if update_interrupted(&transaction, operation, RecoveryClass::InterruptedByRestart)?
+                == 1
+            {
+                interruptions.push(PendingInterruption {
+                    operation,
+                    reason: CancellationReason::Shutdown,
+                });
+            }
+        }
+        let mut cancellations = self.lock_cancellations()?;
+        transaction.commit().map_err(OperationError::Sqlite)?;
+        for interruption in &interruptions {
+            if let Some(token) = cancellations.remove(&interruption.operation) {
+                let _ = token.cancel(interruption.reason);
+            }
+        }
+        drop(cancellations);
+        drop(connection);
+        self.prune_to(MAX_OPERATION_HISTORY)?;
+        u32::try_from(interruptions.len()).map_err(|_| OperationError::CorruptState)
+    }
+
+    /// Checkpoints the SQLite write-ahead log before orderly shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed SQLite failure.
+    pub fn checkpoint(&self) -> Result<(), OperationError> {
+        self.lock_connection()?
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(OperationError::Sqlite)
     }
 
     /// Loads one durable operation state.
     ///
     /// # Errors
     ///
-    /// Returns [`OperationError::NotFound`] for an unknown operation or a typed
-    /// corruption/SQLite error.
+    /// Returns [`OperationError::NotFound`] or a typed corruption/storage error.
     pub fn status(&self, operation: OperationId) -> Result<OperationRecord, OperationError> {
         let connection = self.lock_connection()?;
-        let record = connection
-            .query_row(
-                "SELECT state, revision, completed, total, error_json
-                 FROM operations WHERE operation = ?1",
-                [operation.as_bytes().as_slice()],
-                |row| {
-                    let state: String = row.get(0)?;
-                    let revision: i64 = row.get(1)?;
-                    let completed: u32 = row.get(2)?;
-                    let total: u32 = row.get(3)?;
-                    let error_json: Option<String> = row.get(4)?;
-                    Ok((state, revision, completed, total, error_json))
-                },
-            )
-            .optional()
-            .map_err(OperationError::Sqlite)?
-            .ok_or(OperationError::NotFound)?;
+        let mut record = load_record(&connection, operation)?.ok_or(OperationError::NotFound)?;
         drop(connection);
-        let revision = u64::try_from(record.1).map_err(|_| OperationError::CorruptState)?;
-        let has_persisted_error = record.4.is_some();
-        let persisted_error = record
-            .4
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(OperationError::DeserializePublicError)?;
-        let error = self
-            .lock_errors()?
-            .get(&operation)
-            .cloned()
-            .or(persisted_error);
-        Ok(OperationRecord {
-            operation,
-            state: OperationState::parse(&record.0)?,
-            revision,
-            progress: Progress::new(record.2, record.3)?,
-            error,
-            has_persisted_error,
+        if let Some(error) = self.lock_errors()?.get(&operation).cloned() {
+            record.error = Some(error);
+        }
+        Ok(record)
+    }
+
+    /// Returns bounded nonterminal operation counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed SQLite or integer-conversion failure.
+    pub fn counts(&self) -> Result<OperationCounts, OperationError> {
+        let connection = self.lock_connection()?;
+        let (queued, running, cancelling): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT
+                    COALESCE(SUM(CASE WHEN state = 'queued' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN state = 'cancelling' THEN 1 ELSE 0 END), 0)
+                 FROM operations",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(OperationError::Sqlite)?;
+        Ok(OperationCounts {
+            queued: nonnegative_i64_to_u32(queued)?,
+            running: nonnegative_i64_to_u32(running)?,
+            cancelling: nonnegative_i64_to_u32(cancelling)?,
         })
     }
 
-    /// Returns the number of nonterminal operations.
+    /// Returns the number of durable nonterminal operations.
     ///
     /// # Errors
     ///
     /// Returns a typed SQLite or integer-conversion failure.
     pub fn active_count(&self) -> Result<u32, OperationError> {
-        let connection = self.lock_connection()?;
-        let count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM operations
-                 WHERE state IN ('queued', 'running', 'cancelling')",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(OperationError::Sqlite)?;
-        u32::try_from(count).map_err(|_| OperationError::CorruptState)
+        Ok(self.counts()?.active())
     }
 
-    fn prune(&self) -> Result<(), OperationError> {
+    fn recover_nonterminal(&self, now_unix_ms: u64) -> Result<(), OperationError> {
+        loop {
+            let changed = self.recover_nonterminal_batch(now_unix_ms, 256)?;
+            if changed == 0 {
+                return Ok(());
+            }
+        }
+    }
+
+    fn recover_nonterminal_batch(
+        &self,
+        now_unix_ms: u64,
+        max_records: usize,
+    ) -> Result<u32, OperationError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+        let ids = select_operation_ids(
+            &transaction,
+            "state IN ('queued', 'running', 'cancelling')",
+            max_records,
+            &[],
+        )?;
+        let mut changed = 0_u32;
+        for operation in ids {
+            let record =
+                load_record(&transaction, operation)?.ok_or(OperationError::CorruptState)?;
+            let recovery = recovery_for(&record, now_unix_ms);
+            changed = changed
+                .checked_add(update_interrupted(&transaction, operation, recovery)?)
+                .ok_or(OperationError::CorruptState)?;
+        }
+        transaction.commit().map_err(OperationError::Sqlite)?;
+        Ok(changed)
+    }
+
+    fn prune_to(&self, limit: usize) -> Result<(), OperationError> {
+        let limit = i64::try_from(limit).map_err(|_| OperationError::CorruptState)?;
         let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT operation FROM operations
+                 WHERE state IN ('succeeded', 'failed', 'cancelled', 'interrupted')
+                 ORDER BY sequence DESC LIMIT -1 OFFSET ?1",
+            )
+            .map_err(OperationError::Sqlite)?;
+        let pruned = statement
+            .query_map([limit], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(OperationError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(OperationError::Sqlite)?;
+        drop(statement);
         connection
             .execute(
                 "DELETE FROM operations
                  WHERE operation IN (
-                     SELECT operation FROM operations
-                     WHERE state IN ('succeeded', 'failed', 'interrupted')
-                     ORDER BY sequence DESC
-                     LIMIT -1 OFFSET ?1
+                    SELECT operation FROM operations
+                    WHERE state IN ('succeeded', 'failed', 'cancelled', 'interrupted')
+                    ORDER BY sequence DESC LIMIT -1 OFFSET ?1
                  )",
-                [
-                    i64::try_from(MAX_OPERATION_HISTORY)
-                        .map_err(|_| OperationError::CorruptState)?,
-                ],
+                [limit],
             )
             .map_err(OperationError::Sqlite)?;
+        drop(connection);
+        let mut errors = self.lock_errors()?;
+        for bytes in pruned {
+            if let Ok(array) = <[u8; 16]>::try_from(bytes) {
+                errors.remove(&OperationId::from_bytes(array));
+            }
+        }
         Ok(())
     }
 
@@ -455,49 +1066,499 @@ impl OperationJournal {
 
 /// Exclusive operating-system lock for the writable catalog.
 ///
-/// The lock file may remain after shutdown. Ownership follows the file handle,
+/// The private file may remain after shutdown. Ownership follows the file handle,
 /// so process termination releases the lock without PID probing or stale deletion.
 #[derive(Debug)]
 pub struct CatalogWriterLock {
     file: File,
-    nonce: [u8; 16],
 }
 
 impl CatalogWriterLock {
-    /// Acquires the exclusive catalog writer and records the instance nonce.
+    /// Acquires the exclusive catalog writer.
     ///
     /// # Errors
     ///
-    /// Returns [`OperationError::WriterBusy`] while another process owns the lock
-    /// or [`OperationError::LockIo`] for filesystem and locking failures.
-    pub fn acquire(path: &Path, nonce: [u8; 16]) -> Result<Self, OperationError> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .map_err(OperationError::LockIo)?;
+    /// Returns [`OperationError::WriterBusy`] while another process owns the lock.
+    pub fn acquire(path: &Path, _nonce: [u8; 16]) -> Result<Self, OperationError> {
+        let file = private_lock_file(path)?;
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Err(OperationError::WriterBusy),
             Err(TryLockError::Error(source)) => return Err(OperationError::LockIo(source)),
         }
-        write_lock_record(&mut file, std::process::id(), nonce)?;
-        Ok(Self { file, nonce })
-    }
-
-    /// Returns the instance nonce recorded for endpoint authentication.
-    #[must_use]
-    pub const fn nonce(&self) -> [u8; 16] {
-        self.nonce
+        Ok(Self { file })
     }
 }
 
 impl Drop for CatalogWriterLock {
     fn drop(&mut self) {
-        let _ = self.file.flush();
         let _ = self.file.unlock();
+    }
+}
+
+fn migrate_schema(connection: &mut Connection) -> Result<(), OperationError> {
+    let observed: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(OperationError::Sqlite)?;
+    let observed = u32::try_from(observed).map_err(|_| OperationError::CorruptState)?;
+    if observed > OPERATION_SCHEMA_VERSION {
+        return Err(OperationError::UnsupportedSchemaVersion { observed });
+    }
+    if observed == OPERATION_SCHEMA_VERSION {
+        validate_schema(connection)?;
+        return Ok(());
+    }
+
+    let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+    if !table_exists(&transaction, "operations")? {
+        create_schema(&transaction)?;
+    } else if is_prototype_schema(&transaction)? {
+        migrate_prototype(&transaction)?;
+    } else {
+        return Err(OperationError::UnsupportedLegacySchema);
+    }
+    transaction
+        .pragma_update(None, "user_version", OPERATION_SCHEMA_VERSION)
+        .map_err(OperationError::Sqlite)?;
+    transaction.commit().map_err(OperationError::Sqlite)?;
+    validate_schema(connection)
+}
+
+fn create_schema(connection: &Connection) -> Result<(), OperationError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE operations (
+                operation BLOB PRIMARY KEY NOT NULL CHECK(length(operation) = 16),
+                kind TEXT NOT NULL CHECK(kind IN ('control_probe')),
+                plan_hash BLOB NOT NULL CHECK(length(plan_hash) = 32),
+                owner BLOB NOT NULL CHECK(length(owner) = 16),
+                detached INTEGER NOT NULL CHECK(detached IN (0, 1)),
+                deadline_unix_ms INTEGER CHECK(deadline_unix_ms > 0),
+                lease_expires_unix_ms INTEGER CHECK(lease_expires_unix_ms > 0),
+                state TEXT NOT NULL CHECK(state IN (
+                    'queued', 'running', 'cancelling', 'succeeded', 'failed',
+                    'cancelled', 'interrupted'
+                )),
+                stage TEXT NOT NULL CHECK(stage IN ('accepted', 'executing', 'cleanup')),
+                cancellation_requested INTEGER NOT NULL CHECK(cancellation_requested IN (0, 1)),
+                cancellation_reason TEXT CHECK(cancellation_reason IN (
+                    'client_request', 'parent_cancelled', 'deadline_exceeded',
+                    'shutdown', 'resource_limit'
+                )),
+                recovery_class TEXT NOT NULL CHECK(recovery_class IN (
+                    'not_applicable', 'interrupted_by_restart', 'deadline_elapsed', 'lease_expired'
+                )),
+                revision INTEGER NOT NULL CHECK(revision >= 1),
+                completed INTEGER NOT NULL CHECK(completed >= 0 AND completed <= 4294967295),
+                total INTEGER NOT NULL CHECK(total >= 0 AND total <= 4294967295),
+                error_json TEXT CHECK(length(error_json) <= 16384),
+                sequence INTEGER NOT NULL UNIQUE CHECK(sequence >= 1),
+                CHECK(total = 0 OR completed <= total),
+                CHECK((detached = 1 AND lease_expires_unix_ms IS NULL)
+                   OR (detached = 0 AND lease_expires_unix_ms IS NOT NULL)),
+                CHECK((cancellation_requested = 0 AND cancellation_reason IS NULL)
+                   OR (cancellation_requested = 1 AND cancellation_reason IS NOT NULL)),
+                CHECK((state = 'failed' AND error_json IS NOT NULL)
+                   OR (state != 'failed' AND error_json IS NULL)),
+                CHECK((state = 'interrupted' AND recovery_class != 'not_applicable')
+                   OR (state != 'interrupted' AND recovery_class = 'not_applicable'))
+            );",
+        )
+        .map_err(OperationError::Sqlite)
+}
+
+fn migrate_prototype(transaction: &Transaction<'_>) -> Result<(), OperationError> {
+    transaction
+        .execute_batch("ALTER TABLE operations RENAME TO operations_v0;")
+        .map_err(OperationError::Sqlite)?;
+    create_schema(transaction)?;
+    transaction
+        .execute(
+            "INSERT INTO operations (
+                operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                lease_expires_unix_ms, state, stage, cancellation_requested,
+                cancellation_reason, recovery_class, revision, completed, total,
+                error_json, sequence
+             ) SELECT operation, 'control_probe', zeroblob(32), zeroblob(16), 1,
+                      NULL, NULL, state, 'accepted',
+                      CASE WHEN state = 'cancelling' THEN 1 ELSE 0 END,
+                      CASE WHEN state = 'cancelling' THEN 'client_request' ELSE NULL END,
+                      CASE WHEN state = 'interrupted' THEN 'interrupted_by_restart'
+                           ELSE 'not_applicable' END,
+                      revision, completed, total, error_json, sequence
+               FROM operations_v0",
+            [],
+        )
+        .map_err(OperationError::Sqlite)?;
+    transaction
+        .execute_batch("DROP TABLE operations_v0;")
+        .map_err(OperationError::Sqlite)
+}
+
+fn validate_schema(connection: &Connection) -> Result<(), OperationError> {
+    let columns = table_columns(connection)?;
+    let expected = [
+        "operation",
+        "kind",
+        "plan_hash",
+        "owner",
+        "detached",
+        "deadline_unix_ms",
+        "lease_expires_unix_ms",
+        "state",
+        "stage",
+        "cancellation_requested",
+        "cancellation_reason",
+        "recovery_class",
+        "revision",
+        "completed",
+        "total",
+        "error_json",
+        "sequence",
+    ];
+    if columns != expected {
+        return Err(OperationError::CorruptSchema);
+    }
+    connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+        .map_err(OperationError::Sqlite)
+        .and_then(|result| {
+            if result == "ok" {
+                Ok(())
+            } else {
+                Err(OperationError::CorruptSchema)
+            }
+        })
+}
+
+fn table_exists(connection: &Connection, table: &str) -> Result<bool, OperationError> {
+    connection
+        .query_row(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|value| value.is_some())
+        .map_err(OperationError::Sqlite)
+}
+
+fn is_prototype_schema(connection: &Connection) -> Result<bool, OperationError> {
+    Ok(table_columns(connection)?
+        == [
+            "operation",
+            "state",
+            "revision",
+            "completed",
+            "total",
+            "error_json",
+            "sequence",
+        ])
+}
+
+fn table_columns(connection: &Connection) -> Result<Vec<String>, OperationError> {
+    connection
+        .prepare("PRAGMA table_info(operations)")
+        .map_err(OperationError::Sqlite)?
+        .query_map([], |row| row.get(1))
+        .map_err(OperationError::Sqlite)?
+        .collect::<Result<_, _>>()
+        .map_err(OperationError::Sqlite)
+}
+
+fn load_record(
+    connection: &Connection,
+    operation: OperationId,
+) -> Result<Option<OperationRecord>, OperationError> {
+    let raw = connection
+        .query_row(
+            "SELECT kind, plan_hash, owner, detached, deadline_unix_ms,
+                    lease_expires_unix_ms, state, stage, cancellation_requested,
+                    cancellation_reason, recovery_class, revision, completed, total,
+                    error_json
+             FROM operations WHERE operation = ?1",
+            [operation.as_bytes().as_slice()],
+            |row| {
+                Ok(RawRecord {
+                    kind: row.get(0)?,
+                    plan_hash: row.get(1)?,
+                    owner: row.get(2)?,
+                    detached: row.get(3)?,
+                    deadline_unix_ms: row.get(4)?,
+                    lease_expires_unix_ms: row.get(5)?,
+                    state: row.get(6)?,
+                    stage: row.get(7)?,
+                    cancellation_requested: row.get(8)?,
+                    cancellation_reason: row.get(9)?,
+                    recovery_class: row.get(10)?,
+                    revision: row.get(11)?,
+                    completed: row.get(12)?,
+                    total: row.get(13)?,
+                    error_json: row.get(14)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(OperationError::Sqlite)?;
+    raw.map(|raw| decode_record(operation, raw)).transpose()
+}
+
+struct RawRecord {
+    kind: String,
+    plan_hash: Vec<u8>,
+    owner: Vec<u8>,
+    detached: i64,
+    deadline_unix_ms: Option<i64>,
+    lease_expires_unix_ms: Option<i64>,
+    state: String,
+    stage: String,
+    cancellation_requested: i64,
+    cancellation_reason: Option<String>,
+    recovery_class: String,
+    revision: i64,
+    completed: i64,
+    total: i64,
+    error_json: Option<String>,
+}
+
+fn decode_record(
+    operation: OperationId,
+    raw: RawRecord,
+) -> Result<OperationRecord, OperationError> {
+    let plan_hash = PlanHash::from_bytes(
+        raw.plan_hash
+            .try_into()
+            .map_err(|_| OperationError::CorruptState)?,
+    );
+    let owner = ClientInstanceId::from_bytes(
+        raw.owner
+            .try_into()
+            .map_err(|_| OperationError::CorruptState)?,
+    );
+    let detached = i64_to_bool(raw.detached)?;
+    let cancellation_requested = i64_to_bool(raw.cancellation_requested)?;
+    let cancellation_reason = raw
+        .cancellation_reason
+        .as_deref()
+        .map(parse_cancellation_reason)
+        .transpose()?;
+    if cancellation_requested != cancellation_reason.is_some() {
+        return Err(OperationError::CorruptState);
+    }
+    let state = OperationState::parse(&raw.state)?;
+    let recovery_class = RecoveryClass::parse(&raw.recovery_class)?;
+    if (state == OperationState::Interrupted) == (recovery_class == RecoveryClass::NotApplicable) {
+        return Err(OperationError::CorruptState);
+    }
+    let deadline_unix_ms = optional_nonnegative_i64_to_u64(raw.deadline_unix_ms)?;
+    let lease_expires_unix_ms = optional_nonnegative_i64_to_u64(raw.lease_expires_unix_ms)?;
+    if detached == lease_expires_unix_ms.is_some() {
+        return Err(OperationError::CorruptState);
+    }
+    let has_persisted_error = raw.error_json.is_some();
+    let error = raw
+        .error_json
+        .as_deref()
+        .map(deserialize_public_error)
+        .transpose()?;
+    if (state == OperationState::Failed) != error.is_some() {
+        return Err(OperationError::CorruptState);
+    }
+    Ok(OperationRecord {
+        operation,
+        kind: OperationKind::parse(&raw.kind)?,
+        plan_hash,
+        owner,
+        detached,
+        deadline_unix_ms,
+        lease_expires_unix_ms,
+        state,
+        stage: OperationStage::parse(&raw.stage)?,
+        cancellation_requested,
+        cancellation_reason,
+        recovery_class,
+        revision: nonnegative_i64_to_u64(raw.revision)?,
+        progress: Progress::new(
+            nonnegative_i64_to_u32(raw.completed)?,
+            nonnegative_i64_to_u32(raw.total)?,
+        )?,
+        error,
+        has_persisted_error,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingInterruption {
+    operation: OperationId,
+    reason: CancellationReason,
+}
+
+fn classify_due(
+    transaction: &Transaction<'_>,
+    now_unix_ms: u64,
+    max_records: usize,
+) -> Result<Vec<PendingInterruption>, OperationError> {
+    let now = u64_to_i64(now_unix_ms)?;
+    let ids = select_operation_ids(
+        transaction,
+        "state IN ('queued', 'running', 'cancelling') AND (
+            (deadline_unix_ms IS NOT NULL AND deadline_unix_ms <= ?1) OR
+            (detached = 0 AND lease_expires_unix_ms IS NOT NULL AND lease_expires_unix_ms <= ?1)
+         )",
+        max_records,
+        &[now],
+    )?;
+    let mut interruptions = Vec::with_capacity(ids.len());
+    for operation in ids {
+        let record = load_record(transaction, operation)?.ok_or(OperationError::CorruptState)?;
+        let recovery = recovery_for(&record, now_unix_ms);
+        if update_interrupted(transaction, operation, recovery)? == 1 {
+            let reason = match recovery {
+                RecoveryClass::DeadlineElapsed => CancellationReason::DeadlineExceeded,
+                RecoveryClass::LeaseExpired => CancellationReason::ParentCancelled,
+                RecoveryClass::InterruptedByRestart | RecoveryClass::NotApplicable => {
+                    return Err(OperationError::CorruptState);
+                }
+            };
+            interruptions.push(PendingInterruption { operation, reason });
+        }
+    }
+    Ok(interruptions)
+}
+
+fn select_operation_ids(
+    connection: &Connection,
+    predicate: &str,
+    max_records: usize,
+    values: &[i64],
+) -> Result<Vec<OperationId>, OperationError> {
+    let limit = i64::try_from(max_records).map_err(|_| OperationError::CorruptState)?;
+    let sql = format!(
+        "SELECT operation FROM operations WHERE {predicate} ORDER BY sequence ASC LIMIT ?{}",
+        values.len() + 1
+    );
+    let mut parameters: Vec<&dyn rusqlite::ToSql> = values
+        .iter()
+        .map(|value| value as &dyn rusqlite::ToSql)
+        .collect();
+    parameters.push(&limit);
+    connection
+        .prepare(&sql)
+        .map_err(OperationError::Sqlite)?
+        .query_map(parameters.as_slice(), |row| row.get::<_, Vec<u8>>(0))
+        .map_err(OperationError::Sqlite)?
+        .map(|value| {
+            value
+                .map_err(OperationError::Sqlite)
+                .and_then(|bytes| {
+                    <[u8; 16]>::try_from(bytes).map_err(|_| OperationError::CorruptState)
+                })
+                .map(OperationId::from_bytes)
+        })
+        .collect()
+}
+
+fn update_interrupted(
+    transaction: &Transaction<'_>,
+    operation: OperationId,
+    recovery: RecoveryClass,
+) -> Result<u32, OperationError> {
+    let updated = transaction
+        .execute(
+            "UPDATE operations
+             SET state = 'interrupted', recovery_class = ?1, revision = revision + 1
+             WHERE operation = ?2 AND state IN ('queued', 'running', 'cancelling')",
+            params![recovery.as_str(), operation.as_bytes().as_slice()],
+        )
+        .map_err(OperationError::Sqlite)?;
+    u32::try_from(updated).map_err(|_| OperationError::CorruptState)
+}
+
+fn recovery_for(record: &OperationRecord, now_unix_ms: u64) -> RecoveryClass {
+    if record
+        .deadline_unix_ms
+        .is_some_and(|deadline| deadline <= now_unix_ms)
+    {
+        RecoveryClass::DeadlineElapsed
+    } else if !record.detached
+        && record
+            .lease_expires_unix_ms
+            .is_some_and(|lease| lease <= now_unix_ms)
+    {
+        RecoveryClass::LeaseExpired
+    } else {
+        RecoveryClass::InterruptedByRestart
+    }
+}
+
+fn submission_matches(record: &OperationRecord, submission: OperationSubmission) -> bool {
+    let owner_matches = record.owner == submission.owner || record.detached && submission.detached;
+    record.operation == submission.operation
+        && record.kind == submission.kind
+        && record.plan_hash == submission.plan_hash
+        && owner_matches
+        && record.detached == submission.detached
+        && record.deadline_unix_ms == submission.deadline_unix_ms
+        && record.lease_expires_unix_ms == submission.lease_expires_unix_ms
+}
+
+fn cancellation_for_submission(
+    submission: OperationSubmission,
+) -> Result<Cancellation, OperationError> {
+    let Some(deadline_unix_ms) = submission.deadline_unix_ms else {
+        return Ok(Cancellation::new());
+    };
+    let remaining = deadline_unix_ms.saturating_sub(unix_time_ms()?);
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(remaining))
+        .ok_or(OperationError::TimestampOverflow)?;
+    Ok(Cancellation::with_deadline(deadline))
+}
+
+fn validate_submission(submission: OperationSubmission) -> Result<(), OperationError> {
+    if submission.deadline_unix_ms == Some(0)
+        || submission.lease_expires_unix_ms == Some(0)
+        || submission.detached == submission.lease_expires_unix_ms.is_some()
+    {
+        return Err(OperationError::InvalidSubmission);
+    }
+    Ok(())
+}
+
+fn serialize_public_error(error: &PublicError) -> Result<String, OperationError> {
+    let encoded = serde_json::to_string(error).map_err(OperationError::SerializePublicError)?;
+    if encoded.len() > MAX_PUBLIC_ERROR_BYTES {
+        return Err(OperationError::PublicErrorTooLarge);
+    }
+    Ok(encoded)
+}
+
+fn deserialize_public_error(encoded: &str) -> Result<PublicError, OperationError> {
+    if encoded.len() > MAX_PUBLIC_ERROR_BYTES {
+        return Err(OperationError::PublicErrorTooLarge);
+    }
+    serde_json::from_str(encoded).map_err(OperationError::DeserializePublicError)
+}
+
+fn cancellation_reason_as_str(reason: CancellationReason) -> Result<&'static str, OperationError> {
+    match reason {
+        CancellationReason::ClientRequest => Ok("client_request"),
+        CancellationReason::ParentCancelled => Ok("parent_cancelled"),
+        CancellationReason::DeadlineExceeded => Ok("deadline_exceeded"),
+        CancellationReason::Shutdown => Ok("shutdown"),
+        CancellationReason::ResourceLimit => Ok("resource_limit"),
+        _ => Err(OperationError::UnsupportedCancellationReason),
+    }
+}
+
+fn parse_cancellation_reason(value: &str) -> Result<CancellationReason, OperationError> {
+    match value {
+        "client_request" => Ok(CancellationReason::ClientRequest),
+        "parent_cancelled" => Ok(CancellationReason::ParentCancelled),
+        "deadline_exceeded" => Ok(CancellationReason::DeadlineExceeded),
+        "shutdown" => Ok(CancellationReason::Shutdown),
+        "resource_limit" => Ok(CancellationReason::ResourceLimit),
+        _ => Err(OperationError::CorruptState),
     }
 }
 
@@ -505,13 +1566,13 @@ fn legal_transition(from: OperationState, to: OperationState) -> bool {
     matches!(
         (from, to),
         (OperationState::Queued, OperationState::Running)
-            | (OperationState::Queued, OperationState::Cancelling)
             | (OperationState::Queued, OperationState::Failed)
             | (OperationState::Queued, OperationState::Interrupted)
             | (OperationState::Running, OperationState::Cancelling)
             | (OperationState::Running, OperationState::Succeeded)
             | (OperationState::Running, OperationState::Failed)
             | (OperationState::Running, OperationState::Interrupted)
+            | (OperationState::Cancelling, OperationState::Cancelled)
             | (OperationState::Cancelling, OperationState::Failed)
             | (OperationState::Cancelling, OperationState::Interrupted)
     )
@@ -539,16 +1600,205 @@ fn verify_sqlite(connection: &Connection) -> Result<(), OperationError> {
     Ok(())
 }
 
-fn write_lock_record(file: &mut File, pid: u32, nonce: [u8; 16]) -> Result<(), OperationError> {
-    file.set_len(0).map_err(OperationError::LockIo)?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(OperationError::LockIo)?;
-    writeln!(file, "{pid}").map_err(OperationError::LockIo)?;
-    for byte in nonce {
-        write!(file, "{byte:02x}").map_err(OperationError::LockIo)?;
+fn next_sequence(connection: &Connection) -> Result<i64, OperationError> {
+    connection
+        .query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM operations",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(OperationError::Sqlite)
+}
+
+fn next_revision(revision: u64) -> Result<u64, OperationError> {
+    revision
+        .checked_add(1)
+        .ok_or(OperationError::RevisionOverflow)
+}
+
+fn unix_time_ms() -> Result<u64, OperationError> {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| OperationError::SystemClockBeforeEpoch)?;
+    u64::try_from(duration.as_millis()).map_err(|_| OperationError::TimestampOverflow)
+}
+
+fn bool_to_i64(value: bool) -> i64 {
+    i64::from(value)
+}
+
+fn i64_to_bool(value: i64) -> Result<bool, OperationError> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(OperationError::CorruptState),
     }
-    writeln!(file).map_err(OperationError::LockIo)?;
-    file.sync_all().map_err(OperationError::LockIo)
+}
+
+fn u64_to_i64(value: u64) -> Result<i64, OperationError> {
+    i64::try_from(value).map_err(|_| OperationError::TimestampOverflow)
+}
+
+fn optional_u64_to_i64(value: Option<u64>) -> Result<Option<i64>, OperationError> {
+    value.map(u64_to_i64).transpose()
+}
+
+fn nonnegative_i64_to_u64(value: i64) -> Result<u64, OperationError> {
+    u64::try_from(value).map_err(|_| OperationError::CorruptState)
+}
+
+fn optional_nonnegative_i64_to_u64(value: Option<i64>) -> Result<Option<u64>, OperationError> {
+    value.map(nonnegative_i64_to_u64).transpose()
+}
+
+fn nonnegative_i64_to_u32(value: i64) -> Result<u32, OperationError> {
+    u32::try_from(value).map_err(|_| OperationError::CorruptState)
+}
+
+fn private_lock_file(path: &Path) -> Result<File, OperationError> {
+    #[cfg(unix)]
+    let file = {
+        use nix::{
+            fcntl::{OFlag, open},
+            sys::stat::Mode,
+        };
+
+        let descriptor = open(
+            path,
+            OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(|source| OperationError::LockIo(io::Error::from_raw_os_error(source as i32)))?;
+        File::from(descriptor)
+    };
+    #[cfg(windows)]
+    let file = {
+        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt as _};
+        use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
+        let file = options.open(path).map_err(OperationError::LockIo)?;
+        validate_private_windows_lock_file(&file)?;
+        apply_private_windows_lock_dacl(path)?;
+        verify_private_windows_lock_dacl(path)?;
+        file
+    };
+    #[cfg(unix)]
+    validate_private_lock_file(&file)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn validate_private_lock_file(file: &File) -> Result<(), OperationError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = file.metadata().map_err(OperationError::LockIo)?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(OperationError::InsecureLockFile);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_private_windows_lock_file(file: &File) -> Result<(), OperationError> {
+    use std::os::windows::fs::MetadataExt as _;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    let metadata = file.metadata().map_err(OperationError::LockIo)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+    {
+        return Err(OperationError::InsecureLockFile);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn apply_private_windows_lock_dacl(path: &Path) -> Result<(), OperationError> {
+    use windows_permissions::{
+        LocalBox, SecurityDescriptor,
+        constants::{SeObjectType, SecurityInformation},
+        wrappers::SetNamedSecurityInfo,
+    };
+
+    let sid = windows_account_sid()?;
+    let descriptor: LocalBox<SecurityDescriptor> = format!("D:P(A;;FA;;;{sid})")
+        .parse()
+        .map_err(|_| OperationError::WindowsSecurityPolicy)?;
+    let dacl = descriptor
+        .dacl()
+        .ok_or(OperationError::WindowsSecurityPolicy)?;
+    SetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        None,
+        None,
+        Some(dacl),
+        None,
+    )
+    .map_err(OperationError::LockIo)
+}
+
+#[cfg(windows)]
+fn verify_private_windows_lock_dacl(path: &Path) -> Result<(), OperationError> {
+    use windows_permissions::{
+        constants::{AccessRights, AceType, SeObjectType, SecurityInformation},
+        wrappers::{ConvertSecurityDescriptorToStringSecurityDescriptor, GetNamedSecurityInfo},
+    };
+
+    let expected_sid = windows_account_sid()?;
+    let descriptor = GetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+    )
+    .map_err(OperationError::LockIo)?;
+    let dacl = descriptor
+        .dacl()
+        .ok_or(OperationError::WindowsSecurityPolicy)?;
+    let sddl =
+        ConvertSecurityDescriptorToStringSecurityDescriptor(&descriptor, SecurityInformation::Dacl)
+            .map_err(OperationError::LockIo)?;
+    if !sddl.to_string_lossy().starts_with("D:P") || dacl.len() != 1 {
+        return Err(OperationError::WindowsSecurityPolicy);
+    }
+    let ace = dacl
+        .get_ace(0)
+        .ok_or(OperationError::WindowsSecurityPolicy)?;
+    let observed_sid = ace
+        .sid()
+        .ok_or(OperationError::WindowsSecurityPolicy)?
+        .to_string();
+    if ace.ace_type() != AceType::ACCESS_ALLOWED_ACE_TYPE
+        || ace.mask() != AccessRights::FileAllAccess
+        || !ace.flags().is_empty()
+        || observed_sid != expected_sid
+    {
+        return Err(OperationError::WindowsSecurityPolicy);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_account_sid() -> Result<String, OperationError> {
+    use nt_token::OwnedToken;
+    use windows::Win32::Security::TOKEN_QUERY;
+
+    OwnedToken::from_current_process(TOKEN_QUERY)
+        .map_err(|_| OperationError::WindowsSecurityPolicy)?
+        .user()
+        .and_then(|sid| sid.to_string())
+        .map_err(|_| OperationError::WindowsSecurityPolicy)
 }
 
 /// Typed operation and catalog failures.
@@ -557,9 +1807,24 @@ pub enum OperationError {
     /// The operation does not exist.
     #[error("operation was not found")]
     NotFound,
-    /// The operation ID already exists.
+    /// The legacy operation ID already exists.
     #[error("operation already exists")]
     AlreadyExists,
+    /// Immutable metadata differed for an existing operation ID.
+    #[error("operation submission conflicts with existing metadata")]
+    SubmissionConflict,
+    /// The authenticated client identity used the reserved internal value.
+    #[error("operation client identity is invalid")]
+    InvalidClientInstanceId,
+    /// Submission ownership, detached policy, or timestamps were inconsistent.
+    #[error("operation submission metadata is invalid")]
+    InvalidSubmission,
+    /// Lease renewal was detached, terminal, or requested by another owner.
+    #[error("operation lease owner does not match")]
+    LeaseOwnerMismatch,
+    /// Lease expiry did not advance or could not be represented.
+    #[error("operation lease is invalid")]
+    InvalidLease,
     /// The transition violates the lifecycle state machine.
     #[error("illegal operation transition from {from:?} to {to:?}")]
     IllegalTransition {
@@ -568,12 +1833,18 @@ pub enum OperationError {
         /// Requested next state.
         to: OperationState,
     },
+    /// Durable cancellation prevented successful completion.
+    #[error("operation cancellation won the completion race")]
+    CancellationWon,
     /// Failed-state error metadata was missing or attached to another state.
     #[error("operation terminal error does not match requested state")]
     InvalidTerminalError,
     /// Progress was inconsistent or moved backward.
     #[error("operation progress is invalid")]
     InvalidProgress,
+    /// Operation stage was inconsistent or moved backward.
+    #[error("operation stage is invalid")]
+    InvalidStage,
     /// A monotonic revision cannot be represented.
     #[error("operation revision overflowed")]
     RevisionOverflow,
@@ -583,6 +1854,21 @@ pub enum OperationError {
     /// Persisted operation state failed validation.
     #[error("operation journal contains invalid state")]
     CorruptState,
+    /// Persisted operation schema failed validation.
+    #[error("operation journal schema is corrupt")]
+    CorruptSchema,
+    /// A prototype schema was not recognized for safe migration.
+    #[error("operation journal legacy schema is unsupported")]
+    UnsupportedLegacySchema,
+    /// The journal was created by a newer incompatible implementation.
+    #[error("operation journal schema version {observed} is unsupported")]
+    UnsupportedSchemaVersion {
+        /// Observed SQLite `user_version`.
+        observed: u32,
+    },
+    /// A cancellation reason added by a future dependency is unsupported.
+    #[error("operation cancellation reason is unsupported")]
+    UnsupportedCancellationReason,
     /// A required mutex was poisoned by an earlier panic.
     #[error("operation journal lock was poisoned")]
     MutexPoisoned,
@@ -598,12 +1884,27 @@ pub enum OperationError {
     /// Another process currently owns the catalog writer lock.
     #[error("catalog writer is already active")]
     WriterBusy,
+    /// The existing lock artifact was linked, foreign-owned, or publicly accessible.
+    #[error("catalog writer lock is insecure")]
+    InsecureLockFile,
+    /// Windows token, reparse-point, or ACL verification failed.
+    #[error("catalog writer Windows security policy failed")]
+    WindowsSecurityPolicy,
     /// A public error could not be serialized for durable recovery.
     #[error("operation public error serialization failed")]
     SerializePublicError(#[source] serde_json::Error),
     /// A persisted public error failed checked decoding.
     #[error("operation public error is corrupt")]
     DeserializePublicError(#[source] serde_json::Error),
+    /// A serialized public error exceeded its durable bound.
+    #[error("operation public error exceeds its storage limit")]
+    PublicErrorTooLarge,
+    /// The system clock is before the Unix epoch.
+    #[error("system clock is before the supported epoch")]
+    SystemClockBeforeEpoch,
+    /// A wall-clock timestamp cannot be represented by SQLite.
+    #[error("operation timestamp is out of range")]
+    TimestampOverflow,
     /// SQLite operation failed.
     #[error("operation journal storage failed")]
     Sqlite(#[source] rusqlite::Error),
@@ -625,13 +1926,34 @@ mod tests {
         OperationId::from_bytes([seed; 16])
     }
 
+    fn attached_submission(
+        operation: OperationId,
+        owner: ClientInstanceId,
+        deadline: Option<u64>,
+        lease: u64,
+    ) -> OperationSubmission {
+        OperationSubmission::new(
+            operation,
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes([3; 32]),
+            owner,
+            false,
+            deadline,
+            Some(lease),
+        )
+        .expect("submission is valid")
+    }
+
     #[test]
-    fn operation_transitions_and_progress_are_monotonic() {
+    fn operation_transitions_stage_and_progress_are_monotonic() {
         let journal = OperationJournal::open_in_memory().expect("journal opens");
         journal.enqueue(operation(1)).expect("operation enqueues");
         let running = journal
             .transition(operation(1), OperationState::Running, None)
             .expect("operation starts");
+        let executing = journal
+            .update_stage(operation(1), OperationStage::Executing)
+            .expect("stage advances");
         let progressed = journal
             .update_progress(
                 operation(1),
@@ -642,59 +1964,439 @@ mod tests {
             .transition(operation(1), OperationState::Succeeded, None)
             .expect("operation succeeds");
 
-        assert!(running.revision < progressed.revision);
+        assert!(running.revision < executing.revision);
+        assert!(executing.revision < progressed.revision);
         assert!(progressed.revision < succeeded.revision);
-        assert!(succeeded.state.is_terminal());
         assert!(
             journal
-                .transition(operation(1), OperationState::Running, None)
+                .update_stage(operation(1), OperationStage::Cleanup)
+                .is_err()
+        );
+        assert!(
+            journal
+                .update_progress(
+                    operation(1),
+                    Progress::new(2, 10).expect("progress shape is valid")
+                )
                 .is_err()
         );
     }
 
     #[test]
-    fn cancellation_persists_without_overwriting_terminal_state() {
+    fn idempotent_submission_reuses_identical_detached_work_across_clients() {
         let journal = OperationJournal::open_in_memory().expect("journal opens");
-        let token = journal.enqueue(operation(2)).expect("operation enqueues");
-        journal
-            .transition(operation(2), OperationState::Running, None)
-            .expect("operation starts");
-        let (accepted, record) = journal.cancel(operation(2)).expect("cancellation succeeds");
+        let first = OperationSubmission::new(
+            operation(2),
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes([3; 32]),
+            ClientInstanceId::new([1; 16]).expect("client identity is valid"),
+            true,
+            None,
+            None,
+        )
+        .expect("submission is valid");
+        let submitted = journal.submit(first).expect("submission succeeds");
+        assert!(submitted.inserted);
+        assert_eq!(submitted.operation.revision, 1);
 
-        assert!(accepted);
-        assert_eq!(record.state, OperationState::Cancelling);
-        assert_eq!(token.reason(), Some(CancellationReason::ClientRequest));
+        let retried = OperationSubmission {
+            owner: ClientInstanceId::new([2; 16]).expect("client identity is valid"),
+            ..first
+        };
+        let outcome = journal.submit(retried).expect("detached retry succeeds");
+        assert!(!outcome.inserted);
+        assert_eq!(outcome.operation.revision, 1);
+        assert_eq!(outcome.operation.owner, first.owner);
+
+        let conflict = OperationSubmission {
+            plan_hash: PlanHash::from_bytes([9; 32]),
+            ..retried
+        };
+        assert!(matches!(
+            journal.submit(conflict),
+            Err(OperationError::SubmissionConflict)
+        ));
     }
 
     #[test]
-    fn restart_classifies_nonterminal_operations_as_interrupted() {
-        let temporary = tempdir().expect("temporary directory is available");
-        let path = temporary.path().join("operations.sqlite");
-        {
-            let journal = OperationJournal::open(&path).expect("journal opens");
-            journal.enqueue(operation(3)).expect("operation enqueues");
-            journal
-                .transition(operation(3), OperationState::Running, None)
-                .expect("operation starts");
-        }
-        let reopened = OperationJournal::open(&path).expect("journal reopens");
+    fn attached_submission_requires_the_original_owner() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let first = attached_submission(
+            operation(12),
+            ClientInstanceId::new([1; 16]).expect("client identity is valid"),
+            None,
+            10,
+        );
+        journal.submit(first).expect("submission succeeds");
+
+        let retried = OperationSubmission {
+            owner: ClientInstanceId::new([2; 16]).expect("client identity is valid"),
+            ..first
+        };
+        assert!(matches!(
+            journal.submit(retried),
+            Err(OperationError::SubmissionConflict)
+        ));
+    }
+
+    #[test]
+    fn submitted_deadline_uses_a_process_local_monotonic_token() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let submission = OperationSubmission::new(
+            operation(13),
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes([3; 32]),
+            ClientInstanceId::new([1; 16]).expect("client identity is valid"),
+            true,
+            Some(unix_time_ms().expect("clock is valid")),
+            None,
+        )
+        .expect("submission is valid");
+
+        journal.submit(submission).expect("submission succeeds");
+        let token = journal
+            .cancellation_token(submission.operation)
+            .expect("deadline token exists");
+
+        assert_eq!(token.reason(), Some(CancellationReason::DeadlineExceeded));
+    }
+
+    #[test]
+    fn cancellation_is_durable_idempotent_and_blocks_success() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let queued_token = journal.enqueue(operation(3)).expect("operation enqueues");
+        let queued = journal
+            .cancel(operation(3))
+            .expect("queued cancellation succeeds");
+        assert!(queued.0);
+        assert_eq!(queued.1.state, OperationState::Cancelled);
         assert_eq!(
-            reopened.status(operation(3)).expect("status loads").state,
-            OperationState::Interrupted
+            queued.1.cancellation_reason,
+            Some(CancellationReason::ClientRequest)
+        );
+        assert_eq!(
+            queued_token.reason(),
+            Some(CancellationReason::ClientRequest)
+        );
+        assert!(!journal.cancel(operation(3)).expect("repeat is stable").0);
+
+        let running_token = journal.enqueue(operation(4)).expect("operation enqueues");
+        journal
+            .transition(operation(4), OperationState::Running, None)
+            .expect("operation starts");
+        let running = journal
+            .cancel(operation(4))
+            .expect("running cancellation succeeds");
+        assert_eq!(running.1.state, OperationState::Cancelling);
+        assert!(matches!(
+            journal.transition(operation(4), OperationState::Succeeded, None),
+            Err(OperationError::CancellationWon)
+        ));
+        let cancelled = journal
+            .transition(operation(4), OperationState::Cancelled, None)
+            .expect("cleanup completes");
+        assert_eq!(cancelled.state, OperationState::Cancelled);
+        assert_eq!(
+            running_token.reason(),
+            Some(CancellationReason::ClientRequest)
+        );
+        assert!(
+            !journal
+                .cancel(operation(4))
+                .expect("terminal cancel is stable")
+                .0
         );
     }
 
     #[test]
-    fn failed_operations_require_a_public_error() {
+    fn attached_and_detached_lease_contracts_are_checked() {
+        let owner = ClientInstanceId::new([5; 16]).expect("owner is valid");
+        assert!(
+            OperationSubmission::new(
+                operation(5),
+                OperationKind::ControlProbe,
+                PlanHash::from_bytes([1; 32]),
+                owner,
+                false,
+                None,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            OperationSubmission::new(
+                operation(5),
+                OperationKind::ControlProbe,
+                PlanHash::from_bytes([1; 32]),
+                owner,
+                true,
+                None,
+                Some(10),
+            )
+            .is_err()
+        );
+
         let journal = OperationJournal::open_in_memory().expect("journal opens");
-        journal.enqueue(operation(4)).expect("operation enqueues");
-        let error = PublicError::builder(ErrorCode::Internal, "operation failed")
-            .build()
-            .expect("public error builds");
-        let failed = journal
-            .transition(operation(4), OperationState::Failed, Some(&error))
-            .expect("operation fails");
-        assert_eq!(failed.error, Some(error));
+        journal
+            .submit(attached_submission(operation(5), owner, None, 10))
+            .expect("attached submission succeeds");
+        assert!(matches!(
+            journal.renew_lease(
+                operation(5),
+                ClientInstanceId::new([6; 16]).expect("other owner is valid"),
+                20
+            ),
+            Err(OperationError::LeaseOwnerMismatch)
+        ));
+        assert_eq!(
+            journal
+                .renew_lease(operation(5), owner, 20)
+                .expect("owner renews")
+                .lease_expires_unix_ms,
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn restart_classifies_deadline_lease_and_generic_interruptions() {
+        let connection = Connection::open_in_memory().expect("connection opens");
+        let journal = OperationJournal::initialize(connection, 100).expect("journal initializes");
+        let owner = ClientInstanceId::new([7; 16]).expect("owner is valid");
+        journal
+            .submit(attached_submission(operation(6), owner, Some(90), 200))
+            .expect("deadline operation submits");
+        journal
+            .submit(attached_submission(operation(7), owner, None, 90))
+            .expect("lease operation submits");
+        journal
+            .submit(OperationSubmission::control_probe(operation(8)))
+            .expect("generic operation submits");
+
+        assert_eq!(
+            journal
+                .recover_nonterminal_batch(100, 10)
+                .expect("recovery succeeds"),
+            3
+        );
+        assert_eq!(
+            journal
+                .status(operation(6))
+                .expect("status loads")
+                .recovery_class,
+            RecoveryClass::DeadlineElapsed
+        );
+        assert_eq!(
+            journal
+                .status(operation(7))
+                .expect("status loads")
+                .recovery_class,
+            RecoveryClass::LeaseExpired
+        );
+        assert_eq!(
+            journal
+                .status(operation(8))
+                .expect("status loads")
+                .recovery_class,
+            RecoveryClass::InterruptedByRestart
+        );
+    }
+
+    #[test]
+    fn expiry_signals_tokens_with_deterministic_reason_and_precedence() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let owner = ClientInstanceId::new([8; 16]).expect("owner is valid");
+        let deadline = journal
+            .submit(attached_submission(operation(30), owner, Some(90), 200))
+            .expect("deadline submits");
+        let lease = journal
+            .submit(attached_submission(operation(31), owner, None, 90))
+            .expect("lease submits");
+        let both = journal
+            .submit(attached_submission(operation(32), owner, Some(90), 90))
+            .expect("combined expiry submits");
+        let deadline_token = journal
+            .cancellation_token(deadline.operation.operation)
+            .expect("deadline token exists");
+        let lease_token = journal
+            .cancellation_token(lease.operation.operation)
+            .expect("lease token exists");
+        let both_token = journal
+            .cancellation_token(both.operation.operation)
+            .expect("combined token exists");
+
+        assert_eq!(journal.expire_due(100, 10).expect("expiry succeeds"), 3);
+
+        assert_eq!(
+            deadline_token.reason(),
+            Some(CancellationReason::DeadlineExceeded)
+        );
+        assert_eq!(
+            lease_token.reason(),
+            Some(CancellationReason::ParentCancelled)
+        );
+        assert_eq!(
+            both_token.reason(),
+            Some(CancellationReason::DeadlineExceeded)
+        );
+        assert_eq!(
+            journal
+                .status(operation(30))
+                .expect("deadline loads")
+                .recovery_class,
+            RecoveryClass::DeadlineElapsed
+        );
+        assert_eq!(
+            journal
+                .status(operation(31))
+                .expect("lease loads")
+                .recovery_class,
+            RecoveryClass::LeaseExpired
+        );
+        assert_eq!(
+            journal
+                .status(operation(32))
+                .expect("combined loads")
+                .recovery_class,
+            RecoveryClass::DeadlineElapsed
+        );
+        for seed in 30..=32 {
+            assert!(matches!(
+                journal.cancellation_token(operation(seed)),
+                Err(OperationError::NotFound)
+            ));
+        }
+    }
+
+    #[test]
+    fn shutdown_interruption_signals_and_late_success_is_stable() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let token = journal.enqueue(operation(33)).expect("operation enqueues");
+        journal
+            .transition(operation(33), OperationState::Running, None)
+            .expect("operation starts");
+
+        assert_eq!(
+            journal
+                .interrupt_nonterminal(10)
+                .expect("shutdown interruption succeeds"),
+            1
+        );
+        assert_eq!(token.reason(), Some(CancellationReason::Shutdown));
+        assert!(matches!(
+            journal.cancellation_token(operation(33)),
+            Err(OperationError::NotFound)
+        ));
+        let interrupted = journal.status(operation(33)).expect("status loads");
+        assert_eq!(interrupted.state, OperationState::Interrupted);
+        assert_eq!(
+            interrupted.recovery_class,
+            RecoveryClass::InterruptedByRestart
+        );
+        assert_eq!(
+            journal
+                .update_progress(
+                    operation(33),
+                    Progress::new(1, 1).expect("progress validates")
+                )
+                .expect("late progress observes interruption"),
+            interrupted
+        );
+        assert_eq!(
+            journal
+                .transition(operation(33), OperationState::Succeeded, None)
+                .expect("late success observes interruption"),
+            interrupted
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn catalog_writer_lock_uses_protected_account_dacl() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("catalog.writer.lock");
+        let lock = CatalogWriterLock::acquire(&path, [8; 16]).expect("lock acquires");
+
+        verify_private_windows_lock_dacl(&path).expect("protected account DACL verifies");
+
+        drop(lock);
+    }
+
+    #[test]
+    fn terminal_pruning_never_removes_active_records() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        for seed in 10..14 {
+            journal
+                .enqueue(operation(seed))
+                .expect("operation enqueues");
+            journal
+                .transition(operation(seed), OperationState::Running, None)
+                .expect("operation starts");
+            journal
+                .transition(operation(seed), OperationState::Succeeded, None)
+                .expect("operation succeeds");
+        }
+        journal
+            .enqueue(operation(20))
+            .expect("active operation enqueues");
+        journal.prune_to(2).expect("bounded pruning succeeds");
+
+        assert!(matches!(
+            journal.status(operation(10)),
+            Err(OperationError::NotFound)
+        ));
+        assert!(matches!(
+            journal.status(operation(11)),
+            Err(OperationError::NotFound)
+        ));
+        assert!(journal.status(operation(12)).is_ok());
+        assert!(journal.status(operation(13)).is_ok());
+        assert_eq!(
+            journal.status(operation(20)).expect("active remains").state,
+            OperationState::Queued
+        );
+    }
+
+    #[test]
+    fn prototype_schema_migrates_and_future_schema_is_rejected() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        {
+            let connection = Connection::open(&path).expect("database opens");
+            connection
+                .execute_batch(
+                    "CREATE TABLE operations (
+                        operation BLOB PRIMARY KEY NOT NULL CHECK(length(operation) = 16),
+                        state TEXT NOT NULL,
+                        revision INTEGER NOT NULL CHECK(revision >= 1),
+                        completed INTEGER NOT NULL CHECK(completed >= 0),
+                        total INTEGER NOT NULL CHECK(total >= 0),
+                        error_json TEXT,
+                        sequence INTEGER NOT NULL UNIQUE
+                     );",
+                )
+                .expect("prototype schema creates");
+            connection
+                .execute(
+                    "INSERT INTO operations VALUES (?1, 'running', 1, 0, 0, NULL, 1)",
+                    [operation(21).as_bytes().as_slice()],
+                )
+                .expect("prototype row inserts");
+        }
+        let migrated = OperationJournal::open(&path).expect("prototype migrates");
+        let record = migrated.status(operation(21)).expect("migrated row loads");
+        assert_eq!(record.kind, OperationKind::ControlProbe);
+        assert_eq!(record.state, OperationState::Interrupted);
+        drop(migrated);
+
+        let connection = Connection::open(&path).expect("database reopens");
+        connection
+            .pragma_update(None, "user_version", OPERATION_SCHEMA_VERSION + 1)
+            .expect("future version writes");
+        drop(connection);
+        assert!(matches!(
+            OperationJournal::open(&path),
+            Err(OperationError::UnsupportedSchemaVersion { .. })
+        ));
     }
 
     #[test]
@@ -702,25 +2404,54 @@ mod tests {
         let temporary = tempdir().expect("temporary directory is available");
         let path = temporary.path().join("operations.sqlite");
         let expected = PublicError::builder(ErrorCode::Internal, "operation failed")
-            .operation(operation(5))
+            .operation(operation(22))
             .build()
             .expect("public error builds");
         {
             let journal = OperationJournal::open(&path).expect("journal opens");
-            journal.enqueue(operation(5)).expect("operation enqueues");
+            journal.enqueue(operation(22)).expect("operation enqueues");
             journal
-                .transition(operation(5), OperationState::Failed, Some(&expected))
+                .transition(operation(22), OperationState::Failed, Some(&expected))
                 .expect("operation fails");
         }
-
         let reopened = OperationJournal::open(&path).expect("journal reopens");
-        let actual = reopened.status(operation(5)).expect("status loads");
+        let actual = reopened.status(operation(22)).expect("status loads");
         assert_eq!(actual.error, Some(expected));
         assert!(actual.has_persisted_error);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn catalog_writer_lock_is_exclusive_and_reuses_persistent_record() {
+    fn catalog_writer_lock_rejects_public_or_linked_artifacts() {
+        use std::{
+            fs,
+            os::unix::fs::{PermissionsExt as _, symlink},
+        };
+
+        let temporary = tempdir().expect("temporary directory is available");
+        let public_path = temporary.path().join("public.lock");
+        fs::write(&public_path, b"").expect("lock fixture writes");
+        fs::set_permissions(&public_path, fs::Permissions::from_mode(0o644))
+            .expect("public permissions set");
+        assert!(matches!(
+            CatalogWriterLock::acquire(&public_path, [1; 16]),
+            Err(OperationError::InsecureLockFile)
+        ));
+
+        let target = temporary.path().join("target.lock");
+        fs::write(&target, b"").expect("target writes");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
+            .expect("private permissions set");
+        let linked = temporary.path().join("linked.lock");
+        symlink(target, &linked).expect("link creates");
+        assert!(matches!(
+            CatalogWriterLock::acquire(&linked, [1; 16]),
+            Err(OperationError::LockIo(_))
+        ));
+    }
+
+    #[test]
+    fn catalog_writer_lock_is_exclusive_and_reuses_persistent_file() {
         let temporary = tempdir().expect("temporary directory is available");
         let path = temporary.path().join("writer.lock");
         let first = CatalogWriterLock::acquire(&path, [1; 16]).expect("first lock succeeds");
@@ -730,8 +2461,6 @@ mod tests {
         ));
         drop(first);
         assert!(path.exists());
-
-        let second = CatalogWriterLock::acquire(&path, [2; 16]).expect("second lock succeeds");
-        assert_eq!(second.nonce(), [2; 16]);
+        let _second = CatalogWriterLock::acquire(&path, [2; 16]).expect("second lock succeeds");
     }
 }
