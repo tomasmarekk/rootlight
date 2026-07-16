@@ -1961,13 +1961,16 @@ fn operation_error_to_public(
             "operation submission is invalid",
             false,
         ),
-        OperationError::WriterBusy | OperationError::ConcurrentUpdate => {
+        OperationError::WriterBusy | OperationError::ConcurrentUpdate | OperationError::Busy => {
             (ErrorCode::Busy, "operation state is busy", true)
         }
         OperationError::UnsupportedSqlite { .. }
         | OperationError::UnsupportedSqliteCompileOptions
+        | OperationError::UnsupportedSqliteConfiguration
         | OperationError::CorruptState
         | OperationError::CorruptSchema
+        | OperationError::ForeignCatalog
+        | OperationError::MigrationChecksumMismatch
         | OperationError::UnsupportedLegacySchema
         | OperationError::UnsupportedSchemaVersion { .. }
         | OperationError::DeserializePublicError(_)

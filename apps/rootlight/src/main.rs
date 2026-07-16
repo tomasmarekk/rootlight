@@ -498,13 +498,16 @@ impl CliError {
             | Self::Client(ClientError::DaemonExecutableMissing)
             | Self::Client(ClientError::DaemonLaunchFailed)
             | Self::Client(ClientError::DaemonStartTimedOut)
-            | Self::Operations(rootlight_operations::OperationError::WriterBusy) => {
-                ExitFamily::Unavailable
-            }
+            | Self::Operations(
+                rootlight_operations::OperationError::WriterBusy
+                | rootlight_operations::OperationError::Busy,
+            ) => ExitFamily::Unavailable,
             Self::Client(ClientError::ProtocolMismatch)
             | Self::Client(ClientError::MissingProtocol)
             | Self::Operations(rootlight_operations::OperationError::CorruptState)
             | Self::Operations(rootlight_operations::OperationError::CorruptSchema)
+            | Self::Operations(rootlight_operations::OperationError::ForeignCatalog)
+            | Self::Operations(rootlight_operations::OperationError::MigrationChecksumMismatch)
             | Self::Operations(rootlight_operations::OperationError::UnsupportedLegacySchema)
             | Self::Operations(rootlight_operations::OperationError::UnsupportedSchemaVersion {
                 ..
@@ -513,7 +516,8 @@ impl CliError {
                 ..
             })
             | Self::Operations(
-                rootlight_operations::OperationError::UnsupportedSqliteCompileOptions,
+                rootlight_operations::OperationError::UnsupportedSqliteCompileOptions
+                | rootlight_operations::OperationError::UnsupportedSqliteConfiguration,
             ) => ExitFamily::RepairRequired,
             _ => ExitFamily::Internal,
         }

@@ -17,7 +17,13 @@ use std::{
 pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_error::PublicError;
 use rootlight_ids::OperationId;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{
+    Connection, OptionalExtension, Transaction,
+    config::DbConfig,
+    hooks::{AuthAction, Authorization},
+    params,
+};
+use sha2::{Digest as _, Sha256};
 
 /// Maximum terminal operation records retained after pruning.
 pub const MAX_OPERATION_HISTORY: usize = 10_000;
@@ -26,8 +32,19 @@ pub const MAX_PUBLIC_ERROR_BYTES: usize = 16 * 1024;
 /// Minimum bundled SQLite version required by the P1 catalog.
 pub const MIN_SQLITE_VERSION_NUMBER: i32 = 3_051_003;
 /// Current operation-journal schema version.
-pub const OPERATION_SCHEMA_VERSION: u32 = 1;
+pub const OPERATION_SCHEMA_VERSION: u32 = 2;
+/// SQLite application identifier for Rootlight's per-user catalog.
+pub const CATALOG_APPLICATION_ID: u32 = 0x5254_4c54;
+/// Bounded wait for transient catalog contention.
+pub const CATALOG_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
+const OPERATION_SCHEMA_MIGRATION_ID: u32 = 2;
+// SHA-256 of the three canonical schema statements in `migration_checksum_input`;
+// change this reviewed ledger value rather than silently accepting schema drift.
+const OPERATION_SCHEMA_MIGRATION_CHECKSUM: [u8; 32] = [
+    0x38, 0x93, 0xf3, 0xf0, 0x33, 0x07, 0xb8, 0x8e, 0x9c, 0x15, 0x64, 0xa5, 0x53, 0x6f, 0x76, 0x92,
+    0x55, 0xe3, 0xbd, 0xc9, 0x36, 0x57, 0x73, 0x57, 0x4e, 0xfd, 0xfc, 0x8a, 0x09, 0xe6, 0x66, 0xfe,
+];
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const SYSTEM_CLIENT_INSTANCE_ID: [u8; 16] = [0; 16];
 
@@ -389,6 +406,21 @@ impl OperationCounts {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogStorage {
+    Persistent,
+    Memory,
+}
+
+impl CatalogStorage {
+    const fn journal_mode(self) -> &'static str {
+        match self {
+            Self::Persistent => "wal",
+            Self::Memory => "memory",
+        }
+    }
+}
+
 /// Durable SQLite operation journal.
 #[derive(Debug)]
 pub struct OperationJournal {
@@ -405,8 +437,8 @@ impl OperationJournal {
     ///
     /// Returns [`OperationError`] for SQLite version, schema, integrity, or recovery failures.
     pub fn open(path: &Path) -> Result<Self, OperationError> {
-        let connection = Connection::open(path).map_err(OperationError::Sqlite)?;
-        Self::initialize(connection, unix_time_ms()?)
+        let connection = Connection::open(path).map_err(map_sqlite_error)?;
+        Self::initialize(connection, CatalogStorage::Persistent, unix_time_ms()?)
     }
 
     /// Opens an isolated in-memory journal for standalone composition and tests.
@@ -415,16 +447,20 @@ impl OperationJournal {
     ///
     /// Returns [`OperationError`] for SQLite setup failures.
     pub fn open_in_memory() -> Result<Self, OperationError> {
-        let connection = Connection::open_in_memory().map_err(OperationError::Sqlite)?;
-        Self::initialize(connection, unix_time_ms()?)
+        let connection = Connection::open_in_memory().map_err(map_sqlite_error)?;
+        Self::initialize(connection, CatalogStorage::Memory, unix_time_ms()?)
     }
 
-    fn initialize(mut connection: Connection, now_unix_ms: u64) -> Result<Self, OperationError> {
+    fn initialize(
+        mut connection: Connection,
+        storage: CatalogStorage,
+        now_unix_ms: u64,
+    ) -> Result<Self, OperationError> {
         verify_sqlite(&connection)?;
-        connection
-            .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
-            .map_err(OperationError::Sqlite)?;
-        migrate_schema(&mut connection)?;
+        configure_catalog_connection(&connection, storage)?;
+        migrate_schema(&mut connection, storage)?;
+        validate_catalog_identity(&connection)?;
+        install_catalog_authorizer(&connection)?;
         let journal = Self {
             connection: Mutex::new(connection),
             cancellations: Mutex::new(BTreeMap::new()),
@@ -458,10 +494,10 @@ impl OperationJournal {
         validate_submission(submission)?;
         let live_timers = live_timers_for_submission(submission, now_unix_ms, now)?;
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
         if let Some(existing) = load_record(&transaction, submission.operation)? {
             if submission_matches(&existing, submission) {
-                transaction.commit().map_err(OperationError::Sqlite)?;
+                transaction.commit().map_err(map_sqlite_error)?;
                 return Ok(SubmissionOutcome {
                     inserted: false,
                     operation: existing,
@@ -490,8 +526,8 @@ impl OperationJournal {
                     sequence,
                 ],
             )
-            .map_err(OperationError::Sqlite)?;
-        transaction.commit().map_err(OperationError::Sqlite)?;
+            .map_err(map_sqlite_error)?;
+        transaction.commit().map_err(map_sqlite_error)?;
         self.lock_cancellations()?
             .insert(submission.operation, live_timers.cancellation);
         if let Some(lease_deadline) = live_timers.lease_deadline {
@@ -569,7 +605,7 @@ impl OperationJournal {
                         u64_to_i64(current.revision)?,
                     ],
                 )
-                .map_err(OperationError::Sqlite)?
+                .map_err(map_sqlite_error)?
         };
         if updated != 1 {
             let observed = self.status(operation)?;
@@ -628,7 +664,7 @@ impl OperationJournal {
                     u64_to_i64(current.revision)?,
                 ],
             )
-            .map_err(OperationError::Sqlite)?;
+            .map_err(map_sqlite_error)?;
         drop(connection);
         if updated != 1 {
             let observed = self.status(operation)?;
@@ -676,7 +712,7 @@ impl OperationJournal {
                     u64_to_i64(current.revision)?,
                 ],
             )
-            .map_err(OperationError::Sqlite)?;
+            .map_err(map_sqlite_error)?;
         drop(connection);
         if updated != 1 {
             return Err(OperationError::ConcurrentUpdate);
@@ -718,7 +754,7 @@ impl OperationJournal {
                     u64_to_i64(current.revision)?,
                 ],
             )
-            .map_err(OperationError::Sqlite)?;
+            .map_err(map_sqlite_error)?;
         drop(connection);
         if updated != 1 {
             let observed = self.status(operation)?;
@@ -745,10 +781,10 @@ impl OperationJournal {
     ) -> Result<CancellationOutcome, OperationError> {
         let reason_text = cancellation_reason_as_str(reason)?;
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
         if current.state.is_terminal() || current.cancellation_requested {
-            transaction.commit().map_err(OperationError::Sqlite)?;
+            transaction.commit().map_err(map_sqlite_error)?;
             return Ok(CancellationOutcome {
                 accepted: false,
                 operation: current,
@@ -780,11 +816,11 @@ impl OperationJournal {
                     u64_to_i64(current.revision)?,
                 ],
             )
-            .map_err(OperationError::Sqlite)?;
+            .map_err(map_sqlite_error)?;
         if updated != 1 {
             return Err(OperationError::ConcurrentUpdate);
         }
-        transaction.commit().map_err(OperationError::Sqlite)?;
+        transaction.commit().map_err(map_sqlite_error)?;
         drop(connection);
         let token = self.cancellation_token(operation)?;
         let _ = token.cancel(reason);
@@ -865,7 +901,7 @@ impl OperationJournal {
                     owner.as_bytes().as_slice(),
                 ],
             )
-            .map_err(OperationError::Sqlite)?;
+            .map_err(map_sqlite_error)?;
         drop(connection);
         if updated != 1 {
             return Err(OperationError::ConcurrentUpdate);
@@ -889,17 +925,17 @@ impl OperationJournal {
         operation: OperationId,
     ) -> Result<OperationRecord, OperationError> {
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
         if current.state.is_terminal() {
-            transaction.commit().map_err(OperationError::Sqlite)?;
+            transaction.commit().map_err(map_sqlite_error)?;
             return Ok(current);
         }
         let updated = update_interrupted(&transaction, operation, RecoveryClass::DeadlineElapsed)?;
         if updated != 1 {
             return Err(OperationError::ConcurrentUpdate);
         }
-        transaction.commit().map_err(OperationError::Sqlite)?;
+        transaction.commit().map_err(map_sqlite_error)?;
         self.lock_cancellations()?.remove(&operation);
         self.lock_lease_deadlines()?.remove(&operation);
         drop(connection);
@@ -977,10 +1013,10 @@ impl OperationJournal {
 
     fn interrupt_lease(&self, operation: OperationId) -> Result<OperationRecord, OperationError> {
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
         if current.state.is_terminal() {
-            transaction.commit().map_err(OperationError::Sqlite)?;
+            transaction.commit().map_err(map_sqlite_error)?;
             return Ok(current);
         }
         if current.detached {
@@ -990,7 +1026,7 @@ impl OperationJournal {
         if updated != 1 {
             return Err(OperationError::ConcurrentUpdate);
         }
-        transaction.commit().map_err(OperationError::Sqlite)?;
+        transaction.commit().map_err(map_sqlite_error)?;
         if let Some(token) = self.lock_cancellations()?.remove(&operation) {
             let _ = token.cancel(CancellationReason::ParentCancelled);
         }
@@ -1010,7 +1046,7 @@ impl OperationJournal {
             return Ok(0);
         }
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let ids = select_operation_ids(
             &transaction,
             "state IN ('queued', 'running', 'cancelling')",
@@ -1029,7 +1065,7 @@ impl OperationJournal {
             }
         }
         let mut cancellations = self.lock_cancellations()?;
-        transaction.commit().map_err(OperationError::Sqlite)?;
+        transaction.commit().map_err(map_sqlite_error)?;
         for interruption in &interruptions {
             if let Some(token) = cancellations.remove(&interruption.operation) {
                 let _ = token.cancel(interruption.reason);
@@ -1054,7 +1090,7 @@ impl OperationJournal {
     pub fn checkpoint(&self) -> Result<(), OperationError> {
         self.lock_connection()?
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .map_err(OperationError::Sqlite)
+            .map_err(map_sqlite_error)
     }
 
     /// Loads one durable operation state.
@@ -1089,7 +1125,7 @@ impl OperationJournal {
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .map_err(OperationError::Sqlite)?;
+            .map_err(map_sqlite_error)?;
         Ok(OperationCounts {
             queued: nonnegative_i64_to_u32(queued)?,
             running: nonnegative_i64_to_u32(running)?,
@@ -1104,6 +1140,19 @@ impl OperationJournal {
     /// Returns a typed SQLite or integer-conversion failure.
     pub fn active_count(&self) -> Result<u32, OperationError> {
         Ok(self.counts()?.active())
+    }
+
+    /// Revalidates catalog identity, schema, connection policy, and page integrity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError`] when the catalog is foreign, tampered, corrupt,
+    /// or no longer uses the configured defensive SQLite policy.
+    pub fn quick_check(&self) -> Result<(), OperationError> {
+        let connection = self.lock_connection()?;
+        let storage = catalog_storage(&connection)?;
+        validate_catalog_identity(&connection)?;
+        validate_schema(&connection, storage)
     }
 
     fn recover_nonterminal(&self, now_unix_ms: u64) -> Result<(), OperationError> {
@@ -1121,7 +1170,7 @@ impl OperationJournal {
         max_records: usize,
     ) -> Result<u32, OperationError> {
         let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let ids = select_operation_ids(
             &transaction,
             "state IN ('queued', 'running', 'cancelling')",
@@ -1137,7 +1186,7 @@ impl OperationJournal {
                 .checked_add(update_interrupted(&transaction, operation, recovery)?)
                 .ok_or(OperationError::CorruptState)?;
         }
-        transaction.commit().map_err(OperationError::Sqlite)?;
+        transaction.commit().map_err(map_sqlite_error)?;
         Ok(changed)
     }
 
@@ -1150,12 +1199,12 @@ impl OperationJournal {
                  WHERE state IN ('succeeded', 'failed', 'cancelled', 'interrupted')
                  ORDER BY sequence DESC LIMIT -1 OFFSET ?1",
             )
-            .map_err(OperationError::Sqlite)?;
+            .map_err(map_sqlite_error)?;
         let pruned = statement
             .query_map([limit], |row| row.get::<_, Vec<u8>>(0))
-            .map_err(OperationError::Sqlite)?
+            .map_err(map_sqlite_error)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(OperationError::Sqlite)?;
+            .map_err(map_sqlite_error)?;
         drop(statement);
         connection
             .execute(
@@ -1167,7 +1216,7 @@ impl OperationJournal {
                  )",
                 [limit],
             )
-            .map_err(OperationError::Sqlite)?;
+            .map_err(map_sqlite_error)?;
         drop(connection);
         let mut errors = self.lock_errors()?;
         for bytes in pruned {
@@ -1242,38 +1291,178 @@ impl Drop for CatalogWriterLock {
     }
 }
 
-fn migrate_schema(connection: &mut Connection) -> Result<(), OperationError> {
-    let observed: i64 = connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(OperationError::Sqlite)?;
-    let observed = u32::try_from(observed).map_err(|_| OperationError::CorruptState)?;
+fn configure_catalog_connection(
+    connection: &Connection,
+    storage: CatalogStorage,
+) -> Result<(), OperationError> {
+    connection
+        .busy_timeout(CATALOG_BUSY_TIMEOUT)
+        .map_err(map_sqlite_error)?;
+    for (config, enabled) in [
+        (DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY, true),
+        (DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true),
+        (DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false),
+        (DbConfig::SQLITE_DBCONFIG_DQS_DDL, false),
+        (DbConfig::SQLITE_DBCONFIG_DQS_DML, false),
+        (DbConfig::SQLITE_DBCONFIG_ENABLE_ATTACH_CREATE, false),
+        (DbConfig::SQLITE_DBCONFIG_ENABLE_ATTACH_WRITE, false),
+    ] {
+        let observed = connection
+            .set_db_config(config, enabled)
+            .map_err(map_sqlite_error)?;
+        if observed != enabled {
+            return Err(OperationError::UnsupportedSqliteConfiguration);
+        }
+    }
+    let requested_mode = match storage {
+        CatalogStorage::Persistent => "WAL",
+        CatalogStorage::Memory => "MEMORY",
+    };
+    let journal_mode: String = connection
+        .pragma_update_and_check(None, "journal_mode", requested_mode, |row| row.get(0))
+        .map_err(map_sqlite_error)?;
+    if !journal_mode.eq_ignore_ascii_case(storage.journal_mode()) {
+        return Err(OperationError::UnsupportedSqliteConfiguration);
+    }
+    connection
+        .execute_batch(
+            "PRAGMA synchronous = FULL;
+             PRAGMA wal_autocheckpoint = 256;
+             PRAGMA temp_store = MEMORY;",
+        )
+        .map_err(map_sqlite_error)?;
+    validate_catalog_connection(connection, storage)
+}
+
+fn catalog_storage(connection: &Connection) -> Result<CatalogStorage, OperationError> {
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(map_sqlite_error)?;
+    if journal_mode.eq_ignore_ascii_case(CatalogStorage::Persistent.journal_mode()) {
+        Ok(CatalogStorage::Persistent)
+    } else if journal_mode.eq_ignore_ascii_case(CatalogStorage::Memory.journal_mode()) {
+        Ok(CatalogStorage::Memory)
+    } else {
+        Err(OperationError::UnsupportedSqliteConfiguration)
+    }
+}
+
+fn validate_catalog_connection(
+    connection: &Connection,
+    storage: CatalogStorage,
+) -> Result<(), OperationError> {
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(map_sqlite_error)?;
+    let synchronous: i64 = connection
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .map_err(map_sqlite_error)?;
+    let foreign_keys: i64 = connection
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .map_err(map_sqlite_error)?;
+    let trusted_schema: i64 = connection
+        .query_row("PRAGMA trusted_schema", [], |row| row.get(0))
+        .map_err(map_sqlite_error)?;
+    if !journal_mode.eq_ignore_ascii_case(storage.journal_mode())
+        || synchronous != 2
+        || foreign_keys != 1
+        || trusted_schema != 0
+        || !connection
+            .db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)
+            .map_err(map_sqlite_error)?
+        || connection
+            .db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL)
+            .map_err(map_sqlite_error)?
+        || connection
+            .db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML)
+            .map_err(map_sqlite_error)?
+        || connection
+            .db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_ATTACH_CREATE)
+            .map_err(map_sqlite_error)?
+        || connection
+            .db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_ATTACH_WRITE)
+            .map_err(map_sqlite_error)?
+    {
+        return Err(OperationError::UnsupportedSqliteConfiguration);
+    }
+    Ok(())
+}
+
+fn install_catalog_authorizer(connection: &Connection) -> Result<(), OperationError> {
+    connection
+        .authorizer(Some(
+            |context: rusqlite::hooks::AuthContext<'_>| match context.action {
+                AuthAction::Attach { .. }
+                | AuthAction::Detach { .. }
+                | AuthAction::CreateTempIndex { .. }
+                | AuthAction::CreateTempTable { .. }
+                | AuthAction::CreateTempTrigger { .. }
+                | AuthAction::CreateTempView { .. }
+                | AuthAction::DropTempIndex { .. }
+                | AuthAction::DropTempTable { .. }
+                | AuthAction::DropTempTrigger { .. }
+                | AuthAction::DropTempView { .. }
+                | AuthAction::CreateVtable { .. }
+                | AuthAction::DropVtable { .. } => Authorization::Deny,
+                _ => Authorization::Allow,
+            },
+        ))
+        .map_err(map_sqlite_error)
+}
+
+fn migrate_schema(
+    connection: &mut Connection,
+    storage: CatalogStorage,
+) -> Result<(), OperationError> {
+    let observed_application_id = pragma_u32(connection, "application_id")?;
+    let observed = pragma_u32(connection, "user_version")?;
+    let has_rootlight_tables = table_exists(connection, "operations")?
+        || table_exists(connection, "application_meta")?
+        || table_exists(connection, "migrations")?;
+    if observed_application_id != 0 && observed_application_id != CATALOG_APPLICATION_ID {
+        return Err(OperationError::ForeignCatalog);
+    }
+    if observed_application_id == 0
+        && !has_rootlight_tables
+        && database_has_user_tables(connection)?
+    {
+        return Err(OperationError::ForeignCatalog);
+    }
     if observed > OPERATION_SCHEMA_VERSION {
         return Err(OperationError::UnsupportedSchemaVersion { observed });
     }
     if observed == OPERATION_SCHEMA_VERSION {
-        validate_schema(connection)?;
+        validate_schema(connection, storage)?;
         return Ok(());
     }
 
-    let transaction = connection.transaction().map_err(OperationError::Sqlite)?;
-    if !table_exists(&transaction, "operations")? {
-        create_schema(&transaction)?;
-    } else if is_prototype_schema(&transaction)? {
-        migrate_prototype(&transaction)?;
-    } else {
-        return Err(OperationError::UnsupportedLegacySchema);
+    let transaction = connection.transaction().map_err(map_sqlite_error)?;
+    match observed {
+        0 if !table_exists(&transaction, "operations")? => create_schema(&transaction)?,
+        0 if is_prototype_schema(&transaction)? => migrate_prototype(&transaction)?,
+        1 if is_current_operations_schema(&transaction)? => create_catalog_metadata(&transaction)?,
+        _ => return Err(OperationError::UnsupportedLegacySchema),
     }
+    record_catalog_metadata(&transaction)?;
+    transaction
+        .pragma_update(None, "application_id", CATALOG_APPLICATION_ID)
+        .map_err(map_sqlite_error)?;
     transaction
         .pragma_update(None, "user_version", OPERATION_SCHEMA_VERSION)
-        .map_err(OperationError::Sqlite)?;
-    transaction.commit().map_err(OperationError::Sqlite)?;
-    validate_schema(connection)
+        .map_err(map_sqlite_error)?;
+    transaction.commit().map_err(map_sqlite_error)?;
+    validate_schema(connection, storage)
 }
 
-fn create_schema(connection: &Connection) -> Result<(), OperationError> {
-    connection
-        .execute_batch(
-            "CREATE TABLE operations (
+const APPLICATION_META_SCHEMA_SQL: &str = "CREATE TABLE application_meta (
+                key TEXT PRIMARY KEY NOT NULL,
+                value BLOB NOT NULL
+            ) STRICT";
+const MIGRATIONS_SCHEMA_SQL: &str = "CREATE TABLE migrations (
+                migration_id INTEGER PRIMARY KEY NOT NULL,
+                checksum BLOB NOT NULL CHECK(length(checksum) = 32)
+            ) STRICT";
+const OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
                 operation BLOB PRIMARY KEY NOT NULL CHECK(length(operation) = 16),
                 kind TEXT NOT NULL CHECK(kind IN ('control_probe')),
                 plan_hash BLOB NOT NULL CHECK(length(plan_hash) = 32),
@@ -1308,15 +1497,38 @@ fn create_schema(connection: &Connection) -> Result<(), OperationError> {
                    OR (state != 'failed' AND error_json IS NULL)),
                 CHECK((state = 'interrupted' AND recovery_class != 'not_applicable')
                    OR (state != 'interrupted' AND recovery_class = 'not_applicable'))
-            );",
-        )
-        .map_err(OperationError::Sqlite)
+            ) STRICT";
+
+fn migration_checksum_input() -> String {
+    [
+        APPLICATION_META_SCHEMA_SQL,
+        MIGRATIONS_SCHEMA_SQL,
+        OPERATIONS_SCHEMA_SQL,
+    ]
+    .join("\n")
+}
+
+fn operation_schema_migration_checksum() -> [u8; 32] {
+    Sha256::digest(migration_checksum_input()).into()
+}
+
+fn create_schema(connection: &Connection) -> Result<(), OperationError> {
+    for statement in [
+        APPLICATION_META_SCHEMA_SQL,
+        MIGRATIONS_SCHEMA_SQL,
+        OPERATIONS_SCHEMA_SQL,
+    ] {
+        connection
+            .execute_batch(statement)
+            .map_err(map_sqlite_error)?;
+    }
+    Ok(())
 }
 
 fn migrate_prototype(transaction: &Transaction<'_>) -> Result<(), OperationError> {
     transaction
         .execute_batch("ALTER TABLE operations RENAME TO operations_v0;")
-        .map_err(OperationError::Sqlite)?;
+        .map_err(map_sqlite_error)?;
     create_schema(transaction)?;
     transaction
         .execute(
@@ -1335,13 +1547,116 @@ fn migrate_prototype(transaction: &Transaction<'_>) -> Result<(), OperationError
                FROM operations_v0",
             [],
         )
-        .map_err(OperationError::Sqlite)?;
+        .map_err(map_sqlite_error)?;
     transaction
         .execute_batch("DROP TABLE operations_v0;")
-        .map_err(OperationError::Sqlite)
+        .map_err(map_sqlite_error)
 }
 
-fn validate_schema(connection: &Connection) -> Result<(), OperationError> {
+fn create_catalog_metadata(connection: &Connection) -> Result<(), OperationError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE application_meta (
+                key TEXT PRIMARY KEY NOT NULL,
+                value BLOB NOT NULL
+            ) STRICT;
+            CREATE TABLE migrations (
+                migration_id INTEGER PRIMARY KEY NOT NULL,
+                checksum BLOB NOT NULL CHECK(length(checksum) = 32)
+            ) STRICT;",
+        )
+        .map_err(map_sqlite_error)
+}
+
+fn record_catalog_metadata(connection: &Connection) -> Result<(), OperationError> {
+    let expected_checksum = operation_schema_migration_checksum();
+    if expected_checksum != OPERATION_SCHEMA_MIGRATION_CHECKSUM {
+        return Err(OperationError::MigrationChecksumMismatch);
+    }
+    let existing_checksum: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT checksum FROM migrations WHERE migration_id = ?1",
+            [OPERATION_SCHEMA_MIGRATION_ID],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    if existing_checksum
+        .as_deref()
+        .is_some_and(|checksum| checksum != OPERATION_SCHEMA_MIGRATION_CHECKSUM)
+    {
+        return Err(OperationError::MigrationChecksumMismatch);
+    }
+    connection
+        .execute(
+            "INSERT INTO application_meta(key, value) VALUES ('catalog_kind', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [b"rootlight".as_slice()],
+        )
+        .map_err(map_sqlite_error)?;
+    connection
+        .execute(
+            "INSERT INTO application_meta(key, value) VALUES ('sqlite_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [rusqlite::version().as_bytes()],
+        )
+        .map_err(map_sqlite_error)?;
+    let compile_options = sqlite_compile_options(connection)?.join("\n");
+    connection
+        .execute(
+            "INSERT INTO application_meta(key, value) VALUES ('sqlite_compile_options', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [compile_options.as_bytes()],
+        )
+        .map_err(map_sqlite_error)?;
+    connection
+        .execute(
+            "INSERT INTO migrations(migration_id, checksum) VALUES (?1, ?2)
+             ON CONFLICT(migration_id) DO NOTHING",
+            params![
+                OPERATION_SCHEMA_MIGRATION_ID,
+                OPERATION_SCHEMA_MIGRATION_CHECKSUM.as_slice(),
+            ],
+        )
+        .map_err(map_sqlite_error)?;
+    Ok(())
+}
+
+fn validate_catalog_identity(connection: &Connection) -> Result<(), OperationError> {
+    if operation_schema_migration_checksum() != OPERATION_SCHEMA_MIGRATION_CHECKSUM {
+        return Err(OperationError::MigrationChecksumMismatch);
+    }
+    if pragma_u32(connection, "application_id")? != CATALOG_APPLICATION_ID
+        || pragma_u32(connection, "user_version")? != OPERATION_SCHEMA_VERSION
+    {
+        return Err(OperationError::ForeignCatalog);
+    }
+    let kind: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT value FROM application_meta WHERE key = 'catalog_kind'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    if kind.as_deref() != Some(b"rootlight".as_slice()) {
+        return Err(OperationError::ForeignCatalog);
+    }
+    let checksum: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT checksum FROM migrations WHERE migration_id = ?1",
+            [OPERATION_SCHEMA_MIGRATION_ID],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    if checksum.as_deref() != Some(OPERATION_SCHEMA_MIGRATION_CHECKSUM.as_slice()) {
+        return Err(OperationError::MigrationChecksumMismatch);
+    }
+    Ok(())
+}
+
+fn validate_schema(connection: &Connection, storage: CatalogStorage) -> Result<(), OperationError> {
     let columns = table_columns(connection)?;
     let expected = [
         "operation",
@@ -1362,12 +1677,25 @@ fn validate_schema(connection: &Connection) -> Result<(), OperationError> {
         "error_json",
         "sequence",
     ];
-    if columns != expected {
+    if columns != expected
+        || table_columns_named(connection, "application_meta")? != ["key", "value"]
+        || table_columns_named(connection, "migrations")? != ["migration_id", "checksum"]
+        || !table_is_strict(connection, "application_meta")?
+        || !table_is_strict(connection, "migrations")?
+        || !table_is_strict(connection, "operations")?
+        || normalize_sql(&table_definition(connection, "application_meta")?)
+            != normalize_sql(APPLICATION_META_SCHEMA_SQL)
+        || normalize_sql(&table_definition(connection, "migrations")?)
+            != normalize_sql(MIGRATIONS_SCHEMA_SQL)
+        || normalize_sql(&table_definition(connection, "operations")?)
+            != normalize_sql(OPERATIONS_SCHEMA_SQL)
+    {
         return Err(OperationError::CorruptSchema);
     }
+    validate_catalog_connection(connection, storage)?;
     connection
-        .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
-        .map_err(OperationError::Sqlite)
+        .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+        .map_err(map_sqlite_error)
         .and_then(|result| {
             if result == "ok" {
                 Ok(())
@@ -1375,6 +1703,63 @@ fn validate_schema(connection: &Connection) -> Result<(), OperationError> {
                 Err(OperationError::CorruptSchema)
             }
         })
+}
+
+fn pragma_u32(connection: &Connection, pragma: &str) -> Result<u32, OperationError> {
+    let sql = match pragma {
+        "application_id" => "PRAGMA application_id",
+        "user_version" => "PRAGMA user_version",
+        _ => return Err(OperationError::CorruptState),
+    };
+    let observed: i64 = connection
+        .query_row(sql, [], |row| row.get(0))
+        .map_err(map_sqlite_error)?;
+    u32::try_from(observed).map_err(|_| OperationError::CorruptState)
+}
+
+fn normalize_sql(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn table_definition(connection: &Connection, table: &str) -> Result<String, OperationError> {
+    if !matches!(table, "operations" | "application_meta" | "migrations") {
+        return Err(OperationError::CorruptState);
+    }
+    connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|definition| definition.trim().trim_end_matches(';').to_owned())
+        .map_err(map_sqlite_error)
+}
+
+fn table_is_strict(connection: &Connection, table: &str) -> Result<bool, OperationError> {
+    if !matches!(table, "operations" | "application_meta" | "migrations") {
+        return Err(OperationError::CorruptState);
+    }
+    connection
+        .query_row(
+            "SELECT strict FROM pragma_table_list WHERE schema = 'main' AND name = ?1",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|strict| strict == 1)
+        .map_err(map_sqlite_error)
+}
+
+fn database_has_user_tables(connection: &Connection) -> Result<bool, OperationError> {
+    connection
+        .query_row(
+            "SELECT 1 FROM sqlite_schema
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|value| value.is_some())
+        .map_err(map_sqlite_error)
 }
 
 fn table_exists(connection: &Connection, table: &str) -> Result<bool, OperationError> {
@@ -1386,7 +1771,7 @@ fn table_exists(connection: &Connection, table: &str) -> Result<bool, OperationE
         )
         .optional()
         .map(|value| value.is_some())
-        .map_err(OperationError::Sqlite)
+        .map_err(map_sqlite_error)
 }
 
 fn is_prototype_schema(connection: &Connection) -> Result<bool, OperationError> {
@@ -1402,14 +1787,48 @@ fn is_prototype_schema(connection: &Connection) -> Result<bool, OperationError> 
         ])
 }
 
+fn is_current_operations_schema(connection: &Connection) -> Result<bool, OperationError> {
+    Ok(table_columns(connection)?
+        == [
+            "operation",
+            "kind",
+            "plan_hash",
+            "owner",
+            "detached",
+            "deadline_unix_ms",
+            "lease_expires_unix_ms",
+            "state",
+            "stage",
+            "cancellation_requested",
+            "cancellation_reason",
+            "recovery_class",
+            "revision",
+            "completed",
+            "total",
+            "error_json",
+            "sequence",
+        ])
+}
+
 fn table_columns(connection: &Connection) -> Result<Vec<String>, OperationError> {
+    table_columns_named(connection, "operations")
+}
+
+fn table_columns_named(
+    connection: &Connection,
+    table: &str,
+) -> Result<Vec<String>, OperationError> {
+    if !matches!(table, "operations" | "application_meta" | "migrations") {
+        return Err(OperationError::CorruptState);
+    }
+    let query = format!("PRAGMA table_info({table})");
     connection
-        .prepare("PRAGMA table_info(operations)")
-        .map_err(OperationError::Sqlite)?
+        .prepare(&query)
+        .map_err(map_sqlite_error)?
         .query_map([], |row| row.get(1))
-        .map_err(OperationError::Sqlite)?
+        .map_err(map_sqlite_error)?
         .collect::<Result<_, _>>()
-        .map_err(OperationError::Sqlite)
+        .map_err(map_sqlite_error)
 }
 
 fn load_record(
@@ -1445,7 +1864,7 @@ fn load_record(
             },
         )
         .optional()
-        .map_err(OperationError::Sqlite)?;
+        .map_err(map_sqlite_error)?;
     raw.map(|raw| decode_record(operation, raw)).transpose()
 }
 
@@ -1557,12 +1976,12 @@ fn select_operation_ids(
     parameters.push(&limit);
     connection
         .prepare(&sql)
-        .map_err(OperationError::Sqlite)?
+        .map_err(map_sqlite_error)?
         .query_map(parameters.as_slice(), |row| row.get::<_, Vec<u8>>(0))
-        .map_err(OperationError::Sqlite)?
+        .map_err(map_sqlite_error)?
         .map(|value| {
             value
-                .map_err(OperationError::Sqlite)
+                .map_err(map_sqlite_error)
                 .and_then(|bytes| {
                     <[u8; 16]>::try_from(bytes).map_err(|_| OperationError::CorruptState)
                 })
@@ -1583,7 +2002,7 @@ fn update_interrupted(
              WHERE operation = ?2 AND state IN ('queued', 'running', 'cancelling')",
             params![recovery.as_str(), operation.as_bytes().as_slice()],
         )
-        .map_err(OperationError::Sqlite)?;
+        .map_err(map_sqlite_error)?;
     u32::try_from(updated).map_err(|_| OperationError::CorruptState)
 }
 
@@ -1721,13 +2140,7 @@ fn verify_sqlite(connection: &Connection) -> Result<(), OperationError> {
             observed: rusqlite::version_number(),
         });
     }
-    let compile_options: Vec<String> = connection
-        .prepare("PRAGMA compile_options")
-        .map_err(OperationError::Sqlite)?
-        .query_map([], |row| row.get(0))
-        .map_err(OperationError::Sqlite)?
-        .collect::<Result<_, _>>()
-        .map_err(OperationError::Sqlite)?;
+    let compile_options = sqlite_compile_options(connection)?;
     if compile_options
         .iter()
         .any(|option| option == "OMIT_FOREIGN_KEY")
@@ -1737,6 +2150,30 @@ fn verify_sqlite(connection: &Connection) -> Result<(), OperationError> {
     Ok(())
 }
 
+fn sqlite_compile_options(connection: &Connection) -> Result<Vec<String>, OperationError> {
+    connection
+        .prepare("PRAGMA compile_options")
+        .map_err(map_sqlite_error)?
+        .query_map([], |row| row.get(0))
+        .map_err(map_sqlite_error)?
+        .collect::<Result<_, _>>()
+        .map_err(map_sqlite_error)
+}
+
+fn map_sqlite_error(error: rusqlite::Error) -> OperationError {
+    match &error {
+        rusqlite::Error::SqliteFailure(source, _)
+            if matches!(
+                source.code,
+                rusqlite::ffi::ErrorCode::DatabaseBusy | rusqlite::ffi::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            OperationError::Busy
+        }
+        _ => OperationError::Sqlite(error),
+    }
+}
+
 fn next_sequence(connection: &Connection) -> Result<i64, OperationError> {
     connection
         .query_row(
@@ -1744,7 +2181,7 @@ fn next_sequence(connection: &Connection) -> Result<i64, OperationError> {
             [],
             |row| row.get(0),
         )
-        .map_err(OperationError::Sqlite)
+        .map_err(map_sqlite_error)
 }
 
 fn next_revision(revision: u64) -> Result<u64, OperationError> {
@@ -1988,12 +2425,21 @@ pub enum OperationError {
     /// A concurrent writer changed the operation revision.
     #[error("operation changed concurrently")]
     ConcurrentUpdate,
+    /// SQLite remained busy or locked past the bounded wait.
+    #[error("operation journal is busy")]
+    Busy,
     /// Persisted operation state failed validation.
     #[error("operation journal contains invalid state")]
     CorruptState,
     /// Persisted operation schema failed validation.
     #[error("operation journal schema is corrupt")]
     CorruptSchema,
+    /// The SQLite file is not a Rootlight catalog.
+    #[error("operation journal belongs to another application")]
+    ForeignCatalog,
+    /// The recorded migration digest does not match the checked migration.
+    #[error("operation journal migration checksum is invalid")]
+    MigrationChecksumMismatch,
     /// A prototype schema was not recognized for safe migration.
     #[error("operation journal legacy schema is unsupported")]
     UnsupportedLegacySchema,
@@ -2018,6 +2464,9 @@ pub enum OperationError {
     /// SQLite was compiled without a required feature.
     #[error("bundled SQLite compile options are unsupported")]
     UnsupportedSqliteCompileOptions,
+    /// SQLite refused a required defensive connection setting.
+    #[error("bundled SQLite connection configuration is unsupported")]
+    UnsupportedSqliteConfiguration,
     /// Another process currently owns the catalog writer lock.
     #[error("catalog writer is already active")]
     WriterBusy,
@@ -2302,7 +2751,8 @@ mod tests {
     #[test]
     fn restart_classifies_deadline_lease_and_generic_interruptions() {
         let connection = Connection::open_in_memory().expect("connection opens");
-        let journal = OperationJournal::initialize(connection, 100).expect("journal initializes");
+        let journal = OperationJournal::initialize(connection, CatalogStorage::Memory, 100)
+            .expect("journal initializes");
         let owner = ClientInstanceId::new([7; 16]).expect("owner is valid");
         journal
             .submit(attached_submission(operation(6), owner, Some(90), 200))
@@ -2346,7 +2796,8 @@ mod tests {
     #[test]
     fn expiry_signals_tokens_with_deterministic_reason_and_precedence() {
         let connection = Connection::open_in_memory().expect("connection opens");
-        let journal = OperationJournal::initialize(connection, 100).expect("journal initializes");
+        let journal = OperationJournal::initialize(connection, CatalogStorage::Memory, 100)
+            .expect("journal initializes");
         let owner = ClientInstanceId::new([8; 16]).expect("owner is valid");
         let start = Instant::now();
         let deadline = journal
@@ -2431,7 +2882,8 @@ mod tests {
     #[test]
     fn live_expiry_ignores_wall_clock_after_admission() {
         let connection = Connection::open_in_memory().expect("connection opens");
-        let journal = OperationJournal::initialize(connection, 1_000).expect("journal initializes");
+        let journal = OperationJournal::initialize(connection, CatalogStorage::Memory, 1_000)
+            .expect("journal initializes");
         let owner = ClientInstanceId::new([9; 16]).expect("owner is valid");
         let start = Instant::now();
         journal
@@ -2600,6 +3052,178 @@ mod tests {
             OperationJournal::open(&path),
             Err(OperationError::UnsupportedSchemaVersion { .. })
         ));
+    }
+
+    #[test]
+    fn sqlite_busy_and_locked_failures_map_to_stable_busy() {
+        for code in [
+            rusqlite::ffi::ErrorCode::DatabaseBusy,
+            rusqlite::ffi::ErrorCode::DatabaseLocked,
+        ] {
+            let source = rusqlite::ffi::Error {
+                code,
+                extended_code: 0,
+            };
+            assert!(matches!(
+                map_sqlite_error(rusqlite::Error::SqliteFailure(source, None)),
+                OperationError::Busy
+            ));
+        }
+    }
+
+    #[test]
+    fn catalog_bootstrap_records_identity_and_defensive_policy() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let journal = OperationJournal::open(&path).expect("catalog opens");
+
+        journal.quick_check().expect("catalog validates");
+        let connection = journal.lock_connection().expect("catalog lock is healthy");
+        assert_eq!(
+            pragma_u32(&connection, "application_id").expect("application ID reads"),
+            CATALOG_APPLICATION_ID
+        );
+        assert_eq!(
+            pragma_u32(&connection, "user_version").expect("schema version reads"),
+            OPERATION_SCHEMA_VERSION
+        );
+        assert_eq!(
+            catalog_storage(&connection).expect("storage mode reads"),
+            CatalogStorage::Persistent
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))
+                .expect("synchronous policy reads"),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA trusted_schema", [], |row| row.get::<_, i64>(0))
+                .expect("trusted schema policy reads"),
+            0
+        );
+        assert!(
+            connection
+                .db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)
+                .expect("defensive mode reads")
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM application_meta WHERE key = 'sqlite_version'",
+                    [],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .expect("SQLite version metadata reads"),
+            rusqlite::version().as_bytes()
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT checksum FROM migrations WHERE migration_id = ?1",
+                    [OPERATION_SCHEMA_MIGRATION_ID],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .expect("migration checksum reads"),
+            OPERATION_SCHEMA_MIGRATION_CHECKSUM
+        );
+    }
+
+    #[test]
+    fn catalog_bootstrap_rejects_foreign_and_tampered_databases() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let foreign_path = temporary.path().join("foreign.sqlite");
+        {
+            let connection = Connection::open(&foreign_path).expect("foreign database opens");
+            connection
+                .execute_batch("CREATE TABLE unrelated(value TEXT NOT NULL);")
+                .expect("foreign schema creates");
+        }
+        assert!(matches!(
+            OperationJournal::open(&foreign_path),
+            Err(OperationError::ForeignCatalog)
+        ));
+
+        let checksum_path = temporary.path().join("checksum.sqlite");
+        drop(OperationJournal::open(&checksum_path).expect("catalog creates"));
+        {
+            let connection = Connection::open(&checksum_path).expect("catalog reopens");
+            connection
+                .execute(
+                    "UPDATE migrations SET checksum = zeroblob(32) WHERE migration_id = ?1",
+                    [OPERATION_SCHEMA_MIGRATION_ID],
+                )
+                .expect("checksum is tampered");
+        }
+        assert!(matches!(
+            OperationJournal::open(&checksum_path),
+            Err(OperationError::MigrationChecksumMismatch)
+        ));
+
+        let schema_path = temporary.path().join("schema.sqlite");
+        drop(OperationJournal::open(&schema_path).expect("catalog creates"));
+        {
+            let connection = Connection::open(&schema_path).expect("catalog reopens");
+            connection
+                .execute_batch(
+                    "ALTER TABLE operations RENAME TO operations_original;
+                     CREATE TABLE operations(value TEXT);",
+                )
+                .expect("schema is tampered");
+        }
+        assert!(matches!(
+            OperationJournal::open(&schema_path),
+            Err(OperationError::CorruptSchema)
+        ));
+
+        let application_path = temporary.path().join("application.sqlite");
+        drop(OperationJournal::open(&application_path).expect("catalog creates"));
+        {
+            let connection = Connection::open(&application_path).expect("catalog reopens");
+            connection
+                .pragma_update(None, "application_id", CATALOG_APPLICATION_ID + 1)
+                .expect("application ID is tampered");
+        }
+        assert!(matches!(
+            OperationJournal::open(&application_path),
+            Err(OperationError::ForeignCatalog)
+        ));
+    }
+
+    #[test]
+    fn catalog_authorizer_denies_attachments_temp_schema_and_virtual_tables() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let journal = OperationJournal::open(&path).expect("catalog opens");
+        let connection = journal.lock_connection().expect("catalog lock is healthy");
+
+        assert!(
+            connection
+                .execute_batch("ATTACH ':memory:' AS other;")
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute_batch("CREATE TEMP TABLE forbidden(value INTEGER);")
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute_batch("CREATE VIRTUAL TABLE forbidden USING fts5(value);")
+                .is_err()
+        );
+        assert!(
+            connection
+                .query_row(
+                    "SELECT 1 FROM pragma_database_list WHERE name = 'other'",
+                    [],
+                    |_| Ok(()),
+                )
+                .optional()
+                .expect("attached database list reads")
+                .is_none()
+        );
     }
 
     #[test]
