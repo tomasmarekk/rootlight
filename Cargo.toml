@@ -1,7 +1,11 @@
 [workspace]
 members = [
+    "apps/rootlight",
+    "apps/rootlight-daemon",
     "crates/rootlight-cancel",
+    "crates/rootlight-client",
     "crates/rootlight-config",
+    "crates/rootlight-daemon-core",
     "crates/rootlight-error",
     "crates/rootlight-ids",
     "crates/rootlight-ipc",
@@ -10,6 +14,7 @@ members = [
     "crates/rootlight-mcp-contract",
     "crates/rootlight-operations",
     "crates/rootlight-protocol",
+    "crates/rootlight-runtime",
     "crates/rootlight-vfs",
     "xtask",
 ]
@@ -27,9 +32,13 @@ cap-fs-ext = { version = "3.4.5", default-features = false, features = ["std"] }
 cap-std = { version = "3.4.5", default-features = false }
 cargo_metadata = { version = "0.23.1", default-features = false }
 data-encoding = { version = "2.9.0", default-features = false, features = ["std"] }
+directories = { version = "6.0.0", default-features = false }
+getrandom = { version = "0.3.4", default-features = false }
 ignore = { version = "0.4.29", default-features = false }
-interprocess = { version = "=2.2.3", default-features = false }
+interprocess = { version = "=2.2.3", default-features = false, features = ["tokio"] }
 jsonschema = { version = "0.47.0", default-features = false }
+nix = { version = "0.31.3", default-features = false, features = ["fs", "socket", "user"] }
+nt-token = { version = "=0.5.0", default-features = false }
 proptest = { version = "1.9.0", default-features = false, features = ["std"] }
 prost = { version = "0.14.4", default-features = false, features = ["derive", "std"] }
 prost-build = { version = "0.14.4", default-features = false, features = ["format"] }
@@ -42,8 +51,11 @@ serde_json = { version = "1.0.150", default-features = false, features = ["std"]
 sha2 = { version = "0.11.0", default-features = false }
 tempfile = "3.23.0"
 thiserror = { version = "2.0.18", default-features = false, features = ["std"] }
+tokio = { version = "=1.48.0", default-features = false, features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
 toml = { version = "1.1.3", default-features = false, features = ["parse", "serde", "std"] }
 widestring = { version = "1.2.1", default-features = false, features = ["std"] }
+windows = { version = "=0.61.3", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
+windows-permissions = { version = "=0.2.4", default-features = false }
 yaml-rust2 = { version = "0.10.4", default-features = false }
 
 [workspace.lints.rust]
