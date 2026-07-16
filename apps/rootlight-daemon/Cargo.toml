@@ -1,0 +1,19 @@
+[package]
+name = "rootlight-daemon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+getrandom.workspace = true
+rootlight-daemon-core = { path = "../../crates/rootlight-daemon-core" }
+rootlight-ipc = { path = "../../crates/rootlight-ipc" }
+rootlight-operations = { path = "../../crates/rootlight-operations" }
+rootlight-runtime = { path = "../../crates/rootlight-runtime" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
