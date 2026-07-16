@@ -1,0 +1,24 @@
+[package]
+name = "rootlight-daemon-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+rootlight-error = { path = "../rootlight-error" }
+rootlight-ids = { path = "../rootlight-ids" }
+rootlight-ipc = { path = "../rootlight-ipc" }
+rootlight-operations = { path = "../rootlight-operations" }
+rootlight-protocol = { path = "../rootlight-protocol" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rootlight-client = { path = "../rootlight-client" }
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
