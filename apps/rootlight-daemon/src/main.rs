@@ -124,7 +124,12 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
             admission = submission_rx.recv() => {
                 let Some(admission) = admission else { break; };
                 if let Err(error) = orchestrator.submit(admission).await
-                    && !matches!(error, rootlight_daemon_core::ServiceError::QueueFull | rootlight_daemon_core::ServiceError::NotAccepting)
+                    && !matches!(
+                        error,
+                        rootlight_daemon_core::ServiceError::QueueFull
+                            | rootlight_daemon_core::ServiceError::ClientOperationLimit { .. }
+                            | rootlight_daemon_core::ServiceError::NotAccepting
+                    )
                 {
                     state.set_journal_healthy(false);
                 }

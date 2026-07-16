@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
@@ -56,6 +57,8 @@ pub const DEFAULT_CONNECTION_LIMIT: u32 = 128;
 pub const DEFAULT_CONTROL_QUEUE_LIMIT: usize = 64;
 /// Default durable operation admission limit.
 pub const DEFAULT_OPERATION_QUEUE_LIMIT: u32 = 256;
+/// Default durable operation admission limit for one authenticated client.
+pub const DEFAULT_CLIENT_OPERATION_LIMIT: u32 = 32;
 /// Default fixed synthetic operation worker count.
 pub const DEFAULT_OPERATION_WORKERS: usize = 4;
 /// Fixed bounded CPU work performed by one infrastructure control probe.
@@ -120,6 +123,8 @@ pub struct DaemonLimits {
     pub control_queue_limit: usize,
     /// Maximum admitted nonterminal operations.
     pub operation_queue_limit: u32,
+    /// Maximum admitted nonterminal operations for one authenticated client.
+    pub client_operation_limit: u32,
     /// Exact number of synthetic operation workers.
     pub operation_workers: usize,
     /// Maximum response time accepted from a request envelope.
@@ -145,9 +150,46 @@ impl DaemonLimits {
         maintenance_interval: Duration,
         shutdown_grace: Duration,
     ) -> Result<Self, ServiceError> {
+        Self::new_with_client_operation_limit(
+            connection_limit,
+            control_queue_limit,
+            operation_queue_limit,
+            operation_queue_limit,
+            operation_workers,
+            request_timeout,
+            maintenance_interval,
+            shutdown_grace,
+        )
+    }
+
+    /// Creates checked daemon resource bounds with an explicit per-client operation limit.
+    ///
+    /// The expanded constructor intentionally keeps all resource dimensions together so
+    /// callers cannot construct a partially validated limit set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration is zero,
+    /// or when the client operation limit exceeds the global operation limit.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one validated daemon resource dimension"
+    )]
+    pub const fn new_with_client_operation_limit(
+        connection_limit: u32,
+        control_queue_limit: usize,
+        operation_queue_limit: u32,
+        client_operation_limit: u32,
+        operation_workers: usize,
+        request_timeout: Duration,
+        maintenance_interval: Duration,
+        shutdown_grace: Duration,
+    ) -> Result<Self, ServiceError> {
         if connection_limit == 0
             || control_queue_limit == 0
             || operation_queue_limit == 0
+            || client_operation_limit == 0
+            || client_operation_limit > operation_queue_limit
             || operation_workers == 0
             || request_timeout.is_zero()
             || maintenance_interval.is_zero()
@@ -159,6 +201,7 @@ impl DaemonLimits {
             connection_limit,
             control_queue_limit,
             operation_queue_limit,
+            client_operation_limit,
             operation_workers,
             request_timeout,
             maintenance_interval,
@@ -173,6 +216,7 @@ impl Default for DaemonLimits {
             connection_limit: DEFAULT_CONNECTION_LIMIT,
             control_queue_limit: DEFAULT_CONTROL_QUEUE_LIMIT,
             operation_queue_limit: DEFAULT_OPERATION_QUEUE_LIMIT,
+            client_operation_limit: DEFAULT_CLIENT_OPERATION_LIMIT,
             operation_workers: DEFAULT_OPERATION_WORKERS,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             maintenance_interval: DEFAULT_MAINTENANCE_INTERVAL,
@@ -282,15 +326,11 @@ enum JournalCommand {
         expiry_unix_ms: u64,
         reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
-    CancellationToken {
+    ActivateOperation {
         operation: OperationId,
         reply: tokio::sync::oneshot::Sender<
-            Result<rootlight_operations::Cancellation, OperationError>,
+            Result<(OperationRecord, rootlight_operations::Cancellation), OperationError>,
         >,
-    },
-    StartOperation {
-        operation: OperationId,
-        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
     FinishOperation {
         operation: OperationId,
@@ -422,39 +462,22 @@ impl JournalActorHandle {
             .map_err(ServiceError::Operations)
     }
 
-    /// Returns the process-local cancellation token for active work.
+    /// Atomically activates queued work and returns its process-local cancellation token.
+    ///
+    /// Keeping both steps inside one actor command prevents control-lane pressure from
+    /// leaving durable running work without a worker owner.
     ///
     /// # Errors
     ///
     /// Returns a typed queue, actor, or journal failure.
-    pub async fn cancellation_token(
+    pub async fn activate_operation(
         &self,
         operation: OperationId,
-    ) -> Result<rootlight_operations::Cancellation, ServiceError> {
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        self.try_send(
-            JournalLane::Control,
-            JournalCommand::CancellationToken { operation, reply },
-        )?;
-        receiver
-            .await
-            .map_err(|_| ServiceError::ChannelClosed)?
-            .map_err(ServiceError::Operations)
-    }
-
-    /// Persists the worker-start state before synthetic execution begins.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed queue, actor, or journal failure.
-    pub async fn start_operation(
-        &self,
-        operation: OperationId,
-    ) -> Result<OperationRecord, ServiceError> {
+    ) -> Result<(OperationRecord, rootlight_operations::Cancellation), ServiceError> {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.try_send(
             JournalLane::Normal,
-            JournalCommand::StartOperation { operation, reply },
+            JournalCommand::ActivateOperation { operation, reply },
         )?;
         receiver
             .await
@@ -769,11 +792,13 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
         } => {
             let _ = reply.send(journal.renew_lease(operation, owner, expiry_unix_ms));
         }
-        JournalCommand::CancellationToken { operation, reply } => {
-            let _ = reply.send(journal.cancellation_token(operation));
-        }
-        JournalCommand::StartOperation { operation, reply } => {
-            let _ = reply.send(journal.start_execution(operation));
+        JournalCommand::ActivateOperation { operation, reply } => {
+            let result = journal.start_execution(operation).and_then(|record| {
+                journal
+                    .cancellation_token(operation)
+                    .map(|cancellation| (record, cancellation))
+            });
+            let _ = reply.send(result);
         }
         JournalCommand::FinishOperation {
             operation,
@@ -993,31 +1018,68 @@ enum SchedulerPermitStage {
     Completed,
 }
 
+#[derive(Debug, Default)]
+struct ClientOperationAdmissions {
+    admitted: BTreeMap<ClientInstanceId, u32>,
+}
+
+impl ClientOperationAdmissions {
+    fn reserve(&mut self, owner: ClientInstanceId, limit: u32) -> Result<(), ServiceError> {
+        let admitted = self.admitted.entry(owner).or_default();
+        if *admitted >= limit {
+            return Err(ServiceError::ClientOperationLimit { limit });
+        }
+        *admitted = admitted.checked_add(1).ok_or(ServiceError::InvalidLimits)?;
+        Ok(())
+    }
+
+    fn release(&mut self, owner: ClientInstanceId) {
+        match self.admitted.get(&owner).copied() {
+            Some(1) => {
+                self.admitted.remove(&owner);
+            }
+            Some(admitted) if admitted > 1 => {
+                self.admitted.insert(owner, admitted - 1);
+            }
+            Some(_) => debug_assert!(false, "client operation count cannot be zero"),
+            None => debug_assert!(false, "client operation permit must have an owner bucket"),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct SchedulerPermit {
     state: Arc<DaemonState>,
+    client_admissions: Arc<Mutex<ClientOperationAdmissions>>,
+    owner: ClientInstanceId,
     stage: SchedulerPermitStage,
 }
 
 impl SchedulerPermit {
-    fn reserve(state: Arc<DaemonState>, limit: u32) -> Result<Self, ServiceError> {
-        loop {
-            let admitted = state.admitted_operations.load(Ordering::Acquire);
-            if admitted >= limit {
-                return Err(ServiceError::QueueFull);
-            }
-            if state
-                .admitted_operations
-                .compare_exchange_weak(admitted, admitted + 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                state.queued_operations.fetch_add(1, Ordering::AcqRel);
-                return Ok(Self {
-                    state,
-                    stage: SchedulerPermitStage::Queued,
-                });
-            }
+    fn reserve(
+        state: Arc<DaemonState>,
+        client_admissions: Arc<Mutex<ClientOperationAdmissions>>,
+        owner: ClientInstanceId,
+        global_limit: u32,
+        client_limit: u32,
+    ) -> Result<Self, ServiceError> {
+        let mut admissions = client_admissions
+            .lock()
+            .map_err(|_| ServiceError::AdmissionStatePoisoned)?;
+        let admitted = state.admitted_operations.load(Ordering::Acquire);
+        if admitted >= global_limit {
+            return Err(ServiceError::QueueFull);
         }
+        admissions.reserve(owner, client_limit)?;
+        state.admitted_operations.fetch_add(1, Ordering::AcqRel);
+        state.queued_operations.fetch_add(1, Ordering::AcqRel);
+        drop(admissions);
+        Ok(Self {
+            state,
+            client_admissions,
+            owner,
+            stage: SchedulerPermitStage::Queued,
+        })
     }
 
     fn start(&mut self) {
@@ -1054,7 +1116,11 @@ impl SchedulerPermit {
                     .fetch_sub(1, Ordering::AcqRel);
                 debug_assert!(previous > 0, "admitted operation count cannot underflow");
             }
-            SchedulerPermitStage::Completed => {}
+            SchedulerPermitStage::Completed => return,
+        }
+        match self.client_admissions.lock() {
+            Ok(mut admissions) => admissions.release(self.owner),
+            Err(poisoned) => poisoned.into_inner().release(self.owner),
         }
     }
 }
@@ -1121,14 +1187,16 @@ impl SyntheticWorkerPool {
         })
     }
 
-    fn submit(&self, job: WorkerJob) -> Result<(), (ServiceError, WorkerJob)> {
+    fn submit(&self, job: WorkerJob) -> Result<(), Box<(ServiceError, WorkerJob)>> {
         let Some(sender) = &self.sender else {
-            return Err((ServiceError::ChannelClosed, job));
+            return Err(Box::new((ServiceError::ChannelClosed, job)));
         };
         match sender.try_send(job) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(job)) => Err((ServiceError::QueueFull, job)),
-            Err(TrySendError::Disconnected(job)) => Err((ServiceError::ChannelClosed, job)),
+            Err(TrySendError::Full(job)) => Err(Box::new((ServiceError::QueueFull, job))),
+            Err(TrySendError::Disconnected(job)) => {
+                Err(Box::new((ServiceError::ChannelClosed, job)))
+            }
         }
     }
 
@@ -1211,6 +1279,7 @@ pub struct DaemonOrchestrator {
     journal: JournalActorHandle,
     workers: SyntheticWorkerPool,
     state: Arc<DaemonState>,
+    client_admissions: Arc<Mutex<ClientOperationAdmissions>>,
     limits: DaemonLimits,
 }
 
@@ -1231,6 +1300,7 @@ impl DaemonOrchestrator {
             journal,
             workers: SyntheticWorkerPool::start(limits.operation_workers, queue_limit)?,
             state,
+            client_admissions: Arc::new(Mutex::new(ClientOperationAdmissions::default())),
             limits,
         })
     }
@@ -1278,16 +1348,17 @@ impl DaemonOrchestrator {
         }
         let mut permit = match SchedulerPermit::reserve(
             Arc::clone(&self.state),
+            Arc::clone(&self.client_admissions),
+            submission.owner,
             self.limits.operation_queue_limit,
+            self.limits.client_operation_limit,
         ) {
             Ok(permit) => permit,
-            Err(ServiceError::QueueFull) => {
+            Err(error @ (ServiceError::QueueFull | ServiceError::ClientOperationLimit { .. })) => {
                 return match self.journal.retry_status(submission).await {
                     Ok(operation) => Ok(operation),
-                    Err(ServiceError::Operations(OperationError::NotFound)) => {
-                        Err(ServiceError::QueueFull)
-                    }
-                    Err(error) => Err(error),
+                    Err(ServiceError::Operations(OperationError::NotFound)) => Err(error),
+                    Err(retry_error) => Err(retry_error),
                 };
             }
             Err(error) => return Err(error),
@@ -1297,36 +1368,28 @@ impl DaemonOrchestrator {
             return Ok(outcome.operation);
         }
         let operation = outcome.operation;
-        let cancellation = match operation.state {
-            OperationState::Queued => self
-                .journal
-                .start_operation(operation.operation)
-                .await
-                .and_then(|started| {
-                    if started.state == OperationState::Running {
-                        Ok(started)
-                    } else {
-                        Err(ServiceError::UnexpectedResponse)
-                    }
-                })?,
-            OperationState::Running | OperationState::Cancelling => operation.clone(),
+        let (running, token) = match operation.state {
+            OperationState::Queued => self.journal.activate_operation(operation.operation).await?,
+            OperationState::Running | OperationState::Cancelling => {
+                return Err(ServiceError::UnexpectedResponse);
+            }
             OperationState::Succeeded
             | OperationState::Failed
             | OperationState::Cancelled
             | OperationState::Interrupted => return Ok(operation),
         };
+        if running.state != OperationState::Running {
+            return Err(ServiceError::UnexpectedResponse);
+        }
         permit.start();
-        let token = self
-            .journal
-            .cancellation_token(cancellation.operation)
-            .await?;
-        if let Err((error, job)) = self.workers.submit(WorkerJob {
-            operation: cancellation.operation,
+        if let Err(failure) = self.workers.submit(WorkerJob {
+            operation: running.operation,
             cancellation: token,
             permit,
             #[cfg(test)]
             started: None,
         }) {
+            let (error, job) = *failure;
             let compensation = self
                 .journal
                 .finish_operation(
@@ -1338,7 +1401,7 @@ impl DaemonOrchestrator {
             compensation?;
             return Err(error);
         }
-        Ok(cancellation)
+        Ok(running)
     }
 
     /// Reports whether no synthetic worker result is currently pending.
@@ -1803,6 +1866,9 @@ async fn await_journal_response(
         Ok(Err(ServiceError::QueueFull)) => response_to_wire(ControlResponse::Error(queue_full(
             service.limits.operation_queue_limit,
         ))),
+        Ok(Err(ServiceError::ClientOperationLimit { limit })) => {
+            response_to_wire(ControlResponse::Error(client_operation_limit(limit)))
+        }
         Ok(Err(_)) => response_to_wire(ControlResponse::Error(internal_error())),
         Err(_) => response_to_wire(ControlResponse::Error(request_timed_out())),
     }
@@ -2196,6 +2262,7 @@ impl ServiceError {
     fn to_public(&self) -> PublicError {
         match self {
             Self::QueueFull => queue_full(DEFAULT_OPERATION_QUEUE_LIMIT),
+            Self::ClientOperationLimit { limit } => client_operation_limit(*limit),
             Self::NotAccepting => {
                 PublicError::builder(ErrorCode::Busy, "daemon is not accepting operations")
                     .retryable()
@@ -2220,6 +2287,20 @@ fn queue_full(limit: u32) -> PublicError {
         .next_action(NextAction::Retry)
         .build()
         .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
+}
+
+fn client_operation_limit(limit: u32) -> PublicError {
+    let client_limit = rootlight_error::DetailKey::parse("client_operation_limit")
+        .unwrap_or_else(|_| unreachable!("hard-coded detail key is valid"));
+    PublicError::builder(
+        ErrorCode::ResourceExhausted,
+        "client operation quota is exhausted",
+    )
+    .retryable()
+    .detail(client_limit, PublicValue::Unsigned(u64::from(limit)))
+    .next_action(NextAction::Retry)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
 }
 
 fn request_timed_out() -> PublicError {
@@ -2406,6 +2487,15 @@ pub enum ServiceError {
     /// A bounded daemon orchestration lane is saturated.
     #[error("daemon orchestration queue is full")]
     QueueFull,
+    /// One authenticated client reached its nonterminal operation allowance.
+    #[error("daemon client operation quota is exhausted")]
+    ClientOperationLimit {
+        /// Maximum admitted nonterminal operations for the client.
+        limit: u32,
+    },
+    /// The synchronous operation-admission ledger was poisoned.
+    #[error("daemon operation admission state is unavailable")]
+    AdmissionStatePoisoned,
     /// A daemon request exceeded its response deadline.
     #[error("daemon request timed out")]
     RequestTimedOut,
@@ -2688,18 +2778,113 @@ mod tests {
     #[test]
     fn scheduler_permits_release_their_own_counter_stage() {
         let state = Arc::new(DaemonState::starting());
-        let mut running = SchedulerPermit::reserve(Arc::clone(&state), 2).expect("permit reserves");
+        let client_admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
+        let owner = ClientInstanceId::new([1; 16]).expect("client identity is valid");
+        let mut running = SchedulerPermit::reserve(
+            Arc::clone(&state),
+            Arc::clone(&client_admissions),
+            owner,
+            2,
+            2,
+        )
+        .expect("permit reserves");
         running.start();
-        let queued = SchedulerPermit::reserve(Arc::clone(&state), 2).expect("permit reserves");
+        let queued = SchedulerPermit::reserve(
+            Arc::clone(&state),
+            Arc::clone(&client_admissions),
+            owner,
+            2,
+            2,
+        )
+        .expect("permit reserves");
 
         drop(queued);
 
         assert_eq!(state.admitted_operations.load(Ordering::Acquire), 1);
         assert_eq!(state.queued_operations.load(Ordering::Acquire), 0);
         assert_eq!(state.running_operations.load(Ordering::Acquire), 1);
+        assert_eq!(
+            client_admissions
+                .lock()
+                .expect("admission state is available")
+                .admitted
+                .get(&owner),
+            Some(&1)
+        );
         drop(running);
         assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
         assert_eq!(state.running_operations.load(Ordering::Acquire), 0);
+        assert!(
+            client_admissions
+                .lock()
+                .expect("admission state is available")
+                .admitted
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn permit_release_survives_a_poisoned_client_admission_ledger() {
+        let state = Arc::new(DaemonState::starting());
+        let client_admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
+        let owner = ClientInstanceId::new([8; 16]).expect("client identity is valid");
+        let permit = SchedulerPermit::reserve(
+            Arc::clone(&state),
+            Arc::clone(&client_admissions),
+            owner,
+            1,
+            1,
+        )
+        .expect("permit reserves");
+        let poisoned = Arc::clone(&client_admissions);
+        let _ = thread::spawn(move || {
+            let _guard = poisoned.lock().expect("admission state is available");
+            panic!("poison admission state");
+        })
+        .join();
+
+        drop(permit);
+
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
+        assert_eq!(state.queued_operations.load(Ordering::Acquire), 0);
+        assert!(
+            client_admissions
+                .lock()
+                .expect_err("admission state remains poisoned")
+                .into_inner()
+                .admitted
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn daemon_limits_reject_invalid_client_operation_bounds() {
+        assert!(matches!(
+            DaemonLimits::new_with_client_operation_limit(
+                4,
+                4,
+                4,
+                0,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            Err(ServiceError::InvalidLimits)
+        ));
+        assert!(matches!(
+            DaemonLimits::new_with_client_operation_limit(
+                4,
+                4,
+                4,
+                5,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            Err(ServiceError::InvalidLimits)
+        ));
     }
 
     #[tokio::test]
@@ -2761,6 +2946,122 @@ mod tests {
             .await
             .expect("orchestrator shuts down");
         actor.join().expect("actor joins");
+    }
+
+    #[tokio::test]
+    async fn client_operation_quota_preserves_isolation_retry_and_conflict() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let limits = DaemonLimits::new_with_client_operation_limit(
+            4,
+            4,
+            3,
+            1,
+            2,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .expect("limits are valid");
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let mut orchestrator = DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), limits)
+            .expect("orchestrator starts");
+        let owner_a = ClientInstanceId::new([1; 16]).expect("client identity is valid");
+        let owner_b = ClientInstanceId::new([2; 16]).expect("client identity is valid");
+        let first = OperationSubmission::new(
+            OperationId::from_bytes([19; 16]),
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
+            owner_a,
+            true,
+            None,
+            None,
+        )
+        .expect("submission is valid");
+        let running = orchestrator
+            .schedule(first)
+            .await
+            .expect("first client operation schedules");
+
+        let retried = orchestrator
+            .schedule(first)
+            .await
+            .expect("identical retry bypasses client quota");
+        assert_eq!(retried, running);
+        let conflict = OperationSubmission {
+            plan_hash: PlanHash::from_bytes([9; 32]),
+            ..first
+        };
+        assert!(matches!(
+            orchestrator.schedule(conflict).await,
+            Err(ServiceError::Operations(OperationError::SubmissionConflict))
+        ));
+
+        let owner_a_second = OperationSubmission::new(
+            OperationId::from_bytes([20; 16]),
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
+            owner_a,
+            true,
+            None,
+            None,
+        )
+        .expect("submission is valid");
+        assert!(matches!(
+            orchestrator.schedule(owner_a_second).await,
+            Err(ServiceError::ClientOperationLimit { limit: 1 })
+        ));
+
+        let owner_b_submission = OperationSubmission::new(
+            OperationId::from_bytes([21; 16]),
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
+            owner_b,
+            true,
+            None,
+            None,
+        )
+        .expect("submission is valid");
+        let owner_b_running = orchestrator
+            .schedule(owner_b_submission)
+            .await
+            .expect("another client remains admissible");
+        assert_eq!(owner_b_running.owner, owner_b);
+
+        for _ in 0..2 {
+            let completed = orchestrator
+                .complete_next()
+                .await
+                .expect("completion persists")
+                .expect("completion exists");
+            assert_eq!(completed.state, OperationState::Succeeded);
+        }
+        assert!(orchestrator.is_idle());
+        assert!(
+            orchestrator
+                .client_admissions
+                .lock()
+                .expect("admission state is available")
+                .admitted
+                .is_empty()
+        );
+        orchestrator
+            .shutdown()
+            .await
+            .expect("orchestrator shuts down");
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn client_operation_quota_maps_to_stable_resource_exhaustion() {
+        let error = ServiceError::ClientOperationLimit { limit: 3 }.to_public();
+        let key = rootlight_error::DetailKey::parse("client_operation_limit")
+            .expect("detail key is valid");
+
+        assert_eq!(error.code(), ErrorCode::ResourceExhausted);
+        assert!(error.retryable());
+        assert_eq!(error.details().get(&key), Some(&PublicValue::Unsigned(3)));
     }
 
     #[tokio::test]
@@ -2826,10 +3127,18 @@ mod tests {
     #[tokio::test]
     async fn synthetic_worker_observes_cancellation_after_execution_starts() {
         let state = Arc::new(DaemonState::starting());
+        let client_admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
         let mut pool = SyntheticWorkerPool::start(1, 1).expect("worker pool starts");
         let operation = OperationId::from_bytes([15; 16]);
         let cancellation = rootlight_operations::Cancellation::new();
-        let permit = SchedulerPermit::reserve(Arc::clone(&state), 1).expect("permit reserves");
+        let permit = SchedulerPermit::reserve(
+            Arc::clone(&state),
+            client_admissions,
+            ClientInstanceId::SYSTEM,
+            1,
+            1,
+        )
+        .expect("permit reserves");
         let (started_tx, started_rx) = mpsc::sync_channel(0);
         pool.submit(WorkerJob {
             operation,
