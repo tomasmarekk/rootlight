@@ -1,7 +1,11 @@
 schema_version = "1.0"
 workspace_members = [
+  "rootlight",
   "rootlight-cancel",
+  "rootlight-client",
   "rootlight-config",
+  "rootlight-daemon",
+  "rootlight-daemon-core",
   "rootlight-discovery",
   "rootlight-error",
   "rootlight-ids",
@@ -10,10 +14,25 @@ workspace_members = [
   "rootlight-mcp-contract",
   "rootlight-operations",
   "rootlight-protocol",
+  "rootlight-runtime",
   "rootlight-vfs",
   "xtask",
 ]
 dev_only_members = ["xtask"]
+
+[[crates]]
+name = "rootlight"
+allowed_internal_dependencies = [
+  "rootlight-client",
+  "rootlight-daemon-core",
+  "rootlight-error",
+  "rootlight-ids",
+  "rootlight-ipc",
+  "rootlight-operations",
+  "rootlight-protocol",
+  "rootlight-runtime",
+]
+allow_build_script = false
 
 [[crates]]
 name = "rootlight-cancel"
@@ -21,8 +40,40 @@ allowed_internal_dependencies = []
 allow_build_script = false
 
 [[crates]]
+name = "rootlight-client"
+allowed_internal_dependencies = [
+  "rootlight-error",
+  "rootlight-ids",
+  "rootlight-ipc",
+  "rootlight-protocol",
+  "rootlight-runtime",
+]
+allow_build_script = false
+
+[[crates]]
 name = "rootlight-config"
 allowed_internal_dependencies = ["rootlight-error", "rootlight-ids"]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-daemon"
+allowed_internal_dependencies = [
+  "rootlight-daemon-core",
+  "rootlight-ipc",
+  "rootlight-operations",
+  "rootlight-runtime",
+]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-daemon-core"
+allowed_internal_dependencies = [
+  "rootlight-error",
+  "rootlight-ids",
+  "rootlight-ipc",
+  "rootlight-operations",
+  "rootlight-protocol",
+]
 allow_build_script = false
 
 [[crates]]
@@ -75,6 +126,11 @@ allowed_internal_dependencies = []
 allow_build_script = false
 
 [[crates]]
+name = "rootlight-runtime"
+allowed_internal_dependencies = ["rootlight-ipc", "rootlight-protocol"]
+allow_build_script = false
+
+[[crates]]
 name = "rootlight-vfs"
 allowed_internal_dependencies = ["rootlight-ids", "rootlight-ir"]
 allow_build_script = false
@@ -85,8 +141,10 @@ allowed_internal_dependencies = [
   "rootlight-config",
   "rootlight-error",
   "rootlight-ids",
+  "rootlight-ipc",
   "rootlight-ir",
   "rootlight-mcp-contract",
   "rootlight-protocol",
+  "rootlight-runtime",
 ]
 allow_build_script = false
