@@ -451,7 +451,18 @@ mod tests {
     use super::*;
     use rootlight_protocol::generated::daemon::v1::{HealthRequest, request_envelope};
     use std::{sync::mpsc, thread};
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
+
+    fn private_tempdir() -> TempDir {
+        let temporary = tempdir().expect("temporary directory is available");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("temporary directory becomes private");
+        }
+        temporary
+    }
 
     fn request(request_id: u64) -> RequestEnvelope {
         RequestEnvelope {
@@ -471,7 +482,7 @@ mod tests {
 
     #[test]
     fn local_round_trip_preserves_one_bounded_request() {
-        let temporary = tempdir().expect("temporary directory is available");
+        let temporary = private_tempdir();
         #[cfg(unix)]
         let endpoint =
             Endpoint::new(temporary.path().join("rootlight.sock")).expect("endpoint is valid");
@@ -499,7 +510,7 @@ mod tests {
 
     #[test]
     fn oversized_declared_length_is_rejected_before_payload_read() {
-        let temporary = tempdir().expect("temporary directory is available");
+        let temporary = private_tempdir();
         #[cfg(unix)]
         let endpoint =
             Endpoint::new(temporary.path().join("oversized.sock")).expect("endpoint is valid");
