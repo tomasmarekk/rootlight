@@ -538,6 +538,18 @@ impl JournalActorHandle {
         operation: OperationId,
         cancellation_reason: Option<rootlight_operations::CancellationReason>,
     ) -> Result<OperationRecord, ServiceError> {
+        self.finish_operation_receiver(operation, cancellation_reason)?
+            .await
+            .map_err(|_| ServiceError::ChannelClosed)?
+            .map_err(ServiceError::Operations)
+    }
+
+    fn finish_operation_receiver(
+        &self,
+        operation: OperationId,
+        cancellation_reason: Option<rootlight_operations::CancellationReason>,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<OperationRecord, OperationError>>, ServiceError>
+    {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.try_send(
             JournalLane::Normal,
@@ -547,25 +559,20 @@ impl JournalActorHandle {
                 reply,
             },
         )?;
-        receiver
-            .await
-            .map_err(|_| ServiceError::ChannelClosed)?
-            .map_err(ServiceError::Operations)
+        Ok(receiver)
     }
 
-    async fn interrupt_deadline(
+    fn interrupt_deadline_receiver(
         &self,
         operation: OperationId,
-    ) -> Result<OperationRecord, ServiceError> {
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<OperationRecord, OperationError>>, ServiceError>
+    {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.try_send(
             JournalLane::Control,
             JournalCommand::InterruptDeadline { operation, reply },
         )?;
-        receiver
-            .await
-            .map_err(|_| ServiceError::ChannelClosed)?
-            .map_err(ServiceError::Operations)
+        Ok(receiver)
     }
 
     /// Runs one bounded deadline and lease expiry pass.
@@ -1058,6 +1065,7 @@ impl OperationAdmission {
 enum SchedulerPermitStage {
     Queued,
     Running,
+    Persisting,
     Completed,
 }
 
@@ -1135,6 +1143,15 @@ impl SchedulerPermit {
         self.stage = SchedulerPermitStage::Running;
     }
 
+    fn persist(&mut self) {
+        if self.stage != SchedulerPermitStage::Running {
+            return;
+        }
+        let previous = self.state.running_operations.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "running operation count cannot underflow");
+        self.stage = SchedulerPermitStage::Persisting;
+    }
+
     fn finish(mut self) {
         self.release();
     }
@@ -1153,6 +1170,13 @@ impl SchedulerPermit {
             SchedulerPermitStage::Running => {
                 let previous = self.state.running_operations.fetch_sub(1, Ordering::AcqRel);
                 debug_assert!(previous > 0, "running operation count cannot underflow");
+                let previous = self
+                    .state
+                    .admitted_operations
+                    .fetch_sub(1, Ordering::AcqRel);
+                debug_assert!(previous > 0, "admitted operation count cannot underflow");
+            }
+            SchedulerPermitStage::Persisting => {
                 let previous = self
                     .state
                     .admitted_operations
@@ -1269,6 +1293,12 @@ struct WorkerCompletion {
     permit: SchedulerPermit,
 }
 
+#[derive(Debug)]
+struct PendingWorkerCompletion {
+    completion: WorkerCompletion,
+    reply: Option<tokio::sync::oneshot::Receiver<Result<OperationRecord, OperationError>>>,
+}
+
 /// Fixed bounded synthetic worker pool used by the infrastructure operation kind.
 #[derive(Debug)]
 pub struct SyntheticWorkerPool {
@@ -1357,9 +1387,10 @@ fn synthetic_worker_loop(
             Ok(receiver) => receiver.recv(),
             Err(_) => return,
         };
-        let Ok(job) = job else {
+        let Ok(mut job) = job else {
             return;
         };
+        job.permit.start();
         #[cfg(test)]
         if let Some(started) = job.started.as_ref() {
             let _ = started.send(());
@@ -1382,6 +1413,7 @@ fn synthetic_worker_loop(
             }
             thread::sleep((deadline - now).min(Duration::from_millis(1)));
         };
+        job.permit.persist();
         if completion
             .blocking_send(WorkerCompletion {
                 operation: job.operation,
@@ -1400,6 +1432,7 @@ fn synthetic_worker_loop(
 pub struct DaemonOrchestrator {
     journal: JournalActorHandle,
     workers: SyntheticWorkerPool,
+    pending_completion: Option<PendingWorkerCompletion>,
     state: Arc<DaemonState>,
     client_admissions: Arc<Mutex<ClientOperationAdmissions>>,
     limits: DaemonLimits,
@@ -1421,6 +1454,7 @@ impl DaemonOrchestrator {
         Ok(Self {
             journal,
             workers: SyntheticWorkerPool::start(limits.operation_workers, queue_limit)?,
+            pending_completion: None,
             state,
             client_admissions: Arc::new(Mutex::new(ClientOperationAdmissions::default())),
             limits,
@@ -1468,7 +1502,7 @@ impl DaemonOrchestrator {
         if !self.state.accepting_operations.load(Ordering::Acquire) {
             return Err(ServiceError::NotAccepting);
         }
-        let mut permit = match SchedulerPermit::reserve(
+        let permit = match SchedulerPermit::reserve(
             Arc::clone(&self.state),
             Arc::clone(&self.client_admissions),
             submission.owner,
@@ -1503,25 +1537,27 @@ impl DaemonOrchestrator {
         if running.state != OperationState::Running {
             return Err(ServiceError::UnexpectedResponse);
         }
-        permit.start();
-        if let Err(failure) = self.workers.submit(WorkerJob {
+        match self.workers.submit(WorkerJob {
             operation: running.operation,
             cancellation: token,
             permit,
             #[cfg(test)]
             started: None,
         }) {
-            let (error, job) = *failure;
-            let compensation = self
-                .journal
-                .finish_operation(
-                    job.operation,
-                    Some(rootlight_operations::CancellationReason::ResourceLimit),
-                )
-                .await;
-            drop(job);
-            compensation?;
-            return Err(error);
+            Ok(()) => {}
+            Err(failure) => {
+                let (error, job) = *failure;
+                let compensation = self
+                    .journal
+                    .finish_operation(
+                        job.operation,
+                        Some(rootlight_operations::CancellationReason::ResourceLimit),
+                    )
+                    .await;
+                drop(job);
+                compensation?;
+                return Err(error);
+            }
         }
         Ok(running)
     }
@@ -1529,29 +1565,63 @@ impl DaemonOrchestrator {
     /// Reports whether no synthetic worker result is currently pending.
     #[must_use]
     pub fn is_idle(&self) -> bool {
-        self.state.admitted_operations.load(Ordering::Acquire) == 0
+        self.pending_completion.is_none()
+            && self.state.admitted_operations.load(Ordering::Acquire) == 0
     }
 
     /// Persists one completed worker result and releases admission counters.
+    ///
+    /// A received completion and its journal reply remain owned by the orchestrator so
+    /// cancellation of a surrounding `select!` cannot lose either durable work or quota state.
     ///
     /// # Errors
     ///
     /// Returns a typed actor or journal failure.
     pub async fn complete_next(&mut self) -> Result<Option<OperationRecord>, ServiceError> {
-        let Some(completion) = self.workers.completion().await else {
-            return Ok(None);
-        };
-        let result = if completion.cancellation_reason
-            == Some(rootlight_operations::CancellationReason::DeadlineExceeded)
-        {
-            self.journal.interrupt_deadline(completion.operation).await
-        } else {
-            self.journal
-                .finish_operation(completion.operation, completion.cancellation_reason)
-                .await
-        };
-        completion.permit.finish();
-        result.map(Some)
+        if self.pending_completion.is_none() {
+            let Some(completion) = self.workers.completion().await else {
+                return Ok(None);
+            };
+            self.pending_completion = Some(PendingWorkerCompletion {
+                completion,
+                reply: None,
+            });
+        }
+        let pending = self
+            .pending_completion
+            .as_mut()
+            .unwrap_or_else(|| unreachable!("pending completion was retained"));
+        if pending.reply.is_none() {
+            let completion = &pending.completion;
+            pending.reply = Some(if completion.cancellation_reason
+                == Some(rootlight_operations::CancellationReason::DeadlineExceeded)
+            {
+                self.journal
+                    .interrupt_deadline_receiver(completion.operation)
+            } else {
+                self.journal
+                    .finish_operation_receiver(completion.operation, completion.cancellation_reason)
+            }?);
+        }
+        let result = pending
+            .reply
+            .as_mut()
+            .unwrap_or_else(|| unreachable!("completion reply was initialized"))
+            .await
+            .map_err(|_| ServiceError::ChannelClosed)?
+            .map_err(ServiceError::Operations);
+        match result {
+            Ok(operation) => {
+                self.pending_completion
+                    .take()
+                    .unwrap_or_else(|| unreachable!("pending completion was retained"))
+                    .completion
+                    .permit
+                    .finish();
+                Ok(Some(operation))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Persists every worker completion that is already available.
@@ -1561,19 +1631,20 @@ impl DaemonOrchestrator {
     /// Returns a typed actor or journal failure.
     pub async fn drain_ready_completions(&mut self) -> Result<u32, ServiceError> {
         let mut drained = 0_u32;
-        while let Ok(completion) = self.workers.completions.try_recv() {
-            if completion.cancellation_reason
-                == Some(rootlight_operations::CancellationReason::DeadlineExceeded)
-            {
-                self.journal
-                    .interrupt_deadline(completion.operation)
-                    .await?;
-            } else {
-                self.journal
-                    .finish_operation(completion.operation, completion.cancellation_reason)
-                    .await?;
+        loop {
+            if self.pending_completion.is_none() {
+                self.pending_completion =
+                    self.workers.completions.try_recv().ok().map(|completion| {
+                        PendingWorkerCompletion {
+                            completion,
+                            reply: None,
+                        }
+                    });
             }
-            completion.permit.finish();
+            if self.pending_completion.is_none() {
+                break;
+            }
+            self.complete_next().await?;
             drained = drained.checked_add(1).ok_or(ServiceError::InvalidLimits)?;
         }
         Ok(drained)
@@ -1603,6 +1674,9 @@ impl DaemonOrchestrator {
             }
         }
         self.workers.join()?;
+        if let Some(completion) = self.pending_completion.take() {
+            completion.completion.permit.finish();
+        }
         while let Ok(completion) = self.workers.completions.try_recv() {
             completion.permit.finish();
         }
@@ -2997,6 +3071,45 @@ mod tests {
     }
 
     #[test]
+    fn persisting_permit_releases_worker_occupancy_before_admission() {
+        let state = Arc::new(DaemonState::starting());
+        let client_admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
+        let owner = ClientInstanceId::new([7; 16]).expect("client identity is valid");
+        let mut permit = SchedulerPermit::reserve(
+            Arc::clone(&state),
+            Arc::clone(&client_admissions),
+            owner,
+            1,
+            1,
+        )
+        .expect("permit reserves");
+        permit.start();
+
+        permit.persist();
+
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 1);
+        assert_eq!(state.queued_operations.load(Ordering::Acquire), 0);
+        assert_eq!(state.running_operations.load(Ordering::Acquire), 0);
+        assert_eq!(
+            client_admissions
+                .lock()
+                .expect("admission state is available")
+                .admitted
+                .get(&owner),
+            Some(&1)
+        );
+        permit.finish();
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
+        assert!(
+            client_admissions
+                .lock()
+                .expect("admission state is available")
+                .admitted
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn permit_release_survives_a_poisoned_client_admission_ledger() {
         let state = Arc::new(DaemonState::starting());
         let client_admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
@@ -3479,11 +3592,42 @@ mod tests {
                 .admitted
                 .is_empty()
         );
+
+        let owner_a_reused = orchestrator
+            .schedule(owner_a_second)
+            .await
+            .expect("released owner quota admits new work");
+        assert_eq!(owner_a_reused.owner, owner_a);
+        let completed = orchestrator
+            .complete_next()
+            .await
+            .expect("completion persists")
+            .expect("completion exists");
+        assert_eq!(completed.state, OperationState::Succeeded);
+        assert!(orchestrator.is_idle());
         orchestrator
             .shutdown()
             .await
             .expect("orchestrator shuts down");
         actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn default_limits_bind_per_client_admission_to_global_bounds() {
+        let limits = DaemonLimits::default();
+
+        assert_eq!(
+            limits.client_connection_limit,
+            DEFAULT_CLIENT_CONNECTION_LIMIT
+        );
+        assert_eq!(
+            limits.client_operation_limit,
+            DEFAULT_CLIENT_OPERATION_LIMIT
+        );
+        assert_eq!(limits.operation_workers, DEFAULT_OPERATION_WORKERS);
+        assert_eq!(limits.operation_workers, 4);
+        assert!(limits.client_connection_limit <= limits.connection_limit);
+        assert!(limits.client_operation_limit <= limits.operation_queue_limit);
     }
 
     #[test]
@@ -3548,8 +3692,10 @@ mod tests {
             .expect("operation starts");
 
         let observed = handle
-            .interrupt_deadline(operation)
+            .interrupt_deadline_receiver(operation)
+            .expect("deadline completion queues")
             .await
+            .expect("deadline actor responds")
             .expect("deadline completion persists");
 
         assert_eq!(observed.state, OperationState::Interrupted);

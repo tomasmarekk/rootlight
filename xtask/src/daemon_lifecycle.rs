@@ -7,11 +7,15 @@ use std::{
     io::{self, Write as _},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
+    sync::{Arc, Barrier},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use rootlight_client::{Client, ConnectPolicy};
+use rootlight_client::{
+    Client, ClientError, ConnectPolicy, DaemonLifecycle, Health, OperationState,
+};
+use rootlight_error::{ErrorCode, PublicValue};
 use rootlight_ids::OperationId;
 use rootlight_ipc::connect;
 use rootlight_runtime::{RuntimeError, RuntimePaths};
@@ -22,6 +26,10 @@ const CLIENT_COUNT: usize = 100;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
+const EXPECTED_CLIENT_CONNECTION_LIMIT: u32 = 8;
+const EXPECTED_CLIENT_OPERATION_LIMIT: u32 = 32;
+const EXPECTED_OPERATION_WORKERS: usize = 4;
+const REFERENCE_CONTROL_P95_TARGET: Duration = Duration::from_millis(50);
 
 pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     let rootlight = binary_path(bin_dir, "rootlight")?;
@@ -39,7 +47,9 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     wait_until_ready(&paths, &rootlight, &environment)?;
     let health = run_json(&rootlight, &["health"], &environment, COMMAND_TIMEOUT)?;
     assert_success_type(&health, "health")?;
-    exercise_concurrent_clients(&rootlight, &environment)?;
+    exercise_concurrent_clients(&paths)?;
+    exercise_operation_quota_isolation(&paths)?;
+    let control_latency = exercise_saturated_control_responsiveness(&paths)?;
 
     let operation = OperationId::from_bytes([42; 16]).to_string();
     let submitted = run_json(
@@ -215,8 +225,9 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     wait_until_absent(&daemon_paths)?;
 
     println!(
-        "daemon lifecycle check passed: startup, 100 concurrent clients, health, retry-safe submission, cancellation, stable deadlines, attached lease renewal and expiry, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
+        "daemon lifecycle check passed: startup, 100 deterministic concurrent clients, per-client operation quota isolation, saturated-worker control responsiveness, health, retry-safe submission, cancellation, stable deadlines, attached lease renewal and expiry, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
     );
+    control_latency.report();
     Ok(())
 }
 
@@ -474,25 +485,468 @@ fn exercise_stalled_peer_shutdown(
     wait_until_absent(paths)
 }
 
-fn exercise_concurrent_clients(
-    rootlight: &Path,
-    environment: &Environment,
-) -> Result<(), LifecycleError> {
+fn exercise_concurrent_clients(paths: &RuntimePaths) -> Result<(), LifecycleError> {
+    let barrier = Arc::new(Barrier::new(CLIENT_COUNT));
     let mut clients = Vec::with_capacity(CLIENT_COUNT);
-    for _ in 0..CLIENT_COUNT {
-        let rootlight = rootlight.to_path_buf();
-        let environment = environment.clone();
+    for index in 0..CLIENT_COUNT {
+        let paths = paths.clone();
+        let barrier = Arc::clone(&barrier);
         clients.push(thread::spawn(move || {
-            run_json(&rootlight, &["health"], &environment, COMMAND_TIMEOUT)
+            let identity = deterministic_client_identity(index)?;
+            let client = Client::connect_or_start(&paths, identity, ConnectPolicy::ExistingOnly)
+                .map_err(LifecycleError::Client)?;
+            barrier.wait();
+            client.health().map_err(LifecycleError::Client)
         }));
     }
     for client in clients {
-        let value = client
+        let health = client
             .join()
             .map_err(|_| LifecycleError::ClientThreadPanicked)??;
-        assert_success_type(&value, "health")?;
+        if !health.ready
+            || health.lifecycle != DaemonLifecycle::Ready
+            || !health.accepting_operations
+        {
+            return Err(LifecycleError::UnexpectedClientHealth);
+        }
     }
     Ok(())
+}
+
+fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), LifecycleError> {
+    let noisy = Client::connect_or_start(paths, [70; 16], ConnectPolicy::ExistingOnly)
+        .map_err(LifecycleError::Client)?;
+    let peer = Client::connect_or_start(paths, [71; 16], ConnectPolicy::ExistingOnly)
+        .map_err(LifecycleError::Client)?;
+    let mut noisy_operations = Vec::with_capacity(
+        usize::try_from(EXPECTED_CLIENT_OPERATION_LIMIT)
+            .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?,
+    );
+    for ordinal in 0..EXPECTED_CLIENT_OPERATION_LIMIT {
+        let operation = quota_operation(70, ordinal)?;
+        let status = noisy
+            .operation_submit(operation)
+            .map_err(LifecycleError::Client)?;
+        if !matches!(
+            status.state,
+            OperationState::Running | OperationState::Queued
+        ) {
+            return Err(LifecycleError::UnexpectedQuotaOperationState(status.state));
+        }
+        noisy_operations.push(operation);
+    }
+
+    let rejected = quota_operation(70, EXPECTED_CLIENT_OPERATION_LIMIT)?;
+    match noisy.operation_submit(rejected) {
+        Err(error) if is_client_operation_quota(&error) => {}
+        Err(error) => return Err(LifecycleError::Client(error)),
+        Ok(_) => return Err(LifecycleError::ClientOperationQuotaNotEnforced),
+    }
+
+    let health = peer.health().map_err(LifecycleError::Client)?;
+    let expected_running = default_worker_slots();
+    let expected_queued = EXPECTED_CLIENT_OPERATION_LIMIT
+        .checked_sub(expected_running)
+        .ok_or(LifecycleError::InvalidWorkerConfiguration)?;
+    if !health.ready
+        || health.lifecycle != DaemonLifecycle::Ready
+        || !health.accepting_operations
+        || health.admitted_operations != EXPECTED_CLIENT_OPERATION_LIMIT
+        || health.running_operations != expected_running
+        || health.queued_operations != expected_queued
+    {
+        return Err(LifecycleError::UnexpectedQuotaHealth {
+            admitted: health.admitted_operations,
+            running: health.running_operations,
+            queued: health.queued_operations,
+        });
+    }
+    let peer_operation = quota_operation(71, 0)?;
+    let peer_status = peer
+        .operation_submit(peer_operation)
+        .map_err(LifecycleError::Client)?;
+    if !matches!(
+        peer_status.state,
+        OperationState::Running | OperationState::Queued
+    ) {
+        return Err(LifecycleError::UnexpectedQuotaOperationState(
+            peer_status.state,
+        ));
+    }
+
+    for operation in noisy_operations {
+        cancel_and_wait(&noisy, operation)?;
+    }
+    cancel_and_wait(&peer, peer_operation)?;
+    wait_for_health(&peer, |health| {
+        health.admitted_operations == 0
+            && health.running_operations == 0
+            && health.queued_operations == 0
+    })?;
+    Ok(())
+}
+
+fn exercise_saturated_control_responsiveness(
+    paths: &RuntimePaths,
+) -> Result<ControlLatencyEvidence, LifecycleError> {
+    let workload = Arc::new(
+        Client::connect_or_start(paths, [60; 16], ConnectPolicy::ExistingOnly)
+            .map_err(LifecycleError::Client)?,
+    );
+    let sampler = Client::connect_or_start(paths, [61; 16], ConnectPolicy::ExistingOnly)
+        .map_err(LifecycleError::Client)?;
+    let operations = worker_operations()?;
+    for operation in operations {
+        let status = workload
+            .operation_submit(operation)
+            .map_err(LifecycleError::Client)?;
+        if !matches!(
+            status.state,
+            OperationState::Running | OperationState::Queued
+        ) {
+            return Err(LifecycleError::UnexpectedSaturationState);
+        }
+    }
+    let saturated = wait_for_health(&sampler, |health| {
+        health.ready
+            && health.lifecycle == DaemonLifecycle::Ready
+            && health.accepting_operations
+            && health.admitted_operations == default_worker_slots()
+            && health.running_operations == default_worker_slots()
+            && health.queued_operations == 0
+    })?;
+    require_expected_default_limits(&saturated)?;
+
+    let mut health_samples = Vec::with_capacity(operations.len());
+    let mut status_samples = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let started = Instant::now();
+        let health = sampler.health().map_err(LifecycleError::Client)?;
+        health_samples.push(started.elapsed());
+        require_saturated_health(&health)?;
+
+        let started = Instant::now();
+        let status = workload
+            .operation_status(operation)
+            .map_err(LifecycleError::Client)?;
+        status_samples.push(started.elapsed());
+        if status.state != OperationState::Running {
+            return Err(LifecycleError::UnexpectedSampledOperationState(
+                status.state,
+            ));
+        }
+    }
+
+    require_saturated_health(&sampler.health().map_err(LifecycleError::Client)?)?;
+    let cancel_samples = cancel_saturated_workers(Arc::clone(&workload), operations)?;
+    for operation in operations {
+        wait_for_client_terminal(&workload, operation, OperationState::Cancelled)?;
+    }
+    wait_for_health(&sampler, |health| {
+        health.admitted_operations == 0
+            && health.running_operations == 0
+            && health.queued_operations == 0
+    })?;
+
+    Ok(ControlLatencyEvidence {
+        limits: ControlLimits::from_health(&saturated),
+        health: LatencySeries::new(health_samples)?,
+        status: LatencySeries::new(status_samples)?,
+        cancel: LatencySeries::new(cancel_samples)?,
+    })
+}
+
+fn wait_for_health(
+    client: &Client,
+    predicate: impl Fn(&Health) -> bool,
+) -> Result<Health, LifecycleError> {
+    let deadline = Instant::now()
+        .checked_add(COMMAND_TIMEOUT)
+        .ok_or(LifecycleError::Clock)?;
+    loop {
+        let health = client.health().map_err(LifecycleError::Client)?;
+        if predicate(&health) {
+            return Ok(health);
+        }
+        if Instant::now() >= deadline {
+            return Err(LifecycleError::HealthStateTimedOut);
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn quota_operation(identity: u8, ordinal: u32) -> Result<OperationId, LifecycleError> {
+    let mut bytes = [identity; 16];
+    bytes[12..].copy_from_slice(&ordinal.to_be_bytes());
+    if bytes == [0; 16] {
+        return Err(LifecycleError::InvalidWorkerConfiguration);
+    }
+    Ok(OperationId::from_bytes(bytes))
+}
+
+fn is_client_operation_quota(error: &ClientError) -> bool {
+    let Some(public) = error.as_public_error() else {
+        return false;
+    };
+    if public.code() != ErrorCode::ResourceExhausted || !public.retryable() {
+        return false;
+    }
+    public.details().iter().any(|(key, value)| {
+        key.as_str() == "client_operation_limit"
+            && *value == PublicValue::Unsigned(u64::from(EXPECTED_CLIENT_OPERATION_LIMIT))
+    })
+}
+
+fn cancel_and_wait(client: &Client, operation: OperationId) -> Result<(), LifecycleError> {
+    let (accepted, status) = client
+        .operation_cancel(operation)
+        .map_err(LifecycleError::Client)?;
+    if !accepted
+        || !matches!(
+            status.state,
+            OperationState::Cancelling | OperationState::Cancelled
+        )
+    {
+        return Err(LifecycleError::UnexpectedCancellationState);
+    }
+    wait_for_client_terminal(client, operation, OperationState::Cancelled)
+}
+
+fn deterministic_client_identity(index: usize) -> Result<[u8; 16], LifecycleError> {
+    let ordinal = u64::try_from(index)
+        .map_err(|_| LifecycleError::InvalidClientIdentity)?
+        .checked_add(1)
+        .ok_or(LifecycleError::InvalidClientIdentity)?;
+    let mut identity = [0_u8; 16];
+    identity[..8].copy_from_slice(&ordinal.to_be_bytes());
+    identity[8..].copy_from_slice(&ordinal.rotate_left(17).to_be_bytes());
+    Ok(identity)
+}
+
+fn default_worker_slots() -> u32 {
+    u32::try_from(EXPECTED_OPERATION_WORKERS)
+        .unwrap_or_else(|_| unreachable!("default worker count fits the health protocol"))
+}
+
+fn worker_operations() -> Result<[OperationId; EXPECTED_OPERATION_WORKERS], LifecycleError> {
+    let mut operations = [OperationId::from_bytes([0; 16]); EXPECTED_OPERATION_WORKERS];
+    for (index, operation) in operations.iter_mut().enumerate() {
+        let ordinal = u8::try_from(index)
+            .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?
+            .checked_add(60)
+            .ok_or(LifecycleError::InvalidWorkerConfiguration)?;
+        *operation = OperationId::from_bytes([ordinal; 16]);
+    }
+    Ok(operations)
+}
+
+fn require_expected_default_limits(health: &Health) -> Result<(), LifecycleError> {
+    if health.connection_limit == 128
+        && health.operation_queue_limit == 256
+        && default_worker_slots() == 4
+        && EXPECTED_CLIENT_CONNECTION_LIMIT <= health.connection_limit
+        && EXPECTED_CLIENT_OPERATION_LIMIT <= health.operation_queue_limit
+    {
+        Ok(())
+    } else {
+        Err(LifecycleError::UnexpectedDefaultLimits {
+            connection: health.connection_limit,
+            operation_queue: health.operation_queue_limit,
+            workers: default_worker_slots(),
+        })
+    }
+}
+
+fn require_saturated_health(health: &Health) -> Result<(), LifecycleError> {
+    if health.ready
+        && health.lifecycle == DaemonLifecycle::Ready
+        && health.accepting_operations
+        && health.admitted_operations == default_worker_slots()
+        && health.running_operations == default_worker_slots()
+        && health.queued_operations == 0
+    {
+        Ok(())
+    } else {
+        Err(LifecycleError::UnexpectedSaturationHealth {
+            admitted: health.admitted_operations,
+            running: health.running_operations,
+            queued: health.queued_operations,
+        })
+    }
+}
+
+fn cancel_saturated_workers<const N: usize>(
+    client: Arc<Client>,
+    operations: [OperationId; N],
+) -> Result<Vec<Duration>, LifecycleError> {
+    let barrier = Arc::new(Barrier::new(
+        N.checked_add(1)
+            .ok_or(LifecycleError::InvalidWorkerConfiguration)?,
+    ));
+    let mut requests = Vec::with_capacity(N);
+    for operation in operations {
+        let client = Arc::clone(&client);
+        let barrier = Arc::clone(&barrier);
+        requests.push(thread::spawn(move || {
+            barrier.wait();
+            let started = Instant::now();
+            let result = client.operation_cancel(operation);
+            (started.elapsed(), result)
+        }));
+    }
+    barrier.wait();
+
+    let mut samples = Vec::with_capacity(N);
+    for request in requests {
+        let (elapsed, result) = request
+            .join()
+            .map_err(|_| LifecycleError::ClientThreadPanicked)?;
+        let (accepted, status) = result.map_err(LifecycleError::Client)?;
+        if !accepted
+            || !matches!(
+                status.state,
+                OperationState::Cancelling | OperationState::Cancelled
+            )
+        {
+            return Err(LifecycleError::UnexpectedCancellationState);
+        }
+        samples.push(elapsed);
+    }
+    Ok(samples)
+}
+
+fn wait_for_client_terminal(
+    client: &Client,
+    operation: OperationId,
+    expected: OperationState,
+) -> Result<(), LifecycleError> {
+    let deadline = Instant::now()
+        .checked_add(COMMAND_TIMEOUT)
+        .ok_or(LifecycleError::Clock)?;
+    loop {
+        let status = client
+            .operation_status(operation)
+            .map_err(LifecycleError::Client)?;
+        if status.state == expected {
+            return Ok(());
+        }
+        if matches!(
+            status.state,
+            OperationState::Succeeded | OperationState::Failed | OperationState::Interrupted
+        ) {
+            return Err(LifecycleError::UnexpectedCancellationState);
+        }
+        if Instant::now() >= deadline {
+            return Err(LifecycleError::OperationTimedOut);
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+#[derive(Debug)]
+struct ControlLimits {
+    connection_limit: u32,
+    client_connection_limit: u32,
+    operation_queue_limit: u32,
+    client_operation_limit: u32,
+    worker_slots: u32,
+}
+
+impl ControlLimits {
+    fn from_health(health: &Health) -> Self {
+        Self {
+            connection_limit: health.connection_limit,
+            client_connection_limit: EXPECTED_CLIENT_CONNECTION_LIMIT,
+            operation_queue_limit: health.operation_queue_limit,
+            client_operation_limit: EXPECTED_CLIENT_OPERATION_LIMIT,
+            worker_slots: default_worker_slots(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ControlLatencyEvidence {
+    limits: ControlLimits,
+    health: LatencySeries,
+    status: LatencySeries,
+    cancel: LatencySeries,
+}
+
+impl ControlLatencyEvidence {
+    fn report(&self) {
+        println!(
+            "control latency evidence: profile=portable_shared_ci platform={} arch={} classification=observed reference_host_p95_target_us={} target_enforced=false connection_limit={} client_connection_limit={} operation_queue_limit={} client_operation_limit={} worker_slots={} initial_running={} initial_queued=0 sample_policy=health_and_status_while_fully_saturated_then_concurrent_cancel",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            REFERENCE_CONTROL_P95_TARGET.as_micros(),
+            self.limits.connection_limit,
+            self.limits.client_connection_limit,
+            self.limits.operation_queue_limit,
+            self.limits.client_operation_limit,
+            self.limits.worker_slots,
+            self.limits.worker_slots,
+        );
+        self.health.report("health");
+        self.status.report("status");
+        self.cancel.report("cancel");
+    }
+}
+
+#[derive(Debug)]
+struct LatencySeries {
+    raw_micros: Vec<u128>,
+    p50_micros: u128,
+    p95_micros: u128,
+    p99_micros: u128,
+}
+
+impl LatencySeries {
+    fn new(samples: Vec<Duration>) -> Result<Self, LifecycleError> {
+        if samples.is_empty() {
+            return Err(LifecycleError::MissingLatencySamples);
+        }
+        let raw_micros = samples
+            .into_iter()
+            .map(|sample| sample.as_micros())
+            .collect::<Vec<_>>();
+        let mut sorted = raw_micros.clone();
+        sorted.sort_unstable();
+        Ok(Self {
+            p50_micros: nearest_rank(&sorted, 50)?,
+            p95_micros: nearest_rank(&sorted, 95)?,
+            p99_micros: nearest_rank(&sorted, 99)?,
+            raw_micros,
+        })
+    }
+
+    fn report(&self, operation: &str) {
+        println!(
+            "control latency samples: operation={operation} unit=us count={} p50={} p95={} p99={} raw={:?}",
+            self.raw_micros.len(),
+            self.p50_micros,
+            self.p95_micros,
+            self.p99_micros,
+            self.raw_micros
+        );
+    }
+}
+
+fn nearest_rank(sorted: &[u128], percentile: usize) -> Result<u128, LifecycleError> {
+    if sorted.is_empty() || !(1..=100).contains(&percentile) {
+        return Err(LifecycleError::InvalidPercentile);
+    }
+    let numerator = sorted
+        .len()
+        .checked_mul(percentile)
+        .ok_or(LifecycleError::InvalidPercentile)?;
+    let rank = numerator
+        .checked_add(99)
+        .ok_or(LifecycleError::InvalidPercentile)?
+        / 100;
+    sorted
+        .get(rank.saturating_sub(1))
+        .copied()
+        .ok_or(LifecycleError::InvalidPercentile)
 }
 
 fn wait_for_terminal(
@@ -916,6 +1370,52 @@ pub(crate) enum LifecycleError {
     ReadyTimedOut,
     #[error("daemon operation did not reach a terminal state")]
     OperationTimedOut,
+    #[error("daemon health did not reach the required bounded state")]
+    HealthStateTimedOut,
+    #[error("daemon worker saturation state changed during control sampling")]
+    UnexpectedSaturationState,
+    #[error(
+        "daemon saturation health changed: admitted={admitted}, running={running}, queued={queued}"
+    )]
+    UnexpectedSaturationHealth {
+        admitted: u32,
+        running: u32,
+        queued: u32,
+    },
+    #[error("daemon sampled operation state changed: {0:?}")]
+    UnexpectedSampledOperationState(OperationState),
+    #[error("daemon cancellation did not reach the required state")]
+    UnexpectedCancellationState,
+    #[error("daemon control latency samples are missing")]
+    MissingLatencySamples,
+    #[error("daemon control latency percentile is invalid")]
+    InvalidPercentile,
+    #[error("deterministic daemon client identity is invalid")]
+    InvalidClientIdentity,
+    #[error("daemon default worker configuration is invalid")]
+    InvalidWorkerConfiguration,
+    #[error(
+        "daemon default limits changed: connection={connection}, operation_queue={operation_queue}, workers={workers}"
+    )]
+    UnexpectedDefaultLimits {
+        connection: u32,
+        operation_queue: u32,
+        workers: u32,
+    },
+    #[error("one deterministic client returned unhealthy daemon state")]
+    UnexpectedClientHealth,
+    #[error("daemon did not enforce the per-client operation quota")]
+    ClientOperationQuotaNotEnforced,
+    #[error("daemon quota exercise returned an unexpected operation state: {0:?}")]
+    UnexpectedQuotaOperationState(OperationState),
+    #[error(
+        "daemon quota isolation health is invalid: admitted={admitted}, running={running}, queued={queued}"
+    )]
+    UnexpectedQuotaHealth {
+        admitted: u32,
+        running: u32,
+        queued: u32,
+    },
     #[error("daemon lifecycle client thread panicked")]
     ClientThreadPanicked,
     #[error("simultaneous autostart client {index} failed: {source}")]
