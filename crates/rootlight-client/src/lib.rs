@@ -238,7 +238,7 @@ impl Client {
         coordinate_start(paths, client_instance_id)
     }
 
-    /// Creates a client bound to one discovered daemon and authenticated client instance.
+    /// Creates a client bound to one discovered daemon and validated client-declared identity.
     #[must_use]
     pub fn new(endpoint: Endpoint, instance_nonce: [u8; 16], client_instance_id: [u8; 16]) -> Self {
         Self {
@@ -333,7 +333,7 @@ impl Client {
         self.submit_operation_request(request)
     }
 
-    /// Submits work attached to this authenticated client lease.
+    /// Submits work attached to this validated client-declared identity lease.
     ///
     /// # Errors
     ///
@@ -353,7 +353,7 @@ impl Client {
         self.submit_operation_request(request)
     }
 
-    /// Extends one attached operation lease owned by this authenticated client.
+    /// Extends one attached operation lease owned by this validated client-declared identity.
     ///
     /// # Errors
     ///

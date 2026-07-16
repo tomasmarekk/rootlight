@@ -53,11 +53,13 @@ const CAPABILITIES: &[&str] = &[
 ];
 /// Default simultaneous negotiated connection limit.
 pub const DEFAULT_CONNECTION_LIMIT: u32 = 128;
+/// Default simultaneous negotiated connection limit for one validated client-declared identity.
+pub const DEFAULT_CLIENT_CONNECTION_LIMIT: u32 = 8;
 /// Default bounded control-command queue capacity.
 pub const DEFAULT_CONTROL_QUEUE_LIMIT: usize = 64;
 /// Default durable operation admission limit.
 pub const DEFAULT_OPERATION_QUEUE_LIMIT: u32 = 256;
-/// Default durable operation admission limit for one authenticated client.
+/// Default durable operation admission limit for one validated client-declared identity.
 pub const DEFAULT_CLIENT_OPERATION_LIMIT: u32 = 32;
 /// Default fixed synthetic operation worker count.
 pub const DEFAULT_OPERATION_WORKERS: usize = 4;
@@ -119,11 +121,13 @@ impl DaemonLifecycle {
 pub struct DaemonLimits {
     /// Maximum simultaneous negotiated connections.
     pub connection_limit: u32,
+    /// Maximum simultaneous negotiated connections for one validated client-declared identity.
+    pub client_connection_limit: u32,
     /// Capacity of the high-priority control lane.
     pub control_queue_limit: usize,
     /// Maximum admitted nonterminal operations.
     pub operation_queue_limit: u32,
-    /// Maximum admitted nonterminal operations for one authenticated client.
+    /// Maximum admitted nonterminal operations for one validated client-declared identity.
     pub client_operation_limit: u32,
     /// Exact number of synthetic operation workers.
     pub operation_workers: usize,
@@ -150,7 +154,8 @@ impl DaemonLimits {
         maintenance_interval: Duration,
         shutdown_grace: Duration,
     ) -> Result<Self, ServiceError> {
-        Self::new_with_client_operation_limit(
+        Self::new_with_client_limits(
+            connection_limit,
             connection_limit,
             control_queue_limit,
             operation_queue_limit,
@@ -185,7 +190,43 @@ impl DaemonLimits {
         maintenance_interval: Duration,
         shutdown_grace: Duration,
     ) -> Result<Self, ServiceError> {
+        Self::new_with_client_limits(
+            connection_limit,
+            connection_limit,
+            control_queue_limit,
+            operation_queue_limit,
+            client_operation_limit,
+            operation_workers,
+            request_timeout,
+            maintenance_interval,
+            shutdown_grace,
+        )
+    }
+
+    /// Creates checked daemon resource bounds with explicit per-client limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration is zero,
+    /// or when a client limit exceeds its corresponding global limit.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one validated daemon resource dimension"
+    )]
+    pub const fn new_with_client_limits(
+        connection_limit: u32,
+        client_connection_limit: u32,
+        control_queue_limit: usize,
+        operation_queue_limit: u32,
+        client_operation_limit: u32,
+        operation_workers: usize,
+        request_timeout: Duration,
+        maintenance_interval: Duration,
+        shutdown_grace: Duration,
+    ) -> Result<Self, ServiceError> {
         if connection_limit == 0
+            || client_connection_limit == 0
+            || client_connection_limit > connection_limit
             || control_queue_limit == 0
             || operation_queue_limit == 0
             || client_operation_limit == 0
@@ -199,6 +240,7 @@ impl DaemonLimits {
         }
         Ok(Self {
             connection_limit,
+            client_connection_limit,
             control_queue_limit,
             operation_queue_limit,
             client_operation_limit,
@@ -214,6 +256,7 @@ impl Default for DaemonLimits {
     fn default() -> Self {
         Self {
             connection_limit: DEFAULT_CONNECTION_LIMIT,
+            client_connection_limit: DEFAULT_CLIENT_CONNECTION_LIMIT,
             control_queue_limit: DEFAULT_CONTROL_QUEUE_LIMIT,
             operation_queue_limit: DEFAULT_OPERATION_QUEUE_LIMIT,
             client_operation_limit: DEFAULT_CLIENT_OPERATION_LIMIT,
@@ -1131,6 +1174,85 @@ impl Drop for SchedulerPermit {
     }
 }
 
+/// Shared fairness admission state for negotiated client-declared identities.
+///
+/// The OS-authorized local channel and global connection semaphore remain the hard
+/// security and resource bounds. A same-user client can rotate declared identities,
+/// so this ledger provides cooperative isolation and load shedding rather than an
+/// unforgeable anti-Sybil principal.
+#[derive(Debug)]
+pub struct ClientConnectionAdmissions {
+    limit: u32,
+    active: Arc<Mutex<BTreeMap<ClientInstanceId, u32>>>,
+}
+
+impl ClientConnectionAdmissions {
+    /// Creates a client connection governor from validated daemon limits.
+    #[must_use]
+    pub fn new(limits: DaemonLimits) -> Self {
+        Self {
+            limit: limits.client_connection_limit,
+            active: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    fn reserve(&self, client: ClientInstanceId) -> Result<ClientConnectionPermit, ServiceError> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| ServiceError::AdmissionStatePoisoned)?;
+        let connections = active.entry(client).or_default();
+        if *connections >= self.limit {
+            return Err(ServiceError::ClientConnectionLimit { limit: self.limit });
+        }
+        *connections = connections
+            .checked_add(1)
+            .ok_or(ServiceError::InvalidLimits)?;
+        drop(active);
+        Ok(ClientConnectionPermit {
+            active: Arc::clone(&self.active),
+            client,
+            released: false,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ClientConnectionPermit {
+    active: Arc<Mutex<BTreeMap<ClientInstanceId, u32>>>,
+    client: ClientInstanceId,
+    released: bool,
+}
+
+impl ClientConnectionPermit {
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        let mut active = match self.active.lock() {
+            Ok(active) => active,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match active.get(&self.client).copied() {
+            Some(1) => {
+                active.remove(&self.client);
+            }
+            Some(connections) if connections > 1 => {
+                active.insert(self.client, connections - 1);
+            }
+            Some(_) => debug_assert!(false, "client connection count cannot be zero"),
+            None => debug_assert!(false, "client connection permit must have an owner bucket"),
+        }
+    }
+}
+
+impl Drop for ClientConnectionPermit {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 #[derive(Debug)]
 struct WorkerJob {
     operation: OperationId,
@@ -1551,9 +1673,17 @@ impl ControlService {
     /// Negotiates one bounded protocol and capability set.
     #[must_use]
     pub fn negotiate(&self, hello: &daemon::ClientHello) -> daemon::ServerHello {
-        let negotiation = validate_client_hello(hello, self.instance_nonce);
-        let selected_protocol = negotiation.as_ref().ok().copied();
-        let error = negotiation.err();
+        match validate_client_hello(hello, self.instance_nonce) {
+            Ok(selected_protocol) => self.server_hello(Some(selected_protocol), None),
+            Err(error) => self.server_hello(None, Some(error.as_ref())),
+        }
+    }
+
+    fn server_hello(
+        &self,
+        selected_protocol: Option<common::ContractVersion>,
+        error: Option<&PublicError>,
+    ) -> daemon::ServerHello {
         daemon::ServerHello {
             selected_protocol,
             capabilities: if error.is_none() {
@@ -1564,7 +1694,7 @@ impl ControlService {
             } else {
                 Vec::new()
             },
-            error: error.as_deref().map(public_error_to_wire),
+            error: error.map(public_error_to_wire),
             instance_nonce: self.instance_nonce.to_vec(),
         }
     }
@@ -1726,22 +1856,34 @@ pub async fn handle_connection_async(
     service: Arc<ControlService>,
     journal: JournalActorHandle,
     submissions: tokio::sync::mpsc::Sender<OperationAdmission>,
+    client_connections: Arc<ClientConnectionAdmissions>,
     codec: FrameCodec,
     stream: &mut AsyncLocalStream,
 ) -> Result<(), ServiceError> {
     let hello = read_client_hello_async(codec, stream).await?;
-    let response = service.negotiate(&hello);
-    let accepted = response.error.is_none();
-    let selected_protocol_minor = response
-        .selected_protocol
-        .as_ref()
-        .map_or(PROTOCOL_MINOR, |version| version.minor);
-    write_server_hello_async(codec, stream, &response).await?;
-    if !accepted {
-        return Ok(());
-    }
+    let selected_protocol = match validate_client_hello(&hello, service.instance_nonce) {
+        Ok(selected_protocol) => selected_protocol,
+        Err(error) => {
+            let response = service.server_hello(None, Some(error.as_ref()));
+            write_server_hello_async(codec, stream, &response).await?;
+            return Ok(());
+        }
+    };
     let client_instance_id = parse_client_instance_id(&hello.client_instance_id)
         .map_err(|_| ServiceError::InvalidNegotiatedClient)?;
+    let _client_permit = match client_connections.reserve(client_instance_id) {
+        Ok(permit) => permit,
+        Err(ServiceError::ClientConnectionLimit { limit }) => {
+            let error = client_connection_limit(limit);
+            let response = service.server_hello(None, Some(&error));
+            write_server_hello_async(codec, stream, &response).await?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let selected_protocol_minor = selected_protocol.minor;
+    let response = service.server_hello(Some(selected_protocol), None);
+    write_server_hello_async(codec, stream, &response).await?;
     let envelope = read_request_async(codec, stream).await?;
     let response = dispatch_async(
         &service,
@@ -2303,6 +2445,20 @@ fn client_operation_limit(limit: u32) -> PublicError {
     .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
 }
 
+fn client_connection_limit(limit: u32) -> PublicError {
+    let client_limit = rootlight_error::DetailKey::parse("client_connection_limit")
+        .unwrap_or_else(|_| unreachable!("hard-coded detail key is valid"));
+    PublicError::builder(
+        ErrorCode::ResourceExhausted,
+        "client connection quota is exhausted",
+    )
+    .retryable()
+    .detail(client_limit, PublicValue::Unsigned(u64::from(limit)))
+    .next_action(NextAction::Retry)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
+}
+
 fn request_timed_out() -> PublicError {
     PublicError::builder(ErrorCode::Busy, "daemon request timed out")
         .retryable()
@@ -2487,13 +2643,19 @@ pub enum ServiceError {
     /// A bounded daemon orchestration lane is saturated.
     #[error("daemon orchestration queue is full")]
     QueueFull,
-    /// One authenticated client reached its nonterminal operation allowance.
+    /// One validated client-declared identity reached its nonterminal operation allowance.
     #[error("daemon client operation quota is exhausted")]
     ClientOperationLimit {
         /// Maximum admitted nonterminal operations for the client.
         limit: u32,
     },
-    /// The synchronous operation-admission ledger was poisoned.
+    /// One validated client-declared identity reached its negotiated connection allowance.
+    #[error("daemon client connection quota is exhausted")]
+    ClientConnectionLimit {
+        /// Maximum simultaneous negotiated connections for the client.
+        limit: u32,
+    },
+    /// A synchronous client-admission ledger was poisoned.
     #[error("daemon operation admission state is unavailable")]
     AdmissionStatePoisoned,
     /// A daemon request exceeded its response deadline.
@@ -2529,7 +2691,10 @@ pub enum ServiceError {
 mod tests {
     use super::*;
     use rootlight_client::Client;
-    use rootlight_ipc::{Endpoint, LocalListener};
+    use rootlight_ipc::{
+        AsyncLocalListener, Endpoint, LocalListener, connect_async, read_server_hello_async,
+        write_client_hello_async,
+    };
     use rootlight_operations::Progress;
     use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
     use tempfile::{TempDir, tempdir};
@@ -2542,6 +2707,10 @@ mod tests {
     }
 
     fn supported_hello(nonce: Vec<u8>) -> daemon::ClientHello {
+        supported_hello_for(nonce, [9; 16])
+    }
+
+    fn supported_hello_for(nonce: Vec<u8>, client_instance_id: [u8; 16]) -> daemon::ClientHello {
         daemon::ClientHello {
             supported_protocols: Some(common::VersionRange {
                 minimum: Some(common::ContractVersion {
@@ -2555,7 +2724,7 @@ mod tests {
             }),
             capabilities: vec!["health".to_owned()],
             expected_instance_nonce: nonce,
-            client_instance_id: vec![9; 16],
+            client_instance_id: client_instance_id.to_vec(),
         }
     }
 
@@ -2571,11 +2740,15 @@ mod tests {
     }
 
     fn endpoint(temporary: &TempDir) -> Endpoint {
+        endpoint_named(temporary, "rootlight")
+    }
+
+    fn endpoint_named(temporary: &TempDir, label: &str) -> Endpoint {
         #[cfg(unix)]
-        let path = temporary.path().join("rootlight.sock");
+        let path = temporary.path().join(format!("{label}.sock"));
         #[cfg(windows)]
         let path = PathBuf::from(format!(
-            r"\\.\pipe\rootlight-daemon-core-{}-{}",
+            r"\\.\pipe\rootlight-daemon-core-{}-{}-{label}",
             std::process::id(),
             temporary.path().display().to_string().len()
         ));
@@ -2858,7 +3031,267 @@ mod tests {
     }
 
     #[test]
+    fn client_connection_admissions_isolate_clients_and_remove_empty_buckets() {
+        let limits = DaemonLimits::new_with_client_limits(
+            4,
+            1,
+            4,
+            4,
+            4,
+            1,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .expect("limits are valid");
+        let admissions = ClientConnectionAdmissions::new(limits);
+        let client_a = ClientInstanceId::new([4; 16]).expect("client identity is valid");
+        let client_b = ClientInstanceId::new([5; 16]).expect("client identity is valid");
+        let first = admissions
+            .reserve(client_a)
+            .expect("first connection reserves");
+
+        assert!(matches!(
+            admissions.reserve(client_a),
+            Err(ServiceError::ClientConnectionLimit { limit: 1 })
+        ));
+        let second_client = admissions
+            .reserve(client_b)
+            .expect("another client remains admissible");
+        drop(first);
+        drop(second_client);
+
+        assert!(
+            admissions
+                .active
+                .lock()
+                .expect("admission state is available")
+                .is_empty()
+        );
+        let reconnected = admissions
+            .reserve(client_a)
+            .expect("released client can reconnect");
+        drop(reconnected);
+        assert!(
+            admissions
+                .active
+                .lock()
+                .expect("admission state is available")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn negotiated_connection_quota_isolates_clients_and_releases_on_disconnect() {
+        let temporary = private_tempdir();
+        let endpoint = endpoint_named(&temporary, "connection-quota");
+        let listener =
+            Arc::new(AsyncLocalListener::bind(endpoint.clone()).expect("async listener binds"));
+        let limits = DaemonLimits::new_with_client_limits(
+            3,
+            1,
+            4,
+            4,
+            4,
+            1,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .expect("limits are valid");
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let service = Arc::new(ControlService::with_state(
+            journal,
+            [7; 16],
+            Arc::new(DaemonState::starting()),
+            limits,
+        ));
+        let client_connections = Arc::new(ClientConnectionAdmissions::new(limits));
+        let (submissions, _submission_rx) = tokio::sync::mpsc::channel(4);
+
+        let first_handler = spawn_connection_handler(
+            Arc::clone(&listener),
+            Arc::clone(&service),
+            actor.handle(),
+            submissions.clone(),
+            Arc::clone(&client_connections),
+        );
+        let mut first = connect_async(&endpoint)
+            .await
+            .expect("first client connects");
+        write_client_hello_async(
+            FrameCodec::default(),
+            &mut first,
+            &supported_hello_for(vec![7; 16], [4; 16]),
+        )
+        .await
+        .expect("first hello writes");
+        let first_hello = read_server_hello_async(FrameCodec::default(), &mut first)
+            .await
+            .expect("first hello reads");
+        assert!(first_hello.error.is_none());
+
+        let rejected_handler = spawn_connection_handler(
+            Arc::clone(&listener),
+            Arc::clone(&service),
+            actor.handle(),
+            submissions.clone(),
+            Arc::clone(&client_connections),
+        );
+        let mut rejected = connect_async(&endpoint)
+            .await
+            .expect("second same-client connection opens");
+        write_client_hello_async(
+            FrameCodec::default(),
+            &mut rejected,
+            &supported_hello_for(vec![7; 16], [4; 16]),
+        )
+        .await
+        .expect("second hello writes");
+        let rejected_hello = read_server_hello_async(FrameCodec::default(), &mut rejected)
+            .await
+            .expect("quota rejection reads");
+        let error = rejected_hello.error.expect("quota error is returned");
+        assert_eq!(error.code, common::ErrorCode::ResourceExhausted as i32);
+        assert_eq!(error.message, "client connection quota is exhausted");
+        assert!(
+            rejected_handler
+                .await
+                .expect("rejected handler joins")
+                .is_ok()
+        );
+
+        let other_handler = spawn_connection_handler(
+            Arc::clone(&listener),
+            Arc::clone(&service),
+            actor.handle(),
+            submissions.clone(),
+            Arc::clone(&client_connections),
+        );
+        let mut other = connect_async(&endpoint)
+            .await
+            .expect("another client connects");
+        write_client_hello_async(
+            FrameCodec::default(),
+            &mut other,
+            &supported_hello_for(vec![7; 16], [5; 16]),
+        )
+        .await
+        .expect("other hello writes");
+        let other_hello = read_server_hello_async(FrameCodec::default(), &mut other)
+            .await
+            .expect("other hello reads");
+        assert!(other_hello.error.is_none());
+
+        drop(first);
+        drop(other);
+        assert!(first_handler.await.expect("first handler joins").is_err());
+        assert!(other_handler.await.expect("other handler joins").is_err());
+
+        let reconnected_handler = spawn_connection_handler(
+            listener,
+            service,
+            actor.handle(),
+            submissions,
+            Arc::clone(&client_connections),
+        );
+        let mut reconnected = connect_async(&endpoint)
+            .await
+            .expect("released client reconnects");
+        write_client_hello_async(
+            FrameCodec::default(),
+            &mut reconnected,
+            &supported_hello_for(vec![7; 16], [4; 16]),
+        )
+        .await
+        .expect("reconnected hello writes");
+        let reconnected_hello = read_server_hello_async(FrameCodec::default(), &mut reconnected)
+            .await
+            .expect("reconnected hello reads");
+        assert!(reconnected_hello.error.is_none());
+        drop(reconnected);
+        assert!(
+            reconnected_handler
+                .await
+                .expect("reconnected handler joins")
+                .is_err()
+        );
+        assert!(
+            client_connections
+                .active
+                .lock()
+                .expect("admission state is available")
+                .is_empty()
+        );
+        actor.join().expect("actor joins");
+    }
+
+    fn spawn_connection_handler(
+        listener: Arc<AsyncLocalListener>,
+        service: Arc<ControlService>,
+        journal: JournalActorHandle,
+        submissions: tokio::sync::mpsc::Sender<OperationAdmission>,
+        client_connections: Arc<ClientConnectionAdmissions>,
+    ) -> tokio::task::JoinHandle<Result<(), ServiceError>> {
+        tokio::spawn(async move {
+            let mut stream = listener
+                .accept_timeout(Duration::from_secs(1))
+                .await
+                .expect("connection accepts");
+            handle_connection_async(
+                service,
+                journal,
+                submissions,
+                client_connections,
+                FrameCodec::default(),
+                &mut stream,
+            )
+            .await
+        })
+    }
+
+    #[test]
+    fn client_connection_quota_maps_to_stable_resource_exhaustion() {
+        let error = client_connection_limit(2);
+        let key = rootlight_error::DetailKey::parse("client_connection_limit")
+            .expect("detail key is valid");
+
+        assert_eq!(error.code(), ErrorCode::ResourceExhausted);
+        assert!(error.retryable());
+        assert_eq!(error.details().get(&key), Some(&PublicValue::Unsigned(2)));
+    }
+
+    #[test]
     fn daemon_limits_reject_invalid_client_operation_bounds() {
+        assert!(matches!(
+            DaemonLimits::new_with_client_limits(
+                4,
+                0,
+                4,
+                4,
+                4,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            Err(ServiceError::InvalidLimits)
+        ));
+        assert!(matches!(
+            DaemonLimits::new_with_client_limits(
+                4,
+                5,
+                4,
+                4,
+                4,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            Err(ServiceError::InvalidLimits)
+        ));
         assert!(matches!(
             DaemonLimits::new_with_client_operation_limit(
                 4,

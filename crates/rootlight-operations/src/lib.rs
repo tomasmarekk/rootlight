@@ -48,7 +48,7 @@ const OPERATION_SCHEMA_MIGRATION_CHECKSUM: [u8; 32] = [
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const SYSTEM_CLIENT_INSTANCE_ID: [u8; 16] = [0; 16];
 
-/// Checked identity for one authenticated client process instance.
+/// Checked client-declared identity carried over an OS-authorized local connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ClientInstanceId([u8; 16]);
 
@@ -56,7 +56,7 @@ impl ClientInstanceId {
     /// Reserved identity used only for internal legacy and standalone work.
     pub const SYSTEM: Self = Self(SYSTEM_CLIENT_INSTANCE_ID);
 
-    /// Creates an authenticated client identity.
+    /// Creates a non-reserved client-declared identity.
     ///
     /// # Errors
     ///
@@ -2519,7 +2519,7 @@ pub enum OperationError {
     /// Immutable metadata differed for an existing operation ID.
     #[error("operation submission conflicts with existing metadata")]
     SubmissionConflict,
-    /// The authenticated client identity used the reserved internal value.
+    /// The client-declared identity used the reserved internal value.
     #[error("operation client identity is invalid")]
     InvalidClientInstanceId,
     /// Submission ownership, detached policy, or timestamps were inconsistent.

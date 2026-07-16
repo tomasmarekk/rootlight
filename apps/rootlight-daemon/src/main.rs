@@ -8,8 +8,8 @@
 use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
 
 use rootlight_daemon_core::{
-    ControlService, DaemonLifecycle, DaemonLimits, DaemonOrchestrator, DaemonState, JournalActor,
-    handle_connection_async,
+    ClientConnectionAdmissions, ControlService, DaemonLifecycle, DaemonLimits, DaemonOrchestrator,
+    DaemonState, JournalActor, handle_connection_async,
 };
 use rootlight_ipc::{AsyncLocalListener, FrameCodec};
 use rootlight_operations::{CatalogWriterLock, OperationJournal};
@@ -93,6 +93,7 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let connection_slots = Arc::new(tokio::sync::Semaphore::new(
         usize::try_from(limits.connection_limit).map_err(|_| DaemonError::InvalidLimits)?,
     ));
+    let client_connections = Arc::new(ClientConnectionAdmissions::new(limits));
     let mut connections = tokio::task::JoinSet::new();
     let (submission_tx, mut submission_rx) = tokio::sync::mpsc::channel(
         usize::try_from(limits.operation_queue_limit).map_err(|_| DaemonError::InvalidLimits)?,
@@ -144,6 +145,7 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                 let service = Arc::clone(&service);
                 let actor = actor_handle.clone();
                 let submissions = submission_tx.clone();
+                let client_connections = Arc::clone(&client_connections);
                 let state = Arc::clone(&state);
                 connections.spawn(async move {
                     let _permit = permit;
@@ -152,6 +154,7 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                         service,
                         actor,
                         submissions,
+                        client_connections,
                         FrameCodec::default(),
                         &mut stream,
                     )
