@@ -22,7 +22,7 @@ allowed_build_scripts = [
   "io-extras@0.18.4",
   "io-lifetimes@2.0.4",
   "libc@0.2.186",
-  "libsqlite3-sys@0.38.1",
+  "libsqlite3-sys@0.37.0",
   "num-traits@0.2.19",
   "parking_lot_core@0.9.12",
   "prettyplease@0.2.37",
@@ -34,6 +34,7 @@ allowed_build_scripts = [
   "serde@1.0.228",
   "serde_core@1.0.228",
   "serde_json@1.0.150",
+  "sqlite-wasm-rs@0.5.5",
   "thiserror@2.0.18",
   "unicode-general-category@1.1.0",
   "wasm-bindgen@0.2.126",
@@ -69,7 +70,8 @@ allowed_proc_macros = [
 
 # Cargo's `links` metadata is used as the conservative native boundary signal.
 allowed_native_links = [
-  "libsqlite3-sys@0.38.1:sqlite3",
+  "libsqlite3-sys@0.37.0:sqlite3",
   "prettyplease@0.2.37:prettyplease02",
+  "sqlite-wasm-rs@0.5.5:wsqlite3",
   "wasm-bindgen-shared@0.2.126:wasm_bindgen",
 ]
