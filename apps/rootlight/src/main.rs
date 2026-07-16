@@ -133,12 +133,6 @@ fn execute_client(
                 )?,
             ))
         }
-        ("operation-renew-lease", [operation, lease_expires_unix_ms]) => Ok(
-            CommandResult::OperationStatus(client.operation_renew_lease(
-                parse_operation(operation)?,
-                parse_timestamp_ms(lease_expires_unix_ms)?,
-            )?),
-        ),
         ("operation-status", [operation]) => Ok(CommandResult::OperationStatus(
             client.operation_status(parse_operation(operation)?)?,
         )),
@@ -495,7 +489,7 @@ impl ExitFamily {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: rootlight [--standalone] health|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-renew-lease <id> <lease-unix-ms>|operation-status <id>|operation-cancel <id>"
+        "usage: rootlight [--standalone] health|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
     )]
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]

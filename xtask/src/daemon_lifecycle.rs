@@ -8,9 +8,10 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use rootlight_client::{Client, ConnectPolicy};
 use rootlight_ids::OperationId;
 use rootlight_ipc::connect;
 use rootlight_runtime::{RuntimeError, RuntimePaths};
@@ -94,6 +95,80 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     assert_operation_state(&deadline_terminal, "interrupted")?;
     assert_recovery_class(&deadline_terminal, "deadline_elapsed")?;
 
+    let stable_retry_operation = OperationId::from_bytes([47; 16]).to_string();
+    let stable_deadline = unix_time_ms()?
+        .checked_add(4_000)
+        .ok_or(LifecycleError::Clock)?
+        .to_string();
+    let stable_submit = run_json(
+        &rootlight,
+        &[
+            "operation-submit",
+            &stable_retry_operation,
+            "--deadline-unix-ms",
+            &stable_deadline,
+        ],
+        &environment,
+        COMMAND_TIMEOUT,
+    )?;
+    let stable_retry = run_json(
+        &rootlight,
+        &[
+            "operation-submit",
+            &stable_retry_operation,
+            "--deadline-unix-ms",
+            &stable_deadline,
+        ],
+        &environment,
+        COMMAND_TIMEOUT,
+    )?;
+    assert_same_operation(&stable_submit, &stable_retry)?;
+    assert_timing_fields(&stable_retry, Some(stable_deadline.as_str()), None)?;
+    wait_for_terminal(&rootlight, &stable_retry_operation, &environment)?;
+
+    let lease_operation = OperationId::from_bytes([48; 16]);
+    let initial_lease = unix_time_ms()?
+        .checked_add(60_000)
+        .ok_or(LifecycleError::Clock)?;
+    let renewed_lease = initial_lease
+        .checked_add(60_000)
+        .ok_or(LifecycleError::Clock)?;
+    let lease_client = Client::connect_or_start(&paths, [48; 16], ConnectPolicy::ExistingOnly)
+        .map_err(LifecycleError::Client)?;
+    lease_client
+        .operation_submit_attached(lease_operation, None, initial_lease)
+        .map_err(LifecycleError::Client)?;
+    let renewed = lease_client
+        .operation_renew_lease(lease_operation, renewed_lease)
+        .map_err(LifecycleError::Client)?;
+    if renewed.lease_expires_unix_ms != Some(renewed_lease) {
+        return Err(LifecycleError::UnexpectedEnvelope);
+    }
+    let lease_operation = lease_operation.to_string();
+    let lease_terminal = wait_for_terminal(&rootlight, &lease_operation, &environment)?;
+    assert_operation_state(&lease_terminal, "succeeded")?;
+
+    let expired_lease_operation = OperationId::from_bytes([49; 16]).to_string();
+    let expired_lease = unix_time_ms()?
+        .checked_add(1_500)
+        .ok_or(LifecycleError::Clock)?
+        .to_string();
+    let expired_submit = run_json(
+        &rootlight,
+        &[
+            "operation-submit",
+            &expired_lease_operation,
+            "--lease-expires-unix-ms",
+            &expired_lease,
+        ],
+        &environment,
+        COMMAND_TIMEOUT,
+    )?;
+    assert_success_type(&expired_submit, "operation_submit")?;
+    let expired_terminal = wait_for_terminal(&rootlight, &expired_lease_operation, &environment)?;
+    assert_operation_state(&expired_terminal, "interrupted")?;
+    assert_recovery_class(&expired_terminal, "lease_expired")?;
+
     let writer_conflict = run_json_allow_failure(
         &rootlight,
         &["--standalone", "health"],
@@ -140,7 +215,7 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     wait_until_absent(&daemon_paths)?;
 
     println!(
-        "daemon lifecycle check passed: startup, 100 concurrent clients, health, retry-safe submission, cancellation, monotonic deadlines, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
+        "daemon lifecycle check passed: startup, 100 concurrent clients, health, retry-safe submission, cancellation, stable deadlines, attached lease renewal and expiry, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
     );
     Ok(())
 }
@@ -476,7 +551,10 @@ fn run_json(
     if !output.status.success() {
         return Err(LifecycleError::CommandFailed {
             status: output.status,
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stderr: format!(
+                "arguments={arguments:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
         });
     }
     parse_single_json(&output.stdout)
@@ -660,6 +738,13 @@ fn read_child_stderr(child: &mut Child) -> Result<String, LifecycleError> {
         .map(|value| String::from_utf8_lossy(&value.unwrap_or_default()).into_owned())
 }
 
+fn unix_time_ms() -> Result<u64, LifecycleError> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| LifecycleError::Clock)?;
+    u64::try_from(elapsed.as_millis()).map_err(|_| LifecycleError::Clock)
+}
+
 fn parse_single_json(bytes: &[u8]) -> Result<Value, LifecycleError> {
     let text = std::str::from_utf8(bytes).map_err(LifecycleError::OutputUtf8)?;
     let mut values = serde_json::Deserializer::from_str(text).into_iter::<Value>();
@@ -725,11 +810,34 @@ fn assert_recovery_class(value: &Value, expected: &str) -> Result<(), LifecycleE
     }
 }
 
+fn assert_timing_fields(
+    value: &Value,
+    deadline_unix_ms: Option<&str>,
+    lease_expires_unix_ms: Option<&str>,
+) -> Result<(), LifecycleError> {
+    let observed_deadline = value["result"]["data"]["deadline_unix_ms"]
+        .as_u64()
+        .map(|value| value.to_string());
+    let observed_lease = value["result"]["data"]["lease_expires_unix_ms"]
+        .as_u64()
+        .map(|value| value.to_string());
+    if observed_deadline.as_deref() == deadline_unix_ms
+        && observed_lease.as_deref() == lease_expires_unix_ms
+    {
+        Ok(())
+    } else {
+        Err(LifecycleError::UnexpectedEnvelope)
+    }
+}
+
 fn assert_same_operation(left: &Value, right: &Value) -> Result<(), LifecycleError> {
     if left["result"]["data"]["operation"] == right["result"]["data"]["operation"]
         && left["result"]["data"]["kind"] == right["result"]["data"]["kind"]
         && left["result"]["data"]["plan_hash"] == right["result"]["data"]["plan_hash"]
         && left["result"]["data"]["detached"] == right["result"]["data"]["detached"]
+        && left["result"]["data"]["deadline_unix_ms"] == right["result"]["data"]["deadline_unix_ms"]
+        && left["result"]["data"]["lease_expires_unix_ms"]
+            == right["result"]["data"]["lease_expires_unix_ms"]
     {
         Ok(())
     } else {
@@ -776,6 +884,8 @@ pub(crate) enum LifecycleError {
     Runtime(#[source] RuntimeError),
     #[error("daemon lifecycle IPC setup failed")]
     Ipc(#[source] rootlight_ipc::IpcError),
+    #[error("daemon lifecycle client failed")]
+    Client(#[source] rootlight_client::ClientError),
     #[error("failed to spawn supervised daemon")]
     SpawnDaemon(#[source] io::Error),
     #[error("failed to spawn lifecycle command")]

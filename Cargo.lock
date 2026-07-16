@@ -2382,6 +2382,7 @@ dependencies = [
  "prost-build",
  "prost-types",
  "protoc-bin-vendored",
+ "rootlight-client",
  "rootlight-config",
  "rootlight-error",
  "rootlight-ids",

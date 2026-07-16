@@ -14,6 +14,7 @@ prost.workspace = true
 prost-build.workspace = true
 prost-types.workspace = true
 protoc-bin-vendored.workspace = true
+rootlight-client = { path = "../crates/rootlight-client" }
 rootlight-config = { path = "../crates/rootlight-config", features = ["schema"] }
 rootlight-error = { path = "../crates/rootlight-error", features = ["schema"] }
 rootlight-ids = { path = "../crates/rootlight-ids", features = ["schema"] }
