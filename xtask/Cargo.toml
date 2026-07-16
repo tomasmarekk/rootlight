@@ -17,8 +17,10 @@ protoc-bin-vendored.workspace = true
 rootlight-config = { path = "../crates/rootlight-config", features = ["schema"] }
 rootlight-error = { path = "../crates/rootlight-error", features = ["schema"] }
 rootlight-ids = { path = "../crates/rootlight-ids", features = ["schema"] }
+rootlight-ipc = { path = "../crates/rootlight-ipc" }
 rootlight-ir = { path = "../crates/rootlight-ir", features = ["schema"] }
 rootlight-mcp-contract = { path = "../crates/rootlight-mcp-contract" }
+rootlight-runtime = { path = "../crates/rootlight-runtime" }
 rootlight-protocol = { path = "../crates/rootlight-protocol" }
 schemars.workspace = true
 serde.workspace = true

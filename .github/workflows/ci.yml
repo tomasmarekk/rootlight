@@ -50,6 +50,10 @@ jobs:
           cargo run --locked --quiet --package xtask -- policy-check
           cargo run --locked --quiet --package xtask -- id-vectors > target/id-vectors.actual.json
           cmp tests/fixtures/id-vectors.json target/id-vectors.actual.json
+      - name: Daemon lifecycle
+        run: |
+          cargo build --locked --package rootlight --package rootlight-daemon --package xtask
+          cargo run --locked --quiet --package xtask -- daemon-lifecycle-check --bin-dir target/debug
       - name: Clean generated tree
         run: git diff --exit-code
 
@@ -125,6 +129,11 @@ jobs:
           cargo run --locked --quiet --package xtask -- compatibility-check
           cargo run --locked --quiet --package xtask -- policy-check
           cargo run --locked --quiet --package xtask -- id-vectors > target/id-vectors.actual.json
+      - name: Daemon lifecycle
+        shell: bash
+        run: |
+          cargo build --locked --package rootlight --package rootlight-daemon --package xtask
+          cargo run --locked --quiet --package xtask -- daemon-lifecycle-check --bin-dir target/debug
       - name: Compare identifier vectors
         shell: pwsh
         run: |
@@ -206,7 +215,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require every P0 gate
+      - name: Require every foundation and daemon gate
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
@@ -224,5 +233,5 @@ jobs:
           if failures:
               print(f"required CI jobs did not succeed: {failures}", file=sys.stderr)
               raise SystemExit(1)
-          print("all required P0 CI jobs succeeded")
+          print("all required foundation and daemon CI jobs succeeded")
           PY

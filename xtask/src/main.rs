@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod architecture;
+mod daemon_lifecycle;
 mod ids;
 mod policy;
 mod protobuf_compatibility;
@@ -36,6 +37,10 @@ fn run() -> Result<(), XtaskError> {
             schemas::generate(mode)?;
         }
         Some("compatibility-check") | Some("compatibility") => schemas::check_compatibility()?,
+        Some("daemon-lifecycle-check") => {
+            let bin_dir = parse_required_bin_dir(&mut args)?;
+            daemon_lifecycle::check(&bin_dir)?;
+        }
         Some("policy-check") | Some("policy") => policy::check()?,
         Some("unsafe-check") => {
             let fixture_root = parse_required_fixture_root(&mut args)?;
@@ -82,10 +87,20 @@ fn parse_required_fixture_root(
     parse_fixture_root(args)?.ok_or(XtaskError::MissingFixtureRoot)
 }
 
+fn parse_required_bin_dir(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<std::path::PathBuf, XtaskError> {
+    match (args.next(), args.next()) {
+        (Some(flag), Some(path)) if flag == "--bin-dir" => Ok(std::path::PathBuf::from(path)),
+        (Some(argument), _) => Err(XtaskError::UnexpectedArgument(argument)),
+        (None, _) => Err(XtaskError::MissingBinDir),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|compatibility-check|id-vectors|generate [--check]|policy-check|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|compatibility-check|daemon-lifecycle-check --bin-dir PATH|id-vectors|generate [--check]|policy-check|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -94,8 +109,12 @@ enum XtaskError {
     UnexpectedArgument(String),
     #[error("--fixture-root requires a path")]
     MissingFixtureRoot,
+    #[error("--bin-dir requires a path")]
+    MissingBinDir,
     #[error(transparent)]
     Architecture(#[from] architecture::ArchitectureError),
+    #[error(transparent)]
+    DaemonLifecycle(#[from] daemon_lifecycle::LifecycleError),
     #[error(transparent)]
     IdVectors(#[from] ids::IdVectorError),
     #[error(transparent)]
