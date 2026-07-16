@@ -42,6 +42,7 @@ allow-workspace = true
 skip = [
   { crate = "foldhash@0.1.5", reason = "tooling-only duplicate via prost-build 0.14.4; owner @tomasmarekk; review by 2026-10-15" },
   { crate = "hashbrown@0.15.5", reason = "tooling-only duplicate via petgraph 0.8.3; owner @tomasmarekk; review by 2026-10-15" },
+  { crate = "hashbrown@0.16.1", reason = "wasm-only rusqlite VFS dependency retained by the cross-target lockfile; owner @tomasmarekk; review by 2026-10-15" },
   { crate = "windows-sys@0.52.0", reason = "local IPC Windows dependency; owner @tomasmarekk; review by 2026-10-15" },
   { crate = "windows-sys@0.59.0", reason = "capability VFS Windows dependency; owner @tomasmarekk; review by 2026-10-15" },
 ]
