@@ -698,10 +698,15 @@ mod tests {
     use rootlight_ids::{GenerationId, derive_repository};
     use rootlight_ir::SourceSpan;
     use std::fs;
-    use tempfile::tempdir;
+    use tempfile::tempdir_in;
+
+    fn local_tempdir() -> tempfile::TempDir {
+        let current = std::env::current_dir().expect("current directory is available");
+        tempdir_in(current).expect("local temporary directory is available")
+    }
 
     fn fixture() -> (tempfile::TempDir, RepositoryRoot) {
-        let temporary = tempdir().expect("temporary directory is available");
+        let temporary = local_tempdir();
         let repository = derive_repository(b"vfs-test").id();
         let root = RepositoryRoot::open(repository, temporary.path())
             .expect("temporary directory is a valid repository root");
@@ -758,11 +763,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn repository_roots_reject_symbolic_link_components() {
+        use std::os::unix::fs::symlink;
+
+        let base = local_tempdir();
+        let real = base.path().join("real");
+        fs::create_dir(&real).expect("real repository directory is created");
+        symlink(&real, base.path().join("link")).expect("root link is created");
+        let repository = derive_repository(b"linked-root").id();
+
+        assert!(RepositoryRoot::open(repository, &base.path().join("link")).is_err());
+
+        let nested = real.join("repository");
+        fs::create_dir(&nested).expect("nested repository directory is created");
+        assert!(RepositoryRoot::open(repository, &base.path().join("link/repository")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn snapshots_do_not_follow_symbolic_links() {
         use std::os::unix::fs::symlink;
 
         let (temporary, root) = fixture();
-        let outside = tempdir().expect("outside directory is available");
+        let outside = local_tempdir();
         fs::write(outside.path().join("secret"), b"secret").expect("outside write succeeds");
         symlink(outside.path().join("secret"), temporary.path().join("link"))
             .expect("symlink creation succeeds");

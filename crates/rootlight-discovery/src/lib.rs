@@ -769,7 +769,12 @@ mod tests {
     use rootlight_config::{ConfigLayer, ConfigSource};
     use rootlight_ids::derive_repository;
     use std::fs;
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir_in};
+
+    fn local_tempdir() -> TempDir {
+        let current = std::env::current_dir().expect("current directory is available");
+        tempdir_in(current).expect("local temporary directory is available")
+    }
 
     fn config() -> ConfigSnapshot {
         ConfigSnapshot::resolve(&[ConfigLayer {
@@ -785,7 +790,7 @@ mod tests {
 
     #[test]
     fn repeated_discovery_emits_byte_identical_manifest() {
-        let temporary = tempdir().expect("temporary directory is available");
+        let temporary = local_tempdir();
         fs::create_dir_all(temporary.path().join("src")).expect("fixture directory is created");
         fs::write(temporary.path().join("src/lib.rs"), "pub fn sample() {}")
             .expect("fixture source is written");
@@ -856,7 +861,7 @@ mod tests {
     proptest! {
         #[test]
         fn canonical_manifest_round_trips_for_safe_names(names in prop::collection::btree_set("[a-z]{1,12}\\.rs", 1..30)) {
-            let temporary = tempdir().expect("temporary directory is available");
+            let temporary = local_tempdir();
             for name in &names {
                 fs::write(temporary.path().join(name), "pub fn item() {}")
                     .expect("fixture source is written");
