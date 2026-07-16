@@ -271,6 +271,10 @@ enum JournalCommand {
         submission: OperationSubmission,
         reply: tokio::sync::oneshot::Sender<Result<SubmissionOutcome, OperationError>>,
     },
+    RetryStatus {
+        submission: OperationSubmission,
+        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
+    },
     CancellationToken {
         operation: OperationId,
         reply: tokio::sync::oneshot::Sender<
@@ -357,6 +361,26 @@ impl JournalActorHandle {
         self.try_send(
             JournalLane::Normal,
             JournalCommand::Submit { submission, reply },
+        )?;
+        receiver
+            .await
+            .map_err(|_| ServiceError::ChannelClosed)?
+            .map_err(ServiceError::Operations)
+    }
+
+    /// Returns existing retry-compatible work on the high-priority lane.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, conflict, or missing-record failure.
+    pub async fn retry_status(
+        &self,
+        submission: OperationSubmission,
+    ) -> Result<OperationRecord, ServiceError> {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Control,
+            JournalCommand::RetryStatus { submission, reply },
         )?;
         receiver
             .await
@@ -699,6 +723,9 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
         }
         JournalCommand::Submit { submission, reply } => {
             let _ = reply.send(journal.submit(submission));
+        }
+        JournalCommand::RetryStatus { submission, reply } => {
+            let _ = reply.send(journal.retry_status(submission));
         }
         JournalCommand::CancellationToken { operation, reply } => {
             let _ = reply.send(journal.cancellation_token(operation));
@@ -1189,8 +1216,22 @@ impl DaemonOrchestrator {
         if !self.state.accepting_operations.load(Ordering::Acquire) {
             return Err(ServiceError::NotAccepting);
         }
-        let mut permit =
-            SchedulerPermit::reserve(Arc::clone(&self.state), self.limits.operation_queue_limit)?;
+        let mut permit = match SchedulerPermit::reserve(
+            Arc::clone(&self.state),
+            self.limits.operation_queue_limit,
+        ) {
+            Ok(permit) => permit,
+            Err(ServiceError::QueueFull) => {
+                return match self.journal.retry_status(submission).await {
+                    Ok(operation) => Ok(operation),
+                    Err(ServiceError::Operations(OperationError::NotFound)) => {
+                        Err(ServiceError::QueueFull)
+                    }
+                    Err(error) => Err(error),
+                };
+            }
+            Err(error) => return Err(error),
+        };
         let outcome = self.journal.submit(submission).await?;
         if !outcome.inserted {
             return Ok(outcome.operation);
@@ -1607,26 +1648,12 @@ async fn dispatch_async(
                         Ok(()) => {}
                         Err(tokio::sync::mpsc::error::TrySendError::Full(admission)) => {
                             let submission = admission.submission;
-                            let existing = journal.submit(submission).await;
-                            return match existing {
-                                Ok(outcome) if !outcome.inserted => {
-                                    Ok(ControlResponse::OperationSubmit(outcome.operation))
-                                }
-                                Ok(outcome) => {
-                                    journal
-                                        .finish_operation(
-                                            outcome.operation.operation,
-                                            Some(rootlight_operations::CancellationReason::ResourceLimit),
-                                        )
-                                        .await?;
+                            return match journal.retry_status(submission).await {
+                                Ok(operation) => Ok(ControlResponse::OperationSubmit(operation)),
+                                Err(ServiceError::Operations(OperationError::NotFound)) => {
                                     Err(ServiceError::QueueFull)
                                 }
-                                Err(ServiceError::Operations(
-                                    OperationError::SubmissionConflict,
-                                )) => Err(ServiceError::Operations(
-                                    OperationError::SubmissionConflict,
-                                )),
-                                Err(_) => Err(ServiceError::QueueFull),
+                                Err(error) => Err(error),
                             };
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -2512,6 +2539,67 @@ mod tests {
         drop(running);
         assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
         assert_eq!(state.running_operations.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn admission_saturation_preserves_retry_and_conflict_semantics() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let limits = DaemonLimits::new(
+            4,
+            4,
+            1,
+            1,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .expect("limits are valid");
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let mut orchestrator = DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), limits)
+            .expect("orchestrator starts");
+        let first = OperationSubmission::control_probe(OperationId::from_bytes([17; 16]));
+        let running = orchestrator
+            .schedule(first)
+            .await
+            .expect("first operation schedules");
+        assert_eq!(running.state, OperationState::Running);
+
+        let retried = orchestrator
+            .schedule(first)
+            .await
+            .expect("identical retry bypasses saturated admission");
+        assert_eq!(retried, running);
+
+        let conflict = OperationSubmission {
+            plan_hash: PlanHash::from_bytes([9; 32]),
+            ..first
+        };
+        assert!(matches!(
+            orchestrator.schedule(conflict).await,
+            Err(ServiceError::Operations(OperationError::SubmissionConflict))
+        ));
+        assert!(matches!(
+            orchestrator
+                .schedule(OperationSubmission::control_probe(OperationId::from_bytes(
+                    [18; 16]
+                )))
+                .await,
+            Err(ServiceError::QueueFull)
+        ));
+
+        let completion = orchestrator
+            .complete_next()
+            .await
+            .expect("completion persists")
+            .expect("completion exists");
+        assert_eq!(completion.state, OperationState::Succeeded);
+        orchestrator
+            .shutdown()
+            .await
+            .expect("orchestrator shuts down");
+        actor.join().expect("actor joins");
     }
 
     #[tokio::test]

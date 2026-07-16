@@ -485,6 +485,27 @@ impl OperationJournal {
         self.submit_at(submission, unix_time_ms()?, Instant::now())
     }
 
+    /// Returns an existing retry-compatible record without inserting new work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::SubmissionConflict`] when immutable metadata differs,
+    /// or [`OperationError::NotFound`] when capacity is still required for a new record.
+    pub fn retry_status(
+        &self,
+        submission: OperationSubmission,
+    ) -> Result<OperationRecord, OperationError> {
+        validate_submission(submission)?;
+        let connection = self.lock_connection()?;
+        let existing =
+            load_record(&connection, submission.operation)?.ok_or(OperationError::NotFound)?;
+        if submission_matches(&existing, submission) {
+            Ok(existing)
+        } else {
+            Err(OperationError::SubmissionConflict)
+        }
+    }
+
     fn submit_at(
         &self,
         submission: OperationSubmission,
@@ -2606,6 +2627,20 @@ mod tests {
         assert!(matches!(
             journal.submit(conflict),
             Err(OperationError::SubmissionConflict)
+        ));
+        assert_eq!(
+            journal
+                .retry_status(retried)
+                .expect("existing retry loads without insertion"),
+            submitted.operation
+        );
+        assert!(matches!(
+            journal.retry_status(conflict),
+            Err(OperationError::SubmissionConflict)
+        ));
+        assert!(matches!(
+            journal.retry_status(OperationSubmission::control_probe(operation(29))),
+            Err(OperationError::NotFound)
         ));
     }
 
