@@ -1461,7 +1461,7 @@ fn migrate_schema(
     match observed {
         0 if !table_exists(&transaction, "operations")? => create_schema(&transaction)?,
         0 if is_prototype_schema(&transaction)? => migrate_prototype(&transaction)?,
-        1 if is_current_operations_schema(&transaction)? => create_catalog_metadata(&transaction)?,
+        1 if is_version_one_operations_schema(&transaction)? => migrate_version_one(&transaction)?,
         _ => return Err(OperationError::UnsupportedLegacySchema),
     }
     record_catalog_metadata(&transaction)?;
@@ -1483,6 +1483,42 @@ const MIGRATIONS_SCHEMA_SQL: &str = "CREATE TABLE migrations (
                 migration_id INTEGER PRIMARY KEY NOT NULL,
                 checksum BLOB NOT NULL CHECK(length(checksum) = 32)
             ) STRICT";
+const VERSION_ONE_OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
+                operation BLOB PRIMARY KEY NOT NULL CHECK(length(operation) = 16),
+                kind TEXT NOT NULL CHECK(kind IN ('control_probe')),
+                plan_hash BLOB NOT NULL CHECK(length(plan_hash) = 32),
+                owner BLOB NOT NULL CHECK(length(owner) = 16),
+                detached INTEGER NOT NULL CHECK(detached IN (0, 1)),
+                deadline_unix_ms INTEGER CHECK(deadline_unix_ms > 0),
+                lease_expires_unix_ms INTEGER CHECK(lease_expires_unix_ms > 0),
+                state TEXT NOT NULL CHECK(state IN (
+                    'queued', 'running', 'cancelling', 'succeeded', 'failed',
+                    'cancelled', 'interrupted'
+                )),
+                stage TEXT NOT NULL CHECK(stage IN ('accepted', 'executing', 'cleanup')),
+                cancellation_requested INTEGER NOT NULL CHECK(cancellation_requested IN (0, 1)),
+                cancellation_reason TEXT CHECK(cancellation_reason IN (
+                    'client_request', 'parent_cancelled', 'deadline_exceeded',
+                    'shutdown', 'resource_limit'
+                )),
+                recovery_class TEXT NOT NULL CHECK(recovery_class IN (
+                    'not_applicable', 'interrupted_by_restart', 'deadline_elapsed', 'lease_expired'
+                )),
+                revision INTEGER NOT NULL CHECK(revision >= 1),
+                completed INTEGER NOT NULL CHECK(completed >= 0 AND completed <= 4294967295),
+                total INTEGER NOT NULL CHECK(total >= 0 AND total <= 4294967295),
+                error_json TEXT CHECK(length(error_json) <= 16384),
+                sequence INTEGER NOT NULL UNIQUE CHECK(sequence >= 1),
+                CHECK(total = 0 OR completed <= total),
+                CHECK((detached = 1 AND lease_expires_unix_ms IS NULL)
+                   OR (detached = 0 AND lease_expires_unix_ms IS NOT NULL)),
+                CHECK((cancellation_requested = 0 AND cancellation_reason IS NULL)
+                   OR (cancellation_requested = 1 AND cancellation_reason IS NOT NULL)),
+                CHECK((state = 'failed' AND error_json IS NOT NULL)
+                   OR (state != 'failed' AND error_json IS NULL)),
+                CHECK((state = 'interrupted' AND recovery_class != 'not_applicable')
+                   OR (state != 'interrupted' AND recovery_class = 'not_applicable'))
+            )";
 const OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
                 operation BLOB PRIMARY KEY NOT NULL CHECK(length(operation) = 16),
                 kind TEXT NOT NULL CHECK(kind IN ('control_probe')),
@@ -1574,17 +1610,24 @@ fn migrate_prototype(transaction: &Transaction<'_>) -> Result<(), OperationError
         .map_err(map_sqlite_error)
 }
 
-fn create_catalog_metadata(connection: &Connection) -> Result<(), OperationError> {
-    connection
+fn migrate_version_one(transaction: &Transaction<'_>) -> Result<(), OperationError> {
+    transaction
+        .execute_batch("ALTER TABLE operations RENAME TO operations_v1;")
+        .map_err(map_sqlite_error)?;
+    create_schema(transaction)?;
+    transaction
         .execute_batch(
-            "CREATE TABLE application_meta (
-                key TEXT PRIMARY KEY NOT NULL,
-                value BLOB NOT NULL
-            ) STRICT;
-            CREATE TABLE migrations (
-                migration_id INTEGER PRIMARY KEY NOT NULL,
-                checksum BLOB NOT NULL CHECK(length(checksum) = 32)
-            ) STRICT;",
+            "INSERT INTO operations (
+                operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                lease_expires_unix_ms, state, stage, cancellation_requested,
+                cancellation_reason, recovery_class, revision, completed, total,
+                error_json, sequence
+             ) SELECT operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                      lease_expires_unix_ms, state, stage, cancellation_requested,
+                      cancellation_reason, recovery_class, revision, completed, total,
+                      error_json, sequence
+               FROM operations_v1;
+             DROP TABLE operations_v1;",
         )
         .map_err(map_sqlite_error)
 }
@@ -1808,7 +1851,7 @@ fn is_prototype_schema(connection: &Connection) -> Result<bool, OperationError> 
         ])
 }
 
-fn is_current_operations_schema(connection: &Connection) -> Result<bool, OperationError> {
+fn is_version_one_operations_schema(connection: &Connection) -> Result<bool, OperationError> {
     Ok(table_columns(connection)?
         == [
             "operation",
@@ -1828,7 +1871,10 @@ fn is_current_operations_schema(connection: &Connection) -> Result<bool, Operati
             "total",
             "error_json",
             "sequence",
-        ])
+        ]
+        && !table_is_strict(connection, "operations")?
+        && normalize_sql(&table_definition(connection, "operations")?)
+            == normalize_sql(VERSION_ONE_OPERATIONS_SCHEMA_SQL))
 }
 
 fn table_columns(connection: &Connection) -> Result<Vec<String>, OperationError> {
@@ -3044,6 +3090,73 @@ mod tests {
             journal.status(operation(20)).expect("active remains").state,
             OperationState::Queued
         );
+    }
+
+    #[test]
+    fn version_one_schema_rebuilds_as_strict_without_losing_rows() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let submitted = OperationSubmission::new(
+            operation(22),
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes([7; 32]),
+            ClientInstanceId::new([8; 16]).expect("client identity is valid"),
+            true,
+            Some(4_000_000_000_000),
+            None,
+        )
+        .expect("submission is valid");
+        {
+            let connection = Connection::open(&path).expect("database opens");
+            connection
+                .execute_batch(VERSION_ONE_OPERATIONS_SCHEMA_SQL)
+                .expect("version-one schema creates");
+            connection
+                .execute(
+                    "INSERT INTO operations (
+                        operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                        lease_expires_unix_ms, state, stage, cancellation_requested,
+                        cancellation_reason, recovery_class, revision, completed, total,
+                        error_json, sequence
+                     ) VALUES (?1, 'control_probe', ?2, ?3, 1, ?4, NULL, 'succeeded',
+                               'cleanup', 0, NULL, 'not_applicable', 4, 3, 3, NULL, 1)",
+                    params![
+                        submitted.operation.as_bytes().as_slice(),
+                        submitted.plan_hash.as_bytes().as_slice(),
+                        submitted.owner.as_bytes().as_slice(),
+                        u64_to_i64(submitted.deadline_unix_ms.expect("deadline exists"))
+                            .expect("deadline fits SQLite"),
+                    ],
+                )
+                .expect("version-one row inserts");
+            connection
+                .pragma_update(None, "user_version", 1)
+                .expect("version-one marker writes");
+        }
+
+        let migrated = OperationJournal::open(&path).expect("version-one schema migrates");
+        let record = migrated
+            .status(submitted.operation)
+            .expect("migrated row loads");
+        assert_eq!(record.kind, submitted.kind);
+        assert_eq!(record.plan_hash, submitted.plan_hash);
+        assert_eq!(record.owner, submitted.owner);
+        assert_eq!(record.deadline_unix_ms, submitted.deadline_unix_ms);
+        assert_eq!(record.state, OperationState::Succeeded);
+        assert_eq!(record.stage, OperationStage::Cleanup);
+        assert_eq!(record.revision, 4);
+        assert_eq!(
+            record.progress,
+            Progress::new(3, 3).expect("progress is valid")
+        );
+        assert!(
+            table_is_strict(
+                &migrated.lock_connection().expect("catalog lock is healthy"),
+                "operations",
+            )
+            .expect("strict schema flag reads")
+        );
+        migrated.quick_check().expect("migrated catalog validates");
     }
 
     #[test]
