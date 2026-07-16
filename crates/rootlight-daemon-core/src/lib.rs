@@ -291,7 +291,7 @@ enum JournalCommand {
         reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
     ExpireDue {
-        now_unix_ms: u64,
+        now: std::time::Instant,
         maximum: usize,
         reply: tokio::sync::oneshot::Sender<Result<u32, OperationError>>,
     },
@@ -449,12 +449,16 @@ impl JournalActorHandle {
     /// # Errors
     ///
     /// Returns a typed queue, actor, or journal failure.
-    pub async fn expire_due(&self, now_unix_ms: u64, maximum: usize) -> Result<u32, ServiceError> {
+    pub async fn expire_due(
+        &self,
+        now: std::time::Instant,
+        maximum: usize,
+    ) -> Result<u32, ServiceError> {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.try_send(
             JournalLane::Control,
             JournalCommand::ExpireDue {
-                now_unix_ms,
+                now,
                 maximum,
                 reply,
             },
@@ -700,10 +704,7 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
             let _ = reply.send(journal.cancellation_token(operation));
         }
         JournalCommand::StartOperation { operation, reply } => {
-            let result = journal
-                .transition(operation, OperationState::Running, None)
-                .and_then(|_| journal.update_stage(operation, OperationStage::Executing));
-            let _ = reply.send(result);
+            let _ = reply.send(journal.start_execution(operation));
         }
         JournalCommand::FinishOperation {
             operation,
@@ -775,11 +776,11 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
             let _ = reply.send(journal.interrupt_deadline(operation));
         }
         JournalCommand::ExpireDue {
-            now_unix_ms,
+            now,
             maximum,
             reply,
         } => {
-            let _ = reply.send(journal.expire_due(now_unix_ms, maximum));
+            let _ = reply.send(journal.expire_due(now, maximum));
         }
         JournalCommand::Interrupt { maximum, reply } => {
             let _ = reply.send(journal.interrupt_nonterminal(maximum));
@@ -1298,7 +1299,7 @@ impl DaemonOrchestrator {
     ///
     /// Returns a typed actor, clock, or journal failure.
     pub async fn maintain(&self) -> Result<u32, ServiceError> {
-        self.journal.expire_due(unix_time_ms_value()?, 64).await
+        self.journal.expire_due(std::time::Instant::now(), 64).await
     }
 
     /// Stops admission, interrupts remaining work, and checkpoints the journal.
@@ -1324,13 +1325,6 @@ impl DaemonOrchestrator {
         self.state.set_lifecycle(DaemonLifecycle::Stopped);
         Ok(())
     }
-}
-
-fn unix_time_ms_value() -> Result<u64, ServiceError> {
-    let duration = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| ServiceError::Clock)?;
-    u64::try_from(duration.as_millis()).map_err(|_| ServiceError::Clock)
 }
 
 /// Shared local daemon control service.
@@ -1612,16 +1606,27 @@ async fn dispatch_async(
                     match submissions.try_send(admission) {
                         Ok(()) => {}
                         Err(tokio::sync::mpsc::error::TrySendError::Full(admission)) => {
-                            let existing = journal
-                                .control(ControlRequest::OperationStatus(
-                                    admission.submission.operation,
-                                ))
-                                .await;
+                            let submission = admission.submission;
+                            let existing = journal.submit(submission).await;
                             return match existing {
-                                Ok(ControlResponse::OperationStatus(operation)) => {
-                                    Ok(ControlResponse::OperationSubmit(operation))
+                                Ok(outcome) if !outcome.inserted => {
+                                    Ok(ControlResponse::OperationSubmit(outcome.operation))
                                 }
-                                Ok(_) | Err(_) => Err(ServiceError::QueueFull),
+                                Ok(outcome) => {
+                                    journal
+                                        .finish_operation(
+                                            outcome.operation.operation,
+                                            Some(rootlight_operations::CancellationReason::ResourceLimit),
+                                        )
+                                        .await?;
+                                    Err(ServiceError::QueueFull)
+                                }
+                                Err(ServiceError::Operations(
+                                    OperationError::SubmissionConflict,
+                                )) => Err(ServiceError::Operations(
+                                    OperationError::SubmissionConflict,
+                                )),
+                                Err(_) => Err(ServiceError::QueueFull),
                             };
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {

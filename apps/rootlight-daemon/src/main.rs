@@ -106,7 +106,7 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
         tokio::select! {
             _ = &mut shutdown => break,
             _ = maintenance.tick() => {
-                if let Err(error) = actor_handle.expire_due(unix_time_ms()?, EXPIRY_BATCH).await {
+                if let Err(error) = actor_handle.expire_due(std::time::Instant::now(), EXPIRY_BATCH).await {
                     state.set_journal_healthy(false);
                     return Err(error.into());
                 }
@@ -249,13 +249,6 @@ async fn supervised_shutdown() {
     }
 }
 
-fn unix_time_ms() -> Result<u64, DaemonError> {
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| DaemonError::Clock)?;
-    u64::try_from(elapsed.as_millis()).map_err(|_| DaemonError::Clock)
-}
-
 fn cleanup_prior_instance(paths: &RuntimePaths) -> Result<(), DaemonError> {
     let record = match paths.discover() {
         Ok(record) => record,
@@ -316,8 +309,6 @@ enum DaemonError {
     InvalidLimits,
     #[error("daemon shutdown timed out")]
     ShutdownTimedOut,
-    #[error("daemon clock is invalid")]
-    Clock,
     #[error("daemon orchestration failed")]
     Service(#[from] rootlight_daemon_core::ServiceError),
     #[error("daemon runtime setup failed")]

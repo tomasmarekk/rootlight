@@ -13,7 +13,7 @@ use std::{
 
 use directories::ProjectDirs;
 use rootlight_ipc::Endpoint;
-use rootlight_protocol::CURRENT_PROTOCOL_MINOR;
+use rootlight_protocol::{CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR};
 use serde::{Deserialize, Serialize};
 
 /// Maximum serialized discovery record accepted from disk.
@@ -464,7 +464,7 @@ impl DiscoveryRecord {
         if self.schema_version != DISCOVERY_SCHEMA_VERSION
             || self.pid == 0
             || self.protocol_major != PROTOCOL_MAJOR
-            || self.protocol_minor != PROTOCOL_MINOR
+            || self.protocol_minor < MINIMUM_PROTOCOL_MINOR
         {
             return Err(RuntimeError::InvalidDiscovery);
         }
@@ -1065,6 +1065,27 @@ mod tests {
             symlink(target, paths.discovery_path()).expect("link creates");
             assert!(matches!(paths.discover(), Err(RuntimeError::Io(_))));
         }
+    }
+
+    #[test]
+    fn discovery_allows_negotiation_with_future_minor_and_rejects_obsolete_minor() {
+        let (_temporary, paths) = paths();
+        let nonce = [5; 16];
+        let endpoint = paths.endpoint(nonce).expect("endpoint derives");
+        let mut future = DiscoveryRecord::new(&paths, std::process::id(), &endpoint, nonce)
+            .expect("record validates");
+        future.protocol_minor = PROTOCOL_MINOR.saturating_add(1);
+        paths.publish(&future).expect("future minor publishes");
+        assert_eq!(
+            paths.discover().expect("future minor is negotiable"),
+            future
+        );
+
+        future.protocol_minor = MINIMUM_PROTOCOL_MINOR.saturating_sub(1);
+        assert!(matches!(
+            paths.publish(&future),
+            Err(RuntimeError::InvalidDiscovery)
+        ));
     }
 
     #[test]

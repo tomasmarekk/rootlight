@@ -8,7 +8,7 @@
 
 use std::{
     fmt,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
 
@@ -54,9 +54,31 @@ impl Cancellation {
         Self {
             inner: Arc::new(Inner {
                 reason: OnceLock::new(),
-                deadline,
+                deadline: Mutex::new(deadline),
             }),
         }
+    }
+
+    /// Advances the monotonic deadline for an active lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeadlineUpdateError`] when cancellation already won, the mutex
+    /// was poisoned, or the new deadline does not strictly advance the current one.
+    pub fn extend_deadline(&self, deadline: Instant) -> Result<(), DeadlineUpdateError> {
+        if self.inner.reason.get().is_some() {
+            return Err(DeadlineUpdateError::AlreadyCancelled);
+        }
+        let mut current = self
+            .inner
+            .deadline
+            .lock()
+            .map_err(|_| DeadlineUpdateError::MutexPoisoned)?;
+        if current.is_some_and(|existing| deadline <= existing) {
+            return Err(DeadlineUpdateError::NotAdvanced);
+        }
+        *current = Some(deadline);
+        Ok(())
     }
 
     /// Records cancellation when no earlier reason won.
@@ -80,7 +102,12 @@ impl Cancellation {
         if let Some(reason) = self.inner.reason.get() {
             return Some(*reason);
         }
-        if self.inner.deadline.is_some_and(|deadline| now >= deadline) {
+        let elapsed = self
+            .inner
+            .deadline
+            .lock()
+            .is_ok_and(|deadline| deadline.is_some_and(|deadline| now >= deadline));
+        if elapsed {
             let _ = self.inner.reason.set(CancellationReason::DeadlineExceeded);
         }
         self.inner.reason.get().copied()
@@ -116,10 +143,16 @@ impl Default for Cancellation {
 
 impl fmt::Debug for Cancellation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let has_deadline = self
+            .inner
+            .deadline
+            .lock()
+            .map(|deadline| deadline.is_some())
+            .unwrap_or(true);
         formatter
             .debug_struct("Cancellation")
             .field("reason", &self.inner.reason.get())
-            .field("has_deadline", &self.inner.deadline.is_some())
+            .field("has_deadline", &has_deadline)
             .finish()
     }
 }
@@ -127,7 +160,21 @@ impl fmt::Debug for Cancellation {
 #[derive(Debug)]
 struct Inner {
     reason: OnceLock<CancellationReason>,
-    deadline: Option<Instant>,
+    deadline: Mutex<Option<Instant>>,
+}
+
+/// Failure to extend an active monotonic deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DeadlineUpdateError {
+    /// The new deadline did not strictly advance the current deadline.
+    #[error("cancellation deadline did not advance")]
+    NotAdvanced,
+    /// Cancellation already established a terminal reason.
+    #[error("cancellation was already requested")]
+    AlreadyCancelled,
+    /// A prior panic poisoned the deadline mutex.
+    #[error("cancellation deadline mutex was poisoned")]
+    MutexPoisoned,
 }
 
 /// Terminal cooperative cancellation returned by checkpoints.
@@ -182,6 +229,28 @@ mod tests {
             Err(Cancelled {
                 reason: CancellationReason::DeadlineExceeded
             })
+        );
+    }
+
+    #[test]
+    fn lease_deadline_extension_is_monotonic() {
+        let start = Instant::now();
+        let initial = start + Duration::from_secs(5);
+        let extended = start + Duration::from_secs(10);
+        let cancellation = Cancellation::with_deadline(initial);
+
+        cancellation
+            .extend_deadline(extended)
+            .expect("lease deadline advances");
+        assert_eq!(
+            cancellation.extend_deadline(initial),
+            Err(DeadlineUpdateError::NotAdvanced)
+        );
+        assert_eq!(cancellation.check_at(initial), Ok(()));
+        assert!(cancellation.check_at(extended).is_err());
+        assert_eq!(
+            cancellation.extend_deadline(extended + Duration::from_secs(1)),
+            Err(DeadlineUpdateError::AlreadyCancelled)
         );
     }
 
