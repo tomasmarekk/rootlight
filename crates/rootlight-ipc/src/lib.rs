@@ -12,17 +12,31 @@ use std::{
     time::{Duration, Instant},
 };
 
+use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};
+#[cfg(windows)]
+use interprocess::local_socket::{GenericNamespaced, ToNsName as _};
 use interprocess::local_socket::{
-    GenericFilePath, Listener, ListenerOptions, Stream, ToFsName as _,
+    Listener, ListenerNonblockingMode, ListenerOptions, Stream,
+    tokio::{Listener as TokioListener, Stream as TokioStream},
     traits::{Listener as _, Stream as _},
 };
+#[cfg(unix)]
+use interprocess::{local_socket::ToFsName as _, os::unix::local_socket::FilesystemUdSocket};
+#[cfg(windows)]
+use nt_token::OwnedToken;
 use prost::Message;
-use rootlight_protocol::generated::daemon::v1::{RequestEnvelope, ResponseEnvelope};
+use rootlight_protocol::generated::daemon::v1::{
+    ClientHello, RequestEnvelope, ResponseEnvelope, ServerHello,
+};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
+    time::timeout,
+};
 
 /// Maximum encoded protobuf payload accepted by the local daemon.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// Default time allowed for one frame read or write.
-pub const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const FRAME_HEADER_BYTES: usize = 4;
 const RETRY_PAUSE: Duration = Duration::from_millis(1);
 
@@ -53,10 +67,21 @@ impl Endpoint {
         &self.path
     }
 
+    #[cfg(unix)]
     fn name(&self) -> Result<interprocess::local_socket::Name<'_>, IpcError> {
         self.path
             .as_path()
-            .to_fs_name::<GenericFilePath>()
+            .to_fs_name::<FilesystemUdSocket>()
+            .map_err(IpcError::Transport)
+    }
+
+    #[cfg(windows)]
+    fn name(&self) -> Result<interprocess::local_socket::Name<'_>, IpcError> {
+        self.path
+            .to_str()
+            .and_then(|value| value.get(9..))
+            .ok_or(IpcError::InvalidEndpoint)?
+            .to_ns_name::<GenericNamespaced>()
             .map_err(IpcError::Transport)
     }
 }
@@ -122,6 +147,73 @@ impl FrameCodec {
     pub fn read_message<M: Message + Default>(&self, stream: &mut Stream) -> Result<M, IpcError> {
         let mut header = [0_u8; FRAME_HEADER_BYTES];
         read_exact_bounded(stream, &mut header, self.timeout)?;
+        self.decode_message(stream, header)
+    }
+
+    fn decode_message<M: Message + Default>(
+        &self,
+        stream: &mut Stream,
+        header: [u8; FRAME_HEADER_BYTES],
+    ) -> Result<M, IpcError> {
+        let declared = self.validate_declared_length(header)?;
+        let mut payload = self.allocate_payload(declared)?;
+        read_exact_bounded(stream, &mut payload, self.timeout)?;
+        decode_payload(&payload)
+    }
+
+    /// Encodes and writes one bounded protobuf message asynchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IpcError::FrameTooLarge`] before writing when the encoded body
+    /// exceeds the configured bound, or a transport/timeout error during I/O.
+    pub async fn write_message_async<M: Message, W: AsyncWrite + Unpin>(
+        &self,
+        stream: &mut W,
+        message: &M,
+    ) -> Result<(), IpcError> {
+        let encoded_length = message.encoded_len();
+        if encoded_length > self.maximum_bytes {
+            return Err(IpcError::FrameTooLarge {
+                observed: encoded_length,
+                maximum: self.maximum_bytes,
+            });
+        }
+        let wire_length = u32::try_from(encoded_length).map_err(|_| IpcError::FrameTooLarge {
+            observed: encoded_length,
+            maximum: self.maximum_bytes,
+        })?;
+        let mut frame = Vec::new();
+        frame
+            .try_reserve_exact(FRAME_HEADER_BYTES + encoded_length)
+            .map_err(|_| IpcError::AllocationFailed)?;
+        frame.extend_from_slice(&wire_length.to_be_bytes());
+        message.encode(&mut frame).map_err(IpcError::Encode)?;
+        write_all_async(stream, &frame, self.timeout).await
+    }
+
+    /// Reads and decodes one bounded protobuf message asynchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for elapsed I/O, EOF, an oversized declared length,
+    /// allocation failure, trailing bytes, or malformed protobuf.
+    pub async fn read_message_async<M: Message + Default, R: AsyncRead + Unpin>(
+        &self,
+        stream: &mut R,
+    ) -> Result<M, IpcError> {
+        let mut header = [0_u8; FRAME_HEADER_BYTES];
+        read_exact_async(stream, &mut header, self.timeout).await?;
+        let declared = self.validate_declared_length(header)?;
+        let mut payload = self.allocate_payload(declared)?;
+        read_exact_async(stream, &mut payload, self.timeout).await?;
+        decode_payload(&payload)
+    }
+
+    fn validate_declared_length(
+        &self,
+        header: [u8; FRAME_HEADER_BYTES],
+    ) -> Result<usize, IpcError> {
         let declared = usize::try_from(u32::from_be_bytes(header))
             .map_err(|_| IpcError::InvalidFrameLength)?;
         if declared > self.maximum_bytes {
@@ -130,19 +222,26 @@ impl FrameCodec {
                 maximum: self.maximum_bytes,
             });
         }
+        Ok(declared)
+    }
+
+    fn allocate_payload(&self, declared: usize) -> Result<Vec<u8>, IpcError> {
         let mut payload = Vec::new();
         payload
             .try_reserve_exact(declared)
             .map_err(|_| IpcError::AllocationFailed)?;
         payload.resize(declared, 0);
-        read_exact_bounded(stream, &mut payload, self.timeout)?;
-        let mut bytes = payload.as_slice();
-        let message = M::decode(&mut bytes).map_err(IpcError::Decode)?;
-        if !bytes.is_empty() {
-            return Err(IpcError::TrailingBytes);
-        }
-        Ok(message)
+        Ok(payload)
     }
+}
+
+fn decode_payload<M: Message + Default>(payload: &[u8]) -> Result<M, IpcError> {
+    let mut bytes = payload;
+    let message = M::decode(&mut bytes).map_err(IpcError::Decode)?;
+    if !bytes.is_empty() {
+        return Err(IpcError::TrailingBytes);
+    }
+    Ok(message)
 }
 
 impl Default for FrameCodec {
@@ -161,35 +260,68 @@ pub struct LocalListener {
     endpoint: Endpoint,
 }
 
+/// Accepted local stream used by the bounded frame codec.
+pub type LocalStream = Stream;
+
+/// One Tokio listener configured for private local daemon access.
+#[derive(Debug)]
+pub struct AsyncLocalListener {
+    listener: TokioListener,
+    endpoint: Endpoint,
+}
+
+/// Accepted Tokio local stream used by the asynchronous bounded frame codec.
+pub type AsyncLocalStream = TokioStream;
+
 impl LocalListener {
     /// Binds a private per-user local endpoint.
     ///
-    /// Unix binds mode `0600` and verifies the resulting socket type, owner, and
-    /// permissions. Windows applies a protected DACL for the current logon user.
-    /// Existing endpoints are never removed by this constructor.
+    /// Unix binds mode `0600` inside a private directory and verifies the resulting
+    /// socket metadata. Windows applies a protected DACL for the pipe object owner.
+    /// Unix stale endpoints must be recovered explicitly before this constructor;
+    /// live listeners reclaim only the exact socket name they created when dropped.
     ///
     /// # Errors
     ///
     /// Returns [`IpcError`] for invalid endpoints, access-policy failures, or
     /// transport creation errors.
     pub fn bind(endpoint: Endpoint) -> Result<Self, IpcError> {
+        verify_endpoint_parent(&endpoint)?;
         let name = endpoint.name()?;
-        let options = ListenerOptions::new().name(name).reclaim_name(false);
+        let options = ListenerOptions::new()
+            .name(name)
+            .nonblocking(ListenerNonblockingMode::Both);
         let options = platform_listener_options(options)?;
         let listener = options.create_sync().map_err(IpcError::Transport)?;
-        verify_bound_endpoint(&endpoint)?;
+        if let Err(error) = verify_bound_endpoint(&endpoint) {
+            drop(listener);
+            return Err(error);
+        }
         Ok(Self { listener, endpoint })
     }
 
-    /// Accepts one client stream and enables bounded nonblocking I/O.
+    /// Accepts one client stream within an elapsed deadline.
     ///
     /// # Errors
     ///
-    /// Returns [`IpcError::Transport`] when accept or stream configuration fails.
-    pub fn accept(&self) -> Result<Stream, IpcError> {
-        let stream = self.listener.accept().map_err(IpcError::Transport)?;
-        stream.set_nonblocking(true).map_err(IpcError::Transport)?;
-        Ok(stream)
+    /// Returns [`IpcError::TimedOut`] when no client arrives before the deadline,
+    /// or [`IpcError::Transport`] for listener failures.
+    pub fn accept_timeout(&self, timeout: Duration) -> Result<Stream, IpcError> {
+        if timeout.is_zero() {
+            return Err(IpcError::InvalidLimit);
+        }
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(IpcError::InvalidLimit)?;
+        loop {
+            ensure_before_deadline(deadline)?;
+            match self.listener.accept() {
+                Ok(stream) => return Ok(stream),
+                Err(source) if source.kind() == io::ErrorKind::Interrupted => {}
+                Err(source) if source.kind() == io::ErrorKind::WouldBlock => wait_for_io(deadline)?,
+                Err(source) => return Err(IpcError::Transport(source)),
+            }
+        }
     }
 
     /// Returns the bound endpoint.
@@ -199,13 +331,86 @@ impl LocalListener {
     }
 }
 
-impl Drop for LocalListener {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            let _ = std::fs::remove_file(self.endpoint.as_path());
+impl AsyncLocalListener {
+    /// Binds a private per-user local endpoint to Tokio.
+    ///
+    /// The endpoint security checks are identical to [`LocalListener::bind`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IpcError`] for invalid endpoints, access-policy failures, or
+    /// transport creation errors.
+    pub fn bind(endpoint: Endpoint) -> Result<Self, IpcError> {
+        verify_endpoint_parent(&endpoint)?;
+        let name = endpoint.name()?;
+        let options = ListenerOptions::new().name(name);
+        let options = platform_listener_options(options)?;
+        let listener = options.create_tokio().map_err(IpcError::Transport)?;
+        if let Err(error) = verify_bound_endpoint(&endpoint) {
+            drop(listener);
+            return Err(error);
         }
+        Ok(Self { listener, endpoint })
     }
+
+    /// Accepts one client stream within an elapsed deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IpcError::TimedOut`] when no client arrives before the deadline,
+    /// or [`IpcError::Transport`] for listener failures.
+    pub async fn accept_timeout(&self, duration: Duration) -> Result<AsyncLocalStream, IpcError> {
+        if duration.is_zero() {
+            return Err(IpcError::InvalidLimit);
+        }
+        timeout(duration, self.listener.accept())
+            .await
+            .map_err(|_| IpcError::TimedOut)?
+            .map_err(IpcError::Transport)
+    }
+
+    /// Accepts one client stream without adding a transport deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IpcError::Transport`] when the listener cannot accept a client.
+    pub async fn accept(&self) -> Result<AsyncLocalStream, IpcError> {
+        self.listener.accept().await.map_err(IpcError::Transport)
+    }
+
+    /// Returns the bound endpoint.
+    #[must_use]
+    pub const fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+}
+
+/// Verifies that an accepted local peer belongs to the current user.
+///
+/// On Windows, the protected pipe DACL is the authorization boundary because
+/// the current safe Tokio transport does not expose the client access token.
+///
+/// # Errors
+///
+/// Returns [`IpcError::PeerUnauthorized`] for a foreign Unix user or a typed
+/// transport error when peer credentials cannot be inspected.
+pub fn verify_peer(stream: &LocalStream) -> Result<(), IpcError> {
+    verify_sync_platform_peer(stream)
+}
+
+/// Verifies that an accepted Tokio local peer belongs to the current user.
+///
+/// Unix credential inspection is synchronous but nonblocking and is completed
+/// before the caller starts protocol I/O. On Windows, the protected pipe DACL
+/// is the authorization boundary because the current safe Tokio transport does
+/// not expose the client access token.
+///
+/// # Errors
+///
+/// Returns [`IpcError::PeerUnauthorized`] for a foreign Unix user or a typed
+/// transport error when peer credentials cannot be inspected.
+pub fn verify_peer_async(stream: &AsyncLocalStream) -> Result<(), IpcError> {
+    verify_async_platform_peer(stream)
 }
 
 /// Connects to a local daemon endpoint with bounded nonblocking I/O.
@@ -218,6 +423,61 @@ pub fn connect(endpoint: &Endpoint) -> Result<Stream, IpcError> {
     let stream = Stream::connect(endpoint.name()?).map_err(IpcError::Transport)?;
     stream.set_nonblocking(true).map_err(IpcError::Transport)?;
     Ok(stream)
+}
+
+/// Connects to a local daemon endpoint through Tokio.
+///
+/// # Errors
+///
+/// Returns [`IpcError::Transport`] when the endpoint cannot be reached.
+pub async fn connect_async(endpoint: &Endpoint) -> Result<AsyncLocalStream, IpcError> {
+    TokioStream::connect(endpoint.name()?)
+        .await
+        .map_err(IpcError::Transport)
+}
+
+/// Writes the client negotiation frame.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the hello cannot be encoded or sent within bounds.
+pub fn write_client_hello(
+    codec: FrameCodec,
+    stream: &mut Stream,
+    hello: &ClientHello,
+) -> Result<(), IpcError> {
+    codec.write_message(stream, hello)
+}
+
+/// Reads the client negotiation frame.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the hello frame is malformed, oversized, or late.
+pub fn read_client_hello(codec: FrameCodec, stream: &mut Stream) -> Result<ClientHello, IpcError> {
+    codec.read_message(stream)
+}
+
+/// Writes the server negotiation frame.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the hello cannot be encoded or sent within bounds.
+pub fn write_server_hello(
+    codec: FrameCodec,
+    stream: &mut Stream,
+    hello: &ServerHello,
+) -> Result<(), IpcError> {
+    codec.write_message(stream, hello)
+}
+
+/// Reads the server negotiation frame.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the hello frame is malformed, oversized, or late.
+pub fn read_server_hello(codec: FrameCodec, stream: &mut Stream) -> Result<ServerHello, IpcError> {
+    codec.read_message(stream)
 }
 
 /// Writes one request frame.
@@ -264,6 +524,143 @@ pub fn read_response(codec: FrameCodec, stream: &mut Stream) -> Result<ResponseE
     codec.read_message(stream)
 }
 
+/// Writes the client negotiation frame asynchronously.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the hello cannot be encoded or sent within bounds.
+pub async fn write_client_hello_async(
+    codec: FrameCodec,
+    stream: &mut AsyncLocalStream,
+    hello: &ClientHello,
+) -> Result<(), IpcError> {
+    codec.write_message_async(stream, hello).await
+}
+
+/// Verifies the local peer and reads the client negotiation frame asynchronously.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when peer authorization fails or when the hello frame is
+/// malformed, oversized, or late.
+pub async fn read_client_hello_async(
+    codec: FrameCodec,
+    stream: &mut AsyncLocalStream,
+) -> Result<ClientHello, IpcError> {
+    verify_peer_async(stream)?;
+    codec.read_message_async(stream).await
+}
+
+/// Writes the server negotiation frame asynchronously.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the hello cannot be encoded or sent within bounds.
+pub async fn write_server_hello_async(
+    codec: FrameCodec,
+    stream: &mut AsyncLocalStream,
+    hello: &ServerHello,
+) -> Result<(), IpcError> {
+    codec.write_message_async(stream, hello).await
+}
+
+/// Reads the server negotiation frame asynchronously.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the hello frame is malformed, oversized, or late.
+pub async fn read_server_hello_async(
+    codec: FrameCodec,
+    stream: &mut AsyncLocalStream,
+) -> Result<ServerHello, IpcError> {
+    codec.read_message_async(stream).await
+}
+
+/// Writes one request frame asynchronously.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the request cannot be encoded or sent within bounds.
+pub async fn write_request_async(
+    codec: FrameCodec,
+    stream: &mut AsyncLocalStream,
+    request: &RequestEnvelope,
+) -> Result<(), IpcError> {
+    codec.write_message_async(stream, request).await
+}
+
+/// Reads one request frame asynchronously.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the request frame is malformed, oversized, or late.
+pub async fn read_request_async(
+    codec: FrameCodec,
+    stream: &mut AsyncLocalStream,
+) -> Result<RequestEnvelope, IpcError> {
+    codec.read_message_async(stream).await
+}
+
+/// Writes one response frame asynchronously.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the response cannot be encoded or sent within bounds.
+pub async fn write_response_async(
+    codec: FrameCodec,
+    stream: &mut AsyncLocalStream,
+    response: &ResponseEnvelope,
+) -> Result<(), IpcError> {
+    codec.write_message_async(stream, response).await
+}
+
+/// Reads one response frame asynchronously.
+///
+/// # Errors
+///
+/// Returns [`IpcError`] when the response frame is malformed, oversized, or late.
+pub async fn read_response_async(
+    codec: FrameCodec,
+    stream: &mut AsyncLocalStream,
+) -> Result<ResponseEnvelope, IpcError> {
+    codec.read_message_async(stream).await
+}
+
+async fn read_exact_async<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    buffer: &mut [u8],
+    duration: Duration,
+) -> Result<(), IpcError> {
+    timeout(duration, stream.read_exact(buffer))
+        .await
+        .map_err(|_| IpcError::TimedOut)?
+        .map(|_| ())
+        .map_err(|source| {
+            if source.kind() == io::ErrorKind::UnexpectedEof {
+                IpcError::UnexpectedEof
+            } else {
+                IpcError::Transport(source)
+            }
+        })
+}
+
+async fn write_all_async<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    buffer: &[u8],
+    duration: Duration,
+) -> Result<(), IpcError> {
+    timeout(duration, stream.write_all(buffer))
+        .await
+        .map_err(|_| IpcError::TimedOut)?
+        .map_err(|source| {
+            if source.kind() == io::ErrorKind::WriteZero {
+                IpcError::WriteZero
+            } else {
+                IpcError::Transport(source)
+            }
+        })
+}
+
 fn read_exact_bounded(
     stream: &mut Stream,
     buffer: &mut [u8],
@@ -274,6 +671,7 @@ fn read_exact_bounded(
         .ok_or(IpcError::InvalidLimit)?;
     let mut filled = 0;
     while filled < buffer.len() {
+        ensure_before_deadline(deadline)?;
         match stream.read(&mut buffer[filled..]) {
             Ok(0) if filled == 0 => wait_for_io(deadline)?,
             Ok(0) => return Err(IpcError::UnexpectedEof),
@@ -300,6 +698,7 @@ fn write_all_bounded(
         .ok_or(IpcError::InvalidLimit)?;
     let mut written = 0;
     while written < buffer.len() {
+        ensure_before_deadline(deadline)?;
         match stream.write(&buffer[written..]) {
             Ok(0) => return Err(IpcError::WriteZero),
             Ok(count) => {
@@ -315,11 +714,17 @@ fn write_all_bounded(
     Ok(())
 }
 
-fn wait_for_io(deadline: Instant) -> Result<(), IpcError> {
+fn ensure_before_deadline(deadline: Instant) -> Result<(), IpcError> {
     if Instant::now() >= deadline {
         return Err(IpcError::TimedOut);
     }
-    std::thread::sleep(RETRY_PAUSE);
+    Ok(())
+}
+
+fn wait_for_io(deadline: Instant) -> Result<(), IpcError> {
+    ensure_before_deadline(deadline)?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    std::thread::sleep(RETRY_PAUSE.min(remaining));
     Ok(())
 }
 
@@ -345,6 +750,70 @@ fn validate_endpoint(path: &Path) -> Result<(), IpcError> {
 }
 
 #[cfg(unix)]
+fn verify_sync_platform_peer(stream: &LocalStream) -> Result<(), IpcError> {
+    let Stream::UdSocket(socket) = stream;
+    verify_unix_peer(socket)
+}
+
+#[cfg(unix)]
+fn verify_async_platform_peer(stream: &AsyncLocalStream) -> Result<(), IpcError> {
+    let TokioStream::UdSocket(socket) = stream;
+    verify_unix_peer(socket)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_unix_peer(socket: &impl std::os::fd::AsFd) -> Result<(), IpcError> {
+    let credentials =
+        nix::sys::socket::getsockopt(socket, nix::sys::socket::sockopt::PeerCredentials).map_err(
+            |source| IpcError::PeerCredentials(io::Error::from_raw_os_error(source as i32)),
+        )?;
+    if credentials.uid() != nix::unistd::geteuid().as_raw() {
+        return Err(IpcError::PeerUnauthorized);
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn verify_unix_peer(socket: &impl std::os::fd::AsFd) -> Result<(), IpcError> {
+    let (user, _) = nix::unistd::getpeereid(socket)
+        .map_err(|source| IpcError::PeerCredentials(io::Error::from_raw_os_error(source as i32)))?;
+    if user != nix::unistd::geteuid() {
+        return Err(IpcError::PeerUnauthorized);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_sync_platform_peer(_stream: &LocalStream) -> Result<(), IpcError> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_async_platform_peer(_stream: &AsyncLocalStream) -> Result<(), IpcError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn verify_endpoint_parent(endpoint: &Endpoint) -> Result<(), IpcError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let parent = endpoint
+        .as_path()
+        .parent()
+        .ok_or(IpcError::InvalidEndpoint)?;
+    let metadata = std::fs::symlink_metadata(parent).map_err(IpcError::Transport)?;
+    if !metadata.file_type().is_dir() || metadata.mode() & 0o077 != 0 {
+        return Err(IpcError::InsecureEndpoint);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_endpoint_parent(_endpoint: &Endpoint) -> Result<(), IpcError> {
+    Ok(())
+}
+
+#[cfg(unix)]
 fn platform_listener_options(
     options: ListenerOptions<'_>,
 ) -> Result<ListenerOptions<'_>, IpcError> {
@@ -361,11 +830,44 @@ fn platform_listener_options(
     };
     use widestring::U16CString;
 
-    // `OW` scopes this protected DACL to the owner assigned by Windows for the
-    // new pipe object. The instance nonce remains mandatory protocol defense.
-    let sddl = U16CString::from_str("D:P(A;;GA;;;OW)").map_err(|_| IpcError::SecurityPolicy)?;
+    let sddl = windows_pipe_sddl()?;
+    let sddl = U16CString::from_str(sddl).map_err(|_| IpcError::SecurityPolicy)?;
     let descriptor = SecurityDescriptor::deserialize(&sddl).map_err(IpcError::Transport)?;
     Ok(options.security_descriptor(descriptor))
+}
+
+#[cfg(windows)]
+fn windows_pipe_sddl() -> Result<String, IpcError> {
+    let token = OwnedToken::from_current_process(windows::Win32::Security::TOKEN_QUERY)
+        .map_err(|_| IpcError::SecurityPolicy)?;
+    let mut allowed_sids = token
+        .logon_sid()
+        .map_err(|_| IpcError::SecurityPolicy)?
+        .into_iter()
+        .map(|group| {
+            group
+                .sid()
+                .to_string()
+                .map_err(|_| IpcError::SecurityPolicy)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    allowed_sids.sort_unstable();
+    allowed_sids.dedup();
+    if allowed_sids.is_empty() {
+        allowed_sids.push(
+            token
+                .user()
+                .and_then(|sid| sid.to_string())
+                .map_err(|_| IpcError::SecurityPolicy)?,
+        );
+    }
+
+    let mut sddl = String::from("D:P");
+    for sid in allowed_sids {
+        use std::fmt::Write as _;
+        write!(&mut sddl, "(A;;GRGW;;;{sid})").map_err(|_| IpcError::SecurityPolicy)?;
+    }
+    Ok(sddl)
 }
 
 #[cfg(unix)]
@@ -432,6 +934,12 @@ pub enum IpcError {
     /// Bound endpoint metadata did not satisfy the private-user policy.
     #[error("local IPC endpoint permissions are insecure")]
     InsecureEndpoint,
+    /// The accepted peer belongs to another local user.
+    #[error("local IPC peer is not authorized")]
+    PeerUnauthorized,
+    /// Platform peer credentials could not be inspected.
+    #[error("local IPC peer credentials are unavailable")]
+    PeerCredentials(#[source] io::Error),
     /// Platform access policy could not be constructed safely.
     #[error("local IPC security policy is unavailable")]
     SecurityPolicy,
@@ -468,6 +976,7 @@ mod tests {
         RequestEnvelope {
             request_id,
             instance_nonce: vec![7; 16],
+            timeout_ms: None,
             request: Some(request_envelope::Request::Health(HealthRequest {})),
         }
     }
@@ -497,7 +1006,10 @@ mod tests {
         let (ready_tx, ready_rx) = mpsc::sync_channel(0);
         let server = thread::spawn(move || {
             ready_tx.send(()).expect("test synchronization succeeds");
-            let mut stream = listener.accept().expect("connection accepts");
+            let mut stream = listener
+                .accept_timeout(Duration::from_secs(1))
+                .expect("connection accepts");
+            verify_peer(&stream).expect("peer is authorized");
             read_request(FrameCodec::default(), &mut stream).expect("request decodes")
         });
         ready_rx.recv().expect("server is ready");
@@ -506,6 +1018,114 @@ mod tests {
         write_request(FrameCodec::default(), &mut stream, &request(41)).expect("request writes");
 
         assert_eq!(server.join().expect("server thread joins"), request(41));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_policy_prefers_logon_sid_and_generic_io_only() {
+        let token = OwnedToken::from_current_process(windows::Win32::Security::TOKEN_QUERY)
+            .expect("current process token opens");
+        let logon_sids = token
+            .logon_sid()
+            .expect("logon SID is available")
+            .into_iter()
+            .map(|group| group.sid().to_string().expect("logon SID formats"))
+            .collect::<Vec<_>>();
+        assert!(!logon_sids.is_empty(), "interactive token has a logon SID");
+
+        let user_sid = token
+            .user()
+            .and_then(|sid| sid.to_string())
+            .expect("user SID formats");
+        let sddl = windows_pipe_sddl().expect("pipe security policy builds");
+
+        assert!(sddl.starts_with("D:P"));
+        assert!(!sddl.contains("GA"));
+        assert!(!sddl.contains(&user_sid));
+        for sid in logon_sids {
+            assert!(sddl.contains(&format!("(A;;GRGW;;;{sid})")));
+        }
+    }
+
+    #[tokio::test]
+    async fn async_round_trip_preserves_one_bounded_request() {
+        let temporary = private_tempdir();
+        #[cfg(unix)]
+        let endpoint =
+            Endpoint::new(temporary.path().join("async.sock")).expect("endpoint is valid");
+        #[cfg(windows)]
+        let endpoint = Endpoint::new(PathBuf::from(format!(
+            r"\\.\pipe\rootlight-async-{}-{}",
+            std::process::id(),
+            temporary.path().display().to_string().len()
+        )))
+        .expect("endpoint is valid");
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("listener binds");
+        let server = tokio::spawn(async move {
+            let mut stream = listener
+                .accept_timeout(Duration::from_secs(1))
+                .await
+                .expect("connection accepts");
+            verify_peer_async(&stream).expect("peer is authorized");
+            read_request_async(FrameCodec::default(), &mut stream)
+                .await
+                .expect("request decodes")
+        });
+
+        let mut stream = connect_async(&endpoint).await.expect("client connects");
+        write_request_async(FrameCodec::default(), &mut stream, &request(73))
+            .await
+            .expect("request writes");
+
+        assert_eq!(server.await.expect("server task joins"), request(73));
+    }
+
+    #[tokio::test]
+    async fn stalled_async_client_does_not_block_a_second_accept() {
+        let temporary = private_tempdir();
+        #[cfg(unix)]
+        let endpoint =
+            Endpoint::new(temporary.path().join("concurrent.sock")).expect("endpoint is valid");
+        #[cfg(windows)]
+        let endpoint = Endpoint::new(PathBuf::from(format!(
+            r"\\.\pipe\rootlight-concurrent-{}-{}",
+            std::process::id(),
+            temporary.path().display().to_string().len()
+        )))
+        .expect("endpoint is valid");
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("listener binds");
+        let stalled_client = connect_async(&endpoint)
+            .await
+            .expect("stalled client connects");
+        let mut stalled = listener
+            .accept_timeout(Duration::from_secs(1))
+            .await
+            .expect("stalled connection accepts");
+        let stalled_read =
+            tokio::spawn(
+                async move { read_request_async(FrameCodec::default(), &mut stalled).await },
+            );
+
+        let mut fast_client = connect_async(&endpoint)
+            .await
+            .expect("fast client connects");
+        let fast_server = listener
+            .accept_timeout(Duration::from_secs(1))
+            .await
+            .expect("fast connection accepts");
+        let fast = tokio::spawn(async move {
+            let mut fast_server = fast_server;
+            read_request_async(FrameCodec::default(), &mut fast_server)
+                .await
+                .expect("fast request decodes")
+        });
+        write_request_async(FrameCodec::default(), &mut fast_client, &request(91))
+            .await
+            .expect("fast request writes");
+
+        assert_eq!(fast.await.expect("fast task joins"), request(91));
+        drop(stalled_client);
+        assert!(stalled_read.await.expect("stalled task joins").is_err());
     }
 
     #[test]
@@ -523,7 +1143,9 @@ mod tests {
         .expect("endpoint is valid");
         let listener = LocalListener::bind(endpoint.clone()).expect("listener binds");
         let server = thread::spawn(move || {
-            let mut stream = listener.accept().expect("connection accepts");
+            let mut stream = listener
+                .accept_timeout(Duration::from_secs(1))
+                .expect("connection accepts");
             let codec = FrameCodec::new(16, Duration::from_secs(1)).expect("limits are valid");
             codec.read_message::<RequestEnvelope>(&mut stream)
         });

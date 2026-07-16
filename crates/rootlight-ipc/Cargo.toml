@@ -11,9 +11,15 @@ interprocess.workspace = true
 prost.workspace = true
 rootlight-protocol = { path = "../rootlight-protocol" }
 thiserror.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+nt-token.workspace = true
 widestring.workspace = true
+windows.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
