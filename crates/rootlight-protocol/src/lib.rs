@@ -12,8 +12,15 @@ pub mod generated;
 pub const FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!("../../../schemas/generated/protobuf/rootlight.desc");
 
-/// The initial production protocol contract version.
-pub const PROTOCOL_VERSION: &str = "1.0";
+/// Earliest daemon protocol accepted by the current client and server.
+///
+/// Protocol 1.0 remains a frozen wire-compatibility baseline, but it predates
+/// authenticated operation submission and cannot satisfy the current contract.
+pub const MINIMUM_PROTOCOL_MINOR: u32 = 1;
+/// Latest daemon protocol implemented by the current client and server.
+pub const CURRENT_PROTOCOL_MINOR: u32 = 1;
+/// Current production protocol contract version.
+pub const PROTOCOL_VERSION: &str = "1.1";
 
 #[cfg(test)]
 mod tests {
@@ -45,13 +52,16 @@ mod tests {
 
     #[test]
     fn generated_messages_round_trip_unknown_additive_fields() {
-        let mut encoded =
-            generated::common::v1::ContractVersion { major: 1, minor: 0 }.encode_to_vec();
+        let mut encoded = generated::common::v1::ContractVersion {
+            major: 1,
+            minor: CURRENT_PROTOCOL_MINOR,
+        }
+        .encode_to_vec();
         encoded.extend_from_slice(&[0x98, 0x06, 0x07]);
 
         let decoded = generated::common::v1::ContractVersion::decode(encoded.as_slice())
             .expect("unknown protobuf field is skipped");
         assert_eq!(decoded.major, 1);
-        assert_eq!(decoded.minor, 0);
+        assert_eq!(decoded.minor, CURRENT_PROTOCOL_MINOR);
     }
 }

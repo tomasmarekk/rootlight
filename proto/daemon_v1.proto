@@ -4,10 +4,12 @@ package rootlight.daemon.v1;
 
 import "common.proto";
 
-// Client-supported protocol range and optional capability names.
+// Client-supported protocol range, capabilities, and authenticated session identity.
 message ClientHello {
   rootlight.common.v1.VersionRange supported_protocols = 1;
   repeated string capabilities = 2;
+  bytes expected_instance_nonce = 3;
+  bytes client_instance_id = 4;
 }
 
 // Server-selected protocol and the bounded negotiation result.
@@ -22,10 +24,12 @@ message ServerHello {
 message RequestEnvelope {
   uint64 request_id = 1;
   bytes instance_nonce = 2;
+  optional uint32 timeout_ms = 3;
   oneof request {
     HealthRequest health = 10;
     OperationStatusRequest operation_status = 11;
     OperationCancelRequest operation_cancel = 12;
+    OperationSubmitRequest operation_submit = 13;
   }
 }
 
@@ -36,6 +40,7 @@ message ResponseEnvelope {
     HealthResponse health = 10;
     OperationStatusResponse operation_status = 11;
     OperationCancelResponse operation_cancel = 12;
+    OperationSubmitResponse operation_submit = 13;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -43,12 +48,30 @@ message ResponseEnvelope {
 // Source-free daemon health request.
 message HealthRequest {}
 
+// Source-free daemon lifecycle state.
+enum DaemonLifecycle {
+  DAEMON_LIFECYCLE_UNSPECIFIED = 0;
+  STARTING = 1;
+  READY = 2;
+  DRAINING = 3;
+  FAULTED = 4;
+  STOPPED = 5;
+}
+
 // Source-free daemon health and readiness response.
 message HealthResponse {
   bool ready = 1;
   uint32 active_operations = 2;
   uint32 admitted_operations = 3;
   string protocol_version = 4;
+  DaemonLifecycle lifecycle = 5;
+  bool accepting_operations = 6;
+  uint32 active_connections = 7;
+  uint32 connection_limit = 8;
+  uint32 queued_operations = 9;
+  uint32 running_operations = 10;
+  uint32 operation_queue_limit = 11;
+  bool journal_healthy = 12;
 }
 
 // Durable operation lifecycle state.
@@ -60,6 +83,30 @@ enum OperationState {
   SUCCEEDED = 4;
   FAILED = 5;
   INTERRUPTED = 6;
+  CANCELLED = 7;
+}
+
+// Closed operation kinds supported by the current control plane.
+enum OperationKind {
+  OPERATION_KIND_UNSPECIFIED = 0;
+  CONTROL_PROBE = 1;
+}
+
+// Monotonic infrastructure stages for the bounded control probe.
+enum OperationStage {
+  OPERATION_STAGE_UNSPECIFIED = 0;
+  ACCEPTED = 1;
+  EXECUTING = 2;
+  CLEANUP = 3;
+}
+
+// Why a recovered operation did not continue automatically.
+enum RecoveryClass {
+  RECOVERY_CLASS_UNSPECIFIED = 0;
+  NOT_APPLICABLE = 1;
+  INTERRUPTED_BY_RESTART = 2;
+  DEADLINE_ELAPSED = 3;
+  LEASE_EXPIRED = 4;
 }
 
 // Durable operation status safe for local clients.
@@ -70,6 +117,14 @@ message OperationStatus {
   uint32 completed_units = 4;
   uint32 total_units = 5;
   optional rootlight.common.v1.PublicError error = 6;
+  OperationKind kind = 7;
+  OperationStage stage = 8;
+  bytes plan_hash = 9;
+  bool detached = 10;
+  bool cancellation_requested = 11;
+  optional uint64 deadline_unix_ms = 12;
+  optional uint64 lease_expires_unix_ms = 13;
+  RecoveryClass recovery_class = 14;
 }
 
 // Requests the latest durable state for one operation.
@@ -91,4 +146,18 @@ message OperationCancelRequest {
 message OperationCancelResponse {
   OperationStatus operation = 1;
   bool accepted = 2;
+}
+
+// Submits one bounded operation definition for durable admission.
+message OperationSubmitRequest {
+  rootlight.common.v1.OperationId operation = 1;
+  OperationKind kind = 2;
+  bytes plan_hash = 3;
+  bool detached = 4;
+  optional uint64 timeout_ms = 5;
+}
+
+// Returns the newly queued durable operation.
+message OperationSubmitResponse {
+  OperationStatus operation = 1;
 }

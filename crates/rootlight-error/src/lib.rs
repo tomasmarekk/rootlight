@@ -317,6 +317,14 @@ impl<'de> Deserialize<'de> for PublicError {
 impl PublicError {
     /// Starts a checked public error using a static source-free message template.
     pub fn builder(code: ErrorCode, message: &'static str) -> PublicErrorBuilder {
+        PublicErrorBuilder::new(code, message.to_owned())
+    }
+
+    /// Starts a checked public error from an owned boundary message.
+    ///
+    /// This is intended for trusted protocol decoders that must preserve the
+    /// sender's stable message while reapplying Rootlight's source-free policy.
+    pub fn builder_with_message(code: ErrorCode, message: String) -> PublicErrorBuilder {
         PublicErrorBuilder::new(code, message)
     }
 
@@ -384,13 +392,13 @@ pub struct PublicErrorBuilder {
 }
 
 impl PublicErrorBuilder {
-    fn new(code: ErrorCode, message: &'static str) -> Self {
-        let build_error = (!is_safe_message_template(message))
+    fn new(code: ErrorCode, message: String) -> Self {
+        let build_error = (!is_safe_message_template(&message))
             .then_some(PublicErrorBuildError::InvalidMessageTemplate);
         Self {
             error: PublicError {
                 code,
-                message: message.to_owned(),
+                message,
                 retryable: false,
                 retry_after_ms: None,
                 repository: None,
@@ -603,9 +611,25 @@ mod tests {
             Err(PublicErrorBuildError::InvalidMessageTemplate)
         );
         assert_eq!(
-            PublicError::builder(ErrorCode::Internal, "token=gho_example_secret").build(),
+            PublicError::builder_with_message(
+                ErrorCode::Internal,
+                "token=gho_example_secret".to_owned(),
+            )
+            .build(),
             Err(PublicErrorBuildError::InvalidMessageTemplate)
         );
+    }
+
+    #[test]
+    fn owned_message_builder_preserves_checked_boundary_text() {
+        let error = PublicError::builder_with_message(
+            ErrorCode::ProtocolMismatch,
+            "client protocol range is missing".to_owned(),
+        )
+        .build()
+        .expect("bounded boundary message builds");
+
+        assert_eq!(error.message(), "client protocol range is missing");
     }
 
     #[test]
