@@ -12,6 +12,11 @@ use std::{
 use cargo_metadata::{Metadata, MetadataCommand, Package, TargetKind};
 use serde::Deserialize;
 use sha2::Digest as _;
+use syn::{
+    AttrStyle, Attribute, Expr, Item, Lit, LitStr, Meta, Path as SynPath, Token,
+    punctuated::Punctuated,
+    visit::{self, Visit},
+};
 use yaml_rust2::{Yaml, YamlLoader};
 
 const SUPPLY_CHAIN_POLICY_PATH: &str = "policy/supply-chain.toml";
@@ -539,32 +544,25 @@ fn scan_workspace_unsafe(
     })?;
     let boundaries = validate_unsafe_boundaries(&root, metadata, policy)?;
     let mut observed = BTreeMap::new();
-    let mut source_roots = BTreeSet::new();
     for package in metadata.workspace_packages() {
-        for target in &package.targets {
-            let source = fs::canonicalize(target.src_path.as_std_path()).map_err(|source| {
-                PolicyError::Read {
-                    path: target.src_path.clone().into_std_path_buf(),
-                    source,
-                }
+        let Some(manifest_parent) = package.manifest_path.as_std_path().parent() else {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!("package {} has no manifest parent", package.name),
+            });
+        };
+        let package_root =
+            fs::canonicalize(manifest_parent).map_err(|source| PolicyError::Read {
+                path: manifest_parent.to_path_buf(),
+                source,
             })?;
-            if !source.starts_with(&root) {
-                return Err(PolicyError::InvalidUnsafeBoundary {
-                    detail: format!(
-                        "workspace target source is outside root: {}",
-                        target.src_path
-                    ),
-                });
-            }
-            if let Some(source_root) = source.parent() {
-                source_roots.insert(source_root.to_path_buf());
-            }
+        if !package_root.starts_with(&root) {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!("workspace package {} escapes the workspace", package.name),
+            });
         }
+        scan_rust_tree(&package_root, &mut observed)?;
     }
-    source_roots.insert(root.join("tests/fixtures/unsafe"));
-    for source_root in source_roots {
-        scan_rust_tree(&source_root, &mut observed)?;
-    }
+    scan_rust_tree(&root.join("tests/fixtures/unsafe"), &mut observed)?;
 
     for (path, observation) in &observed {
         if observation.count == 0 {
@@ -630,16 +628,12 @@ fn validate_unsafe_boundaries<'a>(
     metadata: &Metadata,
     policy: &'a UnsafePolicy,
 ) -> Result<BTreeMap<PathBuf, &'a UnsafeBoundary>, PolicyError> {
-    let packages: BTreeMap<_, _> = metadata
-        .workspace_packages()
-        .iter()
-        .map(|package| (package.name.as_str(), *package))
-        .collect();
     let mut by_source = BTreeMap::new();
     let mut modules = BTreeSet::new();
     for boundary in &policy.boundaries {
         validate_relative_policy_path(&boundary.source)?;
         validate_relative_policy_path(&boundary.adr)?;
+        validate_relative_policy_path(&boundary.manifest)?;
         if boundary.module.is_empty()
             || boundary.owner != "@tomasmarekk"
             || boundary.reason.trim().is_empty()
@@ -648,9 +642,27 @@ fn validate_unsafe_boundaries<'a>(
                 detail: format!("incomplete boundary for {}", boundary.source.display()),
             });
         }
-        let Some(package) = packages.get(boundary.package.as_str()) else {
+        let absolute_manifest =
+            canonical_policy_file(root, &boundary.manifest, "unsafe boundary manifest")?;
+        let matching_packages = metadata
+            .workspace_packages()
+            .iter()
+            .filter(|package| {
+                package.name == boundary.package
+                    && package.version.to_string() == boundary.package_version
+                    && fs::canonicalize(package.manifest_path.as_std_path())
+                        .is_ok_and(|manifest| manifest == absolute_manifest)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        let [package] = matching_packages.as_slice() else {
             return Err(PolicyError::InvalidUnsafeBoundary {
-                detail: format!("unknown package {}", boundary.package),
+                detail: format!(
+                    "boundary package identity must match exactly one workspace member: {}@{} ({})",
+                    boundary.package,
+                    boundary.package_version,
+                    boundary.manifest.display()
+                ),
             });
         };
         let Some(manifest_parent) = package.manifest_path.as_std_path().parent() else {
@@ -792,6 +804,159 @@ fn boundary_module_name(
     Ok(module)
 }
 
+fn package_target_reaching_source(
+    package: &Package,
+    package_root: &Path,
+    source: &Path,
+) -> Result<Option<PathBuf>, PolicyError> {
+    for target in &package.targets {
+        let target_path = target.src_path.as_std_path();
+        if path_is_link_or_reparse(target_path)? {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!(
+                    "Cargo target is a symlink or reparse point: {}",
+                    target_path.display()
+                ),
+            });
+        }
+        let target_source = fs::canonicalize(target_path).map_err(|source| PolicyError::Read {
+            path: target_path.to_path_buf(),
+            source,
+        })?;
+        if !target_source.is_file() || !target_source.starts_with(package_root) {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!(
+                    "Cargo target escapes its package: {}",
+                    target_path.display()
+                ),
+            });
+        }
+        let reachable = reachable_module_files(package_root, &target_source)?;
+        if reachable.contains(source) {
+            return Ok(Some(target_source));
+        }
+    }
+    Ok(None)
+}
+
+fn reachable_module_files(
+    package_root: &Path,
+    target_source: &Path,
+) -> Result<BTreeSet<PathBuf>, PolicyError> {
+    let mut reachable = BTreeSet::new();
+    let mut pending = vec![target_source.to_path_buf()];
+    while let Some(source) = pending.pop() {
+        if !reachable.insert(source.clone()) {
+            continue;
+        }
+        let text = fs::read_to_string(&source).map_err(|error| PolicyError::Read {
+            path: source.clone(),
+            source: error,
+        })?;
+        let file = syn::parse_file(&text).map_err(|error| PolicyError::InvalidUnsafeBoundary {
+            detail: format!("cannot parse Rust module {}: {error}", source.display()),
+        })?;
+        let module_root = module_child_root(&source)?;
+        let source_directory =
+            source
+                .parent()
+                .ok_or_else(|| PolicyError::InvalidUnsafeBoundary {
+                    detail: format!("Rust module has no parent: {}", source.display()),
+                })?;
+        let mut declared = Vec::new();
+        collect_external_modules(&file.items, &module_root, source_directory, &mut declared)?;
+        for requested in declared {
+            if requested.exists() {
+                pending.push(canonical_compiler_input(
+                    package_root,
+                    &requested,
+                    "declared Rust module",
+                )?);
+            }
+        }
+    }
+    Ok(reachable)
+}
+
+fn module_child_root(source: &Path) -> Result<PathBuf, PolicyError> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| PolicyError::InvalidUnsafeBoundary {
+            detail: format!("Rust module has no parent: {}", source.display()),
+        })?;
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| PolicyError::InvalidUnsafeBoundary {
+            detail: format!("Rust module has no Unicode stem: {}", source.display()),
+        })?;
+    Ok(if matches!(stem, "lib" | "main" | "mod") {
+        parent.to_path_buf()
+    } else {
+        parent.join(stem)
+    })
+}
+
+fn collect_external_modules(
+    items: &[Item],
+    module_root: &Path,
+    source_directory: &Path,
+    declared: &mut Vec<PathBuf>,
+) -> Result<(), PolicyError> {
+    for item in items {
+        let Item::Mod(module) = item else {
+            continue;
+        };
+        let module_name = module.ident.to_string();
+        if let Some((_, nested)) = &module.content {
+            collect_external_modules(
+                nested,
+                &module_root.join(module_name),
+                source_directory,
+                declared,
+            )?;
+            continue;
+        }
+        if let Some(explicit_path) = module_path_attribute(&module.attrs)? {
+            declared.push(source_directory.join(explicit_path));
+        } else {
+            declared.push(module_root.join(format!("{module_name}.rs")));
+            declared.push(module_root.join(module_name).join("mod.rs"));
+        }
+    }
+    Ok(())
+}
+
+fn module_path_attribute(attributes: &[Attribute]) -> Result<Option<PathBuf>, PolicyError> {
+    let mut paths = attributes
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("path"));
+    let Some(attribute) = paths.next() else {
+        return Ok(None);
+    };
+    if paths.next().is_some() {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: "Rust module declares more than one #[path] compiler input".to_owned(),
+        });
+    }
+    let Meta::NameValue(name_value) = &attribute.meta else {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: "Rust module #[path] must be a literal name-value attribute".to_owned(),
+        });
+    };
+    let Expr::Lit(expression) = &name_value.value else {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: "Rust module #[path] must not use a generated input".to_owned(),
+        });
+    };
+    let Lit::Str(path) = &expression.lit else {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: "Rust module #[path] must contain a string literal".to_owned(),
+        });
+    };
+    Ok(Some(PathBuf::from(path.value())))
+}
+
 fn validate_unsafe_boundary_governance(
     package: &Package,
     package_root: &Path,
@@ -818,41 +983,31 @@ fn validate_unsafe_boundary_governance(
         source,
     })?;
     let expected_status = match boundary.status {
-        UnsafeBoundaryStatus::Proposed => "**Status:** Proposed",
-        UnsafeBoundaryStatus::Accepted => "**Status:** Accepted",
+        UnsafeBoundaryStatus::Proposed => "Proposed",
+        UnsafeBoundaryStatus::Accepted => "Accepted",
     };
-    let decision_date = adr_text
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("**Decision date:** "));
-    if !adr_text.lines().any(|line| line.trim() == expected_status)
+    let status = exact_adr_field(&adr_text, "**Status:** ");
+    let decision_date = exact_adr_field(&adr_text, "**Decision date:** ");
+    if status != Some(expected_status)
         || !adr_decision_state_is_valid(boundary.status, decision_date)
     {
         return Err(PolicyError::InvalidUnsafeBoundary {
             detail: format!(
-                "{} does not declare a consistent {expected_status} decision",
+                "{} does not declare one exact, consistent {expected_status} decision",
                 boundary.adr.display()
             ),
         });
     }
 
-    let target_root = package
-        .targets
-        .iter()
-        .filter_map(|target| {
-            let target_source = fs::canonicalize(target.src_path.as_std_path()).ok()?;
-            let target_parent = target_source.parent()?;
-            source
-                .starts_with(target_parent)
-                .then_some((target_parent.components().count(), target_source))
-        })
-        .max_by_key(|(depth, _)| *depth)
-        .map(|(_, source)| source)
-        .ok_or_else(|| PolicyError::InvalidUnsafeBoundary {
-            detail: format!(
-                "{} is not owned by a declared target in {}",
-                boundary.source.display(),
-                package.name
-            ),
+    let target_root =
+        package_target_reaching_source(package, package_root, source)?.ok_or_else(|| {
+            PolicyError::InvalidUnsafeBoundary {
+                detail: format!(
+                    "{} is not reachable from a declared target module in {}",
+                    boundary.source.display(),
+                    package.name
+                ),
+            }
         })?;
     if !target_root.starts_with(package_root) {
         return Err(PolicyError::InvalidUnsafeBoundary {
@@ -890,6 +1045,14 @@ fn validate_unsafe_boundary_governance(
     Ok(())
 }
 
+fn exact_adr_field<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let mut values = text
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(prefix));
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
+}
+
 fn adr_decision_state_is_valid(status: UnsafeBoundaryStatus, decision_date: Option<&str>) -> bool {
     match status {
         UnsafeBoundaryStatus::Proposed => decision_date == Some("not accepted"),
@@ -914,6 +1077,9 @@ fn boundary_lint_state_is_valid(
     expected_source_tokens: usize,
     expected_geiger_count: usize,
 ) -> bool {
+    let target_forbids = crate_has_unsafe_lint(target_text, "forbid");
+    let target_denies = crate_has_unsafe_lint(target_text, "deny");
+    let source_allows = crate_has_unsafe_lint(source_text, "allow");
     match status {
         UnsafeBoundaryStatus::Proposed => {
             let inherits_workspace = lints
@@ -921,8 +1087,8 @@ fn boundary_lint_state_is_valid(
                 .and_then(toml::Value::as_bool)
                 == Some(true);
             inherits_workspace
-                && target_text.contains("#![forbid(unsafe_code)]")
-                && !source_text.contains("allow(unsafe_code)")
+                && target_forbids
+                && !source_allows
                 && expected_source_tokens == 0
                 && expected_geiger_count == 0
         }
@@ -933,12 +1099,33 @@ fn boundary_lint_state_is_valid(
                 .and_then(toml::Value::as_str)
                 == Some("deny");
             crate_denies
-                && target_text.contains("#![deny(unsafe_code)]")
-                && source_text.contains("#![allow(unsafe_code)]")
+                && target_denies
+                && source_allows
                 && expected_source_tokens > 0
                 && expected_geiger_count > 0
         }
     }
+}
+
+fn crate_has_unsafe_lint(text: &str, level: &str) -> bool {
+    syn::parse_file(text).is_ok_and(|file| {
+        file.attrs.iter().any(|attribute| {
+            matches!(attribute.style, AttrStyle::Inner(_))
+                && attribute_has_unsafe_lint(attribute, level)
+        })
+    })
+}
+
+fn attribute_has_unsafe_lint(attribute: &Attribute, level: &str) -> bool {
+    if !attribute.path().is_ident(level) {
+        return false;
+    }
+    let Meta::List(arguments) = &attribute.meta else {
+        return false;
+    };
+    arguments
+        .parse_args_with(Punctuated::<SynPath, Token![,]>::parse_terminated)
+        .is_ok_and(|lints| lints.iter().any(|lint| lint.is_ident("unsafe_code")))
 }
 
 fn validate_relative_policy_path(path: &Path) -> Result<(), PolicyError> {
@@ -966,8 +1153,22 @@ fn scan_rust_tree(
     if !root.exists() {
         return Ok(());
     }
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
+    let canonical_root = fs::canonicalize(root).map_err(|source| PolicyError::Read {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    if !canonical_root.is_dir() {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: format!(
+                "unsafe inventory root is not a directory: {}",
+                root.display()
+            ),
+        });
+    }
+
+    let mut directories = vec![canonical_root.clone()];
+    let mut pending_files = Vec::new();
+    while let Some(directory) = directories.pop() {
         for entry in fs::read_dir(&directory).map_err(|source| PolicyError::Read {
             path: directory.clone(),
             source,
@@ -981,16 +1182,209 @@ fn scan_rust_tree(
                 path: path.clone(),
                 source,
             })?;
+            if path_is_link_or_reparse(&path)? {
+                return Err(PolicyError::InvalidUnsafeBoundary {
+                    detail: format!(
+                        "unsafe inventory rejects symlink or reparse input {}",
+                        path.display()
+                    ),
+                });
+            }
+            let canonical = fs::canonicalize(&path).map_err(|source| PolicyError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            if canonical != path || !canonical.starts_with(&canonical_root) {
+                return Err(PolicyError::InvalidUnsafeBoundary {
+                    detail: format!(
+                        "unsafe inventory input escapes or aliases {}",
+                        path.display()
+                    ),
+                });
+            }
             if file_type.is_dir() {
-                pending.push(path);
+                directories.push(canonical);
             } else if file_type.is_file()
                 && path.extension().and_then(|value| value.to_str()) == Some("rs")
             {
-                observed.insert(path.clone(), scan_rust_file(&path)?);
+                pending_files.push(canonical);
             }
         }
     }
+
+    let mut processed = BTreeSet::new();
+    while let Some(path) = pending_files.pop() {
+        if !processed.insert(path.clone()) {
+            continue;
+        }
+        let text = fs::read_to_string(&path).map_err(|source| PolicyError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        for input in rust_compiler_inputs(&path, &text)? {
+            pending_files.push(canonical_compiler_input(
+                &canonical_root,
+                &input,
+                "Rust compiler input",
+            )?);
+        }
+        let observation = scan_rust_file(&path)?;
+        if observed.insert(path.clone(), observation).is_some() {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!(
+                    "unsafe inventory scanned the same compiler input twice: {}",
+                    path.display()
+                ),
+            });
+        }
+    }
     Ok(())
+}
+
+fn path_is_link_or_reparse(path: &Path) -> Result<bool, PolicyError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| PolicyError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Ok(true);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn canonical_compiler_input(
+    root: &Path,
+    requested: &Path,
+    description: &str,
+) -> Result<PathBuf, PolicyError> {
+    let relative =
+        requested
+            .strip_prefix(root)
+            .map_err(|_| PolicyError::InvalidUnsafeBoundary {
+                detail: format!("{description} escapes {}", requested.display()),
+            })?;
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: format!("{description} escapes or aliases {}", requested.display()),
+        });
+    }
+    if path_is_link_or_reparse(requested)? {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: format!(
+                "{description} is a symlink or reparse point: {}",
+                requested.display()
+            ),
+        });
+    }
+    let canonical = fs::canonicalize(requested).map_err(|source| PolicyError::Read {
+        path: requested.to_path_buf(),
+        source,
+    })?;
+    if !canonical.is_file() || !canonical.starts_with(root) || canonical != requested {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: format!("{description} escapes or aliases {}", requested.display()),
+        });
+    }
+    Ok(canonical)
+}
+
+#[derive(Debug)]
+enum CompilerInput {
+    Literal(PathBuf),
+    Generated(&'static str),
+}
+
+#[derive(Default)]
+struct CompilerInputVisitor {
+    inputs: Vec<CompilerInput>,
+}
+
+impl<'ast> Visit<'ast> for CompilerInputVisitor {
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if node.path.is_ident("include") {
+            match node.parse_body::<LitStr>() {
+                Ok(path) => self
+                    .inputs
+                    .push(CompilerInput::Literal(path.value().into())),
+                Err(_) => self.inputs.push(CompilerInput::Generated("include!")),
+            }
+        }
+        visit::visit_macro(self, node);
+    }
+
+    fn visit_attribute(&mut self, node: &'ast Attribute) {
+        if node.path().is_ident("path") {
+            match &node.meta {
+                Meta::NameValue(name_value) => match &name_value.value {
+                    Expr::Lit(expression) => match &expression.lit {
+                        Lit::Str(path) => {
+                            self.inputs
+                                .push(CompilerInput::Literal(path.value().into()));
+                        }
+                        _ => self.inputs.push(CompilerInput::Generated("#[path]")),
+                    },
+                    _ => self.inputs.push(CompilerInput::Generated("#[path]")),
+                },
+                Meta::Path(_) | Meta::List(_) => {
+                    self.inputs.push(CompilerInput::Generated("#[path]"));
+                }
+            }
+        }
+        visit::visit_attribute(self, node);
+    }
+}
+
+fn rust_compiler_inputs(source: &Path, text: &str) -> Result<Vec<PathBuf>, PolicyError> {
+    let file = syn::parse_file(text).map_err(|error| PolicyError::InvalidUnsafeBoundary {
+        detail: format!(
+            "unsafe inventory cannot parse compiler input {}: {error}",
+            source.display()
+        ),
+    })?;
+    let mut visitor = CompilerInputVisitor::default();
+    visitor.visit_file(&file);
+    let source_directory = source
+        .parent()
+        .ok_or_else(|| PolicyError::InvalidUnsafeBoundary {
+            detail: format!("compiler input has no parent: {}", source.display()),
+        })?;
+    visitor
+        .inputs
+        .into_iter()
+        .map(|input| match input {
+            CompilerInput::Literal(relative) => {
+                if relative.is_absolute() {
+                    Err(PolicyError::InvalidUnsafeBoundary {
+                        detail: format!(
+                            "compiler input must be relative in {}: {}",
+                            source.display(),
+                            relative.display()
+                        ),
+                    })
+                } else {
+                    Ok(source_directory.join(relative))
+                }
+            }
+            CompilerInput::Generated(kind) => Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!(
+                    "{kind} in {} must use a literal, scanned compiler input; generated or OUT_DIR inputs are not allowed",
+                    source.display()
+                ),
+            }),
+        })
+        .collect()
 }
 
 fn scan_rust_file(path: &Path) -> Result<UnsafeObservation, PolicyError> {
@@ -1191,6 +1585,8 @@ struct UnsafePolicy {
 #[serde(deny_unknown_fields)]
 struct UnsafeBoundary {
     package: String,
+    package_version: String,
+    manifest: PathBuf,
     module: String,
     source: PathBuf,
     status: UnsafeBoundaryStatus,
@@ -1426,6 +1822,14 @@ mod tests {
             0,
             0,
         ));
+        assert!(!boundary_lint_state_is_valid(
+            UnsafeBoundaryStatus::Proposed,
+            proposed_manifest.get("lints"),
+            "// #![forbid(unsafe_code)]\nconst CLAIM: &str = \"#![forbid(unsafe_code)]\";",
+            "fn safe() {}",
+            0,
+            0,
+        ));
     }
 
     #[test]
@@ -1445,6 +1849,83 @@ mod tests {
         assert!(!adr_decision_state_is_valid(
             UnsafeBoundaryStatus::Accepted,
             Some("not accepted")
+        ));
+        assert_eq!(
+            exact_adr_field(
+                "**Status:** Proposed\n**Status:** Accepted\n",
+                "**Status:** "
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn unsafe_scan_inventories_literal_include_inputs() {
+        let directory = tempdir().expect("temporary directory is available");
+        let source = directory.path().join("lib.rs");
+        let included = directory.path().join("hidden.compiler-input");
+        fs::write(&source, "include!(\"hidden.compiler-input\");\n")
+            .expect("source fixture writes");
+        fs::write(
+            &included,
+            "fn fixture() { unsafe { core::hint::unreachable_unchecked() } }\n",
+        )
+        .expect("included fixture writes");
+        let mut observed = BTreeMap::new();
+
+        scan_rust_tree(directory.path(), &mut observed).expect("compiler inventory succeeds");
+
+        let included = fs::canonicalize(included).expect("included input canonicalizes");
+        assert_eq!(observed.get(&included).map(|item| item.count), Some(1));
+    }
+
+    #[test]
+    fn unsafe_scan_rejects_generated_and_escaping_compiler_inputs() {
+        let directory = tempdir().expect("temporary directory is available");
+        let source = directory.path().join("lib.rs");
+        fs::write(&source, "fn safe() {}\n").expect("source fixture writes");
+        assert!(matches!(
+            rust_compiler_inputs(
+                &source,
+                "include!(concat!(env!(\"OUT_DIR\"), \"/hidden.rs\"));\n"
+            ),
+            Err(PolicyError::InvalidUnsafeBoundary { .. })
+        ));
+        assert!(matches!(
+            rust_compiler_inputs(
+                &source,
+                "#[path = concat!(\"hidden\", \".rs\")]\nmod hidden;\n"
+            ),
+            Err(PolicyError::InvalidUnsafeBoundary { .. })
+        ));
+
+        let root = fs::canonicalize(directory.path()).expect("root canonicalizes");
+        let outside = tempdir().expect("outside directory is available");
+        let escaping = outside.path().join("outside.rs");
+        fs::write(&escaping, "unsafe fn hidden() {}\n").expect("outside fixture writes");
+        let escaping = fs::canonicalize(escaping).expect("outside input canonicalizes");
+        assert!(canonical_compiler_input(&root, &escaping, "fixture").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_scan_rejects_symlinked_compiler_inputs() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().expect("temporary directory is available");
+        let outside = tempdir().expect("outside directory is available");
+        fs::write(outside.path().join("unsafe.rs"), "unsafe fn hidden() {}\n")
+            .expect("outside fixture writes");
+        symlink(
+            outside.path().join("unsafe.rs"),
+            directory.path().join("linked.rs"),
+        )
+        .expect("symlink fixture creates");
+        let mut observed = BTreeMap::new();
+
+        assert!(matches!(
+            scan_rust_tree(directory.path(), &mut observed),
+            Err(PolicyError::InvalidUnsafeBoundary { .. })
         ));
     }
 

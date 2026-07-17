@@ -4,6 +4,8 @@
 //! operation-owned temporary directory beside the result destination. Neither
 //! that host path nor fixture source text enters the evidence bundle.
 
+#![forbid(unsafe_code)]
+
 use std::{
     collections::BTreeMap,
     env,
