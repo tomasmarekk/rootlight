@@ -224,6 +224,8 @@ jobs:
           SOURCE_REVISION: ${{ github.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          install -d -m 0700 artifacts
+          test ! -e artifacts/BENCH-PARSE-001
           cargo run --locked --release --package rootlight-bench --bin m05-parser-evidence -- \
             --output artifacts/BENCH-PARSE-001 \
             --source-revision "$SOURCE_REVISION"
