@@ -41,5 +41,6 @@ while IFS=$'\t' read -r package manifest; do
         --output-format Json \
         2> "$output_root/$package.log" \
         | python scripts/validate-geiger.py \
-            --required-workspace-package "$package"
+            --required-workspace-package "$package" \
+            --unsafe-policy policy/unsafe.toml
 done < "$output_root/workspace-packages.tsv"
