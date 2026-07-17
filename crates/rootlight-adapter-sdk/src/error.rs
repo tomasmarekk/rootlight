@@ -157,6 +157,9 @@ pub enum RequestError {
     /// The analyzer cannot satisfy the requested analysis tier.
     #[error("provider does not support the requested analysis tier")]
     UnsupportedTier,
+    /// An analyzer requiring source classification received no generated status.
+    #[error("analysis request requires an explicit generated-source classification")]
+    GeneratedStatusRequired,
     /// The invocation omitted the required process-local monotonic deadline.
     #[error("adapter invocation requires a monotonic deadline")]
     DeadlineRequired,
