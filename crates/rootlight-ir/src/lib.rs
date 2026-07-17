@@ -3,10 +3,9 @@
 //! The frozen version 1.0 envelope remains available for compatibility. Version
 //! 1.1 adds language-neutral files, entities, occurrences, relations, provenance,
 //! source mappings, coverage, diagnostics, and extension envelopes.
-//! Untrusted exact-dispatch documents must enter through [`decode_ir_document`].
-//! The frozen [`IrDocumentSchema`] and record-level `Deserialize`
-//! implementations support schema and fixture composition but do not apply
-//! document-wide [`IrLimits`].
+//! Untrusted documents and standalone extension envelopes must enter through
+//! the explicit byte-bounded decoders. Public dynamic IR values intentionally
+//! do not implement `Deserialize`.
 
 #![forbid(unsafe_code)]
 
@@ -24,11 +23,12 @@ pub use lexical::{
 pub use normalized::{
     ContainerRef, CoverageRecord, CoverageScope, DiagnosticRecord, DiagnosticSeverity, EntityFlag,
     EntityKind, EntityRecord, EntityVisibility, ExtensionCriticality, ExtensionEnvelope,
-    FactDomain, FactEvidence, FactRef, FileRecord, IrDocument, IrDocumentDecodeError,
-    NORMALIZED_IR_VERSION, NormalizedIrDocument, NormalizedIrVersion, OccurrenceRecord,
-    OccurrenceRole, OccurrenceTarget, ProducerKind, ProvenanceRecord, RelationEndpoint,
-    RelationPredicate, RelationRecord, SkippedRegion, SkippedRegionReason, SourceMappingKind,
-    SourceMappingRecord, decode_ir_document,
+    ExtensionEnvelopeDecodeError, FactDomain, FactEvidence, FactRef, FileRecord, IrDocument,
+    IrDocumentDecodeError, LegacyIrDocumentDecodeError, NORMALIZED_IR_VERSION,
+    NormalizedIrDocument, NormalizedIrVersion, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
+    ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord,
+    SkippedRegion, SkippedRegionReason, SourceMappingKind, SourceMappingRecord,
+    decode_extension_envelope, decode_ir_document, decode_legacy_ir_document,
 };
 pub use validation::{
     ExtensionIdentifier, ExtensionSupport, IrDocumentValidationError, IrLimits,
@@ -429,25 +429,6 @@ impl ProducerIdentity {
     }
 }
 
-impl<'de> Deserialize<'de> for ProducerIdentity {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct WireProducerIdentity {
-            name: String,
-            version: String,
-            configuration_hash: ContentHash,
-        }
-
-        let wire = WireProducerIdentity::deserialize(deserializer)?;
-        Self::new(&wire.name, &wire.version, wire.configuration_hash)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 /// Stable digest identifying one build-context interpretation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -552,35 +533,6 @@ impl IrDocumentSchema {
     }
 }
 
-impl<'de> Deserialize<'de> for IrDocumentSchema {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct WireIrDocument {
-            version: IrVersion,
-            generation: GenerationId,
-            producer: ProducerIdentity,
-            build_context: BuildContextIdentity,
-            coverage: CoverageStatus,
-            evidence: EvidenceKind,
-        }
-
-        let wire = WireIrDocument::deserialize(deserializer)?;
-        Self::new(
-            wire.version,
-            wire.generation,
-            wire.producer,
-            wire.build_context,
-            wire.coverage,
-            wire.evidence,
-        )
-        .map_err(serde::de::Error::custom)
-    }
-}
-
 fn valid_label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -666,12 +618,7 @@ mod tests {
         );
         assert!(serde_json::from_value::<Confidence>(serde_json::json!(1_001)).is_err());
         assert!(
-            serde_json::from_value::<ProducerIdentity>(serde_json::json!({
-                "name": "path/shaped",
-                "version": "1.0",
-                "configuration_hash": content_hash(b"configuration")
-            }))
-            .is_err()
+            ProducerIdentity::new("path/shaped", "1.0", content_hash(b"configuration")).is_err()
         );
     }
 
@@ -711,11 +658,15 @@ mod tests {
             })
         };
 
-        let decoded: IrDocumentSchema =
-            serde_json::from_value(document(1, u16::MAX)).expect("additive minor is supported");
+        let encoded =
+            serde_json::to_vec(&document(1, u16::MAX)).expect("legacy fixture serializes");
+        let decoded = decode_legacy_ir_document(&encoded, &IrLimits::default())
+            .expect("additive minor is supported");
         assert_eq!(decoded.version(), IrVersion::new(1, u16::MAX));
         for major in [0, 2] {
-            assert!(serde_json::from_value::<IrDocumentSchema>(document(major, 0)).is_err());
+            let encoded =
+                serde_json::to_vec(&document(major, 0)).expect("legacy fixture serializes");
+            assert!(decode_legacy_ir_document(&encoded, &IrLimits::default()).is_err());
         }
     }
 }

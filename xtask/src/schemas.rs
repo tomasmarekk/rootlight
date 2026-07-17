@@ -14,9 +14,9 @@ use prost::Message;
 use prost_types::FileDescriptorSet;
 use rootlight_config::{ConfigDocumentSchema, ConfigDocumentSchemaV1_1};
 use rootlight_ir::{
-    ExtensionEnvelope, ExtensionSupport, IrDocument, IrDocumentSchema, IrLimits, LexicalEvidenceV1,
-    NormalizedIrDocument, decode_ir_document, decode_lexical_evidence,
-    decode_lexical_evidence_envelope,
+    ExtensionSupport, IrDocument, IrDocumentSchema, IrLimits, LexicalEvidenceV1,
+    NormalizedIrDocument, decode_extension_envelope, decode_ir_document, decode_legacy_ir_document,
+    decode_lexical_evidence, decode_lexical_evidence_envelope,
 };
 use rootlight_mcp_contract::{ErrorResponse, ResponseMetadata};
 use rootlight_protocol::generated::common::v1::ContractVersion as ProtocolContractVersion;
@@ -339,7 +339,8 @@ fn validate_ir_document(
         }
     })?;
     let schema_valid = validator.is_valid(document);
-    let decode_valid = serde_json::from_value::<IrDocumentSchema>(document.clone()).is_ok();
+    let encoded = serde_json::to_vec(document).map_err(SchemaError::SerializeJson)?;
+    let decode_valid = decode_legacy_ir_document(&encoded, &IrLimits::default()).is_ok();
     if schema_valid != expected_valid || decode_valid != expected_valid {
         return Err(SchemaError::CompatibilityIrValidity {
             version: fixture_version.to_owned(),
@@ -403,11 +404,9 @@ fn validate_lexical_extension_baseline(workspace_root: &Path) -> Result<(), Sche
     let fixture_path = workspace_root
         .join(COMPATIBILITY_ROOT)
         .join(LEXICAL_EXTENSION_BASELINE);
-    let envelope: ExtensionEnvelope = serde_json::from_value(read_json_value(&fixture_path)?)
-        .map_err(|source| SchemaError::ParseCompatibilityFixture {
-            path: fixture_path,
-            source,
-        })?;
+    let envelope_bytes = read_bytes(&fixture_path)?;
+    let envelope = decode_extension_envelope(&envelope_bytes, &IrLimits::default())
+        .map_err(|_| SchemaError::CompatibilityLexicalExtensionFixture)?;
     let payload: serde_json::Value = serde_json::from_str(&envelope.payload).map_err(|source| {
         SchemaError::ParseCompatibilityFixture {
             path: workspace_root
@@ -899,7 +898,9 @@ fn validate_generated_json_schemas(
         } else {
             match case.schema {
                 "ir-1.0.schema.json" => {
-                    serde_json::from_value::<IrDocumentSchema>(case.instance.clone()).is_ok()
+                    let encoded =
+                        serde_json::to_vec(&case.instance).map_err(SchemaError::SerializeJson)?;
+                    decode_legacy_ir_document(&encoded, &IrLimits::default()).is_ok()
                 }
                 "ir-1.1.schema.json" => {
                     let encoded =

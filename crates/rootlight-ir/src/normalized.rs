@@ -6,10 +6,13 @@
 use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, RepositoryId, SymbolId};
 use serde::{Deserialize, Serialize, de};
 
+use crate::validation::{
+    StandaloneExtensionValidationError, validate_standalone_extension_envelope,
+};
 use crate::{
     AnalysisTier, BuildContextIdentity, Confidence, CoverageStatus, EvidenceKind, ExtensionSupport,
-    IR_VERSION, IrDocumentSchema, IrLimits, IrVersion, ProducerIdentity, SourceRef,
-    canonicalize_ir_document,
+    IR_VERSION, IrDocumentSchema, IrLimits, IrVersion, LineRange, ProducerIdentity, SourceRef,
+    SourceSpan, canonicalize_ir_document,
 };
 
 /// The exact normalized fact-document version.
@@ -414,7 +417,7 @@ pub enum FactRef {
 }
 
 /// Source or derivation evidence required for a normalized fact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct FactEvidence {
@@ -425,7 +428,7 @@ pub struct FactEvidence {
 }
 
 /// One immutable file owned by the document repository and generation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct FileRecord {
@@ -454,7 +457,7 @@ pub struct FileRecord {
 }
 
 /// One common semantic entity owned by the document repository and generation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct EntityRecord {
@@ -489,7 +492,7 @@ pub struct EntityRecord {
 }
 
 /// A resolved, bounded-candidate, or unresolved occurrence target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OccurrenceTarget {
@@ -515,7 +518,7 @@ pub enum OccurrenceTarget {
 }
 
 /// One source occurrence owned by the document repository and generation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct OccurrenceRecord {
@@ -548,7 +551,7 @@ pub struct OccurrenceRecord {
 }
 
 /// One typed relation owned by the document repository and generation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RelationRecord {
@@ -575,7 +578,7 @@ pub struct RelationRecord {
 }
 
 /// One deduplicated producer and derivation provenance record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ProvenanceRecord {
@@ -623,7 +626,7 @@ pub enum SourceMappingKind {
 }
 
 /// One source-to-source origin mapping.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SourceMappingRecord {
@@ -659,7 +662,7 @@ pub enum CoverageScope {
 }
 
 /// One bounded coverage result for a fact domain.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CoverageRecord {
@@ -709,7 +712,7 @@ pub enum SkippedRegionReason {
 }
 
 /// One explicitly skipped source region.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SkippedRegion {
@@ -747,7 +750,7 @@ pub enum DiagnosticSeverity {
 }
 
 /// One bounded analysis diagnostic.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticRecord {
@@ -785,7 +788,7 @@ pub enum ExtensionCriticality {
 }
 
 /// One namespaced, length-bounded extension envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionEnvelope {
@@ -896,6 +899,58 @@ impl Serialize for IrDocument {
     }
 }
 
+/// Bounded legacy 1.x envelope decoding failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum LegacyIrDocumentDecodeError {
+    /// The encoded legacy envelope exceeded its configured byte ceiling.
+    #[error("encoded legacy IR document contains {observed} bytes, limit is {limit}")]
+    EncodedDocumentTooLarge {
+        /// Observed encoded byte length.
+        observed: usize,
+        /// Configured encoded byte ceiling.
+        limit: usize,
+    },
+    /// The input was not syntactically valid JSON.
+    #[error("encoded legacy IR document is malformed")]
+    MalformedDocument,
+    /// The decoded JSON did not match the frozen legacy envelope shape.
+    #[error("encoded legacy IR document is invalid")]
+    InvalidDocument,
+    /// The envelope declared an unsupported major version.
+    #[error("unsupported legacy IR major version {major}")]
+    UnsupportedMajor {
+        /// Unsupported major component.
+        major: u16,
+    },
+}
+
+/// Bounded standalone extension-envelope decoding failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ExtensionEnvelopeDecodeError {
+    /// The encoded envelope exceeded its configured byte ceiling.
+    #[error("encoded extension envelope contains {observed} bytes, limit is {limit}")]
+    EncodedEnvelopeTooLarge {
+        /// Observed encoded byte length.
+        observed: usize,
+        /// Configured encoded byte ceiling.
+        limit: usize,
+    },
+    /// The input was not syntactically valid JSON.
+    #[error("encoded extension envelope is malformed")]
+    MalformedEnvelope,
+    /// The decoded JSON did not match the strict extension-envelope shape.
+    #[error("encoded extension envelope has an invalid shape")]
+    InvalidEnvelopeShape,
+    /// The envelope exceeded a nested, string, or payload quota.
+    #[error("encoded extension envelope exceeds configured limits")]
+    EnvelopeLimitExceeded,
+    /// The envelope namespace or version was not syntactically valid.
+    #[error("encoded extension envelope has an invalid identity")]
+    InvalidExtensionIdentity,
+}
+
 /// Bounded IR document decoding failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -927,17 +982,108 @@ pub enum IrDocumentDecodeError {
     InvalidNormalizedDocument,
 }
 
+/// Decodes a byte-bounded frozen legacy IR envelope.
+///
+/// This compatibility entry point accepts every additive minor under major 1.
+/// Unified dispatch through [`decode_ir_document`] remains exact and accepts
+/// only versions 1.0 and 1.1.
+///
+/// Direct Serde decoding is intentionally unavailable:
+///
+/// ```compile_fail
+/// use rootlight_ir::IrDocumentSchema;
+///
+/// fn decode_without_limits(encoded: &[u8]) {
+///     let _: IrDocumentSchema = serde_json::from_slice(encoded).unwrap();
+/// }
+/// ```
+///
+/// # Errors
+///
+/// Returns [`LegacyIrDocumentDecodeError::EncodedDocumentTooLarge`] before
+/// JSON decoding when `encoded` exceeds [`IrLimits::max_document_bytes`].
+/// Malformed JSON, an invalid strict envelope shape, an invalid producer
+/// identity, or a major other than 1 is rejected without exposing input text.
+pub fn decode_legacy_ir_document(
+    encoded: &[u8],
+    limits: &IrLimits,
+) -> Result<IrDocumentSchema, LegacyIrDocumentDecodeError> {
+    let observed = encoded.len();
+    if observed > limits.max_document_bytes {
+        return Err(LegacyIrDocumentDecodeError::EncodedDocumentTooLarge {
+            observed,
+            limit: limits.max_document_bytes,
+        });
+    }
+
+    let wire = serde_json::from_slice::<LegacyWireDocument>(encoded)
+        .map_err(classify_legacy_wire_error)?;
+    if wire.version.major() != IR_VERSION.major() {
+        return Err(LegacyIrDocumentDecodeError::UnsupportedMajor {
+            major: wire.version.major(),
+        });
+    }
+    wire.into_domain()
+        .map_err(|()| LegacyIrDocumentDecodeError::InvalidDocument)
+}
+
+/// Decodes and validates one byte-bounded standalone extension envelope.
+///
+/// The encoded ceiling is checked before Serde can materialize payload,
+/// metadata, or nested evidence. The decoded value is then checked against the
+/// configured per-envelope nested, string, and payload quotas and against the
+/// extension identity grammar.
+///
+/// Direct Serde decoding is intentionally unavailable:
+///
+/// ```compile_fail
+/// use rootlight_ir::ExtensionEnvelope;
+///
+/// fn decode_without_limits(encoded: &[u8]) {
+///     let _: ExtensionEnvelope = serde_json::from_slice(encoded).unwrap();
+/// }
+/// ```
+///
+/// # Errors
+///
+/// Returns [`ExtensionEnvelopeDecodeError::EncodedEnvelopeTooLarge`] before
+/// JSON decoding when `encoded` exceeds
+/// [`IrLimits::max_extension_envelope_bytes`]. Strict shape, quota, and
+/// identity failures are source-free.
+pub fn decode_extension_envelope(
+    encoded: &[u8],
+    limits: &IrLimits,
+) -> Result<ExtensionEnvelope, ExtensionEnvelopeDecodeError> {
+    let observed = encoded.len();
+    if observed > limits.max_extension_envelope_bytes {
+        return Err(ExtensionEnvelopeDecodeError::EncodedEnvelopeTooLarge {
+            observed,
+            limit: limits.max_extension_envelope_bytes,
+        });
+    }
+
+    let wire = serde_json::from_slice::<WireExtensionEnvelope>(encoded)
+        .map_err(classify_extension_wire_error)?;
+    let envelope = wire
+        .into_domain()
+        .map_err(|()| ExtensionEnvelopeDecodeError::InvalidEnvelopeShape)?;
+    match validate_standalone_extension_envelope(&envelope, limits) {
+        Ok(()) => Ok(envelope),
+        Err(StandaloneExtensionValidationError::Limit) => {
+            Err(ExtensionEnvelopeDecodeError::EnvelopeLimitExceeded)
+        }
+        Err(StandaloneExtensionValidationError::Identity) => {
+            Err(ExtensionEnvelopeDecodeError::InvalidExtensionIdentity)
+        }
+    }
+}
+
 /// Decodes, validates, and dispatches one byte-bounded IR JSON document.
 ///
 /// The encoded byte ceiling is checked before Serde can materialize any
 /// document string or collection. Version 1.0 returns the frozen legacy
 /// envelope. Version 1.1 is validated against raw quotas and returned in
 /// deterministic canonical order under the supplied extension policy.
-///
-/// The frozen [`IrDocumentSchema`] and individual record types retain
-/// `Deserialize` for schema and fixture composition. Those trait
-/// implementations do not apply document-wide [`IrLimits`] and are not
-/// substitutes for this untrusted-input boundary.
 ///
 /// Direct Serde decoding is intentionally unavailable:
 ///
@@ -954,6 +1100,36 @@ pub enum IrDocumentDecodeError {
 ///
 /// fn decode_normalized_without_limits(encoded: &[u8]) {
 ///     let _: NormalizedIrDocument = serde_json::from_slice(encoded).unwrap();
+/// }
+/// ```
+///
+/// Dynamic record traits cannot bypass the document preflight:
+///
+/// ```compile_fail
+/// use rootlight_ir::{
+///     CoverageRecord, DiagnosticRecord, EntityRecord, ExtensionEnvelope,
+///     FactEvidence, FileRecord, OccurrenceRecord, OccurrenceTarget,
+///     ProducerIdentity, ProvenanceRecord, RelationRecord, SkippedRegion,
+///     SourceMappingRecord,
+/// };
+/// use serde::de::DeserializeOwned;
+///
+/// fn require_deserialize<T: DeserializeOwned>() {}
+///
+/// fn dynamic_records_do_not_deserialize() {
+///     require_deserialize::<ProducerIdentity>();
+///     require_deserialize::<FactEvidence>();
+///     require_deserialize::<FileRecord>();
+///     require_deserialize::<EntityRecord>();
+///     require_deserialize::<OccurrenceTarget>();
+///     require_deserialize::<OccurrenceRecord>();
+///     require_deserialize::<RelationRecord>();
+///     require_deserialize::<ProvenanceRecord>();
+///     require_deserialize::<SourceMappingRecord>();
+///     require_deserialize::<CoverageRecord>();
+///     require_deserialize::<SkippedRegion>();
+///     require_deserialize::<DiagnosticRecord>();
+///     require_deserialize::<ExtensionEnvelope>();
 /// }
 /// ```
 ///
@@ -993,21 +1169,16 @@ pub fn decode_ir_document(
         IR_VERSION => {
             let wire = serde_json::from_slice::<LegacyWireDocument>(encoded)
                 .map_err(classify_wire_error)?;
-            IrDocumentSchema::new(
-                wire.version,
-                wire.generation,
-                wire.producer,
-                wire.build_context,
-                wire.coverage,
-                wire.evidence,
-            )
-            .map(IrDocument::LegacyV1_0)
-            .map_err(|_| IrDocumentDecodeError::InvalidDocumentShape)
+            wire.into_domain()
+                .map(IrDocument::LegacyV1_0)
+                .map_err(|_| IrDocumentDecodeError::InvalidDocumentShape)
         }
         NORMALIZED_IR_VERSION => {
             let wire = serde_json::from_slice::<NormalizedWireDocument>(encoded)
                 .map_err(classify_wire_error)?;
-            let document = wire.into();
+            let document = wire
+                .into_domain()
+                .map_err(|()| IrDocumentDecodeError::InvalidDocumentShape)?;
             canonicalize_ir_document(document, limits, extensions)
                 .map(IrDocument::NormalizedV1_1)
                 .map_err(|_| IrDocumentDecodeError::InvalidNormalizedDocument)
@@ -1029,10 +1200,24 @@ struct VersionProbe {
 struct LegacyWireDocument {
     version: IrVersion,
     generation: GenerationId,
-    producer: ProducerIdentity,
+    producer: WireProducerIdentity,
     build_context: BuildContextIdentity,
     coverage: CoverageStatus,
     evidence: EvidenceKind,
+}
+
+impl LegacyWireDocument {
+    fn into_domain(self) -> Result<IrDocumentSchema, ()> {
+        IrDocumentSchema::new(
+            self.version,
+            self.generation,
+            self.producer.into_domain()?,
+            self.build_context,
+            self.coverage,
+            self.evidence,
+        )
+        .map_err(|_| ())
+    }
 }
 
 #[derive(Deserialize)]
@@ -1041,35 +1226,650 @@ struct NormalizedWireDocument {
     version: NormalizedIrVersion,
     repository: RepositoryId,
     generation: GenerationId,
-    files: Vec<FileRecord>,
-    entities: Vec<EntityRecord>,
-    occurrences: Vec<OccurrenceRecord>,
-    relations: Vec<RelationRecord>,
-    provenance: Vec<ProvenanceRecord>,
-    source_mappings: Vec<SourceMappingRecord>,
-    coverage_records: Vec<CoverageRecord>,
-    skipped_regions: Vec<SkippedRegion>,
-    diagnostics: Vec<DiagnosticRecord>,
-    extensions: Vec<ExtensionEnvelope>,
+    files: Vec<WireFileRecord>,
+    entities: Vec<WireEntityRecord>,
+    occurrences: Vec<WireOccurrenceRecord>,
+    relations: Vec<WireRelationRecord>,
+    provenance: Vec<WireProvenanceRecord>,
+    source_mappings: Vec<WireSourceMappingRecord>,
+    coverage_records: Vec<WireCoverageRecord>,
+    skipped_regions: Vec<WireSkippedRegion>,
+    diagnostics: Vec<WireDiagnosticRecord>,
+    extensions: Vec<WireExtensionEnvelope>,
 }
 
-impl From<NormalizedWireDocument> for NormalizedIrDocument {
-    fn from(wire: NormalizedWireDocument) -> Self {
-        Self {
-            version: wire.version,
-            repository: wire.repository,
-            generation: wire.generation,
-            files: wire.files,
-            entities: wire.entities,
-            occurrences: wire.occurrences,
-            relations: wire.relations,
-            provenance: wire.provenance,
-            source_mappings: wire.source_mappings,
-            coverage_records: wire.coverage_records,
-            skipped_regions: wire.skipped_regions,
-            diagnostics: wire.diagnostics,
-            extensions: wire.extensions,
+impl NormalizedWireDocument {
+    fn into_domain(self) -> Result<NormalizedIrDocument, ()> {
+        Ok(NormalizedIrDocument {
+            version: self.version,
+            repository: self.repository,
+            generation: self.generation,
+            files: self
+                .files
+                .into_iter()
+                .map(WireFileRecord::into_domain)
+                .collect::<Result<_, _>>()?,
+            entities: self
+                .entities
+                .into_iter()
+                .map(WireEntityRecord::into_domain)
+                .collect::<Result<_, _>>()?,
+            occurrences: self
+                .occurrences
+                .into_iter()
+                .map(WireOccurrenceRecord::into_domain)
+                .collect::<Result<_, _>>()?,
+            relations: self
+                .relations
+                .into_iter()
+                .map(WireRelationRecord::into_domain)
+                .collect::<Result<_, _>>()?,
+            provenance: self
+                .provenance
+                .into_iter()
+                .map(WireProvenanceRecord::into_domain)
+                .collect::<Result<_, _>>()?,
+            source_mappings: self
+                .source_mappings
+                .into_iter()
+                .map(WireSourceMappingRecord::into_domain)
+                .collect::<Result<_, _>>()?,
+            coverage_records: self
+                .coverage_records
+                .into_iter()
+                .map(WireCoverageRecord::into_domain)
+                .collect::<Result<_, _>>()?,
+            skipped_regions: self
+                .skipped_regions
+                .into_iter()
+                .map(WireSkippedRegion::into_domain)
+                .collect::<Result<_, _>>()?,
+            diagnostics: self
+                .diagnostics
+                .into_iter()
+                .map(WireDiagnosticRecord::into_domain)
+                .collect::<Result<_, _>>()?,
+            extensions: self
+                .extensions
+                .into_iter()
+                .map(WireExtensionEnvelope::into_domain)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireProducerIdentity {
+    name: String,
+    version: String,
+    configuration_hash: ContentHash,
+}
+
+impl WireProducerIdentity {
+    fn into_domain(self) -> Result<ProducerIdentity, ()> {
+        ProducerIdentity::new(&self.name, &self.version, self.configuration_hash).map_err(|_| ())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireSourceSpan {
+    file: FileId,
+    start_byte: u64,
+    end_byte: u64,
+}
+
+impl WireSourceSpan {
+    fn into_domain(self) -> Result<SourceSpan, ()> {
+        SourceSpan::new(self.file, self.start_byte, self.end_byte).map_err(|_| ())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireLineRange {
+    start_line: u64,
+    end_line: u64,
+}
+
+impl WireLineRange {
+    fn into_domain(self) -> Result<LineRange, ()> {
+        LineRange::new(self.start_line, self.end_line).map_err(|_| ())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireSourceRef {
+    repository: RepositoryId,
+    generation: GenerationId,
+    span: WireSourceSpan,
+    content_hash: ContentHash,
+    line_hint: Option<WireLineRange>,
+}
+
+impl WireSourceRef {
+    fn into_domain(self) -> Result<SourceRef, ()> {
+        Ok(SourceRef::new(
+            self.repository,
+            self.generation,
+            self.span.into_domain()?,
+            self.content_hash,
+            self.line_hint.map(WireLineRange::into_domain).transpose()?,
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum WireFactRef {
+    File(FileId),
+    Entity(SymbolId),
+    Fact(FactId),
+}
+
+impl From<WireFactRef> for FactRef {
+    fn from(wire: WireFactRef) -> Self {
+        match wire {
+            WireFactRef::File(id) => Self::File(id),
+            WireFactRef::Entity(id) => Self::Entity(id),
+            WireFactRef::Fact(id) => Self::Fact(id),
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum WireContainerRef {
+    Repository(RepositoryId),
+    File(FileId),
+    Entity(SymbolId),
+}
+
+impl From<WireContainerRef> for ContainerRef {
+    fn from(wire: WireContainerRef) -> Self {
+        match wire {
+            WireContainerRef::Repository(id) => Self::Repository(id),
+            WireContainerRef::File(id) => Self::File(id),
+            WireContainerRef::Entity(id) => Self::Entity(id),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum WireRelationEndpoint {
+    Repository(RepositoryId),
+    File(FileId),
+    Entity(SymbolId),
+    Occurrence(FactId),
+}
+
+impl From<WireRelationEndpoint> for RelationEndpoint {
+    fn from(wire: WireRelationEndpoint) -> Self {
+        match wire {
+            WireRelationEndpoint::Repository(id) => Self::Repository(id),
+            WireRelationEndpoint::File(id) => Self::File(id),
+            WireRelationEndpoint::Entity(id) => Self::Entity(id),
+            WireRelationEndpoint::Occurrence(id) => Self::Occurrence(id),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum WireCoverageScope {
+    Repository(RepositoryId),
+    File(FileId),
+    Entity(SymbolId),
+}
+
+impl From<WireCoverageScope> for CoverageScope {
+    fn from(wire: WireCoverageScope) -> Self {
+        match wire {
+            WireCoverageScope::Repository(id) => Self::Repository(id),
+            WireCoverageScope::File(id) => Self::File(id),
+            WireCoverageScope::Entity(id) => Self::Entity(id),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireFactEvidence {
+    source: Option<WireSourceRef>,
+    derivation: Vec<WireFactRef>,
+}
+
+impl WireFactEvidence {
+    fn into_domain(self) -> Result<FactEvidence, ()> {
+        Ok(FactEvidence {
+            source: self.source.map(WireSourceRef::into_domain).transpose()?,
+            derivation: self.derivation.into_iter().map(Into::into).collect(),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireFileRecord {
+    id: FileId,
+    repository: RepositoryId,
+    generation: GenerationId,
+    path: String,
+    content_hash: ContentHash,
+    byte_length: u64,
+    language: String,
+    encoding: String,
+    generated: bool,
+    provenance: FactId,
+    evidence: WireFactEvidence,
+}
+
+impl WireFileRecord {
+    fn into_domain(self) -> Result<FileRecord, ()> {
+        Ok(FileRecord {
+            id: self.id,
+            repository: self.repository,
+            generation: self.generation,
+            path: self.path,
+            content_hash: self.content_hash,
+            byte_length: self.byte_length,
+            language: self.language,
+            encoding: self.encoding,
+            generated: self.generated,
+            provenance: self.provenance,
+            evidence: self.evidence.into_domain()?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireEntityRecord {
+    id: SymbolId,
+    repository: RepositoryId,
+    generation: GenerationId,
+    kind: EntityKind,
+    language: String,
+    tier: AnalysisTier,
+    canonical_name: String,
+    display_name: String,
+    qualified_name: String,
+    container: Option<WireContainerRef>,
+    visibility: EntityVisibility,
+    flags: Vec<EntityFlag>,
+    provenance: FactId,
+    evidence: WireFactEvidence,
+}
+
+impl WireEntityRecord {
+    fn into_domain(self) -> Result<EntityRecord, ()> {
+        Ok(EntityRecord {
+            id: self.id,
+            repository: self.repository,
+            generation: self.generation,
+            kind: self.kind,
+            language: self.language,
+            tier: self.tier,
+            canonical_name: self.canonical_name,
+            display_name: self.display_name,
+            qualified_name: self.qualified_name,
+            container: self.container.map(Into::into),
+            visibility: self.visibility,
+            flags: self.flags,
+            provenance: self.provenance,
+            evidence: self.evidence.into_domain()?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum WireOccurrenceTarget {
+    Resolved {
+        symbol: SymbolId,
+    },
+    Candidates {
+        symbols: Vec<SymbolId>,
+        total_count: u64,
+        completeness: CoverageStatus,
+    },
+    Unresolved {
+        text_hash: ContentHash,
+    },
+}
+
+impl From<WireOccurrenceTarget> for OccurrenceTarget {
+    fn from(wire: WireOccurrenceTarget) -> Self {
+        match wire {
+            WireOccurrenceTarget::Resolved { symbol } => Self::Resolved { symbol },
+            WireOccurrenceTarget::Candidates {
+                symbols,
+                total_count,
+                completeness,
+            } => Self::Candidates {
+                symbols,
+                total_count,
+                completeness,
+            },
+            WireOccurrenceTarget::Unresolved { text_hash } => Self::Unresolved { text_hash },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireOccurrenceRecord {
+    id: FactId,
+    repository: RepositoryId,
+    generation: GenerationId,
+    file: FileId,
+    source: WireSourceRef,
+    role: OccurrenceRole,
+    enclosing: Option<SymbolId>,
+    target: WireOccurrenceTarget,
+    syntactic_text_hash: ContentHash,
+    syntax_kind: String,
+    provenance: FactId,
+    confidence: Confidence,
+    evidence: WireFactEvidence,
+}
+
+impl WireOccurrenceRecord {
+    fn into_domain(self) -> Result<OccurrenceRecord, ()> {
+        Ok(OccurrenceRecord {
+            id: self.id,
+            repository: self.repository,
+            generation: self.generation,
+            file: self.file,
+            source: self.source.into_domain()?,
+            role: self.role,
+            enclosing: self.enclosing,
+            target: self.target.into(),
+            syntactic_text_hash: self.syntactic_text_hash,
+            syntax_kind: self.syntax_kind,
+            provenance: self.provenance,
+            confidence: self.confidence,
+            evidence: self.evidence.into_domain()?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireRelationRecord {
+    id: FactId,
+    repository: RepositoryId,
+    generation: GenerationId,
+    subject: WireRelationEndpoint,
+    predicate: RelationPredicate,
+    object: WireRelationEndpoint,
+    confidence: Confidence,
+    evidence_kind: EvidenceKind,
+    provenance: FactId,
+    evidence: WireFactEvidence,
+}
+
+impl WireRelationRecord {
+    fn into_domain(self) -> Result<RelationRecord, ()> {
+        Ok(RelationRecord {
+            id: self.id,
+            repository: self.repository,
+            generation: self.generation,
+            subject: self.subject.into(),
+            predicate: self.predicate,
+            object: self.object.into(),
+            confidence: self.confidence,
+            evidence_kind: self.evidence_kind,
+            provenance: self.provenance,
+            evidence: self.evidence.into_domain()?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireProvenanceRecord {
+    id: FactId,
+    repository: RepositoryId,
+    generation: GenerationId,
+    producer_kind: ProducerKind,
+    producer: WireProducerIdentity,
+    binary_digest: ContentHash,
+    frontend_version: Option<String>,
+    language: String,
+    tier: AnalysisTier,
+    build_context: BuildContextIdentity,
+    input_sources: Vec<WireSourceRef>,
+    evidence_sources: Vec<WireSourceRef>,
+    derivation_parents: Vec<WireFactRef>,
+    rule: Option<String>,
+}
+
+impl WireProvenanceRecord {
+    fn into_domain(self) -> Result<ProvenanceRecord, ()> {
+        Ok(ProvenanceRecord {
+            id: self.id,
+            repository: self.repository,
+            generation: self.generation,
+            producer_kind: self.producer_kind,
+            producer: self.producer.into_domain()?,
+            binary_digest: self.binary_digest,
+            frontend_version: self.frontend_version,
+            language: self.language,
+            tier: self.tier,
+            build_context: self.build_context,
+            input_sources: self
+                .input_sources
+                .into_iter()
+                .map(WireSourceRef::into_domain)
+                .collect::<Result<_, _>>()?,
+            evidence_sources: self
+                .evidence_sources
+                .into_iter()
+                .map(WireSourceRef::into_domain)
+                .collect::<Result<_, _>>()?,
+            derivation_parents: self
+                .derivation_parents
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            rule: self.rule,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireSourceMappingRecord {
+    id: FactId,
+    repository: RepositoryId,
+    generation: GenerationId,
+    from: WireSourceRef,
+    to: WireSourceRef,
+    kind: SourceMappingKind,
+    provenance: FactId,
+    evidence: WireFactEvidence,
+}
+
+impl WireSourceMappingRecord {
+    fn into_domain(self) -> Result<SourceMappingRecord, ()> {
+        Ok(SourceMappingRecord {
+            id: self.id,
+            repository: self.repository,
+            generation: self.generation,
+            from: self.from.into_domain()?,
+            to: self.to.into_domain()?,
+            kind: self.kind,
+            provenance: self.provenance,
+            evidence: self.evidence.into_domain()?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireCoverageRecord {
+    id: FactId,
+    repository: RepositoryId,
+    generation: GenerationId,
+    scope: WireCoverageScope,
+    domain: FactDomain,
+    tier: AnalysisTier,
+    status: CoverageStatus,
+    discovered: u64,
+    indexed: u64,
+    skipped: u64,
+    provenance: FactId,
+    evidence: WireFactEvidence,
+}
+
+impl WireCoverageRecord {
+    fn into_domain(self) -> Result<CoverageRecord, ()> {
+        Ok(CoverageRecord {
+            id: self.id,
+            repository: self.repository,
+            generation: self.generation,
+            scope: self.scope.into(),
+            domain: self.domain,
+            tier: self.tier,
+            status: self.status,
+            discovered: self.discovered,
+            indexed: self.indexed,
+            skipped: self.skipped,
+            provenance: self.provenance,
+            evidence: self.evidence.into_domain()?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireSkippedRegion {
+    id: FactId,
+    repository: RepositoryId,
+    generation: GenerationId,
+    source: WireSourceRef,
+    domain: FactDomain,
+    reason: SkippedRegionReason,
+    detail: String,
+    provenance: FactId,
+    evidence: WireFactEvidence,
+}
+
+impl WireSkippedRegion {
+    fn into_domain(self) -> Result<SkippedRegion, ()> {
+        Ok(SkippedRegion {
+            id: self.id,
+            repository: self.repository,
+            generation: self.generation,
+            source: self.source.into_domain()?,
+            domain: self.domain,
+            reason: self.reason,
+            detail: self.detail,
+            provenance: self.provenance,
+            evidence: self.evidence.into_domain()?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireDiagnosticRecord {
+    id: FactId,
+    repository: RepositoryId,
+    generation: GenerationId,
+    code: String,
+    message: String,
+    severity: DiagnosticSeverity,
+    source: Option<WireSourceRef>,
+    coverage_effect: CoverageStatus,
+    provenance: FactId,
+    evidence: WireFactEvidence,
+}
+
+impl WireDiagnosticRecord {
+    fn into_domain(self) -> Result<DiagnosticRecord, ()> {
+        Ok(DiagnosticRecord {
+            id: self.id,
+            repository: self.repository,
+            generation: self.generation,
+            code: self.code,
+            message: self.message,
+            severity: self.severity,
+            source: self.source.map(WireSourceRef::into_domain).transpose()?,
+            coverage_effect: self.coverage_effect,
+            provenance: self.provenance,
+            evidence: self.evidence.into_domain()?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireExtensionEnvelope {
+    id: FactId,
+    repository: RepositoryId,
+    generation: GenerationId,
+    namespace: String,
+    version: String,
+    criticality: ExtensionCriticality,
+    payload: String,
+    provenance: FactId,
+    evidence: WireFactEvidence,
+}
+
+impl WireExtensionEnvelope {
+    fn into_domain(self) -> Result<ExtensionEnvelope, ()> {
+        Ok(ExtensionEnvelope {
+            id: self.id,
+            repository: self.repository,
+            generation: self.generation,
+            namespace: self.namespace,
+            version: self.version,
+            criticality: self.criticality,
+            payload: self.payload,
+            provenance: self.provenance,
+            evidence: self.evidence.into_domain()?,
+        })
+    }
+}
+
+fn classify_legacy_wire_error(error: serde_json::Error) -> LegacyIrDocumentDecodeError {
+    if error.is_data() {
+        LegacyIrDocumentDecodeError::InvalidDocument
+    } else {
+        LegacyIrDocumentDecodeError::MalformedDocument
+    }
+}
+
+fn classify_extension_wire_error(error: serde_json::Error) -> ExtensionEnvelopeDecodeError {
+    if error.is_data() {
+        ExtensionEnvelopeDecodeError::InvalidEnvelopeShape
+    } else {
+        ExtensionEnvelopeDecodeError::MalformedEnvelope
     }
 }
 
@@ -1091,6 +1891,9 @@ mod tests {
         include_bytes!("../../../tests/fixtures/compatibility/ir/1.0/document.json");
     const NORMALIZED_FIXTURE: &[u8] =
         include_bytes!("../../../tests/fixtures/compatibility/ir/1.1/document.json");
+    const LEXICAL_ENVELOPE_FIXTURE: &[u8] = include_bytes!(
+        "../../../tests/fixtures/compatibility/extensions/rootlight.lexical/1/envelope.json"
+    );
 
     fn legacy_value() -> serde_json::Value {
         serde_json::from_slice(LEGACY_FIXTURE).expect("legacy fixture JSON parses")
@@ -1098,6 +1901,11 @@ mod tests {
 
     fn normalized_value() -> serde_json::Value {
         serde_json::from_slice(NORMALIZED_FIXTURE).expect("normalized fixture JSON parses")
+    }
+
+    fn lexical_envelope_value() -> serde_json::Value {
+        serde_json::from_slice(LEXICAL_ENVELOPE_FIXTURE)
+            .expect("lexical envelope fixture JSON parses")
     }
 
     fn encode_test_value(value: &serde_json::Value) -> Vec<u8> {
@@ -1165,6 +1973,246 @@ mod tests {
                 limit: 4,
             })
         );
+    }
+
+    #[test]
+    fn legacy_decoder_preserves_additive_minor_wire_compatibility() {
+        let decoded = decode_legacy_ir_document(LEGACY_FIXTURE, &IrLimits::default())
+            .expect("frozen legacy fixture decodes");
+        assert_eq!(
+            serde_json::to_value(decoded).expect("legacy document serializes"),
+            legacy_value()
+        );
+
+        let mut additive = legacy_value();
+        additive["version"]["minor"] = serde_json::json!(u16::MAX);
+        let decoded =
+            decode_legacy_ir_document(&encode_test_value(&additive), &IrLimits::default())
+                .expect("additive legacy minor decodes");
+        assert_eq!(decoded.version(), IrVersion::new(1, u16::MAX));
+
+        additive["version"]["major"] = serde_json::json!(2);
+        assert_eq!(
+            decode_legacy_ir_document(&encode_test_value(&additive), &IrLimits::default()),
+            Err(LegacyIrDocumentDecodeError::UnsupportedMajor { major: 2 })
+        );
+    }
+
+    #[test]
+    fn legacy_decoder_rejects_oversize_unknown_fields_and_non_numeric_versions() {
+        let limits = IrLimits {
+            max_document_bytes: 4,
+            ..IrLimits::default()
+        };
+        assert_eq!(
+            decode_legacy_ir_document(b"{{{{{", &limits),
+            Err(LegacyIrDocumentDecodeError::EncodedDocumentTooLarge {
+                observed: 5,
+                limit: 4,
+            })
+        );
+        assert_eq!(
+            decode_legacy_ir_document(b"{", &IrLimits::default()),
+            Err(LegacyIrDocumentDecodeError::MalformedDocument)
+        );
+
+        let mut unknown = legacy_value();
+        unknown["producer"]["unknown"] = serde_json::json!(true);
+        assert_eq!(
+            decode_legacy_ir_document(&encode_test_value(&unknown), &IrLimits::default()),
+            Err(LegacyIrDocumentDecodeError::InvalidDocument)
+        );
+
+        let mut string_version = legacy_value();
+        string_version["version"]["minor"] = serde_json::json!("0");
+        assert_eq!(
+            decode_legacy_ir_document(&encode_test_value(&string_version), &IrLimits::default()),
+            Err(LegacyIrDocumentDecodeError::InvalidDocument)
+        );
+
+        let attacker_text = "/private/attacker.rs";
+        let mut invalid_producer = legacy_value();
+        invalid_producer["producer"]["name"] = serde_json::json!(attacker_text);
+        let error =
+            decode_legacy_ir_document(&encode_test_value(&invalid_producer), &IrLimits::default())
+                .expect_err("invalid producer label is rejected");
+        assert_eq!(error, LegacyIrDocumentDecodeError::InvalidDocument);
+        assert!(!error.to_string().contains(attacker_text));
+    }
+
+    #[test]
+    fn standalone_extension_decoder_preserves_wire_compatibility() {
+        let decoded = decode_extension_envelope(LEXICAL_ENVELOPE_FIXTURE, &IrLimits::default())
+            .expect("frozen extension envelope decodes");
+        assert_eq!(
+            serde_json::to_value(decoded).expect("extension envelope serializes"),
+            lexical_envelope_value()
+        );
+    }
+
+    #[test]
+    fn standalone_extension_preflights_and_rejects_strict_shape_failures() {
+        let limits = IrLimits {
+            max_extension_envelope_bytes: 4,
+            ..IrLimits::default()
+        };
+        assert_eq!(
+            decode_extension_envelope(b"{{{{{", &limits),
+            Err(ExtensionEnvelopeDecodeError::EncodedEnvelopeTooLarge {
+                observed: 5,
+                limit: 4,
+            })
+        );
+        assert_eq!(
+            decode_extension_envelope(b"{", &IrLimits::default()),
+            Err(ExtensionEnvelopeDecodeError::MalformedEnvelope)
+        );
+
+        let mut cases = Vec::new();
+        let mut top_level = lexical_envelope_value();
+        top_level["unknown"] = serde_json::json!(true);
+        cases.push(top_level);
+        let mut evidence = lexical_envelope_value();
+        evidence["evidence"]["unknown"] = serde_json::json!(true);
+        cases.push(evidence);
+        let mut fact_reference = lexical_envelope_value();
+        fact_reference["evidence"]["derivation"][0]["unknown"] = serde_json::json!(true);
+        cases.push(fact_reference);
+        let mut numeric_version = lexical_envelope_value();
+        numeric_version["version"] = serde_json::json!(1);
+        cases.push(numeric_version);
+
+        for invalid in cases {
+            assert_eq!(
+                decode_extension_envelope(&encode_test_value(&invalid), &IrLimits::default()),
+                Err(ExtensionEnvelopeDecodeError::InvalidEnvelopeShape)
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_extension_decoder_enforces_nested_string_and_payload_quotas() {
+        let value = lexical_envelope_value();
+        let encoded = encode_test_value(&value);
+        let derivation_len = value["evidence"]["derivation"]
+            .as_array()
+            .expect("fixture derivation is an array")
+            .len();
+        let namespace_len = value["namespace"]
+            .as_str()
+            .expect("fixture namespace is text")
+            .len();
+        let version_len = value["version"]
+            .as_str()
+            .expect("fixture version is text")
+            .len();
+        let payload_len = value["payload"]
+            .as_str()
+            .expect("fixture payload is text")
+            .len();
+        let exact_limits = IrLimits {
+            max_extension_envelope_bytes: encoded.len(),
+            max_nested_items_per_record: derivation_len,
+            max_total_nested_items: derivation_len,
+            max_string_bytes: namespace_len.max(version_len),
+            max_total_string_bytes: namespace_len
+                .checked_add(version_len)
+                .expect("fixture lengths fit"),
+            max_extension_payload_bytes: payload_len,
+            max_total_extension_bytes: payload_len,
+            ..IrLimits::default()
+        };
+        assert!(
+            decode_extension_envelope(&encoded, &exact_limits).is_ok(),
+            "exact standalone extension caps are inclusive"
+        );
+
+        let limit_cases = [
+            IrLimits {
+                max_nested_items_per_record: derivation_len.saturating_sub(1),
+                ..IrLimits::default()
+            },
+            IrLimits {
+                max_total_nested_items: derivation_len.saturating_sub(1),
+                ..IrLimits::default()
+            },
+            IrLimits {
+                max_string_bytes: namespace_len.saturating_sub(1),
+                ..IrLimits::default()
+            },
+            IrLimits {
+                max_total_string_bytes: namespace_len
+                    .checked_add(version_len)
+                    .expect("fixture lengths fit")
+                    .saturating_sub(1),
+                ..IrLimits::default()
+            },
+            IrLimits {
+                max_extension_payload_bytes: payload_len.saturating_sub(1),
+                ..IrLimits::default()
+            },
+            IrLimits {
+                max_total_extension_bytes: payload_len.saturating_sub(1),
+                ..IrLimits::default()
+            },
+        ];
+        for limits in limit_cases {
+            assert_eq!(
+                decode_extension_envelope(&encoded, &limits),
+                Err(ExtensionEnvelopeDecodeError::EnvelopeLimitExceeded)
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_extension_errors_do_not_expose_attacker_identity_text() {
+        let attacker_text = "/private/attacker.rs";
+        let mut invalid = lexical_envelope_value();
+        invalid["namespace"] = serde_json::json!(attacker_text);
+        let error = decode_extension_envelope(&encode_test_value(&invalid), &IrLimits::default())
+            .expect_err("invalid identity is rejected");
+        assert_eq!(
+            error,
+            ExtensionEnvelopeDecodeError::InvalidExtensionIdentity
+        );
+        assert!(!error.to_string().contains(attacker_text));
+    }
+
+    #[test]
+    fn normalized_private_wires_reject_nested_unknown_fields() {
+        let mut cases = Vec::new();
+
+        let mut evidence = normalized_value();
+        evidence["entities"][0]["evidence"]["unknown"] = serde_json::json!(true);
+        cases.push(evidence);
+
+        let mut source_span = normalized_value();
+        source_span["entities"][0]["evidence"]["source"]["span"]["unknown"] =
+            serde_json::json!(true);
+        cases.push(source_span);
+
+        let mut container = normalized_value();
+        container["entities"][0]["container"]["unknown"] = serde_json::json!(true);
+        cases.push(container);
+
+        let mut occurrence_target = normalized_value();
+        occurrence_target["occurrences"][0]["target"]["unknown"] = serde_json::json!(true);
+        cases.push(occurrence_target);
+
+        let mut relation_endpoint = normalized_value();
+        relation_endpoint["relations"][0]["subject"]["unknown"] = serde_json::json!(true);
+        cases.push(relation_endpoint);
+
+        let mut producer = normalized_value();
+        producer["provenance"][0]["producer"]["unknown"] = serde_json::json!(true);
+        cases.push(producer);
+
+        for invalid in cases {
+            assert_eq!(
+                decode(&encode_test_value(&invalid), &IrLimits::default()),
+                Err(IrDocumentDecodeError::InvalidDocumentShape)
+            );
+        }
     }
 
     #[test]

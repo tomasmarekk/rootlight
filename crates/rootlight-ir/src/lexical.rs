@@ -1173,9 +1173,12 @@ mod tests {
             &evidence,
         )
         .expect("fixture lexical envelope");
-        let frozen: ExtensionEnvelope = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/compatibility/extensions/rootlight.lexical/1/envelope.json"
-        ))
+        let frozen = crate::decode_extension_envelope(
+            include_bytes!(
+                "../../../tests/fixtures/compatibility/extensions/rootlight.lexical/1/envelope.json"
+            ),
+            &crate::IrLimits::default(),
+        )
         .expect("frozen lexical extension fixture decodes");
 
         assert_eq!(frozen, envelope);
