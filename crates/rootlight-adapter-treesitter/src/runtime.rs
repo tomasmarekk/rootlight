@@ -1170,8 +1170,8 @@ fn normalize_query_candidates(
             .iter()
             .any(|candidate| candidate.role == StructuralRole::Documentation);
         selected.extend(group.iter().copied().filter(|candidate| {
-            !(has_definition && candidate.role == StructuralRole::Reference)
-                && !(has_documentation && candidate.role == StructuralRole::Comment)
+            !(has_definition && candidate.role == StructuralRole::Reference
+                || has_documentation && candidate.role == StructuralRole::Comment)
         }));
         group_start = group_end;
     }

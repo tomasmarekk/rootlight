@@ -10,6 +10,7 @@ use std::{
 };
 
 use proptest::prelude::*;
+use proptest::test_runner::{RngAlgorithm, RngSeed};
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, BatchThresholds, EncodingId, GenerationBoundSnapshot, LanguageId,
     MemoryAdmissionPolicy, ParseRequest, StreamLimits, execute_parse,
@@ -22,12 +23,16 @@ use tempfile::tempdir_in;
 
 const MAX_SOURCE_BYTES: usize = 4096;
 const FUZZ_CASES: u32 = 24;
+// CI replays one reviewed corpus; broader random campaigns use a separate runner config.
+const FUZZ_SEED: u64 = 202_607_170_404;
 
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: FUZZ_CASES,
         max_shrink_iters: 256,
         failure_persistence: None,
+        rng_algorithm: RngAlgorithm::ChaCha,
+        rng_seed: RngSeed::Fixed(FUZZ_SEED),
         ..ProptestConfig::default()
     })]
 
