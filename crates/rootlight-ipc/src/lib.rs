@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    io::{self, Read, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -144,15 +144,18 @@ impl FrameCodec {
     ///
     /// Returns a typed error for elapsed I/O, EOF, an oversized declared length,
     /// allocation failure, trailing bytes, or malformed protobuf.
-    pub fn read_message<M: Message + Default>(&self, stream: &mut Stream) -> Result<M, IpcError> {
+    pub fn read_message<M: Message + Default, R: io::Read>(
+        &self,
+        stream: &mut R,
+    ) -> Result<M, IpcError> {
         let mut header = [0_u8; FRAME_HEADER_BYTES];
         read_exact_bounded(stream, &mut header, self.timeout)?;
         self.decode_message(stream, header)
     }
 
-    fn decode_message<M: Message + Default>(
+    fn decode_message<M: Message + Default, R: io::Read>(
         &self,
-        stream: &mut Stream,
+        stream: &mut R,
         header: [u8; FRAME_HEADER_BYTES],
     ) -> Result<M, IpcError> {
         let declared = self.validate_declared_length(header)?;
@@ -662,7 +665,7 @@ async fn write_all_async<W: AsyncWrite + Unpin>(
 }
 
 fn read_exact_bounded(
-    stream: &mut Stream,
+    stream: &mut impl io::Read,
     buffer: &mut [u8],
     timeout: Duration,
 ) -> Result<(), IpcError> {
@@ -958,7 +961,7 @@ pub enum IpcError {
 mod tests {
     use super::*;
     use rootlight_protocol::generated::daemon::v1::{HealthRequest, request_envelope};
-    use std::{sync::mpsc, thread};
+    use std::{io::Cursor, sync::mpsc, thread};
     use tempfile::{TempDir, tempdir};
 
     fn private_tempdir() -> TempDir {
@@ -979,6 +982,15 @@ mod tests {
             timeout_ms: None,
             request: Some(request_envelope::Request::Health(HealthRequest {})),
         }
+    }
+
+    fn encoded_frame(message: &impl Message) -> Vec<u8> {
+        let encoded_length = message.encoded_len();
+        let wire_length = u32::try_from(encoded_length).expect("test frame length fits u32");
+        let mut frame = Vec::with_capacity(FRAME_HEADER_BYTES + encoded_length);
+        frame.extend_from_slice(&wire_length.to_be_bytes());
+        message.encode(&mut frame).expect("test frame encodes");
+        frame
     }
 
     #[test]
@@ -1081,6 +1093,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn async_codec_accepts_fragmented_header_and_payload() {
+        let expected = request(87);
+        let frame = encoded_frame(&expected);
+        let (mut writer, mut reader) = tokio::io::duplex(frame.len());
+        let sender = tokio::spawn(async move {
+            for byte in frame {
+                writer.write_all(&[byte]).await.expect("fragment writes");
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let observed = FrameCodec::default()
+            .read_message_async::<RequestEnvelope, _>(&mut reader)
+            .await
+            .expect("fragmented frame decodes");
+        sender.await.expect("fragment writer joins");
+
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
+    async fn async_codec_rejects_truncated_fragmented_payload() {
+        let expected = request(88);
+        let mut frame = encoded_frame(&expected);
+        frame.pop().expect("encoded request has a payload byte");
+        let (mut writer, mut reader) = tokio::io::duplex(frame.len());
+        let sender = tokio::spawn(async move {
+            for fragment in frame.chunks(2) {
+                writer.write_all(fragment).await.expect("fragment writes");
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let result = FrameCodec::default()
+            .read_message_async::<RequestEnvelope, _>(&mut reader)
+            .await;
+        sender.await.expect("fragment writer joins");
+
+        assert!(matches!(result, Err(IpcError::UnexpectedEof)));
+    }
+
+    #[test]
+    fn codec_accepts_fragmented_synchronous_reads() {
+        struct FragmentedReader {
+            inner: Cursor<Vec<u8>>,
+            maximum_chunk: usize,
+        }
+
+        impl io::Read for FragmentedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let limit = buffer.len().min(self.maximum_chunk);
+                io::Read::read(&mut self.inner, &mut buffer[..limit])
+            }
+        }
+
+        let expected = request(89);
+        let frame = encoded_frame(&expected);
+        let mut reader = FragmentedReader {
+            inner: Cursor::new(frame),
+            maximum_chunk: 1,
+        };
+        let observed = FrameCodec::default()
+            .read_message::<RequestEnvelope, _>(&mut reader)
+            .expect("fragmented frame decodes");
+
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
     async fn stalled_async_client_does_not_block_a_second_accept() {
         let temporary = private_tempdir();
         #[cfg(unix)]
@@ -1147,7 +1228,7 @@ mod tests {
                 .accept_timeout(Duration::from_secs(1))
                 .expect("connection accepts");
             let codec = FrameCodec::new(16, Duration::from_secs(1)).expect("limits are valid");
-            codec.read_message::<RequestEnvelope>(&mut stream)
+            codec.read_message::<RequestEnvelope, _>(&mut stream)
         });
         let mut stream = connect(&endpoint).expect("client connects");
         write_all_bounded(&mut stream, &17_u32.to_be_bytes(), Duration::from_secs(1))
