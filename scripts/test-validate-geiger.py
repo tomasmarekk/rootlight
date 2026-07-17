@@ -80,7 +80,6 @@ class GeigerValidationTests(unittest.TestCase):
         *,
         root: pathlib.Path | None = None,
         version: str = "0.1.0",
-        omitted: list[str] | None = None,
     ) -> dict[str, object]:
         package_root = root or self.package_root
         return {
@@ -93,42 +92,46 @@ class GeigerValidationTests(unittest.TestCase):
                             "source": {
                                 "Path": f"{package_root.as_uri()}%23{version}"
                             },
-                        }
+                        },
+                        "dependencies": [],
+                        "dev_dependencies": [],
+                        "build_dependencies": [],
                     },
                     "forbids_unsafe": True,
                 }
             ],
             "packages_without_metrics": [],
-            "used_but_not_scanned_files": omitted or [],
         }
 
-    def test_exact_workspace_identity_passes(self) -> None:
-        self.assertEqual(
-            VALIDATOR.validate_report(
-                self.report(), self.cargo_id, self.inventory, self.approved
-            ),
-            1,
+    def validate(
+        self,
+        report: dict[str, object] | None = None,
+        *,
+        required_cargo_id: str | None = None,
+        cargo_geiger_version: object = VALIDATOR.SUPPORTED_CARGO_GEIGER_VERSION,
+    ) -> int:
+        return VALIDATOR.validate_report(
+            self.report() if report is None else report,
+            required_cargo_id or self.cargo_id,
+            self.inventory,
+            self.approved,
+            cargo_geiger_version,
         )
+
+    def test_exact_workspace_identity_passes(self) -> None:
+        self.assertEqual(self.validate(), 1)
 
     def test_same_name_outside_workspace_is_rejected(self) -> None:
         outside = self.root / "outside"
         outside.mkdir()
         with self.assertRaisesRegex(ValueError, "outside the exact workspace"):
-            VALIDATOR.validate_report(
-                self.report(root=outside, version="999.0.0"),
-                self.cargo_id,
-                self.inventory,
-                self.approved,
-            )
+            self.validate(self.report(root=outside, version="999.0.0"))
 
-    def test_used_but_not_scanned_files_are_rejected(self) -> None:
-        with self.assertRaisesRegex(ValueError, "unscanned compiler inputs"):
-            VALIDATOR.validate_report(
-                self.report(omitted=["/omitted/unsafe.rs"]),
-                self.cargo_id,
-                self.inventory,
-                self.approved,
-            )
+    def test_quick_report_rejects_full_report_only_and_unknown_fields(self) -> None:
+        report = self.report()
+        report["used_but_not_scanned_files"] = []
+        with self.assertRaisesRegex(ValueError, "missing or unknown fields"):
+            self.validate(report)
 
     def test_workspace_package_without_metrics_is_rejected(self) -> None:
         report = self.report()
@@ -140,9 +143,7 @@ class GeigerValidationTests(unittest.TestCase):
             }
         ]
         with self.assertRaisesRegex(ValueError, "omitted workspace"):
-            VALIDATOR.validate_report(
-                report, self.cargo_id, self.inventory, self.approved
-            )
+            self.validate(report)
 
     def test_registry_parser_gap_cannot_replace_required_workspace_metrics(self) -> None:
         report = self.report()
@@ -160,18 +161,96 @@ class GeigerValidationTests(unittest.TestCase):
         ]
         report["packages"] = []
         with self.assertRaisesRegex(ValueError, "omitted required workspace"):
-            VALIDATOR.validate_report(
-                report, self.cargo_id, self.inventory, self.approved
-            )
+            self.validate(report)
 
     def test_required_cargo_id_must_be_exact(self) -> None:
         with self.assertRaisesRegex(ValueError, "absent from workspace inventory"):
-            VALIDATOR.validate_report(
-                self.report(),
-                f"{self.cargo_id}-substitute",
-                self.inventory,
-                self.approved,
+            self.validate(
+                required_cargo_id=f"{self.cargo_id}-substitute",
             )
+
+    def test_tool_version_must_be_present_and_supported(self) -> None:
+        for version in (None, "", "cargo-geiger 0.12.0", 13):
+            with self.subTest(version=version):
+                with self.assertRaises(ValueError):
+                    self.validate(cargo_geiger_version=version)
+
+    def test_report_security_keys_must_be_present_typed_and_exact(self) -> None:
+        mutations = (
+            ("missing packages", lambda report: report.pop("packages")),
+            ("null packages", lambda report: report.update(packages=None)),
+            (
+                "renamed packages",
+                lambda report: report.update(
+                    package_entries=report.pop("packages")
+                ),
+            ),
+            (
+                "missing packages_without_metrics",
+                lambda report: report.pop("packages_without_metrics"),
+            ),
+            (
+                "null packages_without_metrics",
+                lambda report: report.update(packages_without_metrics=None),
+            ),
+            ("unknown top-level", lambda report: report.update(safe=True)),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                report = self.report()
+                mutate(report)
+                with self.assertRaises(ValueError):
+                    self.validate(report)
+
+    def test_entry_security_keys_must_be_present_typed_and_exact(self) -> None:
+        mutations = (
+            (
+                "missing forbids",
+                lambda entry: entry.pop("forbids_unsafe"),
+            ),
+            (
+                "null forbids",
+                lambda entry: entry.update(forbids_unsafe=None),
+            ),
+            (
+                "string forbids",
+                lambda entry: entry.update(forbids_unsafe="true"),
+            ),
+            (
+                "renamed forbids",
+                lambda entry: entry.update(
+                    forbidsUnsafe=entry.pop("forbids_unsafe")
+                ),
+            ),
+            ("unknown entry", lambda entry: entry.update(unsafety={})),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                report = self.report()
+                entry = report["packages"][0]
+                mutate(entry)
+                with self.assertRaises(ValueError):
+                    self.validate(report)
+
+    def test_package_schema_rejects_missing_null_renamed_and_unknown_keys(self) -> None:
+        mutations = (
+            ("missing id", lambda package: package.pop("id")),
+            ("null id", lambda package: package.update(id=None)),
+            (
+                "renamed dependencies",
+                lambda package: package.update(
+                    deps=package.pop("dependencies")
+                ),
+            ),
+            ("unknown package", lambda package: package.update(features=[])),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                report = self.report()
+                package = report["packages"][0]["package"]
+                mutate(package)
+                with self.assertRaises(ValueError):
+                    self.validate(report)
 
     def test_policy_manifest_must_bind_to_inventory(self) -> None:
         self.policy_path.write_text(

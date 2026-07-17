@@ -15,6 +15,18 @@ from dataclasses import dataclass
 from typing import Any
 
 
+SUPPORTED_CARGO_GEIGER_VERSION = "cargo-geiger 0.13.0"
+QUICK_REPORT_KEYS = {"packages", "packages_without_metrics"}
+QUICK_ENTRY_KEYS = {"package", "forbids_unsafe"}
+PACKAGE_INFO_KEYS = {
+    "id",
+    "dependencies",
+    "dev_dependencies",
+    "build_dependencies",
+}
+PACKAGE_ID_KEYS = {"name", "version", "source"}
+
+
 @dataclass(frozen=True)
 class WorkspacePackage:
     """One package identity emitted by the same Cargo metadata invocation."""
@@ -45,17 +57,36 @@ def require_string(value: Any, description: str) -> str:
     return value
 
 
-def unsafe_count(unsafety: dict[str, Any]) -> int:
-    total = 0
-    for usage in ("used", "unused"):
-        metrics = require_object(unsafety.get(usage), f"{usage} metrics")
-        for counts in metrics.values():
-            count_object = require_object(counts, "unsafe count")
-            count = count_object.get("unsafe_", 0)
-            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-                raise fail("unsafe count must be a non-negative integer")
-            total += count
-    return total
+def require_array(value: Any, description: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise fail(f"{description} must be an array")
+    return value
+
+
+def require_bool(value: Any, description: str) -> bool:
+    if not isinstance(value, bool):
+        raise fail(f"{description} must be a boolean")
+    return value
+
+
+def require_exact_keys(
+    value: dict[str, Any], expected: set[str], description: str
+) -> None:
+    observed = set(value)
+    if observed != expected:
+        raise fail(
+            f"{description} has missing or unknown fields; "
+            f"expected {sorted(expected)}, observed {sorted(observed)}"
+        )
+
+
+def validate_tool_version(value: Any) -> None:
+    version = require_string(value, "cargo-geiger version")
+    if version != SUPPORTED_CARGO_GEIGER_VERSION:
+        raise fail(
+            f"unsupported cargo-geiger version {version!r}; "
+            f"expected {SUPPORTED_CARGO_GEIGER_VERSION!r}"
+        )
 
 
 def canonical_file(path: pathlib.Path, description: str) -> pathlib.Path:
@@ -182,35 +213,68 @@ def package_root_from_uri(value: Any) -> pathlib.Path:
     return root
 
 
+def validate_package_source(value: Any) -> tuple[str, Any]:
+    source = require_object(value, "cargo-geiger package source")
+    if len(source) != 1:
+        raise fail("cargo-geiger package source must contain one known variant")
+    variant, details = next(iter(source.items()))
+    if variant == "Path":
+        require_string(details, "cargo-geiger Path source")
+    elif variant == "Registry":
+        registry = require_object(details, "cargo-geiger Registry source")
+        require_exact_keys(registry, {"name", "url"}, "cargo-geiger Registry source")
+        require_string(registry["name"], "cargo-geiger registry name")
+        require_string(registry["url"], "cargo-geiger registry URL")
+    elif variant == "Git":
+        git = require_object(details, "cargo-geiger Git source")
+        require_exact_keys(git, {"url", "rev"}, "cargo-geiger Git source")
+        require_string(git["url"], "cargo-geiger Git URL")
+        require_string(git["rev"], "cargo-geiger Git revision")
+    else:
+        raise fail(f"cargo-geiger package source uses unknown variant {variant!r}")
+    return variant, details
+
+
+def validate_package_id(value: Any, description: str) -> dict[str, Any]:
+    identifier = require_object(value, description)
+    require_exact_keys(identifier, PACKAGE_ID_KEYS, description)
+    require_string(identifier["name"], f"{description} name")
+    require_string(identifier["version"], f"{description} version")
+    validate_package_source(identifier["source"])
+    return identifier
+
+
+def validate_package_info(value: Any) -> dict[str, Any]:
+    package = require_object(value, "cargo-geiger package")
+    require_exact_keys(package, PACKAGE_INFO_KEYS, "cargo-geiger package")
+    validate_package_id(package["id"], "cargo-geiger package ID")
+    for key in ("dependencies", "dev_dependencies", "build_dependencies"):
+        dependencies = require_array(package[key], f"cargo-geiger {key}")
+        for dependency in dependencies:
+            validate_package_id(dependency, f"cargo-geiger {key} ID")
+    return package
+
+
 def validate_report(
     report: dict[str, Any],
     required_cargo_id: str,
     inventory: dict[str, WorkspacePackage],
     approved_counts: dict[str, int],
+    cargo_geiger_version: Any,
 ) -> int:
-    omitted = report.get("used_but_not_scanned_files", [])
-    if not isinstance(omitted, list) or omitted:
-        raise fail("unsafe inventory contains used but unscanned compiler inputs")
-    packages_without_metrics = report.get("packages_without_metrics", [])
-    if not isinstance(packages_without_metrics, list):
-        raise fail("packages_without_metrics must be an array")
+    validate_tool_version(cargo_geiger_version)
+    require_exact_keys(report, QUICK_REPORT_KEYS, "cargo-geiger QuickSafetyReport")
+    packages_without_metrics = require_array(
+        report["packages_without_metrics"], "packages_without_metrics"
+    )
     for missing_value in packages_without_metrics:
-        missing = require_object(missing_value, "package without metrics")
-        require_string(missing.get("name"), "package without metrics name")
-        require_string(missing.get("version"), "package without metrics version")
-        source = require_object(
-            missing.get("source"), "package without metrics source"
-        )
+        missing = validate_package_id(missing_value, "package without metrics")
+        source = missing["source"]
         # Registry parser gaps cannot substitute for an exact workspace Path
         # package: every Path/Git/unknown source remains fatal below.
         if set(source) != {"Registry"}:
             raise fail("unsafe inventory omitted workspace or non-registry package metrics")
-        registry = require_object(source["Registry"], "registry package source")
-        require_string(registry.get("name"), "registry name")
-        require_string(registry.get("url"), "registry URL")
-    package_entries = report.get("packages")
-    if not isinstance(package_entries, list):
-        raise fail("unsafe inventory packages must be an array")
+    package_entries = require_array(report["packages"], "unsafe inventory packages")
 
     inventory_by_identity = {
         (package.name, package.version, package.root): cargo_id
@@ -219,15 +283,17 @@ def validate_report(
     observed_ids: set[str] = set()
     for raw_entry in package_entries:
         entry = require_object(raw_entry, "cargo-geiger package entry")
-        package = require_object(entry.get("package"), "cargo-geiger package")
-        identifier = require_object(package.get("id"), "cargo-geiger package ID")
-        source = require_object(identifier.get("source"), "cargo-geiger package source")
+        require_exact_keys(entry, QUICK_ENTRY_KEYS, "cargo-geiger package entry")
+        forbids_unsafe = require_bool(
+            entry["forbids_unsafe"], "cargo-geiger forbids_unsafe"
+        )
+        package = validate_package_info(entry["package"])
+        identifier = package["id"]
+        source = identifier["source"]
         if "Path" not in source:
             continue
-        if set(source) != {"Path"}:
-            raise fail("cargo-geiger path source has unknown fields")
-        name = require_string(identifier.get("name"), "cargo-geiger package name")
-        version = require_string(identifier.get("version"), "cargo-geiger package version")
+        name = identifier["name"]
+        version = identifier["version"]
         root = package_root_from_uri(source["Path"])
         cargo_id = inventory_by_identity.get((name, version, root))
         if cargo_id is None:
@@ -239,31 +305,13 @@ def validate_report(
             raise fail(f"cargo-geiger duplicated workspace package {cargo_id}")
         observed_ids.add(cargo_id)
 
-        raw_unsafety = entry.get("unsafety")
-        if raw_unsafety is None:
-            observed_count: int | None = None
-            forbids_unsafe = entry.get("forbids_unsafe")
-        else:
-            unsafety = require_object(raw_unsafety, "cargo-geiger unsafety metrics")
-            observed_count = unsafe_count(unsafety)
-            forbids_unsafe = unsafety.get(
-                "forbids_unsafe", entry.get("forbids_unsafe")
-            )
-
         approved_count = approved_counts.get(cargo_id)
         if approved_count is not None:
-            if observed_count is None:
-                raise fail(
-                    f"accepted workspace package {cargo_id} lacks full unsafe metrics"
-                )
-            if observed_count != approved_count:
-                raise fail(
-                    f"workspace package {cargo_id} expected {approved_count} unsafe "
-                    f"uses, observed {observed_count}"
-                )
-        elif forbids_unsafe is not True or (
-            observed_count is not None and observed_count != 0
-        ):
+            raise fail(
+                f"accepted workspace package {cargo_id} requires the full "
+                "cargo-geiger SafetyReport schema"
+            )
+        if not forbids_unsafe:
             raise fail(f"workspace package {cargo_id} permits or uses unsafe code")
 
     if required_cargo_id not in inventory:
@@ -281,6 +329,7 @@ def validate_report(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--cargo-geiger-version", required=True)
     parser.add_argument("--required-workspace-package-id", required=True)
     parser.add_argument("--workspace-inventory", required=True)
     parser.add_argument("--unsafe-policy", required=True)
@@ -298,6 +347,7 @@ def main() -> int:
             args.required_workspace_package_id,
             inventory,
             approved,
+            args.cargo_geiger_version,
         )
     except (OSError, ValueError, json.JSONDecodeError, tomllib.TOMLDecodeError) as error:
         print(error, file=sys.stderr)
