@@ -1560,7 +1560,7 @@ impl Default for PendingAdmissionRegistry {
 #[derive(Debug)]
 struct PendingAdmissionHandle {
     operation: OperationId,
-    generation: u64,
+    generation: Option<u64>,
     cancelled: Arc<AtomicBool>,
     registry: Arc<Mutex<PendingAdmissionRegistry>>,
 }
@@ -1569,16 +1569,23 @@ impl PendingAdmissionHandle {
     fn cancelled(&self) -> &AtomicBool {
         self.cancelled.as_ref()
     }
-}
 
-impl Drop for PendingAdmissionHandle {
-    fn drop(&mut self) {
-        let Ok(mut registry) = self.registry.lock() else {
+    fn handoff_to_durable(&mut self) -> Result<bool, ServiceError> {
+        let registry = Arc::clone(&self.registry);
+        let mut registry = registry
+            .lock()
+            .map_err(|_| ServiceError::AdmissionStatePoisoned)?;
+        self.unregister(&mut registry);
+        Ok(self.cancelled.load(Ordering::Acquire))
+    }
+
+    fn unregister(&mut self, registry: &mut PendingAdmissionRegistry) {
+        let Some(generation) = self.generation.take() else {
             return;
         };
         let remove_operation =
             if let Some(generations) = registry.by_operation.get_mut(&self.operation) {
-                generations.remove(&self.generation);
+                generations.remove(&generation);
                 generations.is_empty()
             } else {
                 false
@@ -1586,6 +1593,16 @@ impl Drop for PendingAdmissionHandle {
         if remove_operation {
             registry.by_operation.remove(&self.operation);
         }
+    }
+}
+
+impl Drop for PendingAdmissionHandle {
+    fn drop(&mut self) {
+        let registry = Arc::clone(&self.registry);
+        let Ok(mut registry) = registry.lock() else {
+            return;
+        };
+        self.unregister(&mut registry);
     }
 }
 
@@ -1614,7 +1631,7 @@ impl OperationAdmission {
                 reply,
                 pending: Some(PendingAdmissionHandle {
                     operation: prepared.operation(),
-                    generation: 0,
+                    generation: None,
                     cancelled: cancelled_before_persist,
                     registry: Arc::new(Mutex::new(PendingAdmissionRegistry::default())),
                 }),
@@ -2282,12 +2299,7 @@ impl DaemonOrchestrator {
             reply,
             pending,
         } = admission;
-        let result = self
-            .schedule_submission(
-                prepared,
-                pending.as_ref().map(PendingAdmissionHandle::cancelled),
-            )
-            .await;
+        let result = self.schedule_submission(prepared, pending).await;
         let response = match &result {
             Ok(operation) => Ok(operation.clone()),
             Err(error) => Err(error.to_public()),
@@ -2314,7 +2326,7 @@ impl DaemonOrchestrator {
     async fn schedule_submission(
         &mut self,
         prepared: PreparedOperationSubmission,
-        cancelled_before_persist: Option<&AtomicBool>,
+        mut pending: Option<PendingAdmissionHandle>,
     ) -> Result<OperationRecord, ServiceError> {
         let (submission, deadline, lease_deadline, deadline_retry) = prepared.into_parts();
         if !self.state.accepting_operations.load(Ordering::Acquire) {
@@ -2364,6 +2376,21 @@ impl DaemonOrchestrator {
             .journal
             .submit_with_deadline_retry(submission, deadline_retry)
             .await?;
+        let cancelled_at_handoff = pending
+            .as_mut()
+            .map(PendingAdmissionHandle::handoff_to_durable)
+            .transpose()?
+            .unwrap_or(false);
+        if cancelled_at_handoff {
+            let ControlResponse::OperationCancel { operation, .. } = self
+                .journal
+                .control(ControlRequest::OperationCancel(outcome.operation.operation))
+                .await?
+            else {
+                return Err(ServiceError::UnexpectedResponse);
+            };
+            return Ok(operation);
+        }
         if !outcome.inserted {
             return Ok(outcome.operation);
         }
@@ -2392,18 +2419,6 @@ impl DaemonOrchestrator {
         }
         if let Some(terminal) = self.expire_operation_if_due(operation.operation).await? {
             return Ok(terminal);
-        }
-        if cancelled_before_persist.is_some_and(|cancelled| cancelled.load(Ordering::Acquire)) {
-            let ControlResponse::OperationCancel { operation, .. } = self
-                .journal
-                .control(ControlRequest::OperationCancel(operation.operation))
-                .await?
-            else {
-                return Err(ServiceError::UnexpectedResponse);
-            };
-            self.timers.remove_operation(operation.operation);
-            self.active_operations.remove(&operation.operation);
-            return Ok(operation);
         }
         match operation.state {
             OperationState::Queued => {}
@@ -2986,7 +3001,7 @@ impl ControlService {
         drop(registry);
         Ok(PendingAdmissionHandle {
             operation,
-            generation,
+            generation: Some(generation),
             cancelled,
             registry: Arc::clone(&self.pending_admissions),
         })
@@ -3297,13 +3312,11 @@ impl ControlService {
                 selected_protocol_minor,
             ) {
                 Ok(DecodedRequest::Control(request)) => response_to_wire(self.execute(request)),
-                Ok(DecodedRequest::Submission(_)) => {
-                    daemon::response_envelope::Response::Error(public_error_to_wire(
-                        &invalid_argument(
-                            "operation lifecycle mutation requires asynchronous orchestration",
-                        ),
-                    ))
-                }
+                Ok(DecodedRequest::Submission(_)) => daemon::response_envelope::Response::Error(
+                    public_error_to_wire(&invalid_argument(
+                        "operation lifecycle mutation requires asynchronous orchestration",
+                    )),
+                ),
                 Err(error) => {
                     daemon::response_envelope::Response::Error(public_error_to_wire(&error))
                 }
@@ -3485,10 +3498,19 @@ async fn dispatch_async(
                         .control(ControlRequest::OperationCancel(operation))
                         .await
                     {
-                        Err(ServiceError::Operations(OperationError::NotFound))
-                            if service.cancel_pending_admission(operation).unwrap_or(false) =>
-                        {
-                            Ok(ControlResponse::Error(operation_not_ready(operation)))
+                        Err(ServiceError::Operations(OperationError::NotFound)) => {
+                            let pending = service.cancel_pending_admission(operation)?;
+                            match journal
+                                .control(ControlRequest::OperationCancel(operation))
+                                .await
+                            {
+                                Err(ServiceError::Operations(OperationError::NotFound))
+                                    if pending =>
+                                {
+                                    Ok(ControlResponse::Error(operation_not_ready(operation)))
+                                }
+                                result => result,
+                            }
                         }
                         result => result,
                     }
@@ -5655,7 +5677,7 @@ mod tests {
     fn pending_admission_generations_cancel_and_cleanup_independently() {
         let service = service();
         let operation = OperationId::from_bytes([16; 16]);
-        let first = service
+        let mut first = service
             .register_pending_admission(operation)
             .expect("first admission registers");
         let second = service
@@ -5670,7 +5692,11 @@ mod tests {
         assert!(first.cancelled().load(Ordering::Acquire));
         assert!(second.cancelled().load(Ordering::Acquire));
 
-        drop(first);
+        assert!(
+            first
+                .handoff_to_durable()
+                .expect("pending handoff succeeds")
+        );
         {
             let registry = service
                 .pending_admissions
@@ -5686,6 +5712,20 @@ mod tests {
                 .expect("registry is available")
                 .by_operation
                 .is_empty()
+        );
+
+        let mut handed_off = service
+            .register_pending_admission(operation)
+            .expect("third admission registers");
+        assert!(
+            !handed_off
+                .handoff_to_durable()
+                .expect("uncancelled handoff succeeds")
+        );
+        assert!(
+            !service
+                .cancel_pending_admission(operation)
+                .expect("post-handoff lookup succeeds")
         );
     }
 
