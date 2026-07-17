@@ -18,11 +18,40 @@ const MAX_ENCODING_BYTES: usize = 32;
 #[non_exhaustive]
 pub enum MemoryEnforcement {
     /// The adapter runs behind a hard operating-system process boundary.
+    ///
+    /// Process-tree ownership and hostile-provider termination are supplied by
+    /// the M13 runtime, not by this synchronous in-process SDK.
     HardProcess,
-    /// The in-process adapter accounts allocations against a declared budget.
+    /// The cooperative in-process adapter reports its own memory accounting.
+    ///
+    /// This post-hoc counter is useful for bounded trusted adapters, but it is
+    /// not proof against a malicious or noncooperative provider.
     AccountedInProcess,
     /// The adapter cannot provide enforceable or accountable memory usage.
     Unavailable,
+}
+
+/// Caller-selected admission policy for adapter memory enforcement.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemoryAdmissionPolicy {
+    /// Reject adapters without hard or reported in-process enforcement.
+    #[default]
+    RequireHardOrAccounted,
+    /// Intentionally admit the bounded M05 fallback without memory enforcement.
+    AllowUnavailableM05Fallback,
+}
+
+/// Memory-bound status attached by the SDK to committed adapter output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemoryAdmissionStatus {
+    /// The provider is owned by a hard process boundary.
+    HardProcess,
+    /// The trusted in-process provider supplied its required reported counter.
+    AccountedInProcess,
+    /// The caller explicitly admitted the M05 unavailable-enforcement fallback.
+    UnavailableM05Fallback,
 }
 
 /// A bounded normalized language identity.
@@ -87,10 +116,10 @@ pub struct ParseCapabilities {
     languages: Vec<LanguageId>,
     encodings: Vec<EncodingId>,
     max_source_bytes: usize,
+    max_syntax_nodes: usize,
     max_syntax_depth: usize,
     max_embedded_ranges: usize,
     embedded_ranges: bool,
-    incremental_reparse: bool,
     error_recovery: bool,
     cancellation_checkpoints: bool,
     max_concurrent_parses: usize,
@@ -111,10 +140,10 @@ impl ParseCapabilities {
         mut languages: Vec<LanguageId>,
         mut encodings: Vec<EncodingId>,
         max_source_bytes: usize,
+        max_syntax_nodes: usize,
         max_syntax_depth: usize,
         max_embedded_ranges: usize,
         embedded_ranges: bool,
-        incremental_reparse: bool,
         error_recovery: bool,
         cancellation_checkpoints: bool,
         max_concurrent_parses: usize,
@@ -123,6 +152,7 @@ impl ParseCapabilities {
         canonicalize_capability_set("languages", &mut languages)?;
         canonicalize_capability_set("encodings", &mut encodings)?;
         require_nonzero("max_source_bytes", max_source_bytes)?;
+        require_nonzero("max_syntax_nodes", max_syntax_nodes)?;
         require_nonzero("max_syntax_depth", max_syntax_depth)?;
         if embedded_ranges {
             require_nonzero("max_embedded_ranges", max_embedded_ranges)?;
@@ -132,10 +162,10 @@ impl ParseCapabilities {
             languages,
             encodings,
             max_source_bytes,
+            max_syntax_nodes,
             max_syntax_depth,
             max_embedded_ranges,
             embedded_ranges,
-            incremental_reparse,
             error_recovery,
             cancellation_checkpoints,
             max_concurrent_parses,
@@ -161,6 +191,12 @@ impl ParseCapabilities {
         self.max_source_bytes
     }
 
+    /// Returns the largest concrete-syntax node count this provider admits.
+    #[must_use]
+    pub const fn max_syntax_nodes(&self) -> usize {
+        self.max_syntax_nodes
+    }
+
     /// Returns the largest syntax nesting depth this provider admits.
     #[must_use]
     pub const fn max_syntax_depth(&self) -> usize {
@@ -177,12 +213,6 @@ impl ParseCapabilities {
     #[must_use]
     pub const fn supports_embedded_ranges(&self) -> bool {
         self.embedded_ranges
-    }
-
-    /// Reports whether the provider can reuse a prior immutable parse.
-    #[must_use]
-    pub const fn supports_incremental_reparse(&self) -> bool {
-        self.incremental_reparse
     }
 
     /// Reports whether the provider emits bounded recovery facts.

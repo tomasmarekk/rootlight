@@ -59,6 +59,18 @@ impl Cancellation {
         }
     }
 
+    /// Reports whether this token carries a process-local monotonic deadline.
+    ///
+    /// This admission query exposes neither the deadline value nor elapsed
+    /// timing. A poisoned deadline lock fails closed and returns `false`.
+    #[must_use]
+    pub fn has_deadline(&self) -> bool {
+        self.inner
+            .deadline
+            .lock()
+            .is_ok_and(|deadline| deadline.is_some())
+    }
+
     /// Advances the monotonic deadline for an active lease.
     ///
     /// # Errors
@@ -143,16 +155,10 @@ impl Default for Cancellation {
 
 impl fmt::Debug for Cancellation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let has_deadline = self
-            .inner
-            .deadline
-            .lock()
-            .map(|deadline| deadline.is_some())
-            .unwrap_or(true);
         formatter
             .debug_struct("Cancellation")
             .field("reason", &self.inner.reason.get())
-            .field("has_deadline", &has_deadline)
+            .field("has_deadline", &self.has_deadline())
             .finish()
     }
 }
@@ -220,6 +226,7 @@ mod tests {
         let deadline = start + Duration::from_secs(10);
         let cancellation = Cancellation::with_deadline(deadline);
 
+        assert!(cancellation.has_deadline());
         assert_eq!(
             cancellation.check_at(deadline - Duration::from_nanos(1)),
             Ok(())
@@ -229,6 +236,14 @@ mod tests {
             Err(Cancelled {
                 reason: CancellationReason::DeadlineExceeded
             })
+        );
+    }
+
+    #[test]
+    fn deadline_admission_query_does_not_expose_timing() {
+        assert!(!Cancellation::new().has_deadline());
+        assert!(
+            Cancellation::with_deadline(Instant::now() + Duration::from_secs(1)).has_deadline()
         );
     }
 

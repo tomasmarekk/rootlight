@@ -13,7 +13,6 @@ rootlight-vfs = { path = "../rootlight-vfs" }
 thiserror.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

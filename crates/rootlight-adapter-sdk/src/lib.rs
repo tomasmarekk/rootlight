@@ -15,7 +15,8 @@ mod sink;
 pub mod testkit;
 
 pub use descriptor::{
-    EncodingId, LanguageId, MemoryEnforcement, ParseCapabilities, ProducerDescriptor,
+    EncodingId, LanguageId, MemoryAdmissionPolicy, MemoryAdmissionStatus, MemoryEnforcement,
+    ParseCapabilities, ProducerDescriptor,
 };
 pub use error::{
     AdapterError, DescriptorError, LabelError, LabelField, LabelViolation, LimitError, ReportError,
