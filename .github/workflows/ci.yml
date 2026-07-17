@@ -208,15 +208,60 @@ jobs:
           sudo RUNNER_HOME="$HOME" RUNNER_PATH="$PATH" \
             bash scripts/run-in-network-namespace.sh scripts/run-offline-tests.sh
 
+  m05-evidence:
+    name: parser benchmark evidence / linux
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Generate and verify BENCH-PARSE-001 evidence
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          cargo run --locked --release --package rootlight-bench --bin m05-parser-evidence -- \
+            --output artifacts/BENCH-PARSE-001 \
+            --source-revision "$SOURCE_REVISION"
+      - name: Upload immutable BENCH-PARSE-001 evidence
+        id: evidence-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: BENCH-PARSE-001-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/BENCH-PARSE-001
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+      - name: Record immutable artifact identity
+        env:
+          ARTIFACT_ID: ${{ steps.evidence-upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence-upload.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.evidence-upload.outputs.artifact-digest }}
+        run: |
+          {
+            echo "### BENCH-PARSE-001 evidence"
+            echo
+            echo "- artifact id: \`$ARTIFACT_ID\`"
+            echo "- artifact url: $ARTIFACT_URL"
+            echo "- artifact digest: \`$ARTIFACT_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, supply-chain, offline]
+    needs: [fast, msrv, current-stable, platform, supply-chain, offline, m05-evidence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every foundation and daemon gate
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           python - <<'PY'
@@ -225,13 +270,23 @@ jobs:
           import sys
 
           needs = json.loads(os.environ["NEEDS_JSON"])
-          failures = {
-              name: result.get("result")
-              for name, result in needs.items()
-              if result.get("result") != "success"
-          }
+          expected = {name: "success" for name in needs}
+          expected["m05-evidence"] = (
+              "success"
+              if os.environ["EVENT_NAME"] == "push"
+              and os.environ["EVENT_REF"] == "refs/heads/main"
+              else "skipped"
+          )
+          failures = {}
+          for name, result in needs.items():
+              observed = result.get("result")
+              if observed != expected[name]:
+                  failures[name] = {
+                      "expected": expected[name],
+                      "observed": observed,
+                  }
           if failures:
               print(f"required CI jobs did not succeed: {failures}", file=sys.stderr)
               raise SystemExit(1)
-          print("all required foundation and daemon CI jobs succeeded")
+          print("all required foundation, daemon, and evidence CI jobs satisfied their gates")
           PY
