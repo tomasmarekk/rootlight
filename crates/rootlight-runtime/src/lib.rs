@@ -429,6 +429,26 @@ struct PrivateOutputState {
 }
 
 impl PrivateOutputFile {
+    /// Verifies that this platform can establish the private output publication boundary.
+    ///
+    /// This preflight does not accept or inspect an output path. Command layers can therefore call
+    /// it before runtime discovery, random generation, service startup, or path validation.
+    ///
+    /// # Errors
+    ///
+    /// On macOS, returns [`RuntimeError::PrivateOutputSecurityPolicy`] with an unsupported source
+    /// until an approved handle-bound no-replace publication primitive is available.
+    pub fn preflight() -> Result<(), RuntimeError> {
+        #[cfg(target_os = "macos")]
+        {
+            macos_private_output_unavailable()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(())
+        }
+    }
+
     /// Creates a new private output publication handle for `path`.
     ///
     /// # Errors
@@ -441,7 +461,7 @@ impl PrivateOutputFile {
         #[cfg(target_os = "macos")]
         {
             let _ = path;
-            Err(macos_private_output_unsupported())
+            macos_private_output_unavailable()
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -532,10 +552,12 @@ fn private_output_security_policy() -> RuntimeError {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_private_output_unsupported() -> RuntimeError {
-    RuntimeError::PrivateOutputSecurityPolicy(Some(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "macOS private output requires an approved handle-bound no-replace publication primitive",
+fn macos_private_output_unavailable<T>() -> Result<T, RuntimeError> {
+    Err(RuntimeError::PrivateOutputSecurityPolicy(Some(
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "macOS private output requires an approved handle-bound no-replace publication primitive",
+        ),
     )))
 }
 
@@ -1268,24 +1290,25 @@ mod tests {
         let parent = fs::canonicalize(temporary.path()).expect("temporary path canonicalizes");
         let path = parent.join("support.zip");
 
+        let preflight = PrivateOutputFile::preflight()
+            .expect_err("macOS private output preflight fails closed");
         let error = PrivateOutputFile::create(&path)
             .expect_err("macOS private output fails closed before creation");
 
-        match &error {
+        let error_signature = |error: &RuntimeError| match error {
             RuntimeError::PrivateOutputSecurityPolicy(Some(source)) => {
-                assert_eq!(source.kind(), io::ErrorKind::Unsupported);
-                assert_eq!(
-                    source.to_string(),
-                    "macOS private output requires an approved handle-bound no-replace publication primitive"
-                );
-                assert!(
-                    !source
-                        .to_string()
-                        .contains(parent.to_string_lossy().as_ref())
-                );
+                (source.kind(), source.to_string())
             }
             other => panic!("unexpected macOS publication error: {other:?}"),
-        }
+        };
+        let expected = error_signature(&preflight);
+        assert_eq!(expected.0, io::ErrorKind::Unsupported);
+        assert_eq!(error_signature(&error), expected);
+        assert!(
+            !error_signature(&error)
+                .1
+                .contains(parent.to_string_lossy().as_ref())
+        );
         assert!(!path.exists());
         assert_eq!(
             fs::read_dir(&parent).expect("output parent reads").count(),

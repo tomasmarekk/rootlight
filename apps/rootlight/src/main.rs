@@ -77,16 +77,36 @@ fn run() -> Result<CommandResult, CliError> {
     };
     let trailing = arguments.collect::<Vec<_>>();
 
-    let paths = runtime_paths()?;
-    if standalone {
-        execute_standalone(&paths, command.to_string_lossy().as_ref(), &trailing)
-    } else {
-        let mut client_instance_id = [0_u8; 16];
-        getrandom::fill(&mut client_instance_id).map_err(|_| CliError::RandomUnavailable)?;
-        let client =
-            Client::connect_or_start(&paths, client_instance_id, ConnectPolicy::StartIfMissing)?;
-        execute_client(&client, command.to_string_lossy().as_ref(), &trailing)
+    dispatch_after_command_preflight(standalone, &command, &trailing, |standalone| {
+        let paths = runtime_paths()?;
+        if standalone {
+            execute_standalone(&paths, command.to_string_lossy().as_ref(), &trailing)
+        } else {
+            let mut client_instance_id = [0_u8; 16];
+            getrandom::fill(&mut client_instance_id).map_err(|_| CliError::RandomUnavailable)?;
+            let client = Client::connect_or_start(
+                &paths,
+                client_instance_id,
+                ConnectPolicy::StartIfMissing,
+            )?;
+            execute_client(&client, command.to_string_lossy().as_ref(), &trailing)
+        }
+    })
+}
+
+fn dispatch_after_command_preflight<T>(
+    standalone: bool,
+    command: &std::ffi::OsStr,
+    arguments: &[std::ffi::OsString],
+    dispatch: impl FnOnce(bool) -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    if matches!(
+        arguments,
+        [output, _] if command == "support-bundle" && output == "--output"
+    ) {
+        preflight_support_output()?;
     }
+    dispatch(standalone)
 }
 
 fn execute_client(
@@ -454,6 +474,7 @@ fn write_support_bundle_with_writer(
     archive: &[u8],
     write: impl FnOnce(&mut PrivateOutputFile, &[u8]) -> std::io::Result<()>,
 ) -> Result<(), CliError> {
+    preflight_support_output()?;
     validate_support_output_path(path)?;
     let mut output = PrivateOutputFile::create(path).map_err(map_support_output_error)?;
     if let Err(source) = write(&mut output, archive) {
@@ -463,6 +484,10 @@ fn write_support_bundle_with_writer(
         };
     }
     output.commit().map_err(map_support_output_error)
+}
+
+fn preflight_support_output() -> Result<(), CliError> {
+    PrivateOutputFile::preflight().map_err(map_support_output_error)
 }
 
 fn support_output_path(argument: &std::ffi::OsStr) -> Result<&Path, CliError> {
@@ -911,6 +936,29 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     #[test]
+    fn support_command_preflight_preserves_supported_dispatch() {
+        let arguments = [
+            std::ffi::OsString::from("--output"),
+            std::ffi::OsString::from("support.zip"),
+        ];
+        let mut dispatched = false;
+
+        dispatch_after_command_preflight(
+            false,
+            std::ffi::OsStr::new("support-bundle"),
+            &arguments,
+            |_| {
+                dispatched = true;
+                Ok(())
+            },
+        )
+        .expect("supported platform dispatches");
+
+        assert!(dispatched);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
     fn support_bundle_write_is_private_and_refuses_overwrite() {
         let temporary = support_tempdir();
         let output = temporary.path().join("support.zip");
@@ -1015,41 +1063,120 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn support_bundle_fails_closed_before_running_the_writer() {
+    fn support_command_preflight_stops_all_downstream_effects() {
+        #[derive(Debug, Default, PartialEq, Eq)]
+        struct ObservedEffects {
+            runtime_resolution: bool,
+            random_generation: bool,
+            client_connection: bool,
+            standalone_preparation: bool,
+            service_generation: bool,
+            writer_callback: bool,
+        }
+
+        let arguments = [
+            std::ffi::OsString::from("--output"),
+            std::ffi::OsString::from("path-that-must-not-be-inspected/support.zip"),
+        ];
+        let expected = unsupported_support_output_signature(
+            &preflight_support_output().expect_err("macOS support output preflight fails closed"),
+        );
+
+        for standalone in [false, true] {
+            let mut effects = ObservedEffects::default();
+            let error = dispatch_after_command_preflight(
+                standalone,
+                std::ffi::OsStr::new("support-bundle"),
+                &arguments,
+                |standalone| {
+                    effects.runtime_resolution = true;
+                    effects.random_generation = true;
+                    if standalone {
+                        effects.standalone_preparation = true;
+                    } else {
+                        effects.client_connection = true;
+                    }
+                    effects.service_generation = true;
+                    effects.writer_callback = true;
+                    Ok(())
+                },
+            )
+            .expect_err("macOS support command fails before dispatch");
+
+            assert_eq!(effects, ObservedEffects::default());
+            assert_eq!(unsupported_support_output_signature(&error), expected);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn support_writer_preflight_does_not_inspect_any_path_class() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
         let temporary = support_tempdir();
-        let output = temporary.path().join("support.zip");
-        let mut writer_called = false;
+        let existing = temporary.path().join("existing.zip");
+        std::fs::write(&existing, b"existing").expect("existing output writes");
+        let symlinked = temporary.path().join("symlinked.zip");
+        symlink(&existing, &symlinked).expect("output symlink creates");
+        let unreadable_parent = temporary.path().join("unreadable");
+        std::fs::create_dir(&unreadable_parent).expect("unreadable parent creates");
+        let unreadable = unreadable_parent.join("support.zip");
+        std::fs::set_permissions(&unreadable_parent, std::fs::Permissions::from_mode(0o000))
+            .expect("unreadable parent permissions apply");
+        let nonexistent = temporary
+            .path()
+            .join("nonexistent-parent")
+            .join("support.zip");
+        let invalid = PathBuf::new();
+        let paths = [&invalid, &nonexistent, &unreadable, &symlinked, &existing];
+        let expected = unsupported_support_output_signature(
+            &preflight_support_output().expect_err("macOS support output preflight fails closed"),
+        );
+        assert_eq!(expected.0, ExitFamily::SecurityPolicy);
+        assert_eq!(expected.1, std::io::ErrorKind::Unsupported);
+        assert!(
+            !expected
+                .2
+                .contains(temporary.path().to_string_lossy().as_ref())
+        );
 
-        let error = write_support_bundle_with_writer(&output, b"bundle", |_, _| {
-            writer_called = true;
-            Ok(())
-        })
-        .expect_err("macOS support publication fails closed");
+        for path in paths {
+            let mut writer_called = false;
+            let error = write_support_bundle_with_writer(path, b"bundle", |_, _| {
+                writer_called = true;
+                Ok(())
+            })
+            .expect_err("macOS support publication fails before path validation");
 
-        assert!(!writer_called);
-        assert_eq!(error.exit_family(), ExitFamily::SecurityPolicy);
-        match &error {
+            assert!(!writer_called);
+            assert_eq!(unsupported_support_output_signature(&error), expected);
+        }
+        std::fs::set_permissions(&unreadable_parent, std::fs::Permissions::from_mode(0o700))
+            .expect("unreadable parent permissions restore");
+        assert_eq!(
+            std::fs::read(&existing).expect("existing output reads"),
+            b"existing"
+        );
+        assert!(
+            std::fs::symlink_metadata(&symlinked)
+                .expect("output symlink metadata reads")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!nonexistent.exists());
+        assert!(!unreadable.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    fn unsupported_support_output_signature(
+        error: &CliError,
+    ) -> (ExitFamily, std::io::ErrorKind, String) {
+        match error {
             CliError::Runtime(RuntimeError::PrivateOutputSecurityPolicy(Some(source))) => {
-                assert_eq!(source.kind(), std::io::ErrorKind::Unsupported);
-                assert_eq!(
-                    source.to_string(),
-                    "macOS private output requires an approved handle-bound no-replace publication primitive"
-                );
-                assert!(
-                    !source
-                        .to_string()
-                        .contains(temporary.path().to_string_lossy().as_ref())
-                );
+                (error.exit_family(), source.kind(), source.to_string())
             }
             other => panic!("unexpected macOS support error: {other:?}"),
         }
-        assert!(!output.exists());
-        assert_eq!(
-            std::fs::read_dir(temporary.path())
-                .expect("support parent reads")
-                .count(),
-            0
-        );
     }
 
     #[test]
