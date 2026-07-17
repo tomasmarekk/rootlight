@@ -36,6 +36,7 @@ use crate::{
 };
 
 const LOGICAL_TREE_NODE_BYTES: usize = 64;
+const LOGICAL_SYNTAX_FACT_BYTES: usize = 64;
 const CANCELLATION_CHECK_INTERVAL: usize = 256;
 const CANCELLATION_BYTE_INTERVAL: usize = 64 * 1024;
 static NEXT_PROVIDER_ID: AtomicU64 = AtomicU64::new(1);
@@ -378,22 +379,23 @@ impl TreeSitterProvider {
             extraction.fact_limit,
             cancellation,
         )?;
-        let initial_plan = plan_fact_batches(&normalized.facts, sink.remaining_budget())?;
-        let limited = extraction.limit.is_some()
-            || normalized.limited
-            || initial_plan.emitted < normalized.facts.len();
-        if limited {
+        let query_limited = extraction.limit.is_some() || normalized.limited;
+        if query_limited {
             emit_extraction_limit_diagnostic(request, sink, cancellation)?;
         }
-        let plan = if limited {
-            plan_fact_batches(&normalized.facts, sink.remaining_budget())?
+        let initial_plan =
+            plan_fact_batches(&normalized.facts, sink.remaining_budget(), cancellation)?;
+        let sink_limited = initial_plan.emitted < normalized.facts.len();
+        let plan = if sink_limited && !query_limited {
+            emit_extraction_limit_diagnostic(request, sink, cancellation)?;
+            plan_fact_batches(&normalized.facts, sink.remaining_budget(), cancellation)?
         } else {
             initial_plan
         };
         let emitted = plan.emitted;
         emit_fact_plan(&normalized.facts, plan, sink, cancellation)?;
         Ok(ExtractionReport {
-            limited: limited || emitted < normalized.facts.len(),
+            limited: query_limited || sink_limited || emitted < normalized.facts.len(),
         })
     }
 
@@ -1053,6 +1055,7 @@ struct FactDraft {
     role: StructuralRole,
     syntax_kind: SyntaxKindLabel,
     parent: Option<usize>,
+    depth: usize,
 }
 
 #[derive(Debug)]
@@ -1194,24 +1197,14 @@ fn normalize_query_candidates(
             syntax_kind: SyntaxKindLabel::new(&label)
                 .map_err(|_| provider_failure("query-syntax-label"))?,
             parent: None,
+            depth: 0,
         });
     }
     assign_fact_parents(&mut drafts, cancellation)?;
-    let mut depths = Vec::new();
-    depths
-        .try_reserve_exact(drafts.len())
-        .map_err(|_| provider_failure("query-fact-allocation"))?;
-    for index in 0..drafts.len() {
-        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
-            cancellation.check()?;
-        }
-        depths.push(fact_depth(index, &drafts)?);
-    }
     let facts = drafts
         .into_iter()
-        .zip(depths)
         .enumerate()
-        .map(|(index, (draft, depth))| {
+        .map(|(index, draft)| {
             let local_id = u64::try_from(index)
                 .ok()
                 .and_then(|index| index.checked_add(1))
@@ -1234,7 +1227,7 @@ fn normalize_query_candidates(
                 parent,
                 draft.role.fact_kind(),
                 span,
-                depth,
+                draft.depth,
                 draft.syntax_kind,
             ))
         })
@@ -1305,38 +1298,28 @@ fn assign_fact_parents(
         }) {
             active.pop();
         }
-        drafts[index].parent = active
+        let parent = active
             .iter()
             .rev()
             .copied()
             .find(|&parent| parent_is_valid(&drafts[parent], &drafts[index]));
+        let depth = parent
+            .map(|parent| {
+                drafts[parent]
+                    .depth
+                    .checked_add(1)
+                    .ok_or_else(|| provider_failure("query-depth-accounting"))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        drafts[index].parent = parent;
+        drafts[index].depth = depth;
         if drafts[index].role.container_rank().is_some() {
             active.push(index);
         }
     }
     cancellation.check()?;
     Ok(())
-}
-
-fn fact_depth(index: usize, drafts: &[FactDraft]) -> Result<usize, AdapterError> {
-    let mut depth = 0usize;
-    let mut current = drafts
-        .get(index)
-        .ok_or_else(|| provider_failure("query-parent"))?
-        .parent;
-    while let Some(parent) = current {
-        depth = depth
-            .checked_add(1)
-            .ok_or_else(|| provider_failure("query-depth-accounting"))?;
-        if depth > drafts.len() {
-            return Err(provider_failure("query-parent-cycle"));
-        }
-        current = drafts
-            .get(parent)
-            .ok_or_else(|| provider_failure("query-parent"))?
-            .parent;
-    }
-    Ok(depth)
 }
 
 const fn hierarchy_rank(role: StructuralRole) -> u8 {
@@ -1369,6 +1352,7 @@ const fn span_contains(
 fn plan_fact_batches(
     facts: &[SyntaxFact],
     budget: RemainingBudget,
+    cancellation: &Cancellation,
 ) -> Result<FactPlan, AdapterError> {
     let remaining = budget.remaining();
     let batch = budget.batch();
@@ -1381,16 +1365,18 @@ fn plan_fact_batches(
     let mut total_strings = 0usize;
 
     for (index, fact) in facts.iter().enumerate() {
-        let usage = SyntaxFactBatch::new(0, vec![fact.clone()], Vec::new()).usage()?;
-        if usage.records() > batch.max_records() || usage.output_bytes() > batch.max_output_bytes()
-        {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        let usage = fact_usage(fact)?;
+        if usage.output_bytes > batch.max_output_bytes() {
             break;
         }
         let next_batch_records = batch_records
-            .checked_add(usage.records())
+            .checked_add(1)
             .ok_or_else(|| provider_failure("query-batch-accounting"))?;
         let next_batch_output = batch_output
-            .checked_add(usage.output_bytes())
+            .checked_add(usage.output_bytes)
             .ok_or_else(|| provider_failure("query-batch-accounting"))?;
         if batch_records > 0
             && (next_batch_records > batch.max_records()
@@ -1405,13 +1391,13 @@ fn plan_fact_batches(
             break;
         }
         let next_total_records = total_records
-            .checked_add(usage.records())
+            .checked_add(1)
             .ok_or_else(|| provider_failure("query-stream-accounting"))?;
         let next_total_output = total_output
-            .checked_add(usage.output_bytes())
+            .checked_add(usage.output_bytes)
             .ok_or_else(|| provider_failure("query-stream-accounting"))?;
         let next_total_strings = total_strings
-            .checked_add(usage.string_bytes())
+            .checked_add(usage.string_bytes)
             .ok_or_else(|| provider_failure("query-stream-accounting"))?;
         if next_total_records > remaining.records()
             || next_total_output > remaining.output_bytes()
@@ -1420,10 +1406,10 @@ fn plan_fact_batches(
             break;
         }
         batch_records = batch_records
-            .checked_add(usage.records())
+            .checked_add(1)
             .ok_or_else(|| provider_failure("query-batch-accounting"))?;
         batch_output = batch_output
-            .checked_add(usage.output_bytes())
+            .checked_add(usage.output_bytes)
             .ok_or_else(|| provider_failure("query-batch-accounting"))?;
         total_records = next_total_records;
         total_output = next_total_output;
@@ -1433,9 +1419,27 @@ fn plan_fact_batches(
     if batch_records > 0 {
         ranges.push(batch_start..emitted);
     }
+    cancellation.check()?;
     Ok(FactPlan {
         batches: ranges,
         emitted,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FactUsage {
+    output_bytes: usize,
+    string_bytes: usize,
+}
+
+fn fact_usage(fact: &SyntaxFact) -> Result<FactUsage, AdapterError> {
+    let string_bytes = fact.syntax_kind().as_str().len();
+    let output_bytes = LOGICAL_SYNTAX_FACT_BYTES
+        .checked_add(string_bytes)
+        .ok_or_else(|| provider_failure("query-fact-accounting"))?;
+    Ok(FactUsage {
+        output_bytes,
+        string_bytes,
     })
 }
 
@@ -1864,6 +1868,70 @@ mod tests {
         let edit = SourceEdit::new(0, 0, "x").expect("test edit is valid");
         assert!(matches!(
             validate_edit_admission(Some(&previous), &[edit], &config, &cancellation),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest
+            })
+        ));
+    }
+
+    #[test]
+    fn nonallocating_fact_accounting_matches_the_sdk_sink_contract() {
+        let fact = SyntaxFact::new(
+            1,
+            None,
+            rootlight_adapter_sdk::SyntaxFactKind::Signature,
+            SourceSpan::new(rootlight_ids::FileId::from_bytes([1; 20]), 0, 1)
+                .expect("test span is ordered"),
+            0,
+            SyntaxKindLabel::new("rust.parameters.signature").expect("test syntax label is valid"),
+        );
+        let observed = fact_usage(&fact).expect("fact usage is representable");
+        let expected = SyntaxFactBatch::new(0, vec![fact], Vec::new())
+            .usage()
+            .expect("SDK batch usage is representable");
+
+        assert_eq!(observed.output_bytes, expected.output_bytes());
+        assert_eq!(observed.string_bytes, expected.string_bytes());
+        assert_eq!(expected.records(), 1);
+    }
+
+    #[test]
+    fn wide_fact_planning_observes_cancellation_before_allocation_work() {
+        let file = rootlight_ids::FileId::from_bytes([3; 20]);
+        let fact = SyntaxFact::new(
+            1,
+            None,
+            rootlight_adapter_sdk::SyntaxFactKind::Occurrence,
+            SourceSpan::new(file, 0, 1).expect("test span is ordered"),
+            0,
+            SyntaxKindLabel::new("rust.identifier.reference").expect("test syntax label is valid"),
+        );
+        let facts = vec![fact; 4096];
+        let batch = rootlight_adapter_sdk::BatchThresholds::new(64, 64 * 1024, 4, 1024)
+            .expect("test batch limits are valid");
+        let stream = rootlight_adapter_sdk::StreamLimits::new(
+            64,
+            4096,
+            4 * 1024 * 1024,
+            16,
+            4096,
+            128 * 1024,
+            batch,
+        )
+        .expect("test stream limits are valid");
+        let source = SourceRef::new(
+            rootlight_ids::RepositoryId::from_bytes([1; 16]),
+            rootlight_ids::GenerationId::from_bytes([2; 20]),
+            SourceSpan::new(file, 0, 1).expect("test source span is ordered"),
+            ContentHash::from_bytes([4; 32]),
+            None,
+        );
+        let sink = rootlight_adapter_sdk::BoundedSyntaxSink::new(source, stream, 64);
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+
+        assert!(matches!(
+            plan_fact_batches(&facts, sink.remaining_budget(), &cancellation),
             Err(AdapterError::Cancelled {
                 reason: rootlight_cancel::CancellationReason::ClientRequest
             })
