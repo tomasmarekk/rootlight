@@ -12,9 +12,9 @@ use std::{
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, AnalysisReport, AnalysisRequest, CoverageReport,
     DiagnosticCode, DomainCoverage, IrBatch, IrBatchSink, IrRecord, LanguageAnalyzer,
-    MemoryAdmissionPolicy, MemoryEnforcement, ParseOutput, ParseProvider, ParseRequest,
-    ProducerDescriptor, RequestError, ResourceKind, ResourceUsage, SinkError, StreamEnd,
-    StreamUsage, SyntaxFact, SyntaxFactKind, execute_parse,
+    MemoryAdmissionPolicy, MemoryEnforcement, ParseOutput, ParseProvider, ProducerDescriptor,
+    RequestError, ResourceKind, ResourceUsage, SinkError, StreamEnd, StreamUsage, SyntaxFact,
+    SyntaxFactKind, execute_parse,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{
@@ -141,13 +141,7 @@ impl LanguageAnalyzer for TreeSitterAnalyzer {
         if request.generated_status().is_none() {
             return Err(RequestError::GeneratedStatusRequired.into());
         }
-        let parse_request = ParseRequest::new(
-            request.source().clone(),
-            request.language().clone(),
-            request.encoding().clone(),
-            request.included_ranges().to_vec(),
-            request.limits(),
-        )?;
+        let parse_request = request.to_parse_request();
         let parser_memory_policy =
             memory_policy_for(self.parser.capabilities().memory_enforcement());
         let parse_output = execute_parse(

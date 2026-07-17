@@ -209,7 +209,9 @@ impl TreeSitterProvider {
             .registry
             .get(family)
             .ok_or_else(|| provider_failure("grammar-missing"))?;
-        let included_ranges = range_identities(request.included_ranges(), cancellation)?;
+        cancellation.check()?;
+        let included_ranges = request.shared_included_ranges();
+        cancellation.check()?;
         let identity = ParseIdentity {
             content_hash: request.source().source_ref().content_hash(),
             family,
@@ -1222,27 +1224,6 @@ fn validate_included_range_languages(
     }
     cancellation.check()?;
     Ok(())
-}
-
-fn range_identities(
-    ranges: &[IncludedRange],
-    cancellation: &Cancellation,
-) -> Result<Arc<Vec<IncludedRange>>, AdapterError> {
-    let mut identities = Vec::new();
-    try_reserve_exact_cancellable(
-        &mut identities,
-        ranges.len(),
-        cancellation,
-        "range-identity-allocation",
-    )?;
-    for (index, range) in ranges.iter().enumerate() {
-        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
-            cancellation.check()?;
-        }
-        identities.push(range.clone());
-    }
-    cancellation.check()?;
-    Ok(Arc::new(identities))
 }
 
 #[derive(Debug)]
@@ -2541,12 +2522,11 @@ mod tests {
             &language,
             &cancellation,
         ));
-        assert_cancelled(range_identities(&ranges, &cancellation));
         assert_cancelled(included_range_source_bytes(&ranges, &cancellation));
     }
 
     #[test]
-    fn included_range_copy_and_coverage_preserve_semantics() {
+    fn included_range_validation_and_coverage_preserve_semantics() {
         let file = rootlight_ids::FileId::from_bytes([6; 20]);
         let language = LanguageId::new("rust").expect("test language is valid");
         let ranges = vec![
@@ -2563,10 +2543,6 @@ mod tests {
 
         validate_included_range_languages(&ranges, &language, &cancellation)
             .expect("matching languages are accepted");
-        let identities =
-            range_identities(&ranges, &cancellation).expect("bounded identity copy succeeds");
-
-        assert_eq!(identities.as_slice(), ranges.as_slice());
         assert_eq!(
             included_range_source_bytes(&ranges, &cancellation)
                 .expect("bounded coverage accounting succeeds"),

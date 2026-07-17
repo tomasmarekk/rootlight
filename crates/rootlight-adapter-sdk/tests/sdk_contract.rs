@@ -6,6 +6,7 @@
 use std::{
     fs,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -128,6 +129,52 @@ fn parser_and_analyzer_share_included_range_validation() {
         analysis_error,
         RequestError::IncludedRangeOrder { index: 1 }
     );
+}
+
+#[test]
+fn parser_context_shares_checked_included_range_ownership() {
+    let (_temporary, snapshot, source) = source_fixture();
+    let limits = limits(2, IrLimits::default());
+    let bound = GenerationBoundSnapshot::new(&snapshot, &source).expect("fixture snapshot binds");
+    let language = LanguageId::new("rust").expect("test language is safe");
+    let encoding = EncodingId::new("utf-8").expect("test encoding is safe");
+    let ranges = vec![
+        IncludedRange::new(
+            SourceSpan::new(snapshot.file(), 0, 4).expect("test span is ordered"),
+            language.clone(),
+        ),
+        IncludedRange::new(
+            SourceSpan::new(snapshot.file(), 8, 16).expect("test span is ordered"),
+            language.clone(),
+        ),
+    ];
+    let analysis = AnalysisRequest::new_with_parse_context(
+        bound,
+        language,
+        encoding,
+        ranges.clone(),
+        AnalysisTier::TierC,
+        BuildContextIdentity::new(snapshot.content_hash()),
+        &limits,
+    )
+    .expect("sorted disjoint analysis ranges are accepted");
+
+    let first_parse = analysis.to_parse_request();
+    let second_parse = analysis.clone().to_parse_request();
+    let first_ranges = first_parse.shared_included_ranges();
+    let second_ranges = second_parse.shared_included_ranges();
+    let cloned_parse_ranges = first_parse.clone().shared_included_ranges();
+
+    assert_eq!(first_parse.included_ranges(), ranges);
+    assert_eq!(first_parse.language(), analysis.language());
+    assert_eq!(first_parse.encoding(), analysis.encoding());
+    assert_eq!(
+        first_parse.source().source_ref(),
+        analysis.source().source_ref()
+    );
+    assert!(std::ptr::eq(first_parse.limits(), analysis.limits()));
+    assert!(Arc::ptr_eq(&first_ranges, &second_ranges));
+    assert!(Arc::ptr_eq(&first_ranges, &cloned_parse_ranges));
 }
 
 #[test]
