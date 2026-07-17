@@ -40,7 +40,8 @@ fn fixture_documents() -> (
         manifest_hash: content_hash(b"manifest"),
         config_hash: content_hash(b"configuration"),
         provider_set_hash: content_hash(b"providers"),
-        format_version: u32::from(GENERATION_CONTRACT_VERSION.major()),
+        format_version: (u32::from(GENERATION_CONTRACT_VERSION.major()) << 16)
+            | u32::from(GENERATION_CONTRACT_VERSION.minor()),
     })
     .id();
     let rebound = String::from_utf8(encoded)
@@ -511,12 +512,12 @@ fn normalized_validation_rejects_hostile_source_input_before_sql() {
 fn schema_identity_is_versioned_and_source_body_columns_are_absent() {
     let catalog = catalog_schema_compatibility();
     let oracle = oracle_schema_compatibility();
-    assert_eq!(catalog.schema_version(), 1);
-    assert_eq!(oracle.schema_version(), 1);
+    assert_eq!(catalog.schema_version(), 2);
+    assert_eq!(oracle.schema_version(), 2);
     assert_ne!(catalog.application_id(), oracle.application_id());
     assert_ne!(catalog.checksum(), oracle.checksum());
     assert_eq!(GENERATION_CONTRACT_VERSION.major(), 1);
-    assert_eq!(GENERATION_CONTRACT_VERSION.minor(), 0);
+    assert_eq!(GENERATION_CONTRACT_VERSION.minor(), 1);
 
     let directory = TempDir::new().expect("temporary generation directory is created");
     write_fixture(directory.path());

@@ -35,7 +35,10 @@ const GENERATED_RUST_FILES: [&str; 3] = [
 const SCHEMA_ROOT: &str = "schemas/generated";
 const PROTOCOL_GENERATED_ROOT: &str = "crates/rootlight-protocol/src/generated";
 const COMPATIBILITY_ROOT: &str = "tests/fixtures/compatibility";
-const STORAGE_COMPATIBILITY_FIXTURE: &str = "storage/1.0/schema-fingerprints.json";
+const STORAGE_COMPATIBILITY_BASELINES: [&str; 2] = [
+    "storage/1.0/schema-fingerprints.json",
+    "storage/1.1/schema-fingerprints.json",
+];
 const STORAGE_GENERATOR_INPUTS: [&str; 2] = [
     "crates/rootlight-catalog/src/schema.rs",
     "crates/rootlight-storage/src/generation.rs",
@@ -47,13 +50,15 @@ const COMPATIBILITY_FILES: [&str; 4] = [
     "contract-2.0-rejected.json",
 ];
 const LEXICAL_EXTENSION_BASELINE: &str = "extensions/rootlight.lexical/1/envelope.json";
-const COMPATIBILITY_BASELINES: [&str; 6] = [
+const COMPATIBILITY_BASELINES: [&str; 8] = [
     LEXICAL_EXTENSION_BASELINE,
     "ir/1.0/document.json",
     "ir/1.1/document.json",
     "protobuf/1.0/contract-version.bin",
     "protobuf/1.0/contract-version.json",
     "protobuf/1.0/rootlight.desc",
+    STORAGE_COMPATIBILITY_BASELINES[0],
+    STORAGE_COMPATIBILITY_BASELINES[1],
 ];
 const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 3] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
@@ -75,7 +80,6 @@ pub(crate) fn generate(mode: GenerateMode) -> Result<(), SchemaError> {
     generate_protobuf(&workspace_root, staged_root)?;
     generate_json_schemas(staged_root)?;
     validate_generated_json_schemas(&workspace_root, staged_root)?;
-    generate_storage_compatibility(staged_root)?;
     generate_manifest(&workspace_root, staged_root)?;
 
     match mode {
@@ -208,42 +212,35 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
     Ok(())
 }
 
-fn generate_storage_compatibility(staged_root: &Path) -> Result<(), SchemaError> {
-    let catalog = catalog_schema_compatibility();
-    let oracle = oracle_schema_compatibility();
-    let fixture = StorageCompatibilityFixture {
-        fixture_version: MANIFEST_VERSION.to_owned(),
-        generation_contract: VersionFixture {
-            major: GENERATION_CONTRACT_VERSION.major(),
-            minor: GENERATION_CONTRACT_VERSION.minor(),
-        },
-        catalog: SqliteSchemaFixture {
-            application_id: catalog.application_id(),
-            schema_version: catalog.schema_version(),
-            checksum: catalog.checksum().to_string(),
-        },
-        oracle: SqliteSchemaFixture {
-            application_id: oracle.application_id(),
-            schema_version: oracle.schema_version(),
-            checksum: oracle.checksum().to_string(),
-        },
-    };
-    let mut bytes = serde_json::to_vec_pretty(&fixture).map_err(SchemaError::SerializeJson)?;
-    bytes.push(b'\n');
-    write_bytes(
-        &staged_root
-            .join(COMPATIBILITY_ROOT)
-            .join(STORAGE_COMPATIBILITY_FIXTURE),
-        &bytes,
-    )
-}
-
 fn validate_storage_compatibility(workspace_root: &Path) -> Result<(), SchemaError> {
-    let path = workspace_root
-        .join(COMPATIBILITY_ROOT)
-        .join(STORAGE_COMPATIBILITY_FIXTURE);
-    let fixture: StorageCompatibilityFixture = serde_json::from_slice(&read_bytes(&path)?)
-        .map_err(|source| SchemaError::ParseCompatibilityFixture { path, source })?;
+    let fixtures = STORAGE_COMPATIBILITY_BASELINES
+        .iter()
+        .map(|relative| {
+            let path = workspace_root.join(COMPATIBILITY_ROOT).join(relative);
+            serde_json::from_slice::<StorageCompatibilityFixture>(&read_bytes(&path)?)
+                .map_err(|source| SchemaError::ParseCompatibilityFixture { path, source })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if fixtures
+        .iter()
+        .any(|fixture| fixture.fixture_version != MANIFEST_VERSION)
+        || fixtures
+            .iter()
+            .map(|fixture| {
+                (
+                    fixture.generation_contract.major,
+                    fixture.generation_contract.minor,
+                )
+            })
+            .collect::<Vec<_>>()
+            != [(1, 0), (1, 1)]
+        || fixtures[0].catalog.application_id != fixtures[1].catalog.application_id
+        || fixtures[0].oracle.application_id != fixtures[1].oracle.application_id
+        || fixtures[0].catalog.schema_version >= fixtures[1].catalog.schema_version
+        || fixtures[0].oracle.schema_version >= fixtures[1].oracle.schema_version
+    {
+        return Err(SchemaError::StorageCompatibilityMismatch);
+    }
     let catalog = catalog_schema_compatibility();
     let oracle = oracle_schema_compatibility();
     let expected = StorageCompatibilityFixture {
@@ -263,7 +260,7 @@ fn validate_storage_compatibility(workspace_root: &Path) -> Result<(), SchemaErr
             checksum: oracle.checksum().to_string(),
         },
     };
-    if fixture != expected {
+    if fixtures.last() != Some(&expected) {
         return Err(SchemaError::StorageCompatibilityMismatch);
     }
     Ok(())
@@ -1195,7 +1192,6 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-response-metadata-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-error-response-1.0.schema.json"),
-        format!("{COMPATIBILITY_ROOT}/{STORAGE_COMPATIBILITY_FIXTURE}"),
     ]);
     paths.sort();
     paths
@@ -1250,18 +1246,6 @@ fn observed_output_paths(workspace_root: &Path) -> Result<BTreeSet<String>, Sche
         &workspace_root.join(SCHEMA_ROOT),
         &mut paths,
     )?;
-    let storage_fixture = workspace_root
-        .join(COMPATIBILITY_ROOT)
-        .join(STORAGE_COMPATIBILITY_FIXTURE);
-    if storage_fixture.is_file() {
-        paths.insert(
-            storage_fixture
-                .strip_prefix(workspace_root)
-                .map_err(|_| SchemaError::PathOutsideWorkspace(storage_fixture.clone()))?
-                .to_string_lossy()
-                .replace('\\', "/"),
-        );
-    }
     Ok(paths)
 }
 
@@ -1583,6 +1567,9 @@ mod tests {
         assert_eq!(outputs.len(), artifacts.len() + 1);
         assert!(outputs.contains(&format!("{SCHEMA_ROOT}/manifest.json")));
         assert!(!artifacts.contains(&format!("{SCHEMA_ROOT}/manifest.json")));
+        for baseline in STORAGE_COMPATIBILITY_BASELINES {
+            assert!(!outputs.contains(&format!("{COMPATIBILITY_ROOT}/{baseline}")));
+        }
     }
 
     #[test]

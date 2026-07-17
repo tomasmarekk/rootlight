@@ -16,7 +16,7 @@ use rootlight_ir::{
 
 /// Current backend-neutral generation contract version.
 pub const GENERATION_CONTRACT_VERSION: GenerationContractVersion =
-    GenerationContractVersion::new(1, 0);
+    GenerationContractVersion::new(1, 1);
 
 /// Hard ceiling for physical rows written or materialized by one operation.
 pub const HARD_MAX_GENERATION_ROWS: u64 = 1_000_000;
@@ -93,7 +93,7 @@ impl GenerationMetadata {
             manifest_hash,
             config_hash: configuration_hash,
             provider_set_hash,
-            format_version: u32::from(GENERATION_CONTRACT_VERSION.major()),
+            format_version: generation_format_version(),
         })
         .id();
         if generation != expected {
@@ -156,6 +156,10 @@ impl GenerationMetadata {
     pub const fn provider_set_hash(&self) -> ContentHash {
         self.provider_set_hash
     }
+}
+
+const fn generation_format_version() -> u32 {
+    (GENERATION_CONTRACT_VERSION.major() as u32) << 16 | GENERATION_CONTRACT_VERSION.minor() as u32
 }
 
 /// Owned, canonical normalized IR for one generation.
@@ -630,7 +634,7 @@ mod tests {
             manifest_hash,
             config_hash: configuration_hash,
             provider_set_hash,
-            format_version: u32::from(GENERATION_CONTRACT_VERSION.major()),
+            format_version: generation_format_version(),
         })
         .id();
         GenerationMetadata::new(
