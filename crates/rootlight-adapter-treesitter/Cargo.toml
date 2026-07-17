@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-cancel = { path = "../rootlight-cancel" }
+rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 thiserror.workspace = true
 tree-sitter.workspace = true
@@ -19,8 +20,8 @@ tree-sitter-rust.workspace = true
 
 [dev-dependencies]
 blake3.workspace = true
-rootlight-ids = { path = "../rootlight-ids" }
 rootlight-vfs = { path = "../rootlight-vfs" }
+tempfile.workspace = true
 
 [lints]
 workspace = true

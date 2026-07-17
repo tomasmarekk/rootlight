@@ -1454,6 +1454,7 @@ dependencies = [
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-vfs",
+ "tempfile",
  "thiserror",
  "tree-sitter",
  "tree-sitter-java",
