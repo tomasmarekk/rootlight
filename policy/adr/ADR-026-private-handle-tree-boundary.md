@@ -36,6 +36,13 @@ Add a safe `rootlight_vfs::platform` API with opaque RAII types for private
 directories and files. Confine all native calls and raw representations to the
 private `rootlight-vfs::platform::os` module named in `policy/unsafe.toml`.
 
+While this decision remains `Proposed`, that API is type and ownership
+scaffolding only. Creation, publication, synchronization, and removal return an
+explicit unsupported error on every target before filesystem mutation.
+Destructors close retained Rust owners only; they do not attempt path-based
+cleanup. No platform implementation dependency or successful Linux fallback is
+authorized by this proposal.
+
 The safe contract is:
 
 - directory and file names are one bounded native component;
@@ -159,7 +166,7 @@ no benchmark authorizes weaker behavior.
 
 ## Rollback
 
-Before acceptance, Windows and macOS operations remain fail-closed. After
+Before acceptance, every platform operation remains fail-closed. After
 acceptance, rollback removes the consumers and native implementation, restores
 the VFS crate to workspace lint inheritance, and deletes the exact policy
 entry. Existing repository snapshot behavior remains usable throughout.
