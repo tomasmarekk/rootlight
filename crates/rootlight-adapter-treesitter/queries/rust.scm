@@ -28,7 +28,11 @@
 
 (use_declaration) @import
 (parameters) @signature
-[(impl_item) (block)] @scope
+(impl_item
+  type: (_) @scope_type) @scope
+(impl_item
+  trait: (_) @scope_trait)
+(block) @scope
 (identifier) @reference
 (type_identifier) @reference
 [(line_comment) (block_comment)] @comment

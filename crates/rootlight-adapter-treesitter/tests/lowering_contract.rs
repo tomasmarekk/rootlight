@@ -278,6 +278,67 @@ fn missing_java_field_definition_is_reserved_in_preflight_quotas() {
 }
 
 #[test]
+fn rust_impl_without_reviewed_owner_capture_becomes_an_explicit_gap() {
+    const RUST: &str = "impl A { fn same(&self) {} }\n";
+    let (_temporary, snapshot, source) =
+        source_fixture_for(RUST, "src/lib.rs", b"missing-impl-owner-fixture");
+    let facts = vec![
+        SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Root,
+            source.span(),
+            0,
+            label("rust.file.root"),
+        ),
+        SyntaxFact::new(
+            2,
+            Some(1),
+            SyntaxFactKind::Scope,
+            span_in(RUST, &source, RUST.trim_end(), 0),
+            1,
+            label("rust.impl.scope"),
+        ),
+        SyntaxFact::new(
+            3,
+            Some(2),
+            SyntaxFactKind::Declaration,
+            span_in(RUST, &source, "fn same(&self) {}", 0),
+            2,
+            label("rust.function.declaration"),
+        ),
+        SyntaxFact::new(
+            4,
+            Some(3),
+            SyntaxFactKind::Occurrence,
+            span_in(RUST, &source, "same", 0),
+            3,
+            label("rust.function.definition"),
+        ),
+    ];
+    let output = analyze_custom(
+        &snapshot,
+        &source,
+        language(),
+        &limits(IrLimits::default()),
+        facts,
+    )
+    .expect("unsupported impl identity commits an explicit partial document");
+
+    assert!(
+        output
+            .document()
+            .entities
+            .iter()
+            .all(|entity| entity.canonical_name != "same")
+    );
+    assert!(output.document().skipped_regions.iter().any(|region| {
+        region.domain == rootlight_ir::FactDomain::Entities
+            && region.detail == "stable-scope-identity-unavailable"
+    }));
+}
+
+#[test]
 fn lowering_emits_only_evidence_backed_conservative_relations() {
     let (_temporary, snapshot, source) = source_fixture();
     let limits = limits(IrLimits::default());

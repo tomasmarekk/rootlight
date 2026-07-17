@@ -29,6 +29,7 @@ const EXPECTED_CAPTURES: [&str; 11] = [
     "signature",
     "string",
 ];
+const RUST_SCOPE_CAPTURES: [&str; 2] = ["scope_trait", "scope_type"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum StructuralRole {
@@ -38,6 +39,8 @@ pub(crate) enum StructuralRole {
     Signature,
     Import,
     Scope,
+    ScopeTrait,
+    ScopeType,
     Definition,
     Reference,
     Comment,
@@ -54,6 +57,8 @@ impl StructuralRole {
             "signature" => Some(Self::Signature),
             "import" => Some(Self::Import),
             "scope" => Some(Self::Scope),
+            "scope_trait" => Some(Self::ScopeTrait),
+            "scope_type" => Some(Self::ScopeType),
             "definition" => Some(Self::Definition),
             "reference" => Some(Self::Reference),
             "comment" => Some(Self::Comment),
@@ -68,7 +73,7 @@ impl StructuralRole {
             Self::Root => SyntaxFactKind::Root,
             Self::Module => SyntaxFactKind::Module,
             Self::Declaration => SyntaxFactKind::Declaration,
-            Self::Signature => SyntaxFactKind::Signature,
+            Self::Signature | Self::ScopeTrait | Self::ScopeType => SyntaxFactKind::Signature,
             Self::Import => SyntaxFactKind::Import,
             Self::Scope => SyntaxFactKind::Scope,
             Self::Definition | Self::Reference => SyntaxFactKind::Occurrence,
@@ -85,6 +90,8 @@ impl StructuralRole {
             Self::Signature => "signature",
             Self::Import => "import",
             Self::Scope => "scope",
+            Self::ScopeTrait => "scope_trait",
+            Self::ScopeType => "scope_type",
             Self::Definition => "definition",
             Self::Reference => "reference",
             Self::Comment => "comment",
@@ -134,9 +141,14 @@ pub(crate) struct QueryPack {
 impl QueryPack {
     fn compile(family: GrammarFamily, source: &str) -> Result<Self, GrammarFamily> {
         let query = Query::new(&language_for(family), source).map_err(|_| family)?;
+        let mut expected = EXPECTED_CAPTURES.to_vec();
+        if family == GrammarFamily::Rust {
+            expected.extend(RUST_SCOPE_CAPTURES);
+            expected.sort_unstable();
+        }
         let mut observed = query.capture_names().to_vec();
         observed.sort_unstable();
-        if observed != EXPECTED_CAPTURES {
+        if observed != expected {
             return Err(family);
         }
         let roles_by_capture = query
@@ -232,8 +244,14 @@ impl QueryPack {
                 let role = self
                     .role_for_capture(capture.index)
                     .ok_or_else(|| query_failure("query-capture-role"))?;
-                let syntax = canonical_syntax(family, capture.node.kind())
-                    .ok_or_else(|| query_failure("query-node-kind"))?;
+                // These roles identify reviewed Rust grammar fields rather than
+                // the many concrete node kinds accepted by the `_type` rule.
+                let syntax = match role {
+                    StructuralRole::ScopeTrait => "rust.impl_trait",
+                    StructuralRole::ScopeType => "rust.impl_type",
+                    _ => canonical_syntax(family, capture.node.kind())
+                        .ok_or_else(|| query_failure("query-node-kind"))?,
+                };
                 candidates.push(QueryCandidate {
                     start: capture.node.start_byte(),
                     end: capture.node.end_byte(),
@@ -400,8 +418,13 @@ mod tests {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.query.capture_names().to_vec();
             names.sort_unstable();
-            assert_eq!(names, EXPECTED_CAPTURES);
-            assert_eq!(pack.roles_by_capture.len(), EXPECTED_CAPTURES.len());
+            let mut expected = EXPECTED_CAPTURES.to_vec();
+            if family == GrammarFamily::Rust {
+                expected.extend(RUST_SCOPE_CAPTURES);
+                expected.sort_unstable();
+            }
+            assert_eq!(names, expected);
+            assert_eq!(pack.roles_by_capture.len(), expected.len());
         }
     }
 }

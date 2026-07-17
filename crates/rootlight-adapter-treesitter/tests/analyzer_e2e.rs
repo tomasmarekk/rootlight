@@ -202,6 +202,8 @@ fn real_analyzer_keeps_rust_methods_bound_to_stable_impl_headers() {
     let inserted = "struct C;\nimpl C { fn other(&self) {} }\nstruct A;\nstruct B;\nimpl A { fn same(&self) {} }\nimpl B { fn same(&self) {} }\n";
     let reordered =
         "struct A;\nstruct B;\nimpl B { fn same(&self) {} }\nimpl A { fn same(&self) {} }\n";
+    let commented = "struct A;\nstruct B;\nimpl /* explanatory comment */ A { fn same(&self) {} }\nimpl B { fn same(&self) {} }\n";
+    let macro_item = "struct A;\nstruct B;\nimpl A {\n  generate_helpers! { unrelated_tokens }\n  fn same(&self) {}\n}\nimpl B { fn same(&self) {} }\n";
     let fixture = Fixture::new(case, before.as_bytes());
     let analyzer = analyzer(&provider, case);
     let initial_request = request(&fixture.snapshot, &fixture.source, case, &limits);
@@ -229,6 +231,8 @@ fn real_analyzer_keeps_rust_methods_bound_to_stable_impl_headers() {
     for (description, source) in [
         ("inserting an unrelated earlier impl", inserted),
         ("reordering sibling impls", reordered),
+        ("adding non-semantic impl-header trivia", commented),
+        ("adding an unsupported earlier impl item", macro_item),
     ] {
         let variant = fixture.rewrite(source.as_bytes());
         let variant_request = request(&variant.snapshot, &variant.source, case, &limits);
@@ -244,6 +248,78 @@ fn real_analyzer_keeps_rust_methods_bound_to_stable_impl_headers() {
             );
         }
     }
+}
+
+#[test]
+fn real_analyzer_distinguishes_trait_and_inherent_impl_owners() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let extensions = ExtensionSupport::default();
+    let case = CASES[0];
+    let source = "trait Foo { fn same(&self); }\nstruct Bar;\nstruct FooforBar;\nimpl Foo for Bar { fn same(&self) {} }\nimpl FooforBar { fn same(&self) {} }\n";
+    let fixture = Fixture::new(case, source.as_bytes());
+    let analyzer = analyzer(&provider, case);
+    let analysis_request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let output = analyze(&analyzer, &analysis_request, &extensions);
+    let symbols = same_symbols_by_qualified_name(output.document());
+
+    assert_eq!(
+        symbols.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["<Bar as Foo>::same", "FooforBar::same"]
+    );
+    assert_ne!(
+        symbols["<Bar as Foo>::same"].0, symbols["FooforBar::same"].0,
+        "trait and inherent impl owners must remain distinct"
+    );
+}
+
+#[test]
+fn real_analyzer_preserves_rust_type_token_boundaries() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let extensions = ExtensionSupport::default();
+    let case = CASES[0];
+    let source = "trait Foo {}\nstruct dynFoo;\nimpl dyn Foo { fn same(&self) {} }\nimpl dynFoo { fn same(&self) {} }\n";
+    let fixture = Fixture::new(case, source.as_bytes());
+    let analyzer = analyzer(&provider, case);
+    let analysis_request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let output = analyze(&analyzer, &analysis_request, &extensions);
+    let symbols = same_symbols_by_qualified_name(output.document());
+
+    assert_eq!(
+        symbols.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["dyn Foo::same", "dynFoo::same"]
+    );
+    assert_ne!(
+        symbols["dyn Foo::same"].0, symbols["dynFoo::same"].0,
+        "distinct valid Rust token streams must not collapse after trivia normalization"
+    );
+}
+
+#[test]
+fn real_analyzer_ignores_comments_inside_generic_impl_targets() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let extensions = ExtensionSupport::default();
+    let case = CASES[0];
+    let before = "struct Generic<T>(T);\nimpl<T> Generic<T> { fn same(&self) {} }\n";
+    let commented =
+        "struct Generic<T>(T);\nimpl<T> Generic</* identity trivia */ T> { fn same(&self) {} }\n";
+    let fixture = Fixture::new(case, before.as_bytes());
+    let analyzer = analyzer(&provider, case);
+    let initial_request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let initial = analyze(&analyzer, &initial_request, &extensions);
+    let initial_symbol = same_symbols_by_qualified_name(initial.document());
+    assert!(initial_symbol.contains_key("Generic<T>::same"));
+
+    let variant = fixture.rewrite(commented.as_bytes());
+    let variant_request = request(&variant.snapshot, &variant.source, case, &limits);
+    let reparsed = analyze(&analyzer, &variant_request, &extensions);
+    assert_eq!(
+        same_symbols_by_qualified_name(reparsed.document()),
+        initial_symbol,
+        "comments inside a captured impl target must not change semantic identity"
+    );
 }
 
 #[test]
