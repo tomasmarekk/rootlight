@@ -2792,10 +2792,20 @@ struct CancellationHandoffTestHook {
 }
 
 #[cfg(test)]
+const CANCELLATION_HANDOFF_TEST_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[cfg(test)]
 impl CancellationHandoffTestHook {
     async fn pause_after_initial_not_found(&self) {
-        self.initial_not_found.wait().await;
-        self.resume.wait().await;
+        tokio::time::timeout(
+            CANCELLATION_HANDOFF_TEST_TIMEOUT,
+            self.initial_not_found.wait(),
+        )
+        .await
+        .expect("cancellation handoff test did not observe the initial NotFound");
+        tokio::time::timeout(CANCELLATION_HANDOFF_TEST_TIMEOUT, self.resume.wait())
+            .await
+            .expect("cancellation handoff test did not resume the dispatch");
     }
 }
 
@@ -5643,11 +5653,13 @@ mod tests {
         let operation = OperationId::from_bytes([44; 16]);
         let owner = ClientInstanceId::new([44; 16]).expect("client identity is valid");
 
-        let submission_dispatch = {
+        // Dropping either set aborts its dispatch if a bounded rendezvous fails.
+        let mut submission_dispatches = tokio::task::JoinSet::new();
+        {
             let service = Arc::clone(&service);
             let actor = actor.handle();
             let commands = commands.clone();
-            tokio::spawn(async move {
+            submission_dispatches.spawn(async move {
                 dispatch_async(
                     service.as_ref(),
                     &actor,
@@ -5674,17 +5686,19 @@ mod tests {
                     PROTOCOL_MINOR,
                 )
                 .await
-            })
-        };
-        let admission = submission_rx
-            .recv()
-            .await
-            .expect("submission reaches the pending lane");
-        let cancellation_dispatch = {
+            });
+        }
+        let admission =
+            tokio::time::timeout(CANCELLATION_HANDOFF_TEST_TIMEOUT, submission_rx.recv())
+                .await
+                .expect("submission dispatch did not reach the pending lane")
+                .expect("submission lane closed before receiving the admission");
+        let mut cancellation_dispatches = tokio::task::JoinSet::new();
+        {
             let service = Arc::clone(&service);
             let actor = actor.handle();
             let commands = commands.clone();
-            tokio::spawn(async move {
+            cancellation_dispatches.spawn(async move {
                 dispatch_async(
                     service.as_ref(),
                     &actor,
@@ -5705,10 +5719,12 @@ mod tests {
                     PROTOCOL_MINOR,
                 )
                 .await
-            })
-        };
+            });
+        }
 
-        initial_not_found.wait().await;
+        tokio::time::timeout(CANCELLATION_HANDOFF_TEST_TIMEOUT, initial_not_found.wait())
+            .await
+            .expect("cancellation dispatch did not reach the initial durable NotFound");
         orchestrator
             .submit(admission)
             .await
@@ -5721,11 +5737,18 @@ mod tests {
                 .by_operation
                 .contains_key(&operation)
         );
-        resume.wait().await;
-
-        let cancellation = cancellation_dispatch
+        tokio::time::timeout(CANCELLATION_HANDOFF_TEST_TIMEOUT, resume.wait())
             .await
-            .expect("cancellation dispatch joins");
+            .expect("cancellation dispatch did not rendezvous after the durable handoff");
+
+        let cancellation = tokio::time::timeout(
+            CANCELLATION_HANDOFF_TEST_TIMEOUT,
+            cancellation_dispatches.join_next(),
+        )
+        .await
+        .expect("cancellation dispatch did not complete after the durable handoff")
+        .expect("cancellation dispatch task is present")
+        .expect("cancellation dispatch task joins");
         let Some(daemon::response_envelope::Response::OperationCancel(cancellation)) =
             cancellation.response
         else {
@@ -5745,10 +5768,15 @@ mod tests {
                 .cancellation_requested
         );
         assert!(matches!(
-            submission_dispatch
-                .await
-                .expect("submission dispatch joins")
-                .response,
+            tokio::time::timeout(
+                CANCELLATION_HANDOFF_TEST_TIMEOUT,
+                submission_dispatches.join_next(),
+            )
+            .await
+            .expect("submission dispatch did not complete after becoming durable")
+            .expect("submission dispatch task is present")
+            .expect("submission dispatch task joins")
+            .response,
             Some(daemon::response_envelope::Response::OperationSubmit(_))
         ));
 
