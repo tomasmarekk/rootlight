@@ -6,13 +6,15 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     ffi::OsStr,
     fmt,
-    fs::{self, File},
     io::{self, Read as _, Write as _},
     path::Path,
 };
+
+#[cfg(test)]
+use std::fs;
 
 use serde::{
     Deserialize, Serialize,
@@ -443,10 +445,49 @@ pub fn verify_bundle_with_limits(
     destination: &Path,
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
+    verify_bundle_with_control(destination, limits, || {}, |_| {}, || {})
+}
+
+fn verify_bundle_with_control<R, F, C>(
+    destination: &Path,
+    limits: BundleLimits,
+    after_root_open: R,
+    before_file_open: F,
+    after_collection: C,
+) -> Result<(), BundleError>
+where
+    R: FnOnce(),
+    F: FnMut(&str),
+    C: FnOnce(),
+{
     let limits = limits.validate()?;
-    let observed = collect_files(destination, limits)?;
-    let checksum_size = *observed
-        .get(CHECKSUMS_FILE)
+    let parent_path = destination_parent(destination)?;
+    let destination_name = destination
+        .file_name()
+        .ok_or(BundleError::InvalidDestination)?;
+    let parent = cap_std::fs::Dir::open_ambient_dir(&parent_path, cap_std::ambient_authority())
+        .map_err(|source| BundleError::Io {
+            operation: "open result parent directory",
+            source,
+        })?;
+    let root = parent
+        .open_dir_nofollow(destination_name)
+        .map_err(|source| BundleError::Io {
+            operation: "open result bundle",
+            source,
+        })?;
+    let root_metadata = root.dir_metadata().map_err(|source| BundleError::Io {
+        operation: "inspect result bundle",
+        source,
+    })?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(BundleError::UnsupportedArtifactType);
+    }
+    after_root_open();
+    let mut observed = collect_files(root, limits, before_file_open)?;
+    after_collection();
+    let checksum_size = observed
+        .size(CHECKSUMS_FILE)
         .ok_or(BundleError::ArtifactSetMismatch)?;
     if checksum_size > limits.max_checksum_bytes {
         return Err(BundleError::LimitExceeded {
@@ -454,17 +495,16 @@ pub fn verify_bundle_with_limits(
         });
     }
     let checksum_bytes = read_bounded(
-        &destination.join(CHECKSUMS_FILE),
+        observed
+            .file_mut(CHECKSUMS_FILE)
+            .ok_or(BundleError::ArtifactSetMismatch)?,
         limits.max_checksum_bytes,
         "read checksum manifest",
     )?;
     let checksum_text =
         std::str::from_utf8(&checksum_bytes).map_err(|_| BundleError::InvalidChecksumManifest)?;
     let expected = parse_checksums(checksum_text, limits)?;
-    let mut observed_paths = observed.keys().cloned().collect::<BTreeSet<_>>();
-    observed_paths.remove(CHECKSUMS_FILE);
-    let expected_paths = expected.keys().cloned().collect::<BTreeSet<_>>();
-    if observed_paths != expected_paths {
+    if !observed.matches_expected_paths(&expected) {
         return Err(BundleError::ArtifactSetMismatch);
     }
     preflight_artifact_classes(&expected, &observed, limits)?;
@@ -473,7 +513,9 @@ pub fn verify_bundle_with_limits(
     let mut logs = BTreeMap::new();
     for (relative, checksum) in expected {
         let bytes = read_bounded(
-            &destination.join(&relative),
+            observed
+                .file_mut(&relative)
+                .ok_or(BundleError::ArtifactSetMismatch)?,
             limits.max_artifact_bytes,
             "read result artifact",
         )?;
@@ -498,7 +540,7 @@ pub fn verify_bundle_with_limits(
 
 fn preflight_artifact_classes(
     expected: &BTreeMap<String, String>,
-    observed: &BTreeMap<String, u64>,
+    observed: &OpenedArtifacts,
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
     let mut profile_count = 0_usize;
@@ -506,8 +548,8 @@ fn preflight_artifact_classes(
     let mut profile_bytes = 0_u64;
     let mut log_bytes = 0_u64;
     for relative in expected.keys() {
-        let size = *observed
-            .get(relative)
+        let size = observed
+            .size(relative)
             .ok_or(BundleError::ArtifactSetMismatch)?;
         if relative.starts_with("profiles/") {
             profile_count = profile_count
@@ -751,6 +793,9 @@ fn install_staged_bundle(
     .map_err(io::Error::from);
 
     #[cfg(windows)]
+    // MoveFileExW has no directory-handle-relative form. The parent remains
+    // open, the source name is cryptographically unguessable, and the
+    // exclusive operation still guarantees that the destination is untouched.
     let result = renamore::rename_exclusive(
         parent_path.join(staging_name),
         parent_path.join(destination_name),
@@ -1227,31 +1272,86 @@ fn valid_checksum_path(relative: &str) -> bool {
     false
 }
 
-fn collect_files(root: &Path, limits: BundleLimits) -> Result<BTreeMap<String, u64>, BundleError> {
-    let root_metadata = fs::symlink_metadata(root).map_err(|source| BundleError::Io {
-        operation: "inspect result bundle",
-        source,
-    })?;
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        return Err(BundleError::UnsupportedArtifactType);
+struct OpenedArtifact {
+    relative: String,
+    size: u64,
+    file: cap_std::fs::File,
+}
+
+struct OpenedArtifacts {
+    entries: Vec<OpenedArtifact>,
+}
+
+impl OpenedArtifacts {
+    fn size(&self, relative: &str) -> Option<u64> {
+        self.entries
+            .binary_search_by_key(&relative, |entry| entry.relative.as_str())
+            .ok()
+            .map(|index| self.entries[index].size)
     }
-    let mut pending = vec![(root.to_path_buf(), 0_usize)];
-    let mut paths = BTreeMap::new();
+
+    fn file_mut(&mut self, relative: &str) -> Option<&mut cap_std::fs::File> {
+        let index = self
+            .entries
+            .binary_search_by_key(&relative, |entry| entry.relative.as_str())
+            .ok()?;
+        Some(&mut self.entries[index].file)
+    }
+
+    fn matches_expected_paths(&self, expected: &BTreeMap<String, String>) -> bool {
+        self.entries
+            .iter()
+            .filter(|entry| entry.relative != CHECKSUMS_FILE)
+            .map(|entry| entry.relative.as_str())
+            .eq(expected.keys().map(String::as_str))
+    }
+}
+
+struct PendingDirectory {
+    directory: cap_std::fs::Dir,
+    prefix: String,
+    depth: usize,
+}
+
+fn collect_files<F>(
+    root: cap_std::fs::Dir,
+    limits: BundleLimits,
+    mut before_file_open: F,
+) -> Result<OpenedArtifacts, BundleError>
+where
+    F: FnMut(&str),
+{
+    let mut pending = Vec::new();
+    pending
+        .try_reserve_exact(limits.max_depth.saturating_add(1))
+        .map_err(|_| BundleError::AllocationFailed)?;
+    pending.push(PendingDirectory {
+        directory: root,
+        prefix: String::new(),
+        depth: 0,
+    });
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(limits.max_file_count)
+        .map_err(|_| BundleError::AllocationFailed)?;
     let mut visited_entries = 0_usize;
     let mut visited_files = 0_usize;
     let mut total_bytes = 0_u64;
     let mut unexpected_directory = false;
-    while let Some((current, depth)) = pending.pop() {
-        if depth > limits.max_depth {
+    while let Some(current) = pending.pop() {
+        if current.depth > limits.max_depth {
             return Err(BundleError::LimitExceeded {
                 resource: "directory_depth",
             });
         }
-        let entries = fs::read_dir(current).map_err(|source| BundleError::Io {
-            operation: "enumerate result bundle",
-            source,
-        })?;
-        for entry in entries {
+        let directory_entries = current
+            .directory
+            .entries()
+            .map_err(|source| BundleError::Io {
+                operation: "enumerate result bundle",
+                source,
+            })?;
+        for entry in directory_entries {
             let entry = entry.map_err(|source| BundleError::Io {
                 operation: "read result directory entry",
                 source,
@@ -1266,34 +1366,79 @@ fn collect_files(root: &Path, limits: BundleLimits) -> Result<BTreeMap<String, u
                 limits.max_directory_entries,
                 "directory_entry_count",
             )?;
-            let metadata =
-                fs::symlink_metadata(entry.path()).map_err(|source| BundleError::Io {
-                    operation: "inspect result artifact",
-                    source,
-                })?;
-            let file_type = metadata.file_type();
+            let name = entry.file_name();
+            let name = name.to_str().ok_or(BundleError::InvalidChecksumManifest)?;
+            let relative = join_artifact_path(&current.prefix, name, limits.max_string_bytes)?;
+            let file_type = entry.file_type().map_err(|source| BundleError::Io {
+                operation: "inspect result artifact",
+                source,
+            })?;
             if file_type.is_symlink() {
                 return Err(BundleError::UnsupportedArtifactType);
             }
             if file_type.is_dir() {
-                let next_depth = depth.checked_add(1).ok_or(BundleError::LimitExceeded {
-                    resource: "directory_depth",
-                })?;
+                let next_depth =
+                    current
+                        .depth
+                        .checked_add(1)
+                        .ok_or(BundleError::LimitExceeded {
+                            resource: "directory_depth",
+                        })?;
                 if next_depth > limits.max_depth {
                     return Err(BundleError::LimitExceeded {
                         resource: "directory_depth",
                     });
                 }
-                if depth != 0 || !matches!(entry.file_name().to_str(), Some("profiles" | "logs")) {
+                if current.depth != 0 || !matches!(name, "profiles" | "logs") {
                     unexpected_directory = true;
                 }
-                pending.push((entry.path(), next_depth));
-            } else if file_type.is_file() {
-                if metadata.len() > limits.max_artifact_bytes {
-                    return Err(BundleError::LimitExceeded {
-                        resource: "artifact_bytes",
-                    });
+                let directory = current
+                    .directory
+                    .open_dir_nofollow(name)
+                    .map_err(|source| BundleError::Io {
+                        operation: "open result directory",
+                        source,
+                    })?;
+                let metadata = directory.dir_metadata().map_err(|source| BundleError::Io {
+                    operation: "inspect result directory",
+                    source,
+                })?;
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(BundleError::UnsupportedArtifactType);
                 }
+                if pending.len() == pending.capacity() {
+                    pending
+                        .try_reserve(1)
+                        .map_err(|_| BundleError::AllocationFailed)?;
+                }
+                pending.push(PendingDirectory {
+                    directory,
+                    prefix: relative,
+                    depth: next_depth,
+                });
+            } else if file_type.is_file() {
+                before_file_open(&relative);
+                let mut options = cap_std::fs::OpenOptions::new();
+                options.read(true);
+                cap_fs_ext::OpenOptionsFollowExt::follow(
+                    &mut options,
+                    cap_fs_ext::FollowSymlinks::No,
+                );
+                let file = current
+                    .directory
+                    .open_with(name, &options)
+                    .map_err(|source| BundleError::Io {
+                        operation: "open result artifact",
+                        source,
+                    })?;
+                let metadata = file.metadata().map_err(|source| BundleError::Io {
+                    operation: "inspect result artifact",
+                    source,
+                })?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err(BundleError::UnsupportedArtifactType);
+                }
+                check_artifact_size(metadata.len(), limits.max_artifact_bytes)?;
                 visited_files = visited_files
                     .checked_add(1)
                     .ok_or(BundleError::LimitExceeded {
@@ -1311,18 +1456,11 @@ fn collect_files(root: &Path, limits: BundleLimits) -> Result<BTreeMap<String, u
                         resource: "total_bytes",
                     });
                 }
-                let entry_path = entry.path();
-                let relative = entry_path
-                    .strip_prefix(root)
-                    .map_err(|_| BundleError::InvalidDestination)?
-                    .to_str()
-                    .ok_or(BundleError::InvalidChecksumManifest)?
-                    .replace('\\', "/");
-                if relative.len() > limits.max_string_bytes
-                    || paths.insert(relative, metadata.len()).is_some()
-                {
-                    return Err(BundleError::InvalidChecksumManifest);
-                }
+                entries.push(OpenedArtifact {
+                    relative,
+                    size: metadata.len(),
+                    file,
+                });
             } else {
                 return Err(BundleError::UnsupportedArtifactType);
             }
@@ -1331,25 +1469,67 @@ fn collect_files(root: &Path, limits: BundleLimits) -> Result<BTreeMap<String, u
     if unexpected_directory {
         return Err(BundleError::ArtifactSetMismatch);
     }
-    Ok(paths)
+    entries.sort_unstable_by(|left, right| left.relative.cmp(&right.relative));
+    if entries
+        .windows(2)
+        .any(|pair| pair[0].relative == pair[1].relative)
+    {
+        return Err(BundleError::InvalidChecksumManifest);
+    }
+    Ok(OpenedArtifacts { entries })
 }
 
-fn read_bounded(path: &Path, limit: u64, operation: &'static str) -> Result<Vec<u8>, BundleError> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|source| BundleError::Io { operation, source })?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(BundleError::UnsupportedArtifactType);
+fn join_artifact_path(prefix: &str, name: &str, limit: usize) -> Result<String, BundleError> {
+    let separator = usize::from(!prefix.is_empty());
+    let length = prefix
+        .len()
+        .checked_add(separator)
+        .and_then(|length| length.checked_add(name.len()))
+        .filter(|length| *length <= limit)
+        .ok_or(BundleError::InvalidChecksumManifest)?;
+    let mut relative = String::new();
+    relative
+        .try_reserve_exact(length)
+        .map_err(|_| BundleError::AllocationFailed)?;
+    if !prefix.is_empty() {
+        relative.push_str(prefix);
+        relative.push('/');
     }
-    if metadata.len() > limit {
+    relative.push_str(name);
+    Ok(relative)
+}
+
+fn check_artifact_size(size: u64, limit: u64) -> Result<(), BundleError> {
+    if size > limit {
         return Err(BundleError::LimitExceeded {
             resource: "artifact_bytes",
         });
     }
-    let file = File::open(path).map_err(|source| BundleError::Io { operation, source })?;
+    Ok(())
+}
+
+fn read_bounded(
+    file: &mut cap_std::fs::File,
+    limit: u64,
+    operation: &'static str,
+) -> Result<Vec<u8>, BundleError> {
+    let metadata = file
+        .metadata()
+        .map_err(|source| BundleError::Io { operation, source })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(BundleError::UnsupportedArtifactType);
+    }
+    check_artifact_size(metadata.len(), limit)?;
+    let capacity = usize::try_from(metadata.len()).map_err(|_| BundleError::LimitExceeded {
+        resource: "artifact_bytes",
+    })?;
     let read_limit = limit.checked_add(1).ok_or(BundleError::LimitExceeded {
         resource: "artifact_bytes",
     })?;
     let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| BundleError::AllocationFailed)?;
     file.take(read_limit)
         .read_to_end(&mut bytes)
         .map_err(|source| BundleError::Io { operation, source })?;
@@ -1357,6 +1537,9 @@ fn read_bounded(path: &Path, limit: u64, operation: &'static str) -> Result<Vec<
         return Err(BundleError::LimitExceeded {
             resource: "artifact_bytes",
         });
+    }
+    if u64::try_from(bytes.len()).ok() != Some(metadata.len()) {
+        return Err(BundleError::ChecksumMismatch);
     }
     Ok(bytes)
 }
@@ -1480,6 +1663,7 @@ pub enum BundleError {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::Cell,
         sync::{Arc, Barrier, Mutex},
         thread,
     };
@@ -1917,6 +2101,114 @@ mod tests {
 
         assert!(matches!(error, BundleError::ChecksumMismatch));
         assert_eq!(error.to_string(), "result artifact checksum mismatch");
+    }
+
+    #[test]
+    fn verifier_keeps_using_the_opened_root_after_a_path_swap() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let displaced = temporary.path().join("displaced");
+        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        let swapped = Cell::new(false);
+        let blocked = Cell::new(false);
+
+        verify_bundle_with_control(
+            &destination,
+            BundleLimits::default(),
+            || match fs::rename(&destination, &displaced) {
+                Ok(()) => {
+                    fs::create_dir(&destination).expect("replacement root is created");
+                    swapped.set(true);
+                }
+                #[cfg(windows)]
+                Err(_) => blocked.set(true),
+                #[cfg(not(windows))]
+                Err(error) => panic!("opened root can be renamed: {error}"),
+            },
+            |_| {},
+            || {},
+        )
+        .expect("verification stays bound to the original root handle");
+
+        assert!(swapped.get() || blocked.get());
+        if swapped.get() {
+            assert_eq!(
+                fs::read_dir(&destination)
+                    .expect("replacement root is readable")
+                    .count(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_keeps_using_opened_files_after_path_replacement() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let summary = destination.join(SUMMARY_FILE);
+        let displaced = destination.join("summary.displaced");
+        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        let swapped = Cell::new(false);
+        let blocked = Cell::new(false);
+
+        verify_bundle_with_control(
+            &destination,
+            BundleLimits::default(),
+            || {},
+            |_| {},
+            || match fs::rename(&summary, &displaced) {
+                Ok(()) => {
+                    fs::write(&summary, b"replacement").expect("replacement summary is written");
+                    swapped.set(true);
+                }
+                #[cfg(windows)]
+                Err(_) => blocked.set(true),
+                #[cfg(not(windows))]
+                Err(error) => panic!("opened summary can be renamed: {error}"),
+            },
+        )
+        .expect("verification stays bound to opened artifact handles");
+
+        assert!(swapped.get() || blocked.get());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verifier_never_follows_a_file_swapped_to_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let outside = temporary.path().join("outside");
+        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        fs::write(&outside, b"outside").expect("outside content is written");
+        let swapped = Cell::new(false);
+
+        let error = verify_bundle_with_control(
+            &destination,
+            BundleLimits::default(),
+            || {},
+            |relative| {
+                if relative == SUMMARY_FILE {
+                    fs::remove_file(destination.join(SUMMARY_FILE))
+                        .expect("summary is removed before open");
+                    symlink(&outside, destination.join(SUMMARY_FILE))
+                        .expect("summary symlink is installed");
+                    swapped.set(true);
+                }
+            },
+            || {},
+        )
+        .expect_err("a swapped symlink is rejected");
+
+        assert!(swapped.get());
+        assert!(matches!(
+            error,
+            BundleError::Io {
+                operation: "open result artifact",
+                ..
+            } | BundleError::UnsupportedArtifactType
+        ));
     }
 
     #[test]
