@@ -85,9 +85,6 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), EvidenceError> {
     let arguments = Arguments::parse(env::args_os())?;
-    if arguments.output.exists() {
-        return Err(rootlight_bench::BundleError::DestinationExists.into());
-    }
     let manifest = embedded_manifest()?;
     let command = benchmark_command();
     let fixture_directory = create_fixture_directory(&arguments.output)?;

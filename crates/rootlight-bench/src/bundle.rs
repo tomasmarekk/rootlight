@@ -6,9 +6,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{self, Read as _, Write as _},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use serde::Serialize;
@@ -339,11 +340,12 @@ pub fn publish_bundle(bundle: &ResultBundle, destination: &Path) -> Result<(), B
 /// Publishes one immutable result bundle with checked caller-selected limits.
 ///
 /// All artifacts are serialized and byte-accounted before a staging directory
-/// is created. The destination parent must already exist. On Unix, staging and
-/// parent directories are synced around the atomic rename. Rust's standard
-/// library does not expose portable Windows directory-handle syncing, so
-/// Windows retains synced files plus same-filesystem rename as an explicit
-/// best-effort crash-durability fallback.
+/// is created. The destination parent must already exist. Publication acquires
+/// an atomic sibling reservation before the final same-filesystem rename, so
+/// concurrent publishers cannot replace one another. On Unix, staging and
+/// parent directories are synced around the rename. Rust's standard library
+/// does not expose portable Windows directory-handle syncing, so Windows
+/// retains synced files plus rename as a best-effort crash-durability fallback.
 ///
 /// # Errors
 ///
@@ -425,16 +427,29 @@ fn publish_bundle_with_fault(
     limits: BundleLimits,
     fail_after_writes: Option<usize>,
 ) -> Result<(), BundleError> {
+    publish_bundle_with_control(bundle, destination, limits, fail_after_writes, || {})
+}
+
+fn publish_bundle_with_control<F>(
+    bundle: &ResultBundle,
+    destination: &Path,
+    limits: BundleLimits,
+    fail_after_writes: Option<usize>,
+    before_reservation: F,
+) -> Result<(), BundleError>
+where
+    F: FnOnce(),
+{
     let limits = limits.validate()?;
-    if destination.exists() {
-        return Err(BundleError::DestinationExists);
-    }
     let artifacts = build_artifacts(bundle, limits)?;
     let parent = destination_parent(destination)?;
     let file_name = destination
         .file_name()
         .ok_or(BundleError::InvalidDestination)?;
     let final_destination = parent.join(file_name);
+    if destination_is_present(&final_destination)? {
+        return Err(BundleError::DestinationExists);
+    }
     let staging = tempfile::Builder::new()
         .prefix(".rootlight-result-partial-")
         .tempdir_in(&parent)
@@ -451,15 +466,92 @@ fn publish_bundle_with_fault(
         close_staging(staging)?;
         return Err(error);
     }
+    before_reservation();
+    let reservation = match PublicationReservation::acquire(&parent, file_name) {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            close_staging(staging)?;
+            return Err(error);
+        }
+    };
+    if destination_is_present(&final_destination)? {
+        close_staging(staging)?;
+        return Err(BundleError::DestinationExists);
+    }
     if let Err(source) = fs::rename(staging.path(), &final_destination) {
         close_staging(staging)?;
+        if destination_is_present(&final_destination)? {
+            return Err(BundleError::DestinationExists);
+        }
         return Err(BundleError::Io {
             operation: "publish result bundle",
             source,
         });
     }
     drop(staging);
+    reservation.release()?;
     sync_directory(&parent, "sync result parent directory")
+}
+
+fn destination_is_present(path: &Path) -> Result<bool, BundleError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(BundleError::Io {
+            operation: "inspect result destination",
+            source,
+        }),
+    }
+}
+
+#[derive(Debug)]
+struct PublicationReservation {
+    path: PathBuf,
+    file: Option<File>,
+}
+
+impl PublicationReservation {
+    fn acquire(parent: &Path, destination_name: &OsStr) -> Result<Self, BundleError> {
+        let mut reservation_name = OsString::from(".");
+        reservation_name.push(destination_name);
+        reservation_name.push(".rootlight-publish-reservation");
+        let path = parent.join(reservation_name);
+        let file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => file,
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(BundleError::DestinationExists);
+            }
+            Err(source) => {
+                return Err(BundleError::Io {
+                    operation: "reserve result destination",
+                    source,
+                });
+            }
+        };
+        Ok(Self {
+            path,
+            file: Some(file),
+        })
+    }
+
+    fn release(mut self) -> Result<(), BundleError> {
+        self.file.take();
+        fs::remove_file(&self.path).map_err(|source| BundleError::Io {
+            operation: "release result destination",
+            source,
+        })?;
+        self.path = PathBuf::new();
+        Ok(())
+    }
+}
+
+impl Drop for PublicationReservation {
+    fn drop(&mut self) {
+        self.file.take();
+        if !self.path.as_os_str().is_empty() {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 fn close_staging(staging: tempfile::TempDir) -> Result<(), BundleError> {
@@ -1090,7 +1182,10 @@ pub enum BundleError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{
+        sync::{Arc, Barrier, Mutex},
+        thread,
+    };
 
     use super::*;
     use crate::{
@@ -1278,6 +1373,81 @@ mod tests {
         let error = publish_bundle(&fixture(), &destination).expect_err("overwrite is rejected");
 
         assert!(matches!(error, BundleError::DestinationExists));
+    }
+
+    #[test]
+    fn concurrent_publishers_have_one_winner_and_leave_no_reservations() {
+        const PUBLISHER_COUNT: usize = 8;
+
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let barrier = Arc::new(Barrier::new(PUBLISHER_COUNT));
+        let mut publishers = Vec::new();
+        for index in 0..PUBLISHER_COUNT {
+            let mut bundle = fixture();
+            bundle.environment.operating_system =
+                EvidenceValue::observed(format!("publisher-{index}"));
+            let destination = destination.clone();
+            let barrier = Arc::clone(&barrier);
+            publishers.push(thread::spawn(move || {
+                publish_bundle_with_control(
+                    &bundle,
+                    &destination,
+                    BundleLimits::default(),
+                    None,
+                    || {
+                        barrier.wait();
+                    },
+                )
+            }));
+        }
+
+        let mut successes = 0;
+        for publisher in publishers {
+            match publisher.join().expect("publisher thread does not panic") {
+                Ok(()) => successes += 1,
+                Err(BundleError::DestinationExists) => {}
+                Err(error) => panic!("unexpected publication error: {error:?}"),
+            }
+        }
+
+        assert_eq!(successes, 1);
+        verify_bundle(&destination).expect("winning bundle verifies");
+        let remaining = fs::read_dir(temporary.path())
+            .expect("temporary root is readable")
+            .count();
+        assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn destination_created_after_preflight_is_not_replaced() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+
+        let error = publish_bundle_with_control(
+            &fixture(),
+            &destination,
+            BundleLimits::default(),
+            None,
+            || {
+                fs::create_dir(&destination).expect("racing destination is created");
+            },
+        )
+        .expect_err("racing destination is rejected");
+
+        assert!(matches!(error, BundleError::DestinationExists));
+        assert_eq!(
+            fs::read_dir(&destination)
+                .expect("racing destination remains a directory")
+                .count(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(temporary.path())
+                .expect("temporary root is readable")
+                .count(),
+            1
+        );
     }
 
     #[test]
