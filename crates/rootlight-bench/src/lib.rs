@@ -6,9 +6,14 @@
 #![forbid(unsafe_code)]
 
 mod bundle;
+mod decode;
 mod model;
 
-pub use bundle::{BundleError, ResultBundle, publish_bundle, verify_bundle};
+pub use bundle::{
+    BundleError, BundleLimits, ResultBundle, SourceFreeLog, publish_bundle,
+    publish_bundle_with_limits, verify_bundle, verify_bundle_with_limits,
+};
+pub use decode::{DecodeError, decode_benchmark_command, decode_dataset_manifest};
 pub use model::{
     AgentTrajectory, Availability, BenchmarkCommand, BuildProvenance, CoverageEvidence,
     DatasetEntry, DatasetManifest, EnvironmentEvidence, EvidenceValue, MetricDistribution,
