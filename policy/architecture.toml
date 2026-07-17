@@ -3,6 +3,7 @@ workspace_members = [
   "rootlight",
   "rootlight-adapter-sdk",
   "rootlight-adapter-treesitter",
+  "rootlight-bench",
   "rootlight-cancel",
   "rootlight-client",
   "rootlight-config",
@@ -21,7 +22,7 @@ workspace_members = [
   "rootlight-vfs",
   "xtask",
 ]
-dev_only_members = ["xtask"]
+dev_only_members = ["rootlight-bench", "xtask"]
 
 [[crates]]
 name = "rootlight"
@@ -51,6 +52,18 @@ allow_build_script = false
 name = "rootlight-adapter-treesitter"
 allowed_internal_dependencies = [
   "rootlight-adapter-sdk",
+  "rootlight-cancel",
+  "rootlight-ids",
+  "rootlight-ir",
+  "rootlight-vfs",
+]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-bench"
+allowed_internal_dependencies = [
+  "rootlight-adapter-sdk",
+  "rootlight-adapter-treesitter",
   "rootlight-cancel",
   "rootlight-ids",
   "rootlight-ir",

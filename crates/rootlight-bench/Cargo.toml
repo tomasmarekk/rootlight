@@ -1,0 +1,25 @@
+[package]
+name = "rootlight-bench"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
+rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
+rootlight-cancel = { path = "../rootlight-cancel" }
+rootlight-ids = { path = "../rootlight-ids" }
+rootlight-ir = { path = "../rootlight-ir" }
+rootlight-vfs = { path = "../rootlight-vfs" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

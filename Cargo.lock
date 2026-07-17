@@ -1466,6 +1466,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootlight-bench"
+version = "0.1.0"
+dependencies = [
+ "rootlight-adapter-sdk",
+ "rootlight-adapter-treesitter",
+ "rootlight-cancel",
+ "rootlight-ids",
+ "rootlight-ir",
+ "rootlight-vfs",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "rootlight-cancel"
 version = "0.1.0"
 dependencies = [
