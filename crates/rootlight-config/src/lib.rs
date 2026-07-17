@@ -11,8 +11,19 @@ use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, SafeLabel};
 use rootlight_ids::{ContentHash, content_hash};
 use serde::{Deserialize, Serialize};
 
-/// The initial production configuration contract version.
-pub const CONFIG_VERSION: ContractVersion = ContractVersion::new(1, 0);
+/// The frozen initial production configuration contract version.
+pub const CONFIG_VERSION_1_0: ContractVersion = ContractVersion::new(1, 0);
+/// The current production configuration contract version.
+pub const CONFIG_VERSION: ContractVersion = ContractVersion::new(1, 1);
+/// Default source bytes available to one source-bearing response.
+pub const DEFAULT_MAX_SOURCE_RESPONSE_BYTES: u64 = 64 * 1024;
+/// Hard source-byte ceiling for one source-bearing response in configuration 1.1.
+pub const MAX_SOURCE_RESPONSE_BYTES: u64 = 512 * 1024;
+/// Default bytes accepted from one source file for discovery and analysis.
+pub const DEFAULT_MAX_SOURCE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// Hard bytes accepted from one source file for discovery and analysis.
+pub const MAX_SOURCE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const CONFIG_V1_0_MAX_SOURCE_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 /// Maximum number of explicit configuration layers in one resolution.
 pub const MAX_CONFIG_LAYERS: usize = 16;
 /// Maximum UTF-8 bytes accepted for one configuration layer.
@@ -197,13 +208,17 @@ impl Default for SecurityConfig {
     }
 }
 
-/// Bounded resource configuration for contract-level operations.
+/// Bounded response resource configuration for contract-level operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ResourceConfig {
-    /// Maximum source bytes one contract operation may request.
-    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 16_777_216)))]
+    /// Maximum source bytes one source-bearing response may return.
+    ///
+    /// Configuration 1.0 snapshots can retain their frozen 16 MiB legacy
+    /// ceiling. Configuration 1.1 snapshots are bounded by
+    /// [`MAX_SOURCE_RESPONSE_BYTES`].
+    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 524_288)))]
     pub max_source_bytes: u64,
     /// Maximum result records one contract operation may return.
     #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 10_000)))]
@@ -213,7 +228,7 @@ pub struct ResourceConfig {
 impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
-            max_source_bytes: 65_536,
+            max_source_bytes: DEFAULT_MAX_SOURCE_RESPONSE_BYTES,
             max_results: 50,
         }
     }
@@ -226,12 +241,16 @@ impl Default for ResourceConfig {
 pub struct AnalysisConfig {
     /// Default requested analysis tier.
     pub default_tier: AnalysisTier,
+    /// Maximum bytes accepted from one source file for discovery and analysis.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 67_108_864)))]
+    pub max_source_file_bytes: u64,
 }
 
 impl Default for AnalysisConfig {
     fn default() -> Self {
         Self {
             default_tier: AnalysisTier::Structural,
+            max_source_file_bytes: DEFAULT_MAX_SOURCE_FILE_BYTES,
         }
     }
 }
@@ -318,9 +337,7 @@ impl ConfigSnapshot {
         let mut ordered = layers.to_vec();
         ordered.sort_by_key(|layer| layer.source);
         for layer in ordered {
-            let parsed: WireConfig =
-                toml::from_str(layer.contents).map_err(|source| ConfigError::Parse { source })?;
-            parsed.version.require_supported()?;
+            let parsed = decode_wire_config(layer.contents)?;
             state.apply(layer.source, parsed)?;
         }
         state.finish()
@@ -400,6 +417,8 @@ struct EffectiveConfig {
     extensions: BTreeMap<String, ExtensionSnapshot>,
     provenance: BTreeMap<String, ConfigSource>,
     hard_denial_provenance: BTreeMap<String, ConfigSource>,
+    saw_explicit_layer: bool,
+    uses_current_contract: bool,
 }
 
 impl EffectiveConfig {
@@ -412,6 +431,7 @@ impl EffectiveConfig {
             "resources.max_source_bytes",
             "resources.max_results",
             "analysis.default_tier",
+            "analysis.max_source_file_bytes",
         ] {
             provenance.insert(field.to_owned(), ConfigSource::Defaults);
         }
@@ -422,10 +442,14 @@ impl EffectiveConfig {
             extensions: BTreeMap::new(),
             provenance,
             hard_denial_provenance: BTreeMap::new(),
+            saw_explicit_layer: false,
+            uses_current_contract: false,
         }
     }
 
-    fn apply(&mut self, source: ConfigSource, wire: WireConfig) -> Result<(), ConfigError> {
+    fn apply(&mut self, source: ConfigSource, wire: DecodedConfig) -> Result<(), ConfigError> {
+        self.saw_explicit_layer = true;
+        self.uses_current_contract |= wire.uses_current_contract;
         if let Some(security) = wire.security {
             if let Some(network) = security.network {
                 self.apply_network_policy(source, network)?;
@@ -441,7 +465,12 @@ impl EffectiveConfig {
         }
         if let Some(resources) = wire.resources {
             if let Some(max_source_bytes) = resources.max_source_bytes {
-                if !(1..=16 * 1024 * 1024).contains(&max_source_bytes) {
+                let maximum = if wire.uses_current_contract {
+                    MAX_SOURCE_RESPONSE_BYTES
+                } else {
+                    CONFIG_V1_0_MAX_SOURCE_RESPONSE_BYTES
+                };
+                if !(1..=maximum).contains(&max_source_bytes) {
                     return Err(ConfigError::ResourceLimitOutOfRange {
                         field: "max_source_bytes",
                     });
@@ -461,12 +490,22 @@ impl EffectiveConfig {
                     .insert("resources.max_results".to_owned(), source);
             }
         }
-        if let Some(analysis) = wire.analysis
-            && let Some(default_tier) = analysis.default_tier
-        {
-            self.analysis.default_tier = default_tier;
-            self.provenance
-                .insert("analysis.default_tier".to_owned(), source);
+        if let Some(analysis) = wire.analysis {
+            if let Some(default_tier) = analysis.default_tier {
+                self.analysis.default_tier = default_tier;
+                self.provenance
+                    .insert("analysis.default_tier".to_owned(), source);
+            }
+            if let Some(max_source_file_bytes) = analysis.max_source_file_bytes {
+                if !(1..=MAX_SOURCE_FILE_BYTES).contains(&max_source_file_bytes) {
+                    return Err(ConfigError::ResourceLimitOutOfRange {
+                        field: "max_source_file_bytes",
+                    });
+                }
+                self.analysis.max_source_file_bytes = max_source_file_bytes;
+                self.provenance
+                    .insert("analysis.max_source_file_bytes".to_owned(), source);
+            }
         }
         for (namespace, extension) in wire.extensions {
             validate_namespace(&namespace)?;
@@ -537,19 +576,45 @@ impl EffectiveConfig {
         Ok(())
     }
 
-    fn finish(self) -> Result<ConfigSnapshot, ConfigError> {
-        let canonical_wire = CanonicalConfig {
-            version: CONFIG_VERSION,
-            security: self.security,
-            resources: self.resources,
-            analysis: self.analysis,
-            extensions: self.extensions.clone(),
+    fn finish(mut self) -> Result<ConfigSnapshot, ConfigError> {
+        let version = if !self.saw_explicit_layer || self.uses_current_contract {
+            CONFIG_VERSION
+        } else {
+            CONFIG_VERSION_1_0
         };
-        let canonical = serde_json::to_vec(&canonical_wire)
-            .map_err(|source| ConfigError::Canonicalize { source })?;
+        if version == CONFIG_VERSION && self.resources.max_source_bytes > MAX_SOURCE_RESPONSE_BYTES
+        {
+            return Err(ConfigError::ResourceLimitOutOfRange {
+                field: "max_source_bytes",
+            });
+        }
+        let canonical = if version == CONFIG_VERSION_1_0 {
+            self.provenance.remove("analysis.max_source_file_bytes");
+            serde_json::to_vec(&CanonicalConfigV1_0 {
+                version,
+                security: self.security,
+                resources: CanonicalResourceConfigV1_0 {
+                    max_source_bytes: self.resources.max_source_bytes,
+                    max_results: self.resources.max_results,
+                },
+                analysis: CanonicalAnalysisConfigV1_0 {
+                    default_tier: self.analysis.default_tier,
+                },
+                extensions: self.extensions.clone(),
+            })
+        } else {
+            serde_json::to_vec(&CanonicalConfig {
+                version,
+                security: self.security,
+                resources: self.resources,
+                analysis: self.analysis,
+                extensions: self.extensions.clone(),
+            })
+        }
+        .map_err(|source| ConfigError::Canonicalize { source })?;
         let hash = content_hash(&canonical);
         Ok(ConfigSnapshot {
-            version: CONFIG_VERSION,
+            version,
             security: self.security,
             resources: self.resources,
             analysis: self.analysis,
@@ -711,7 +776,7 @@ impl schemars::JsonSchema for ExtensionMapSchema {
     }
 }
 
-/// JSON Schema marker for the strict versioned configuration document.
+/// JSON Schema marker for the frozen strict configuration 1.0 document.
 ///
 /// Layer source and semantic validation are applied only by
 /// [`ConfigSnapshot::resolve`]; this marker intentionally has no Serde decoder.
@@ -728,6 +793,63 @@ impl schemars::JsonSchema for ConfigDocumentSchema {
         let mut schema = generator.subschema_for::<WireConfig>();
         schema.insert("title".to_owned(), "Rootlight configuration 1.0".into());
         schema
+    }
+}
+
+/// JSON Schema marker for the strict configuration 1.1 document.
+///
+/// This schema separates bounded source-bearing responses from source-file
+/// bytes accepted by discovery and analysis.
+#[derive(Debug)]
+pub struct ConfigDocumentSchemaV1_1;
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for ConfigDocumentSchemaV1_1 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ConfigDocumentSchemaV1_1".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = generator.subschema_for::<WireConfigV1_1>();
+        schema.insert("title".to_owned(), "Rootlight configuration 1.1".into());
+        schema
+    }
+}
+
+fn decode_wire_config(contents: &str) -> Result<DecodedConfig, ConfigError> {
+    let probe: WireVersionProbe =
+        toml::from_str(contents).map_err(|source| ConfigError::Parse { source })?;
+    probe.version.require_supported()?;
+    if probe.version.minor() == 0 {
+        toml::from_str::<WireConfig>(contents)
+            .map(DecodedConfig::from)
+            .map_err(|source| ConfigError::Parse { source })
+    } else {
+        toml::from_str::<WireConfigV1_1>(contents)
+            .map(DecodedConfig::from)
+            .map_err(|source| ConfigError::Parse { source })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WireVersionProbe {
+    version: ContractVersion,
+}
+
+#[cfg(feature = "schema")]
+struct ConfigVersionV1_1Schema;
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for ConfigVersionV1_1Schema {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ConfigVersionV1_1".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": "^1\\.([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$",
+        })
     }
 }
 
@@ -776,6 +898,113 @@ struct PartialAnalysisConfig {
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+struct WireConfigV1_1 {
+    #[cfg_attr(feature = "schema", schemars(with = "ConfigVersionV1_1Schema"))]
+    version: ContractVersion,
+    #[serde(default)]
+    security: Option<PartialSecurityConfig>,
+    #[serde(default)]
+    resources: Option<PartialResourceConfigV1_1>,
+    #[serde(default)]
+    analysis: Option<PartialAnalysisConfigV1_1>,
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "ExtensionMapSchema"))]
+    extensions: BTreeMap<String, WireExtension>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct PartialResourceConfigV1_1 {
+    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 524_288)))]
+    max_source_bytes: Option<u64>,
+    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 10_000)))]
+    max_results: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct PartialAnalysisConfigV1_1 {
+    default_tier: Option<AnalysisTier>,
+    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 67_108_864)))]
+    max_source_file_bytes: Option<u64>,
+}
+
+#[derive(Debug)]
+struct DecodedConfig {
+    uses_current_contract: bool,
+    security: Option<PartialSecurityConfig>,
+    resources: Option<DecodedResourceConfig>,
+    analysis: Option<DecodedAnalysisConfig>,
+    extensions: BTreeMap<String, WireExtension>,
+}
+
+#[derive(Debug)]
+struct DecodedResourceConfig {
+    max_source_bytes: Option<u64>,
+    max_results: Option<u32>,
+}
+
+#[derive(Debug)]
+struct DecodedAnalysisConfig {
+    default_tier: Option<AnalysisTier>,
+    max_source_file_bytes: Option<u64>,
+}
+
+impl From<WireConfig> for DecodedConfig {
+    fn from(wire: WireConfig) -> Self {
+        let WireConfig {
+            version,
+            security,
+            resources,
+            analysis,
+            extensions,
+        } = wire;
+        Self {
+            uses_current_contract: version.minor() != 0,
+            security,
+            resources: resources.map(|resources| DecodedResourceConfig {
+                max_source_bytes: resources.max_source_bytes,
+                max_results: resources.max_results,
+            }),
+            analysis: analysis.map(|analysis| DecodedAnalysisConfig {
+                default_tier: analysis.default_tier,
+                max_source_file_bytes: None,
+            }),
+            extensions,
+        }
+    }
+}
+
+impl From<WireConfigV1_1> for DecodedConfig {
+    fn from(wire: WireConfigV1_1) -> Self {
+        let WireConfigV1_1 {
+            version,
+            security,
+            resources,
+            analysis,
+            extensions,
+        } = wire;
+        Self {
+            uses_current_contract: version.minor() != 0,
+            security,
+            resources: resources.map(|resources| DecodedResourceConfig {
+                max_source_bytes: resources.max_source_bytes,
+                max_results: resources.max_results,
+            }),
+            analysis: analysis.map(|analysis| DecodedAnalysisConfig {
+                default_tier: analysis.default_tier,
+                max_source_file_bytes: analysis.max_source_file_bytes,
+            }),
+            extensions,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 struct WireExtension {
     version: ContractVersion,
     critical: bool,
@@ -807,6 +1036,26 @@ struct CanonicalConfig {
     resources: ResourceConfig,
     analysis: AnalysisConfig,
     extensions: BTreeMap<String, ExtensionSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+struct CanonicalConfigV1_0 {
+    version: ContractVersion,
+    security: SecurityConfig,
+    resources: CanonicalResourceConfigV1_0,
+    analysis: CanonicalAnalysisConfigV1_0,
+    extensions: BTreeMap<String, ExtensionSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+struct CanonicalResourceConfigV1_0 {
+    max_source_bytes: u64,
+    max_results: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct CanonicalAnalysisConfigV1_0 {
+    default_tier: AnalysisTier,
 }
 
 /// Configuration parsing and resolution failures.
@@ -1094,7 +1343,7 @@ repository_execution = "explicit_consent"
         let explicit = ConfigSnapshot::resolve(&[ConfigLayer {
             source: ConfigSource::System,
             contents: r#"
-version = "1.0"
+version = "1.1"
 [security]
 network = "deny"
 repository_execution = "deny"
@@ -1131,6 +1380,117 @@ default_tier = "deep"
 
         assert_eq!(first.canonical_bytes(), second.canonical_bytes());
         assert_eq!(first.hash(), second.hash());
+    }
+
+    #[test]
+    fn frozen_1_0_contract_keeps_legacy_response_limit_and_canonical_shape() {
+        let snapshot = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: r#"
+version = "1.0"
+[resources]
+max_source_bytes = 16777216
+"#,
+        }])
+        .expect("frozen configuration resolves");
+
+        assert_eq!(snapshot.version(), CONFIG_VERSION_1_0);
+        assert_eq!(
+            snapshot.resources().max_source_bytes,
+            CONFIG_V1_0_MAX_SOURCE_RESPONSE_BYTES
+        );
+        assert_eq!(
+            snapshot.analysis().max_source_file_bytes,
+            DEFAULT_MAX_SOURCE_FILE_BYTES
+        );
+        assert!(
+            !snapshot
+                .provenance()
+                .contains_key("analysis.max_source_file_bytes")
+        );
+        assert_eq!(
+            std::str::from_utf8(snapshot.canonical_bytes())
+                .expect("canonical configuration is UTF-8"),
+            r#"{"version":"1.0","security":{"network":"deny","repository_execution":"deny","in_process_native_plugins":"deny"},"resources":{"max_source_bytes":16777216,"max_results":50},"analysis":{"default_tier":"structural"},"extensions":{}}"#
+        );
+
+        assert!(matches!(
+            ConfigSnapshot::resolve(&[ConfigLayer {
+                source: ConfigSource::User,
+                contents: "version = \"1.0\"\n[analysis]\nmax_source_file_bytes = 8388608\n",
+            }]),
+            Err(ConfigError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn version_1_1_separates_response_and_analysis_source_limits() {
+        let snapshot = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: r#"
+version = "1.1"
+[resources]
+max_source_bytes = 524288
+[analysis]
+max_source_file_bytes = 67108864
+"#,
+        }])
+        .expect("configuration 1.1 resolves");
+
+        assert_eq!(snapshot.version(), CONFIG_VERSION);
+        assert_eq!(
+            snapshot.resources().max_source_bytes,
+            MAX_SOURCE_RESPONSE_BYTES
+        );
+        assert_eq!(
+            snapshot.analysis().max_source_file_bytes,
+            MAX_SOURCE_FILE_BYTES
+        );
+        assert_eq!(
+            snapshot.provenance().get("analysis.max_source_file_bytes"),
+            Some(&ConfigSource::User)
+        );
+
+        for (field, contents) in [
+            (
+                "max_source_bytes",
+                "version = \"1.1\"\n[resources]\nmax_source_bytes = 524289\n",
+            ),
+            (
+                "max_source_file_bytes",
+                "version = \"1.1\"\n[analysis]\nmax_source_file_bytes = 67108865\n",
+            ),
+        ] {
+            assert!(matches!(
+                ConfigSnapshot::resolve(&[ConfigLayer {
+                    source: ConfigSource::User,
+                    contents,
+                }]),
+                Err(ConfigError::ResourceLimitOutOfRange { field: observed })
+                    if observed == field
+            ));
+        }
+    }
+
+    #[test]
+    fn current_layer_cannot_inherit_wide_legacy_response_limit() {
+        let result = ConfigSnapshot::resolve(&[
+            ConfigLayer {
+                source: ConfigSource::System,
+                contents: "version = \"1.0\"\n[resources]\nmax_source_bytes = 16777216\n",
+            },
+            ConfigLayer {
+                source: ConfigSource::User,
+                contents: "version = \"1.1\"\n[analysis]\ndefault_tier = \"deep\"\n",
+            },
+        ]);
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::ResourceLimitOutOfRange {
+                field: "max_source_bytes"
+            })
+        ));
     }
 
     #[test]
@@ -1288,5 +1648,6 @@ critical = true
         assert_eq!(snapshot.version(), CONFIG_VERSION);
         assert_eq!(snapshot.security(), SecurityConfig::default());
         assert_eq!(snapshot.resources(), ResourceConfig::default());
+        assert_eq!(snapshot.analysis(), AnalysisConfig::default());
     }
 }

@@ -22,7 +22,7 @@ use rootlight_ids::{ContentHash, FileId, FileIdentity, RepositoryId, content_has
 use rootlight_ir::SourceRef;
 
 /// Hard ceiling for one VFS source capture, independent of caller configuration.
-pub const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum number of relative path components accepted by the VFS.
 pub const MAX_PATH_COMPONENTS: usize = 256;
 /// Maximum platform path bytes accepted by the VFS.
@@ -737,6 +737,22 @@ mod tests {
 
         assert_ne!(first.content_hash(), second.content_hash());
         assert_eq!(first.metadata().length, second.metadata().length);
+    }
+
+    #[test]
+    fn snapshots_enforce_the_hard_source_file_ceiling() {
+        let (temporary, root) = fixture();
+        let fixture_path = temporary.path().join("oversized.rs");
+        let fixture_file = fs::File::create(&fixture_path).expect("fixture file is created");
+        fixture_file
+            .set_len(MAX_SNAPSHOT_BYTES + 1)
+            .expect("fixture file length is set");
+        let path = RelativePath::parse(Path::new("oversized.rs")).expect("fixture path is valid");
+
+        assert!(matches!(
+            root.snapshot(&path, u64::MAX),
+            Err(VfsError::FileTooLarge { maximum }) if maximum == MAX_SNAPSHOT_BYTES
+        ));
     }
 
     #[test]

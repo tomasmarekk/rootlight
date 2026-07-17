@@ -30,7 +30,7 @@
     },
     {
       "path": "tests/fixtures/compatibility/contract-1.0.json",
-      "blake3": "48fecf19b132b9f6bbd2ca2f56f4a2328c403b1352781746aea973dcdc9f142b"
+      "blake3": "ff9739fe25b0f913b092e9d091a380fcf10ee9fc1b3e95a6f1e5e39df1274520"
     },
     {
       "path": "tests/fixtures/compatibility/contract-2.0-rejected.json",
@@ -89,6 +89,10 @@
     {
       "path": "schemas/generated/json/config-1.0.schema.json",
       "blake3": "8467cf5c6e098ec5906e7ec08e23114d8cd12c42a622edea5583838cc3780537"
+    },
+    {
+      "path": "schemas/generated/json/config-1.1.schema.json",
+      "blake3": "ab5e94fe54a0ea35e71a27575d934af33d4155914d04078bd83d640d987caddb"
     },
     {
       "path": "schemas/generated/json/ir-1.0.schema.json",

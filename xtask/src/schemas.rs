@@ -12,7 +12,7 @@ use std::{
 use cargo_metadata::MetadataCommand;
 use prost::Message;
 use prost_types::FileDescriptorSet;
-use rootlight_config::ConfigDocumentSchema;
+use rootlight_config::{ConfigDocumentSchema, ConfigDocumentSchemaV1_1};
 use rootlight_ir::{IrDocument, IrDocumentSchema, NormalizedIrDocument};
 use rootlight_mcp_contract::{ErrorResponse, ResponseMetadata};
 use rootlight_protocol::generated::common::v1::ContractVersion as ProtocolContractVersion;
@@ -182,7 +182,7 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
 
     validate_daemon_protocol_baselines(&workspace_root)?;
     validate_protobuf_unknown_field_skip()?;
-    println!("compatibility: configuration and MCP fixtures verified");
+    println!("compatibility: frozen configuration 1.0 and current 1.1 fixtures verified");
     println!("compatibility: frozen protobuf descriptor is a compatible subset");
     println!("compatibility: daemon protocol 1.1, 1.2, and 1.3 descriptors verified");
     println!("compatibility: frozen protobuf wire semantics verified");
@@ -197,14 +197,26 @@ fn validate_configuration_schema(
     configuration: &serde_json::Value,
     expected_valid: bool,
 ) -> Result<(), SchemaError> {
+    let schema_name = configuration
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|version| rootlight_config::ContractVersion::parse(version).ok())
+        .map_or("config-1.1.schema.json", |version| {
+            if version.major() == 1 && version.minor() == 0 {
+                "config-1.0.schema.json"
+            } else {
+                "config-1.1.schema.json"
+            }
+        });
     let path = workspace_root
         .join(SCHEMA_ROOT)
-        .join("json/config-1.0.schema.json");
+        .join("json")
+        .join(schema_name);
     let schema: serde_json::Value = serde_json::from_slice(&read_bytes(&path)?)
         .map_err(|source| SchemaError::ParseGeneratedJson { path, source })?;
     let validator = jsonschema::draft202012::new(&schema).map_err(|source| {
         SchemaError::CompileGeneratedSchema {
-            name: "config-1.0.schema.json".to_owned(),
+            name: schema_name.to_owned(),
             detail: source.to_string(),
         }
     })?;
@@ -564,6 +576,7 @@ pub mod adapter {
 fn generate_json_schemas(staged_root: &Path) -> Result<(), SchemaError> {
     let schema_root = staged_root.join(SCHEMA_ROOT).join("json");
     write_schema::<ConfigDocumentSchema>(&schema_root.join("config-1.0.schema.json"))?;
+    write_schema::<ConfigDocumentSchemaV1_1>(&schema_root.join("config-1.1.schema.json"))?;
     write_schema::<IrDocumentSchema>(&schema_root.join("ir-1.0.schema.json"))?;
     write_schema::<NormalizedIrDocument>(&schema_root.join("ir-1.1.schema.json"))?;
     write_schema::<ResponseMetadata>(&schema_root.join("mcp-response-metadata-1.0.schema.json"))?;
@@ -619,6 +632,44 @@ fn validate_generated_json_schemas(
             "config-1.0.schema.json",
             "malformed configuration version",
             serde_json::json!({"version": "invalid"}),
+        ),
+        SchemaSemanticCase::invalid(
+            "config-1.0.schema.json",
+            "analysis source-file limit is not part of frozen configuration 1.0",
+            serde_json::json!({
+                "version": "1.0",
+                "analysis": {"max_source_file_bytes": 8_388_608}
+            }),
+        ),
+        SchemaSemanticCase::valid(
+            "config-1.1.schema.json",
+            "separate response and analysis source limits",
+            serde_json::json!({
+                "version": "1.1",
+                "resources": {"max_source_bytes": 524_288},
+                "analysis": {"max_source_file_bytes": 67_108_864}
+            }),
+        ),
+        SchemaSemanticCase::invalid(
+            "config-1.1.schema.json",
+            "frozen configuration minor cannot use the current schema",
+            serde_json::json!({"version": "1.0"}),
+        ),
+        SchemaSemanticCase::invalid(
+            "config-1.1.schema.json",
+            "response source limit exceeds its hard ceiling",
+            serde_json::json!({
+                "version": "1.1",
+                "resources": {"max_source_bytes": 524_289}
+            }),
+        ),
+        SchemaSemanticCase::invalid(
+            "config-1.1.schema.json",
+            "analysis source-file limit exceeds its hard ceiling",
+            serde_json::json!({
+                "version": "1.1",
+                "analysis": {"max_source_file_bytes": 67_108_865}
+            }),
         ),
         SchemaSemanticCase::valid(
             "ir-1.0.schema.json",
@@ -874,6 +925,7 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{PROTOCOL_GENERATED_ROOT}/mod.rs"),
         format!("{SCHEMA_ROOT}/protobuf/rootlight.desc"),
         format!("{SCHEMA_ROOT}/json/config-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/config-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-response-metadata-1.0.schema.json"),
