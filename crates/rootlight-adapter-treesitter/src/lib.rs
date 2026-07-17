@@ -8,6 +8,7 @@
 mod config;
 mod incremental;
 mod pool;
+mod query_pack;
 mod registry;
 mod runtime;
 

@@ -224,6 +224,12 @@ pub enum RuntimeConfigError {
     /// A built-in SDK label failed validation.
     #[error(transparent)]
     Label(#[from] LabelError),
+    /// A reviewed structural query pack no longer compiles against its pinned grammar.
+    #[error("built-in structural query pack is invalid for {family:?}")]
+    InvalidBuiltInQueryPack {
+        /// Affected grammar family.
+        family: crate::GrammarFamily,
+    },
     /// The process-local provider identity space was exhausted.
     #[error("Tree-sitter provider identity space is exhausted")]
     ProviderIdentityExhausted,

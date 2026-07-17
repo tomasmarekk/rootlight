@@ -30,6 +30,7 @@ use crate::{
         ReuseStatus, SourceEdit, SourceEditIdentity,
     },
     pool::{ParserPool, PoolError},
+    query_pack::QueryPackRegistry,
     registry::language_for,
 };
 
@@ -42,6 +43,7 @@ static NEXT_PROVIDER_ID: AtomicU64 = AtomicU64::new(1);
 pub struct TreeSitterProvider {
     provider_id: u64,
     registry: GrammarRegistry,
+    query_packs: QueryPackRegistry,
     capabilities: ParseCapabilities,
     config: RuntimeConfig,
     pool: ParserPool,
@@ -62,6 +64,15 @@ impl TreeSitterProvider {
             })
             .map_err(|_| RuntimeConfigError::ProviderIdentityExhausted)?;
         let registry = GrammarRegistry::audited()?;
+        let query_packs = QueryPackRegistry::audited()
+            .map_err(|family| RuntimeConfigError::InvalidBuiltInQueryPack { family })?;
+        for descriptor in registry.descriptors() {
+            if query_packs.get(descriptor.family()).is_none() {
+                return Err(RuntimeConfigError::InvalidBuiltInQueryPack {
+                    family: descriptor.family(),
+                });
+            }
+        }
         let languages = registry
             .descriptors()
             .iter()
@@ -83,6 +94,7 @@ impl TreeSitterProvider {
         Ok(Self {
             provider_id,
             registry,
+            query_packs,
             capabilities,
             pool: ParserPool::new(config.max_concurrent_parses()),
             cache: Mutex::new(ParseCache::new(config.max_cache_bytes())),
@@ -447,6 +459,8 @@ impl std::fmt::Debug for TreeSitterProvider {
             .field("provider_id", &self.provider_id)
             .field("capabilities", &self.capabilities)
             .field("config", &self.config)
+            .field("query_pack_count", &self.query_packs.len())
+            .field("query_pattern_count", &self.query_packs.pattern_count())
             .field("stats", &self.stats())
             .finish_non_exhaustive()
     }
