@@ -906,14 +906,8 @@ impl OperationJournal {
             .ok_or(OperationError::NotFound)
     }
 
-    /// Renews persisted attached-operation lease metadata for its authenticated owner.
-    ///
-    /// The accepting process owns the corresponding live monotonic lease deadline.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed error for detached, terminal, stale, foreign-owner, or nonfuture expiry.
-    pub fn renew_lease(
+    #[cfg(test)]
+    fn renew_lease(
         &self,
         operation: OperationId,
         owner: ClientInstanceId,

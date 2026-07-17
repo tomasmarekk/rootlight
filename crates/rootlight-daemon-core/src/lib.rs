@@ -486,12 +486,6 @@ enum JournalCommand {
         deadline_retry: DeadlineRetry,
         reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
-    RenewLease {
-        operation: OperationId,
-        owner: ClientInstanceId,
-        expiry_unix_ms: u64,
-        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
-    },
     StartOperation {
         operation: OperationId,
         started: SyncSender<WorkerStart>,
@@ -616,33 +610,6 @@ impl JournalActorHandle {
             JournalCommand::RetryStatus {
                 submission,
                 deadline_retry,
-                reply,
-            },
-        )?;
-        receiver
-            .await
-            .map_err(|_| ServiceError::ChannelClosed)?
-            .map_err(ServiceError::Operations)
-    }
-
-    /// Renews an attached operation lease on the high-priority lane.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed queue, ownership, expiry, actor, or journal failure.
-    pub async fn renew_lease(
-        &self,
-        operation: OperationId,
-        owner: ClientInstanceId,
-        expiry_unix_ms: u64,
-    ) -> Result<OperationRecord, ServiceError> {
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        self.try_send(
-            JournalLane::Control,
-            JournalCommand::RenewLease {
-                operation,
-                owner,
-                expiry_unix_ms,
                 reply,
             },
         )?;
@@ -1012,14 +979,6 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
         } => {
             let _ =
                 reply.send(journal.retry_status_with_deadline_retry(submission, deadline_retry));
-        }
-        JournalCommand::RenewLease {
-            operation,
-            owner,
-            expiry_unix_ms,
-            reply,
-        } => {
-            let _ = reply.send(journal.renew_lease(operation, owner, expiry_unix_ms));
         }
         JournalCommand::StartOperation { operation, started } => {
             let _ =
@@ -1830,48 +1789,6 @@ impl Drop for SchedulerPermit {
     }
 }
 
-/// One attached-lease renewal paired with process-local monotonic timing.
-#[derive(Debug)]
-pub struct LeaseRenewalAdmission {
-    operation: OperationId,
-    owner: ClientInstanceId,
-    expiry_unix_ms: u64,
-    lease_deadline: tokio::time::Instant,
-    reply: tokio::sync::oneshot::Sender<Result<OperationRecord, PublicError>>,
-}
-
-impl LeaseRenewalAdmission {
-    #[cfg(test)]
-    fn prepare_at(
-        operation: OperationId,
-        owner: ClientInstanceId,
-        expiry_unix_ms: u64,
-        clock: AdmissionClockSample,
-    ) -> Result<
-        (
-            Self,
-            tokio::sync::oneshot::Receiver<Result<OperationRecord, PublicError>>,
-        ),
-        OperationPreparationError,
-    > {
-        if expiry_unix_ms == 0 || expiry_unix_ms <= clock.wall_unix_ms {
-            return Err(OperationPreparationError::InvalidTimeout);
-        }
-        let lease_deadline = monotonic_target(clock, expiry_unix_ms)?;
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        Ok((
-            Self {
-                operation,
-                owner,
-                expiry_unix_ms,
-                lease_deadline,
-                reply,
-            },
-            receiver,
-        ))
-    }
-}
-
 /// Shared fairness admission state for negotiated client-declared identities.
 ///
 /// The OS-authorized local channel and global connection semaphore remain the hard
@@ -2176,19 +2093,6 @@ impl TimerSchedule {
         self.by_timer.insert(id, (deadline, timer));
         self.by_deadline.insert((deadline, timer));
         Ok(())
-    }
-
-    fn replace(&mut self, timer: ScheduledTimer, deadline: tokio::time::Instant) {
-        let id = timer.id();
-        self.remove(id);
-        self.by_timer.insert(id, (deadline, timer));
-        self.by_deadline.insert((deadline, timer));
-    }
-
-    fn contains(&self, timer: ScheduledTimer) -> bool {
-        self.by_timer
-            .get(&timer.id())
-            .is_some_and(|(_, current)| *current == timer)
     }
 
     fn remove(&mut self, id: TimerId) {
@@ -2497,58 +2401,6 @@ impl DaemonOrchestrator {
             }
         }
         Ok(())
-    }
-
-    /// Renews one attached lease and replaces its live monotonic timer.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed actor, journal, or timer failure.
-    pub async fn renew_lease(
-        &mut self,
-        admission: LeaseRenewalAdmission,
-    ) -> Result<OperationRecord, ServiceError> {
-        let LeaseRenewalAdmission {
-            operation,
-            owner,
-            expiry_unix_ms,
-            lease_deadline,
-            reply,
-        } = admission;
-        let timer = ScheduledTimer {
-            operation,
-            reason: TimerReason::Lease {
-                expected_expiry_unix_ms: expiry_unix_ms,
-            },
-        };
-        let result = match self.expire_operation_if_due(operation).await {
-            Ok(Some(observed))
-                if observed.cancellation_requested && !observed.state.is_terminal() =>
-            {
-                Err(ServiceError::Operations(OperationError::CancellationWon))
-            }
-            Ok(_) => {
-                self.journal
-                    .renew_lease(operation, owner, expiry_unix_ms)
-                    .await
-            }
-            Err(error) => Err(error),
-        };
-        if let Ok(record) = &result {
-            if record.state.is_terminal() {
-                self.timers.remove_operation(operation);
-            } else if !self.timers.contains(timer) {
-                // An exact retry acknowledges the durable renewal without
-                // re-anchoring its already-authoritative monotonic deadline.
-                self.timers.replace(timer, lease_deadline);
-            }
-        }
-        let response = match &result {
-            Ok(operation) => Ok(operation.clone()),
-            Err(error) => Err(error.to_public()),
-        };
-        let _ = reply.send(response);
-        result
     }
 
     /// Reports whether no synthetic worker result is currently pending.
@@ -5628,17 +5480,6 @@ mod tests {
 
         let absolute = monotonic_target(clock, 1_500).expect("absolute deadline fits");
         assert_eq!(absolute, monotonic_before_wall + Duration::from_millis(249));
-        let (renewal, _response) = LeaseRenewalAdmission::prepare_at(
-            OperationId::from_bytes([36; 16]),
-            ClientInstanceId::SYSTEM,
-            1_450,
-            clock,
-        )
-        .expect("lease renewal prepares");
-        assert_eq!(
-            renewal.lease_deadline,
-            monotonic_before_wall + Duration::from_millis(199)
-        );
     }
 
     #[test]
@@ -5874,257 +5715,6 @@ mod tests {
             Err(OperationError::NotFound)
         ));
         assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
-        orchestrator
-            .shutdown()
-            .await
-            .expect("orchestrator shuts down");
-        actor.join().expect("actor joins");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn lease_renewal_replaces_live_timer() {
-        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-        let state = Arc::new(DaemonState::starting());
-        state.set_lifecycle(DaemonLifecycle::Ready);
-        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
-        let mut orchestrator =
-            DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), DaemonLimits::default())
-                .expect("orchestrator starts");
-        let owner = ClientInstanceId::new([8; 16]).expect("owner is valid");
-        let operation = OperationId::from_bytes([26; 16]);
-        let now = tokio::time::Instant::now();
-        let wall_unix_ms = u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock is valid")
-                .as_millis(),
-        )
-        .expect("wall clock fits");
-        let initial_expiry = wall_unix_ms.checked_add(30_000).expect("expiry fits");
-        let renewed_expiry = wall_unix_ms.checked_add(60_000).expect("expiry fits");
-        let submission = OperationSubmission::new(
-            operation,
-            OperationKind::ControlProbe,
-            PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
-            owner,
-            false,
-            None,
-            Some(initial_expiry),
-        )
-        .expect("submission is valid");
-        orchestrator
-            .schedule(prepared_at(
-                submission,
-                AdmissionClockSample {
-                    wall_unix_ms,
-                    monotonic: now,
-                },
-            ))
-            .await
-            .expect("attached operation schedules");
-
-        let (renewal, response) = LeaseRenewalAdmission::prepare_at(
-            operation,
-            owner,
-            renewed_expiry,
-            AdmissionClockSample {
-                wall_unix_ms,
-                monotonic: now,
-            },
-        )
-        .expect("renewal prepares");
-        orchestrator
-            .renew_lease(renewal)
-            .await
-            .expect("lease renews");
-        response
-            .await
-            .expect("renewal responds")
-            .expect("renewal succeeds");
-        let lease = orchestrator
-            .timers
-            .by_timer
-            .get(&TimerId {
-                operation,
-                kind: TimerKind::Lease,
-            })
-            .expect("renewed lease timer exists")
-            .1;
-        assert_eq!(
-            lease.reason,
-            TimerReason::Lease {
-                expected_expiry_unix_ms: renewed_expiry,
-            }
-        );
-        assert_ne!(
-            lease.reason,
-            TimerReason::Lease {
-                expected_expiry_unix_ms: initial_expiry,
-            }
-        );
-        orchestrator
-            .shutdown()
-            .await
-            .expect("orchestrator shuts down");
-        actor.join().expect("actor joins");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn exact_lease_renewal_retry_preserves_live_timer() {
-        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-        let state = Arc::new(DaemonState::starting());
-        state.set_lifecycle(DaemonLifecycle::Ready);
-        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
-        let mut orchestrator =
-            DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), DaemonLimits::default())
-                .expect("orchestrator starts");
-        let owner = ClientInstanceId::new([11; 16]).expect("owner is valid");
-        let operation = OperationId::from_bytes([43; 16]);
-        let monotonic = tokio::time::Instant::now();
-        let wall_unix_ms = u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock is valid")
-                .as_millis(),
-        )
-        .expect("wall clock fits");
-        let expiry = wall_unix_ms.checked_add(30_000).expect("expiry fits");
-        orchestrator
-            .schedule(prepared_at(
-                OperationSubmission::new(
-                    operation,
-                    OperationKind::ControlProbe,
-                    PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
-                    owner,
-                    false,
-                    None,
-                    Some(expiry),
-                )
-                .expect("submission is valid"),
-                AdmissionClockSample {
-                    wall_unix_ms,
-                    monotonic,
-                },
-            ))
-            .await
-            .expect("attached operation schedules");
-        let timer_id = TimerId {
-            operation,
-            kind: TimerKind::Lease,
-        };
-        let original_deadline = orchestrator
-            .timers
-            .by_timer
-            .get(&timer_id)
-            .expect("initial lease timer exists")
-            .0;
-
-        let rolled_back_wall = wall_unix_ms
-            .checked_sub(10_000)
-            .expect("wall clock exceeds test rollback");
-        let (renewal, response) = LeaseRenewalAdmission::prepare_at(
-            operation,
-            owner,
-            expiry,
-            AdmissionClockSample {
-                wall_unix_ms: rolled_back_wall,
-                monotonic,
-            },
-        )
-        .expect("exact retry prepares");
-        orchestrator
-            .renew_lease(renewal)
-            .await
-            .expect("exact retry is acknowledged");
-        response
-            .await
-            .expect("renewal responds")
-            .expect("exact retry succeeds");
-
-        assert_eq!(
-            orchestrator
-                .timers
-                .by_timer
-                .get(&timer_id)
-                .expect("live lease timer remains")
-                .0,
-            original_deadline
-        );
-        orchestrator
-            .shutdown()
-            .await
-            .expect("orchestrator shuts down");
-        actor.join().expect("actor joins");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn due_lease_interrupts_before_direct_renewal() {
-        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-        let state = Arc::new(DaemonState::starting());
-        state.set_lifecycle(DaemonLifecycle::Ready);
-        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
-        let mut orchestrator =
-            DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), DaemonLimits::default())
-                .expect("orchestrator starts");
-        let owner = ClientInstanceId::new([10; 16]).expect("owner is valid");
-        let operation = OperationId::from_bytes([42; 16]);
-        let monotonic = tokio::time::Instant::now();
-        let wall_unix_ms = u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock is valid")
-                .as_millis(),
-        )
-        .expect("wall clock fits");
-        let initial_expiry = wall_unix_ms.checked_add(100).expect("expiry fits");
-        orchestrator
-            .schedule(prepared_at(
-                OperationSubmission::new(
-                    operation,
-                    OperationKind::ControlProbe,
-                    PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
-                    owner,
-                    false,
-                    None,
-                    Some(initial_expiry),
-                )
-                .expect("submission is valid"),
-                AdmissionClockSample {
-                    wall_unix_ms,
-                    monotonic,
-                },
-            ))
-            .await
-            .expect("attached operation schedules");
-        tokio::time::advance(Duration::from_millis(100)).await;
-
-        let renewed_expiry = wall_unix_ms.checked_add(30_000).expect("expiry fits");
-        let (renewal, response) = LeaseRenewalAdmission::prepare_at(
-            operation,
-            owner,
-            renewed_expiry,
-            AdmissionClockSample {
-                wall_unix_ms,
-                monotonic,
-            },
-        )
-        .expect("renewal prepares");
-        assert!(matches!(
-            orchestrator.renew_lease(renewal).await,
-            Err(ServiceError::Operations(OperationError::LeaseOwnerMismatch))
-        ));
-        assert!(
-            response
-                .await
-                .expect("renewal responds")
-                .expect_err("expired lease rejects renewal")
-                .code()
-                == ErrorCode::Conflict
-        );
-        let interrupted = journal.status(operation).expect("status loads");
-        assert_eq!(interrupted.state, OperationState::Interrupted);
-        assert_eq!(interrupted.recovery_class, RecoveryClass::LeaseExpired);
-
         orchestrator
             .shutdown()
             .await
