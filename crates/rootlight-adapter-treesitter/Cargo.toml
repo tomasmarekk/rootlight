@@ -20,6 +20,7 @@ tree-sitter-python.workspace = true
 tree-sitter-rust.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 rootlight-vfs = { path = "../rootlight-vfs" }
 tempfile.workspace = true
 
