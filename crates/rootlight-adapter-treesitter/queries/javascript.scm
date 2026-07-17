@@ -18,7 +18,7 @@
 ]
 
 (import_statement) @import
-[(function_declaration) (class_declaration) (method_definition)] @signature
+(formal_parameters) @signature
 (statement_block) @scope
 [(identifier) (property_identifier)] @reference
 (comment) @comment

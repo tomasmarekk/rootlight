@@ -7,6 +7,8 @@
 [
   (class_declaration)
   (interface_declaration)
+  (annotation_type_declaration)
+  (annotation_type_element_declaration)
   (enum_declaration)
   (record_declaration)
   (method_declaration)
@@ -17,6 +19,8 @@
 [
   (class_declaration name: (identifier) @definition)
   (interface_declaration name: (identifier) @definition)
+  (annotation_type_declaration name: (identifier) @definition)
+  (annotation_type_element_declaration name: (identifier) @definition)
   (enum_declaration name: (identifier) @definition)
   (record_declaration name: (identifier) @definition)
   (method_declaration name: (identifier) @definition)
@@ -25,14 +29,12 @@
 ]
 
 (import_declaration) @import
-[
-  (class_declaration)
-  (interface_declaration)
-  (enum_declaration)
-  (record_declaration)
-  (method_declaration)
-  (constructor_declaration)
-] @signature
+(formal_parameters) @signature
+
+(annotation_type_element_declaration
+  "(" @signature
+  ")")
+
 (block) @scope
 (identifier) @reference
 [(line_comment) (block_comment)] @comment
