@@ -8,6 +8,8 @@
 mod bundle;
 mod decode;
 mod model;
+mod parser;
+mod sampler;
 
 pub use bundle::{
     BundleError, BundleLimits, OperationalEvent, OperationalLog, OperationalLogRecord,
@@ -19,6 +21,14 @@ pub use model::{
     AgentTrajectory, Availability, BenchmarkCommand, BuildProvenance, CoverageEvidence,
     DatasetEntry, DatasetManifest, EnvironmentEvidence, EvidenceValue, MetricDistribution,
     QualityEvidence, RawSample, ResultSummary, SampleOutcome,
+};
+pub use parser::{
+    ParserBenchmarkConfig, ParserBenchmarkEvidence, ParserDatasetInput, ParserRunError,
+    SemanticFactProbe, UnavailableSemanticFacts, run_parser_benchmark,
+};
+pub use sampler::{
+    ProcessTreeMeasurement, ProcessTreeSample, ProcessTreeSampler, UnavailableProcessTreeSample,
+    UnavailableProcessTreeSampler,
 };
 
 /// Result-bundle schema version written by this crate.
