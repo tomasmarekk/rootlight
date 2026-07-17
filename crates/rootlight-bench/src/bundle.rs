@@ -24,7 +24,7 @@ use sha2::{Digest as _, Sha256};
 
 use cap_fs_ext::DirExt as _;
 
-use crate::integrity::{is_fixed_artifact, validate_fixed_artifacts};
+use crate::integrity::{FixedArtifactSource, is_fixed_artifact, validate_fixed_artifacts};
 use crate::{
     AgentTrajectory, BenchmarkCommand, BuildProvenance, CoverageEvidence, DatasetManifest,
     EnvironmentEvidence, QualityEvidence, RawSample, ResultSummary,
@@ -864,10 +864,59 @@ fn sync_cap_directory(
     Ok(())
 }
 
+struct ArtifactSet<'a> {
+    entries: Vec<(String, Cow<'a, [u8]>)>,
+}
+
+impl FixedArtifactSource for ArtifactSet<'_> {
+    fn artifact_bytes(&self, name: &str) -> Option<&[u8]> {
+        self.entries
+            .iter()
+            .find(|(relative, _)| relative == name)
+            .map(|(_, bytes)| bytes.as_ref())
+    }
+}
+
+impl<'a> ArtifactSet<'a> {
+    fn with_capacity(capacity: usize) -> Result<Self, BundleError> {
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(capacity)
+            .map_err(|_| BundleError::AllocationFailed)?;
+        Ok(Self { entries })
+    }
+
+    fn push(
+        &mut self,
+        relative: String,
+        bytes: Cow<'a, [u8]>,
+        retained_bytes: &mut u64,
+        limits: BundleLimits,
+    ) -> Result<(), BundleError> {
+        add_bytes(
+            retained_bytes,
+            bytes.as_ref().len(),
+            limits.max_total_bytes,
+            "total_bytes",
+        )?;
+        self.entries.push((relative, bytes));
+        Ok(())
+    }
+
+    fn sort(&mut self) -> Result<(), BundleError> {
+        self.entries
+            .sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        if self.entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(BundleError::ArtifactInvariantViolation);
+        }
+        Ok(())
+    }
+}
+
 fn build_artifacts<'a>(
     bundle: &'a ResultBundle,
     limits: BundleLimits,
-) -> Result<BTreeMap<String, Cow<'a, [u8]>>, BundleError> {
+) -> Result<ArtifactSet<'a>, BundleError> {
     check_count(
         bundle.raw_samples.len(),
         limits.max_raw_samples,
@@ -880,51 +929,50 @@ fn build_artifacts<'a>(
     )?;
     validate_artifact_map(&bundle.profiles, limits.max_artifacts_per_class)?;
     validate_log_map(&bundle.logs, limits.max_artifacts_per_class)?;
-
-    let serialized_limit =
-        usize::try_from(limits.max_artifact_bytes).map_err(|_| BundleError::LimitExceeded {
-            resource: "artifact_bytes",
+    let artifact_count = FIXED_ARTIFACT_COUNT
+        .checked_add(bundle.profiles.len())
+        .and_then(|count| count.checked_add(bundle.logs.len()))
+        .ok_or(BundleError::LimitExceeded {
+            resource: "file_count",
         })?;
-    let mut artifacts = BTreeMap::<String, Cow<'a, [u8]>>::new();
-    artifacts.insert(
-        ENVIRONMENT_FILE.to_owned(),
-        Cow::Owned(json_bytes(&bundle.environment, serialized_limit)?),
-    );
-    artifacts.insert(
-        DATASET_MANIFEST_FILE.to_owned(),
-        Cow::Owned(json_bytes(&bundle.dataset_manifest, serialized_limit)?),
-    );
-    artifacts.insert(
-        BUILD_PROVENANCE_FILE.to_owned(),
-        Cow::Owned(json_bytes(&bundle.build_provenance, serialized_limit)?),
-    );
-    artifacts.insert(
-        COMMAND_FILE.to_owned(),
-        Cow::Owned(json_bytes(&bundle.command, serialized_limit)?),
-    );
-    artifacts.insert(
-        RAW_SAMPLES_FILE.to_owned(),
-        Cow::Owned(json_lines(&bundle.raw_samples, serialized_limit)?),
-    );
-    artifacts.insert(
-        SUMMARY_FILE.to_owned(),
-        Cow::Owned(json_bytes(&bundle.summary, serialized_limit)?),
-    );
-    artifacts.insert(
-        COVERAGE_FILE.to_owned(),
-        Cow::Owned(json_bytes(&bundle.coverage, serialized_limit)?),
-    );
-    artifacts.insert(
-        QUALITY_FILE.to_owned(),
-        Cow::Owned(json_bytes(&bundle.quality, serialized_limit)?),
-    );
-    artifacts.insert(
-        AGENT_TRAJECTORIES_FILE.to_owned(),
-        Cow::Owned(json_lines(&bundle.agent_trajectories, serialized_limit)?),
-    );
-
+    check_count(
+        artifact_count
+            .checked_add(1)
+            .ok_or(BundleError::LimitExceeded {
+                resource: "file_count",
+            })?,
+        limits.max_file_count,
+        "file_count",
+    )?;
+    check_count(
+        artifact_count,
+        limits.max_checksum_lines,
+        "checksum_line_count",
+    )?;
+    let directory_entries = artifact_count
+        .checked_add(3)
+        .ok_or(BundleError::LimitExceeded {
+            resource: "directory_entry_count",
+        })?;
+    check_count(
+        directory_entries,
+        limits.max_directory_entries,
+        "directory_entry_count",
+    )?;
+    let checksum_bytes = checksum_manifest_size(bundle)?;
+    if checksum_bytes > limits.max_checksum_bytes {
+        return Err(BundleError::LimitExceeded {
+            resource: "checksum_bytes",
+        });
+    }
+    let mut retained_bytes = checksum_bytes;
+    if retained_bytes > limits.max_total_bytes {
+        return Err(BundleError::LimitExceeded {
+            resource: "total_bytes",
+        });
+    }
     let mut profile_bytes = 0_u64;
-    for (name, bytes) in &bundle.profiles {
+    for bytes in bundle.profiles.values() {
         check_bytes(bytes.len(), limits.max_artifact_bytes, "artifact_bytes")?;
         add_bytes(
             &mut profile_bytes,
@@ -932,11 +980,65 @@ fn build_artifacts<'a>(
             limits.max_profile_bytes,
             "profile_bytes",
         )?;
-        artifacts.insert(format!("profiles/{name}"), Cow::Borrowed(bytes));
+    }
+
+    let mut artifacts = ArtifactSet::with_capacity(artifact_count.checked_add(1).ok_or(
+        BundleError::LimitExceeded {
+            resource: "file_count",
+        },
+    )?)?;
+    macro_rules! push_owned {
+        ($name:expr, $serializer:ident, $value:expr) => {
+            artifacts.push(
+                fallible_string($name)?,
+                Cow::Owned(serialize_with_budget(
+                    retained_bytes,
+                    limits,
+                    None,
+                    |limit| $serializer($value, limit),
+                )?),
+                &mut retained_bytes,
+                limits,
+            )?
+        };
+    }
+    push_owned!(ENVIRONMENT_FILE, json_bytes, &bundle.environment);
+    push_owned!(DATASET_MANIFEST_FILE, json_bytes, &bundle.dataset_manifest);
+    push_owned!(BUILD_PROVENANCE_FILE, json_bytes, &bundle.build_provenance);
+    push_owned!(COMMAND_FILE, json_bytes, &bundle.command);
+    push_owned!(RAW_SAMPLES_FILE, json_lines, &bundle.raw_samples);
+    push_owned!(SUMMARY_FILE, json_bytes, &bundle.summary);
+    push_owned!(COVERAGE_FILE, json_bytes, &bundle.coverage);
+    push_owned!(QUALITY_FILE, json_bytes, &bundle.quality);
+    push_owned!(
+        AGENT_TRAJECTORIES_FILE,
+        json_lines,
+        &bundle.agent_trajectories
+    );
+
+    for (name, bytes) in &bundle.profiles {
+        artifacts.push(
+            class_artifact_path("profiles/", name)?,
+            Cow::Borrowed(bytes),
+            &mut retained_bytes,
+            limits,
+        )?;
     }
     let mut log_bytes = 0_u64;
     for (name, log) in &bundle.logs {
-        let bytes = json_bytes(log, serialized_limit)?;
+        let remaining_log =
+            limits
+                .max_log_bytes
+                .checked_sub(log_bytes)
+                .ok_or(BundleError::LimitExceeded {
+                    resource: "log_bytes",
+                })?;
+        let bytes = serialize_with_budget(
+            retained_bytes,
+            limits,
+            Some((remaining_log, "log_bytes")),
+            |limit| json_bytes(log, limit),
+        )?;
         decode_operational_log(&bytes, limits)?;
         add_bytes(
             &mut log_bytes,
@@ -944,72 +1046,197 @@ fn build_artifacts<'a>(
             limits.max_log_bytes,
             "log_bytes",
         )?;
-        artifacts.insert(format!("logs/{name}"), Cow::Owned(bytes));
-    }
-
-    validate_fixed_artifacts(&artifacts, limits)?;
-    check_count(artifacts.len() + 1, limits.max_file_count, "file_count")?;
-    check_count(
-        artifacts.len(),
-        limits.max_checksum_lines,
-        "checksum_line_count",
-    )?;
-    let checksums = checksum_manifest(&artifacts, limits)?;
-    let mut total = u64::try_from(checksums.len()).map_err(|_| BundleError::LimitExceeded {
-        resource: "total_bytes",
-    })?;
-    for bytes in artifacts.values() {
-        add_bytes(
-            &mut total,
-            bytes.as_ref().len(),
-            limits.max_total_bytes,
-            "total_bytes",
+        artifacts.push(
+            class_artifact_path("logs/", name)?,
+            Cow::Owned(bytes),
+            &mut retained_bytes,
+            limits,
         )?;
     }
-    if total > limits.max_total_bytes {
-        return Err(BundleError::LimitExceeded {
-            resource: "total_bytes",
-        });
+
+    artifacts.sort()?;
+    validate_fixed_artifacts(&artifacts, limits)?;
+    let checksums = checksum_manifest(&artifacts, limits)?;
+    if u64::try_from(checksums.len()).ok() != Some(checksum_bytes) {
+        return Err(BundleError::ArtifactInvariantViolation);
     }
-    artifacts.insert(CHECKSUMS_FILE.to_owned(), Cow::Owned(checksums));
+    let mut checksum_retained = 0_u64;
+    artifacts.push(
+        fallible_string(CHECKSUMS_FILE)?,
+        Cow::Owned(checksums),
+        &mut checksum_retained,
+        limits,
+    )?;
+    artifacts.sort()?;
     Ok(artifacts)
 }
 
-fn checksum_manifest<B>(
-    artifacts: &BTreeMap<String, B>,
+fn serialize_with_budget(
+    retained_bytes: u64,
     limits: BundleLimits,
-) -> Result<Vec<u8>, BundleError>
-where
-    B: AsRef<[u8]>,
-{
+    additional_limit: Option<(u64, &'static str)>,
+    serialize: impl FnOnce(usize) -> Result<Vec<u8>, BundleError>,
+) -> Result<Vec<u8>, BundleError> {
+    let remaining =
+        limits
+            .max_total_bytes
+            .checked_sub(retained_bytes)
+            .ok_or(BundleError::LimitExceeded {
+                resource: "total_bytes",
+            })?;
+    let additional = additional_limit.map_or(u64::MAX, |(limit, _)| limit);
+    let cap_bytes = remaining.min(limits.max_artifact_bytes).min(additional);
+    if cap_bytes == 0 {
+        let resource = if remaining <= additional {
+            "total_bytes"
+        } else {
+            additional_limit
+                .map(|(_, resource)| resource)
+                .unwrap_or("total_bytes")
+        };
+        return Err(BundleError::LimitExceeded { resource });
+    }
+    let cap = usize::try_from(cap_bytes).map_err(|_| BundleError::LimitExceeded {
+        resource: "artifact_bytes",
+    })?;
+    match serialize(cap) {
+        Err(BundleError::LimitExceeded {
+            resource: "serialized_artifact_bytes",
+        }) if cap_bytes < limits.max_artifact_bytes => {
+            let resource = if remaining <= additional {
+                "total_bytes"
+            } else {
+                additional_limit
+                    .map(|(_, resource)| resource)
+                    .unwrap_or("total_bytes")
+            };
+            Err(BundleError::LimitExceeded { resource })
+        }
+        result => result,
+    }
+}
+
+fn checksum_manifest(
+    artifacts: &ArtifactSet<'_>,
+    limits: BundleLimits,
+) -> Result<Vec<u8>, BundleError> {
     let checksum_limit =
         usize::try_from(limits.max_checksum_bytes).map_err(|_| BundleError::LimitExceeded {
             resource: "checksum_bytes",
         })?;
     let mut checksums = BoundedBuffer::new(checksum_limit);
-    for (relative, bytes) in artifacts {
-        let line = format!("{}  {relative}\n", sha256_hex(bytes.as_ref()));
-        if checksums.write_all(line.as_bytes()).is_err() {
-            return Err(if checksums.allocation_failed() {
-                BundleError::AllocationFailed
-            } else {
-                BundleError::LimitExceeded {
-                    resource: "checksum_bytes",
-                }
-            });
+    for (relative, bytes) in &artifacts.entries {
+        let digest = Sha256::digest(bytes.as_ref());
+        for byte in digest {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            if checksums
+                .write_all(&[HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]])
+                .is_err()
+            {
+                return Err(checksum_buffer_error(&checksums));
+            }
+        }
+        if checksums.write_all(b"  ").is_err()
+            || checksums.write_all(relative.as_bytes()).is_err()
+            || checksums.write_all(b"\n").is_err()
+        {
+            return Err(checksum_buffer_error(&checksums));
         }
     }
     Ok(checksums.into_inner())
 }
 
-fn write_bundle<B>(
-    artifacts: &BTreeMap<String, B>,
+fn checksum_buffer_error(checksums: &BoundedBuffer) -> BundleError {
+    if checksums.allocation_failed() {
+        BundleError::AllocationFailed
+    } else {
+        BundleError::LimitExceeded {
+            resource: "checksum_bytes",
+        }
+    }
+}
+
+fn checksum_manifest_size(bundle: &ResultBundle) -> Result<u64, BundleError> {
+    let mut size = 0_u64;
+    for relative in [
+        ENVIRONMENT_FILE,
+        DATASET_MANIFEST_FILE,
+        BUILD_PROVENANCE_FILE,
+        COMMAND_FILE,
+        RAW_SAMPLES_FILE,
+        SUMMARY_FILE,
+        COVERAGE_FILE,
+        QUALITY_FILE,
+        AGENT_TRAJECTORIES_FILE,
+    ] {
+        add_checksum_line_size(&mut size, relative.len())?;
+    }
+    for name in bundle.profiles.keys() {
+        let length =
+            "profiles/"
+                .len()
+                .checked_add(name.len())
+                .ok_or(BundleError::LimitExceeded {
+                    resource: "checksum_bytes",
+                })?;
+        add_checksum_line_size(&mut size, length)?;
+    }
+    for name in bundle.logs.keys() {
+        let length = "logs/"
+            .len()
+            .checked_add(name.len())
+            .ok_or(BundleError::LimitExceeded {
+                resource: "checksum_bytes",
+            })?;
+        add_checksum_line_size(&mut size, length)?;
+    }
+    Ok(size)
+}
+
+fn add_checksum_line_size(total: &mut u64, path_length: usize) -> Result<(), BundleError> {
+    let line = path_length
+        .checked_add(67)
+        .ok_or(BundleError::LimitExceeded {
+            resource: "checksum_bytes",
+        })?;
+    *total = total
+        .checked_add(u64::try_from(line).map_err(|_| BundleError::LimitExceeded {
+            resource: "checksum_bytes",
+        })?)
+        .ok_or(BundleError::LimitExceeded {
+            resource: "checksum_bytes",
+        })?;
+    Ok(())
+}
+
+fn fallible_string(value: &str) -> Result<String, BundleError> {
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(value.len())
+        .map_err(|_| BundleError::AllocationFailed)?;
+    owned.push_str(value);
+    Ok(owned)
+}
+
+fn class_artifact_path(prefix: &str, name: &str) -> Result<String, BundleError> {
+    let length = prefix
+        .len()
+        .checked_add(name.len())
+        .ok_or(BundleError::InvalidArtifactName)?;
+    let mut relative = String::new();
+    relative
+        .try_reserve_exact(length)
+        .map_err(|_| BundleError::AllocationFailed)?;
+    relative.push_str(prefix);
+    relative.push_str(name);
+    Ok(relative)
+}
+
+fn write_bundle(
+    artifacts: &ArtifactSet<'_>,
     staging: &cap_std::fs::Dir,
     fail_after_writes: Option<usize>,
-) -> Result<(), BundleError>
-where
-    B: AsRef<[u8]>,
-{
+) -> Result<(), BundleError> {
     staging
         .create_dir("profiles")
         .map_err(|source| BundleError::Io {
@@ -1023,7 +1250,7 @@ where
             source,
         })?;
 
-    for (write_count, (relative, bytes)) in artifacts.iter().enumerate() {
+    for (write_count, (relative, bytes)) in artifacts.entries.iter().enumerate() {
         if fail_after_writes == Some(write_count) {
             return Err(BundleError::InjectedWriteFailure);
         }
@@ -2579,6 +2806,81 @@ mod tests {
     }
 
     #[test]
+    fn nested_collection_limits_precede_checksum_valid_decode_errors() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let summary_destination = temporary.path().join("summary");
+        publish_bundle(&fixture(), &summary_destination).expect("summary bundle publishes");
+        let summary = fs::read_to_string(summary_destination.join(SUMMARY_FILE))
+            .expect("summary is readable")
+            .replace("\"families\":{}", "\"families\":{\"a\":0,\"b\":0}");
+        rewrite_artifact_and_checksum(&summary_destination, SUMMARY_FILE, summary.as_bytes());
+        let limits = BundleLimits {
+            max_manifest_entries: 1,
+            ..constrained_limits()
+        };
+        assert!(matches!(
+            verify_bundle_with_limits(&summary_destination, limits),
+            Err(BundleError::LimitExceeded {
+                resource: "summary_family_count"
+            })
+        ));
+
+        let environment_destination = temporary.path().join("environment");
+        let mut environment_bundle = fixture();
+        environment_bundle.environment.adapter_versions =
+            EvidenceValue::observed(BTreeMap::from([
+                ("a".to_owned(), "one".to_owned()),
+                ("b".to_owned(), "two".to_owned()),
+            ]));
+        let environment =
+            json_bytes(&environment_bundle.environment, 64 * 1024).expect("environment serializes");
+        publish_bundle(&fixture(), &environment_destination).expect("environment bundle publishes");
+        let environment = String::from_utf8(environment)
+            .expect("environment is UTF-8")
+            .replace("\"b\":\"two\"", "\"b\":7");
+        rewrite_artifact_and_checksum(
+            &environment_destination,
+            ENVIRONMENT_FILE,
+            environment.as_bytes(),
+        );
+        assert!(matches!(
+            verify_bundle_with_limits(&environment_destination, limits),
+            Err(BundleError::LimitExceeded {
+                resource: "evidence_map_entry_count"
+            })
+        ));
+
+        let trajectory_destination = temporary.path().join("trajectory");
+        publish_bundle(&fixture(), &trajectory_destination).expect("trajectory bundle publishes");
+        let trajectory = AgentTrajectory {
+            schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
+            task_id: "task".to_owned(),
+            eligibility: Availability::Available,
+            tool_calls: vec!["first".to_owned(), "second".to_owned()],
+            total_tokens: EvidenceValue::unavailable("not_measured"),
+        };
+        let trajectory =
+            String::from_utf8(json_lines(&[trajectory], 64 * 1024).expect("trajectory serializes"))
+                .expect("trajectory is UTF-8")
+                .replace("\"second\"", "7");
+        rewrite_artifact_and_checksum(
+            &trajectory_destination,
+            AGENT_TRAJECTORIES_FILE,
+            trajectory.as_bytes(),
+        );
+        let limits = BundleLimits {
+            max_command_arguments: 1,
+            ..constrained_limits()
+        };
+        assert!(matches!(
+            verify_bundle_with_limits(&trajectory_destination, limits),
+            Err(BundleError::LimitExceeded {
+                resource: "trajectory_tool_call_count"
+            })
+        ));
+    }
+
+    #[test]
     fn failed_publication_removes_partial_staging_tree() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
@@ -2676,10 +2978,13 @@ mod tests {
         assert!(matches!(error, BundleError::LimitExceeded { .. }));
         assert!(!temporary.path().join("file").exists());
 
+        let mut invalid_later = fixture();
+        invalid_later.quality.precision_ppm = EvidenceValue::unavailable("../../invalid");
         let mut limits = constrained_limits();
         limits.max_total_bytes = 256;
-        let error = publish_bundle_with_limits(&fixture(), &temporary.path().join("total"), limits)
-            .expect_err("total byte bound is enforced");
+        let error =
+            publish_bundle_with_limits(&invalid_later, &temporary.path().join("total"), limits)
+                .expect_err("total bytes are preflighted before later artifact validation");
         assert!(matches!(
             error,
             BundleError::LimitExceeded {
@@ -2687,6 +2992,23 @@ mod tests {
             }
         ));
         assert!(!temporary.path().join("total").exists());
+
+        let checksum_bytes =
+            checksum_manifest_size(&invalid_later).expect("checksum size is computable");
+        let mut limits = constrained_limits();
+        limits.max_total_bytes = checksum_bytes + 32;
+        let error = publish_bundle_with_limits(
+            &invalid_later,
+            &temporary.path().join("rolling-total"),
+            limits,
+        )
+        .expect_err("serialization is capped by the remaining total budget");
+        assert!(matches!(
+            error,
+            BundleError::LimitExceeded {
+                resource: "total_bytes"
+            }
+        ));
 
         let mut bundle = fixture();
         bundle.profiles.insert("first.pb".to_owned(), vec![0; 40]);
@@ -2700,6 +3022,23 @@ mod tests {
             error,
             BundleError::LimitExceeded {
                 resource: "profile_bytes"
+            }
+        ));
+
+        let mut bundle = fixture();
+        bundle.profiles.insert("extra.pb".to_owned(), vec![0]);
+        let mut limits = constrained_limits();
+        limits.max_directory_entries = FIXED_ARTIFACT_COUNT + 3;
+        let error = publish_bundle_with_limits(
+            &bundle,
+            &temporary.path().join("directory-entries"),
+            limits,
+        )
+        .expect_err("checksum and class directories count toward directory entries");
+        assert!(matches!(
+            error,
+            BundleError::LimitExceeded {
+                resource: "directory_entry_count"
             }
         ));
 
@@ -2725,8 +3064,8 @@ mod tests {
         let mut limits = constrained_limits();
         limits.max_checksum_bytes = 128;
         let error =
-            publish_bundle_with_limits(&fixture(), &temporary.path().join("checksums"), limits)
-                .expect_err("checksum byte bound is enforced");
+            publish_bundle_with_limits(&invalid_later, &temporary.path().join("checksums"), limits)
+                .expect_err("checksum bytes are preflighted before later artifact validation");
         assert!(matches!(
             error,
             BundleError::LimitExceeded {

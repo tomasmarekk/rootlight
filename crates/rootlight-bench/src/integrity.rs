@@ -13,15 +13,16 @@ use crate::bundle::{
     DATASET_MANIFEST_FILE, ENVIRONMENT_FILE, QUALITY_FILE, RAW_SAMPLES_FILE, SUMMARY_FILE,
     json_bytes, json_lines,
 };
+use crate::decode::{CollectionKind, preflight_artifact_collection};
 use crate::parser::{
     ScheduledSample, build_schedule, outlier_fences, semantic_fact_eligibility,
-    semantic_quality_eligibility, summarize,
+    semantic_quality_eligibility_from_values, summarize,
 };
 use crate::{
     AgentTrajectory, Availability, BuildProvenance, BundleLimits, CoverageEvidence,
     DatasetManifest, EnvironmentEvidence, EvidenceValue, MetricDistribution, QualityEvidence,
     RESULT_BUNDLE_SCHEMA_VERSION, RawSample, ResultSummary, SEMANTIC_QUALITY_RUBRIC_ID,
-    SampleOutcome, SemanticQualityMeasurement, decode_benchmark_command, decode_dataset_manifest,
+    SampleOutcome, decode_benchmark_command, decode_dataset_manifest,
 };
 
 const FIXED_ARTIFACTS: [&str; 9] = [
@@ -53,26 +54,39 @@ pub(crate) fn is_fixed_artifact(relative: &str) -> bool {
     FIXED_ARTIFACTS.contains(&relative)
 }
 
-pub(crate) fn validate_fixed_artifacts<B>(
-    artifacts: &BTreeMap<String, B>,
+pub(crate) trait FixedArtifactSource {
+    fn artifact_bytes(&self, name: &str) -> Option<&[u8]>;
+}
+
+impl<B> FixedArtifactSource for BTreeMap<String, B>
+where
+    B: AsRef<[u8]>,
+{
+    fn artifact_bytes(&self, name: &str) -> Option<&[u8]> {
+        self.get(name).map(AsRef::as_ref)
+    }
+}
+
+pub(crate) fn validate_fixed_artifacts<S>(
+    artifacts: &S,
     limits: BundleLimits,
 ) -> Result<(), BundleError>
 where
-    B: AsRef<[u8]>,
+    S: FixedArtifactSource + ?Sized,
 {
     let fixed = decode_fixed_artifacts(artifacts, limits)?;
     validate_fixed_bundle(&fixed, limits)
 }
 
-fn decode_fixed_artifacts<B>(
-    artifacts: &BTreeMap<String, B>,
+fn decode_fixed_artifacts<S>(
+    artifacts: &S,
     limits: BundleLimits,
 ) -> Result<FixedArtifacts, BundleError>
 where
-    B: AsRef<[u8]>,
+    S: FixedArtifactSource + ?Sized,
 {
     for name in FIXED_ARTIFACTS {
-        if !artifacts.contains_key(name) {
+        if artifacts.artifact_bytes(name).is_none() {
             return Err(BundleError::ArtifactSetMismatch);
         }
     }
@@ -93,6 +107,65 @@ where
         limits.max_raw_samples,
     )
     .map_err(map_parser_integrity_error)?;
+    for field in [
+        "adapter_versions",
+        "grammar_versions",
+        "grammar_source_package_checksums",
+        "grammar_hashes",
+    ] {
+        preflight_fixed_collection(
+            artifacts,
+            ENVIRONMENT_FILE,
+            &[field, "value"],
+            CollectionKind::Object,
+            limits.max_manifest_entries,
+            "evidence_map_entry_count",
+            false,
+            limits,
+        )?;
+    }
+    preflight_fixed_collection(
+        artifacts,
+        BUILD_PROVENANCE_FILE,
+        &["features"],
+        CollectionKind::Array,
+        limits.max_command_arguments,
+        "feature_count",
+        true,
+        limits,
+    )?;
+    preflight_fixed_collection(
+        artifacts,
+        SUMMARY_FILE,
+        &["families"],
+        CollectionKind::Object,
+        limits.max_manifest_entries,
+        "summary_family_count",
+        true,
+        limits,
+    )?;
+    for field in ["skipped", "parser_status"] {
+        preflight_fixed_collection(
+            artifacts,
+            COVERAGE_FILE,
+            &[field],
+            CollectionKind::Object,
+            limits.max_manifest_entries,
+            "coverage_entry_count",
+            true,
+            limits,
+        )?;
+    }
+    preflight_fixed_collection(
+        artifacts,
+        QUALITY_FILE,
+        &["unsupported_cases"],
+        CollectionKind::Object,
+        limits.max_manifest_entries,
+        "unsupported_case_count",
+        true,
+        limits,
+    )?;
     Ok(FixedArtifacts {
         environment: decode_json(fixed_bytes(artifacts, ENVIRONMENT_FILE)?, limits)?,
         dataset_manifest,
@@ -102,6 +175,7 @@ where
             schedule.len(),
             limits,
             "raw_sample_count",
+            None,
         )?,
         schedule,
         summary: decode_json(fixed_bytes(artifacts, SUMMARY_FILE)?, limits)?,
@@ -112,20 +186,48 @@ where
             limits.max_agent_trajectories,
             limits,
             "agent_trajectory_count",
+            Some((
+                &["tool_calls"],
+                CollectionKind::Array,
+                limits.max_command_arguments,
+                "trajectory_tool_call_count",
+            )),
         )?,
     })
 }
 
-fn fixed_bytes<'a, B>(
-    artifacts: &'a BTreeMap<String, B>,
-    name: &str,
-) -> Result<&'a [u8], BundleError>
+#[allow(clippy::too_many_arguments)]
+fn preflight_fixed_collection<S>(
+    artifacts: &S,
+    artifact: &str,
+    path: &[&'static str],
+    kind: CollectionKind,
+    maximum: usize,
+    resource: &'static str,
+    required: bool,
+    limits: BundleLimits,
+) -> Result<(), BundleError>
 where
-    B: AsRef<[u8]>,
+    S: FixedArtifactSource + ?Sized,
+{
+    let bytes = fixed_bytes(artifacts, artifact)?;
+    validate_json_bytes(bytes, limits)?;
+    preflight_artifact_collection(
+        &bytes[..bytes.len() - 1],
+        path,
+        kind,
+        maximum,
+        resource,
+        required,
+    )
+}
+
+fn fixed_bytes<'a, S>(artifacts: &'a S, name: &str) -> Result<&'a [u8], BundleError>
+where
+    S: FixedArtifactSource + ?Sized,
 {
     artifacts
-        .get(name)
-        .map(AsRef::as_ref)
+        .artifact_bytes(name)
         .ok_or(BundleError::ArtifactSetMismatch)
 }
 
@@ -145,6 +247,7 @@ fn decode_json_lines<T: DeserializeOwned + serde::Serialize>(
     maximum_count: usize,
     limits: BundleLimits,
     resource: &'static str,
+    collection_preflight: Option<(&[&'static str], CollectionKind, usize, &'static str)>,
 ) -> Result<Vec<T>, BundleError> {
     if bytes.is_empty() {
         return Ok(Vec::new());
@@ -169,6 +272,9 @@ fn decode_json_lines<T: DeserializeOwned + serde::Serialize>(
         }
         if values.len() >= maximum_count {
             return Err(BundleError::LimitExceeded { resource });
+        }
+        if let Some((path, kind, maximum, resource)) = collection_preflight {
+            preflight_artifact_collection(line, path, kind, maximum, resource, true)?;
         }
         let value =
             serde_json::from_slice(line).map_err(|_| BundleError::InvalidArtifactEncoding)?;
@@ -228,6 +334,7 @@ fn map_decode_error(error: crate::DecodeError) -> BundleError {
     match error {
         crate::DecodeError::Limits(source) => source,
         crate::DecodeError::LimitExceeded { resource } => BundleError::LimitExceeded { resource },
+        crate::DecodeError::AllocationFailed => BundleError::AllocationFailed,
         crate::DecodeError::InvalidSchema => BundleError::UnsupportedSchemaVersion,
         _ => BundleError::InvalidArtifactEncoding,
     }
@@ -474,18 +581,24 @@ fn validate_coverage(
     if !coverage.skipped.is_empty() {
         return Err(BundleError::ArtifactInvariantViolation);
     }
-    let mut statuses = manifest
-        .entries
-        .iter()
-        .map(|entry| (entry.id.clone(), "succeeded".to_owned()))
-        .collect::<BTreeMap<_, _>>();
+    let mut statuses = Vec::new();
+    statuses
+        .try_reserve_exact(manifest.entries.len())
+        .map_err(|_| BundleError::AllocationFailed)?;
+    statuses.extend(
+        manifest
+            .entries
+            .iter()
+            .map(|entry| (entry.id.as_str(), "succeeded")),
+    );
     for sample in samples.iter().filter(|sample| sample.phase == "trial") {
         let observed = outcome_status(&sample.outcome);
-        let status = statuses
-            .get_mut(&sample.dataset_entry_id)
-            .ok_or(BundleError::ArtifactInvariantViolation)?;
+        let index = statuses
+            .binary_search_by_key(&sample.dataset_entry_id.as_str(), |(entry, _)| *entry)
+            .map_err(|_| BundleError::ArtifactInvariantViolation)?;
+        let status = &mut statuses[index].1;
         if status_severity(observed) > status_severity(status) {
-            *status = observed.to_owned();
+            *status = observed;
         }
     }
     for (entry, status) in &coverage.parser_status {
@@ -501,12 +614,17 @@ fn validate_coverage(
         u64::try_from(statuses.len()).map_err(|_| BundleError::ArtifactInvariantViolation)?;
     let committed = u64::try_from(
         statuses
-            .values()
-            .filter(|status| **status == "succeeded")
+            .iter()
+            .filter(|(_, status)| *status == "succeeded")
             .count(),
     )
     .map_err(|_| BundleError::ArtifactInvariantViolation)?;
-    if coverage.parser_status != statuses
+    let statuses_match = coverage
+        .parser_status
+        .iter()
+        .map(|(entry, status)| (entry.as_str(), status.as_str()))
+        .eq(statuses.iter().copied());
+    if !statuses_match
         || coverage.attempted_entries != attempted
         || coverage.committed_entries != committed
     {
@@ -556,14 +674,13 @@ fn validate_quality(
     for category in quality.unsupported_cases.keys() {
         validate_label(category, limits)?;
     }
-    let measurement = SemanticQualityMeasurement {
-        precision_ppm: quality.precision_ppm.clone(),
-        recall_ppm: quality.recall_ppm.clone(),
-        expected_calibration_error_ppm: quality.expected_calibration_error_ppm.clone(),
-        unsupported_cases: quality.unsupported_cases.clone(),
-    };
     let fact_eligibility = semantic_fact_eligibility(samples);
-    let expected = semantic_quality_eligibility(&fact_eligibility, &measurement);
+    let expected = semantic_quality_eligibility_from_values(
+        &fact_eligibility,
+        &quality.precision_ppm,
+        &quality.recall_ppm,
+        &quality.expected_calibration_error_ppm,
+    );
     if quality.semantic_eligibility != expected || summary.semantic_eligibility != expected {
         return Err(BundleError::ArtifactInvariantViolation);
     }

@@ -3,7 +3,7 @@
 //! Raw external inputs cross this module's byte, collection, string, digest,
 //! path, and aggregate-size checks before becoming trusted model values.
 
-use std::{collections::BTreeSet, fmt};
+use std::fmt;
 
 use serde::{
     Deserialize,
@@ -52,7 +52,10 @@ pub fn decode_dataset_manifest(
 
     let mut total_source_bytes = 0_u64;
     let mut prior_id: Option<&str> = None;
-    let mut paths = BTreeSet::new();
+    let mut paths = Vec::new();
+    paths
+        .try_reserve_exact(input.entries.len())
+        .map_err(|_| DecodeError::AllocationFailed)?;
     for entry in &input.entries {
         validate_string(&entry.id, limits, StringKind::Label)?;
         validate_string(&entry.grammar_family, limits, StringKind::Label)?;
@@ -63,9 +66,7 @@ pub fn decode_dataset_manifest(
             return Err(DecodeError::NonCanonicalOrder);
         }
         prior_id = Some(&entry.id);
-        if !paths.insert(entry.relative_path.as_str()) {
-            return Err(DecodeError::DuplicatePath);
-        }
+        paths.push(entry.relative_path.as_str());
         if entry.source_bytes > limits.max_snapshot_bytes {
             return Err(DecodeError::LimitExceeded {
                 resource: "snapshot_bytes",
@@ -92,6 +93,10 @@ pub fn decode_dataset_manifest(
             return Err(DecodeError::InvalidPhysicalLineCount);
         }
     }
+    paths.sort_unstable();
+    if paths.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(DecodeError::DuplicatePath);
+    }
 
     Ok(DatasetManifest {
         schema_version: input.schema_version,
@@ -99,20 +104,7 @@ pub fn decode_dataset_manifest(
         revision: input.revision,
         scope_rule: input.scope_rule,
         loc_counting_rule: input.loc_counting_rule,
-        entries: input
-            .entries
-            .into_iter()
-            .map(|entry| DatasetEntry {
-                id: entry.id,
-                grammar_family: entry.grammar_family,
-                language: entry.language,
-                relative_path: entry.relative_path,
-                source_sha256: entry.source_sha256,
-                source_bytes: entry.source_bytes,
-                physical_lines: entry.physical_lines,
-                generated: entry.generated,
-            })
-            .collect(),
+        entries: input.entries,
     })
 }
 
@@ -191,6 +183,139 @@ fn preflight_array_field(
         return Err(DecodeError::LimitExceeded { resource });
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CollectionKind {
+    Array,
+    Object,
+}
+
+pub(crate) fn preflight_artifact_collection(
+    bytes: &[u8],
+    path: &[&'static str],
+    kind: CollectionKind,
+    maximum: usize,
+    resource: &'static str,
+    required: bool,
+) -> Result<(), BundleError> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let count = ObjectPathCountSeed { path, kind }
+        .deserialize(&mut deserializer)
+        .map_err(|_| BundleError::InvalidArtifactEncoding)?;
+    deserializer
+        .end()
+        .map_err(|_| BundleError::InvalidArtifactEncoding)?;
+    let count = match count {
+        Some(count) => count,
+        None if !required => return Ok(()),
+        None => return Err(BundleError::InvalidArtifactEncoding),
+    };
+    if count > maximum {
+        return Err(BundleError::LimitExceeded { resource });
+    }
+    Ok(())
+}
+
+struct ObjectPathCountSeed<'a> {
+    path: &'a [&'static str],
+    kind: CollectionKind,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for ObjectPathCountSeed<'_> {
+    type Value = Option<usize>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if self.path.is_empty() {
+            return Err(serde::de::Error::custom("collection path is empty"));
+        }
+        deserializer.deserialize_map(ObjectPathCountVisitor {
+            path: self.path,
+            kind: self.kind,
+        })
+    }
+}
+
+struct ObjectPathCountVisitor<'a> {
+    path: &'a [&'static str],
+    kind: CollectionKind,
+}
+
+impl<'de> Visitor<'de> for ObjectPathCountVisitor<'_> {
+    type Value = Option<usize>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a benchmark JSON object containing a bounded collection")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut count = None;
+        while let Some(key) = map.next_key::<&str>()? {
+            if key == self.path[0] {
+                if count.is_some() {
+                    return Err(serde::de::Error::duplicate_field(self.path[0]));
+                }
+                count = if self.path.len() == 1 {
+                    Some(map.next_value_seed(CollectionCountSeed { kind: self.kind })?)
+                } else {
+                    map.next_value_seed(ObjectPathCountSeed {
+                        path: &self.path[1..],
+                        kind: self.kind,
+                    })?
+                };
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(count)
+    }
+}
+
+struct CollectionCountSeed {
+    kind: CollectionKind,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for CollectionCountSeed {
+    type Value = usize;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match self.kind {
+            CollectionKind::Array => deserializer.deserialize_seq(ArrayCountVisitor),
+            CollectionKind::Object => deserializer.deserialize_map(MapCountVisitor),
+        }
+    }
+}
+
+struct MapCountVisitor;
+
+impl<'de> Visitor<'de> for MapCountVisitor {
+    type Value = usize;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a benchmark JSON object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut count = 0_usize;
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| serde::de::Error::custom("object count overflow"))?;
+        }
+        Ok(count)
+    }
 }
 
 struct ObjectArrayCountSeed {
@@ -342,20 +467,7 @@ struct DatasetManifestInput {
     revision: String,
     scope_rule: String,
     loc_counting_rule: String,
-    entries: Vec<DatasetEntryInput>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DatasetEntryInput {
-    id: String,
-    grammar_family: String,
-    language: String,
-    relative_path: String,
-    source_sha256: String,
-    source_bytes: u64,
-    physical_lines: u64,
-    generated: bool,
+    entries: Vec<DatasetEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -386,6 +498,9 @@ pub enum DecodeError {
     /// The input is not strict JSON for the expected document shape.
     #[error("benchmark input JSON is invalid")]
     InvalidJson,
+    /// A bounded decoder reservation could not be satisfied.
+    #[error("benchmark input allocation failed")]
+    AllocationFailed,
     /// The schema version is unsupported.
     #[error("benchmark input schema is invalid")]
     InvalidSchema,

@@ -709,6 +709,20 @@ pub(crate) fn semantic_quality_eligibility(
     fact_eligibility: &Availability,
     quality: &SemanticQualityMeasurement,
 ) -> Availability {
+    semantic_quality_eligibility_from_values(
+        fact_eligibility,
+        &quality.precision_ppm,
+        &quality.recall_ppm,
+        &quality.expected_calibration_error_ppm,
+    )
+}
+
+pub(crate) fn semantic_quality_eligibility_from_values(
+    fact_eligibility: &Availability,
+    precision: &EvidenceValue<u64>,
+    recall: &EvidenceValue<u64>,
+    calibration_error: &EvidenceValue<u64>,
+) -> Availability {
     if !matches!(fact_eligibility, Availability::Available) {
         return fact_eligibility.clone();
     }
@@ -720,11 +734,7 @@ pub(crate) fn semantic_quality_eligibility(
         EvidenceValue::Observed {
             value: calibration_error_ppm,
         },
-    ) = (
-        &quality.precision_ppm,
-        &quality.recall_ppm,
-        &quality.expected_calibration_error_ppm,
-    )
+    ) = (precision, recall, calibration_error)
     else {
         return Availability::Unavailable {
             reason_code: "semantic_quality_not_measured".to_owned(),
