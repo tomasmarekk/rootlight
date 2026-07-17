@@ -1332,7 +1332,7 @@ impl PreparedOperationSubmission {
             .map_err(|_| OperationPreparationError::InvalidTimeout)?,
             Some(deadline),
             None,
-            DeadlineRetry::ReanchoredRelative,
+            DeadlineRetry::ReanchoredRelative { timeout_ms },
         )
     }
 
@@ -3838,10 +3838,9 @@ fn operation_submission_from_wire(
         .map(|(target, clock)| monotonic_target(clock, target))
         .transpose()
         .map_err(operation_preparation_public)?;
-    let deadline_retry = if request.timeout_ms.is_some() {
-        DeadlineRetry::ReanchoredRelative
-    } else {
-        DeadlineRetry::Exact
+    let deadline_retry = match request.timeout_ms {
+        Some(timeout_ms) => DeadlineRetry::ReanchoredRelative { timeout_ms },
+        None => DeadlineRetry::Exact,
     };
     PreparedOperationSubmission::new_with_deadline_retry(
         submission,
@@ -5499,7 +5498,10 @@ mod tests {
             relative.deadline,
             Some(monotonic_before_wall + Duration::from_millis(100))
         );
-        assert_eq!(relative.deadline_retry, DeadlineRetry::ReanchoredRelative);
+        assert_eq!(
+            relative.deadline_retry,
+            DeadlineRetry::ReanchoredRelative { timeout_ms: 100 }
+        );
 
         let absolute = monotonic_target(clock, 1_500).expect("absolute deadline fits");
         assert_eq!(absolute, monotonic_before_wall + Duration::from_millis(249));

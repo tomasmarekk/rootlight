@@ -32,16 +32,23 @@ pub const MAX_PUBLIC_ERROR_BYTES: usize = 16 * 1024;
 /// Minimum bundled SQLite version required by the P1 catalog.
 pub const MIN_SQLITE_VERSION_NUMBER: i32 = 3_051_003;
 /// Current operation-journal schema version.
-pub const OPERATION_SCHEMA_VERSION: u32 = 2;
+pub const OPERATION_SCHEMA_VERSION: u32 = 3;
 /// SQLite application identifier for Rootlight's per-user catalog.
 pub const CATALOG_APPLICATION_ID: u32 = 0x5254_4c54;
 /// Bounded wait for transient catalog contention.
 pub const CATALOG_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
-const OPERATION_SCHEMA_MIGRATION_ID: u32 = 2;
+const OPERATION_SCHEMA_MIGRATION_ID: u32 = 3;
 // SHA-256 of the three canonical schema statements in `migration_checksum_input`;
 // change this reviewed ledger value rather than silently accepting schema drift.
 const OPERATION_SCHEMA_MIGRATION_CHECKSUM: [u8; 32] = [
+    0x0a, 0xc6, 0x43, 0xfe, 0xca, 0x7f, 0x37, 0x08, 0x63, 0x21, 0x22, 0x07, 0x36, 0xf3, 0xa1, 0xa0,
+    0x39, 0x65, 0x59, 0x27, 0x65, 0xb6, 0xe0, 0xf5, 0xc0, 0x05, 0xdd, 0xc0, 0x0a, 0x4b, 0x53, 0xec,
+];
+// Version-two catalogs must authenticate against their original reviewed
+// ledger entry before any migration rewrites durable rows.
+const VERSION_TWO_SCHEMA_MIGRATION_ID: u32 = 2;
+const VERSION_TWO_SCHEMA_MIGRATION_CHECKSUM: [u8; 32] = [
     0x38, 0x93, 0xf3, 0xf0, 0x33, 0x07, 0xb8, 0x8e, 0x9c, 0x15, 0x64, 0xa5, 0x53, 0x6f, 0x76, 0x92,
     0x55, 0xe3, 0xbd, 0xc9, 0x36, 0x57, 0x73, 0x57, 0x4e, 0xfd, 0xfc, 0x8a, 0x09, 0xe6, 0x66, 0xfe,
 ];
@@ -209,8 +216,20 @@ pub struct OperationSubmission {
 pub enum DeadlineRetry {
     /// Requires the submitted absolute deadline to match durable metadata exactly.
     Exact,
-    /// Matches the timed/untimed shape of detached work whose relative timeout was re-anchored.
-    ReanchoredRelative,
+    /// Matches detached work whose identical relative timeout was re-anchored.
+    ReanchoredRelative {
+        /// Original relative timeout, before conversion to an audit wall-clock deadline.
+        timeout_ms: u64,
+    },
+}
+
+impl DeadlineRetry {
+    const fn relative_timeout_ms(self) -> Option<u64> {
+        match self {
+            Self::Exact => None,
+            Self::ReanchoredRelative { timeout_ms } => Some(timeout_ms),
+        }
+    }
 }
 
 impl OperationSubmission {
@@ -506,11 +525,13 @@ impl OperationJournal {
         submission: OperationSubmission,
         deadline_retry: DeadlineRetry,
     ) -> Result<SubmissionOutcome, OperationError> {
-        validate_submission(submission)?;
+        validate_submission_with_retry(submission, deadline_retry)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
-        if let Some(existing) = load_record(&transaction, submission.operation)? {
-            if submission_matches(&existing, submission, deadline_retry) {
+        if let Some((existing, stored_timeout_ms)) =
+            load_record_with_retry_intent(&transaction, submission.operation)?
+        {
+            if submission_matches(&existing, stored_timeout_ms, submission, deadline_retry) {
                 transaction.commit().map_err(map_sqlite_error)?;
                 return Ok(SubmissionOutcome {
                     inserted: false,
@@ -524,11 +545,11 @@ impl OperationJournal {
             .execute(
                 "INSERT INTO operations (
                     operation, kind, plan_hash, owner, detached, deadline_unix_ms,
-                    lease_expires_unix_ms, state, stage, cancellation_requested,
+                    relative_timeout_ms, lease_expires_unix_ms, state, stage, cancellation_requested,
                     cancellation_reason, recovery_class, revision, completed, total,
                     error_json, sequence
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 'accepted', 0,
-                           NULL, 'not_applicable', 1, 0, 0, NULL, ?8)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'queued', 'accepted', 0,
+                           NULL, 'not_applicable', 1, 0, 0, NULL, ?9)",
                 params![
                     submission.operation.as_bytes().as_slice(),
                     submission.kind.as_str(),
@@ -536,6 +557,7 @@ impl OperationJournal {
                     submission.owner.as_bytes().as_slice(),
                     bool_to_i64(submission.detached),
                     optional_u64_to_i64(submission.deadline_unix_ms)?,
+                    optional_u64_to_i64(deadline_retry.relative_timeout_ms())?,
                     optional_u64_to_i64(submission.lease_expires_unix_ms)?,
                     sequence,
                 ],
@@ -576,11 +598,12 @@ impl OperationJournal {
         submission: OperationSubmission,
         deadline_retry: DeadlineRetry,
     ) -> Result<OperationRecord, OperationError> {
-        validate_submission(submission)?;
+        validate_submission_with_retry(submission, deadline_retry)?;
         let connection = self.lock_connection()?;
-        let existing =
-            load_record(&connection, submission.operation)?.ok_or(OperationError::NotFound)?;
-        if submission_matches(&existing, submission, deadline_retry) {
+        let (existing, stored_timeout_ms) =
+            load_record_with_retry_intent(&connection, submission.operation)?
+                .ok_or(OperationError::NotFound)?;
+        if submission_matches(&existing, stored_timeout_ms, submission, deadline_retry) {
             Ok(existing)
         } else {
             Err(OperationError::SubmissionConflict)
@@ -1538,6 +1561,10 @@ fn migrate_schema(
         0 if !table_exists(&transaction, "operations")? => create_schema(&transaction)?,
         0 if is_prototype_schema(&transaction)? => migrate_prototype(&transaction)?,
         1 if is_version_one_operations_schema(&transaction)? => migrate_version_one(&transaction)?,
+        2 if is_version_two_operations_schema(&transaction)? => {
+            validate_version_two_catalog_identity(&transaction)?;
+            migrate_version_two(&transaction)?;
+        }
         _ => return Err(OperationError::UnsupportedLegacySchema),
     }
     record_catalog_metadata(&transaction)?;
@@ -1595,7 +1622,7 @@ const VERSION_ONE_OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
                 CHECK((state = 'interrupted' AND recovery_class != 'not_applicable')
                    OR (state != 'interrupted' AND recovery_class = 'not_applicable'))
             )";
-const OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
+const VERSION_TWO_OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
                 operation BLOB PRIMARY KEY NOT NULL CHECK(length(operation) = 16),
                 kind TEXT NOT NULL CHECK(kind IN ('control_probe')),
                 plan_hash BLOB NOT NULL CHECK(length(plan_hash) = 32),
@@ -1624,6 +1651,45 @@ const OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
                 CHECK(total = 0 OR completed <= total),
                 CHECK((detached = 1 AND lease_expires_unix_ms IS NULL)
                    OR (detached = 0 AND lease_expires_unix_ms IS NOT NULL)),
+                CHECK((cancellation_requested = 0 AND cancellation_reason IS NULL)
+                   OR (cancellation_requested = 1 AND cancellation_reason IS NOT NULL)),
+                CHECK((state = 'failed' AND error_json IS NOT NULL)
+                   OR (state != 'failed' AND error_json IS NULL)),
+                CHECK((state = 'interrupted' AND recovery_class != 'not_applicable')
+                   OR (state != 'interrupted' AND recovery_class = 'not_applicable'))
+            ) STRICT";
+const OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
+                operation BLOB PRIMARY KEY NOT NULL CHECK(length(operation) = 16),
+                kind TEXT NOT NULL CHECK(kind IN ('control_probe')),
+                plan_hash BLOB NOT NULL CHECK(length(plan_hash) = 32),
+                owner BLOB NOT NULL CHECK(length(owner) = 16),
+                detached INTEGER NOT NULL CHECK(detached IN (0, 1)),
+                deadline_unix_ms INTEGER CHECK(deadline_unix_ms > 0),
+                relative_timeout_ms INTEGER CHECK(relative_timeout_ms > 0),
+                lease_expires_unix_ms INTEGER CHECK(lease_expires_unix_ms > 0),
+                state TEXT NOT NULL CHECK(state IN (
+                    'queued', 'running', 'cancelling', 'succeeded', 'failed',
+                    'cancelled', 'interrupted'
+                )),
+                stage TEXT NOT NULL CHECK(stage IN ('accepted', 'executing', 'cleanup')),
+                cancellation_requested INTEGER NOT NULL CHECK(cancellation_requested IN (0, 1)),
+                cancellation_reason TEXT CHECK(cancellation_reason IN (
+                    'client_request', 'parent_cancelled', 'deadline_exceeded',
+                    'shutdown', 'resource_limit'
+                )),
+                recovery_class TEXT NOT NULL CHECK(recovery_class IN (
+                    'not_applicable', 'interrupted_by_restart', 'deadline_elapsed', 'lease_expired'
+                )),
+                revision INTEGER NOT NULL CHECK(revision >= 1),
+                completed INTEGER NOT NULL CHECK(completed >= 0 AND completed <= 4294967295),
+                total INTEGER NOT NULL CHECK(total >= 0 AND total <= 4294967295),
+                error_json TEXT CHECK(length(error_json) <= 16384),
+                sequence INTEGER NOT NULL UNIQUE CHECK(sequence >= 1),
+                CHECK(total = 0 OR completed <= total),
+                CHECK((detached = 1 AND lease_expires_unix_ms IS NULL)
+                   OR (detached = 0 AND lease_expires_unix_ms IS NOT NULL)),
+                CHECK(relative_timeout_ms IS NULL
+                   OR (detached = 1 AND deadline_unix_ms IS NOT NULL)),
                 CHECK((cancellation_requested = 0 AND cancellation_reason IS NULL)
                    OR (cancellation_requested = 1 AND cancellation_reason IS NOT NULL)),
                 CHECK((state = 'failed' AND error_json IS NOT NULL)
@@ -1667,11 +1733,11 @@ fn migrate_prototype(transaction: &Transaction<'_>) -> Result<(), OperationError
         .execute(
             "INSERT INTO operations (
                 operation, kind, plan_hash, owner, detached, deadline_unix_ms,
-                lease_expires_unix_ms, state, stage, cancellation_requested,
+                relative_timeout_ms, lease_expires_unix_ms, state, stage, cancellation_requested,
                 cancellation_reason, recovery_class, revision, completed, total,
                 error_json, sequence
              ) SELECT operation, 'control_probe', zeroblob(32), zeroblob(16), 1,
-                      NULL, NULL, state, 'accepted',
+                      NULL, NULL, NULL, state, 'accepted',
                       CASE WHEN state = 'cancelling' THEN 1 ELSE 0 END,
                       CASE WHEN state = 'cancelling' THEN 'client_request' ELSE NULL END,
                       CASE WHEN state = 'interrupted' THEN 'interrupted_by_restart'
@@ -1695,15 +1761,41 @@ fn migrate_version_one(transaction: &Transaction<'_>) -> Result<(), OperationErr
         .execute_batch(
             "INSERT INTO operations (
                 operation, kind, plan_hash, owner, detached, deadline_unix_ms,
-                lease_expires_unix_ms, state, stage, cancellation_requested,
+                relative_timeout_ms, lease_expires_unix_ms, state, stage, cancellation_requested,
                 cancellation_reason, recovery_class, revision, completed, total,
                 error_json, sequence
              ) SELECT operation, kind, plan_hash, owner, detached, deadline_unix_ms,
-                      lease_expires_unix_ms, state, stage, cancellation_requested,
+                      NULL, lease_expires_unix_ms, state, stage, cancellation_requested,
                       cancellation_reason, recovery_class, revision, completed, total,
                       error_json, sequence
                FROM operations_v1;
              DROP TABLE operations_v1;",
+        )
+        .map_err(map_sqlite_error)
+}
+
+fn migrate_version_two(transaction: &Transaction<'_>) -> Result<(), OperationError> {
+    transaction
+        .execute_batch("ALTER TABLE operations RENAME TO operations_v2;")
+        .map_err(map_sqlite_error)?;
+    transaction
+        .execute_batch(OPERATIONS_SCHEMA_SQL)
+        .map_err(map_sqlite_error)?;
+    // Version two stored only the derived wall deadline. Leaving the intent
+    // absent rejects relative retries instead of guessing their old timeout.
+    transaction
+        .execute_batch(
+            "INSERT INTO operations (
+                operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                relative_timeout_ms, lease_expires_unix_ms, state, stage,
+                cancellation_requested, cancellation_reason, recovery_class, revision,
+                completed, total, error_json, sequence
+             ) SELECT operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                      NULL, lease_expires_unix_ms, state, stage, cancellation_requested,
+                      cancellation_reason, recovery_class, revision, completed, total,
+                      error_json, sequence
+               FROM operations_v2;
+             DROP TABLE operations_v2;",
         )
         .map_err(map_sqlite_error)
 }
@@ -1796,6 +1888,35 @@ fn validate_catalog_identity(connection: &Connection) -> Result<(), OperationErr
     Ok(())
 }
 
+fn validate_version_two_catalog_identity(connection: &Connection) -> Result<(), OperationError> {
+    if pragma_u32(connection, "application_id")? != CATALOG_APPLICATION_ID {
+        return Err(OperationError::ForeignCatalog);
+    }
+    let kind: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT value FROM application_meta WHERE key = 'catalog_kind'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    if kind.as_deref() != Some(b"rootlight".as_slice()) {
+        return Err(OperationError::ForeignCatalog);
+    }
+    let checksum: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT checksum FROM migrations WHERE migration_id = ?1",
+            [VERSION_TWO_SCHEMA_MIGRATION_ID],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    if checksum.as_deref() != Some(VERSION_TWO_SCHEMA_MIGRATION_CHECKSUM.as_slice()) {
+        return Err(OperationError::MigrationChecksumMismatch);
+    }
+    Ok(())
+}
+
 fn validate_schema(connection: &Connection, storage: CatalogStorage) -> Result<(), OperationError> {
     let columns = table_columns(connection)?;
     let expected = [
@@ -1805,6 +1926,7 @@ fn validate_schema(connection: &Connection, storage: CatalogStorage) -> Result<(
         "owner",
         "detached",
         "deadline_unix_ms",
+        "relative_timeout_ms",
         "lease_expires_unix_ms",
         "state",
         "stage",
@@ -1953,6 +2075,32 @@ fn is_version_one_operations_schema(connection: &Connection) -> Result<bool, Ope
             == normalize_sql(VERSION_ONE_OPERATIONS_SCHEMA_SQL))
 }
 
+fn is_version_two_operations_schema(connection: &Connection) -> Result<bool, OperationError> {
+    Ok(table_columns(connection)?
+        == [
+            "operation",
+            "kind",
+            "plan_hash",
+            "owner",
+            "detached",
+            "deadline_unix_ms",
+            "lease_expires_unix_ms",
+            "state",
+            "stage",
+            "cancellation_requested",
+            "cancellation_reason",
+            "recovery_class",
+            "revision",
+            "completed",
+            "total",
+            "error_json",
+            "sequence",
+        ]
+        && table_is_strict(connection, "operations")?
+        && normalize_sql(&table_definition(connection, "operations")?)
+            == normalize_sql(VERSION_TWO_OPERATIONS_SCHEMA_SQL))
+}
+
 fn table_columns(connection: &Connection) -> Result<Vec<String>, OperationError> {
     table_columns_named(connection, "operations")
 }
@@ -1978,10 +2126,18 @@ fn load_record(
     connection: &Connection,
     operation: OperationId,
 ) -> Result<Option<OperationRecord>, OperationError> {
+    Ok(load_record_with_retry_intent(connection, operation)?
+        .map(|(record, _relative_timeout_ms)| record))
+}
+
+fn load_record_with_retry_intent(
+    connection: &Connection,
+    operation: OperationId,
+) -> Result<Option<(OperationRecord, Option<u64>)>, OperationError> {
     let raw = connection
         .query_row(
             "SELECT kind, plan_hash, owner, detached, deadline_unix_ms,
-                    lease_expires_unix_ms, state, stage, cancellation_requested,
+                    relative_timeout_ms, lease_expires_unix_ms, state, stage, cancellation_requested,
                     cancellation_reason, recovery_class, revision, completed, total,
                     error_json
              FROM operations WHERE operation = ?1",
@@ -1993,22 +2149,33 @@ fn load_record(
                     owner: row.get(2)?,
                     detached: row.get(3)?,
                     deadline_unix_ms: row.get(4)?,
-                    lease_expires_unix_ms: row.get(5)?,
-                    state: row.get(6)?,
-                    stage: row.get(7)?,
-                    cancellation_requested: row.get(8)?,
-                    cancellation_reason: row.get(9)?,
-                    recovery_class: row.get(10)?,
-                    revision: row.get(11)?,
-                    completed: row.get(12)?,
-                    total: row.get(13)?,
-                    error_json: row.get(14)?,
+                    relative_timeout_ms: row.get(5)?,
+                    lease_expires_unix_ms: row.get(6)?,
+                    state: row.get(7)?,
+                    stage: row.get(8)?,
+                    cancellation_requested: row.get(9)?,
+                    cancellation_reason: row.get(10)?,
+                    recovery_class: row.get(11)?,
+                    revision: row.get(12)?,
+                    completed: row.get(13)?,
+                    total: row.get(14)?,
+                    error_json: row.get(15)?,
                 })
             },
         )
         .optional()
         .map_err(map_sqlite_error)?;
-    raw.map(|raw| decode_record(operation, raw)).transpose()
+    raw.map(|raw| {
+        let relative_timeout_ms = optional_nonnegative_i64_to_u64(raw.relative_timeout_ms)?;
+        if relative_timeout_ms == Some(0)
+            || relative_timeout_ms.is_some()
+                && (raw.detached != 1 || raw.deadline_unix_ms.is_none())
+        {
+            return Err(OperationError::CorruptState);
+        }
+        decode_record(operation, raw).map(|record| (record, relative_timeout_ms))
+    })
+    .transpose()
 }
 
 struct RawRecord {
@@ -2017,6 +2184,7 @@ struct RawRecord {
     owner: Vec<u8>,
     detached: i64,
     deadline_unix_ms: Option<i64>,
+    relative_timeout_ms: Option<i64>,
     lease_expires_unix_ms: Option<i64>,
     state: String,
     stage: String,
@@ -2169,6 +2337,7 @@ fn recovery_for(record: &OperationRecord, now_unix_ms: u64) -> RecoveryClass {
 
 fn submission_matches(
     record: &OperationRecord,
+    stored_timeout_ms: Option<u64>,
     submission: OperationSubmission,
     deadline_retry: DeadlineRetry,
 ) -> bool {
@@ -2178,21 +2347,42 @@ fn submission_matches(
         && record.plan_hash == submission.plan_hash
         && owner_matches
         && record.detached == submission.detached
-        && deadline_matches(record, submission, deadline_retry)
+        && deadline_matches(record, stored_timeout_ms, submission, deadline_retry)
         && record.lease_expires_unix_ms == submission.lease_expires_unix_ms
 }
 
 fn deadline_matches(
     record: &OperationRecord,
+    stored_timeout_ms: Option<u64>,
     submission: OperationSubmission,
     deadline_retry: DeadlineRetry,
 ) -> bool {
-    match deadline_retry {
-        DeadlineRetry::Exact => record.deadline_unix_ms == submission.deadline_unix_ms,
-        DeadlineRetry::ReanchoredRelative if record.detached && submission.detached => {
-            record.deadline_unix_ms.is_some() == submission.deadline_unix_ms.is_some()
+    match (stored_timeout_ms, deadline_retry) {
+        (None, DeadlineRetry::Exact) => record.deadline_unix_ms == submission.deadline_unix_ms,
+        (Some(stored_timeout_ms), DeadlineRetry::ReanchoredRelative { timeout_ms })
+            if record.detached && submission.detached =>
+        {
+            stored_timeout_ms == timeout_ms
+                && record.deadline_unix_ms.is_some()
+                && submission.deadline_unix_ms.is_some()
         }
-        DeadlineRetry::ReanchoredRelative => record.deadline_unix_ms == submission.deadline_unix_ms,
+        _ => false,
+    }
+}
+
+fn validate_submission_with_retry(
+    submission: OperationSubmission,
+    deadline_retry: DeadlineRetry,
+) -> Result<(), OperationError> {
+    validate_submission(submission)?;
+    match deadline_retry {
+        DeadlineRetry::Exact => Ok(()),
+        DeadlineRetry::ReanchoredRelative { timeout_ms }
+            if timeout_ms > 0 && submission.detached && submission.deadline_unix_ms.is_some() =>
+        {
+            Ok(())
+        }
+        DeadlineRetry::ReanchoredRelative { .. } => Err(OperationError::InvalidSubmission),
     }
 }
 
@@ -2960,40 +3150,66 @@ mod tests {
     }
 
     #[test]
-    fn reanchored_relative_retry_preserves_the_first_deadline() {
-        let journal = OperationJournal::open_in_memory().expect("journal opens");
+    fn reanchored_relative_retry_requires_the_original_timeout_intent() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let journal = OperationJournal::open(&path).expect("journal opens");
         let first = OperationSubmission::new(
             operation(31),
             OperationKind::ControlProbe,
             PlanHash::from_bytes([3; 32]),
             ClientInstanceId::new([1; 16]).expect("client identity is valid"),
             true,
-            Some(100),
+            Some(4_000_000_000_000),
             None,
         )
         .expect("submission is valid");
-        let submitted = journal.submit(first).expect("submission succeeds");
+        let retry_intent = DeadlineRetry::ReanchoredRelative { timeout_ms: 100 };
+        let submitted = journal
+            .submit_with_deadline_retry(first, retry_intent)
+            .expect("submission succeeds");
+        drop(journal);
+        let journal = OperationJournal::open(&path).expect("journal reopens");
         let retry = OperationSubmission {
             owner: ClientInstanceId::new([2; 16]).expect("client identity is valid"),
-            deadline_unix_ms: Some(200),
+            deadline_unix_ms: Some(4_000_000_000_100),
             ..first
         };
         let observed = journal
-            .submit_with_deadline_retry(retry, DeadlineRetry::ReanchoredRelative)
+            .submit_with_deadline_retry(retry, retry_intent)
             .expect("relative retry succeeds");
 
         assert!(!observed.inserted);
-        assert_eq!(observed.operation, submitted.operation);
-        assert_eq!(observed.operation.deadline_unix_ms, Some(100));
+        assert_eq!(observed.operation.operation, submitted.operation.operation);
+        assert_eq!(observed.operation.plan_hash, submitted.operation.plan_hash);
+        assert_eq!(observed.operation.deadline_unix_ms, Some(4_000_000_000_000));
         assert!(matches!(
             journal.submit_with_deadline_retry(
-                OperationSubmission {
-                    deadline_unix_ms: None,
-                    ..retry
-                },
-                DeadlineRetry::ReanchoredRelative,
+                retry,
+                DeadlineRetry::ReanchoredRelative { timeout_ms: 200 },
             ),
             Err(OperationError::SubmissionConflict)
+        ));
+        assert!(matches!(
+            journal.submit(OperationSubmission {
+                deadline_unix_ms: None,
+                ..retry
+            }),
+            Err(OperationError::SubmissionConflict)
+        ));
+        assert!(matches!(
+            journal.submit(OperationSubmission {
+                deadline_unix_ms: Some(4_000_000_000_000),
+                ..retry
+            }),
+            Err(OperationError::SubmissionConflict)
+        ));
+        assert!(matches!(
+            journal.submit_with_deadline_retry(
+                retry,
+                DeadlineRetry::ReanchoredRelative { timeout_ms: 0 },
+            ),
+            Err(OperationError::InvalidSubmission)
         ));
     }
 
@@ -3495,6 +3711,107 @@ mod tests {
             .expect("strict schema flag reads")
         );
         migrated.quick_check().expect("migrated catalog validates");
+    }
+
+    #[test]
+    fn version_two_schema_migrates_without_inventing_relative_timeout_intent() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let submitted = OperationSubmission::new(
+            operation(23),
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes([8; 32]),
+            ClientInstanceId::new([9; 16]).expect("client identity is valid"),
+            true,
+            Some(4_000_000_000_000),
+            None,
+        )
+        .expect("submission is valid");
+        {
+            let connection = Connection::open(&path).expect("database opens");
+            for statement in [
+                APPLICATION_META_SCHEMA_SQL,
+                MIGRATIONS_SCHEMA_SQL,
+                VERSION_TWO_OPERATIONS_SCHEMA_SQL,
+            ] {
+                connection
+                    .execute_batch(statement)
+                    .expect("version-two schema creates");
+            }
+            connection
+                .execute(
+                    "INSERT INTO application_meta(key, value) VALUES ('catalog_kind', ?1)",
+                    [b"rootlight".as_slice()],
+                )
+                .expect("catalog identity inserts");
+            connection
+                .execute(
+                    "INSERT INTO migrations(migration_id, checksum) VALUES (?1, ?2)",
+                    params![
+                        VERSION_TWO_SCHEMA_MIGRATION_ID,
+                        VERSION_TWO_SCHEMA_MIGRATION_CHECKSUM.as_slice(),
+                    ],
+                )
+                .expect("version-two ledger inserts");
+            connection
+                .execute(
+                    "INSERT INTO operations (
+                        operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                        lease_expires_unix_ms, state, stage, cancellation_requested,
+                        cancellation_reason, recovery_class, revision, completed, total,
+                        error_json, sequence
+                     ) VALUES (?1, 'control_probe', ?2, ?3, 1, ?4, NULL, 'succeeded',
+                               'cleanup', 0, NULL, 'not_applicable', 1, 1, 1, NULL, 1)",
+                    params![
+                        submitted.operation.as_bytes().as_slice(),
+                        submitted.plan_hash.as_bytes().as_slice(),
+                        submitted.owner.as_bytes().as_slice(),
+                        u64_to_i64(submitted.deadline_unix_ms.expect("deadline exists"))
+                            .expect("deadline fits SQLite"),
+                    ],
+                )
+                .expect("version-two row inserts");
+            connection
+                .pragma_update(None, "application_id", CATALOG_APPLICATION_ID)
+                .expect("application marker writes");
+            connection
+                .pragma_update(None, "user_version", 2)
+                .expect("version-two marker writes");
+        }
+
+        let migrated = OperationJournal::open(&path).expect("version-two schema migrates");
+        assert_eq!(
+            migrated
+                .submit(submitted)
+                .expect("exact retry remains compatible")
+                .operation,
+            migrated
+                .status(submitted.operation)
+                .expect("migrated row loads")
+        );
+        assert!(matches!(
+            migrated.submit_with_deadline_retry(
+                OperationSubmission {
+                    deadline_unix_ms: Some(4_000_000_000_100),
+                    ..submitted
+                },
+                DeadlineRetry::ReanchoredRelative { timeout_ms: 100 },
+            ),
+            Err(OperationError::SubmissionConflict)
+        ));
+        let connection = migrated.lock_connection().expect("catalog lock is healthy");
+        let relative_timeout_ms = connection
+            .query_row(
+                "SELECT relative_timeout_ms FROM operations WHERE operation = ?1",
+                [submitted.operation.as_bytes().as_slice()],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .expect("retry intent reads");
+        assert_eq!(relative_timeout_ms, None);
+        assert_eq!(
+            pragma_u32(&connection, "user_version").expect("schema version reads"),
+            OPERATION_SCHEMA_VERSION
+        );
     }
 
     #[test]
