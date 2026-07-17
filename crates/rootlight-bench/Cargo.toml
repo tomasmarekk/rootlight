@@ -7,6 +7,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+cap-fs-ext.workspace = true
+cap-std.workspace = true
+getrandom = { workspace = true, features = ["std"] }
 rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
 rootlight-cancel = { path = "../rootlight-cancel" }
@@ -18,6 +21,12 @@ serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+renamore.workspace = true
 
 [lints]
 workspace = true
