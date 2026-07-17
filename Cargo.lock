@@ -1689,6 +1689,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootlight-storage"
+version = "0.1.0"
+dependencies = [
+ "rootlight-cancel",
+ "rootlight-ids",
+ "rootlight-ir",
+ "thiserror",
+]
+
+[[package]]
 name = "rootlight-vfs"
 version = "0.1.0"
 dependencies = [

@@ -19,6 +19,7 @@ workspace_members = [
   "rootlight-operations",
   "rootlight-protocol",
   "rootlight-runtime",
+  "rootlight-storage",
   "rootlight-vfs",
   "xtask",
 ]
@@ -173,6 +174,15 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-runtime"
 allowed_internal_dependencies = ["rootlight-ipc", "rootlight-protocol"]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-storage"
+allowed_internal_dependencies = [
+  "rootlight-cancel",
+  "rootlight-ids",
+  "rootlight-ir",
+]
 allow_build_script = false
 
 [[crates]]
