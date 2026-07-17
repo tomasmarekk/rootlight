@@ -8,8 +8,8 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
-    fs::{self, File, OpenOptions},
-    io::{self, Read as _, Write as _},
+    fs::{self, File, OpenOptions, TryLockError},
+    io::{self, Read as _, Seek as _, Write as _},
     path::{Path, PathBuf},
 };
 
@@ -32,6 +32,9 @@ pub(crate) const COVERAGE_FILE: &str = "coverage.json";
 pub(crate) const QUALITY_FILE: &str = "quality.json";
 pub(crate) const AGENT_TRAJECTORIES_FILE: &str = "agent-trajectories.jsonl";
 const CHECKSUMS_FILE: &str = "checksums.txt";
+const PUBLICATION_MARKER_FILE: &str = ".rootlight-publication";
+const PUBLICATION_MARKER_PREFIX: &str = "rootlight-result-publication-v1:";
+const MAX_PUBLICATION_MARKER_BYTES: u64 = 128;
 const FIXED_ARTIFACT_COUNT: usize = 9;
 
 const HARD_MAX_RAW_SAMPLES: usize = 250_000;
@@ -351,12 +354,14 @@ pub fn publish_bundle(bundle: &ResultBundle, destination: &Path) -> Result<(), B
 /// Publishes one immutable result bundle with checked caller-selected limits.
 ///
 /// All artifacts are serialized and byte-accounted before a staging directory
-/// is created. The destination parent must already exist. Publication acquires
-/// an atomic sibling reservation before the final same-filesystem rename, so
-/// concurrent publishers cannot replace one another. On Unix, staging and
-/// parent directories are synced around the rename. Rust's standard library
-/// does not expose portable Windows directory-handle syncing, so Windows
-/// retains synced files plus rename as a best-effort crash-durability fallback.
+/// is created. The destination parent must already exist. Publication locks a
+/// sibling reservation, atomically creates the destination without replacement,
+/// and installs the checksum manifest last as the readiness marker. An
+/// abandoned, operation-owned partial destination is recovered by the next
+/// publisher. On Unix, staging and parent directories are synced around each
+/// state transition. Rust's standard library does not expose portable Windows
+/// directory-handle syncing, so Windows retains synced files plus atomic
+/// creation and same-filesystem moves as a best-effort durability fallback.
 ///
 /// # Errors
 ///
@@ -391,7 +396,10 @@ pub fn verify_bundle_with_limits(
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
     let limits = limits.validate()?;
-    let observed = collect_files(destination, limits)?;
+    let mut observed = collect_files(destination, limits)?;
+    if observed.remove(PUBLICATION_MARKER_FILE).is_some() {
+        validate_publication_marker_file(destination)?;
+    }
     let checksum_size = *observed
         .get(CHECKSUMS_FILE)
         .ok_or(BundleError::ArtifactSetMismatch)?;
@@ -531,18 +539,30 @@ fn publish_bundle_with_fault(
     limits: BundleLimits,
     fail_after_writes: Option<usize>,
 ) -> Result<(), BundleError> {
-    publish_bundle_with_control(bundle, destination, limits, fail_after_writes, || {})
+    publish_bundle_with_control(
+        bundle,
+        destination,
+        limits,
+        fail_after_writes,
+        || {},
+        || {},
+        || Ok(()),
+    )
 }
 
-fn publish_bundle_with_control<F>(
+fn publish_bundle_with_control<F, G, H>(
     bundle: &ResultBundle,
     destination: &Path,
     limits: BundleLimits,
     fail_after_writes: Option<usize>,
     before_reservation: F,
+    before_destination_create: G,
+    after_checksum_install: H,
 ) -> Result<(), BundleError>
 where
     F: FnOnce(),
+    G: FnOnce(),
+    H: FnOnce() -> Result<(), BundleError>,
 {
     let limits = limits.validate()?;
     let artifacts = build_artifacts(bundle, limits)?;
@@ -551,7 +571,8 @@ where
         .file_name()
         .ok_or(BundleError::InvalidDestination)?;
     let final_destination = parent.join(file_name);
-    if destination_is_present(&final_destination)? {
+    let reservation_path = publication_reservation_path(&parent, file_name);
+    if destination_is_present(&final_destination)? && !destination_is_present(&reservation_path)? {
         return Err(BundleError::DestinationExists);
     }
     let staging = tempfile::Builder::new()
@@ -571,30 +592,96 @@ where
         return Err(error);
     }
     before_reservation();
-    let reservation = match PublicationReservation::acquire(&parent, file_name) {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            close_staging(staging)?;
-            return Err(error);
-        }
-    };
-    if destination_is_present(&final_destination)? {
+    let marker = publication_marker(staging.path())?;
+    let reservation =
+        match PublicationReservation::acquire(&parent, file_name, &final_destination, marker) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                close_staging(staging)?;
+                return Err(error);
+            }
+        };
+    before_destination_create();
+    if let Err(source) = fs::create_dir(&final_destination) {
         close_staging(staging)?;
-        return Err(BundleError::DestinationExists);
+        return if source.kind() == io::ErrorKind::AlreadyExists
+            || destination_is_present(&final_destination)?
+        {
+            Err(BundleError::DestinationExists)
+        } else {
+            Err(BundleError::Io {
+                operation: "reserve result destination",
+                source,
+            })
+        };
     }
-    if let Err(source) = fs::rename(staging.path(), &final_destination) {
+    if let Err(error) = write_new(
+        &final_destination.join(PUBLICATION_MARKER_FILE),
+        reservation.marker(),
+    )
+    .and_then(|()| sync_directory(&final_destination, "sync result destination"))
+    {
+        quarantine_destination(&parent, &final_destination)?;
         close_staging(staging)?;
-        if destination_is_present(&final_destination)? {
-            return Err(BundleError::DestinationExists);
+        return Err(error);
+    }
+    if let Err(error) = install_staged_bundle(staging.path(), &final_destination) {
+        if !destination_is_present(&final_destination.join(CHECKSUMS_FILE))? {
+            quarantine_destination(&parent, &final_destination)?;
         }
-        return Err(BundleError::Io {
-            operation: "publish result bundle",
-            source,
-        });
+        close_staging(staging)?;
+        return Err(error);
     }
     drop(staging);
+    after_checksum_install()?;
+    fs::remove_file(final_destination.join(PUBLICATION_MARKER_FILE)).map_err(|source| {
+        BundleError::Io {
+            operation: "remove publication marker",
+            source,
+        }
+    })?;
+    sync_directory(&final_destination, "sync result destination")?;
     reservation.release()?;
     sync_directory(&parent, "sync result parent directory")
+}
+
+fn install_staged_bundle(staging: &Path, destination: &Path) -> Result<(), BundleError> {
+    for directory in ["profiles", "logs"] {
+        fs::rename(staging.join(directory), destination.join(directory)).map_err(|source| {
+            BundleError::Io {
+                operation: "install result directory",
+                source,
+            }
+        })?;
+    }
+    for artifact in [
+        ENVIRONMENT_FILE,
+        DATASET_MANIFEST_FILE,
+        BUILD_PROVENANCE_FILE,
+        COMMAND_FILE,
+        RAW_SAMPLES_FILE,
+        SUMMARY_FILE,
+        COVERAGE_FILE,
+        QUALITY_FILE,
+        AGENT_TRAJECTORIES_FILE,
+    ] {
+        fs::rename(staging.join(artifact), destination.join(artifact)).map_err(|source| {
+            BundleError::Io {
+                operation: "install result artifact",
+                source,
+            }
+        })?;
+    }
+    sync_directory(destination, "sync result destination")?;
+    fs::rename(
+        staging.join(CHECKSUMS_FILE),
+        destination.join(CHECKSUMS_FILE),
+    )
+    .map_err(|source| BundleError::Io {
+        operation: "install checksum manifest",
+        source,
+    })?;
+    sync_directory(destination, "sync result destination")
 }
 
 fn destination_is_present(path: &Path) -> Result<bool, BundleError> {
@@ -610,31 +697,210 @@ fn destination_is_present(path: &Path) -> Result<bool, BundleError> {
 
 #[derive(Debug)]
 struct PublicationReservation {
+    parent: PathBuf,
     path: PathBuf,
     file: Option<File>,
+    marker: Vec<u8>,
 }
 
 impl PublicationReservation {
-    fn acquire(parent: &Path, destination_name: &OsStr) -> Result<Self, BundleError> {
-        let mut reservation_name = OsString::from(".");
-        reservation_name.push(destination_name);
-        reservation_name.push(".rootlight-publish-reservation");
-        let path = parent.join(reservation_name);
-        let file = match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => file,
-            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+    fn acquire(
+        parent: &Path,
+        destination_name: &OsStr,
+        destination: &Path,
+        marker: Vec<u8>,
+    ) -> Result<Self, BundleError> {
+        let path = publication_reservation_path(parent, destination_name);
+        let mut open_attempts = 0_u8;
+        let (file, created) = loop {
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => break (file, true),
+                Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                    match OpenOptions::new().read(true).write(true).open(&path) {
+                        Ok(file) => break (file, false),
+                        Err(source)
+                            if source.kind() == io::ErrorKind::NotFound && open_attempts < 8 =>
+                        {
+                            open_attempts += 1;
+                            std::thread::yield_now();
+                        }
+                        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                            return Err(BundleError::DestinationExists);
+                        }
+                        Err(source) => {
+                            return Err(BundleError::Io {
+                                operation: "open result reservation",
+                                source,
+                            });
+                        }
+                    }
+                }
+                Err(source) => {
+                    return Err(BundleError::Io {
+                        operation: "reserve result destination",
+                        source,
+                    });
+                }
+            }
+        };
+        let mut reservation = Self {
+            parent: parent.to_owned(),
+            path,
+            file: Some(file),
+            marker,
+        };
+        if created {
+            let mut acquired = false;
+            for _ in 0..256 {
+                match reservation.file()?.try_lock() {
+                    Ok(()) => {
+                        acquired = true;
+                        break;
+                    }
+                    Err(TryLockError::WouldBlock) => std::thread::yield_now(),
+                    Err(TryLockError::Error(source)) => {
+                        reservation.preserve();
+                        return Err(BundleError::Io {
+                            operation: "lock result reservation",
+                            source,
+                        });
+                    }
+                }
+            }
+            if !acquired {
+                reservation.preserve();
                 return Err(BundleError::DestinationExists);
             }
+        } else {
+            match reservation.file()?.try_lock() {
+                Ok(()) => {}
+                Err(TryLockError::WouldBlock) => {
+                    reservation.preserve();
+                    return Err(BundleError::DestinationExists);
+                }
+                Err(TryLockError::Error(source)) => {
+                    reservation.preserve();
+                    return Err(BundleError::Io {
+                        operation: "lock result reservation",
+                        source,
+                    });
+                }
+            }
+        }
+        if created {
+            reservation.write_marker()?;
+            return Ok(reservation);
+        }
+        let stale_marker = match reservation.read_marker()? {
+            Some(stale_marker) => stale_marker,
+            None => {
+                reservation.preserve();
+                return Err(BundleError::DestinationExists);
+            }
+        };
+        match fs::symlink_metadata(destination) {
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
             Err(source) => {
                 return Err(BundleError::Io {
-                    operation: "reserve result destination",
+                    operation: "inspect result destination",
                     source,
                 });
             }
-        };
-        Ok(Self {
-            path,
-            file: Some(file),
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    reservation.release()?;
+                    return Err(BundleError::DestinationExists);
+                }
+                if destination_is_present(&destination.join(CHECKSUMS_FILE))? {
+                    reservation.release()?;
+                    return Err(BundleError::DestinationExists);
+                }
+                if !publication_marker_matches(destination, &stale_marker)? {
+                    reservation.release()?;
+                    return Err(BundleError::DestinationExists);
+                }
+                quarantine_destination(parent, destination)?;
+            }
+        }
+        reservation.write_marker()?;
+        Ok(reservation)
+    }
+
+    fn marker(&self) -> &[u8] {
+        &self.marker
+    }
+
+    fn file(&self) -> Result<&File, BundleError> {
+        self.file
+            .as_ref()
+            .ok_or(BundleError::PublicationInvariantViolation)
+    }
+
+    fn file_mut(&mut self) -> Result<&mut File, BundleError> {
+        self.file
+            .as_mut()
+            .ok_or(BundleError::PublicationInvariantViolation)
+    }
+
+    fn read_marker(&mut self) -> Result<Option<Vec<u8>>, BundleError> {
+        let file = self.file_mut()?;
+        let length = file
+            .metadata()
+            .map_err(|source| BundleError::Io {
+                operation: "inspect result reservation",
+                source,
+            })?
+            .len();
+        if length == 0 || length > MAX_PUBLICATION_MARKER_BYTES {
+            return Ok(None);
+        }
+        file.rewind().map_err(|source| BundleError::Io {
+            operation: "seek result reservation",
+            source,
+        })?;
+        let length = usize::try_from(length).map_err(|_| BundleError::AllocationFailed)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length)
+            .map_err(|_| BundleError::AllocationFailed)?;
+        file.take(MAX_PUBLICATION_MARKER_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|source| BundleError::Io {
+                operation: "read result reservation",
+                source,
+            })?;
+        if valid_publication_marker(&bytes) {
+            Ok(Some(bytes))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn write_marker(&mut self) -> Result<(), BundleError> {
+        let Self { file, marker, .. } = self;
+        let file = file
+            .as_mut()
+            .ok_or(BundleError::PublicationInvariantViolation)?;
+        file.set_len(0).map_err(|source| BundleError::Io {
+            operation: "truncate result reservation",
+            source,
+        })?;
+        file.rewind().map_err(|source| BundleError::Io {
+            operation: "seek result reservation",
+            source,
+        })?;
+        file.write_all(marker).map_err(|source| BundleError::Io {
+            operation: "write result reservation",
+            source,
+        })?;
+        file.sync_all().map_err(|source| BundleError::Io {
+            operation: "sync result reservation",
+            source,
         })
     }
 
@@ -645,7 +911,15 @@ impl PublicationReservation {
             source,
         })?;
         self.path = PathBuf::new();
+        sync_directory(&self.parent, "sync result parent directory")?;
+        self.parent = PathBuf::new();
         Ok(())
+    }
+
+    fn preserve(&mut self) {
+        self.file.take();
+        self.path = PathBuf::new();
+        self.parent = PathBuf::new();
     }
 }
 
@@ -656,6 +930,100 @@ impl Drop for PublicationReservation {
             let _ = fs::remove_file(&self.path);
         }
     }
+}
+
+fn publication_reservation_path(parent: &Path, destination_name: &OsStr) -> PathBuf {
+    let mut reservation_name = OsString::from(".");
+    reservation_name.push(destination_name);
+    reservation_name.push(".rootlight-publish-reservation");
+    parent.join(reservation_name)
+}
+
+fn publication_marker(staging: &Path) -> Result<Vec<u8>, BundleError> {
+    let name = staging
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or(BundleError::InvalidDestination)?;
+    let token = sha256_hex(name.as_bytes());
+    let capacity = PUBLICATION_MARKER_PREFIX
+        .len()
+        .checked_add(token.len())
+        .and_then(|length| length.checked_add(1))
+        .ok_or(BundleError::AllocationFailed)?;
+    let mut marker = Vec::new();
+    marker
+        .try_reserve_exact(capacity)
+        .map_err(|_| BundleError::AllocationFailed)?;
+    marker.extend_from_slice(PUBLICATION_MARKER_PREFIX.as_bytes());
+    marker.extend_from_slice(token.as_bytes());
+    marker.push(b'\n');
+    Ok(marker)
+}
+
+fn valid_publication_marker(bytes: &[u8]) -> bool {
+    bytes.len() == PUBLICATION_MARKER_PREFIX.len() + 65
+        && bytes.starts_with(PUBLICATION_MARKER_PREFIX.as_bytes())
+        && bytes.ends_with(b"\n")
+        && bytes[PUBLICATION_MARKER_PREFIX.len()..bytes.len() - 1]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn publication_marker_matches(destination: &Path, expected: &[u8]) -> Result<bool, BundleError> {
+    let path = destination.join(PUBLICATION_MARKER_FILE);
+    match fs::symlink_metadata(&path) {
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(BundleError::Io {
+            operation: "inspect publication marker",
+            source,
+        }),
+        Ok(metadata)
+            if metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() <= MAX_PUBLICATION_MARKER_BYTES =>
+        {
+            Ok(read_bounded(
+                &path,
+                MAX_PUBLICATION_MARKER_BYTES,
+                "read publication marker",
+            )? == expected)
+        }
+        Ok(_) => Ok(false),
+    }
+}
+
+fn validate_publication_marker_file(destination: &Path) -> Result<(), BundleError> {
+    let bytes = read_bounded(
+        &destination.join(PUBLICATION_MARKER_FILE),
+        MAX_PUBLICATION_MARKER_BYTES,
+        "read publication marker",
+    )?;
+    if !valid_publication_marker(&bytes) {
+        return Err(BundleError::ArtifactSetMismatch);
+    }
+    Ok(())
+}
+
+fn quarantine_destination(parent: &Path, destination: &Path) -> Result<(), BundleError> {
+    let quarantine = tempfile::Builder::new()
+        .prefix(".rootlight-result-quarantine-")
+        .tempdir_in(parent)
+        .map_err(|source| BundleError::Io {
+            operation: "create result quarantine",
+            source,
+        })?;
+    fs::rename(destination, quarantine.path().join("incomplete")).map_err(|source| {
+        BundleError::Io {
+            operation: "quarantine incomplete result",
+            source,
+        }
+    })?;
+    sync_directory(parent, "sync result parent directory")?;
+    quarantine.close().map_err(|source| BundleError::Io {
+        operation: "remove result quarantine",
+        source,
+    })?;
+    sync_directory(parent, "sync result parent directory")
 }
 
 fn close_staging(staging: tempfile::TempDir) -> Result<(), BundleError> {
@@ -1105,6 +1473,7 @@ fn collect_files(root: &Path, limits: BundleLimits) -> Result<BTreeMap<String, u
     let mut pending = vec![(root.to_path_buf(), 0_usize)];
     let mut paths = BTreeMap::new();
     let mut visited_entries = 0_usize;
+    let mut visited_files = 0_usize;
     let mut total_bytes = 0_u64;
     while let Some((current, depth)) = pending.pop() {
         if depth > limits.max_depth {
@@ -1117,20 +1486,25 @@ fn collect_files(root: &Path, limits: BundleLimits) -> Result<BTreeMap<String, u
             source,
         })?;
         for entry in entries {
-            visited_entries = visited_entries
-                .checked_add(1)
-                .ok_or(BundleError::LimitExceeded {
-                    resource: "directory_entry_count",
-                })?;
-            check_count(
-                visited_entries,
-                limits.max_directory_entries,
-                "directory_entry_count",
-            )?;
             let entry = entry.map_err(|source| BundleError::Io {
                 operation: "read result directory entry",
                 source,
             })?;
+            let operational_marker =
+                depth == 0 && entry.file_name() == OsStr::new(PUBLICATION_MARKER_FILE);
+            if !operational_marker {
+                visited_entries =
+                    visited_entries
+                        .checked_add(1)
+                        .ok_or(BundleError::LimitExceeded {
+                            resource: "directory_entry_count",
+                        })?;
+                check_count(
+                    visited_entries,
+                    limits.max_directory_entries,
+                    "directory_entry_count",
+                )?;
+            }
             let metadata =
                 fs::symlink_metadata(entry.path()).map_err(|source| BundleError::Io {
                     operation: "inspect result artifact",
@@ -1151,22 +1525,33 @@ fn collect_files(root: &Path, limits: BundleLimits) -> Result<BTreeMap<String, u
                 }
                 pending.push((entry.path(), next_depth));
             } else if file_type.is_file() {
-                check_count(paths.len() + 1, limits.max_file_count, "file_count")?;
-                if metadata.len() > limits.max_artifact_bytes {
+                if operational_marker {
+                    if metadata.len() > MAX_PUBLICATION_MARKER_BYTES {
+                        return Err(BundleError::ArtifactSetMismatch);
+                    }
+                } else if metadata.len() > limits.max_artifact_bytes {
                     return Err(BundleError::LimitExceeded {
                         resource: "artifact_bytes",
                     });
                 }
-                total_bytes =
-                    total_bytes
-                        .checked_add(metadata.len())
-                        .ok_or(BundleError::LimitExceeded {
+                if !operational_marker {
+                    visited_files =
+                        visited_files
+                            .checked_add(1)
+                            .ok_or(BundleError::LimitExceeded {
+                                resource: "file_count",
+                            })?;
+                    check_count(visited_files, limits.max_file_count, "file_count")?;
+                    total_bytes = total_bytes.checked_add(metadata.len()).ok_or(
+                        BundleError::LimitExceeded {
                             resource: "total_bytes",
-                        })?;
-                if total_bytes > limits.max_total_bytes {
-                    return Err(BundleError::LimitExceeded {
-                        resource: "total_bytes",
-                    });
+                        },
+                    )?;
+                    if total_bytes > limits.max_total_bytes {
+                        return Err(BundleError::LimitExceeded {
+                            resource: "total_bytes",
+                        });
+                    }
                 }
                 let entry_path = entry.path();
                 let relative = entry_path
@@ -1320,6 +1705,9 @@ pub enum BundleError {
     /// Fixed artifacts contradict one another or their recorded run policy.
     #[error("result artifact invariants are invalid")]
     ArtifactInvariantViolation,
+    /// An internal publication state transition lost its owned reservation.
+    #[error("result publication invariant is invalid")]
+    PublicationInvariantViolation,
     /// The verifier encountered a link or special file.
     #[error("result bundle contains an unsupported artifact type")]
     UnsupportedArtifactType,
@@ -1648,6 +2036,8 @@ mod tests {
                     || {
                         barrier.wait();
                     },
+                    || {},
+                    || Ok(()),
                 )
             }));
         }
@@ -1670,7 +2060,7 @@ mod tests {
     }
 
     #[test]
-    fn destination_created_after_preflight_is_not_replaced() {
+    fn noncooperating_destination_created_before_atomic_claim_is_not_replaced() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
 
@@ -1679,9 +2069,11 @@ mod tests {
             &destination,
             BundleLimits::default(),
             None,
+            || {},
             || {
                 fs::create_dir(&destination).expect("racing destination is created");
             },
+            || Ok(()),
         )
         .expect_err("racing destination is rejected");
 
@@ -1698,6 +2090,147 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn stale_owned_partial_publication_is_recovered() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let marker = publication_marker(Path::new(".rootlight-result-partial-stale"))
+            .expect("stale marker is representable");
+        let reservation = publication_reservation_path(
+            temporary.path(),
+            destination
+                .file_name()
+                .expect("destination has a file name"),
+        );
+        fs::write(&reservation, &marker).expect("stale reservation is written");
+        fs::create_dir(&destination).expect("partial destination is created");
+        fs::write(destination.join(PUBLICATION_MARKER_FILE), &marker)
+            .expect("ownership marker is written");
+        fs::write(destination.join("partial"), b"incomplete").expect("partial artifact is written");
+
+        publish_bundle(&fixture(), &destination).expect("stale publication is recovered");
+
+        verify_bundle(&destination).expect("replacement bundle verifies");
+        assert_eq!(
+            fs::read_dir(temporary.path())
+                .expect("temporary root is readable")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn live_partial_publication_is_not_recovered() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let marker = publication_marker(Path::new(".rootlight-result-partial-live"))
+            .expect("live marker is representable");
+        let reservation = publication_reservation_path(
+            temporary.path(),
+            destination
+                .file_name()
+                .expect("destination has a file name"),
+        );
+        fs::write(&reservation, &marker).expect("live reservation is written");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&reservation)
+            .expect("live reservation is open");
+        lock.try_lock().expect("live reservation is locked");
+        fs::create_dir(&destination).expect("live destination is created");
+        fs::write(destination.join(PUBLICATION_MARKER_FILE), &marker)
+            .expect("live ownership marker is written");
+        fs::write(destination.join("partial"), b"incomplete")
+            .expect("live partial artifact is written");
+
+        let error =
+            publish_bundle(&fixture(), &destination).expect_err("live publication is preserved");
+
+        assert!(matches!(error, BundleError::DestinationExists));
+        assert_eq!(
+            fs::read(destination.join("partial")).expect("live partial artifact remains"),
+            b"incomplete"
+        );
+        drop(lock);
+    }
+
+    #[test]
+    fn stale_reservation_does_not_remove_an_unowned_destination() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let marker = publication_marker(Path::new(".rootlight-result-partial-stale"))
+            .expect("stale marker is representable");
+        let reservation = publication_reservation_path(
+            temporary.path(),
+            destination
+                .file_name()
+                .expect("destination has a file name"),
+        );
+        fs::write(&reservation, marker).expect("stale reservation is written");
+        fs::create_dir(&destination).expect("foreign destination is created");
+        fs::write(destination.join("foreign"), b"preserve").expect("foreign content is written");
+
+        let error = publish_bundle(&fixture(), &destination)
+            .expect_err("unowned destination is not recovered");
+
+        assert!(matches!(error, BundleError::DestinationExists));
+        assert_eq!(
+            fs::read(destination.join("foreign")).expect("foreign content remains"),
+            b"preserve"
+        );
+        assert!(!reservation.exists());
+    }
+
+    #[test]
+    fn verifier_accepts_only_a_canonical_crash_window_marker() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        let marker = publication_marker(Path::new(".rootlight-result-partial-complete"))
+            .expect("marker is representable");
+        fs::write(destination.join(PUBLICATION_MARKER_FILE), marker)
+            .expect("crash-window marker is written");
+
+        verify_bundle(&destination).expect("canonical operational marker is accepted");
+        verify_bundle_with_limits(&destination, constrained_limits())
+            .expect("operational marker does not consume evidence limits");
+
+        fs::write(destination.join(PUBLICATION_MARKER_FILE), b"invalid\n")
+            .expect("marker is corrupted");
+        let error = verify_bundle(&destination).expect_err("invalid marker is rejected");
+        assert!(matches!(error, BundleError::ArtifactSetMismatch));
+    }
+
+    #[test]
+    fn crash_after_checksum_install_leaves_a_verifiable_complete_bundle() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+
+        let error = publish_bundle_with_control(
+            &fixture(),
+            &destination,
+            BundleLimits::default(),
+            None,
+            || {},
+            || {},
+            || Err(BundleError::InjectedWriteFailure),
+        )
+        .expect_err("post-checksum crash is injected");
+
+        assert!(matches!(error, BundleError::InjectedWriteFailure));
+        assert!(destination.join(CHECKSUMS_FILE).is_file());
+        assert!(destination.join(PUBLICATION_MARKER_FILE).is_file());
+        verify_bundle(&destination).expect("checksum-complete crash window verifies");
+        let reservation = publication_reservation_path(
+            temporary.path(),
+            destination
+                .file_name()
+                .expect("destination has a file name"),
+        );
+        assert!(!reservation.exists());
     }
 
     #[test]
