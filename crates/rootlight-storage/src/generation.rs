@@ -6,7 +6,9 @@
 use std::error::Error;
 
 use rootlight_cancel::{Cancellation, CancellationReason};
-use rootlight_ids::{ContentHash, GenerationId, RepositoryId};
+use rootlight_ids::{
+    ContentHash, GenerationId, GenerationIdentity, RepositoryId, derive_generation,
+};
 use rootlight_ir::{
     ExtensionSupport, IrDocumentValidationError, IrLimits, IrVersion, NORMALIZED_IR_VERSION,
     NormalizedIrDocument, canonicalize_ir_document,
@@ -71,7 +73,9 @@ impl GenerationMetadata {
     /// # Errors
     ///
     /// Returns [`GenerationValidationError::SelfParent`] when a generation
-    /// names itself as its parent.
+    /// names itself as its parent, or
+    /// [`GenerationValidationError::GenerationIdentityMismatch`] when the
+    /// supplied identifier is not derived from the complete semantic inputs.
     pub fn new(
         repository: RepositoryId,
         generation: GenerationId,
@@ -82,6 +86,18 @@ impl GenerationMetadata {
     ) -> Result<Self, GenerationValidationError> {
         if parent == Some(generation) {
             return Err(GenerationValidationError::SelfParent);
+        }
+        let expected = derive_generation(GenerationIdentity {
+            repository,
+            parent,
+            manifest_hash,
+            config_hash: configuration_hash,
+            provider_set_hash,
+            format_version: u32::from(GENERATION_CONTRACT_VERSION.major()),
+        })
+        .id();
+        if generation != expected {
+            return Err(GenerationValidationError::GenerationIdentityMismatch);
         }
         Ok(Self {
             repository,
@@ -152,14 +168,10 @@ pub struct GenerationSnapshot {
 impl GenerationSnapshot {
     /// Validates, canonicalizes, and binds normalized IR to generation metadata.
     ///
-    /// The first storage contract deliberately accepts only files, entities,
-    /// occurrences, relations, provenance, and coverage. Other normalized IR
-    /// sections fail explicitly instead of being dropped or stored opaquely.
-    ///
     /// # Errors
     ///
-    /// Returns [`GenerationValidationError`] for invalid IR, ownership
-    /// mismatches, or sections not represented by contract version 1.0.
+    /// Returns [`GenerationValidationError`] for invalid IR or ownership
+    /// mismatches.
     pub fn new(
         metadata: GenerationMetadata,
         document: NormalizedIrDocument,
@@ -172,28 +184,6 @@ impl GenerationSnapshot {
             || document.generation != metadata.generation()
         {
             return Err(GenerationValidationError::OwnershipMismatch);
-        }
-        for (section, is_present) in [
-            (
-                GenerationSection::SourceMappings,
-                !document.source_mappings.is_empty(),
-            ),
-            (
-                GenerationSection::SkippedRegions,
-                !document.skipped_regions.is_empty(),
-            ),
-            (
-                GenerationSection::Diagnostics,
-                !document.diagnostics.is_empty(),
-            ),
-            (
-                GenerationSection::Extensions,
-                !document.extensions.is_empty(),
-            ),
-        ] {
-            if is_present {
-                return Err(GenerationValidationError::UnsupportedSection(section));
-            }
         }
         Ok(Self { metadata, document })
     }
@@ -217,20 +207,6 @@ impl GenerationSnapshot {
     }
 }
 
-/// Normalized IR sections intentionally deferred from storage contract 1.0.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum GenerationSection {
-    /// Generated-to-origin source mappings.
-    SourceMappings,
-    /// Explicit skipped source regions.
-    SkippedRegions,
-    /// Analysis diagnostics.
-    Diagnostics,
-    /// Opaque language or lexical extensions.
-    Extensions,
-}
-
 /// Logical and physical cardinalities for one sealed generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenerationStats {
@@ -239,7 +215,11 @@ pub struct GenerationStats {
     occurrences: u64,
     relations: u64,
     provenance: u64,
+    source_mappings: u64,
     coverage: u64,
+    skipped_regions: u64,
+    diagnostics: u64,
+    extensions: u64,
     source_refs: u64,
     stored_rows: u64,
     text_bytes: u64,
@@ -262,7 +242,11 @@ impl GenerationStats {
         occurrences: u64,
         relations: u64,
         provenance: u64,
+        source_mappings: u64,
         coverage: u64,
+        skipped_regions: u64,
+        diagnostics: u64,
+        extensions: u64,
         source_refs: u64,
         stored_rows: u64,
         text_bytes: u64,
@@ -274,7 +258,11 @@ impl GenerationStats {
             occurrences,
             relations,
             provenance,
+            source_mappings,
             coverage,
+            skipped_regions,
+            diagnostics,
+            extensions,
             source_refs,
         ]
         .into_iter()
@@ -289,7 +277,11 @@ impl GenerationStats {
             occurrences,
             relations,
             provenance,
+            source_mappings,
             coverage,
+            skipped_regions,
+            diagnostics,
+            extensions,
             source_refs,
             stored_rows,
             text_bytes,
@@ -326,10 +318,34 @@ impl GenerationStats {
         self.provenance
     }
 
+    /// Returns the source-mapping count.
+    #[must_use]
+    pub const fn source_mappings(self) -> u64 {
+        self.source_mappings
+    }
+
     /// Returns the coverage-record count.
     #[must_use]
     pub const fn coverage(self) -> u64 {
         self.coverage
+    }
+
+    /// Returns the skipped-region count.
+    #[must_use]
+    pub const fn skipped_regions(self) -> u64 {
+        self.skipped_regions
+    }
+
+    /// Returns the diagnostic count.
+    #[must_use]
+    pub const fn diagnostics(self) -> u64 {
+        self.diagnostics
+    }
+
+    /// Returns the extension-envelope count.
+    #[must_use]
+    pub const fn extensions(self) -> u64 {
+        self.extensions
     }
 
     /// Returns the distinct source-reference count.
@@ -579,15 +595,15 @@ pub enum GenerationValidationError {
     /// A generation named itself as its parent.
     #[error("generation parent cannot equal the generation")]
     SelfParent,
+    /// The generation identifier was not derived from all metadata inputs.
+    #[error("generation identity does not match its semantic inputs")]
+    GenerationIdentityMismatch,
     /// Document repository or generation differed from metadata.
     #[error("generation document ownership does not match metadata")]
     OwnershipMismatch,
     /// Normalized IR failed its existing bounded validation contract.
     #[error("generation normalized IR is invalid")]
     InvalidIr(#[source] IrDocumentValidationError),
-    /// A normalized IR section is deferred from contract version 1.0.
-    #[error("generation contains a section unsupported by this storage contract")]
-    UnsupportedSection(GenerationSection),
     /// Cardinality addition overflowed.
     #[error("generation statistics overflowed")]
     StatisticsOverflow,
@@ -600,16 +616,30 @@ pub enum GenerationValidationError {
 mod tests {
     use super::*;
     use rootlight_cancel::CancellationReason;
-    use rootlight_ids::{GenerationId, RepositoryId, content_hash};
+    use rootlight_ids::{
+        GenerationId, GenerationIdentity, RepositoryId, content_hash, derive_generation,
+    };
 
-    fn metadata(repository: RepositoryId, generation: GenerationId) -> GenerationMetadata {
+    fn metadata(repository: RepositoryId) -> GenerationMetadata {
+        let manifest_hash = content_hash(b"manifest");
+        let configuration_hash = content_hash(b"configuration");
+        let provider_set_hash = content_hash(b"providers");
+        let generation = derive_generation(GenerationIdentity {
+            repository,
+            parent: None,
+            manifest_hash,
+            config_hash: configuration_hash,
+            provider_set_hash,
+            format_version: u32::from(GENERATION_CONTRACT_VERSION.major()),
+        })
+        .id();
         GenerationMetadata::new(
             repository,
             generation,
             None,
-            content_hash(b"manifest"),
-            content_hash(b"configuration"),
-            content_hash(b"providers"),
+            manifest_hash,
+            configuration_hash,
+            provider_set_hash,
         )
         .expect("fixture metadata is valid")
     }
@@ -617,9 +647,10 @@ mod tests {
     #[test]
     fn snapshot_binds_canonical_ir_to_metadata() {
         let repository = RepositoryId::from_bytes([1; 16]);
-        let generation = GenerationId::from_bytes([2; 20]);
+        let metadata = metadata(repository);
+        let generation = metadata.generation();
         let snapshot = GenerationSnapshot::new(
-            metadata(repository, generation),
+            metadata,
             NormalizedIrDocument::empty(repository, generation),
             &IrLimits::default(),
             &ExtensionSupport::default(),
@@ -633,15 +664,32 @@ mod tests {
     #[test]
     fn snapshot_rejects_mismatched_generation() {
         let repository = RepositoryId::from_bytes([1; 16]);
-        let generation = GenerationId::from_bytes([2; 20]);
+        let metadata = metadata(repository);
         let result = GenerationSnapshot::new(
-            metadata(repository, generation),
+            metadata,
             NormalizedIrDocument::empty(repository, GenerationId::from_bytes([3; 20])),
             &IrLimits::default(),
             &ExtensionSupport::default(),
         );
 
         assert_eq!(result, Err(GenerationValidationError::OwnershipMismatch));
+    }
+
+    #[test]
+    fn metadata_rejects_an_underived_generation_id() {
+        let result = GenerationMetadata::new(
+            RepositoryId::from_bytes([1; 16]),
+            GenerationId::from_bytes([2; 20]),
+            None,
+            content_hash(b"manifest"),
+            content_hash(b"configuration"),
+            content_hash(b"providers"),
+        );
+
+        assert_eq!(
+            result,
+            Err(GenerationValidationError::GenerationIdentityMismatch)
+        );
     }
 
     #[test]

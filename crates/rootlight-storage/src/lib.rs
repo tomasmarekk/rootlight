@@ -10,7 +10,7 @@ mod generation;
 pub use generation::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationBudgetError, GenerationContext,
     GenerationContractVersion, GenerationControlError, GenerationMetadata, GenerationReader,
-    GenerationResource, GenerationSection, GenerationSnapshot, GenerationStats,
-    GenerationValidationError, GenerationWriter, HARD_MAX_GENERATION_ROWS,
-    HARD_MAX_GENERATION_SOURCE_REFS, HARD_MAX_GENERATION_TEXT_BYTES,
+    GenerationResource, GenerationSnapshot, GenerationStats, GenerationValidationError,
+    GenerationWriter, HARD_MAX_GENERATION_ROWS, HARD_MAX_GENERATION_SOURCE_REFS,
+    HARD_MAX_GENERATION_TEXT_BYTES,
 };
