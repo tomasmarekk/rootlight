@@ -6,6 +6,7 @@ members = [
     "crates/rootlight-adapter-treesitter",
     "crates/rootlight-bench",
     "crates/rootlight-cancel",
+    "crates/rootlight-catalog",
     "crates/rootlight-client",
     "crates/rootlight-config",
     "crates/rootlight-daemon-core",

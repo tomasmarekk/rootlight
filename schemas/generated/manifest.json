@@ -9,6 +9,14 @@
   },
   "inputs": [
     {
+      "path": "crates/rootlight-catalog/src/schema.rs",
+      "blake3": "943c90aa1209c4103b91957a4d17cb2bdcb5598007ed73de77b6ae19f555e30d"
+    },
+    {
+      "path": "crates/rootlight-storage/src/generation.rs",
+      "blake3": "4c446821c9b8fb4c8740a75b830a43b18e69d9a00fb04ff0df5355756c21c1de"
+    },
+    {
       "path": "proto/adapter_v1.proto",
       "blake3": "43fe7a21ed61a79460b765500009ceded42de0c666c191eabcd1301421d574c3"
     },
@@ -121,6 +129,10 @@
     {
       "path": "schemas/generated/protobuf/rootlight.desc",
       "blake3": "d611cb9904e1087d06b18b9c62441e912609274ae8f9bac5f647c2cab4b454d0"
+    },
+    {
+      "path": "tests/fixtures/compatibility/storage/1.0/schema-fingerprints.json",
+      "blake3": "37aae71b93acea8d49bece736d17d8b8c39646328394edd75c68f4e86c1d2ef1"
     }
   ]
 }

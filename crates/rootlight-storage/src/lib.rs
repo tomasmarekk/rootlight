@@ -1,7 +1,7 @@
 //! Backend-neutral contracts for immutable Rootlight generations.
 //!
-//! This crate owns versioning, owned boundary data, and bounded cancellation
-//! context without depending on SQLite, segment, query, or publication code.
+//! Keeping these contracts outside `rootlight-ir` leaves normalized-model
+//! ownership there while SQLite and future backends share one bounded boundary.
 
 #![forbid(unsafe_code)]
 

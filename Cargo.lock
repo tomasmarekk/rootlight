@@ -1491,6 +1491,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootlight-catalog"
+version = "0.1.0"
+dependencies = [
+ "rootlight-cancel",
+ "rootlight-ids",
+ "rootlight-ir",
+ "rootlight-storage",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "rootlight-client"
 version = "0.1.0"
 dependencies = [
@@ -2557,6 +2571,7 @@ dependencies = [
  "prost-build",
  "prost-types",
  "protoc-bin-vendored",
+ "rootlight-catalog",
  "rootlight-client",
  "rootlight-config",
  "rootlight-error",
@@ -2567,6 +2582,7 @@ dependencies = [
  "rootlight-observability",
  "rootlight-protocol",
  "rootlight-runtime",
+ "rootlight-storage",
  "schemars",
  "serde",
  "serde_json",

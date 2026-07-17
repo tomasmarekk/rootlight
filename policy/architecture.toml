@@ -5,6 +5,7 @@ workspace_members = [
   "rootlight-adapter-treesitter",
   "rootlight-bench",
   "rootlight-cancel",
+  "rootlight-catalog",
   "rootlight-client",
   "rootlight-config",
   "rootlight-daemon",
@@ -75,6 +76,15 @@ allow_build_script = true
 [[crates]]
 name = "rootlight-cancel"
 allowed_internal_dependencies = []
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-catalog"
+allowed_internal_dependencies = [
+  "rootlight-ids",
+  "rootlight-ir",
+  "rootlight-storage",
+]
 allow_build_script = false
 
 [[crates]]
@@ -193,6 +203,7 @@ allow_build_script = false
 [[crates]]
 name = "xtask"
 allowed_internal_dependencies = [
+  "rootlight-catalog",
   "rootlight-client",
   "rootlight-config",
   "rootlight-error",
@@ -203,5 +214,6 @@ allowed_internal_dependencies = [
   "rootlight-observability",
   "rootlight-protocol",
   "rootlight-runtime",
+  "rootlight-storage",
 ]
 allow_build_script = false

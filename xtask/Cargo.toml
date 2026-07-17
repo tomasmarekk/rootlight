@@ -15,6 +15,7 @@ prost-build.workspace = true
 prost-types.workspace = true
 protoc-bin-vendored.workspace = true
 rootlight-client = { path = "../crates/rootlight-client" }
+rootlight-catalog = { path = "../crates/rootlight-catalog" }
 rootlight-config = { path = "../crates/rootlight-config", features = ["schema"] }
 rootlight-error = { path = "../crates/rootlight-error", features = ["schema"] }
 rootlight-ids = { path = "../crates/rootlight-ids", features = ["schema"] }
@@ -23,6 +24,7 @@ rootlight-ir = { path = "../crates/rootlight-ir", features = ["schema"] }
 rootlight-mcp-contract = { path = "../crates/rootlight-mcp-contract" }
 rootlight-observability = { path = "../crates/rootlight-observability" }
 rootlight-runtime = { path = "../crates/rootlight-runtime" }
+rootlight-storage = { path = "../crates/rootlight-storage" }
 rootlight-protocol = { path = "../crates/rootlight-protocol" }
 schemars.workspace = true
 serde.workspace = true

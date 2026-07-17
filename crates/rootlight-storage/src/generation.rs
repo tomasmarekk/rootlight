@@ -489,6 +489,12 @@ impl<'a> GenerationContext<'a> {
     pub const fn budget(self) -> GenerationBudget {
         self.budget
     }
+
+    /// Returns the shared token for backend-native cancellation hooks.
+    #[must_use]
+    pub const fn cancellation(self) -> &'a Cancellation {
+        self.cancellation
+    }
 }
 
 /// A backend-neutral reader for one immutable, pinned generation.
