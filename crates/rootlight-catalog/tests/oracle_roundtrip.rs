@@ -10,7 +10,7 @@ use rootlight_catalog::{
     CATALOG_FILENAME, Catalog, CatalogErrorKind, ORACLE_FILENAME, OracleReader, OracleWriter,
     catalog_schema_compatibility, oracle_schema_compatibility,
 };
-use rootlight_ids::{FileId, content_hash};
+use rootlight_ids::{FileId, GenerationIdentity, content_hash, derive_generation};
 use rootlight_ir::{
     ExtensionSupport, IrDocument, IrLimits, SourceRef, SourceSpan, decode_ir_document,
 };
@@ -28,16 +28,32 @@ fn fixture_documents() -> (
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/compatibility/ir/1.1/document.json");
     let encoded = fs::read(path).expect("compatibility IR fixture is readable");
-    let IrDocument::NormalizedV1_1(mut document) =
+    let IrDocument::NormalizedV1_1(template) =
         decode_ir_document(&encoded, &IrLimits::default(), &ExtensionSupport::default())
             .expect("compatibility IR fixture decodes")
     else {
         panic!("fixture must use normalized IR 1.1");
     };
-    document.source_mappings.clear();
-    document.skipped_regions.clear();
-    document.diagnostics.clear();
-    document.extensions.clear();
+    let generation = derive_generation(GenerationIdentity {
+        repository: template.repository,
+        parent: None,
+        manifest_hash: content_hash(b"manifest"),
+        config_hash: content_hash(b"configuration"),
+        provider_set_hash: content_hash(b"providers"),
+        format_version: u32::from(GENERATION_CONTRACT_VERSION.major()),
+    })
+    .id();
+    let rebound = String::from_utf8(encoded)
+        .expect("compatibility IR fixture is UTF-8")
+        .replace(&template.generation.to_string(), &generation.to_string());
+    let IrDocument::NormalizedV1_1(mut document) = decode_ir_document(
+        rebound.as_bytes(),
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .expect("generation-rebound compatibility IR fixture decodes") else {
+        panic!("fixture must use normalized IR 1.1");
+    };
 
     let mut second_file = document.files[0].clone();
     second_file.id = FileId::from_bytes([0xf0; 20]);
@@ -60,7 +76,11 @@ fn fixture_documents() -> (
     reversed.occurrences.reverse();
     reversed.relations.reverse();
     reversed.provenance.reverse();
+    reversed.source_mappings.reverse();
     reversed.coverage_records.reverse();
+    reversed.skipped_regions.reverse();
+    reversed.diagnostics.reverse();
+    reversed.extensions.reverse();
     for entity in &mut reversed.entities {
         entity.flags.reverse();
         entity.evidence.derivation.reverse();
@@ -69,6 +89,18 @@ fn fixture_documents() -> (
         provenance.input_sources.reverse();
         provenance.evidence_sources.reverse();
         provenance.derivation_parents.reverse();
+    }
+    for mapping in &mut reversed.source_mappings {
+        mapping.evidence.derivation.reverse();
+    }
+    for region in &mut reversed.skipped_regions {
+        region.evidence.derivation.reverse();
+    }
+    for diagnostic in &mut reversed.diagnostics {
+        diagnostic.evidence.derivation.reverse();
+    }
+    for extension in &mut reversed.extensions {
+        extension.evidence.derivation.reverse();
     }
     (document, reversed)
 }
@@ -205,7 +237,11 @@ fn rebuild_and_insertion_order_have_equal_logical_results() {
               + (SELECT count(*) FROM occurrences)
               + (SELECT count(*) FROM occurrence_candidates)
               + (SELECT count(*) FROM relations)
+              + (SELECT count(*) FROM source_mappings)
               + (SELECT count(*) FROM coverage_records)
+              + (SELECT count(*) FROM skipped_regions)
+              + (SELECT count(*) FROM diagnostics)
+              + (SELECT count(*) FROM extensions)
               + (SELECT count(*) FROM evidence_derivations)
               + (SELECT count(*) FROM provenance_sources)
               + (SELECT count(*) FROM provenance_derivations)",
@@ -363,6 +399,73 @@ fn future_schema_version_is_rejected_without_guessing() {
 }
 
 #[test]
+fn undeclared_schema_objects_are_rejected() {
+    for sql in [
+        "CREATE TABLE unexpected_table (value INTEGER) STRICT",
+        "CREATE INDEX unexpected_index ON files(path)",
+        "CREATE VIEW unexpected_view AS SELECT file_id FROM files",
+        "CREATE TRIGGER unexpected_trigger
+         AFTER INSERT ON files BEGIN SELECT 1; END",
+    ] {
+        let directory = TempDir::new().expect("temporary generation directory is created");
+        write_fixture(directory.path());
+        let connection =
+            Connection::open(directory.path().join(ORACLE_FILENAME)).expect("oracle opens");
+        connection
+            .execute_batch(sql)
+            .expect("unexpected schema object is installed");
+        drop(connection);
+
+        let cancellation = Cancellation::new();
+        let context = default_context(&cancellation);
+        let error = OracleReader::open_in(directory.path(), &context)
+            .expect_err("the exact schema ledger rejects undeclared objects");
+        assert_eq!(error.kind(), CatalogErrorKind::Corrupt);
+    }
+}
+
+#[test]
+fn actual_text_bytes_are_checked_before_materialization() {
+    let directory = TempDir::new().expect("temporary generation directory is created");
+    write_fixture(directory.path());
+    let connection =
+        Connection::open(directory.path().join(ORACLE_FILENAME)).expect("oracle opens");
+    connection
+        .execute("UPDATE files SET path = path || '-tampered'", [])
+        .expect("text-byte tamper is applied");
+    drop(connection);
+
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let error = OracleReader::open_in(directory.path(), &context)
+        .expect_err("actual text bytes must match the sealed header");
+    assert_eq!(error.kind(), CatalogErrorKind::Corrupt);
+}
+
+#[test]
+fn oversized_application_metadata_is_rejected_without_returning_the_blob() {
+    let directory = TempDir::new().expect("temporary generation directory is created");
+    write_fixture(directory.path());
+    let connection =
+        Connection::open(directory.path().join(ORACLE_FILENAME)).expect("oracle opens");
+    connection
+        .execute_batch(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE application_meta
+             SET value = zeroblob(1048576)
+             WHERE key = 'database_kind';",
+        )
+        .expect("oversized hostile metadata is installed");
+    drop(connection);
+
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let error = OracleReader::open_in(directory.path(), &context)
+        .expect_err("oversized application metadata is rejected");
+    assert_eq!(error.kind(), CatalogErrorKind::ForeignDatabase);
+}
+
+#[test]
 fn arbitrary_non_database_bytes_are_typed_as_corruption() {
     let directory = TempDir::new().expect("temporary generation directory is created");
     fs::write(
@@ -433,7 +536,11 @@ fn schema_identity_is_versioned_and_source_body_columns_are_absent() {
         "entities",
         "occurrences",
         "relations",
+        "source_mappings",
         "coverage_records",
+        "skipped_regions",
+        "diagnostics",
+        "extensions",
     ] {
         let names = statement
             .query_map([table], |row| row.get::<_, String>(0))

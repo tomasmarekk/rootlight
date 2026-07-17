@@ -4,6 +4,7 @@
 //! pins only application IDs, versions, and checksums of this private ledger.
 
 use std::{
+    collections::BTreeMap,
     fs::{self, OpenOptions},
     path::Path,
     time::Duration,
@@ -15,6 +16,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension,
     config::DbConfig,
     hooks::{AuthAction, Authorization},
+    limits::Limit,
     params,
 };
 
@@ -30,7 +32,7 @@ const ORACLE_SCHEMA_VERSION: u32 = 1;
 
 const APPLICATION_META_SQL: &str = "CREATE TABLE application_meta (
     key TEXT PRIMARY KEY NOT NULL,
-    value BLOB NOT NULL
+    value BLOB NOT NULL CHECK(length(value) BETWEEN 1 AND 128)
 ) STRICT";
 const MIGRATIONS_SQL: &str = "CREATE TABLE migrations (
     migration_id INTEGER PRIMARY KEY NOT NULL,
@@ -54,7 +56,11 @@ const GENERATION_META_SQL: &str = "CREATE TABLE generation_meta (
     occurrence_count INTEGER NOT NULL CHECK(occurrence_count >= 0),
     relation_count INTEGER NOT NULL CHECK(relation_count >= 0),
     provenance_count INTEGER NOT NULL CHECK(provenance_count >= 0),
+    source_mapping_count INTEGER NOT NULL CHECK(source_mapping_count >= 0),
     coverage_count INTEGER NOT NULL CHECK(coverage_count >= 0),
+    skipped_region_count INTEGER NOT NULL CHECK(skipped_region_count >= 0),
+    diagnostic_count INTEGER NOT NULL CHECK(diagnostic_count >= 0),
+    extension_count INTEGER NOT NULL CHECK(extension_count >= 0),
     source_ref_count INTEGER NOT NULL CHECK(source_ref_count >= 0),
     stored_row_count INTEGER NOT NULL CHECK(stored_row_count >= 1),
     text_bytes INTEGER NOT NULL CHECK(text_bytes >= 0),
@@ -313,6 +319,58 @@ const COVERAGE_SQL: &str = "CREATE TABLE coverage_records (
         DEFERRABLE INITIALLY DEFERRED
 ) STRICT";
 
+const SOURCE_MAPPINGS_TABLE_SQL: &str = "CREATE TABLE source_mappings (
+    source_mapping_id BLOB PRIMARY KEY NOT NULL CHECK(length(source_mapping_id) = 20),
+    repository_id BLOB NOT NULL CHECK(length(repository_id) = 16),
+    generation_id BLOB NOT NULL CHECK(length(generation_id) = 20),
+    provenance_id BLOB NOT NULL CHECK(length(provenance_id) = 20),
+    payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) BETWEEN 2 AND 1048576),
+    FOREIGN KEY(repository_id, generation_id)
+        REFERENCES generation_meta(repository_id, generation_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(provenance_id) REFERENCES provenance(provenance_id)
+        DEFERRABLE INITIALLY DEFERRED
+) STRICT";
+
+const SKIPPED_REGIONS_TABLE_SQL: &str = "CREATE TABLE skipped_regions (
+    skipped_region_id BLOB PRIMARY KEY NOT NULL CHECK(length(skipped_region_id) = 20),
+    repository_id BLOB NOT NULL CHECK(length(repository_id) = 16),
+    generation_id BLOB NOT NULL CHECK(length(generation_id) = 20),
+    provenance_id BLOB NOT NULL CHECK(length(provenance_id) = 20),
+    payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) BETWEEN 2 AND 1048576),
+    FOREIGN KEY(repository_id, generation_id)
+        REFERENCES generation_meta(repository_id, generation_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(provenance_id) REFERENCES provenance(provenance_id)
+        DEFERRABLE INITIALLY DEFERRED
+) STRICT";
+
+const DIAGNOSTICS_TABLE_SQL: &str = "CREATE TABLE diagnostics (
+    diagnostic_id BLOB PRIMARY KEY NOT NULL CHECK(length(diagnostic_id) = 20),
+    repository_id BLOB NOT NULL CHECK(length(repository_id) = 16),
+    generation_id BLOB NOT NULL CHECK(length(generation_id) = 20),
+    provenance_id BLOB NOT NULL CHECK(length(provenance_id) = 20),
+    payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) BETWEEN 2 AND 1048576),
+    FOREIGN KEY(repository_id, generation_id)
+        REFERENCES generation_meta(repository_id, generation_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(provenance_id) REFERENCES provenance(provenance_id)
+        DEFERRABLE INITIALLY DEFERRED
+) STRICT";
+
+const EXTENSIONS_TABLE_SQL: &str = "CREATE TABLE extensions (
+    extension_id BLOB PRIMARY KEY NOT NULL CHECK(length(extension_id) = 20),
+    repository_id BLOB NOT NULL CHECK(length(repository_id) = 16),
+    generation_id BLOB NOT NULL CHECK(length(generation_id) = 20),
+    provenance_id BLOB NOT NULL CHECK(length(provenance_id) = 20),
+    payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) BETWEEN 2 AND 1048576),
+    FOREIGN KEY(repository_id, generation_id)
+        REFERENCES generation_meta(repository_id, generation_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(provenance_id) REFERENCES provenance(provenance_id)
+        DEFERRABLE INITIALLY DEFERRED
+) STRICT";
+
 const EVIDENCE_DERIVATIONS_SQL: &str = "CREATE TABLE evidence_derivations (
     owner_kind TEXT NOT NULL CHECK(owner_kind IN ('file', 'entity', 'fact')),
     owner_id BLOB NOT NULL CHECK(length(owner_id) = 20),
@@ -376,7 +434,7 @@ const CONTROL_TABLES: [NamedSql; 2] = [
     NamedSql::table("migrations", MIGRATIONS_SQL),
 ];
 
-const ORACLE_TABLES: [NamedSql; 15] = [
+const ORACLE_TABLES: [NamedSql; 19] = [
     NamedSql::table("application_meta", APPLICATION_META_SQL),
     NamedSql::table("migrations", MIGRATIONS_SQL),
     NamedSql::table("generation_meta", GENERATION_META_SQL),
@@ -389,7 +447,11 @@ const ORACLE_TABLES: [NamedSql; 15] = [
     NamedSql::table("occurrences", OCCURRENCES_SQL),
     NamedSql::table("occurrence_candidates", OCCURRENCE_CANDIDATES_SQL),
     NamedSql::table("relations", RELATIONS_SQL),
+    NamedSql::table("source_mappings", SOURCE_MAPPINGS_TABLE_SQL),
     NamedSql::table("coverage_records", COVERAGE_SQL),
+    NamedSql::table("skipped_regions", SKIPPED_REGIONS_TABLE_SQL),
+    NamedSql::table("diagnostics", DIAGNOSTICS_TABLE_SQL),
+    NamedSql::table("extensions", EXTENSIONS_TABLE_SQL),
     NamedSql::table("evidence_derivations", EVIDENCE_DERIVATIONS_SQL),
     NamedSql::table("provenance_sources", PROVENANCE_SOURCES_SQL),
 ];
@@ -460,6 +522,7 @@ pub(crate) fn open_control(path: &Path) -> Result<Connection, CatalogError> {
     let created = create_private_file(path, false)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let connection = Connection::open_with_flags(path, flags).map_err(CatalogError::sqlite)?;
+    configure_limits(&connection)?;
     verify_sqlite(&connection)?;
     let definition = control_definition();
     if created {
@@ -481,6 +544,7 @@ pub(crate) fn create_oracle(path: &Path) -> Result<Connection, CatalogError> {
     create_private_file(path, true)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let connection = Connection::open_with_flags(path, flags).map_err(CatalogError::sqlite)?;
+    configure_limits(&connection)?;
     verify_sqlite(&connection)?;
     configure_writer(&connection, JournalMode::Delete)?;
     let definition = oracle_definition();
@@ -508,6 +572,7 @@ pub(crate) fn open_oracle_reader(
             CatalogError::sqlite(error)
         }
     })?;
+    configure_limits(&connection)?;
     install_generation_cancellation(&connection, context)?;
     verify_sqlite(&connection)?;
     configure_reader(&connection)?;
@@ -635,7 +700,9 @@ fn validate_schema(
     }
     let kind: Option<Vec<u8>> = connection
         .query_row(
-            "SELECT value FROM application_meta WHERE key = 'database_kind'",
+            "SELECT value
+             FROM application_meta
+             WHERE key = 'database_kind' AND length(value) BETWEEN 1 AND 128",
             [],
             |row| row.get(0),
         )
@@ -657,21 +724,41 @@ fn validate_schema(
             CatalogErrorKind::MigrationChecksumMismatch,
         ));
     }
-    for object in definition.objects {
-        let observed: Option<String> = connection
-            .query_row(
-                "SELECT sql FROM sqlite_schema WHERE type = ?1 AND name = ?2",
-                [object.kind, object.name],
-                |row| row.get(0),
+    let mut expected = definition
+        .objects
+        .iter()
+        .map(|object| {
+            (
+                (object.kind.to_owned(), object.name.to_owned()),
+                normalize_sql(object.sql),
             )
-            .optional()
-            .map_err(CatalogError::sqlite)?;
-        let Some(observed) = observed else {
+        })
+        .collect::<BTreeMap<_, _>>();
+    if expected.len() != definition.objects.len() {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, sql
+             FROM sqlite_schema
+             WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+             ORDER BY type, name",
+        )
+        .map_err(CatalogError::sqlite)?;
+    let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
+    while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
+        let kind: String = row.get(0).map_err(CatalogError::sqlite)?;
+        let name: String = row.get(1).map_err(CatalogError::sqlite)?;
+        let sql: String = row.get(2).map_err(CatalogError::sqlite)?;
+        let Some(expected_sql) = expected.remove(&(kind, name)) else {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         };
-        if normalize_sql(&observed) != normalize_sql(object.sql) {
+        if normalize_sql(&sql) != expected_sql {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
+    }
+    if !expected.is_empty() {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
     Ok(())
 }
@@ -717,6 +804,33 @@ fn verify_sqlite(connection: &Connection) -> Result<(), CatalogError> {
         .any(|option| option == "OMIT_FOREIGN_KEY")
     {
         return Err(CatalogError::new(CatalogErrorKind::UnsupportedSqlite));
+    }
+    Ok(())
+}
+
+fn configure_limits(connection: &Connection) -> Result<(), CatalogError> {
+    for (limit, value) in [
+        (Limit::SQLITE_LIMIT_LENGTH, 2 * 1024 * 1024),
+        (Limit::SQLITE_LIMIT_SQL_LENGTH, 64 * 1024),
+        (Limit::SQLITE_LIMIT_COLUMN, 64),
+        (Limit::SQLITE_LIMIT_EXPR_DEPTH, 128),
+        (Limit::SQLITE_LIMIT_COMPOUND_SELECT, 32),
+        (Limit::SQLITE_LIMIT_VDBE_OP, 100_000),
+        (Limit::SQLITE_LIMIT_FUNCTION_ARG, 32),
+        (Limit::SQLITE_LIMIT_ATTACHED, 0),
+        (Limit::SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 256),
+        (Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 64),
+        (Limit::SQLITE_LIMIT_TRIGGER_DEPTH, 0),
+        (Limit::SQLITE_LIMIT_WORKER_THREADS, 0),
+    ] {
+        connection
+            .set_limit(limit, value)
+            .map_err(CatalogError::sqlite)?;
+        if connection.limit(limit).map_err(CatalogError::sqlite)? != value {
+            return Err(CatalogError::new(
+                CatalogErrorKind::UnsupportedConfiguration,
+            ));
+        }
     }
     Ok(())
 }

@@ -62,6 +62,7 @@ pub(crate) fn write_generation(
         &plan.source_ordinals,
         context,
     )?;
+    insert_opaque_facts(&transaction, generation.document(), context)?;
     insert_coverage(
         &transaction,
         generation.document(),
@@ -140,8 +141,30 @@ fn measure(
         add_text(&mut text_bytes, &provenance.language, context)?;
         add_optional_text(&mut text_bytes, provenance.rule.as_deref(), context)?;
     }
+    for mapping in &document.source_mappings {
+        collect_source(&mapping.from, &mut sources, context)?;
+        collect_source(&mapping.to, &mut sources, context)?;
+        collect_opaque_evidence_source(&mapping.evidence, &mut sources, context)?;
+        add_serialized_text(&mut text_bytes, mapping, context)?;
+    }
     for coverage in &document.coverage_records {
         collect_evidence(&coverage.evidence, &mut sources, &mut child_rows, context)?;
+    }
+    for region in &document.skipped_regions {
+        collect_source(&region.source, &mut sources, context)?;
+        collect_opaque_evidence_source(&region.evidence, &mut sources, context)?;
+        add_serialized_text(&mut text_bytes, region, context)?;
+    }
+    for diagnostic in &document.diagnostics {
+        if let Some(source) = &diagnostic.source {
+            collect_source(source, &mut sources, context)?;
+        }
+        collect_opaque_evidence_source(&diagnostic.evidence, &mut sources, context)?;
+        add_serialized_text(&mut text_bytes, diagnostic, context)?;
+    }
+    for extension in &document.extensions {
+        collect_opaque_evidence_source(&extension.evidence, &mut sources, context)?;
+        add_serialized_text(&mut text_bytes, extension, context)?;
     }
 
     let source_count = usize_to_u64(sources.len())?;
@@ -154,7 +177,11 @@ fn measure(
         usize_to_u64(document.occurrences.len())?,
         usize_to_u64(document.relations.len())?,
         usize_to_u64(document.provenance.len())?,
+        usize_to_u64(document.source_mappings.len())?,
         usize_to_u64(document.coverage_records.len())?,
+        usize_to_u64(document.skipped_regions.len())?,
+        usize_to_u64(document.diagnostics.len())?,
+        usize_to_u64(document.extensions.len())?,
     ];
     let logical_rows = logical_records
         .into_iter()
@@ -183,6 +210,10 @@ fn measure(
         logical_records[3],
         logical_records[4],
         logical_records[5],
+        logical_records[6],
+        logical_records[7],
+        logical_records[8],
+        logical_records[9],
         source_count,
         stored_rows,
         text_bytes,
@@ -213,6 +244,17 @@ fn collect_evidence(
         usize_to_u64(evidence.derivation.len())?,
         context,
     )
+}
+
+fn collect_opaque_evidence_source(
+    evidence: &FactEvidence,
+    sources: &mut BTreeSet<SourceRef>,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    if let Some(source) = &evidence.source {
+        collect_source(source, sources, context)?;
+    }
+    Ok(())
 }
 
 fn collect_source(
@@ -266,6 +308,20 @@ fn add_optional_text(
     Ok(())
 }
 
+fn add_serialized_text(
+    bytes: &mut u64,
+    value: &impl serde::Serialize,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    let encoded = serde_json::to_vec(value).map_err(CatalogError::json)?;
+    *bytes = bytes
+        .checked_add(usize_to_u64(encoded.len())?)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
+    context
+        .require(GenerationResource::TextBytes, *bytes)
+        .map_err(CatalogError::control)
+}
+
 fn insert_header(
     transaction: &Transaction<'_>,
     generation: &GenerationSnapshot,
@@ -281,11 +337,13 @@ fn insert_header(
                 repository_id, generation_id, parent_generation_id,
                 manifest_hash, configuration_hash, provider_set_hash,
                 file_count, entity_count, occurrence_count, relation_count,
-                provenance_count, coverage_count, source_ref_count,
+                provenance_count, source_mapping_count, coverage_count,
+                skipped_region_count, diagnostic_count, extension_count, source_ref_count,
                 stored_row_count, text_bytes, sealed
              ) VALUES (
                 1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 1
+                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+                ?21, ?22, ?23, 1
              )",
             params![
                 i64::from(contract.major()),
@@ -305,7 +363,11 @@ fn insert_header(
                 codec::sqlite_i64(stats.occurrences())?,
                 codec::sqlite_i64(stats.relations())?,
                 codec::sqlite_i64(stats.provenance())?,
+                codec::sqlite_i64(stats.source_mappings())?,
                 codec::sqlite_i64(stats.coverage())?,
+                codec::sqlite_i64(stats.skipped_regions())?,
+                codec::sqlite_i64(stats.diagnostics())?,
+                codec::sqlite_i64(stats.extensions())?,
                 codec::sqlite_i64(stats.source_refs())?,
                 codec::sqlite_i64(stats.stored_rows())?,
                 codec::sqlite_i64(stats.text_bytes())?,
@@ -360,6 +422,30 @@ fn insert_identities(
         .chain(
             document
                 .coverage_records
+                .iter()
+                .map(|record| ("fact", record.id.as_bytes().as_slice())),
+        )
+        .chain(
+            document
+                .source_mappings
+                .iter()
+                .map(|record| ("fact", record.id.as_bytes().as_slice())),
+        )
+        .chain(
+            document
+                .skipped_regions
+                .iter()
+                .map(|record| ("fact", record.id.as_bytes().as_slice())),
+        )
+        .chain(
+            document
+                .diagnostics
+                .iter()
+                .map(|record| ("fact", record.id.as_bytes().as_slice())),
+        )
+        .chain(
+            document
+                .extensions
                 .iter()
                 .map(|record| ("fact", record.id.as_bytes().as_slice())),
         )
@@ -788,6 +874,102 @@ fn insert_coverage(
             record.id.as_bytes(),
             &record.evidence,
         )?;
+    }
+    Ok(())
+}
+
+fn insert_opaque_facts(
+    transaction: &Transaction<'_>,
+    document: &NormalizedIrDocument,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    for (sql, records) in [
+        (
+            "INSERT INTO source_mappings (
+                source_mapping_id, repository_id, generation_id, provenance_id, payload
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            document
+                .source_mappings
+                .iter()
+                .map(|record| {
+                    (
+                        record.id.as_bytes().as_slice(),
+                        record.repository.as_bytes().as_slice(),
+                        record.generation.as_bytes().as_slice(),
+                        record.provenance.as_bytes().as_slice(),
+                        serde_json::to_string(record),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "INSERT INTO skipped_regions (
+                skipped_region_id, repository_id, generation_id, provenance_id, payload
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            document
+                .skipped_regions
+                .iter()
+                .map(|record| {
+                    (
+                        record.id.as_bytes().as_slice(),
+                        record.repository.as_bytes().as_slice(),
+                        record.generation.as_bytes().as_slice(),
+                        record.provenance.as_bytes().as_slice(),
+                        serde_json::to_string(record),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "INSERT INTO diagnostics (
+                diagnostic_id, repository_id, generation_id, provenance_id, payload
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            document
+                .diagnostics
+                .iter()
+                .map(|record| {
+                    (
+                        record.id.as_bytes().as_slice(),
+                        record.repository.as_bytes().as_slice(),
+                        record.generation.as_bytes().as_slice(),
+                        record.provenance.as_bytes().as_slice(),
+                        serde_json::to_string(record),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "INSERT INTO extensions (
+                extension_id, repository_id, generation_id, provenance_id, payload
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            document
+                .extensions
+                .iter()
+                .map(|record| {
+                    (
+                        record.id.as_bytes().as_slice(),
+                        record.repository.as_bytes().as_slice(),
+                        record.generation.as_bytes().as_slice(),
+                        record.provenance.as_bytes().as_slice(),
+                        serde_json::to_string(record),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+    ] {
+        let mut statement = transaction.prepare(sql).map_err(CatalogError::sqlite)?;
+        for (id, repository, generation, provenance, payload) in records {
+            context.check().map_err(CatalogError::control)?;
+            statement
+                .execute(params![
+                    id,
+                    repository,
+                    generation,
+                    provenance,
+                    payload.map_err(CatalogError::json)?,
+                ])
+                .map_err(CatalogError::sqlite)?;
+        }
     }
     Ok(())
 }
