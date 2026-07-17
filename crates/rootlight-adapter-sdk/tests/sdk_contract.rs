@@ -350,6 +350,39 @@ fn sink_rejects_duplicate_out_of_order_and_oversized_batches_atomically() {
 }
 
 #[test]
+fn signature_facts_consume_the_same_bounded_sink_budget_as_other_facts() {
+    let (_temporary, _snapshot, source) = source_fixture();
+    let batch = BatchThresholds::new(1, 1024, 1, 128).expect("signature batch limits are valid");
+    let stream = StreamLimits::new(2, 1, 2048, 2, 256, 128, batch)
+        .expect("signature stream limits are valid");
+    let mut sink = BoundedSyntaxSink::new(source.clone(), stream, 8);
+    let signature = SyntaxFact::new(
+        1,
+        None,
+        SyntaxFactKind::Signature,
+        SourceSpan::new(source.span().file(), 0, source.span().end_byte().min(1))
+            .expect("signature span is valid"),
+        0,
+        SyntaxKindLabel::new("rust.function.signature").expect("signature syntax label is valid"),
+    );
+
+    sink.push(SyntaxFactBatch::new(0, vec![signature.clone()], Vec::new()))
+        .expect("signature fact is accepted");
+    assert_eq!(sink.staged_usage().records(), 1);
+    assert_eq!(sink.remaining_budget().remaining().records(), 0);
+    assert_eq!(
+        sink.push(SyntaxFactBatch::new(1, vec![signature], Vec::new())),
+        Err(SinkError::StreamLimit {
+            resource: ResourceKind::Records,
+            observed: 2,
+            limit: 1,
+        })
+    );
+    assert_eq!(sink.staged_usage().records(), 1);
+    assert_eq!(sink.next_sequence(), 1);
+}
+
+#[test]
 fn discard_rolls_back_staged_state_and_closes_the_transaction() {
     let (_temporary, _snapshot, source) = source_fixture();
     let limits = limits(2, IrLimits::default());
