@@ -842,7 +842,6 @@ mod tests {
         assert_eq!(json["result"]["data"]["kind"], "control_probe");
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn support_bundle_write_is_private_and_refuses_overwrite() {
         let temporary = tempfile::tempdir().expect("temporary directory is available");
@@ -953,7 +952,7 @@ mod tests {
         let temporary = private_support_tempdir();
         let acl = "others allow read,file_inherit,directory_inherit";
         let status = Command::new("/bin/chmod")
-            .args(["+a", &acl])
+            .args(["+a", acl])
             .arg(temporary.path())
             .env_clear()
             .env("LC_ALL", "C")
