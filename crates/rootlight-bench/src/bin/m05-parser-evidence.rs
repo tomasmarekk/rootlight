@@ -22,9 +22,9 @@ use rootlight_adapter_treesitter::{
 };
 use rootlight_bench::{
     Availability, BenchmarkCommand, BuildProvenance, BundleLimits, DatasetEntry, DatasetManifest,
-    EnvironmentEvidence, EvidenceValue, ParserBenchmarkConfig, ParserDatasetInput, ResultBundle,
-    UnavailableProcessTreeSampler, UnavailableSemanticFacts, publish_bundle, run_parser_benchmark,
-    verify_bundle,
+    EnvironmentEvidence, EvidenceValue, ParserBenchmarkConfig, ParserDatasetInput,
+    RESULT_BUNDLE_SCHEMA_VERSION, ResultBundle, UnavailableProcessTreeSampler,
+    UnavailableSemanticFacts, publish_bundle, run_parser_benchmark, verify_bundle,
 };
 use rootlight_ids::{GenerationId, derive_repository};
 use rootlight_ir::{IrLimits, SourceRef, SourceSpan};
@@ -190,7 +190,7 @@ fn embedded_manifest() -> Result<DatasetManifest, EvidenceError> {
         hash_length_prefixed(&mut revision_hasher, entry.source_sha256.as_bytes())?;
     }
     Ok(DatasetManifest {
-        schema_version: "1.0".to_owned(),
+        schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
         dataset_id: DATASET_ID.to_owned(),
         revision: format!("sha256:{}", hex_digest(revision_hasher.finalize())),
         scope_rule: "embedded_fixture_set_v1".to_owned(),
@@ -201,7 +201,7 @@ fn embedded_manifest() -> Result<DatasetManifest, EvidenceError> {
 
 fn benchmark_command() -> BenchmarkCommand {
     BenchmarkCommand {
-        schema_version: "1.0".to_owned(),
+        schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
         subcommand: "m05-parser-evidence".to_owned(),
         arguments: vec![
             format!("dataset_id={DATASET_ID}"),
@@ -249,7 +249,7 @@ fn environment(binary_sha256: &str) -> Result<EnvironmentEvidence, EvidenceError
         }
     }
     Ok(EnvironmentEvidence {
-        schema_version: "1.0".to_owned(),
+        schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
         cpu_model: EvidenceValue::unavailable("host_inventory_not_collected"),
         cpu_topology: EvidenceValue::unavailable("host_inventory_not_collected"),
         ram_bytes: EvidenceValue::unavailable("host_inventory_not_collected"),
@@ -289,7 +289,7 @@ fn environment(binary_sha256: &str) -> Result<EnvironmentEvidence, EvidenceError
 
 fn build_provenance(source_revision: &str, binary_sha256: &str) -> BuildProvenance {
     BuildProvenance {
-        schema_version: "1.0".to_owned(),
+        schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
         source_revision: source_revision.to_owned(),
         binary_revision: format!("sha256:{binary_sha256}"),
         build_profile: build_profile().to_owned(),

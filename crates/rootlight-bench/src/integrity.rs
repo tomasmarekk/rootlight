@@ -11,6 +11,7 @@ use sha2::{Digest as _, Sha256};
 use crate::bundle::{
     AGENT_TRAJECTORIES_FILE, BUILD_PROVENANCE_FILE, BundleError, COMMAND_FILE, COVERAGE_FILE,
     DATASET_MANIFEST_FILE, ENVIRONMENT_FILE, QUALITY_FILE, RAW_SAMPLES_FILE, SUMMARY_FILE,
+    json_bytes, json_lines,
 };
 use crate::parser::{semantic_fact_eligibility, semantic_quality_eligibility};
 use crate::{
@@ -50,18 +51,24 @@ pub(crate) fn is_fixed_artifact(relative: &str) -> bool {
     FIXED_ARTIFACTS.contains(&relative)
 }
 
-pub(crate) fn validate_fixed_artifacts(
-    artifacts: &BTreeMap<String, Vec<u8>>,
+pub(crate) fn validate_fixed_artifacts<B>(
+    artifacts: &BTreeMap<String, B>,
     limits: BundleLimits,
-) -> Result<(), BundleError> {
+) -> Result<(), BundleError>
+where
+    B: AsRef<[u8]>,
+{
     let fixed = decode_fixed_artifacts(artifacts, limits)?;
     validate_fixed_bundle(&fixed, limits)
 }
 
-fn decode_fixed_artifacts(
-    artifacts: &BTreeMap<String, Vec<u8>>,
+fn decode_fixed_artifacts<B>(
+    artifacts: &BTreeMap<String, B>,
     limits: BundleLimits,
-) -> Result<FixedArtifacts, BundleError> {
+) -> Result<FixedArtifacts, BundleError>
+where
+    B: AsRef<[u8]>,
+{
     for name in FIXED_ARTIFACTS {
         if !artifacts.contains_key(name) {
             return Err(BundleError::ArtifactSetMismatch);
@@ -71,9 +78,11 @@ fn decode_fixed_artifacts(
     validate_json_bytes(manifest_bytes, limits)?;
     let dataset_manifest =
         decode_dataset_manifest(manifest_bytes, limits).map_err(map_decode_error)?;
+    validate_canonical_json(manifest_bytes, &dataset_manifest, limits)?;
     let command_bytes = fixed_bytes(artifacts, COMMAND_FILE)?;
     validate_json_bytes(command_bytes, limits)?;
     let command = decode_benchmark_command(command_bytes, limits).map_err(map_decode_error)?;
+    validate_canonical_json(command_bytes, &command, limits)?;
     Ok(FixedArtifacts {
         environment: decode_json(fixed_bytes(artifacts, ENVIRONMENT_FILE)?, limits)?,
         dataset_manifest,
@@ -97,23 +106,31 @@ fn decode_fixed_artifacts(
     })
 }
 
-fn fixed_bytes<'a>(
-    artifacts: &'a BTreeMap<String, Vec<u8>>,
+fn fixed_bytes<'a, B>(
+    artifacts: &'a BTreeMap<String, B>,
     name: &str,
-) -> Result<&'a [u8], BundleError> {
+) -> Result<&'a [u8], BundleError>
+where
+    B: AsRef<[u8]>,
+{
     artifacts
         .get(name)
-        .map(Vec::as_slice)
+        .map(AsRef::as_ref)
         .ok_or(BundleError::ArtifactSetMismatch)
 }
 
-fn decode_json<T: DeserializeOwned>(bytes: &[u8], limits: BundleLimits) -> Result<T, BundleError> {
+fn decode_json<T: DeserializeOwned + serde::Serialize>(
+    bytes: &[u8],
+    limits: BundleLimits,
+) -> Result<T, BundleError> {
     validate_json_bytes(bytes, limits)?;
-    serde_json::from_slice(&bytes[..bytes.len() - 1])
-        .map_err(|_| BundleError::InvalidArtifactEncoding)
+    let value = serde_json::from_slice(&bytes[..bytes.len() - 1])
+        .map_err(|_| BundleError::InvalidArtifactEncoding)?;
+    validate_canonical_json(bytes, &value, limits)?;
+    Ok(value)
 }
 
-fn decode_json_lines<T: DeserializeOwned>(
+fn decode_json_lines<T: DeserializeOwned + serde::Serialize>(
     bytes: &[u8],
     maximum_count: usize,
     limits: BundleLimits,
@@ -126,7 +143,16 @@ fn decode_json_lines<T: DeserializeOwned>(
     if !bytes.ends_with(b"\n") {
         return Err(BundleError::InvalidArtifactEncoding);
     }
+    let line_count = bytes[..bytes.len() - 1]
+        .split(|byte| *byte == b'\n')
+        .count();
+    if line_count > maximum_count {
+        return Err(BundleError::LimitExceeded { resource });
+    }
     let mut values = Vec::new();
+    values
+        .try_reserve_exact(line_count)
+        .map_err(|_| BundleError::AllocationFailed)?;
     for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
         if line.is_empty() || line.contains(&b'\r') {
             return Err(BundleError::InvalidArtifactEncoding);
@@ -138,7 +164,29 @@ fn decode_json_lines<T: DeserializeOwned>(
             serde_json::from_slice(line).map_err(|_| BundleError::InvalidArtifactEncoding)?;
         values.push(value);
     }
+    let canonical_limit =
+        usize::try_from(limits.max_artifact_bytes).map_err(|_| BundleError::LimitExceeded {
+            resource: "artifact_bytes",
+        })?;
+    if json_lines(&values, canonical_limit)? != bytes {
+        return Err(BundleError::InvalidArtifactEncoding);
+    }
     Ok(values)
+}
+
+fn validate_canonical_json(
+    bytes: &[u8],
+    value: &impl serde::Serialize,
+    limits: BundleLimits,
+) -> Result<(), BundleError> {
+    let canonical_limit =
+        usize::try_from(limits.max_artifact_bytes).map_err(|_| BundleError::LimitExceeded {
+            resource: "artifact_bytes",
+        })?;
+    if json_bytes(value, canonical_limit)? != bytes {
+        return Err(BundleError::InvalidArtifactEncoding);
+    }
+    Ok(())
 }
 
 fn validate_json_bytes(bytes: &[u8], limits: BundleLimits) -> Result<(), BundleError> {
@@ -170,6 +218,7 @@ fn map_decode_error(error: crate::DecodeError) -> BundleError {
     match error {
         crate::DecodeError::Limits(source) => source,
         crate::DecodeError::LimitExceeded { resource } => BundleError::LimitExceeded { resource },
+        crate::DecodeError::InvalidSchema => BundleError::UnsupportedSchemaVersion,
         _ => BundleError::InvalidArtifactEncoding,
     }
 }
@@ -546,7 +595,7 @@ fn validate_quality(
 ) -> Result<(), BundleError> {
     validate_schema(&quality.schema_version)?;
     if quality.rubric_id != SEMANTIC_QUALITY_RUBRIC_ID {
-        return Err(BundleError::ArtifactInvariantViolation);
+        return Err(BundleError::UnsupportedRubricVersion);
     }
     validate_availability(&quality.semantic_eligibility, limits)?;
     validate_observation(&quality.precision_ppm, limits)?;
@@ -675,7 +724,7 @@ fn validate_availability(
 
 fn validate_schema(schema: &str) -> Result<(), BundleError> {
     if schema != RESULT_BUNDLE_SCHEMA_VERSION {
-        return Err(BundleError::ArtifactInvariantViolation);
+        return Err(BundleError::UnsupportedSchemaVersion);
     }
     Ok(())
 }

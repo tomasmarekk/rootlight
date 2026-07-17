@@ -20,8 +20,9 @@ use crate::model::MILLION_PPM;
 use crate::{
     Availability, BundleError, BundleLimits, CoverageEvidence, DatasetEntry, EvidenceValue,
     MAX_SEMANTIC_CALIBRATION_ERROR_PPM, MIN_SEMANTIC_PRECISION_PPM, MIN_SEMANTIC_RECALL_PPM,
-    MetricDistribution, ProcessTreeSample, ProcessTreeSampler, QualityEvidence, RawSample,
-    ResultSummary, SEMANTIC_QUALITY_RUBRIC_ID, SampleOutcome, SemanticQualityMeasurement,
+    MetricDistribution, ProcessTreeSample, ProcessTreeSampler, QualityEvidence,
+    RESULT_BUNDLE_SCHEMA_VERSION, RawSample, ResultSummary, SEMANTIC_QUALITY_RUBRIC_ID,
+    SampleOutcome, SemanticQualityMeasurement,
 };
 
 const MAX_SAMPLE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -175,7 +176,7 @@ where
         .map(|(id, status)| (id, status.as_str().to_owned()))
         .collect();
     let coverage = CoverageEvidence {
-        schema_version: "1.0".to_owned(),
+        schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
         attempted_entries: u64::try_from(parser_status.len())
             .map_err(|_| ParserRunError::SampleCountOverflow)?,
         committed_entries: u64::try_from(committed_entries)
@@ -184,7 +185,7 @@ where
         parser_status,
     };
     let quality = QualityEvidence {
-        schema_version: "1.0".to_owned(),
+        schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
         rubric_id: SEMANTIC_QUALITY_RUBRIC_ID.to_owned(),
         semantic_eligibility,
         precision_ppm: semantic_quality.precision_ppm,
@@ -539,7 +540,7 @@ fn sample_from_result<E: SemanticFactProbe + ?Sized>(
         ),
     };
     Ok(RawSample {
-        schema_version: "1.0".to_owned(),
+        schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
         ordinal,
         phase: phase.as_str().to_owned(),
         dataset_entry_id: input.entry.id.clone(),
@@ -637,7 +638,7 @@ fn summarize(
         .map(|(family, samples)| distribution(&samples).map(|value| (family, value)))
         .collect::<Result<BTreeMap<_, _>, ParserRunError>>()?;
     Ok(ResultSummary {
-        schema_version: "1.0".to_owned(),
+        schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
         benchmark_id: "BENCH-PARSE-001".to_owned(),
         semantic_eligibility,
         families,

@@ -7,7 +7,10 @@ use std::collections::BTreeSet;
 
 use serde::Deserialize;
 
-use crate::{BenchmarkCommand, BundleLimits, DatasetEntry, DatasetManifest, bundle::BundleError};
+use crate::{
+    BenchmarkCommand, BundleLimits, DatasetEntry, DatasetManifest, RESULT_BUNDLE_SCHEMA_VERSION,
+    bundle::BundleError,
+};
 
 /// Decodes a strict dataset manifest under checked limits.
 ///
@@ -25,7 +28,7 @@ pub fn decode_dataset_manifest(
     let input: DatasetManifestInput =
         serde_json::from_slice(bytes).map_err(|_| DecodeError::InvalidJson)?;
     validate_string(&input.schema_version, limits, StringKind::Label)?;
-    if input.schema_version != "1.0" {
+    if input.schema_version != RESULT_BUNDLE_SCHEMA_VERSION {
         return Err(DecodeError::InvalidSchema);
     }
     validate_string(&input.dataset_id, limits, StringKind::Label)?;
@@ -119,7 +122,7 @@ pub fn decode_benchmark_command(
     let input: BenchmarkCommandInput =
         serde_json::from_slice(bytes).map_err(|_| DecodeError::InvalidJson)?;
     validate_string(&input.schema_version, limits, StringKind::Label)?;
-    if input.schema_version != "1.0" {
+    if input.schema_version != RESULT_BUNDLE_SCHEMA_VERSION {
         return Err(DecodeError::InvalidSchema);
     }
     validate_string(&input.subcommand, limits, StringKind::Label)?;
@@ -305,7 +308,7 @@ mod tests {
     fn manifest(digest: &str, path: &str) -> Vec<u8> {
         format!(
             r#"{{
-                "schema_version":"1.0",
+                "schema_version":"2.0",
                 "dataset_id":"fixture",
                 "revision":"rev-1",
                 "scope_rule":"listed_entries",
@@ -410,7 +413,7 @@ mod tests {
     #[test]
     fn command_decoder_is_strict_bounded_and_source_free() {
         let valid = br#"{
-            "schema_version":"1.0",
+            "schema_version":"2.0",
             "subcommand":"m05-parser",
             "arguments":["dataset=fixture"],
             "seed":7,
@@ -422,7 +425,7 @@ mod tests {
             .expect("bounded source-free command decodes");
 
         let path_shaped = br#"{
-            "schema_version":"1.0",
+            "schema_version":"2.0",
             "subcommand":"m05-parser",
             "arguments":["C:/source/repo"],
             "seed":7,

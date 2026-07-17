@@ -5,6 +5,7 @@
 //! every read before allocating artifact contents.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
@@ -12,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::integrity::{is_fixed_artifact, validate_fixed_artifacts};
@@ -169,7 +170,7 @@ impl BundleLimits {
 }
 
 /// Closed source-free event vocabulary for operational benchmark logs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OperationalEvent {
@@ -205,7 +206,7 @@ impl OperationalEvent {
 }
 
 /// Closed source-free terminal-status vocabulary for operational logs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OperationalStatus {
@@ -244,7 +245,7 @@ impl OperationalStatus {
 }
 
 /// One source-free structured operational log record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperationalLogRecord {
     /// Monotonic record sequence within this artifact.
@@ -297,6 +298,16 @@ impl Serialize for OperationalLog {
         S: serde::Serializer,
     {
         self.records.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OperationalLog {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let records = Vec::<OperationalLogRecord>::deserialize(deserializer)?;
+        Self::new(records).map_err(serde::de::Error::custom)
     }
 }
 
@@ -403,7 +414,10 @@ pub fn verify_bundle_with_limits(
     if observed_paths != expected_paths {
         return Err(BundleError::ArtifactSetMismatch);
     }
+    preflight_artifact_classes(&expected, &observed, limits)?;
     let mut fixed_artifacts = BTreeMap::new();
+    let mut profiles = BTreeMap::new();
+    let mut logs = BTreeMap::new();
     for (relative, checksum) in expected {
         let bytes = read_bounded(
             &destination.join(&relative),
@@ -415,10 +429,100 @@ pub fn verify_bundle_with_limits(
         }
         if is_fixed_artifact(&relative) {
             fixed_artifacts.insert(relative, bytes);
+        } else if let Some(name) = relative.strip_prefix("profiles/") {
+            profiles.insert(name.to_owned(), bytes);
+        } else if let Some(name) = relative.strip_prefix("logs/") {
+            let log = decode_operational_log(&bytes, limits)?;
+            logs.insert(name.to_owned(), log);
         }
     }
     validate_fixed_artifacts(&fixed_artifacts, limits)?;
+    // Keep non-fixed artifacts alive through all semantic verification so
+    // class-level validation cannot accidentally regress to checksum-only.
+    drop((profiles, logs));
     Ok(())
+}
+
+fn preflight_artifact_classes(
+    expected: &BTreeMap<String, String>,
+    observed: &BTreeMap<String, u64>,
+    limits: BundleLimits,
+) -> Result<(), BundleError> {
+    let mut profile_count = 0_usize;
+    let mut log_count = 0_usize;
+    let mut profile_bytes = 0_u64;
+    let mut log_bytes = 0_u64;
+    for relative in expected.keys() {
+        let size = *observed
+            .get(relative)
+            .ok_or(BundleError::ArtifactSetMismatch)?;
+        if relative.starts_with("profiles/") {
+            profile_count = profile_count
+                .checked_add(1)
+                .ok_or(BundleError::LimitExceeded {
+                    resource: "artifact_count",
+                })?;
+            profile_bytes = profile_bytes
+                .checked_add(size)
+                .ok_or(BundleError::LimitExceeded {
+                    resource: "profile_bytes",
+                })?;
+        } else if relative.starts_with("logs/") {
+            log_count = log_count.checked_add(1).ok_or(BundleError::LimitExceeded {
+                resource: "artifact_count",
+            })?;
+            log_bytes = log_bytes
+                .checked_add(size)
+                .ok_or(BundleError::LimitExceeded {
+                    resource: "log_bytes",
+                })?;
+        }
+    }
+    check_count(
+        profile_count,
+        limits.max_artifacts_per_class,
+        "artifact_count",
+    )?;
+    check_count(log_count, limits.max_artifacts_per_class, "artifact_count")?;
+    if profile_bytes > limits.max_profile_bytes {
+        return Err(BundleError::LimitExceeded {
+            resource: "profile_bytes",
+        });
+    }
+    if log_bytes > limits.max_log_bytes {
+        return Err(BundleError::LimitExceeded {
+            resource: "log_bytes",
+        });
+    }
+    Ok(())
+}
+
+fn decode_operational_log(
+    bytes: &[u8],
+    limits: BundleLimits,
+) -> Result<OperationalLog, BundleError> {
+    let length = u64::try_from(bytes.len()).map_err(|_| BundleError::LimitExceeded {
+        resource: "log_bytes",
+    })?;
+    if length > limits.max_artifact_bytes
+        || bytes.len() <= 1
+        || !bytes.ends_with(b"\n")
+        || bytes[..bytes.len() - 1]
+            .iter()
+            .any(|byte| matches!(byte, b'\n' | b'\r'))
+    {
+        return Err(BundleError::InvalidLog);
+    }
+    let log = serde_json::from_slice::<OperationalLog>(&bytes[..bytes.len() - 1])
+        .map_err(|_| BundleError::InvalidLog)?;
+    let limit =
+        usize::try_from(limits.max_artifact_bytes).map_err(|_| BundleError::LimitExceeded {
+            resource: "artifact_bytes",
+        })?;
+    if json_bytes(&log, limit)? != bytes {
+        return Err(BundleError::InvalidLog);
+    }
+    Ok(log)
 }
 
 fn publish_bundle_with_fault(
@@ -587,10 +691,10 @@ fn sync_directory(_path: &Path, _operation: &'static str) -> Result<(), BundleEr
     Ok(())
 }
 
-fn build_artifacts(
-    bundle: &ResultBundle,
+fn build_artifacts<'a>(
+    bundle: &'a ResultBundle,
     limits: BundleLimits,
-) -> Result<BTreeMap<String, Vec<u8>>, BundleError> {
+) -> Result<BTreeMap<String, Cow<'a, [u8]>>, BundleError> {
     check_count(
         bundle.raw_samples.len(),
         limits.max_raw_samples,
@@ -608,42 +712,42 @@ fn build_artifacts(
         usize::try_from(limits.max_artifact_bytes).map_err(|_| BundleError::LimitExceeded {
             resource: "artifact_bytes",
         })?;
-    let mut artifacts = BTreeMap::new();
+    let mut artifacts = BTreeMap::<String, Cow<'a, [u8]>>::new();
     artifacts.insert(
         ENVIRONMENT_FILE.to_owned(),
-        json_bytes(&bundle.environment, serialized_limit)?,
+        Cow::Owned(json_bytes(&bundle.environment, serialized_limit)?),
     );
     artifacts.insert(
         DATASET_MANIFEST_FILE.to_owned(),
-        json_bytes(&bundle.dataset_manifest, serialized_limit)?,
+        Cow::Owned(json_bytes(&bundle.dataset_manifest, serialized_limit)?),
     );
     artifacts.insert(
         BUILD_PROVENANCE_FILE.to_owned(),
-        json_bytes(&bundle.build_provenance, serialized_limit)?,
+        Cow::Owned(json_bytes(&bundle.build_provenance, serialized_limit)?),
     );
     artifacts.insert(
         COMMAND_FILE.to_owned(),
-        json_bytes(&bundle.command, serialized_limit)?,
+        Cow::Owned(json_bytes(&bundle.command, serialized_limit)?),
     );
     artifacts.insert(
         RAW_SAMPLES_FILE.to_owned(),
-        json_lines(&bundle.raw_samples, serialized_limit)?,
+        Cow::Owned(json_lines(&bundle.raw_samples, serialized_limit)?),
     );
     artifacts.insert(
         SUMMARY_FILE.to_owned(),
-        json_bytes(&bundle.summary, serialized_limit)?,
+        Cow::Owned(json_bytes(&bundle.summary, serialized_limit)?),
     );
     artifacts.insert(
         COVERAGE_FILE.to_owned(),
-        json_bytes(&bundle.coverage, serialized_limit)?,
+        Cow::Owned(json_bytes(&bundle.coverage, serialized_limit)?),
     );
     artifacts.insert(
         QUALITY_FILE.to_owned(),
-        json_bytes(&bundle.quality, serialized_limit)?,
+        Cow::Owned(json_bytes(&bundle.quality, serialized_limit)?),
     );
     artifacts.insert(
         AGENT_TRAJECTORIES_FILE.to_owned(),
-        json_lines(&bundle.agent_trajectories, serialized_limit)?,
+        Cow::Owned(json_lines(&bundle.agent_trajectories, serialized_limit)?),
     );
 
     let mut profile_bytes = 0_u64;
@@ -655,18 +759,19 @@ fn build_artifacts(
             limits.max_profile_bytes,
             "profile_bytes",
         )?;
-        artifacts.insert(format!("profiles/{name}"), bytes.clone());
+        artifacts.insert(format!("profiles/{name}"), Cow::Borrowed(bytes));
     }
     let mut log_bytes = 0_u64;
     for (name, log) in &bundle.logs {
         let bytes = json_bytes(log, serialized_limit)?;
+        decode_operational_log(&bytes, limits)?;
         add_bytes(
             &mut log_bytes,
             bytes.len(),
             limits.max_log_bytes,
             "log_bytes",
         )?;
-        artifacts.insert(format!("logs/{name}"), bytes);
+        artifacts.insert(format!("logs/{name}"), Cow::Owned(bytes));
     }
 
     validate_fixed_artifacts(&artifacts, limits)?;
@@ -683,7 +788,7 @@ fn build_artifacts(
     for bytes in artifacts.values() {
         add_bytes(
             &mut total,
-            bytes.len(),
+            bytes.as_ref().len(),
             limits.max_total_bytes,
             "total_bytes",
         )?;
@@ -693,35 +798,45 @@ fn build_artifacts(
             resource: "total_bytes",
         });
     }
-    artifacts.insert(CHECKSUMS_FILE.to_owned(), checksums);
+    artifacts.insert(CHECKSUMS_FILE.to_owned(), Cow::Owned(checksums));
     Ok(artifacts)
 }
 
-fn checksum_manifest(
-    artifacts: &BTreeMap<String, Vec<u8>>,
+fn checksum_manifest<B>(
+    artifacts: &BTreeMap<String, B>,
     limits: BundleLimits,
-) -> Result<Vec<u8>, BundleError> {
+) -> Result<Vec<u8>, BundleError>
+where
+    B: AsRef<[u8]>,
+{
     let checksum_limit =
         usize::try_from(limits.max_checksum_bytes).map_err(|_| BundleError::LimitExceeded {
             resource: "checksum_bytes",
         })?;
     let mut checksums = BoundedBuffer::new(checksum_limit);
     for (relative, bytes) in artifacts {
-        let line = format!("{}  {relative}\n", sha256_hex(bytes));
-        checksums
-            .write_all(line.as_bytes())
-            .map_err(|_| BundleError::LimitExceeded {
-                resource: "checksum_bytes",
-            })?;
+        let line = format!("{}  {relative}\n", sha256_hex(bytes.as_ref()));
+        if checksums.write_all(line.as_bytes()).is_err() {
+            return Err(if checksums.allocation_failed() {
+                BundleError::AllocationFailed
+            } else {
+                BundleError::LimitExceeded {
+                    resource: "checksum_bytes",
+                }
+            });
+        }
     }
     Ok(checksums.into_inner())
 }
 
-fn write_bundle(
-    artifacts: &BTreeMap<String, Vec<u8>>,
+fn write_bundle<B>(
+    artifacts: &BTreeMap<String, B>,
     staging: &Path,
     fail_after_writes: Option<usize>,
-) -> Result<(), BundleError> {
+) -> Result<(), BundleError>
+where
+    B: AsRef<[u8]>,
+{
     fs::create_dir(staging.join("profiles")).map_err(|source| BundleError::Io {
         operation: "create profiles directory",
         source,
@@ -735,43 +850,57 @@ fn write_bundle(
         if fail_after_writes == Some(write_count) {
             return Err(BundleError::InjectedWriteFailure);
         }
-        write_new(&staging.join(relative), bytes)?;
+        write_new(&staging.join(relative), bytes.as_ref())?;
     }
     Ok(())
 }
 
-fn json_bytes(value: &impl Serialize, limit: usize) -> Result<Vec<u8>, BundleError> {
+pub(crate) fn json_bytes(value: &impl Serialize, limit: usize) -> Result<Vec<u8>, BundleError> {
     let mut bytes = BoundedBuffer::new(limit);
     let result = serde_json::to_writer(&mut bytes, value);
+    if bytes.allocation_failed() {
+        return Err(BundleError::AllocationFailed);
+    }
     if bytes.exceeded() {
         return Err(BundleError::LimitExceeded {
             resource: "serialized_artifact_bytes",
         });
     }
     result.map_err(BundleError::Serialize)?;
-    bytes
-        .write_all(b"\n")
-        .map_err(|_| BundleError::LimitExceeded {
-            resource: "serialized_artifact_bytes",
-        })?;
+    if bytes.write_all(b"\n").is_err() {
+        return Err(if bytes.allocation_failed() {
+            BundleError::AllocationFailed
+        } else {
+            BundleError::LimitExceeded {
+                resource: "serialized_artifact_bytes",
+            }
+        });
+    }
     Ok(bytes.into_inner())
 }
 
-fn json_lines<T: Serialize>(values: &[T], limit: usize) -> Result<Vec<u8>, BundleError> {
+pub(crate) fn json_lines<T: Serialize>(values: &[T], limit: usize) -> Result<Vec<u8>, BundleError> {
     let mut bytes = BoundedBuffer::new(limit);
     for value in values {
         let result = serde_json::to_writer(&mut bytes, value);
+        if bytes.allocation_failed() {
+            return Err(BundleError::AllocationFailed);
+        }
         if bytes.exceeded() {
             return Err(BundleError::LimitExceeded {
                 resource: "serialized_artifact_bytes",
             });
         }
         result.map_err(BundleError::Serialize)?;
-        bytes
-            .write_all(b"\n")
-            .map_err(|_| BundleError::LimitExceeded {
-                resource: "serialized_artifact_bytes",
-            })?;
+        if bytes.write_all(b"\n").is_err() {
+            return Err(if bytes.allocation_failed() {
+                BundleError::AllocationFailed
+            } else {
+                BundleError::LimitExceeded {
+                    resource: "serialized_artifact_bytes",
+                }
+            });
+        }
     }
     Ok(bytes.into_inner())
 }
@@ -781,6 +910,7 @@ struct BoundedBuffer {
     bytes: Vec<u8>,
     limit: usize,
     exceeded: bool,
+    allocation_failed: bool,
 }
 
 impl BoundedBuffer {
@@ -789,11 +919,16 @@ impl BoundedBuffer {
             bytes: Vec::new(),
             limit,
             exceeded: false,
+            allocation_failed: false,
         }
     }
 
     fn exceeded(&self) -> bool {
         self.exceeded
+    }
+
+    fn allocation_failed(&self) -> bool {
+        self.allocation_failed
     }
 
     fn into_inner(self) -> Vec<u8> {
@@ -814,6 +949,10 @@ impl io::Write for BoundedBuffer {
                 io::ErrorKind::FileTooLarge,
                 "bounded buffer limit exceeded",
             ));
+        }
+        if self.bytes.try_reserve(buffer.len()).is_err() {
+            self.allocation_failed = true;
+            return Err(io::Error::other("bounded buffer allocation failed"));
         }
         self.bytes.extend_from_slice(buffer);
         Ok(buffer.len())
@@ -897,7 +1036,7 @@ fn parse_checksums(
     text: &str,
     limits: BundleLimits,
 ) -> Result<BTreeMap<String, String>, BundleError> {
-    if text.is_empty() || !text.ends_with('\n') {
+    if text.is_empty() || !text.ends_with('\n') || text.as_bytes().contains(&b'\r') {
         return Err(BundleError::InvalidChecksumManifest);
     }
     let mut checksums = BTreeMap::new();
@@ -1130,6 +1269,9 @@ pub enum BundleError {
         /// Stable source-free resource label.
         resource: &'static str,
     },
+    /// A bounded in-memory reservation could not be satisfied.
+    #[error("result bundle allocation failed")]
+    AllocationFailed,
     /// The final destination already exists.
     #[error("result destination already exists")]
     DestinationExists,
@@ -1169,6 +1311,12 @@ pub enum BundleError {
     /// A fixed artifact is not strict canonical JSON for its schema.
     #[error("result artifact encoding is invalid")]
     InvalidArtifactEncoding,
+    /// The bundle schema is recognized but unsupported by this verifier.
+    #[error("result bundle schema version is unsupported")]
+    UnsupportedSchemaVersion,
+    /// The quality rubric is incompatible with the current bundle schema.
+    #[error("result bundle quality rubric is unsupported")]
+    UnsupportedRubricVersion,
     /// Fixed artifacts contradict one another or their recorded run policy.
     #[error("result artifact invariants are invalid")]
     ArtifactInvariantViolation,
@@ -1196,7 +1344,7 @@ mod tests {
     fn fixture() -> ResultBundle {
         ResultBundle {
             environment: EnvironmentEvidence {
-                schema_version: "1.0".to_owned(),
+                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
                 cpu_model: EvidenceValue::unavailable("not_sampled"),
                 cpu_topology: EvidenceValue::unavailable("not_sampled"),
                 ram_bytes: EvidenceValue::unavailable("not_sampled"),
@@ -1222,7 +1370,7 @@ mod tests {
                 },
             },
             dataset_manifest: DatasetManifest {
-                schema_version: "1.0".to_owned(),
+                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
                 dataset_id: "fixture".to_owned(),
                 revision: format!("sha256:{}", sha256_hex(&[])),
                 scope_rule: "listed_entries".to_owned(),
@@ -1230,7 +1378,7 @@ mod tests {
                 entries: Vec::new(),
             },
             build_provenance: BuildProvenance {
-                schema_version: "1.0".to_owned(),
+                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
                 source_revision: "00".repeat(20),
                 binary_revision: format!("sha256:{}", "00".repeat(32)),
                 build_profile: "test".to_owned(),
@@ -1238,7 +1386,7 @@ mod tests {
                 target: "test-target".to_owned(),
             },
             command: BenchmarkCommand {
-                schema_version: "1.0".to_owned(),
+                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
                 subcommand: "m05-parser".to_owned(),
                 arguments: Vec::new(),
                 seed: 7,
@@ -1248,7 +1396,7 @@ mod tests {
             },
             raw_samples: Vec::new(),
             summary: ResultSummary {
-                schema_version: "1.0".to_owned(),
+                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
                 benchmark_id: "BENCH-PARSE-001".to_owned(),
                 semantic_eligibility: Availability::Failed {
                     reason_code: "no_measured_samples".to_owned(),
@@ -1262,14 +1410,14 @@ mod tests {
                 },
             },
             coverage: CoverageEvidence {
-                schema_version: "1.0".to_owned(),
+                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
                 attempted_entries: 0,
                 committed_entries: 0,
                 skipped: BTreeMap::new(),
                 parser_status: BTreeMap::new(),
             },
             quality: QualityEvidence {
-                schema_version: "1.0".to_owned(),
+                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
                 rubric_id: crate::SEMANTIC_QUALITY_RUBRIC_ID.to_owned(),
                 semantic_eligibility: Availability::Failed {
                     reason_code: "no_measured_samples".to_owned(),
@@ -1492,14 +1640,155 @@ mod tests {
     }
 
     #[test]
+    fn verifier_preflights_profile_and_log_class_limits() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let mut bundle = fixture();
+        bundle.profiles.insert("first.pb".to_owned(), vec![0; 40]);
+        bundle.profiles.insert("second.pb".to_owned(), vec![0; 40]);
+        bundle
+            .logs
+            .insert("first.json".to_owned(), large_operational_log(0, 2));
+        bundle
+            .logs
+            .insert("second.json".to_owned(), large_operational_log(2, 2));
+        publish_bundle(&bundle, &destination).expect("bundle publishes");
+
+        let count_limits = BundleLimits {
+            max_artifacts_per_class: 1,
+            ..constrained_limits()
+        };
+        assert!(matches!(
+            verify_bundle_with_limits(&destination, count_limits),
+            Err(BundleError::LimitExceeded {
+                resource: "artifact_count"
+            })
+        ));
+
+        let profile_limits = BundleLimits {
+            max_profile_bytes: 79,
+            ..constrained_limits()
+        };
+        assert!(matches!(
+            verify_bundle_with_limits(&destination, profile_limits),
+            Err(BundleError::LimitExceeded {
+                resource: "profile_bytes"
+            })
+        ));
+
+        let log_limits = BundleLimits {
+            max_log_bytes: 1,
+            ..constrained_limits()
+        };
+        assert!(matches!(
+            verify_bundle_with_limits(&destination, log_limits),
+            Err(BundleError::LimitExceeded {
+                resource: "log_bytes"
+            })
+        ));
+    }
+
+    #[test]
+    fn verifier_strictly_decodes_operational_logs() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let mut bundle = fixture();
+        bundle
+            .logs
+            .insert("run.json".to_owned(), large_operational_log(0, 1));
+        publish_bundle(&bundle, &destination).expect("bundle publishes");
+        let bytes = fs::read(destination.join("logs").join("run.json"))
+            .expect("operational log is readable");
+        let mut text = String::from_utf8(bytes).expect("operational log is UTF-8");
+        text = text.replace(
+            "\"elapsed_ns\":1",
+            "\"elapsed_ns\":1,\"host_path\":\"C:/source\"",
+        );
+        rewrite_artifact_and_checksum(&destination, "logs/run.json", text.as_bytes());
+
+        let error = verify_bundle(&destination).expect_err("unknown log payload is rejected");
+
+        assert!(matches!(error, BundleError::InvalidLog));
+    }
+
+    #[test]
+    fn verifier_requires_canonical_json_and_jsonl_bytes() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let json_destination = temporary.path().join("json-result");
+        publish_bundle(&fixture(), &json_destination).expect("bundle publishes");
+        let environment =
+            fs::read(json_destination.join(ENVIRONMENT_FILE)).expect("environment is readable");
+        let mut noncanonical = Vec::with_capacity(environment.len() + 1);
+        noncanonical.push(b' ');
+        noncanonical.extend_from_slice(&environment);
+        rewrite_artifact_and_checksum(&json_destination, ENVIRONMENT_FILE, &noncanonical);
+        assert!(matches!(
+            verify_bundle(&json_destination),
+            Err(BundleError::InvalidArtifactEncoding)
+        ));
+
+        let jsonl_destination = temporary.path().join("jsonl-result");
+        let mut bundle = fixture();
+        bundle.agent_trajectories.push(AgentTrajectory {
+            schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
+            task_id: "task".to_owned(),
+            eligibility: Availability::Unavailable {
+                reason_code: "not_measured".to_owned(),
+            },
+            tool_calls: Vec::new(),
+            total_tokens: EvidenceValue::unavailable("not_measured"),
+        });
+        publish_bundle(&bundle, &jsonl_destination).expect("trajectory bundle publishes");
+        let trajectory = fs::read(jsonl_destination.join(AGENT_TRAJECTORIES_FILE))
+            .expect("trajectory is readable");
+        let mut noncanonical = Vec::with_capacity(trajectory.len() + 1);
+        noncanonical.push(b' ');
+        noncanonical.extend_from_slice(&trajectory);
+        rewrite_artifact_and_checksum(&jsonl_destination, AGENT_TRAJECTORIES_FILE, &noncanonical);
+        assert!(matches!(
+            verify_bundle(&jsonl_destination),
+            Err(BundleError::InvalidArtifactEncoding)
+        ));
+    }
+
+    #[test]
+    fn version_one_bundle_is_explicitly_unsupported() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("legacy-result");
+        publish_bundle(&fixture(), &destination).expect("current bundle publishes");
+        let manifest =
+            fs::read(destination.join(DATASET_MANIFEST_FILE)).expect("manifest is readable");
+        let legacy = String::from_utf8(manifest)
+            .expect("manifest is UTF-8")
+            .replace("\"schema_version\":\"2.0\"", "\"schema_version\":\"1.0\"");
+        rewrite_artifact_and_checksum(&destination, DATASET_MANIFEST_FILE, legacy.as_bytes());
+
+        let error = verify_bundle(&destination).expect_err("legacy bundle is rejected explicitly");
+
+        assert!(matches!(error, BundleError::UnsupportedSchemaVersion));
+    }
+
+    #[test]
+    fn version_two_bundle_rejects_the_version_one_quality_rubric() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let mut bundle = fixture();
+        bundle.quality.rubric_id = "m05-parser-semantic-eligibility-1.0".to_owned();
+
+        let error = publish_bundle(&bundle, &temporary.path().join("result"))
+            .expect_err("legacy rubric is incompatible with schema version two");
+
+        assert!(matches!(error, BundleError::UnsupportedRubricVersion));
+    }
+
+    #[test]
     fn publication_rejects_schema_revision_count_and_availability_contradictions() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
 
         let mut invalid_schema = fixture();
-        invalid_schema.environment.schema_version = "2.0".to_owned();
+        invalid_schema.environment.schema_version = "3.0".to_owned();
         assert!(matches!(
             publish_bundle(&invalid_schema, &temporary.path().join("schema")),
-            Err(BundleError::ArtifactInvariantViolation)
+            Err(BundleError::UnsupportedSchemaVersion)
         ));
 
         let mut invalid_dataset_revision = fixture();
@@ -1575,7 +1864,7 @@ mod tests {
         let destination = temporary.path().join("result");
         publish_bundle(&fixture(), &destination).expect("bundle publishes");
         let sample = RawSample {
-            schema_version: "1.0".to_owned(),
+            schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
             ordinal: 0,
             phase: "trial".to_owned(),
             dataset_entry_id: "entry".to_owned(),
@@ -1633,7 +1922,7 @@ mod tests {
         let mut bundle = fixture();
         bundle.raw_samples = vec![
             RawSample {
-                schema_version: "1.0".to_owned(),
+                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
                 ordinal: 0,
                 phase: "measured".to_owned(),
                 dataset_entry_id: "entry".to_owned(),
@@ -1676,7 +1965,7 @@ mod tests {
         let mut bundle = fixture();
         bundle.agent_trajectories = vec![
             AgentTrajectory {
-                schema_version: "1.0".to_owned(),
+                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
                 task_id: "task".to_owned(),
                 eligibility: Availability::Unavailable {
                     reason_code: "not_measured".to_owned(),
@@ -1864,6 +2153,17 @@ mod tests {
             BundleError::LimitExceeded {
                 resource: "checksum_line_count"
             }
+        ));
+
+        let crlf_destination = temporary.path().join("crlf-result");
+        publish_bundle(&fixture(), &crlf_destination).expect("CRLF fixture publishes");
+        let checksum_path = crlf_destination.join(CHECKSUMS_FILE);
+        let checksums = fs::read_to_string(&checksum_path).expect("checksums are readable");
+        fs::write(&checksum_path, checksums.replace('\n', "\r\n"))
+            .expect("CRLF checksums are written");
+        assert!(matches!(
+            verify_bundle(&crlf_destination),
+            Err(BundleError::InvalidChecksumManifest)
         ));
     }
 

@@ -34,5 +34,9 @@ pub use sampler::{
     UnavailableProcessTreeSampler,
 };
 
-/// Result-bundle schema version written by this crate.
-pub const RESULT_BUNDLE_SCHEMA_VERSION: &str = "1.0";
+/// Result-bundle schema version written and verified by this crate.
+///
+/// Version 2 makes corpus-backed semantic quality and strict cross-artifact
+/// verification normative. Version 1 bundles remain identifiable but are not
+/// accepted as evidence under the stronger contract.
+pub const RESULT_BUNDLE_SCHEMA_VERSION: &str = "2.0";
