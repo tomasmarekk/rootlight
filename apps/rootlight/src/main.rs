@@ -24,20 +24,20 @@ use rootlight_daemon_core::{
     ControlRequest, ControlResponse, ControlService, DaemonLifecycle, DaemonLimits,
     DaemonOrchestrator, DaemonState, DiagnosticOutcome as DomainDiagnosticOutcome,
     DiagnosticsQuick as DomainDiagnosticsQuick, HealthStatus as DomainHealthStatus, JournalActor,
+    OperationPreparationError, PreparedOperationSubmission,
     ResourcePressure as DomainResourcePressure, ServiceError, SupportBundle as DomainSupportBundle,
 };
 use rootlight_error::{ErrorCode, PublicError};
 use rootlight_ids::OperationId;
 use rootlight_operations::{
     CatalogWriterLock, ClientInstanceId, OperationJournal, OperationRecord,
-    OperationStage as JournalStage, OperationState as JournalState, OperationSubmission, PlanHash,
+    OperationStage as JournalStage, OperationState as JournalState,
     RecoveryClass as JournalRecoveryClass,
 };
 use rootlight_runtime::RuntimePaths;
 use serde::Serialize;
 
 const CLI_CONTRACT_VERSION: &str = "1.0";
-const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 
 fn main() -> ExitCode {
     match run() {
@@ -185,7 +185,9 @@ fn execute_standalone(
         limits.control_queue_limit,
         usize::try_from(limits.operation_queue_limit).map_err(|_| CliError::InvalidLimits)?,
     )?;
-    let mut orchestrator = DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), limits)?;
+    let actor_handle = actor.handle();
+    let mut orchestrator =
+        DaemonOrchestrator::new(actor_handle.clone(), Arc::clone(&state), limits)?;
     let service = ControlService::with_state(journal, nonce, Arc::clone(&state), limits)
         .with_catalog_path(catalog_path);
     state.set_catalog_status(DomainHealthStatus::Healthy);
@@ -198,6 +200,7 @@ fn execute_standalone(
         .map_err(CliError::AsyncRuntime)?;
     let result = runtime.block_on(execute_standalone_command(
         &service,
+        &actor_handle,
         &mut orchestrator,
         command,
         arguments,
@@ -213,6 +216,7 @@ fn execute_standalone(
 
 async fn execute_standalone_command(
     service: &ControlService,
+    actor: &rootlight_daemon_core::JournalActorHandle,
     orchestrator: &mut DaemonOrchestrator,
     command: &str,
     arguments: &[std::ffi::OsString],
@@ -235,36 +239,98 @@ async fn execute_standalone_command(
             Ok(CommandResult::SupportBundle(support_receipt(&bundle)))
         }
         ("operation-submit", [operation]) => {
-            let submission = standalone_submission(parse_operation(operation)?, None)?;
-            let admission = orchestrator.schedule(submission).await?;
-            await_standalone_terminal(service, orchestrator, admission.clone()).await?;
-            Ok(CommandResult::OperationSubmit(operation_from_domain(
-                admission,
-            )))
+            submit_standalone(
+                standalone_submission(parse_operation(operation)?, None)?,
+                actor,
+                orchestrator,
+            )
+            .await
         }
         ("operation-submit", [operation, flag, timeout_ms]) if flag == "--timeout-ms" => {
-            let submission = standalone_submission(
+            submit_standalone(
+                standalone_submission(
+                    parse_operation(operation)?,
+                    Some(parse_timeout_ms(timeout_ms)?),
+                )?,
+                actor,
+                orchestrator,
+            )
+            .await
+        }
+        ("operation-submit", [operation, flag, deadline_unix_ms])
+            if flag == "--deadline-unix-ms" =>
+        {
+            let submission = PreparedOperationSubmission::control_probe_timing(
                 parse_operation(operation)?,
-                Some(parse_timeout_ms(timeout_ms)?),
-            )?;
-            let admission = orchestrator.schedule(submission).await?;
-            await_standalone_terminal(service, orchestrator, admission.clone()).await?;
-            Ok(CommandResult::OperationSubmit(operation_from_domain(
-                admission,
-            )))
+                ClientInstanceId::SYSTEM,
+                true,
+                Some(parse_timestamp_ms(deadline_unix_ms)?),
+                None,
+            )
+            .map_err(operation_preparation_error)?;
+            submit_standalone(submission, actor, orchestrator).await
+        }
+        (
+            "operation-submit",
+            [
+                operation,
+                deadline_flag,
+                deadline_unix_ms,
+                lease_flag,
+                lease_expires_unix_ms,
+            ],
+        ) if deadline_flag == "--deadline-unix-ms" && lease_flag == "--lease-expires-unix-ms" => {
+            let submission = PreparedOperationSubmission::control_probe_timing(
+                parse_operation(operation)?,
+                ClientInstanceId::SYSTEM,
+                false,
+                Some(parse_timestamp_ms(deadline_unix_ms)?),
+                Some(parse_timestamp_ms(lease_expires_unix_ms)?),
+            )
+            .map_err(operation_preparation_error)?;
+            submit_standalone(submission, actor, orchestrator).await
+        }
+        ("operation-submit", [operation, lease_flag, lease_expires_unix_ms])
+            if lease_flag == "--lease-expires-unix-ms" =>
+        {
+            let submission = PreparedOperationSubmission::control_probe_timing(
+                parse_operation(operation)?,
+                ClientInstanceId::SYSTEM,
+                false,
+                None,
+                Some(parse_timestamp_ms(lease_expires_unix_ms)?),
+            )
+            .map_err(operation_preparation_error)?;
+            submit_standalone(submission, actor, orchestrator).await
         }
         ("operation-status", [operation]) => response_to_result(
-            service.execute(ControlRequest::OperationStatus(parse_operation(operation)?)),
+            actor
+                .control(ControlRequest::OperationStatus(parse_operation(operation)?))
+                .await?,
         ),
         ("operation-cancel", [operation]) => response_to_result(
-            service.execute(ControlRequest::OperationCancel(parse_operation(operation)?)),
+            actor
+                .control(ControlRequest::OperationCancel(parse_operation(operation)?))
+                .await?,
         ),
         _ => Err(CliError::Usage),
     }
 }
 
+async fn submit_standalone(
+    submission: PreparedOperationSubmission,
+    actor: &rootlight_daemon_core::JournalActorHandle,
+    orchestrator: &mut DaemonOrchestrator,
+) -> Result<CommandResult, CliError> {
+    let admission = orchestrator.schedule(submission).await?;
+    let terminal = await_standalone_terminal(actor, orchestrator, admission).await?;
+    Ok(CommandResult::OperationSubmit(operation_from_domain(
+        terminal,
+    )))
+}
+
 async fn await_standalone_terminal(
-    service: &ControlService,
+    actor: &rootlight_daemon_core::JournalActorHandle,
     orchestrator: &mut DaemonOrchestrator,
     running: OperationRecord,
 ) -> Result<OperationRecord, CliError> {
@@ -272,24 +338,21 @@ async fn await_standalone_terminal(
         return Ok(running);
     }
     loop {
-        let maintenance = tokio::time::sleep(service.limits().maintenance_interval);
-        tokio::pin!(maintenance);
-        tokio::select! {
-            completion = orchestrator.complete_next() => {
-                return completion?.ok_or(CliError::MissingCompletion);
-            }
-            () = &mut maintenance => {
-                orchestrator.maintain().await?;
-                let status = control_response(service.execute(
-                    ControlRequest::OperationStatus(running.operation),
-                ))?;
-                let ControlResponse::OperationStatus(status) = status else {
-                    return Err(CliError::UnexpectedResponse);
-                };
-                if status.state.is_terminal() {
-                    return Ok(status);
-                }
-            }
+        let event = orchestrator.next_event().await?;
+        if let Some(completed) = orchestrator.process_event(event).await?
+            && completed.operation == running.operation
+            && completed.state.is_terminal()
+        {
+            return Ok(completed);
+        }
+        let ControlResponse::OperationStatus(status) = actor
+            .control(ControlRequest::OperationStatus(running.operation))
+            .await?
+        else {
+            return Err(CliError::UnexpectedResponse);
+        };
+        if status.state.is_terminal() {
+            return Ok(status);
         }
     }
 }
@@ -297,17 +360,20 @@ async fn await_standalone_terminal(
 fn standalone_submission(
     operation: OperationId,
     timeout_ms: Option<u64>,
-) -> Result<OperationSubmission, CliError> {
-    OperationSubmission::new(
+) -> Result<PreparedOperationSubmission, CliError> {
+    PreparedOperationSubmission::control_probe(
         operation,
-        rootlight_operations::OperationKind::ControlProbe,
-        PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
         ClientInstanceId::SYSTEM,
-        true,
-        timeout_ms.map(operation_deadline).transpose()?,
-        None,
+        timeout_ms.map(Duration::from_millis),
     )
-    .map_err(|_| CliError::InvalidTimeout)
+    .map_err(operation_preparation_error)
+}
+
+fn operation_preparation_error(error: OperationPreparationError) -> CliError {
+    match error {
+        OperationPreparationError::InvalidTimeout => CliError::InvalidTimeout,
+        OperationPreparationError::Clock => CliError::Clock,
+    }
 }
 
 fn response_to_result(response: ControlResponse) -> Result<CommandResult, CliError> {
@@ -570,19 +636,6 @@ fn parse_timestamp_ms(value: &std::ffi::OsString) -> Result<u64, CliError> {
     Ok(milliseconds)
 }
 
-fn operation_deadline(timeout_ms: u64) -> Result<u64, CliError> {
-    unix_time_ms()?
-        .checked_add(timeout_ms)
-        .ok_or(CliError::InvalidTimeout)
-}
-
-fn unix_time_ms() -> Result<u64, CliError> {
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| CliError::Clock)?;
-    u64::try_from(elapsed.as_millis()).map_err(|_| CliError::Clock)
-}
-
 fn runtime_paths() -> Result<RuntimePaths, CliError> {
     match (
         env::var_os("ROOTLIGHT_STATE_DIR"),
@@ -702,8 +755,6 @@ enum CliError {
     InvalidTimeout,
     #[error("daemon resource limits are invalid")]
     InvalidLimits,
-    #[error("standalone operation completion is missing")]
-    MissingCompletion,
     #[error("standalone service returned an unexpected response")]
     UnexpectedResponse,
     #[error("system clock is before the supported epoch")]

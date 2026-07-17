@@ -9,13 +9,12 @@ use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
 
 use rootlight_daemon_core::{
     ClientConnectionAdmissions, ControlService, DaemonLifecycle, DaemonLimits, DaemonOrchestrator,
-    DaemonState, DiagnosticActor, HealthStatus, JournalActor, handle_connection_async,
+    DaemonState, DiagnosticActor, HealthStatus, JournalActor, OrchestratorSenders,
+    handle_connection_async,
 };
 use rootlight_ipc::{AsyncLocalListener, FrameCodec};
 use rootlight_operations::{CatalogWriterLock, OperationJournal};
 use rootlight_runtime::{DiscoveryRecord, RuntimePaths};
-
-const EXPIRY_BATCH: usize = 64;
 
 fn main() -> ExitCode {
     match run() {
@@ -97,44 +96,55 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     ));
     let client_connections = Arc::new(ClientConnectionAdmissions::new(limits));
     let mut connections = tokio::task::JoinSet::new();
-    let (submission_tx, mut submission_rx) = tokio::sync::mpsc::channel(
-        usize::try_from(limits.operation_queue_limit).map_err(|_| DaemonError::InvalidLimits)?,
-    );
-    let mut maintenance = tokio::time::interval(limits.maintenance_interval);
-    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let command_capacity =
+        usize::try_from(limits.operation_queue_limit).map_err(|_| DaemonError::InvalidLimits)?;
+    let renewal_capacity = limits.control_queue_limit;
+    let (submission_tx, mut submission_rx) = tokio::sync::mpsc::channel(command_capacity);
+    let (renewal_tx, mut renewal_rx) = tokio::sync::mpsc::channel(renewal_capacity);
+    let command_senders = OrchestratorSenders::new(submission_tx, renewal_tx);
     let shutdown = shutdown_signal(mode);
     tokio::pin!(shutdown);
 
     loop {
         tokio::select! {
+            biased;
             _ = &mut shutdown => break,
-            _ = maintenance.tick() => {
-                if let Err(error) = actor_handle.expire_due(std::time::Instant::now(), EXPIRY_BATCH).await {
-                    state.set_journal_healthy(false);
-                    return Err(error.into());
-                }
-                if let Err(error) = orchestrator.drain_ready_completions().await {
+            event = orchestrator.next_event(), if !orchestrator.is_idle() => {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(error) => {
+                        state.set_journal_healthy(false);
+                        return Err(error.into());
+                    }
+                };
+                if let Err(error) = orchestrator.process_event(event).await {
                     state.set_journal_healthy(false);
                     return Err(error.into());
                 }
             }
-            completed = orchestrator.complete_next(), if !orchestrator.is_idle() => {
-                if let Err(error) = completed {
-                    state.set_journal_healthy(false);
-                    return Err(error.into());
-                }
-            }
-            admission = submission_rx.recv() => {
-                let Some(admission) = admission else { break; };
-                if let Err(error) = orchestrator.submit(admission).await
-                    && !matches!(
-                        error,
-                        rootlight_daemon_core::ServiceError::QueueFull
-                            | rootlight_daemon_core::ServiceError::ClientOperationLimit { .. }
-                            | rootlight_daemon_core::ServiceError::NotAccepting
-                    )
+            renewal = renewal_rx.recv() => {
+                let Some(admission) = renewal else { continue; };
+                if let Err(error) = orchestrator.renew_lease(admission).await
+                    && error.is_fatal_submission_failure()
                 {
                     state.set_journal_healthy(false);
+                    return Err(error.into());
+                }
+            }
+            submission = submission_rx.recv() => {
+                let Some(admission) = submission else { continue; };
+                if let Err(error) = orchestrator.submit(admission).await
+                    && error.is_fatal_submission_failure()
+                {
+                    state.set_journal_healthy(false);
+                    return Err(error.into());
+                }
+            }
+            // Reap before accepting: completed handlers release connection permits
+            // before JoinSet removes their retained task output.
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    eprintln!("rootlight-daemon: connection task failed: {error}");
                 }
             }
             accepted = listener.accept() => {
@@ -146,7 +156,7 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                 state.connection_started();
                 let service = Arc::clone(&service);
                 let actor = actor_handle.clone();
-                let submissions = submission_tx.clone();
+                let commands = command_senders.clone();
                 let client_connections = Arc::clone(&client_connections);
                 let state = Arc::clone(&state);
                 connections.spawn(async move {
@@ -155,7 +165,7 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                     let result = handle_connection_async(
                         service,
                         actor,
-                        submissions,
+                        commands,
                         client_connections,
                         FrameCodec::default(),
                         &mut stream,
@@ -165,11 +175,6 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                     result
                 });
             }
-            joined = connections.join_next(), if !connections.is_empty() => {
-                if let Some(Err(error)) = joined {
-                    eprintln!("rootlight-daemon: connection task failed: {error}");
-                }
-            }
         }
     }
 
@@ -177,21 +182,31 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     diagnostic_actor.stop();
     drop(discovery);
     drop(listener);
-    drop(submission_tx);
+    drop(command_senders);
     let drain = async {
-        let mut admissions_closed = false;
+        let mut submissions_closed = false;
+        let mut renewals_closed = false;
         loop {
             let handlers_done = state.active_connections() == 0 && connections.is_empty();
-            if handlers_done && admissions_closed {
+            if handlers_done && submissions_closed && renewals_closed {
                 break;
             }
             tokio::select! {
-                admission = submission_rx.recv(), if !admissions_closed => {
-                    match admission {
+                biased;
+                renewal = renewal_rx.recv(), if !renewals_closed => {
+                    match renewal {
+                        Some(admission) => {
+                            let _ = orchestrator.renew_lease(admission).await;
+                        }
+                        None => renewals_closed = true,
+                    }
+                }
+                submission = submission_rx.recv(), if !submissions_closed => {
+                    match submission {
                         Some(admission) => {
                             let _ = orchestrator.submit(admission).await;
                         }
-                        None => admissions_closed = true,
+                        None => submissions_closed = true,
                     }
                 }
                 joined = connections.join_next(), if !connections.is_empty() => {
@@ -199,8 +214,9 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                         eprintln!("rootlight-daemon: connection task failed: {error}");
                     }
                 }
-                completed = orchestrator.complete_next(), if !orchestrator.is_idle() => {
-                    completed?;
+                event = orchestrator.next_event(), if !orchestrator.is_idle() => {
+                    let event = event?;
+                    orchestrator.process_event(event).await?;
                 }
             }
         }
