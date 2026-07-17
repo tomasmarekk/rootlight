@@ -157,6 +157,15 @@ pub enum RequestError {
     /// The analyzer cannot satisfy the requested analysis tier.
     #[error("provider does not support the requested analysis tier")]
     UnsupportedTier,
+    /// The invocation omitted the required process-local monotonic deadline.
+    #[error("adapter invocation requires a monotonic deadline")]
+    DeadlineRequired,
+    /// The parser cannot cooperatively observe cancellation while parsing.
+    #[error("parser provider does not advertise cancellation checkpoints")]
+    CancellationCheckpointsRequired,
+    /// The selected memory policy rejected unavailable enforcement.
+    #[error("provider memory enforcement is unavailable under the selected admission policy")]
+    MemoryEnforcementUnavailable,
     /// The request exceeded a provider's advertised capability.
     #[error("{resource:?} request bound {observed} exceeds provider maximum {limit}")]
     ProviderLimit {
@@ -193,10 +202,12 @@ pub enum ResourceKind {
     SourceBytes,
     /// Embedded included source ranges.
     IncludedRanges,
+    /// Concrete-syntax nodes processed by a parser or analyzer.
+    SyntaxNodes,
     /// Syntax nesting depth.
     SyntaxDepth,
-    /// Accounted working memory.
-    WorkingMemory,
+    /// Adapter-reported in-process memory bytes.
+    ReportedMemoryBytes,
 }
 
 /// Rejection from a bounded transactional stream sink.
@@ -296,8 +307,8 @@ pub enum ReportError {
         /// Requested maximum.
         limit: usize,
     },
-    /// An accountable in-process adapter omitted memory accounting.
-    #[error("accounted in-process adapter omitted memory usage")]
+    /// An accountable in-process adapter omitted its reported memory counter.
+    #[error("accounted in-process adapter omitted its reported memory counter")]
     MissingMemoryAccounting,
     /// The report usage did not match the staged stream.
     #[error("reported stream usage does not match staged usage")]

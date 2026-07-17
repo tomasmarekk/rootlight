@@ -189,8 +189,9 @@ impl CoverageReport {
 pub struct ResourceUsage {
     source_bytes: usize,
     output_records: usize,
+    syntax_nodes: usize,
     max_syntax_depth: usize,
-    accounted_memory_bytes: Option<usize>,
+    reported_memory_bytes: Option<usize>,
     stream: StreamUsage,
 }
 
@@ -200,15 +201,17 @@ impl ResourceUsage {
     pub const fn new(
         source_bytes: usize,
         output_records: usize,
+        syntax_nodes: usize,
         max_syntax_depth: usize,
-        accounted_memory_bytes: Option<usize>,
+        reported_memory_bytes: Option<usize>,
         stream: StreamUsage,
     ) -> Self {
         Self {
             source_bytes,
             output_records,
+            syntax_nodes,
             max_syntax_depth,
-            accounted_memory_bytes,
+            reported_memory_bytes,
             stream,
         }
     }
@@ -225,16 +228,25 @@ impl ResourceUsage {
         self.output_records
     }
 
+    /// Returns concrete-syntax nodes observed independently of emitted facts.
+    #[must_use]
+    pub const fn syntax_nodes(self) -> usize {
+        self.syntax_nodes
+    }
+
     /// Returns the deepest syntax nesting level observed.
     #[must_use]
     pub const fn max_syntax_depth(self) -> usize {
         self.max_syntax_depth
     }
 
-    /// Returns accounted working bytes when the provider can report them.
+    /// Returns the cooperative provider's reported working-memory counter.
+    ///
+    /// The adapter authors this post-hoc counter, so it is not proof against a
+    /// malicious or noncooperative provider.
     #[must_use]
-    pub const fn accounted_memory_bytes(self) -> Option<usize> {
-        self.accounted_memory_bytes
+    pub const fn reported_memory_bytes(self) -> Option<usize> {
+        self.reported_memory_bytes
     }
 
     /// Returns exact output stream usage.
@@ -359,15 +371,20 @@ impl WorkReport {
             limits.max_source_bytes(),
         )?;
         require_at_most(
+            ResourceKind::SyntaxNodes,
+            self.resources.syntax_nodes,
+            limits.max_syntax_nodes(),
+        )?;
+        require_at_most(
             ResourceKind::SyntaxDepth,
             self.resources.max_syntax_depth,
             limits.max_syntax_depth(),
         )?;
-        if let Some(observed) = self.resources.accounted_memory_bytes {
+        if let Some(observed) = self.resources.reported_memory_bytes {
             require_at_most(
-                ResourceKind::WorkingMemory,
+                ResourceKind::ReportedMemoryBytes,
                 observed,
-                limits.max_accounted_memory_bytes(),
+                limits.max_reported_memory_bytes(),
             )?;
         }
         Ok(())

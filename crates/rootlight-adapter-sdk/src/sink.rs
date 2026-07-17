@@ -14,7 +14,10 @@ use rootlight_ir::{
 };
 
 use crate::{
-    descriptor::{MemoryEnforcement, ParseCapabilities, ProducerDescriptor, validated_label},
+    descriptor::{
+        MemoryAdmissionPolicy, MemoryAdmissionStatus, MemoryEnforcement, ParseCapabilities,
+        ProducerDescriptor, validated_label,
+    },
     error::{
         AdapterError, LabelError, LabelField, ReportError, RequestError, ResourceKind, SinkError,
     },
@@ -495,7 +498,11 @@ pub trait IrBatchSink {
     fn push(&mut self, batch: IrBatch) -> Result<(), SinkError>;
 }
 
-/// Synchronous parser-provider contract without parser framework types.
+/// Synchronous cooperative parser contract without parser framework types.
+///
+/// Providers must reach cancellation checkpoints during parsing. This
+/// in-process trait cannot terminate a noncooperative call; hard process-tree
+/// ownership and termination belong to the M13 runtime boundary.
 pub trait ParseProvider: Send + Sync {
     /// Returns immutable admission-control capabilities.
     fn capabilities(&self) -> &ParseCapabilities;
@@ -505,7 +512,8 @@ pub trait ParseProvider: Send + Sync {
     /// # Errors
     ///
     /// Returns [`AdapterError`] for cancellation, backpressure, or provider
-    /// failure. Implementations should check `cancellation` between batches.
+    /// failure. Implementations must check `cancellation` between bounded work
+    /// units and before every emitted batch.
     fn parse(
         &self,
         request: &ParseRequest<'_>,
@@ -514,7 +522,10 @@ pub trait ParseProvider: Send + Sync {
     ) -> Result<ParseReport, AdapterError>;
 }
 
-/// Synchronous language analyzer contract producing normalized IR.
+/// Synchronous cooperative language analyzer contract producing normalized IR.
+///
+/// The SDK checks admission and transaction boundaries, but cannot terminate a
+/// noncooperative in-process call. Hard process-tree termination belongs to M13.
 pub trait LanguageAnalyzer: Send + Sync {
     /// Returns immutable producer identity and capabilities.
     fn descriptor(&self) -> &ProducerDescriptor;
@@ -524,7 +535,8 @@ pub trait LanguageAnalyzer: Send + Sync {
     /// # Errors
     ///
     /// Returns [`AdapterError`] for cancellation, backpressure, or provider
-    /// failure. Implementations should check `cancellation` between batches.
+    /// failure. Implementations must check `cancellation` between bounded work
+    /// units and before every emitted batch.
     fn analyze(
         &self,
         request: &AnalysisRequest<'_>,
@@ -539,6 +551,7 @@ pub struct ParseOutput {
     facts: Vec<SyntaxFact>,
     diagnostics: Vec<AdapterDiagnostic>,
     report: ParseReport,
+    memory_admission: MemoryAdmissionStatus,
 }
 
 impl ParseOutput {
@@ -559,6 +572,12 @@ impl ParseOutput {
     pub const fn report(&self) -> &ParseReport {
         &self.report
     }
+
+    /// Returns the caller-selected memory enforcement outcome.
+    #[must_use]
+    pub const fn memory_admission(&self) -> MemoryAdmissionStatus {
+        self.memory_admission
+    }
 }
 
 /// Committed canonical normalized-IR output.
@@ -566,6 +585,7 @@ impl ParseOutput {
 pub struct AnalysisOutput {
     document: NormalizedIrDocument,
     report: AnalysisReport,
+    memory_admission: MemoryAdmissionStatus,
 }
 
 impl AnalysisOutput {
@@ -579,6 +599,12 @@ impl AnalysisOutput {
     #[must_use]
     pub const fn report(&self) -> &AnalysisReport {
         &self.report
+    }
+
+    /// Returns the caller-selected memory enforcement outcome.
+    #[must_use]
+    pub const fn memory_admission(&self) -> MemoryAdmissionStatus {
+        self.memory_admission
     }
 }
 
@@ -853,16 +879,25 @@ impl IrBatchSink for BoundedIrSink {
 
 /// Executes one parser transaction and commits only a valid successful report.
 ///
+/// `cancellation` must carry a process-local monotonic deadline. The explicit
+/// `memory_policy` either admits hard/reported enforcement or intentionally
+/// selects the visible M05 unavailable-enforcement fallback.
+///
 /// # Errors
 ///
-/// Returns [`AdapterError`] for request-capability mismatch, cancellation,
+/// Returns [`AdapterError`] for missing deadline or cancellation checkpoints,
+/// request-capability mismatch, rejected memory admission, cancellation,
 /// provider failure, sink rejection, or inconsistent reporting.
 pub fn execute_parse<P: ParseProvider + ?Sized>(
     provider: &P,
     request: &ParseRequest<'_>,
+    memory_policy: MemoryAdmissionPolicy,
     cancellation: &Cancellation,
 ) -> Result<ParseOutput, AdapterError> {
+    validate_deadline_admission(cancellation)?;
     validate_parse_capabilities(provider.capabilities(), request)?;
+    let memory_admission =
+        admit_memory(provider.capabilities().memory_enforcement(), memory_policy)?;
     let mut sink = BoundedSyntaxSink::new(
         request.source().source_ref().clone(),
         request.limits().syntax_stream().clone(),
@@ -894,7 +929,7 @@ pub fn execute_parse<P: ParseProvider + ?Sized>(
     }
     if let Err(error) = validate_memory_report(
         provider.capabilities().memory_enforcement(),
-        report.resources().accounted_memory_bytes(),
+        report.resources().reported_memory_bytes(),
     ) {
         sink.discard();
         return Err(error.into());
@@ -904,22 +939,31 @@ pub fn execute_parse<P: ParseProvider + ?Sized>(
         facts,
         diagnostics,
         report,
+        memory_admission,
     })
 }
 
 /// Executes one analyzer transaction and commits only canonical valid IR.
 ///
+/// `cancellation` must carry a process-local monotonic deadline. The explicit
+/// `memory_policy` either admits hard/reported enforcement or intentionally
+/// selects the visible M05 unavailable-enforcement fallback.
+///
 /// # Errors
 ///
-/// Returns [`AdapterError`] for request-capability mismatch, cancellation,
-/// provider failure, sink rejection, invalid IR, or inconsistent reporting.
+/// Returns [`AdapterError`] for missing deadline, request-capability mismatch,
+/// rejected memory admission, cancellation, provider failure, sink rejection,
+/// invalid IR, or inconsistent reporting.
 pub fn execute_analysis<A: LanguageAnalyzer + ?Sized>(
     analyzer: &A,
     request: &AnalysisRequest<'_>,
     extensions: ExtensionSupport,
+    memory_policy: MemoryAdmissionPolicy,
     cancellation: &Cancellation,
 ) -> Result<AnalysisOutput, AdapterError> {
+    validate_deadline_admission(cancellation)?;
     validate_analyzer_descriptor(analyzer.descriptor(), request)?;
+    let memory_admission = admit_memory(analyzer.descriptor().memory_enforcement(), memory_policy)?;
     let mut sink = BoundedIrSink::new(
         request.source().source_ref().clone(),
         request.limits().ir_stream().clone(),
@@ -952,19 +996,26 @@ pub fn execute_analysis<A: LanguageAnalyzer + ?Sized>(
     }
     if let Err(error) = validate_memory_report(
         analyzer.descriptor().memory_enforcement(),
-        report.resources().accounted_memory_bytes(),
+        report.resources().reported_memory_bytes(),
     ) {
         sink.discard();
         return Err(error.into());
     }
     let document = sink.commit()?;
-    Ok(AnalysisOutput { document, report })
+    Ok(AnalysisOutput {
+        document,
+        report,
+        memory_admission,
+    })
 }
 
 fn validate_parse_capabilities(
     capabilities: &ParseCapabilities,
     request: &ParseRequest<'_>,
 ) -> Result<(), RequestError> {
+    if !capabilities.has_cancellation_checkpoints() {
+        return Err(RequestError::CancellationCheckpointsRequired);
+    }
     if !capabilities.languages().contains(request.language()) {
         return Err(RequestError::UnsupportedLanguage);
     }
@@ -978,6 +1029,11 @@ fn validate_parse_capabilities(
         ResourceKind::SourceBytes,
         request.source().bytes().len(),
         capabilities.max_source_bytes(),
+    )?;
+    require_provider_limit(
+        ResourceKind::SyntaxNodes,
+        request.limits().max_syntax_nodes(),
+        capabilities.max_syntax_nodes(),
     )?;
     require_provider_limit(
         ResourceKind::SyntaxDepth,
@@ -1022,12 +1078,36 @@ fn require_provider_limit(
 
 fn validate_memory_report(
     enforcement: MemoryEnforcement,
-    accounted_memory_bytes: Option<usize>,
+    reported_memory_bytes: Option<usize>,
 ) -> Result<(), ReportError> {
-    if enforcement == MemoryEnforcement::AccountedInProcess && accounted_memory_bytes.is_none() {
+    if enforcement == MemoryEnforcement::AccountedInProcess && reported_memory_bytes.is_none() {
         Err(ReportError::MissingMemoryAccounting)
     } else {
         Ok(())
+    }
+}
+
+fn validate_deadline_admission(cancellation: &Cancellation) -> Result<(), RequestError> {
+    if cancellation.has_deadline() {
+        Ok(())
+    } else {
+        Err(RequestError::DeadlineRequired)
+    }
+}
+
+fn admit_memory(
+    enforcement: MemoryEnforcement,
+    policy: MemoryAdmissionPolicy,
+) -> Result<MemoryAdmissionStatus, RequestError> {
+    match (enforcement, policy) {
+        (MemoryEnforcement::HardProcess, _) => Ok(MemoryAdmissionStatus::HardProcess),
+        (MemoryEnforcement::AccountedInProcess, _) => Ok(MemoryAdmissionStatus::AccountedInProcess),
+        (MemoryEnforcement::Unavailable, MemoryAdmissionPolicy::AllowUnavailableM05Fallback) => {
+            Ok(MemoryAdmissionStatus::UnavailableM05Fallback)
+        }
+        (MemoryEnforcement::Unavailable, MemoryAdmissionPolicy::RequireHardOrAccounted) => {
+            Err(RequestError::MemoryEnforcementUnavailable)
+        }
     }
 }
 

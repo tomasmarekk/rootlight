@@ -166,9 +166,10 @@ impl StreamLimits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisLimits {
     max_source_bytes: usize,
+    max_syntax_nodes: usize,
     max_syntax_depth: usize,
     max_embedded_ranges: usize,
-    max_accounted_memory_bytes: usize,
+    max_reported_memory_bytes: usize,
     syntax_stream: StreamLimits,
     ir_stream: StreamLimits,
     ir: IrLimits,
@@ -185,24 +186,27 @@ impl AnalysisLimits {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         max_source_bytes: usize,
+        max_syntax_nodes: usize,
         max_syntax_depth: usize,
         max_embedded_ranges: usize,
-        max_accounted_memory_bytes: usize,
+        max_reported_memory_bytes: usize,
         syntax_stream: StreamLimits,
         ir_stream: StreamLimits,
         ir: IrLimits,
     ) -> Result<Self, LimitError> {
         require_nonzero("analysis.max_source_bytes", max_source_bytes)?;
+        require_nonzero("analysis.max_syntax_nodes", max_syntax_nodes)?;
         require_nonzero("analysis.max_syntax_depth", max_syntax_depth)?;
         require_nonzero(
-            "analysis.max_accounted_memory_bytes",
-            max_accounted_memory_bytes,
+            "analysis.max_reported_memory_bytes",
+            max_reported_memory_bytes,
         )?;
         Ok(Self {
             max_source_bytes,
+            max_syntax_nodes,
             max_syntax_depth,
             max_embedded_ranges,
-            max_accounted_memory_bytes,
+            max_reported_memory_bytes,
             syntax_stream,
             ir_stream,
             ir,
@@ -213,6 +217,12 @@ impl AnalysisLimits {
     #[must_use]
     pub const fn max_source_bytes(&self) -> usize {
         self.max_source_bytes
+    }
+
+    /// Returns the admitted concrete-syntax node count.
+    #[must_use]
+    pub const fn max_syntax_nodes(&self) -> usize {
+        self.max_syntax_nodes
     }
 
     /// Returns the admitted syntax nesting depth.
@@ -227,10 +237,13 @@ impl AnalysisLimits {
         self.max_embedded_ranges
     }
 
-    /// Returns the accounted in-process memory ceiling.
+    /// Returns the ceiling for adapter-reported in-process memory.
+    ///
+    /// This bounds cooperative provider accounting and is not a hostile-process
+    /// memory guarantee.
     #[must_use]
-    pub const fn max_accounted_memory_bytes(&self) -> usize {
-        self.max_accounted_memory_bytes
+    pub const fn max_reported_memory_bytes(&self) -> usize {
+        self.max_reported_memory_bytes
     }
 
     /// Returns syntax-fact stream limits.

@@ -3,26 +3,30 @@
 //! Tests exercise public contracts through real immutable VFS snapshots and
 //! the in-process mock adapters supplied by the SDK.
 
-use std::{fs, path::Path, time::Instant};
+use std::{
+    fs,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds,
     BoundedIrSink, BoundedSyntaxSink, CoverageReport, DiagnosticCode, DomainCoverage, EncodingId,
-    GenerationBoundSnapshot, IrBatch, IrBatchSink, IrRecord, LanguageId, MemoryEnforcement,
-    ParseCapabilities, ParseProvider, ParseReport, ParseRequest, ProducerDescriptor, ReportError,
-    ResourceKind, ResourceUsage, SinkError, StreamEnd, StreamLimits, SyntaxFact, SyntaxFactBatch,
-    SyntaxFactKind, SyntaxFactSink, SyntaxKindLabel, WorkReport, execute_analysis, execute_parse,
+    GenerationBoundSnapshot, IrBatch, IrBatchSink, IrRecord, LanguageId, MemoryAdmissionPolicy,
+    MemoryAdmissionStatus, MemoryEnforcement, ParseCapabilities, ParseProvider, ParseReport,
+    ParseRequest, ProducerDescriptor, ReportError, RequestError, ResourceKind, ResourceUsage,
+    SinkError, StreamEnd, StreamLimits, SyntaxFact, SyntaxFactBatch, SyntaxFactKind,
+    SyntaxFactSink, SyntaxKindLabel, WorkReport, execute_analysis, execute_parse,
     testkit::{MockLanguageAnalyzer, MockParseProvider},
 };
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticSeverity, ExtensionSupport,
-    FactDomain, IrLimits, NormalizedIrDocument, SourceRef, SourceSpan,
+    AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticSeverity, ExtensionCriticality,
+    ExtensionEnvelope, ExtensionSupport, FactDomain, FactEvidence, FileRecord, IrLimits,
+    ProducerIdentity, ProvenanceRecord, SourceRef, SourceSpan,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
-
-const IR_FIXTURE: &str = include_str!("../../../tests/fixtures/compatibility/ir/1.1/document.json");
 
 #[test]
 fn checked_snapshot_requires_exact_full_file_identity() {
@@ -34,11 +38,16 @@ fn checked_snapshot_requires_exact_full_file_identity() {
         snapshot.content_hash(),
         None,
     );
-    let stale = fixture_document().files[0]
-        .evidence
-        .source
-        .clone()
-        .expect("fixture file has direct source evidence");
+    let stale_hash = "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+        .parse()
+        .expect("checked alternate content hash parses");
+    let stale = SourceRef::new(
+        source.repository(),
+        source.generation(),
+        source.span(),
+        stale_hash,
+        None,
+    );
 
     assert!(GenerationBoundSnapshot::new(&snapshot, &source).is_ok());
     assert!(GenerationBoundSnapshot::new(&snapshot, &partial).is_err());
@@ -62,8 +71,13 @@ fn mock_parser_honors_batch_backpressure_and_canonicalizes_order() {
         complete_coverage(source_len(&source)),
     );
 
-    let output = execute_parse(&provider, &request, &Cancellation::new())
-        .expect("bounded parser transaction commits");
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::default(),
+        &deadline(),
+    )
+    .expect("bounded parser transaction commits");
 
     assert_eq!(
         output
@@ -75,6 +89,54 @@ fn mock_parser_honors_batch_backpressure_and_canonicalizes_order() {
     );
     assert_eq!(output.report().resources().stream().batches(), 3);
     assert_eq!(output.report().resources().stream().records(), 3);
+    assert_eq!(
+        output.memory_admission(),
+        MemoryAdmissionStatus::AccountedInProcess
+    );
+}
+
+#[test]
+fn syntax_node_limits_are_independent_of_emitted_facts() {
+    let (_temporary, snapshot, source) = source_fixture();
+    let limits = limits(1, IrLimits::default());
+    let request = parse_request(&snapshot, &source, &limits);
+    let provider = MockParseProvider::new(
+        parse_capabilities(),
+        vec![syntax_fact(&source, 1, 0)],
+        Vec::new(),
+        complete_coverage(source_len(&source)),
+    )
+    .with_syntax_nodes(1_000_000);
+
+    assert_eq!(
+        execute_parse(
+            &provider,
+            &request,
+            MemoryAdmissionPolicy::default(),
+            &deadline(),
+        ),
+        Err(AdapterError::InvalidReport(ReportError::ResourceLimit {
+            resource: ResourceKind::SyntaxNodes,
+            observed: 1_000_000,
+            limit: 1024,
+        }))
+    );
+
+    let oversized_limits = limits_with_syntax_nodes(1, IrLimits::default(), 4097);
+    let oversized_request = parse_request(&snapshot, &source, &oversized_limits);
+    assert_eq!(
+        execute_parse(
+            &provider,
+            &oversized_request,
+            MemoryAdmissionPolicy::default(),
+            &deadline(),
+        ),
+        Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+            resource: ResourceKind::SyntaxNodes,
+            observed: 4097,
+            limit: 4096,
+        }))
+    );
 }
 
 #[test]
@@ -89,11 +151,16 @@ fn cancellation_wins_before_and_between_batches() {
         Vec::new(),
         coverage.clone(),
     );
-    let before = Cancellation::new();
+    let before = deadline();
     before.cancel(CancellationReason::ClientRequest);
 
     assert_eq!(
-        execute_parse(&provider, &request, &before),
+        execute_parse(
+            &provider,
+            &request,
+            MemoryAdmissionPolicy::default(),
+            &before,
+        ),
         Err(AdapterError::Cancelled {
             reason: CancellationReason::ClientRequest,
         })
@@ -107,7 +174,12 @@ fn cancellation_wins_before_and_between_batches() {
     )
     .with_cancellation_after_batches(1, CancellationReason::ResourceLimit);
     assert_eq!(
-        execute_parse(&between, &request, &Cancellation::new()),
+        execute_parse(
+            &between,
+            &request,
+            MemoryAdmissionPolicy::default(),
+            &deadline(),
+        ),
         Err(AdapterError::Cancelled {
             reason: CancellationReason::ResourceLimit,
         })
@@ -115,7 +187,105 @@ fn cancellation_wins_before_and_between_batches() {
 
     let deadline = Cancellation::with_deadline(Instant::now());
     assert_eq!(
-        execute_parse(&provider, &request, &deadline),
+        execute_parse(
+            &provider,
+            &request,
+            MemoryAdmissionPolicy::default(),
+            &deadline,
+        ),
+        Err(AdapterError::Cancelled {
+            reason: CancellationReason::DeadlineExceeded,
+        })
+    );
+}
+
+#[test]
+fn invocation_admission_requires_deadline_and_parser_checkpoints() {
+    let (_temporary, snapshot, source) = source_fixture();
+    let limits = limits(1, IrLimits::default());
+    let parse_request = parse_request(&snapshot, &source, &limits);
+    let provider = MockParseProvider::new(
+        parse_capabilities(),
+        vec![syntax_fact(&source, 1, 0)],
+        Vec::new(),
+        complete_coverage(source_len(&source)),
+    );
+
+    assert_eq!(
+        execute_parse(
+            &provider,
+            &parse_request,
+            MemoryAdmissionPolicy::default(),
+            &Cancellation::new(),
+        ),
+        Err(AdapterError::RejectedRequest(
+            RequestError::DeadlineRequired
+        ))
+    );
+
+    let missing_checkpoints = MockParseProvider::new(
+        parse_capabilities_with(MemoryEnforcement::AccountedInProcess, false),
+        vec![syntax_fact(&source, 1, 0)],
+        Vec::new(),
+        complete_coverage(source_len(&source)),
+    );
+    assert_eq!(
+        execute_parse(
+            &missing_checkpoints,
+            &parse_request,
+            MemoryAdmissionPolicy::default(),
+            &deadline(),
+        ),
+        Err(AdapterError::RejectedRequest(
+            RequestError::CancellationCheckpointsRequired
+        ))
+    );
+
+    let analysis_request = analysis_request(&snapshot, &source, &limits);
+    let (file, provenance, descriptor) = minimal_ir_records(&source);
+    let analyzer = MockLanguageAnalyzer::new(
+        descriptor,
+        vec![IrRecord::File(file), IrRecord::Provenance(provenance)],
+        complete_coverage(source_len(&source)),
+        0,
+    );
+    assert_eq!(
+        execute_analysis(
+            &analyzer,
+            &analysis_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::default(),
+            &Cancellation::new(),
+        ),
+        Err(AdapterError::RejectedRequest(
+            RequestError::DeadlineRequired
+        ))
+    );
+}
+
+#[test]
+fn monotonic_deadline_expires_between_parser_batches() {
+    let (_temporary, snapshot, source) = source_fixture();
+    let limits = limits(1, IrLimits::default());
+    let request = parse_request(&snapshot, &source, &limits);
+    let known_deadline = Instant::now()
+        .checked_add(Duration::from_secs(30))
+        .expect("test deadline derives");
+    let provider = DeadlineBetweenBatchesProvider {
+        capabilities: parse_capabilities(),
+        fact: syntax_fact(&source, 1, 0),
+        coverage: complete_coverage(source_len(&source)),
+        known_deadline,
+    };
+    let cancellation = Cancellation::with_deadline(known_deadline);
+
+    assert_eq!(
+        execute_parse(
+            &provider,
+            &request,
+            MemoryAdmissionPolicy::default(),
+            &cancellation,
+        ),
         Err(AdapterError::Cancelled {
             reason: CancellationReason::DeadlineExceeded,
         })
@@ -276,7 +446,12 @@ fn explicit_end_of_stream_must_match_staged_batches() {
     };
 
     assert!(matches!(
-        execute_parse(&provider, &request, &Cancellation::new()),
+        execute_parse(
+            &provider,
+            &request,
+            MemoryAdmissionPolicy::default(),
+            &deadline(),
+        ),
         Err(AdapterError::InvalidReport(
             ReportError::EndSequenceMismatch {
                 expected: 1,
@@ -299,10 +474,92 @@ fn accounted_in_process_provider_must_report_memory_usage() {
     };
 
     assert_eq!(
-        execute_parse(&provider, &request, &Cancellation::new()),
+        execute_parse(
+            &provider,
+            &request,
+            MemoryAdmissionPolicy::default(),
+            &deadline(),
+        ),
         Err(AdapterError::InvalidReport(
             ReportError::MissingMemoryAccounting
         ))
+    );
+}
+
+#[test]
+fn unavailable_memory_requires_explicit_visible_fallback() {
+    let (_temporary, snapshot, source) = source_fixture();
+    let limits = limits(2, IrLimits::default());
+    let parse_request = parse_request(&snapshot, &source, &limits);
+    let provider = MockParseProvider::new(
+        parse_capabilities_with(MemoryEnforcement::Unavailable, true),
+        vec![syntax_fact(&source, 1, 0)],
+        Vec::new(),
+        complete_coverage(source_len(&source)),
+    );
+
+    assert_eq!(
+        execute_parse(
+            &provider,
+            &parse_request,
+            MemoryAdmissionPolicy::default(),
+            &deadline(),
+        ),
+        Err(AdapterError::RejectedRequest(
+            RequestError::MemoryEnforcementUnavailable
+        ))
+    );
+    let parse_output = execute_parse(
+        &provider,
+        &parse_request,
+        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        &deadline(),
+    )
+    .expect("explicit parser fallback commits");
+    assert_eq!(
+        parse_output.memory_admission(),
+        MemoryAdmissionStatus::UnavailableM05Fallback
+    );
+
+    let analysis_request = analysis_request(&snapshot, &source, &limits);
+    let (file, provenance, descriptor) = minimal_ir_records(&source);
+    let fallback_descriptor = ProducerDescriptor::new(
+        descriptor.identity().clone(),
+        descriptor.kind(),
+        descriptor.language().clone(),
+        descriptor.tier(),
+        MemoryEnforcement::Unavailable,
+        descriptor.supports_noncritical_extensions(),
+    );
+    let analyzer = MockLanguageAnalyzer::new(
+        fallback_descriptor,
+        vec![IrRecord::File(file), IrRecord::Provenance(provenance)],
+        complete_coverage(source_len(&source)),
+        0,
+    );
+    assert_eq!(
+        execute_analysis(
+            &analyzer,
+            &analysis_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::default(),
+            &deadline(),
+        ),
+        Err(AdapterError::RejectedRequest(
+            RequestError::MemoryEnforcementUnavailable
+        ))
+    );
+    let analysis_output = execute_analysis(
+        &analyzer,
+        &analysis_request,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        &deadline(),
+    )
+    .expect("explicit analyzer fallback commits");
+    assert_eq!(
+        analysis_output.memory_admission(),
+        MemoryAdmissionStatus::UnavailableM05Fallback
     );
 }
 
@@ -365,14 +622,16 @@ fn canonical_ir_is_independent_of_allowed_batch_order() {
         &first,
         &request,
         ExtensionSupport::default(),
-        &Cancellation::new(),
+        MemoryAdmissionPolicy::default(),
+        &deadline(),
     )
     .expect("first batch order canonicalizes");
     let second_output = execute_analysis(
         &second,
         &request,
         ExtensionSupport::default(),
-        &Cancellation::new(),
+        MemoryAdmissionPolicy::default(),
+        &deadline(),
     )
     .expect("second batch order canonicalizes");
 
@@ -406,8 +665,13 @@ fn partial_coverage_is_preserved_without_claiming_completeness() {
         coverage,
     );
 
-    let output = execute_parse(&provider, &request, &Cancellation::new())
-        .expect("partial result still commits");
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::default(),
+        &deadline(),
+    )
+    .expect("partial result still commits");
 
     assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
     assert_eq!(output.report().coverage().skipped_regions(), 1);
@@ -432,14 +696,22 @@ fn invalid_ir_errors_do_not_retain_extension_payloads() {
     let request = analysis_request(&snapshot, &source, &limits);
     let (file, provenance, descriptor) = minimal_ir_records(&source);
     let secret = "../../private/token-source";
-    let mut fixture = fixture_document();
-    let mut extension = fixture.extensions.remove(0);
-    extension.repository = source.repository();
-    extension.generation = source.generation();
-    extension.namespace = secret.to_owned();
-    extension.provenance = provenance.id;
-    extension.evidence.source = Some(source.clone());
-    extension.evidence.derivation.clear();
+    let extension = ExtensionEnvelope {
+        id: "fact1_baeaqcaibaeaqcaibaeaqcaibaeaqcai4pro3da"
+            .parse()
+            .expect("checked extension identity parses"),
+        repository: source.repository(),
+        generation: source.generation(),
+        namespace: secret.to_owned(),
+        version: "1.0".to_owned(),
+        criticality: ExtensionCriticality::Noncritical,
+        payload: "{}".to_owned(),
+        provenance: provenance.id,
+        evidence: FactEvidence {
+            source: Some(source.clone()),
+            derivation: Vec::new(),
+        },
+    };
     let analyzer = MockLanguageAnalyzer::new(
         descriptor,
         vec![
@@ -455,7 +727,8 @@ fn invalid_ir_errors_do_not_retain_extension_payloads() {
         &analyzer,
         &request,
         ExtensionSupport::default(),
-        &Cancellation::new(),
+        MemoryAdmissionPolicy::default(),
+        &deadline(),
     )
     .expect_err("invalid extension identity is rejected");
     let rendered = format!("{error:?} {error}");
@@ -463,6 +736,47 @@ fn invalid_ir_errors_do_not_retain_extension_payloads() {
     assert!(matches!(error, AdapterError::Sink(SinkError::InvalidIr)));
     assert!(!rendered.contains("private"));
     assert!(!rendered.contains("token-source"));
+}
+
+struct DeadlineBetweenBatchesProvider {
+    capabilities: ParseCapabilities,
+    fact: SyntaxFact,
+    coverage: CoverageReport,
+    known_deadline: Instant,
+}
+
+impl ParseProvider for DeadlineBetweenBatchesProvider {
+    fn capabilities(&self) -> &ParseCapabilities {
+        &self.capabilities
+    }
+
+    fn parse(
+        &self,
+        _request: &ParseRequest<'_>,
+        sink: &mut dyn SyntaxFactSink,
+        cancellation: &Cancellation,
+    ) -> Result<ParseReport, AdapterError> {
+        sink.push(SyntaxFactBatch::new(0, vec![self.fact.clone()], Vec::new()))?;
+
+        // Advancing the deterministic checkpoint to the known deadline proves
+        // the token's monotonic deadline path, without wall-clock sleeps.
+        cancellation.check_at(self.known_deadline)?;
+
+        let usage = sink.staged_usage();
+        WorkReport::new(
+            self.coverage.clone(),
+            ResourceUsage::new(
+                self.coverage.total_source_bytes(),
+                usage.records(),
+                1,
+                self.fact.depth(),
+                Some(0),
+                usage,
+            ),
+            StreamEnd::new(sink.next_sequence(), usage),
+        )
+        .map_err(AdapterError::from)
+    }
 }
 
 struct WrongEndProvider {
@@ -490,6 +804,7 @@ impl ParseProvider for WrongEndProvider {
             ResourceUsage::new(
                 self.coverage.total_source_bytes(),
                 usage.records(),
+                1,
                 self.fact.depth(),
                 None,
                 usage,
@@ -501,11 +816,6 @@ impl ParseProvider for WrongEndProvider {
 }
 
 fn source_fixture() -> (TempDir, SourceSnapshot, SourceRef) {
-    let seed = fixture_document().files[0]
-        .evidence
-        .source
-        .clone()
-        .expect("fixture file has direct source evidence");
     let current = std::env::current_dir().expect("current directory is available");
     let temporary = tempdir_in(current).expect("local temporary directory is available");
     fs::create_dir(temporary.path().join("src")).expect("fixture source directory is created");
@@ -514,8 +824,11 @@ fn source_fixture() -> (TempDir, SourceSnapshot, SourceRef) {
         b"pub fn fixture() { let value = 1; }\n",
     )
     .expect("fixture source is written");
+    let repository_id = "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        .parse()
+        .expect("checked repository identity parses");
     let repository =
-        RepositoryRoot::open(seed.repository(), temporary.path()).expect("temporary root opens");
+        RepositoryRoot::open(repository_id, temporary.path()).expect("temporary root opens");
     let path =
         RelativePath::parse(Path::new("src/lib.rs")).expect("fixture relative path is valid");
     let snapshot = repository
@@ -523,18 +836,17 @@ fn source_fixture() -> (TempDir, SourceSnapshot, SourceRef) {
         .expect("fixture snapshot is stable");
     let end = u64::try_from(snapshot.content().len()).expect("small fixture length fits");
     let span = SourceSpan::new(snapshot.file(), 0, end).expect("full-file span is valid");
+    let generation = "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by"
+        .parse()
+        .expect("checked generation identity parses");
     let source = SourceRef::new(
-        seed.repository(),
-        seed.generation(),
+        repository_id,
+        generation,
         span,
         snapshot.content_hash(),
         None,
     );
     (temporary, snapshot, source)
-}
-
-fn fixture_document() -> NormalizedIrDocument {
-    serde_json::from_str(IR_FIXTURE).expect("checked IR compatibility fixture decodes")
 }
 
 fn minimal_ir_records(
@@ -544,22 +856,43 @@ fn minimal_ir_records(
     rootlight_ir::ProvenanceRecord,
     ProducerDescriptor,
 ) {
-    let mut document = fixture_document();
-    let mut file = document.files.remove(0);
-    let mut provenance = document.provenance.remove(0);
-    file.id = source.span().file();
-    file.repository = source.repository();
-    file.generation = source.generation();
-    file.content_hash = source.content_hash();
-    file.byte_length = source.span().end_byte();
-    file.evidence.source = Some(source.clone());
-    file.evidence.derivation.clear();
-    file.provenance = provenance.id;
-    provenance.repository = source.repository();
-    provenance.generation = source.generation();
-    provenance.input_sources = vec![source.clone()];
-    provenance.evidence_sources = vec![source.clone()];
-    provenance.derivation_parents.clear();
+    let provenance_id = "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga"
+        .parse()
+        .expect("checked provenance identity parses");
+    let producer = ProducerIdentity::new("rootlight-sdk-test", "1.0", source.content_hash())
+        .expect("test producer identity is valid");
+    let provenance = ProvenanceRecord {
+        id: provenance_id,
+        repository: source.repository(),
+        generation: source.generation(),
+        producer_kind: rootlight_ir::ProducerKind::Parser,
+        producer,
+        binary_digest: source.content_hash(),
+        frontend_version: Some("sdk-test-grammar-1".to_owned()),
+        language: "rust".to_owned(),
+        tier: AnalysisTier::TierC,
+        build_context: BuildContextIdentity::new(source.content_hash()),
+        input_sources: vec![source.clone()],
+        evidence_sources: vec![source.clone()],
+        derivation_parents: Vec::new(),
+        rule: None,
+    };
+    let file = FileRecord {
+        id: source.span().file(),
+        repository: source.repository(),
+        generation: source.generation(),
+        path: "src/lib.rs".to_owned(),
+        content_hash: source.content_hash(),
+        byte_length: source.span().end_byte(),
+        language: "rust".to_owned(),
+        encoding: "utf-8".to_owned(),
+        generated: false,
+        provenance: provenance_id,
+        evidence: FactEvidence {
+            source: Some(source.clone()),
+            derivation: Vec::new(),
+        },
+    };
     let descriptor = ProducerDescriptor::new(
         provenance.producer.clone(),
         provenance.producer_kind,
@@ -584,29 +917,61 @@ fn syntax_fact(source: &SourceRef, local_id: u64, depth: usize) -> SyntaxFact {
 }
 
 fn parse_capabilities() -> ParseCapabilities {
+    parse_capabilities_with(MemoryEnforcement::AccountedInProcess, true)
+}
+
+fn parse_capabilities_with(
+    memory_enforcement: MemoryEnforcement,
+    cancellation_checkpoints: bool,
+) -> ParseCapabilities {
     ParseCapabilities::new(
         vec![LanguageId::new("rust").expect("test language is safe")],
         vec![EncodingId::new("utf-8").expect("test encoding is safe")],
+        4096,
         4096,
         32,
         8,
         true,
         true,
-        true,
-        true,
+        cancellation_checkpoints,
         4,
-        MemoryEnforcement::AccountedInProcess,
+        memory_enforcement,
     )
     .expect("test parser capabilities are valid")
 }
 
 fn limits(batch_records: usize, ir: IrLimits) -> AnalysisLimits {
+    limits_with_syntax_nodes(batch_records, ir, 1024)
+}
+
+fn limits_with_syntax_nodes(
+    batch_records: usize,
+    ir: IrLimits,
+    max_syntax_nodes: usize,
+) -> AnalysisLimits {
     let batch =
         BatchThresholds::new(batch_records, 32 * 1024, 16, 4096).expect("batch limits are valid");
     let stream = StreamLimits::new(64, 128, 1024 * 1024, 64, 64 * 1024, 64 * 1024, batch)
         .expect("stream limits are valid");
-    AnalysisLimits::new(4096, 32, 8, 1024 * 1024, stream.clone(), stream, ir)
-        .expect("analysis limits are valid")
+    AnalysisLimits::new(
+        4096,
+        max_syntax_nodes,
+        32,
+        8,
+        1024 * 1024,
+        stream.clone(),
+        stream,
+        ir,
+    )
+    .expect("analysis limits are valid")
+}
+
+fn deadline() -> Cancellation {
+    Cancellation::with_deadline(
+        Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .expect("test deadline derives"),
+    )
 }
 
 fn parse_request<'a>(

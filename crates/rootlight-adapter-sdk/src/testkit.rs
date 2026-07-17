@@ -19,7 +19,8 @@ pub struct MockParseProvider {
     facts: Vec<SyntaxFact>,
     diagnostics: Vec<AdapterDiagnostic>,
     coverage: CoverageReport,
-    accounted_memory_bytes: Option<usize>,
+    syntax_nodes: usize,
+    reported_memory_bytes: Option<usize>,
     cancel_after_batches: Option<(usize, CancellationReason)>,
 }
 
@@ -32,24 +33,33 @@ impl MockParseProvider {
         diagnostics: Vec<AdapterDiagnostic>,
         coverage: CoverageReport,
     ) -> Self {
-        let accounted_memory_bytes = match capabilities.memory_enforcement() {
+        let reported_memory_bytes = match capabilities.memory_enforcement() {
             crate::MemoryEnforcement::AccountedInProcess => Some(0),
             _ => None,
         };
+        let syntax_nodes = facts.len();
         Self {
             capabilities,
             facts,
             diagnostics,
             coverage,
-            accounted_memory_bytes,
+            syntax_nodes,
+            reported_memory_bytes,
             cancel_after_batches: None,
         }
     }
 
-    /// Configures deterministic accounted working memory.
+    /// Configures concrete-syntax nodes independently of emitted facts.
     #[must_use]
-    pub const fn with_accounted_memory_bytes(mut self, bytes: usize) -> Self {
-        self.accounted_memory_bytes = Some(bytes);
+    pub const fn with_syntax_nodes(mut self, nodes: usize) -> Self {
+        self.syntax_nodes = nodes;
+        self
+    }
+
+    /// Configures deterministic adapter-reported working memory.
+    #[must_use]
+    pub const fn with_reported_memory_bytes(mut self, bytes: usize) -> Self {
+        self.reported_memory_bytes = Some(bytes);
         self
     }
 
@@ -133,13 +143,17 @@ impl ParseProvider for MockParseProvider {
             emitted_batches += 1;
         }
         cancellation.check()?;
+        let usage = sink.staged_usage();
         report(
             self.coverage.clone(),
-            request.source().bytes().len(),
-            self.facts.len(),
-            self.facts.iter().map(SyntaxFact::depth).max().unwrap_or(0),
-            self.accounted_memory_bytes,
-            sink.staged_usage(),
+            ResourceUsage::new(
+                request.source().bytes().len(),
+                self.facts.len(),
+                self.syntax_nodes,
+                self.facts.iter().map(SyntaxFact::depth).max().unwrap_or(0),
+                self.reported_memory_bytes,
+                usage,
+            ),
             sink.next_sequence(),
         )
     }
@@ -151,8 +165,9 @@ pub struct MockLanguageAnalyzer {
     descriptor: ProducerDescriptor,
     records: Vec<IrRecord>,
     coverage: CoverageReport,
+    syntax_nodes: usize,
     max_syntax_depth: usize,
-    accounted_memory_bytes: Option<usize>,
+    reported_memory_bytes: Option<usize>,
     cancel_after_batches: Option<(usize, CancellationReason)>,
 }
 
@@ -165,7 +180,7 @@ impl MockLanguageAnalyzer {
         coverage: CoverageReport,
         max_syntax_depth: usize,
     ) -> Self {
-        let accounted_memory_bytes = match descriptor.memory_enforcement() {
+        let reported_memory_bytes = match descriptor.memory_enforcement() {
             crate::MemoryEnforcement::AccountedInProcess => Some(0),
             _ => None,
         };
@@ -173,16 +188,24 @@ impl MockLanguageAnalyzer {
             descriptor,
             records,
             coverage,
+            syntax_nodes: 0,
             max_syntax_depth,
-            accounted_memory_bytes,
+            reported_memory_bytes,
             cancel_after_batches: None,
         }
     }
 
-    /// Configures deterministic accounted working memory.
+    /// Configures concrete-syntax nodes observed by the analyzer.
     #[must_use]
-    pub const fn with_accounted_memory_bytes(mut self, bytes: usize) -> Self {
-        self.accounted_memory_bytes = Some(bytes);
+    pub const fn with_syntax_nodes(mut self, nodes: usize) -> Self {
+        self.syntax_nodes = nodes;
+        self
+    }
+
+    /// Configures deterministic adapter-reported working memory.
+    #[must_use]
+    pub const fn with_reported_memory_bytes(mut self, bytes: usize) -> Self {
+        self.reported_memory_bytes = Some(bytes);
         self
     }
 
@@ -239,13 +262,17 @@ impl LanguageAnalyzer for MockLanguageAnalyzer {
             emitted_batches += 1;
         }
         cancellation.check()?;
+        let usage = sink.staged_usage();
         report(
             self.coverage.clone(),
-            request.source().bytes().len(),
-            self.records.len(),
-            self.max_syntax_depth,
-            self.accounted_memory_bytes,
-            sink.staged_usage(),
+            ResourceUsage::new(
+                request.source().bytes().len(),
+                self.records.len(),
+                self.syntax_nodes,
+                self.max_syntax_depth,
+                self.reported_memory_bytes,
+                usage,
+            ),
             sink.next_sequence(),
         )
     }
@@ -309,20 +336,10 @@ fn usage_fits(usage: StreamUsage, budget: crate::RemainingBudget) -> bool {
 
 fn report(
     coverage: CoverageReport,
-    source_bytes: usize,
-    output_records: usize,
-    max_syntax_depth: usize,
-    accounted_memory_bytes: Option<usize>,
-    usage: StreamUsage,
+    resources: ResourceUsage,
     next_sequence: u64,
 ) -> Result<WorkReport, AdapterError> {
-    let resources = ResourceUsage::new(
-        source_bytes,
-        output_records,
-        max_syntax_depth,
-        accounted_memory_bytes,
-        usage,
-    );
+    let usage = resources.stream();
     WorkReport::new(coverage, resources, StreamEnd::new(next_sequence, usage))
         .map_err(AdapterError::from)
 }
