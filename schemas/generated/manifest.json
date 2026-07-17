@@ -37,6 +37,10 @@
       "blake3": "35944c64bab7bfb0a413b4581a82d8b1d834f15c288e5dedf55d62f719902cc7"
     },
     {
+      "path": "tests/fixtures/compatibility/extensions/rootlight.lexical/1/envelope.json",
+      "blake3": "3fbed95476a6072a770bfa84ba442cc343d1f1bb222ae0a6c826d0b5efe263ff"
+    },
+    {
       "path": "tests/fixtures/compatibility/ir/1.0/document.json",
       "blake3": "f59ca69f01b2c9be2d62f687e2a2ffac6bcc726ce30bdfd28f478bcbdcc01d7d"
     },
@@ -101,6 +105,10 @@
     {
       "path": "schemas/generated/json/ir-1.1.schema.json",
       "blake3": "9815111822daab89e54ce1083937e52f2d288af6286819355ac0e62cca0873aa"
+    },
+    {
+      "path": "schemas/generated/json/ir-extension-rootlight-lexical-1.schema.json",
+      "blake3": "fc2627d22d5e6bdff02086e98c1cf05152be2d89ddbd0143f098d30b7351a9d9"
     },
     {
       "path": "schemas/generated/json/mcp-error-response-1.0.schema.json",

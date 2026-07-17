@@ -1,0 +1,295 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Rootlight lexical evidence extension version 1",
+  "description": "Bounded source-derived lexical evidence. Runtime decoding additionally enforces UTF-8 byte limits, canonical JSON, and complete-text hashes.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "complete_text_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "format": {
+          "type": "string",
+          "const": "source_text"
+        },
+        "kind": {
+          "type": "string",
+          "const": "signature"
+        },
+        "subject": {
+          "description": "The common IR fact described by this evidence.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/FileId"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "file"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "id"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/SymbolId"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "entity"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "id"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/FactId"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "fact"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "id"
+              ]
+            }
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1,
+          "x-rootlight-max-utf8-bytes": 4096
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "subject",
+        "format",
+        "text",
+        "complete_text_hash",
+        "truncated"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "complete_text_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "format": {
+          "type": "string",
+          "const": "plain_text"
+        },
+        "kind": {
+          "type": "string",
+          "const": "documentation_summary"
+        },
+        "subject": {
+          "description": "The common IR fact described by this evidence.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/FileId"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "file"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "id"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/SymbolId"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "entity"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "id"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/FactId"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "fact"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "id"
+              ]
+            }
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1,
+          "x-rootlight-max-utf8-bytes": 512
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "subject",
+        "format",
+        "text",
+        "complete_text_hash",
+        "truncated"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "complete_text_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "format": {
+          "type": "string",
+          "const": "plain_text"
+        },
+        "kind": {
+          "type": "string",
+          "const": "comment_summary"
+        },
+        "subject": {
+          "description": "The common IR fact described by this evidence.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/FileId"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "file"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "id"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/SymbolId"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "entity"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "id"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/FactId"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "fact"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "id"
+              ]
+            }
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1,
+          "x-rootlight-max-utf8-bytes": 512
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "subject",
+        "format",
+        "text",
+        "complete_text_hash",
+        "truncated"
+      ]
+    }
+  ],
+  "$defs": {
+    "ContentHash": {
+      "type": "string",
+      "pattern": "^b3_[a-z2-7]{58}$"
+    },
+    "FactId": {
+      "type": "string",
+      "pattern": "^fact1_[a-z2-7]{39}$"
+    },
+    "FileId": {
+      "type": "string",
+      "pattern": "^file1_[a-z2-7]{39}$"
+    },
+    "SymbolId": {
+      "type": "string",
+      "pattern": "^sym1_[a-z2-7]{39}$"
+    }
+  }
+}
