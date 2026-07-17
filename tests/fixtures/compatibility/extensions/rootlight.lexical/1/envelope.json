@@ -1,0 +1,32 @@
+{
+  "id": "fact1_7rf5pcrfc4frpy7eapxddd7aiz4jh3c6x6bjqea",
+  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+  "namespace": "rootlight.lexical",
+  "version": "1",
+  "criticality": "noncritical",
+  "payload": "{\"kind\":\"signature\",\"subject\":{\"kind\":\"entity\",\"id\":\"sym1_cylbmfqwcylbmfqwcylbmfqwcylbmfqwntdenqa\"},\"format\":\"source_text\",\"text\":\"fixture\",\"complete_text_hash\":\"b3_75bprqkwsgfv4kw74qjkj2xli5knc43nxoicyuklbc4qajuuj6gsxi36m4\",\"truncated\":false}",
+  "provenance": "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga",
+  "evidence": {
+    "source": {
+      "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+      "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+      "span": {
+        "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+        "start_byte": 0,
+        "end_byte": 7
+      },
+      "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+      "line_hint": {
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    "derivation": [
+      {
+        "kind": "entity",
+        "id": "sym1_cylbmfqwcylbmfqwcylbmfqwcylbmfqwntdenqa"
+      }
+    ]
+  }
+}

@@ -13,7 +13,10 @@ use cargo_metadata::MetadataCommand;
 use prost::Message;
 use prost_types::FileDescriptorSet;
 use rootlight_config::{ConfigDocumentSchema, ConfigDocumentSchemaV1_1};
-use rootlight_ir::{IrDocument, IrDocumentSchema, NormalizedIrDocument};
+use rootlight_ir::{
+    ExtensionEnvelope, IrDocument, IrDocumentSchema, LexicalEvidenceV1, NormalizedIrDocument,
+    decode_lexical_evidence_envelope,
+};
 use rootlight_mcp_contract::{ErrorResponse, ResponseMetadata};
 use rootlight_protocol::generated::common::v1::ContractVersion as ProtocolContractVersion;
 use schemars::{JsonSchema, generate::SchemaSettings};
@@ -35,7 +38,9 @@ const COMPATIBILITY_FILES: [&str; 4] = [
     "contract-1.0.json",
     "contract-2.0-rejected.json",
 ];
-const COMPATIBILITY_BASELINES: [&str; 5] = [
+const LEXICAL_EXTENSION_BASELINE: &str = "extensions/rootlight.lexical/1/envelope.json";
+const COMPATIBILITY_BASELINES: [&str; 6] = [
+    LEXICAL_EXTENSION_BASELINE,
     "ir/1.0/document.json",
     "ir/1.1/document.json",
     "protobuf/1.0/contract-version.bin",
@@ -187,6 +192,7 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
     println!("compatibility: daemon protocol 1.1, 1.2, and 1.3 descriptors verified");
     println!("compatibility: frozen protobuf wire semantics verified");
     println!("compatibility: frozen IR 1.0 and normalized IR 1.1 documents verified");
+    println!("compatibility: frozen rootlight.lexical extension version 1 verified");
     println!("compatibility: unsupported IR major and minor versions rejected");
     Ok(())
 }
@@ -301,6 +307,7 @@ fn validate_production_baselines(
     let ir = read_json_value(&workspace_root.join(COMPATIBILITY_ROOT).join(ir_path))?;
     validate_ir_document(workspace_root, &fixture.contract_version, &ir, true)?;
     validate_normalized_ir_baseline(workspace_root)?;
+    validate_lexical_extension_baseline(workspace_root)?;
 
     let protobuf =
         fixture
@@ -383,6 +390,50 @@ fn validate_normalized_ir_baseline(workspace_root: &Path) -> Result<(), SchemaEr
         return Err(SchemaError::CompatibilityIrValidity {
             version: "1.1".to_owned(),
             expected_valid: true,
+            schema_valid,
+            decode_valid,
+        });
+    }
+    Ok(())
+}
+
+fn validate_lexical_extension_baseline(workspace_root: &Path) -> Result<(), SchemaError> {
+    let fixture_path = workspace_root
+        .join(COMPATIBILITY_ROOT)
+        .join(LEXICAL_EXTENSION_BASELINE);
+    let envelope: ExtensionEnvelope = serde_json::from_value(read_json_value(&fixture_path)?)
+        .map_err(|source| SchemaError::ParseCompatibilityFixture {
+            path: fixture_path,
+            source,
+        })?;
+    let payload: serde_json::Value = serde_json::from_str(&envelope.payload).map_err(|source| {
+        SchemaError::ParseCompatibilityFixture {
+            path: workspace_root
+                .join(COMPATIBILITY_ROOT)
+                .join(LEXICAL_EXTENSION_BASELINE),
+            source,
+        }
+    })?;
+    let schema_path = workspace_root
+        .join(SCHEMA_ROOT)
+        .join("json/ir-extension-rootlight-lexical-1.schema.json");
+    let schema: serde_json::Value =
+        serde_json::from_slice(&read_bytes(&schema_path)?).map_err(|source| {
+            SchemaError::ParseGeneratedJson {
+                path: schema_path,
+                source,
+            }
+        })?;
+    let validator = jsonschema::draft202012::new(&schema).map_err(|source| {
+        SchemaError::CompileGeneratedSchema {
+            name: "ir-extension-rootlight-lexical-1.schema.json".to_owned(),
+            detail: source.to_string(),
+        }
+    })?;
+    let schema_valid = validator.is_valid(&payload);
+    let decode_valid = decode_lexical_evidence_envelope(&envelope).is_ok();
+    if !schema_valid || !decode_valid {
+        return Err(SchemaError::CompatibilityLexicalExtensionValidity {
             schema_valid,
             decode_valid,
         });
@@ -579,6 +630,9 @@ fn generate_json_schemas(staged_root: &Path) -> Result<(), SchemaError> {
     write_schema::<ConfigDocumentSchemaV1_1>(&schema_root.join("config-1.1.schema.json"))?;
     write_schema::<IrDocumentSchema>(&schema_root.join("ir-1.0.schema.json"))?;
     write_schema::<NormalizedIrDocument>(&schema_root.join("ir-1.1.schema.json"))?;
+    write_schema::<LexicalEvidenceV1>(
+        &schema_root.join("ir-extension-rootlight-lexical-1.schema.json"),
+    )?;
     write_schema::<ResponseMetadata>(&schema_root.join("mcp-response-metadata-1.0.schema.json"))?;
     write_schema::<ErrorResponse>(&schema_root.join("mcp-error-response-1.0.schema.json"))?;
     Ok(())
@@ -622,6 +676,38 @@ fn validate_generated_json_schemas(
     )?;
     let mut wrong_normalized_minor = normalized_ir.clone();
     wrong_normalized_minor["version"]["minor"] = serde_json::json!(2);
+    let lexical_envelope = read_json_value(
+        &workspace_root
+            .join(COMPATIBILITY_ROOT)
+            .join(LEXICAL_EXTENSION_BASELINE),
+    )?;
+    let lexical_payload_text = lexical_envelope
+        .get("payload")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SchemaError::CompatibilityLexicalExtensionFixture)?;
+    let lexical_payload: serde_json::Value =
+        serde_json::from_str(lexical_payload_text).map_err(|source| {
+            SchemaError::ParseCompatibilityFixture {
+                path: workspace_root
+                    .join(COMPATIBILITY_ROOT)
+                    .join(LEXICAL_EXTENSION_BASELINE),
+                source,
+            }
+        })?;
+    let mut lexical_wrong_format = lexical_payload.clone();
+    lexical_wrong_format["format"] = serde_json::json!("plain_text");
+    let mut lexical_overlong_signature = lexical_payload.clone();
+    lexical_overlong_signature["text"] = serde_json::json!("x".repeat(4_097));
+    lexical_overlong_signature["truncated"] = serde_json::json!(true);
+    let mut lexical_overlong_summary = lexical_payload.clone();
+    lexical_overlong_summary["kind"] = serde_json::json!("documentation_summary");
+    lexical_overlong_summary["format"] = serde_json::json!("plain_text");
+    lexical_overlong_summary["text"] = serde_json::json!("x".repeat(513));
+    lexical_overlong_summary["truncated"] = serde_json::json!(true);
+    let mut lexical_unknown_field = lexical_payload.clone();
+    lexical_unknown_field["unknown"] = serde_json::json!(true);
+    let mut lexical_unknown_subject_field = lexical_payload.clone();
+    lexical_unknown_subject_field["subject"]["unknown"] = serde_json::json!(true);
     let cases = [
         SchemaSemanticCase::valid(
             "config-1.0.schema.json",
@@ -712,6 +798,36 @@ fn validate_generated_json_schemas(
             wrong_normalized_minor,
         ),
         SchemaSemanticCase::valid(
+            "ir-extension-rootlight-lexical-1.schema.json",
+            "frozen first-party lexical evidence",
+            lexical_payload,
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-extension-rootlight-lexical-1.schema.json",
+            "signature uses the summary text format",
+            lexical_wrong_format,
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-extension-rootlight-lexical-1.schema.json",
+            "signature exceeds its retained text cap",
+            lexical_overlong_signature,
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-extension-rootlight-lexical-1.schema.json",
+            "documentation summary exceeds its retained text cap",
+            lexical_overlong_summary,
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-extension-rootlight-lexical-1.schema.json",
+            "lexical payload contains an unknown field",
+            lexical_unknown_field,
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-extension-rootlight-lexical-1.schema.json",
+            "lexical subject contains an unknown field",
+            lexical_unknown_subject_field,
+        ),
+        SchemaSemanticCase::valid(
             "mcp-response-metadata-1.0.schema.json",
             "valid response metadata",
             serde_json::json!({
@@ -764,6 +880,9 @@ fn validate_generated_json_schemas(
             }
             "ir-1.1.schema.json" => {
                 serde_json::from_value::<NormalizedIrDocument>(case.instance.clone()).is_ok()
+            }
+            "ir-extension-rootlight-lexical-1.schema.json" => {
+                serde_json::from_value::<LexicalEvidenceV1>(case.instance.clone()).is_ok()
             }
             _ => case.expected_valid,
         };
@@ -928,6 +1047,7 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/config-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-response-metadata-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-error-response-1.0.schema.json"),
     ]);
@@ -1197,6 +1317,15 @@ pub(crate) enum SchemaError {
     CompatibilityIrValidity {
         version: String,
         expected_valid: bool,
+        schema_valid: bool,
+        decode_valid: bool,
+    },
+    #[error("COMPAT_LEXICAL_FIXTURE: frozen rootlight.lexical extension fixture is malformed")]
+    CompatibilityLexicalExtensionFixture,
+    #[error(
+        "COMPAT_LEXICAL_VALIDITY: frozen rootlight.lexical extension expected schema=true and decode=true, schema={schema_valid}, decode={decode_valid}"
+    )]
+    CompatibilityLexicalExtensionValidity {
         schema_valid: bool,
         decode_valid: bool,
     },

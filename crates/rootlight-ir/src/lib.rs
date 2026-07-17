@@ -6,9 +6,17 @@
 
 #![forbid(unsafe_code)]
 
+mod lexical;
 mod normalized;
 mod validation;
 
+pub use lexical::{
+    LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION, LexicalEvidenceFormat,
+    LexicalEvidenceKind, LexicalEvidenceV1, LexicalExtensionError, MAX_LEXICAL_PAYLOAD_BYTES,
+    MAX_LEXICAL_SIGNATURE_BYTES, MAX_LEXICAL_SUMMARY_BYTES, decode_lexical_evidence,
+    decode_lexical_evidence_envelope, encode_lexical_evidence, new_lexical_evidence_envelope,
+    validate_lexical_evidence_envelope,
+};
 pub use normalized::{
     ContainerRef, CoverageRecord, CoverageScope, DiagnosticRecord, DiagnosticSeverity, EntityFlag,
     EntityKind, EntityRecord, EntityVisibility, ExtensionCriticality, ExtensionEnvelope,
