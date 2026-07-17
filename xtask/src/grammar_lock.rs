@@ -21,6 +21,7 @@ const GRAMMAR_LOCK_SHA256: &str =
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
+const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
 const EXPECTED_PACKAGES: [(&str, &str, &str); 5] = [
     (
@@ -188,31 +189,64 @@ fn validate_direct_dependencies(metadata: &Metadata) -> Result<(), GrammarLockEr
         .iter()
         .find(|package| package.name.as_str() == ADAPTER_PACKAGE)
         .ok_or(GrammarLockError::MissingAdapterPackage)?;
+    validate_tree_sitter_dependencies(&package.dependencies)
+}
+
+fn validate_tree_sitter_dependencies(dependencies: &[Dependency]) -> Result<(), GrammarLockError> {
     let expected: BTreeMap<_, _> = EXPECTED_PACKAGES
         .iter()
         .map(|(name, version, _)| (*name, *version))
         .collect();
-    let observed: BTreeMap<_, _> = package
-        .dependencies
+    let observed: Vec<_> = dependencies
         .iter()
-        .filter(|dependency| expected.contains_key(dependency.name.as_str()))
-        .map(|dependency| (dependency.name.as_str(), dependency))
+        .filter(|dependency| {
+            is_tree_sitter_package(&dependency.name)
+                || dependency
+                    .rename
+                    .as_deref()
+                    .is_some_and(is_tree_sitter_package)
+        })
         .collect();
-    if observed.len() != expected.len() {
+    let observed_names: BTreeSet<_> = observed
+        .iter()
+        .map(|dependency| dependency.name.as_str())
+        .collect();
+    let expected_names: BTreeSet<_> = expected.keys().copied().collect();
+    if observed.len() != expected.len() || observed_names != expected_names {
         return Err(GrammarLockError::DependencySet);
     }
     for (name, version) in expected {
-        let dependency = observed.get(name).ok_or(GrammarLockError::DependencySet)?;
+        let dependency = observed
+            .iter()
+            .find(|dependency| dependency.name == name)
+            .ok_or(GrammarLockError::DependencySet)?;
         validate_dependency_profile(dependency, version)?;
     }
     Ok(())
+}
+
+fn is_tree_sitter_package(name: &str) -> bool {
+    name == "tree-sitter" || name.starts_with("tree-sitter-")
 }
 
 fn validate_dependency_profile(
     dependency: &Dependency,
     version: &str,
 ) -> Result<(), GrammarLockError> {
-    if dependency.req.to_string() != format!("={version}") || dependency.uses_default_features {
+    if dependency.req.to_string() != format!("={version}")
+        || dependency.kind != cargo_metadata::DependencyKind::Normal
+        || dependency.optional
+        || dependency.uses_default_features
+        || dependency.rename.is_some()
+        || dependency.target.is_some()
+        || dependency.registry.is_some()
+        || dependency
+            .source
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref()
+            != Some(CRATES_IO_SOURCE)
+    {
         return Err(GrammarLockError::DependencyProfile {
             package: dependency.name.clone(),
         });
@@ -295,7 +329,11 @@ fn require_digest(
 }
 
 fn validate_sha256(label: &'static str, value: &str) -> Result<(), GrammarLockError> {
-    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         Ok(())
     } else {
         Err(GrammarLockError::InvalidDigest { label })
@@ -455,12 +493,111 @@ pub(crate) enum GrammarLockError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
-    fn digest_validation_rejects_truncated_values() {
+    fn digest_validation_rejects_truncated_and_uppercase_values() {
+        for invalid in [
+            "abcd",
+            "A25fcae685241c79da6ccba18d38a6f81e963cd2cad75434a65b28b50246ac8c",
+        ] {
+            assert!(matches!(
+                validate_sha256("fixture", invalid),
+                Err(GrammarLockError::InvalidDigest { label: "fixture" })
+            ));
+        }
+    }
+
+    #[test]
+    fn dependency_set_rejects_an_unreviewed_tree_sitter_package() {
+        let mut dependencies = audited_dependency_fixtures();
+        dependencies.push(dependency_fixture("tree-sitter-unreviewed", "1.0.0", &[]));
+
         assert!(matches!(
-            validate_sha256("fixture", "abcd"),
-            Err(GrammarLockError::InvalidDigest { label: "fixture" })
+            validate_tree_sitter_dependencies(&dependencies),
+            Err(GrammarLockError::DependencySet)
         ));
+    }
+
+    #[test]
+    fn dependency_profile_rejects_non_normal_optional_and_non_crates_io_forms() {
+        let baseline = dependency_fixture("tree-sitter-rust", "0.24.2", &[]);
+        let mut profiles = Vec::new();
+
+        let mut development = baseline.clone();
+        development.kind = cargo_metadata::DependencyKind::Development;
+        profiles.push(development);
+
+        let mut optional = baseline.clone();
+        optional.optional = true;
+        profiles.push(optional);
+
+        let mut targeted = baseline.clone();
+        targeted.target = Some(
+            "cfg(windows)"
+                .parse()
+                .expect("test target expression is valid"),
+        );
+        profiles.push(targeted);
+
+        let mut path = baseline.clone();
+        path.source = None;
+        profiles.push(path);
+
+        let alternate_registry = dependency_fixture_with_source(
+            "tree-sitter-rust",
+            "0.24.2",
+            &[],
+            Some("registry+https://example.invalid/index"),
+            Some("https://example.invalid/index"),
+        );
+        profiles.push(alternate_registry);
+
+        for dependency in profiles {
+            assert!(matches!(
+                validate_dependency_profile(&dependency, "0.24.2"),
+                Err(GrammarLockError::DependencyProfile { .. })
+            ));
+        }
+    }
+
+    fn audited_dependency_fixtures() -> Vec<Dependency> {
+        EXPECTED_PACKAGES
+            .iter()
+            .map(|(name, version, _)| {
+                let features = if *name == "tree-sitter" {
+                    &["std"][..]
+                } else {
+                    &[][..]
+                };
+                dependency_fixture(name, version, features)
+            })
+            .collect()
+    }
+
+    fn dependency_fixture(name: &str, version: &str, features: &[&str]) -> Dependency {
+        dependency_fixture_with_source(name, version, features, Some(CRATES_IO_SOURCE), None)
+    }
+
+    fn dependency_fixture_with_source(
+        name: &str,
+        version: &str,
+        features: &[&str],
+        source: Option<&str>,
+        registry: Option<&str>,
+    ) -> Dependency {
+        serde_json::from_value(json!({
+            "name": name,
+            "source": source,
+            "req": format!("={version}"),
+            "kind": null,
+            "rename": null,
+            "optional": false,
+            "uses_default_features": false,
+            "features": features,
+            "target": null,
+            "registry": registry,
+        }))
+        .expect("test dependency metadata is valid")
     }
 }
