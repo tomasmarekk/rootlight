@@ -463,6 +463,11 @@ pub enum LogEvent {
         /// Stable source-free failure code.
         error_code: ErrorCode,
     },
+    /// The daemon process failed before or outside a request response.
+    DaemonFailed {
+        /// Stable source-free failure code.
+        error_code: ErrorCode,
+    },
 }
 
 /// One normalized bounded structured log record.
@@ -906,6 +911,13 @@ impl Telemetry {
         });
     }
 
+    /// Records a daemon process failure without retaining error text.
+    pub fn record_daemon_failed(&self) {
+        self.record_log(LogEvent::DaemonFailed {
+            error_code: ErrorCode::Internal,
+        });
+    }
+
     /// Returns a bounded source-free process-local snapshot.
     #[must_use]
     pub fn snapshot(&self) -> TelemetrySnapshot {
@@ -1055,6 +1067,7 @@ fn classify_log_event(event: LogEvent) -> (LogSeverity, TelemetryTarget) {
             ..
         }
         | LogEvent::ConnectionTaskFailed { .. } => (LogSeverity::Error, TelemetryTarget::Ipc),
+        LogEvent::DaemonFailed { .. } => (LogSeverity::Error, TelemetryTarget::Daemon),
         LogEvent::RequestCompleted { .. } => (LogSeverity::Warn, TelemetryTarget::Ipc),
         LogEvent::DiagnosticCompleted {
             outcome: TelemetryOutcome::Succeeded,
@@ -1551,5 +1564,24 @@ mod tests {
         ] {
             assert!(!String::from_utf8_lossy(&bytes).contains(forbidden));
         }
+    }
+
+    #[test]
+    fn daemon_failure_record_is_closed_and_source_free() {
+        let telemetry = Telemetry::default();
+        telemetry.record_daemon_failed();
+
+        let snapshot = telemetry.snapshot();
+        let record = snapshot.logs.first().expect("daemon failure retained");
+        assert_eq!(record.severity, LogSeverity::Error);
+        assert_eq!(record.target, TelemetryTarget::Daemon);
+        assert_eq!(
+            record.event,
+            LogEvent::DaemonFailed {
+                error_code: ErrorCode::Internal,
+            }
+        );
+        let bytes = serde_json::to_vec(record).expect("record serializes");
+        assert!(bytes.len() < MAX_STRUCTURED_LOG_LINE_BYTES);
     }
 }

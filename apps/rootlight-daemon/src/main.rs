@@ -21,8 +21,8 @@ const EXPIRY_BATCH: usize = 64;
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("rootlight-daemon: {error}");
+        Err(_) => {
+            Telemetry::new(TelemetryOutput::StderrJson).record_daemon_failed();
             ExitCode::FAILURE
         }
     }
