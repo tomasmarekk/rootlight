@@ -75,6 +75,8 @@ pub const DEFAULT_OPERATION_WORKERS: usize = 4;
 pub const CONTROL_PROBE_WORK: Duration = Duration::from_secs(3);
 /// Default maximum server-side request response time.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Retained compatibility interval from the former polling scheduler.
+pub const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 /// Default orderly shutdown grace period.
 pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
@@ -223,6 +225,8 @@ pub struct DaemonLimits {
     pub operation_workers: usize,
     /// Maximum response time accepted from a request envelope.
     pub request_timeout: Duration,
+    /// Retained compatibility interval from the former polling scheduler.
+    pub maintenance_interval: Duration,
     /// Maximum graceful drain duration.
     pub shutdown_grace: Duration,
 }
@@ -239,6 +243,7 @@ impl DaemonLimits {
         operation_queue_limit: u32,
         operation_workers: usize,
         request_timeout: Duration,
+        maintenance_interval: Duration,
         shutdown_grace: Duration,
     ) -> Result<Self, ServiceError> {
         Self::new_with_client_limits(
@@ -249,6 +254,7 @@ impl DaemonLimits {
             operation_queue_limit,
             operation_workers,
             request_timeout,
+            maintenance_interval,
             shutdown_grace,
         )
     }
@@ -262,6 +268,10 @@ impl DaemonLimits {
     ///
     /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration is zero,
     /// or when the client operation limit exceeds the global operation limit.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one validated daemon resource dimension"
+    )]
     pub const fn new_with_client_operation_limit(
         connection_limit: u32,
         control_queue_limit: usize,
@@ -269,6 +279,7 @@ impl DaemonLimits {
         client_operation_limit: u32,
         operation_workers: usize,
         request_timeout: Duration,
+        maintenance_interval: Duration,
         shutdown_grace: Duration,
     ) -> Result<Self, ServiceError> {
         Self::new_with_client_limits(
@@ -279,6 +290,7 @@ impl DaemonLimits {
             client_operation_limit,
             operation_workers,
             request_timeout,
+            maintenance_interval,
             shutdown_grace,
         )
     }
@@ -301,6 +313,7 @@ impl DaemonLimits {
         client_operation_limit: u32,
         operation_workers: usize,
         request_timeout: Duration,
+        maintenance_interval: Duration,
         shutdown_grace: Duration,
     ) -> Result<Self, ServiceError> {
         if connection_limit == 0
@@ -312,6 +325,7 @@ impl DaemonLimits {
             || client_operation_limit > operation_queue_limit
             || operation_workers == 0
             || request_timeout.is_zero()
+            || maintenance_interval.is_zero()
             || shutdown_grace.is_zero()
         {
             return Err(ServiceError::InvalidLimits);
@@ -324,6 +338,7 @@ impl DaemonLimits {
             client_operation_limit,
             operation_workers,
             request_timeout,
+            maintenance_interval,
             shutdown_grace,
         })
     }
@@ -339,6 +354,7 @@ impl Default for DaemonLimits {
             client_operation_limit: DEFAULT_CLIENT_OPERATION_LIMIT,
             operation_workers: DEFAULT_OPERATION_WORKERS,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            maintenance_interval: DEFAULT_MAINTENANCE_INTERVAL,
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
         }
     }
@@ -1525,6 +1541,7 @@ struct PendingAdmissionHandle {
 }
 
 impl PendingAdmissionHandle {
+    #[cfg(test)]
     fn cancelled(&self) -> &AtomicBool {
         self.cancelled.as_ref()
     }
@@ -5157,6 +5174,7 @@ mod tests {
             1,
             Duration::from_secs(1),
             Duration::from_secs(1),
+            Duration::from_secs(1),
         )
         .expect("limits are valid");
         let admissions = ClientConnectionAdmissions::new(limits);
@@ -5209,6 +5227,7 @@ mod tests {
             4,
             4,
             1,
+            Duration::from_secs(1),
             Duration::from_secs(1),
             Duration::from_secs(1),
         )
@@ -5389,6 +5408,7 @@ mod tests {
                 1,
                 Duration::from_secs(1),
                 Duration::from_secs(1),
+                Duration::from_secs(1),
             ),
             Err(ServiceError::InvalidLimits)
         ));
@@ -5400,6 +5420,7 @@ mod tests {
                 4,
                 4,
                 1,
+                Duration::from_secs(1),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
             ),
@@ -5414,6 +5435,7 @@ mod tests {
                 1,
                 Duration::from_secs(1),
                 Duration::from_secs(1),
+                Duration::from_secs(1),
             ),
             Err(ServiceError::InvalidLimits)
         ));
@@ -5424,6 +5446,7 @@ mod tests {
                 4,
                 5,
                 1,
+                Duration::from_secs(1),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
             ),
@@ -5725,8 +5748,16 @@ mod tests {
     #[tokio::test]
     async fn admission_saturation_preserves_retry_and_conflict_semantics() {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-        let limits = DaemonLimits::new(4, 4, 1, 1, Duration::from_secs(1), Duration::from_secs(1))
-            .expect("limits are valid");
+        let limits = DaemonLimits::new(
+            4,
+            4,
+            1,
+            1,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .expect("limits are valid");
         let state = Arc::new(DaemonState::starting());
         state.set_lifecycle(DaemonLifecycle::Ready);
         let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
@@ -5784,6 +5815,7 @@ mod tests {
             3,
             1,
             2,
+            Duration::from_secs(1),
             Duration::from_secs(1),
             Duration::from_secs(1),
         )
@@ -6103,8 +6135,16 @@ mod tests {
     #[tokio::test]
     async fn orchestrator_runs_synthetic_operation_to_completion() {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-        let limits = DaemonLimits::new(4, 4, 4, 1, Duration::from_secs(1), Duration::from_secs(1))
-            .expect("limits are valid");
+        let limits = DaemonLimits::new(
+            4,
+            4,
+            4,
+            1,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .expect("limits are valid");
         let state = Arc::new(DaemonState::starting());
         state.set_lifecycle(DaemonLifecycle::Ready);
         let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
@@ -6143,8 +6183,16 @@ mod tests {
     #[tokio::test]
     async fn shutdown_drains_pending_completion_permits_before_resetting_counts() {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-        let limits = DaemonLimits::new(4, 4, 2, 1, Duration::from_secs(1), Duration::from_secs(1))
-            .expect("limits are valid");
+        let limits = DaemonLimits::new(
+            4,
+            4,
+            2,
+            1,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .expect("limits are valid");
         let state = Arc::new(DaemonState::starting());
         state.set_lifecycle(DaemonLifecycle::Ready);
         let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
