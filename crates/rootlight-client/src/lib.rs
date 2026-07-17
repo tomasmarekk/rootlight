@@ -1245,15 +1245,27 @@ fn validate_telemetry_snapshot(telemetry: &TelemetrySnapshot) -> Result<(), Clie
         .iter()
         .zip(ControlMethod::ALL)
     {
+        let bucket_total = metric
+            .duration_us
+            .bucket_counts
+            .iter()
+            .try_fold(0_u64, |total, count| total.checked_add(*count))
+            .ok_or(ClientError::InvalidSupportBundle)?;
+        let outcome_total = [
+            metric.succeeded_total,
+            metric.rejected_total,
+            metric.timed_out_total,
+            metric.cancelled_total,
+            metric.failed_total,
+            metric.abandoned_total,
+        ]
+        .into_iter()
+        .try_fold(0_u64, |total, count| total.checked_add(count))
+        .ok_or(ClientError::InvalidSupportBundle)?;
         if metric.method != method
             || metric.duration_us.upper_bounds_us != DURATION_BUCKET_UPPER_US
-            || metric
-                .duration_us
-                .bucket_counts
-                .iter()
-                .copied()
-                .sum::<u64>()
-                != metric.duration_us.count
+            || bucket_total != metric.duration_us.count
+            || outcome_total != metric.duration_us.count
         {
             return Err(ClientError::InvalidSupportBundle);
         }
