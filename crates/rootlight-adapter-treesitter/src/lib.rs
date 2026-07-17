@@ -5,6 +5,16 @@
 
 #![forbid(unsafe_code)]
 
+mod config;
+mod incremental;
+mod pool;
 mod registry;
+mod runtime;
 
+pub use config::{ParserSettings, RuntimeConfig, RuntimeConfigError};
+pub use incremental::{
+    ParseReuseKey, ParseWithPrevious, PreviousParse, ReuseInvalidation, ReuseStatus, SourceEdit,
+    SourceEditError,
+};
 pub use registry::{GrammarDescriptor, GrammarFamily, GrammarRegistry, RegistryError};
+pub use runtime::{CacheStats, RuntimeStats, TreeSitterProvider};

@@ -125,6 +125,13 @@ impl GrammarRegistry {
             .ok()
             .and_then(|index| self.descriptors.get(index))
     }
+
+    pub(crate) fn family_for_language(&self, language: &LanguageId) -> Option<GrammarFamily> {
+        self.descriptors
+            .iter()
+            .find(|descriptor| descriptor.language == *language)
+            .map(|descriptor| descriptor.family)
+    }
 }
 
 /// Failure to initialize the audited grammar registry.
