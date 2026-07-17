@@ -99,15 +99,26 @@ impl Drop for ParserLease {
             return;
         };
         parser.reset();
-        let _ = parser.set_included_ranges(&[]);
+        // Empty ranges are Tree-sitter's documented full-document reset. If a
+        // future runtime rejects it, discard the parser instead of risking
+        // stale included ranges crossing request boundaries.
+        let reusable = parser.set_included_ranges(&[]).is_ok();
         let mut state = match self.inner.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        state.checked_out = state.checked_out.saturating_sub(1);
-        state.available.push(parser);
+        return_parser(&mut state, parser, reusable);
         drop(state);
         self.inner.available.notify_one();
+    }
+}
+
+fn return_parser(state: &mut PoolState, parser: Parser, reusable: bool) {
+    state.checked_out = state.checked_out.saturating_sub(1);
+    if reusable {
+        state.available.push(parser);
+    } else {
+        state.created = state.created.saturating_sub(1);
     }
 }
 
@@ -166,6 +177,21 @@ mod tests {
         assert_eq!(stats.created, 1);
         assert_eq!(stats.available, 1);
         assert_eq!(stats.checked_out, 0);
+    }
+
+    #[test]
+    fn a_parser_that_cannot_reset_is_discarded_from_pool_accounting() {
+        let mut state = PoolState {
+            available: Vec::new(),
+            created: 1,
+            checked_out: 1,
+        };
+
+        return_parser(&mut state, Parser::new(), false);
+
+        assert_eq!(state.created, 0);
+        assert_eq!(state.checked_out, 0);
+        assert!(state.available.is_empty());
     }
 
     fn deadline(duration: Duration) -> Cancellation {

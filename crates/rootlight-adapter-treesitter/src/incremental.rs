@@ -63,6 +63,12 @@ impl SourceEdit {
         self.start_byte.saturating_add(self.replacement.len())
     }
 
+    /// Returns the UTF-8 replacement byte length without exposing source text.
+    #[must_use]
+    pub const fn replacement_bytes(&self) -> usize {
+        self.replacement.len()
+    }
+
     pub(crate) fn replacement(&self) -> &[u8] {
         &self.replacement
     }

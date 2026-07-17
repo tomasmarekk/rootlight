@@ -38,6 +38,7 @@ pub struct RuntimeConfig {
     max_syntax_nodes: usize,
     max_syntax_depth: usize,
     max_included_ranges: usize,
+    max_incremental_edits: usize,
     max_concurrent_parses: usize,
     max_cache_bytes: usize,
     default_settings: ParserSettings,
@@ -53,14 +54,16 @@ impl RuntimeConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeConfigError`] for zero capacities, source extents above
-    /// Tree-sitter's 32-bit offset domain, or an input chunk larger than a file.
+    /// Returns [`RuntimeConfigError`] for zero capacities, including the edit
+    /// ceiling, source extents above Tree-sitter's 32-bit offset domain, or an
+    /// input chunk larger than a file.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         max_source_bytes: usize,
         max_syntax_nodes: usize,
         max_syntax_depth: usize,
         max_included_ranges: usize,
+        max_incremental_edits: usize,
         max_concurrent_parses: usize,
         max_cache_bytes: usize,
         default_settings: ParserSettings,
@@ -70,6 +73,7 @@ impl RuntimeConfig {
             ("max_syntax_nodes", max_syntax_nodes),
             ("max_syntax_depth", max_syntax_depth),
             ("max_included_ranges", max_included_ranges),
+            ("max_incremental_edits", max_incremental_edits),
             ("max_concurrent_parses", max_concurrent_parses),
             ("max_cache_bytes", max_cache_bytes),
         ] {
@@ -92,6 +96,7 @@ impl RuntimeConfig {
             max_syntax_nodes,
             max_syntax_depth,
             max_included_ranges,
+            max_incremental_edits,
             max_concurrent_parses,
             max_cache_bytes,
             default_settings,
@@ -120,6 +125,12 @@ impl RuntimeConfig {
     #[must_use]
     pub const fn max_included_ranges(&self) -> usize {
         self.max_included_ranges
+    }
+
+    /// Returns the sequential incremental edit ceiling.
+    #[must_use]
+    pub const fn max_incremental_edits(&self) -> usize {
+        self.max_incremental_edits
     }
 
     /// Returns the parser permit count.

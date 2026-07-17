@@ -313,6 +313,116 @@ fn provider_and_parser_settings_mismatches_invalidate_reuse() {
 }
 
 #[test]
+fn incremental_edit_work_is_bounded_before_cloning_or_intermediate_growth() {
+    let fixture = Fixture::new("bounded.rs", b"abcdefgh");
+    let limits = limits(8, 1024, 64);
+    let provider = provider_with_edit_limit(8, 1024, 64, 4, 4096);
+    let settings = ParserSettings::new(4).expect("settings fit the source bound");
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "rust",
+        Vec::new(),
+    );
+    let cancellation = deadline(Duration::from_secs(30));
+    let mut initial_sink = BoundedSyntaxSink::new(
+        fixture.source.clone(),
+        limits.syntax_stream().clone(),
+        limits.max_syntax_depth(),
+    );
+    let initial = provider
+        .parse_with_previous(
+            &request,
+            None,
+            &[],
+            settings,
+            &mut initial_sink,
+            &cancellation,
+        )
+        .expect("initial bounded source parses");
+    let previous = initial.previous().expect("initial tree is cached").clone();
+
+    let mut no_previous_sink = BoundedSyntaxSink::new(
+        fixture.source.clone(),
+        limits.syntax_stream().clone(),
+        limits.max_syntax_depth(),
+    );
+    let insertion = SourceEdit::new(0, 0, "x").expect("test insertion is valid");
+    assert!(matches!(
+        provider.parse_with_previous(
+            &request,
+            None,
+            std::slice::from_ref(&insertion),
+            settings,
+            &mut no_previous_sink,
+            &cancellation,
+        ),
+        Err(AdapterError::ProviderFailed { code })
+            if code.as_str() == "incremental-edit-without-previous"
+    ));
+
+    let mut count_sink = BoundedSyntaxSink::new(
+        fixture.source.clone(),
+        limits.syntax_stream().clone(),
+        limits.max_syntax_depth(),
+    );
+    let empty_edit = SourceEdit::new(0, 0, "").expect("empty replacement is valid");
+    let too_many = vec![empty_edit; 5];
+    assert!(matches!(
+        provider.parse_with_previous(
+            &request,
+            Some(&previous),
+            &too_many,
+            settings,
+            &mut count_sink,
+            &cancellation,
+        ),
+        Err(AdapterError::ProviderFailed { code }) if code.as_str() == "incremental-edit-limit"
+    ));
+
+    let mut replacement_sink = BoundedSyntaxSink::new(
+        fixture.source.clone(),
+        limits.syntax_stream().clone(),
+        limits.max_syntax_depth(),
+    );
+    let oversized_replacement =
+        SourceEdit::new(0, 0, "123456789").expect("replacement offsets are valid");
+    assert!(matches!(
+        provider.parse_with_previous(
+            &request,
+            Some(&previous),
+            &[oversized_replacement],
+            settings,
+            &mut replacement_sink,
+            &cancellation,
+        ),
+        Err(AdapterError::ProviderFailed { code })
+            if code.as_str() == "incremental-replacement-limit"
+    ));
+
+    let mut intermediate_sink = BoundedSyntaxSink::new(
+        fixture.source.clone(),
+        limits.syntax_stream().clone(),
+        limits.max_syntax_depth(),
+    );
+    let remove_insertion = SourceEdit::new(0, 1, "").expect("test deletion is valid");
+    assert!(matches!(
+        provider.parse_with_previous(
+            &request,
+            Some(&previous),
+            &[insertion, remove_insertion],
+            settings,
+            &mut intermediate_sink,
+            &cancellation,
+        ),
+        Err(AdapterError::ProviderFailed { code })
+            if code.as_str() == "incremental-source-limit"
+    ));
+    assert_eq!(provider.stats().checked_out_parsers, 0);
+}
+
+#[test]
 fn node_and_depth_limits_commit_explicit_partial_coverage() {
     let node_fixture = Fixture::new(
         "nodes.rs",
@@ -488,12 +598,24 @@ fn provider(
     max_depth: usize,
     cache_bytes: usize,
 ) -> TreeSitterProvider {
-    let settings = ParserSettings::new(1024).expect("test settings are valid");
+    provider_with_edit_limit(max_source_bytes, max_nodes, max_depth, 64, cache_bytes)
+}
+
+fn provider_with_edit_limit(
+    max_source_bytes: usize,
+    max_nodes: usize,
+    max_depth: usize,
+    max_incremental_edits: usize,
+    cache_bytes: usize,
+) -> TreeSitterProvider {
+    let settings =
+        ParserSettings::new(max_source_bytes.min(1024)).expect("test settings are valid");
     let config = RuntimeConfig::new(
         max_source_bytes,
         max_nodes,
         max_depth,
         16,
+        max_incremental_edits,
         1,
         cache_bytes,
         settings,
