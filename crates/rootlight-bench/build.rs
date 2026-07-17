@@ -1,5 +1,7 @@
 //! Compile-time provenance for the offline benchmark executable.
 
+#![forbid(unsafe_code)]
+
 use std::{env, error::Error, io, process::Command};
 
 fn main() -> Result<(), Box<dyn Error>> {

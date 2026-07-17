@@ -55,6 +55,7 @@ schemars = { version = "1.2.1", default-features = false, features = ["derive", 
 serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
 sha2 = { version = "0.11.0", default-features = false }
+syn = { version = "=2.0.119", default-features = false, features = ["full", "parsing", "visit"] }
 tempfile = "3.23.0"
 thiserror = { version = "2.0.18", default-features = false, features = ["std"] }
 tree-sitter = { version = "=0.26.11", default-features = false, features = ["std"] }

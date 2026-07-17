@@ -2,6 +2,8 @@ schema_version = "1.0"
 
 [[boundaries]]
 package = "rootlight-vfs"
+package_version = "0.1.0"
+manifest = "crates/rootlight-vfs/Cargo.toml"
 module = "rootlight-vfs::platform::os"
 source = "crates/rootlight-vfs/src/platform/os.rs"
 status = "proposed"
