@@ -41,6 +41,11 @@ const COMPATIBILITY_BASELINES: [&str; 4] = [
     "protobuf/1.0/contract-version.json",
     "protobuf/1.0/rootlight.desc",
 ];
+const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 3] = [
+    ("1.1", "protobuf/1.1/rootlight.desc"),
+    ("1.2", "protobuf/1.2/rootlight.desc"),
+    ("1.3", "protobuf/1.3/rootlight.desc"),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GenerateMode {
@@ -174,9 +179,11 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
         }
     }
 
+    validate_daemon_protocol_baselines(&workspace_root)?;
     validate_protobuf_unknown_field_skip()?;
     println!("compatibility: configuration and MCP fixtures verified");
     println!("compatibility: frozen protobuf descriptor is a compatible subset");
+    println!("compatibility: daemon protocol 1.1, 1.2, and exact 1.3 descriptors verified");
     println!("compatibility: frozen protobuf wire semantics verified");
     println!("compatibility: frozen IR document and major rejection verified");
     Ok(())
@@ -337,6 +344,35 @@ fn validate_descriptor_baseline(
         .map_err(SchemaError::CompatibilityDescriptorDecode)?;
     crate::protobuf_compatibility::require_compatible(&historical, &current)
         .map_err(SchemaError::CompatibilityDescriptor)
+}
+
+fn validate_daemon_protocol_baselines(workspace_root: &Path) -> Result<(), SchemaError> {
+    let current_path = workspace_root
+        .join(SCHEMA_ROOT)
+        .join("protobuf/rootlight.desc");
+    let current_bytes = read_bytes(&current_path)?;
+    let current = FileDescriptorSet::decode(current_bytes.as_slice())
+        .map_err(SchemaError::CompatibilityDescriptorDecode)?;
+
+    for (version, descriptor_relative) in DAEMON_PROTOCOL_DESCRIPTOR_BASELINES {
+        let historical_path = workspace_root
+            .join(COMPATIBILITY_ROOT)
+            .join(descriptor_relative);
+        let historical_bytes = read_bytes(&historical_path)?;
+        if version == "1.3" {
+            if historical_bytes != current_bytes {
+                return Err(SchemaError::DaemonProtocolDescriptorDrift {
+                    version: version.to_owned(),
+                });
+            }
+            continue;
+        }
+        let historical = FileDescriptorSet::decode(historical_bytes.as_slice())
+            .map_err(SchemaError::CompatibilityDescriptorDecode)?;
+        crate::protobuf_compatibility::require_compatible(&historical, &current)
+            .map_err(SchemaError::CompatibilityDescriptor)?;
+    }
+    Ok(())
 }
 
 fn validate_wire_baseline(
@@ -732,6 +768,11 @@ fn generation_inputs(workspace_root: &Path) -> Result<Vec<ArtifactRecord>, Schem
             .iter()
             .map(|name| format!("{COMPATIBILITY_ROOT}/{name}")),
     );
+    paths.extend(
+        DAEMON_PROTOCOL_DESCRIPTOR_BASELINES
+            .iter()
+            .map(|(_, name)| format!("{COMPATIBILITY_ROOT}/{name}")),
+    );
     paths.sort();
     paths
         .into_iter()
@@ -1032,6 +1073,8 @@ pub(crate) enum SchemaError {
     CompatibilityDescriptorDecode(#[source] prost::DecodeError),
     #[error("COMPAT_PROTOBUF_DESCRIPTOR: frozen descriptor is incompatible: {0}")]
     CompatibilityDescriptor(#[source] crate::protobuf_compatibility::CompatibilityError),
+    #[error("COMPAT_DAEMON_DESCRIPTOR_DRIFT: frozen daemon protocol {version} descriptor changed")]
+    DaemonProtocolDescriptorDrift { version: String },
     #[error("COMPAT_PROTOBUF_FIXTURE: frozen wire fixture metadata or digest is invalid")]
     CompatibilityProtobufFixture,
     #[error("COMPAT_PROTOBUF_DECODE: protobuf wire fixture failed to decode")]
@@ -1118,6 +1161,11 @@ mod tests {
                 COMPATIBILITY_BASELINES
                     .iter()
                     .map(|name| format!("{COMPATIBILITY_ROOT}/{name}")),
+            )
+            .chain(
+                DAEMON_PROTOCOL_DESCRIPTOR_BASELINES
+                    .iter()
+                    .map(|(_, name)| format!("{COMPATIBILITY_ROOT}/{name}")),
             )
             .collect();
         expected.sort();
