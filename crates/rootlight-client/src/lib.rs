@@ -6,7 +6,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    io,
+    io::{self, Cursor, Read as _},
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -18,21 +18,33 @@ use rootlight_ipc::{
     Endpoint, FrameCodec, IpcError, connect, read_response, read_server_hello, write_client_hello,
     write_request,
 };
+use rootlight_observability::{
+    DiagnosticsQuickSnapshot as SupportDiagnosticsQuick, HealthSnapshot as SupportHealth,
+    OperationsSummary as SupportOperations, RedactionReport, SUPPORT_BUNDLE_SCHEMA_VERSION,
+    SUPPORT_ENTRY_NAMES, SupportBundleInput, SupportManifest, build_support_bundle,
+};
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR,
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
 use rootlight_runtime::RuntimePaths;
+use sha2::{Digest as _, Sha256};
+use zip::CompressionMethod;
 
 const CLIENT_CAPABILITIES: &[&str] = &[
+    "diagnostics.quick",
     "health",
     "operation.cancel",
     "operation.lease.renew",
     "operation.lifecycle.v1",
     "operation.status",
     "operation.submit",
+    "support.bundle.v1",
 ];
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_IO_TIMEOUT: Duration = Duration::from_secs(6);
+const MAX_SUPPORT_ARCHIVE_BYTES: usize = 768 * 1024;
+const MAX_SUPPORT_ENTRY_BYTES: usize = 128 * 1024;
 const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(10);
 const START_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
@@ -51,6 +63,38 @@ pub enum DaemonLifecycle {
     Faulted,
     /// The in-process host has stopped.
     Stopped,
+}
+
+/// Closed status for one daemon subsystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    /// The subsystem is operating normally.
+    Healthy,
+    /// The subsystem is available with a known limitation.
+    Degraded,
+    /// The subsystem is temporarily unavailable.
+    Unavailable,
+    /// The subsystem does not exist in the current product slice.
+    NotConfigured,
+    /// The subsystem failed validation and needs repair.
+    Failed,
+}
+
+/// Closed bounded host resource-pressure classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourcePressure {
+    /// Resource use is within configured bounds.
+    Normal,
+    /// One or more bounded resources approach policy limits.
+    Elevated,
+    /// Resource pressure is sustained near a configured limit.
+    High,
+    /// Admission must be rejected to preserve host stability.
+    Critical,
+    /// No bounded sampler exists for the current slice.
+    Unknown,
 }
 
 /// Health data returned by the local daemon.
@@ -80,6 +124,73 @@ pub struct Health {
     pub operation_queue_limit: u32,
     /// Whether the durable journal remains available.
     pub journal_healthy: bool,
+    /// Cached startup or explicit catalog validation status.
+    pub catalog_status: HealthStatus,
+    /// Current operation catalog schema version.
+    pub catalog_schema_version: u32,
+    /// Generation storage status.
+    pub generation_status: HealthStatus,
+    /// Adapter subsystem status.
+    pub adapter_status: HealthStatus,
+    /// Watcher subsystem status.
+    pub watcher_status: HealthStatus,
+    /// Latest bounded host-pressure classification.
+    pub resource_pressure: ResourcePressure,
+    /// Private local endpoint ownership and publication status.
+    pub endpoint_status: HealthStatus,
+    /// Current discovery-record schema version.
+    pub endpoint_schema_version: u32,
+}
+
+/// Closed outcome for one bounded diagnostic check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticOutcome {
+    /// The check passed.
+    Passed,
+    /// The check completed and proved a failure.
+    Failed,
+    /// The check exceeded its bounded request deadline.
+    TimedOut,
+    /// The check could not be admitted or executed.
+    Unavailable,
+}
+
+/// One source-free diagnostic result.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DiagnosticResult {
+    /// Closed check outcome.
+    pub outcome: DiagnosticOutcome,
+    /// Monotonic elapsed time rounded to milliseconds.
+    pub duration_ms: u32,
+    /// Stable source-redacted public failure, when applicable.
+    pub error: Option<PublicError>,
+}
+
+/// Bounded quick-diagnostics response.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DiagnosticsQuick {
+    /// Diagnostics schema version.
+    pub schema_version: u32,
+    /// Aggregate source-free status.
+    pub overall_status: HealthStatus,
+    /// Current catalog quick-check result.
+    pub catalog: DiagnosticResult,
+}
+
+/// Validated bounded source-free support archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupportBundle {
+    /// Support-bundle schema version.
+    pub schema_version: u32,
+    /// Deterministic stored ZIP bytes.
+    pub archive: Vec<u8>,
+    /// SHA-256 of the complete archive.
+    pub sha256: [u8; 32],
+    /// Encoded archive byte count.
+    pub archive_bytes: u64,
+    /// Always false for the default support contract.
+    pub contains_source: bool,
 }
 
 /// Client-facing operation kind.
@@ -245,7 +356,8 @@ impl Client {
             endpoint,
             instance_nonce,
             client_instance_id,
-            codec: FrameCodec::default(),
+            codec: FrameCodec::new(rootlight_ipc::MAX_FRAME_BYTES, REQUEST_IO_TIMEOUT)
+                .unwrap_or_else(|_| unreachable!("closed client frame limits are valid")),
             next_request_id: AtomicU64::new(1),
         }
     }
@@ -272,23 +384,46 @@ impl Client {
     ///
     /// Returns [`ClientError`] for negotiation, transport, pairing, or response errors.
     pub fn health(&self) -> Result<Health, ClientError> {
-        match self.request(daemon::request_envelope::Request::Health(
-            daemon::HealthRequest {},
+        let (response, selected_protocol_minor) = self.request_with_protocol(
+            daemon::request_envelope::Request::Health(daemon::HealthRequest {}),
+        )?;
+        match response {
+            daemon::response_envelope::Response::Health(health) => {
+                parse_health(health, selected_protocol_minor)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Runs bounded source-free quick diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for unavailable protocol support or malformed results.
+    pub fn diagnostics_quick(&self) -> Result<DiagnosticsQuick, ClientError> {
+        match self.request(daemon::request_envelope::Request::DiagnosticsQuick(
+            daemon::DiagnosticsQuickRequest {},
         ))? {
-            daemon::response_envelope::Response::Health(health) => Ok(Health {
-                ready: health.ready,
-                active_operations: health.active_operations,
-                admitted_operations: health.admitted_operations,
-                protocol_version: health.protocol_version,
-                lifecycle: parse_daemon_lifecycle(health.lifecycle)?,
-                accepting_operations: health.accepting_operations,
-                active_connections: health.active_connections,
-                connection_limit: health.connection_limit,
-                queued_operations: health.queued_operations,
-                running_operations: health.running_operations,
-                operation_queue_limit: health.operation_queue_limit,
-                journal_healthy: health.journal_healthy,
-            }),
+            daemon::response_envelope::Response::DiagnosticsQuick(response) => {
+                parse_diagnostics_quick(response)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Builds one bounded source-free support archive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for unavailable protocol support, malformed bounds,
+    /// a digest mismatch, or a response that claims to contain source.
+    pub fn support_bundle(&self) -> Result<SupportBundle, ClientError> {
+        match self.request(daemon::request_envelope::Request::SupportBundle(
+            daemon::SupportBundleRequest {},
+        ))? {
+            daemon::response_envelope::Response::SupportBundle(response) => {
+                parse_support_bundle(response)
+            }
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -435,6 +570,14 @@ impl Client {
         &self,
         request: daemon::request_envelope::Request,
     ) -> Result<daemon::response_envelope::Response, ClientError> {
+        self.request_with_protocol(request)
+            .map(|(response, _)| response)
+    }
+
+    fn request_with_protocol(
+        &self,
+        request: daemon::request_envelope::Request,
+    ) -> Result<(daemon::response_envelope::Response, u32), ClientError> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         if request_id == 0 {
             return Err(ClientError::RequestIdExhausted);
@@ -469,7 +612,7 @@ impl Client {
             daemon::response_envelope::Response::Error(error) => {
                 Err(ClientError::Public(Box::new(parse_public_error(error)?)))
             }
-            response => Ok(response),
+            response => Ok((response, selected_protocol_minor)),
         }
     }
 }
@@ -725,22 +868,307 @@ fn ensure_request_supported(
     request: &daemon::request_envelope::Request,
     selected_protocol_minor: u32,
 ) -> Result<(), ClientError> {
-    let needs_minor_two = match request {
-        daemon::request_envelope::Request::OperationLeaseRenew(_) => true,
-        daemon::request_envelope::Request::OperationSubmit(request) => {
-            request.deadline_unix_ms.is_some()
+    let required_minor = match request {
+        daemon::request_envelope::Request::DiagnosticsQuick(_)
+        | daemon::request_envelope::Request::SupportBundle(_) => 3,
+        daemon::request_envelope::Request::OperationLeaseRenew(_) => 2,
+        daemon::request_envelope::Request::OperationSubmit(request)
+            if request.deadline_unix_ms.is_some()
                 || request.lease_expires_unix_ms.is_some()
-                || !request.detached
+                || !request.detached =>
+        {
+            2
         }
         daemon::request_envelope::Request::Health(_)
         | daemon::request_envelope::Request::OperationStatus(_)
-        | daemon::request_envelope::Request::OperationCancel(_) => false,
+        | daemon::request_envelope::Request::OperationCancel(_)
+        | daemon::request_envelope::Request::OperationSubmit(_) => 1,
     };
-    if needs_minor_two && selected_protocol_minor < 2 {
+    if selected_protocol_minor < required_minor {
         Err(ClientError::ProtocolFeatureUnavailable)
     } else {
         Ok(())
     }
+}
+
+fn parse_health(
+    health: daemon::HealthResponse,
+    selected_protocol_minor: u32,
+) -> Result<Health, ClientError> {
+    let legacy = selected_protocol_minor < 3;
+    Ok(Health {
+        ready: health.ready,
+        active_operations: health.active_operations,
+        admitted_operations: health.admitted_operations,
+        protocol_version: health.protocol_version,
+        lifecycle: parse_daemon_lifecycle(health.lifecycle)?,
+        accepting_operations: health.accepting_operations,
+        active_connections: health.active_connections,
+        connection_limit: health.connection_limit,
+        queued_operations: health.queued_operations,
+        running_operations: health.running_operations,
+        operation_queue_limit: health.operation_queue_limit,
+        journal_healthy: health.journal_healthy,
+        catalog_status: parse_health_status(
+            health.catalog_status,
+            legacy.then_some(if health.journal_healthy {
+                HealthStatus::Healthy
+            } else {
+                HealthStatus::Failed
+            }),
+        )?,
+        catalog_schema_version: health.catalog_schema_version,
+        generation_status: parse_health_status(
+            health.generation_status,
+            legacy.then_some(HealthStatus::NotConfigured),
+        )?,
+        adapter_status: parse_health_status(
+            health.adapter_status,
+            legacy.then_some(HealthStatus::NotConfigured),
+        )?,
+        watcher_status: parse_health_status(
+            health.watcher_status,
+            legacy.then_some(HealthStatus::NotConfigured),
+        )?,
+        resource_pressure: parse_resource_pressure(
+            health.resource_pressure,
+            legacy.then_some(ResourcePressure::Unknown),
+        )?,
+        endpoint_status: parse_health_status(
+            health.endpoint_status,
+            legacy.then_some(HealthStatus::Unavailable),
+        )?,
+        endpoint_schema_version: health.endpoint_schema_version,
+    })
+}
+
+fn parse_health_status(
+    value: i32,
+    legacy_default: Option<HealthStatus>,
+) -> Result<HealthStatus, ClientError> {
+    match daemon::HealthStatus::try_from(value).map_err(|_| ClientError::InvalidHealthStatus)? {
+        daemon::HealthStatus::Healthy => Ok(HealthStatus::Healthy),
+        daemon::HealthStatus::Degraded => Ok(HealthStatus::Degraded),
+        daemon::HealthStatus::Unavailable => Ok(HealthStatus::Unavailable),
+        daemon::HealthStatus::NotConfigured => Ok(HealthStatus::NotConfigured),
+        daemon::HealthStatus::Failed => Ok(HealthStatus::Failed),
+        daemon::HealthStatus::Unspecified => legacy_default.ok_or(ClientError::InvalidHealthStatus),
+    }
+}
+
+fn parse_resource_pressure(
+    value: i32,
+    legacy_default: Option<ResourcePressure>,
+) -> Result<ResourcePressure, ClientError> {
+    match daemon::ResourcePressure::try_from(value)
+        .map_err(|_| ClientError::InvalidResourcePressure)?
+    {
+        daemon::ResourcePressure::Normal => Ok(ResourcePressure::Normal),
+        daemon::ResourcePressure::Elevated => Ok(ResourcePressure::Elevated),
+        daemon::ResourcePressure::High => Ok(ResourcePressure::High),
+        daemon::ResourcePressure::Critical => Ok(ResourcePressure::Critical),
+        daemon::ResourcePressure::Unknown => Ok(ResourcePressure::Unknown),
+        daemon::ResourcePressure::Unspecified => {
+            legacy_default.ok_or(ClientError::InvalidResourcePressure)
+        }
+    }
+}
+
+fn parse_diagnostics_quick(
+    response: daemon::DiagnosticsQuickResponse,
+) -> Result<DiagnosticsQuick, ClientError> {
+    if response.schema_version != 1 || response.results.len() != 1 {
+        return Err(ClientError::InvalidDiagnostics);
+    }
+    let result = response
+        .results
+        .into_iter()
+        .next()
+        .ok_or(ClientError::InvalidDiagnostics)?;
+    if daemon::DiagnosticCheck::try_from(result.check)
+        .map_err(|_| ClientError::InvalidDiagnostics)?
+        != daemon::DiagnosticCheck::CatalogQuickCheck
+    {
+        return Err(ClientError::InvalidDiagnostics);
+    }
+    let outcome = match daemon::DiagnosticOutcome::try_from(result.outcome)
+        .map_err(|_| ClientError::InvalidDiagnostics)?
+    {
+        daemon::DiagnosticOutcome::Passed => DiagnosticOutcome::Passed,
+        daemon::DiagnosticOutcome::Failed => DiagnosticOutcome::Failed,
+        daemon::DiagnosticOutcome::TimedOut => DiagnosticOutcome::TimedOut,
+        daemon::DiagnosticOutcome::Unavailable => DiagnosticOutcome::Unavailable,
+        daemon::DiagnosticOutcome::Unspecified => return Err(ClientError::InvalidDiagnostics),
+    };
+    Ok(DiagnosticsQuick {
+        schema_version: response.schema_version,
+        overall_status: parse_health_status(response.overall_status, None)?,
+        catalog: DiagnosticResult {
+            outcome,
+            duration_ms: result.duration_ms,
+            error: result.error.map(parse_public_error).transpose()?,
+        },
+    })
+}
+
+fn parse_support_bundle(
+    response: daemon::SupportBundleResponse,
+) -> Result<SupportBundle, ClientError> {
+    if response.schema_version != 1
+        || response.contains_source
+        || response.archive.len() > MAX_SUPPORT_ARCHIVE_BYTES
+        || response.archive_bytes
+            != u64::try_from(response.archive.len())
+                .map_err(|_| ClientError::InvalidSupportBundle)?
+    {
+        return Err(ClientError::InvalidSupportBundle);
+    }
+    let sha256: [u8; 32] = response
+        .sha256
+        .try_into()
+        .map_err(|_| ClientError::InvalidSupportBundle)?;
+    if <[u8; 32]>::from(Sha256::digest(&response.archive)) != sha256 {
+        return Err(ClientError::InvalidSupportBundle);
+    }
+    validate_support_archive(&response.archive)?;
+    Ok(SupportBundle {
+        schema_version: response.schema_version,
+        archive: response.archive,
+        sha256,
+        archive_bytes: response.archive_bytes,
+        contains_source: false,
+    })
+}
+
+fn validate_support_archive(archive: &[u8]) -> Result<(), ClientError> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(archive))
+        .map_err(|_| ClientError::InvalidSupportBundle)?;
+    if zip.len() != SUPPORT_ENTRY_NAMES.len() {
+        return Err(ClientError::InvalidSupportBundle);
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    for (index, expected_name) in SUPPORT_ENTRY_NAMES.into_iter().enumerate() {
+        let mut entry = zip
+            .by_index(index)
+            .map_err(|_| ClientError::InvalidSupportBundle)?;
+        if entry.name() != expected_name
+            || entry.is_dir()
+            || entry.compression() != CompressionMethod::Stored
+            || entry.size() > u64::try_from(MAX_SUPPORT_ENTRY_BYTES).unwrap_or(u64::MAX)
+        {
+            return Err(ClientError::InvalidSupportBundle);
+        }
+        let maximum = u64::try_from(MAX_SUPPORT_ENTRY_BYTES)
+            .map_err(|_| ClientError::InvalidSupportBundle)?;
+        let mut bounded = entry.by_ref().take(maximum.saturating_add(1));
+        let mut contents = Vec::new();
+        bounded
+            .read_to_end(&mut contents)
+            .map_err(|_| ClientError::InvalidSupportBundle)?;
+        if contents.len() > MAX_SUPPORT_ENTRY_BYTES {
+            return Err(ClientError::InvalidSupportBundle);
+        }
+        entries.insert(expected_name, contents);
+    }
+    let diagnostics: SupportDiagnosticsQuick =
+        decode_support_entry(&entries, "diagnostics/quick.json")?;
+    let health: SupportHealth = decode_support_entry(&entries, "health.json")?;
+    let operations: SupportOperations = decode_support_entry(&entries, "operations-summary.json")?;
+    let manifest: SupportManifest = decode_support_entry(&entries, "manifest.json")?;
+    let redaction: RedactionReport = decode_support_entry(&entries, "redaction-report.json")?;
+    validate_support_semantics(
+        &entries,
+        &diagnostics,
+        &health,
+        &operations,
+        &manifest,
+        &redaction,
+    )?;
+    let canonical = build_support_bundle(&SupportBundleInput {
+        protocol_version: manifest.protocol_version,
+        operating_system: manifest.operating_system,
+        architecture: manifest.architecture,
+        health,
+        diagnostics,
+        operations,
+    })
+    .map_err(|_| ClientError::InvalidSupportBundle)?;
+    if canonical.archive() != archive {
+        return Err(ClientError::InvalidSupportBundle);
+    }
+    Ok(())
+}
+
+fn decode_support_entry<T: serde::de::DeserializeOwned>(
+    entries: &std::collections::BTreeMap<&str, Vec<u8>>,
+    name: &str,
+) -> Result<T, ClientError> {
+    serde_json::from_slice(entries.get(name).ok_or(ClientError::InvalidSupportBundle)?)
+        .map_err(|_| ClientError::InvalidSupportBundle)
+}
+
+fn validate_support_semantics(
+    entries: &std::collections::BTreeMap<&str, Vec<u8>>,
+    diagnostics: &SupportDiagnosticsQuick,
+    health: &SupportHealth,
+    operations: &SupportOperations,
+    manifest: &SupportManifest,
+    redaction: &RedactionReport,
+) -> Result<(), ClientError> {
+    if diagnostics.schema_version != SUPPORT_BUNDLE_SCHEMA_VERSION
+        || health.catalog_schema_version == 0
+        || health.endpoint_schema_version == 0
+        || operations
+            .queued
+            .checked_add(operations.running)
+            .and_then(|count| count.checked_add(operations.cancelling))
+            .is_none()
+        || manifest.schema_version != SUPPORT_BUNDLE_SCHEMA_VERSION
+        || manifest.contains_source
+        || redaction.schema_version != SUPPORT_BUNDLE_SCHEMA_VERSION
+        || redaction.contains_source
+        || redaction.omitted_data_classes
+            != rootlight_observability::OMITTED_DATA_CLASSES
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+    {
+        return Err(ClientError::InvalidSupportBundle);
+    }
+    let expected_manifest_names = [
+        "diagnostics/quick.json",
+        "health.json",
+        "operations-summary.json",
+        "redaction-report.json",
+    ];
+    if manifest.entries.len() != expected_manifest_names.len() {
+        return Err(ClientError::InvalidSupportBundle);
+    }
+    for (record, expected_name) in manifest.entries.iter().zip(expected_manifest_names) {
+        let bytes = entries
+            .get(expected_name)
+            .ok_or(ClientError::InvalidSupportBundle)?;
+        if record.name != expected_name
+            || record.bytes
+                != u64::try_from(bytes.len()).map_err(|_| ClientError::InvalidSupportBundle)?
+            || record.sha256 != hex_sha256(bytes)
+        {
+            return Err(ClientError::InvalidSupportBundle);
+        }
+    }
+    Ok(())
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}")
+            .unwrap_or_else(|_| unreachable!("formatting into String cannot fail"));
+    }
+    encoded
 }
 
 fn parse_daemon_lifecycle(value: i32) -> Result<DaemonLifecycle, ClientError> {
@@ -1035,6 +1463,18 @@ pub enum ClientError {
     /// Daemon lifecycle was unspecified or unknown.
     #[error("daemon lifecycle is invalid")]
     InvalidDaemonLifecycle,
+    /// A subsystem health status was unknown.
+    #[error("daemon health status is invalid")]
+    InvalidHealthStatus,
+    /// A resource-pressure value was unknown.
+    #[error("daemon resource pressure is invalid")]
+    InvalidResourcePressure,
+    /// Quick-diagnostics wire content violated its closed schema.
+    #[error("daemon diagnostics response is invalid")]
+    InvalidDiagnostics,
+    /// Support-bundle bounds, digest, or privacy declaration was invalid.
+    #[error("daemon support bundle is invalid")]
+    InvalidSupportBundle,
     /// Operation state was unspecified or unknown.
     #[error("daemon operation state is invalid")]
     InvalidOperationState,
@@ -1189,6 +1629,335 @@ mod tests {
                 operation: Some(operation_to_wire(OperationId::from_bytes([6; 16]))),
             });
         assert!(ensure_request_supported(&status, 1).is_ok());
+
+        let diagnostics =
+            daemon::request_envelope::Request::DiagnosticsQuick(daemon::DiagnosticsQuickRequest {});
+        let support =
+            daemon::request_envelope::Request::SupportBundle(daemon::SupportBundleRequest {});
+        assert!(matches!(
+            ensure_request_supported(&diagnostics, 2),
+            Err(ClientError::ProtocolFeatureUnavailable)
+        ));
+        assert!(matches!(
+            ensure_request_supported(&support, 2),
+            Err(ClientError::ProtocolFeatureUnavailable)
+        ));
+        assert!(ensure_request_supported(&diagnostics, 3).is_ok());
+        assert!(ensure_request_supported(&support, 3).is_ok());
+    }
+
+    #[test]
+    fn health_decoder_requires_minor_three_additive_fields() {
+        let response = daemon::HealthResponse {
+            ready: true,
+            active_operations: 0,
+            admitted_operations: 0,
+            protocol_version: "1.3".to_owned(),
+            lifecycle: daemon::DaemonLifecycle::Ready as i32,
+            accepting_operations: true,
+            active_connections: 0,
+            connection_limit: 128,
+            queued_operations: 0,
+            running_operations: 0,
+            operation_queue_limit: 256,
+            journal_healthy: true,
+            catalog_status: daemon::HealthStatus::Unspecified as i32,
+            catalog_schema_version: 0,
+            generation_status: daemon::HealthStatus::Unspecified as i32,
+            adapter_status: daemon::HealthStatus::Unspecified as i32,
+            watcher_status: daemon::HealthStatus::Unspecified as i32,
+            resource_pressure: daemon::ResourcePressure::Unspecified as i32,
+            endpoint_status: daemon::HealthStatus::Unspecified as i32,
+            endpoint_schema_version: 0,
+        };
+
+        let legacy = parse_health(response.clone(), 2).expect("minor two uses legacy defaults");
+        assert_eq!(legacy.catalog_status, HealthStatus::Healthy);
+        assert_eq!(legacy.generation_status, HealthStatus::NotConfigured);
+        assert_eq!(legacy.resource_pressure, ResourcePressure::Unknown);
+        assert!(matches!(
+            parse_health(response, 3),
+            Err(ClientError::InvalidHealthStatus)
+        ));
+    }
+
+    fn support_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let output = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(output);
+        let options =
+            zip::write::SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        for (name, contents) in entries {
+            writer
+                .start_file(*name, options)
+                .expect("test ZIP entry starts");
+            std::io::Write::write_all(&mut writer, contents).expect("test ZIP entry writes");
+        }
+        writer.finish().expect("test ZIP finishes").into_inner()
+    }
+
+    fn valid_support_archive() -> Vec<u8> {
+        let input = rootlight_observability::SupportBundleInput {
+            protocol_version: rootlight_observability::ProtocolVersion::V1_3,
+            operating_system: rootlight_observability::OperatingSystem::Windows,
+            architecture: rootlight_observability::Architecture::X86_64,
+            health: SupportHealth {
+                ready: true,
+                lifecycle: rootlight_observability::DaemonLifecycle::Ready,
+                accepting_operations: true,
+                active_connections: 1,
+                connection_limit: 8,
+                admitted_operations: 0,
+                queued_operations: 0,
+                running_operations: 0,
+                operation_queue_limit: 8,
+                catalog_status: rootlight_observability::HealthStatus::Healthy,
+                catalog_schema_version: 2,
+                generation_status: rootlight_observability::HealthStatus::NotConfigured,
+                adapter_status: rootlight_observability::HealthStatus::NotConfigured,
+                watcher_status: rootlight_observability::HealthStatus::NotConfigured,
+                endpoint_status: rootlight_observability::HealthStatus::Healthy,
+                endpoint_schema_version: 2,
+                resource_pressure: rootlight_observability::ResourcePressure::Unknown,
+            },
+            diagnostics: SupportDiagnosticsQuick {
+                schema_version: 1,
+                overall_status: rootlight_observability::HealthStatus::Healthy,
+                catalog_quick_check: rootlight_observability::DiagnosticOutcome::Passed,
+                duration_ms: 1,
+                error_code: None,
+            },
+            operations: SupportOperations {
+                queued: 0,
+                running: 0,
+                cancelling: 0,
+            },
+        };
+        rootlight_observability::build_support_bundle(&input)
+            .expect("test support bundle builds")
+            .archive()
+            .to_vec()
+    }
+
+    fn support_response(archive: Vec<u8>) -> daemon::SupportBundleResponse {
+        let digest: [u8; 32] = Sha256::digest(&archive).into();
+        daemon::SupportBundleResponse {
+            schema_version: 1,
+            archive_bytes: u64::try_from(archive.len()).expect("test archive fits u64"),
+            archive,
+            sha256: digest.to_vec(),
+            contains_source: false,
+        }
+    }
+
+    fn support_entries(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let mut archive = zip::ZipArchive::new(Cursor::new(archive)).expect("test ZIP opens");
+        (0..archive.len())
+            .map(|index| {
+                let mut entry = archive.by_index(index).expect("test ZIP entry opens");
+                let name = entry.name().to_owned();
+                let mut contents = Vec::new();
+                entry
+                    .read_to_end(&mut contents)
+                    .expect("test ZIP entry reads");
+                (name, contents)
+            })
+            .collect()
+    }
+
+    const END_OF_CENTRAL_DIRECTORY_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
+
+    fn end_of_central_directory_offset(archive: &[u8]) -> usize {
+        archive
+            .windows(END_OF_CENTRAL_DIRECTORY_SIGNATURE.len())
+            .rposition(|window| window == END_OF_CENTRAL_DIRECTORY_SIGNATURE)
+            .expect("test support ZIP has an end-of-central-directory record")
+    }
+
+    fn read_u16_le(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes(
+            bytes[offset..offset + 2]
+                .try_into()
+                .expect("test ZIP field has two bytes"),
+        )
+    }
+
+    fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .expect("test ZIP field has four bytes"),
+        )
+    }
+
+    fn write_u16_le(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u32_le(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn central_directory_offset(archive: &[u8]) -> usize {
+        let end = end_of_central_directory_offset(archive);
+        usize::try_from(read_u32_le(archive, end + 16))
+            .expect("test ZIP central-directory offset fits usize")
+    }
+
+    fn increase_central_directory_size(archive: &mut [u8], increase: u32) {
+        let end = end_of_central_directory_offset(archive);
+        let size = read_u32_le(archive, end + 12);
+        write_u32_le(
+            archive,
+            end + 12,
+            size.checked_add(increase)
+                .expect("test ZIP central-directory size remains bounded"),
+        );
+    }
+
+    fn with_archive_comment(mut archive: Vec<u8>) -> Vec<u8> {
+        let end = end_of_central_directory_offset(&archive);
+        assert_eq!(read_u16_le(&archive, end + 20), 0);
+        write_u16_le(&mut archive, end + 20, 1);
+        archive.push(b'x');
+        archive
+    }
+
+    fn with_first_entry_comment(mut archive: Vec<u8>) -> Vec<u8> {
+        let central_directory = central_directory_offset(&archive);
+        assert_eq!(
+            &archive[central_directory..central_directory + 4],
+            b"PK\x01\x02"
+        );
+        let name_length = usize::from(read_u16_le(&archive, central_directory + 28));
+        let extra_length = usize::from(read_u16_le(&archive, central_directory + 30));
+        assert_eq!(read_u16_le(&archive, central_directory + 32), 0);
+        let comment_offset = central_directory + 46 + name_length + extra_length;
+        write_u16_le(&mut archive, central_directory + 32, 1);
+        archive.insert(comment_offset, b'x');
+        increase_central_directory_size(&mut archive, 1);
+        archive
+    }
+
+    fn with_first_entry_extra_field(mut archive: Vec<u8>) -> Vec<u8> {
+        let central_directory = central_directory_offset(&archive);
+        assert_eq!(
+            &archive[central_directory..central_directory + 4],
+            b"PK\x01\x02"
+        );
+        let name_length = usize::from(read_u16_le(&archive, central_directory + 28));
+        let extra_length = read_u16_le(&archive, central_directory + 30);
+        let extra_offset = central_directory + 46 + name_length;
+        write_u16_le(
+            &mut archive,
+            central_directory + 30,
+            extra_length
+                .checked_add(4)
+                .expect("test ZIP extra-field length remains bounded"),
+        );
+        archive.splice(extra_offset..extra_offset, [0xfe, 0xca, 0, 0]);
+        increase_central_directory_size(&mut archive, 4);
+        archive
+    }
+
+    #[test]
+    fn support_bundle_decoder_enforces_privacy_size_digest_and_shape() {
+        let valid = support_response(valid_support_archive());
+        assert!(parse_support_bundle(valid.clone()).is_ok());
+
+        let mut contains_source = valid.clone();
+        contains_source.contains_source = true;
+        assert!(matches!(
+            parse_support_bundle(contains_source),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+
+        let mut wrong_digest = valid.clone();
+        wrong_digest.sha256 = vec![0; 32];
+        assert!(matches!(
+            parse_support_bundle(wrong_digest),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+
+        let mut wrong_length = valid;
+        wrong_length.archive_bytes = 1;
+        assert!(matches!(
+            parse_support_bundle(wrong_length),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+
+        let wrong_shape = support_response(support_archive(&[("source.rs", b"{}\n")]));
+        assert!(matches!(
+            parse_support_bundle(wrong_shape),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+
+        let poisoned_json =
+            serde_json::to_vec("PRIVATE_SOURCE_BODY").expect("poisoned JSON serializes");
+        let poisoned = support_response(support_archive(&[
+            ("diagnostics/quick.json", &poisoned_json),
+            ("health.json", &poisoned_json),
+            ("manifest.json", &poisoned_json),
+            ("operations-summary.json", &poisoned_json),
+            ("redaction-report.json", &poisoned_json),
+        ]));
+        assert!(matches!(
+            parse_support_bundle(poisoned),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+
+        let archive = valid_support_archive();
+        let mut entries = support_entries(&archive);
+        let health_index = entries
+            .iter()
+            .position(|(name, _)| name == "health.json")
+            .expect("health entry exists");
+        let mut health: serde_json::Value =
+            serde_json::from_slice(&entries[health_index].1).expect("health JSON parses");
+        health["source"] = serde_json::Value::String("PRIVATE_SOURCE_BODY".to_owned());
+        entries[health_index].1 = serde_json::to_vec_pretty(&health).expect("health JSON writes");
+        let manifest_index = entries
+            .iter()
+            .position(|(name, _)| name == "manifest.json")
+            .expect("manifest entry exists");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&entries[manifest_index].1).expect("manifest JSON parses");
+        let health_record = manifest["entries"]
+            .as_array_mut()
+            .expect("manifest records exist")
+            .iter_mut()
+            .find(|entry| entry["name"] == "health.json")
+            .expect("health manifest record exists");
+        health_record["bytes"] = serde_json::Value::from(entries[health_index].1.len());
+        health_record["sha256"] = serde_json::Value::String(hex_sha256(&entries[health_index].1));
+        entries[manifest_index].1 =
+            serde_json::to_vec_pretty(&manifest).expect("manifest JSON writes");
+        let entry_refs = entries
+            .iter()
+            .map(|(name, contents)| (name.as_str(), contents.as_slice()))
+            .collect::<Vec<_>>();
+        let unknown_source = support_response(support_archive(&entry_refs));
+        assert!(matches!(
+            parse_support_bundle(unknown_source),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+    }
+
+    #[test]
+    fn support_bundle_decoder_requires_canonical_zip_bytes() {
+        let canonical = valid_support_archive();
+        let mut trailing = canonical.clone();
+        trailing.extend_from_slice(b"source-bearing trailing bytes");
+        for archive in [
+            trailing,
+            with_archive_comment(canonical.clone()),
+            with_first_entry_comment(canonical.clone()),
+            with_first_entry_extra_field(canonical),
+        ] {
+            assert!(matches!(
+                parse_support_bundle(support_response(archive)),
+                Err(ClientError::InvalidSupportBundle)
+            ));
+        }
     }
 
     #[test]

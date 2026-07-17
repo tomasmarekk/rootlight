@@ -9,7 +9,7 @@ use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
 
 use rootlight_daemon_core::{
     ClientConnectionAdmissions, ControlService, DaemonLifecycle, DaemonLimits, DaemonOrchestrator,
-    DaemonState, JournalActor, handle_connection_async,
+    DaemonState, DiagnosticActor, HealthStatus, JournalActor, handle_connection_async,
 };
 use rootlight_ipc::{AsyncLocalListener, FrameCodec};
 use rootlight_operations::{CatalogWriterLock, OperationJournal};
@@ -67,9 +67,11 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let _writer = CatalogWriterLock::acquire(&paths.writer_lock_path(), nonce)?;
     cleanup_prior_instance(&paths)?;
     let endpoint = paths.endpoint(nonce)?;
-    let journal = Arc::new(OperationJournal::open(&paths.operation_journal_path())?);
+    let catalog_path = paths.operation_journal_path();
+    let journal = Arc::new(OperationJournal::open(&catalog_path)?);
     let limits = DaemonLimits::default();
     let state = Arc::new(DaemonState::starting());
+    state.set_catalog_status(HealthStatus::Healthy);
     let actor = JournalActor::start(
         Arc::clone(&journal),
         limits.control_queue_limit,
@@ -78,16 +80,16 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let actor_handle = actor.handle();
     let mut orchestrator =
         DaemonOrchestrator::new(actor_handle.clone(), Arc::clone(&state), limits)?;
-    let service = Arc::new(ControlService::with_state(
-        journal,
-        nonce,
-        Arc::clone(&state),
-        limits,
-    ));
+    let service = ControlService::with_state(journal, nonce, Arc::clone(&state), limits)
+        .with_catalog_path(catalog_path);
+    let (service, diagnostic_actor): (ControlService, DiagnosticActor) =
+        service.with_diagnostic_actor()?;
+    let service = Arc::new(service);
     let listener = Arc::new(AsyncLocalListener::bind(endpoint.clone())?);
     let discovery = DiscoveryRecord::new(&paths, std::process::id(), &endpoint, nonce)?;
     paths.publish(&discovery)?;
     let discovery = DiscoveryGuard::new(paths, nonce);
+    state.set_endpoint_status(HealthStatus::Healthy);
     state.set_lifecycle(DaemonLifecycle::Ready);
 
     let connection_slots = Arc::new(tokio::sync::Semaphore::new(
@@ -172,6 +174,7 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     }
 
     state.set_lifecycle(DaemonLifecycle::Draining);
+    diagnostic_actor.stop();
     drop(discovery);
     drop(listener);
     drop(submission_tx);

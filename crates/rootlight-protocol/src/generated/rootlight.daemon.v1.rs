@@ -47,7 +47,7 @@ pub struct RequestEnvelope {
     #[prost(uint32, optional, tag = "3")]
     #[allow(missing_docs)]
     pub timeout_ms: ::core::option::Option<u32>,
-    #[prost(oneof = "request_envelope::Request", tags = "10, 11, 12, 13, 14")]
+    #[prost(oneof = "request_envelope::Request", tags = "10, 11, 12, 13, 14, 15, 16")]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
 }
@@ -71,6 +71,12 @@ pub mod request_envelope {
         #[prost(message, tag = "14")]
         #[allow(missing_docs)]
         OperationLeaseRenew(super::OperationLeaseRenewRequest),
+        #[prost(message, tag = "15")]
+        #[allow(missing_docs)]
+        DiagnosticsQuick(super::DiagnosticsQuickRequest),
+        #[prost(message, tag = "16")]
+        #[allow(missing_docs)]
+        SupportBundle(super::SupportBundleRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -79,7 +85,10 @@ pub struct ResponseEnvelope {
     #[prost(uint64, tag = "1")]
     #[allow(missing_docs)]
     pub request_id: u64,
-    #[prost(oneof = "response_envelope::Response", tags = "10, 11, 12, 13, 14, 20")]
+    #[prost(
+        oneof = "response_envelope::Response",
+        tags = "10, 11, 12, 13, 14, 15, 16, 20"
+    )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
 }
@@ -103,6 +112,12 @@ pub mod response_envelope {
         #[prost(message, tag = "14")]
         #[allow(missing_docs)]
         OperationLeaseRenew(super::OperationLeaseRenewResponse),
+        #[prost(message, tag = "15")]
+        #[allow(missing_docs)]
+        DiagnosticsQuick(super::DiagnosticsQuickResponse),
+        #[prost(message, tag = "16")]
+        #[allow(missing_docs)]
+        SupportBundle(super::SupportBundleResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -150,6 +165,84 @@ pub struct HealthResponse {
     #[prost(bool, tag = "12")]
     #[allow(missing_docs)]
     pub journal_healthy: bool,
+    #[prost(enumeration = "HealthStatus", tag = "13")]
+    #[allow(missing_docs)]
+    pub catalog_status: i32,
+    #[prost(uint32, tag = "14")]
+    #[allow(missing_docs)]
+    pub catalog_schema_version: u32,
+    #[prost(enumeration = "HealthStatus", tag = "15")]
+    #[allow(missing_docs)]
+    pub generation_status: i32,
+    #[prost(enumeration = "HealthStatus", tag = "16")]
+    #[allow(missing_docs)]
+    pub adapter_status: i32,
+    #[prost(enumeration = "HealthStatus", tag = "17")]
+    #[allow(missing_docs)]
+    pub watcher_status: i32,
+    #[prost(enumeration = "ResourcePressure", tag = "18")]
+    #[allow(missing_docs)]
+    pub resource_pressure: i32,
+    #[prost(enumeration = "HealthStatus", tag = "19")]
+    #[allow(missing_docs)]
+    pub endpoint_status: i32,
+    #[prost(uint32, tag = "20")]
+    #[allow(missing_docs)]
+    pub endpoint_schema_version: u32,
+}
+/// Requests bounded source-free catalog diagnostics.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DiagnosticsQuickRequest {}
+/// One source-free bounded diagnostic result.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DiagnosticResult {
+    #[prost(enumeration = "DiagnosticCheck", tag = "1")]
+    #[allow(missing_docs)]
+    pub check: i32,
+    #[prost(enumeration = "DiagnosticOutcome", tag = "2")]
+    #[allow(missing_docs)]
+    pub outcome: i32,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub duration_ms: u32,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub error: ::core::option::Option<super::super::common::v1::PublicError>,
+}
+/// Bounded quick-diagnostics response.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DiagnosticsQuickResponse {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: u32,
+    #[prost(enumeration = "HealthStatus", tag = "2")]
+    #[allow(missing_docs)]
+    pub overall_status: i32,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub results: ::prost::alloc::vec::Vec<DiagnosticResult>,
+}
+/// Requests a bounded source-free support bundle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SupportBundleRequest {}
+/// Returns one validated in-memory support archive.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SupportBundleResponse {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub archive: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    #[allow(missing_docs)]
+    pub sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub archive_bytes: u64,
+    #[prost(bool, tag = "5")]
+    #[allow(missing_docs)]
+    pub contains_source: bool,
 }
 /// Durable operation status safe for local clients.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -319,6 +412,170 @@ impl DaemonLifecycle {
             "DRAINING" => Some(Self::Draining),
             "FAULTED" => Some(Self::Faulted),
             "STOPPED" => Some(Self::Stopped),
+            _ => None,
+        }
+    }
+}
+/// Closed status for one daemon subsystem.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum HealthStatus {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    Healthy = 1,
+    #[allow(missing_docs)]
+    Degraded = 2,
+    #[allow(missing_docs)]
+    Unavailable = 3,
+    #[allow(missing_docs)]
+    NotConfigured = 4,
+    #[allow(missing_docs)]
+    Failed = 5,
+}
+impl HealthStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "HEALTH_STATUS_UNSPECIFIED",
+            Self::Healthy => "HEALTH_STATUS_HEALTHY",
+            Self::Degraded => "HEALTH_STATUS_DEGRADED",
+            Self::Unavailable => "HEALTH_STATUS_UNAVAILABLE",
+            Self::NotConfigured => "HEALTH_STATUS_NOT_CONFIGURED",
+            Self::Failed => "HEALTH_STATUS_FAILED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "HEALTH_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "HEALTH_STATUS_HEALTHY" => Some(Self::Healthy),
+            "HEALTH_STATUS_DEGRADED" => Some(Self::Degraded),
+            "HEALTH_STATUS_UNAVAILABLE" => Some(Self::Unavailable),
+            "HEALTH_STATUS_NOT_CONFIGURED" => Some(Self::NotConfigured),
+            "HEALTH_STATUS_FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+/// Closed classification for bounded host resource pressure.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ResourcePressure {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    Normal = 1,
+    #[allow(missing_docs)]
+    Elevated = 2,
+    #[allow(missing_docs)]
+    High = 3,
+    #[allow(missing_docs)]
+    Critical = 4,
+    #[allow(missing_docs)]
+    Unknown = 5,
+}
+impl ResourcePressure {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "RESOURCE_PRESSURE_UNSPECIFIED",
+            Self::Normal => "RESOURCE_PRESSURE_NORMAL",
+            Self::Elevated => "RESOURCE_PRESSURE_ELEVATED",
+            Self::High => "RESOURCE_PRESSURE_HIGH",
+            Self::Critical => "RESOURCE_PRESSURE_CRITICAL",
+            Self::Unknown => "RESOURCE_PRESSURE_UNKNOWN",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RESOURCE_PRESSURE_UNSPECIFIED" => Some(Self::Unspecified),
+            "RESOURCE_PRESSURE_NORMAL" => Some(Self::Normal),
+            "RESOURCE_PRESSURE_ELEVATED" => Some(Self::Elevated),
+            "RESOURCE_PRESSURE_HIGH" => Some(Self::High),
+            "RESOURCE_PRESSURE_CRITICAL" => Some(Self::Critical),
+            "RESOURCE_PRESSURE_UNKNOWN" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+/// Closed diagnostic checks supported by the current control plane.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum DiagnosticCheck {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    CatalogQuickCheck = 1,
+}
+impl DiagnosticCheck {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "DIAGNOSTIC_CHECK_UNSPECIFIED",
+            Self::CatalogQuickCheck => "DIAGNOSTIC_CHECK_CATALOG_QUICK_CHECK",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "DIAGNOSTIC_CHECK_UNSPECIFIED" => Some(Self::Unspecified),
+            "DIAGNOSTIC_CHECK_CATALOG_QUICK_CHECK" => Some(Self::CatalogQuickCheck),
+            _ => None,
+        }
+    }
+}
+/// Closed outcome for one diagnostic check.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum DiagnosticOutcome {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    Passed = 1,
+    #[allow(missing_docs)]
+    Failed = 2,
+    #[allow(missing_docs)]
+    TimedOut = 3,
+    #[allow(missing_docs)]
+    Unavailable = 4,
+}
+impl DiagnosticOutcome {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "DIAGNOSTIC_OUTCOME_UNSPECIFIED",
+            Self::Passed => "DIAGNOSTIC_OUTCOME_PASSED",
+            Self::Failed => "DIAGNOSTIC_OUTCOME_FAILED",
+            Self::TimedOut => "DIAGNOSTIC_OUTCOME_TIMED_OUT",
+            Self::Unavailable => "DIAGNOSTIC_OUTCOME_UNAVAILABLE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "DIAGNOSTIC_OUTCOME_UNSPECIFIED" => Some(Self::Unspecified),
+            "DIAGNOSTIC_OUTCOME_PASSED" => Some(Self::Passed),
+            "DIAGNOSTIC_OUTCOME_FAILED" => Some(Self::Failed),
+            "DIAGNOSTIC_OUTCOME_TIMED_OUT" => Some(Self::TimedOut),
+            "DIAGNOSTIC_OUTCOME_UNAVAILABLE" => Some(Self::Unavailable),
             _ => None,
         }
     }

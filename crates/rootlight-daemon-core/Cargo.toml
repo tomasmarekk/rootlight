@@ -10,6 +10,7 @@ publish = false
 rootlight-error = { path = "../rootlight-error" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ipc = { path = "../rootlight-ipc" }
+rootlight-observability = { path = "../rootlight-observability" }
 rootlight-operations = { path = "../rootlight-operations" }
 rootlight-protocol = { path = "../rootlight-protocol" }
 thiserror.workspace = true

@@ -1261,6 +1261,17 @@ impl OperationJournal {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or(OperationError::DiagnosticTimedOut)?;
+        Self::quick_check_path_until(path, deadline)
+    }
+
+    /// Revalidates a persistent catalog against an existing monotonic deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError`] for an expired deadline, open, policy, identity,
+    /// schema, or integrity failure.
+    pub fn quick_check_path_until(path: &Path, deadline: Instant) -> Result<(), OperationError> {
+        check_diagnostic_deadline(deadline)?;
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_URI;
@@ -3632,6 +3643,23 @@ mod tests {
 
         assert!(matches!(
             OperationJournal::quick_check_path_with_timeout(&path, Duration::ZERO),
+            Err(OperationError::DiagnosticTimedOut)
+        ));
+    }
+
+    #[test]
+    fn read_only_quick_check_rejects_an_expired_absolute_deadline() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        OperationJournal::open(&path).expect("catalog opens");
+
+        assert!(matches!(
+            OperationJournal::quick_check_path_until(
+                &path,
+                Instant::now()
+                    .checked_sub(Duration::from_millis(1))
+                    .expect("test instant subtracts"),
+            ),
             Err(OperationError::DiagnosticTimedOut)
         ));
     }

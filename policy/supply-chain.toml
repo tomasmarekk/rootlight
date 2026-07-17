@@ -16,6 +16,7 @@ allowed_build_scripts = [
   "crossbeam-deque@0.8.7",
   "crossbeam-epoch@0.9.20",
   "crossbeam-utils@0.8.22",
+  "crc32fast@1.5.0",
   "getrandom@0.3.4",
   "icu_normalizer_data@2.2.0",
   "icu_properties_data@2.2.0",
@@ -54,10 +55,12 @@ allowed_build_scripts = [
   "winapi@0.3.9",
   "wit-bindgen@0.57.1",
   "zerocopy@0.8.54",
+  "zip@2.4.2",
   "zmij@1.0.23",
 ]
 
 allowed_proc_macros = [
+  "derive_arbitrary@1.4.2",
   "doctest-file@1.1.1",
   "displaydoc@0.2.6",
   "prost-derive@0.14.4",

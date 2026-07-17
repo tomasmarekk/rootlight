@@ -14,7 +14,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rootlight_error::{ErrorCode, NextAction, PublicError, PublicValue};
@@ -23,6 +23,12 @@ use rootlight_ipc::{
     AsyncLocalStream, FrameCodec, IpcError, LocalStream, read_client_hello,
     read_client_hello_async, read_request, read_request_async, verify_peer, write_response,
     write_response_async, write_server_hello, write_server_hello_async,
+};
+use rootlight_observability::{
+    Architecture as ObservabilityArchitecture, DaemonLifecycle as ObservabilityDaemonLifecycle,
+    DiagnosticsQuickSnapshot, ErrorCode as ObservabilityErrorCode, HealthSnapshot, OperatingSystem,
+    OperationsSummary, ProtocolVersion as ObservabilityProtocolVersion, SupportBundleInput,
+    build_support_bundle,
 };
 use rootlight_operations::{
     ClientInstanceId, OperationError, OperationJournal, OperationKind, OperationRecord,
@@ -44,12 +50,14 @@ pub const MAX_CAPABILITIES: usize = 32;
 pub const MAX_CAPABILITY_BYTES: usize = 64;
 
 const CAPABILITIES: &[&str] = &[
+    "diagnostics.quick",
     "health",
     "operation.cancel",
     "operation.lease.renew",
     "operation.lifecycle.v1",
     "operation.status",
     "operation.submit",
+    "support.bundle.v1",
 ];
 /// Default simultaneous negotiated connection limit.
 pub const DEFAULT_CONNECTION_LIMIT: u32 = 128;
@@ -78,6 +86,16 @@ const LIFECYCLE_READY: u8 = 2;
 const LIFECYCLE_DRAINING: u8 = 3;
 const LIFECYCLE_FAULTED: u8 = 4;
 const LIFECYCLE_STOPPED: u8 = 5;
+const HEALTH_HEALTHY: u8 = 1;
+const HEALTH_DEGRADED: u8 = 2;
+const HEALTH_UNAVAILABLE: u8 = 3;
+const HEALTH_NOT_CONFIGURED: u8 = 4;
+const HEALTH_FAILED: u8 = 5;
+const RESOURCE_NORMAL: u8 = 1;
+const RESOURCE_ELEVATED: u8 = 2;
+const RESOURCE_HIGH: u8 = 3;
+const RESOURCE_CRITICAL: u8 = 4;
+const RESOURCE_UNKNOWN: u8 = 5;
 
 /// Source-free daemon lifecycle phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +130,80 @@ impl DaemonLifecycle {
             LIFECYCLE_FAULTED => Self::Faulted,
             LIFECYCLE_STOPPED => Self::Stopped,
             _ => Self::Starting,
+        }
+    }
+}
+
+/// Closed status for one daemon subsystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthStatus {
+    /// The subsystem is operating normally.
+    Healthy,
+    /// The subsystem is available with a known limitation.
+    Degraded,
+    /// The subsystem is temporarily unavailable.
+    Unavailable,
+    /// The subsystem does not exist in the current product slice.
+    NotConfigured,
+    /// The subsystem failed validation and needs repair.
+    Failed,
+}
+
+impl HealthStatus {
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::Healthy => HEALTH_HEALTHY,
+            Self::Degraded => HEALTH_DEGRADED,
+            Self::Unavailable => HEALTH_UNAVAILABLE,
+            Self::NotConfigured => HEALTH_NOT_CONFIGURED,
+            Self::Failed => HEALTH_FAILED,
+        }
+    }
+
+    const fn from_u8(value: u8) -> Self {
+        match value {
+            HEALTH_HEALTHY => Self::Healthy,
+            HEALTH_DEGRADED => Self::Degraded,
+            HEALTH_NOT_CONFIGURED => Self::NotConfigured,
+            HEALTH_FAILED => Self::Failed,
+            _ => Self::Unavailable,
+        }
+    }
+}
+
+/// Closed bounded host resource-pressure classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourcePressure {
+    /// Resource use is within configured bounds.
+    Normal,
+    /// One or more bounded resources approach policy limits.
+    Elevated,
+    /// Resource pressure is sustained near a configured limit.
+    High,
+    /// Admission must be rejected to preserve host stability.
+    Critical,
+    /// No bounded sampler exists for the current slice.
+    Unknown,
+}
+
+impl ResourcePressure {
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::Normal => RESOURCE_NORMAL,
+            Self::Elevated => RESOURCE_ELEVATED,
+            Self::High => RESOURCE_HIGH,
+            Self::Critical => RESOURCE_CRITICAL,
+            Self::Unknown => RESOURCE_UNKNOWN,
+        }
+    }
+
+    const fn from_u8(value: u8) -> Self {
+        match value {
+            RESOURCE_NORMAL => Self::Normal,
+            RESOURCE_ELEVATED => Self::Elevated,
+            RESOURCE_HIGH => Self::High,
+            RESOURCE_CRITICAL => Self::Critical,
+            _ => Self::Unknown,
         }
     }
 }
@@ -277,7 +369,12 @@ pub struct DaemonState {
     admitted_operations: AtomicU32,
     queued_operations: AtomicU32,
     running_operations: AtomicU32,
+    cancelling_operations: AtomicU32,
+    persisting_operations: AtomicU32,
     journal_healthy: AtomicBool,
+    catalog_status: AtomicU8,
+    endpoint_status: AtomicU8,
+    resource_pressure: AtomicU8,
 }
 
 impl DaemonState {
@@ -291,7 +388,12 @@ impl DaemonState {
             admitted_operations: AtomicU32::new(0),
             queued_operations: AtomicU32::new(0),
             running_operations: AtomicU32::new(0),
+            cancelling_operations: AtomicU32::new(0),
+            persisting_operations: AtomicU32::new(0),
             journal_healthy: AtomicBool::new(true),
+            catalog_status: AtomicU8::new(HealthStatus::Unavailable.as_u8()),
+            endpoint_status: AtomicU8::new(HealthStatus::Unavailable.as_u8()),
+            resource_pressure: AtomicU8::new(ResourcePressure::Unknown.as_u8()),
         }
     }
 
@@ -311,9 +413,34 @@ impl DaemonState {
     /// Records whether the journal remains available.
     pub fn set_journal_healthy(&self, healthy: bool) {
         self.journal_healthy.store(healthy, Ordering::Release);
+        self.set_catalog_status(if healthy {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Failed
+        });
         if !healthy {
             self.set_lifecycle(DaemonLifecycle::Faulted);
         }
+    }
+
+    /// Records the cached result of startup or explicit catalog validation.
+    pub fn set_catalog_status(&self, status: HealthStatus) {
+        self.catalog_status.store(status.as_u8(), Ordering::Release);
+        if status == HealthStatus::Failed {
+            self.set_lifecycle(DaemonLifecycle::Faulted);
+        }
+    }
+
+    /// Records whether the private local endpoint has completed publication.
+    pub fn set_endpoint_status(&self, status: HealthStatus) {
+        self.endpoint_status
+            .store(status.as_u8(), Ordering::Release);
+    }
+
+    /// Records the latest bounded host-pressure classification.
+    pub fn set_resource_pressure(&self, pressure: ResourcePressure) {
+        self.resource_pressure
+            .store(pressure.as_u8(), Ordering::Release);
     }
 
     /// Sets bounded operation counters after one serialized scheduler update.
@@ -321,6 +448,16 @@ impl DaemonState {
         self.admitted_operations.store(admitted, Ordering::Release);
         self.queued_operations.store(queued, Ordering::Release);
         self.running_operations.store(running, Ordering::Release);
+        self.cancelling_operations.store(0, Ordering::Release);
+        self.persisting_operations.store(0, Ordering::Release);
+    }
+
+    fn operation_counts(&self) -> OperationsSummary {
+        OperationsSummary {
+            queued: self.queued_operations.load(Ordering::Acquire),
+            running: self.running_operations.load(Ordering::Acquire),
+            cancelling: self.cancelling_operations.load(Ordering::Acquire),
+        }
     }
 
     /// Returns the current active connection count.
@@ -940,8 +1077,10 @@ fn execute_journal_request(
     request: ControlRequest,
 ) -> Result<ControlResponse, OperationError> {
     match request {
-        ControlRequest::Health => Ok(ControlResponse::Error(invalid_argument(
-            "health is served from daemon state",
+        ControlRequest::Health
+        | ControlRequest::DiagnosticsQuick
+        | ControlRequest::SupportBundle => Ok(ControlResponse::Error(invalid_argument(
+            "request is served outside the journal actor",
         ))),
         ControlRequest::OperationSubmit(submission) => journal
             .submit(submission)
@@ -994,6 +1133,72 @@ pub struct Health {
     pub operation_queue_limit: u32,
     /// Whether the durable journal remains healthy.
     pub journal_healthy: bool,
+    /// Cached startup or explicit catalog validation status.
+    pub catalog_status: HealthStatus,
+    /// Current operation catalog schema version.
+    pub catalog_schema_version: u32,
+    /// Generation storage status; not configured in the M04 control slice.
+    pub generation_status: HealthStatus,
+    /// Adapter status; not configured before parser providers exist.
+    pub adapter_status: HealthStatus,
+    /// Watcher status; not configured before incremental discovery exists.
+    pub watcher_status: HealthStatus,
+    /// Latest bounded host-pressure classification.
+    pub resource_pressure: ResourcePressure,
+    /// Private local endpoint ownership and publication status.
+    pub endpoint_status: HealthStatus,
+    /// Current discovery-record schema version.
+    pub endpoint_schema_version: u32,
+}
+
+/// Closed outcome for one bounded diagnostic check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticOutcome {
+    /// The check passed.
+    Passed,
+    /// The check completed and proved a failure.
+    Failed,
+    /// The check exceeded its bounded request deadline.
+    TimedOut,
+    /// The check could not be admitted or executed.
+    Unavailable,
+}
+
+/// One source-free diagnostic result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticResult {
+    /// Closed check outcome.
+    pub outcome: DiagnosticOutcome,
+    /// Monotonic elapsed time rounded to milliseconds.
+    pub duration_ms: u32,
+    /// Stable source-redacted public failure, when applicable.
+    pub error: Option<PublicError>,
+}
+
+/// Bounded quick-diagnostics response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticsQuick {
+    /// Diagnostics schema version.
+    pub schema_version: u32,
+    /// Aggregate source-free status.
+    pub overall_status: HealthStatus,
+    /// Current catalog quick-check result.
+    pub catalog: DiagnosticResult,
+}
+
+/// Validated bounded support archive returned by daemon and standalone modes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupportBundle {
+    /// Support-bundle schema version.
+    pub schema_version: u32,
+    /// Deterministic stored ZIP bytes.
+    pub archive: Vec<u8>,
+    /// SHA-256 of the complete archive.
+    pub sha256: [u8; 32],
+    /// Encoded archive byte count.
+    pub archive_bytes: u64,
+    /// Always false for the default support contract.
+    pub contains_source: bool,
 }
 
 /// Typed control request independent of protobuf or CLI JSON representation.
@@ -1001,6 +1206,10 @@ pub struct Health {
 pub enum ControlRequest {
     /// Read readiness and operation pressure.
     Health,
+    /// Execute the bounded catalog quick check.
+    DiagnosticsQuick,
+    /// Build a bounded source-free support archive.
+    SupportBundle,
     /// Submit one durable operation for admission.
     OperationSubmit(OperationSubmission),
     /// Read one durable operation status.
@@ -1023,6 +1232,10 @@ pub enum ControlRequest {
 pub enum ControlResponse {
     /// Health result.
     Health(Health),
+    /// Bounded quick-diagnostics result.
+    DiagnosticsQuick(DiagnosticsQuick),
+    /// Bounded source-free support archive.
+    SupportBundle(SupportBundle),
     /// Newly queued durable operation.
     OperationSubmit(OperationRecord),
     /// Durable operation status.
@@ -1065,6 +1278,7 @@ impl OperationAdmission {
 enum SchedulerPermitStage {
     Queued,
     Running,
+    Cancelling,
     Persisting,
     Completed,
 }
@@ -1143,13 +1357,23 @@ impl SchedulerPermit {
         self.stage = SchedulerPermitStage::Running;
     }
 
-    fn persist(&mut self) {
+    fn persist(&mut self, cancellation_cleanup: bool) {
         if self.stage != SchedulerPermitStage::Running {
             return;
         }
         let previous = self.state.running_operations.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "running operation count cannot underflow");
-        self.stage = SchedulerPermitStage::Persisting;
+        if cancellation_cleanup {
+            self.state
+                .cancelling_operations
+                .fetch_add(1, Ordering::AcqRel);
+            self.stage = SchedulerPermitStage::Cancelling;
+        } else {
+            self.state
+                .persisting_operations
+                .fetch_add(1, Ordering::AcqRel);
+            self.stage = SchedulerPermitStage::Persisting;
+        }
     }
 
     fn finish(mut self) {
@@ -1176,7 +1400,24 @@ impl SchedulerPermit {
                     .fetch_sub(1, Ordering::AcqRel);
                 debug_assert!(previous > 0, "admitted operation count cannot underflow");
             }
+            SchedulerPermitStage::Cancelling => {
+                let previous = self
+                    .state
+                    .cancelling_operations
+                    .fetch_sub(1, Ordering::AcqRel);
+                debug_assert!(previous > 0, "cancelling operation count cannot underflow");
+                let previous = self
+                    .state
+                    .admitted_operations
+                    .fetch_sub(1, Ordering::AcqRel);
+                debug_assert!(previous > 0, "admitted operation count cannot underflow");
+            }
             SchedulerPermitStage::Persisting => {
+                let previous = self
+                    .state
+                    .persisting_operations
+                    .fetch_sub(1, Ordering::AcqRel);
+                debug_assert!(previous > 0, "persisting operation count cannot underflow");
                 let previous = self
                     .state
                     .admitted_operations
@@ -1413,7 +1654,7 @@ fn synthetic_worker_loop(
             }
             thread::sleep((deadline - now).min(Duration::from_millis(1)));
         };
-        job.permit.persist();
+        job.permit.persist(cancellation_reason.is_some());
         if completion
             .blocking_send(WorkerCompletion {
                 operation: job.operation,
@@ -1687,13 +1928,170 @@ impl DaemonOrchestrator {
     }
 }
 
-/// Shared local daemon control service.
+enum DiagnosticCommand {
+    Execute {
+        support_bundle: bool,
+        deadline: Instant,
+        reply: tokio::sync::oneshot::Sender<ControlResponse>,
+    },
+}
+
 #[derive(Debug)]
+struct DiagnosticActorState {
+    stopping: AtomicBool,
+    busy: AtomicBool,
+}
+
+#[derive(Debug, Clone)]
+struct DiagnosticActorHandle {
+    sender: SyncSender<DiagnosticCommand>,
+    state: Arc<DiagnosticActorState>,
+}
+
+impl DiagnosticActorHandle {
+    fn request(
+        &self,
+        support_bundle: bool,
+        deadline: Instant,
+    ) -> Result<tokio::sync::oneshot::Receiver<ControlResponse>, ServiceError> {
+        if self.state.stopping.load(Ordering::Acquire) {
+            return Err(ServiceError::ChannelClosed);
+        }
+        if self
+            .state
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ServiceError::QueueFull);
+        }
+        if self.state.stopping.load(Ordering::Acquire) {
+            self.state.busy.store(false, Ordering::Release);
+            return Err(ServiceError::ChannelClosed);
+        }
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.sender
+            .try_send(DiagnosticCommand::Execute {
+                support_bundle,
+                deadline,
+                reply,
+            })
+            .map_err(|error| {
+                self.state.busy.store(false, Ordering::Release);
+                match error {
+                    TrySendError::Full(_) => ServiceError::QueueFull,
+                    TrySendError::Disconnected(_) => ServiceError::ChannelClosed,
+                }
+            })?;
+        Ok(receiver)
+    }
+
+    fn stop(&self) {
+        self.state.stopping.store(true, Ordering::Release);
+    }
+}
+
+/// Owner for the single-flight diagnostic worker thread.
+#[derive(Debug)]
+pub struct DiagnosticActor {
+    handle: DiagnosticActorHandle,
+    join: Option<JoinHandle<()>>,
+}
+
+impl DiagnosticActor {
+    /// Starts one single-flight worker around the source-free diagnostic service.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::ThreadSpawn`] when the worker thread cannot start.
+    pub fn start(service: ControlService) -> Result<Self, ServiceError> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let state = Arc::new(DiagnosticActorState {
+            stopping: AtomicBool::new(false),
+            busy: AtomicBool::new(false),
+        });
+        let worker_state = Arc::clone(&state);
+        let join = thread::Builder::new()
+            .name("rootlight-diagnostics".to_owned())
+            .spawn(move || diagnostic_actor_loop(service, receiver, worker_state))
+            .map_err(ServiceError::ThreadSpawn)?;
+        Ok(Self {
+            handle: DiagnosticActorHandle { sender, state },
+            join: Some(join),
+        })
+    }
+
+    /// Returns the cloneable single-flight diagnostic handle.
+    #[must_use]
+    fn handle(&self) -> DiagnosticActorHandle {
+        self.handle.clone()
+    }
+
+    /// Stops new diagnostic admission without waiting for an OS-blocked check.
+    pub fn stop(&self) {
+        self.handle.stop();
+    }
+
+    #[cfg(test)]
+    fn join_for_test(mut self) -> Result<(), ServiceError> {
+        self.stop();
+        let Some(join) = self.join.take() else {
+            return Ok(());
+        };
+        join.join().map_err(|_| ServiceError::ThreadPanicked)
+    }
+}
+
+impl Drop for DiagnosticActor {
+    fn drop(&mut self) {
+        self.stop();
+        let _ = self.join.take();
+    }
+}
+
+fn diagnostic_actor_loop(
+    service: ControlService,
+    receiver: Receiver<DiagnosticCommand>,
+    state: Arc<DiagnosticActorState>,
+) {
+    while !state.stopping.load(Ordering::Acquire) {
+        let command = match receiver.recv_timeout(Duration::from_millis(10)) {
+            Ok(command) => command,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                state.busy.store(false, Ordering::Release);
+                return;
+            }
+        };
+        let DiagnosticCommand::Execute {
+            support_bundle,
+            deadline,
+            reply,
+        } = command;
+        if state.stopping.load(Ordering::Acquire) || Instant::now() >= deadline {
+            let _ = reply.send(ControlResponse::Error(request_timed_out()));
+            state.busy.store(false, Ordering::Release);
+            continue;
+        }
+        let response = if support_bundle {
+            service.support_bundle_until(deadline)
+        } else {
+            service.diagnostics_quick_until(deadline)
+        };
+        let _ = reply.send(response);
+        state.busy.store(false, Ordering::Release);
+    }
+}
+
+/// Shared local daemon control service.
+#[derive(Debug, Clone)]
 pub struct ControlService {
     journal: Arc<OperationJournal>,
+    catalog_path: Option<Arc<std::path::PathBuf>>,
     instance_nonce: [u8; 16],
     state: Arc<DaemonState>,
     limits: DaemonLimits,
+    diagnostic_actor: Option<DiagnosticActorHandle>,
 }
 
 impl ControlService {
@@ -1701,6 +2099,8 @@ impl ControlService {
     #[must_use]
     pub fn new(journal: Arc<OperationJournal>, instance_nonce: [u8; 16]) -> Self {
         let state = Arc::new(DaemonState::starting());
+        state.set_catalog_status(HealthStatus::Healthy);
+        state.set_endpoint_status(HealthStatus::NotConfigured);
         state.set_lifecycle(DaemonLifecycle::Ready);
         Self::with_state(journal, instance_nonce, state, DaemonLimits::default())
     }
@@ -1715,10 +2115,30 @@ impl ControlService {
     ) -> Self {
         Self {
             journal,
+            catalog_path: None,
             instance_nonce,
             state,
             limits,
+            diagnostic_actor: None,
         }
+    }
+
+    /// Associates a persistent catalog path with the independent diagnostic connection.
+    #[must_use]
+    pub fn with_catalog_path(mut self, path: std::path::PathBuf) -> Self {
+        self.catalog_path = Some(Arc::new(path));
+        self
+    }
+
+    /// Starts and associates the single-flight diagnostic actor used by async IPC.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::ThreadSpawn`] when the worker thread cannot start.
+    pub fn with_diagnostic_actor(mut self) -> Result<(Self, DiagnosticActor), ServiceError> {
+        let actor = DiagnosticActor::start(self.clone())?;
+        self.diagnostic_actor = Some(actor.handle());
+        Ok((self, actor))
     }
 
     /// Returns the instance nonce used to reject stale discovery records.
@@ -1761,8 +2181,15 @@ impl ControlService {
         daemon::ServerHello {
             selected_protocol,
             capabilities: if error.is_none() {
+                let selected_minor = selected_protocol
+                    .as_ref()
+                    .map_or(PROTOCOL_MINOR, |version| version.minor);
                 CAPABILITIES
                     .iter()
+                    .filter(|value| {
+                        selected_minor >= 3
+                            || !matches!(**value, "diagnostics.quick" | "support.bundle.v1")
+                    })
                     .map(|value| (*value).to_owned())
                     .collect()
             } else {
@@ -1781,8 +2208,19 @@ impl ControlService {
         let queued_operations = self.state.queued_operations.load(Ordering::Acquire);
         let running_operations = self.state.running_operations.load(Ordering::Acquire);
         let journal_healthy = self.state.journal_healthy.load(Ordering::Acquire);
+        let catalog_status =
+            HealthStatus::from_u8(self.state.catalog_status.load(Ordering::Acquire));
+        let endpoint_status =
+            HealthStatus::from_u8(self.state.endpoint_status.load(Ordering::Acquire));
+        let endpoint_ready = matches!(
+            endpoint_status,
+            HealthStatus::Healthy | HealthStatus::NotConfigured
+        );
         Health {
-            ready: lifecycle == DaemonLifecycle::Ready && journal_healthy,
+            ready: lifecycle == DaemonLifecycle::Ready
+                && journal_healthy
+                && catalog_status == HealthStatus::Healthy
+                && endpoint_ready,
             active_operations: admitted_operations,
             admitted_operations,
             protocol_version: PROTOCOL_VERSION,
@@ -1794,7 +2232,158 @@ impl ControlService {
             running_operations,
             operation_queue_limit: self.limits.operation_queue_limit,
             journal_healthy,
+            catalog_status,
+            catalog_schema_version: rootlight_operations::OPERATION_SCHEMA_VERSION,
+            generation_status: HealthStatus::NotConfigured,
+            adapter_status: HealthStatus::NotConfigured,
+            watcher_status: HealthStatus::NotConfigured,
+            resource_pressure: ResourcePressure::from_u8(
+                self.state.resource_pressure.load(Ordering::Acquire),
+            ),
+            endpoint_status,
+            endpoint_schema_version: 2,
         }
+    }
+
+    fn diagnostics_quick(&self, timeout: Duration) -> ControlResponse {
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return ControlResponse::Error(request_timed_out());
+        };
+        self.diagnostics_quick_until(deadline)
+    }
+
+    fn diagnostics_quick_until(&self, deadline: Instant) -> ControlResponse {
+        let started = Instant::now();
+        if started >= deadline {
+            return ControlResponse::Error(request_timed_out());
+        }
+        let checked = self.catalog_path.as_deref().map_or_else(
+            || self.journal.quick_check(),
+            |path| OperationJournal::quick_check_path_until(path, deadline),
+        );
+        let duration_ms = duration_ms(started.elapsed());
+        if Instant::now() >= deadline {
+            return ControlResponse::Error(request_timed_out());
+        }
+        match checked {
+            Ok(()) => {
+                self.update_catalog_status_from_diagnostic(HealthStatus::Healthy);
+                ControlResponse::DiagnosticsQuick(DiagnosticsQuick {
+                    schema_version: 1,
+                    overall_status: HealthStatus::Healthy,
+                    catalog: DiagnosticResult {
+                        outcome: DiagnosticOutcome::Passed,
+                        duration_ms,
+                        error: None,
+                    },
+                })
+            }
+            Err(error) => {
+                let status = diagnostic_health_status(&error);
+                if diagnostic_result_is_conclusive(&error) {
+                    self.update_catalog_status_from_diagnostic(status);
+                }
+                ControlResponse::DiagnosticsQuick(DiagnosticsQuick {
+                    schema_version: 1,
+                    overall_status: status,
+                    catalog: DiagnosticResult {
+                        outcome: diagnostic_outcome_for_error(&error),
+                        duration_ms,
+                        error: Some(operation_error_to_public(&error, None)),
+                    },
+                })
+            }
+        }
+    }
+
+    fn update_catalog_status_from_diagnostic(&self, status: HealthStatus) {
+        if !matches!(
+            self.state.lifecycle(),
+            DaemonLifecycle::Draining | DaemonLifecycle::Stopped
+        ) {
+            self.state.set_catalog_status(status);
+        }
+    }
+
+    fn diagnostics_quick_path(&self, path: &std::path::Path, timeout: Duration) -> ControlResponse {
+        let started = Instant::now();
+        let checked = OperationJournal::quick_check_path_with_timeout(path, timeout);
+        let duration_ms = duration_ms(started.elapsed());
+        match checked {
+            Ok(()) => {
+                self.update_catalog_status_from_diagnostic(HealthStatus::Healthy);
+                ControlResponse::DiagnosticsQuick(DiagnosticsQuick {
+                    schema_version: 1,
+                    overall_status: HealthStatus::Healthy,
+                    catalog: DiagnosticResult {
+                        outcome: DiagnosticOutcome::Passed,
+                        duration_ms,
+                        error: None,
+                    },
+                })
+            }
+            Err(error) => {
+                let status = diagnostic_health_status(&error);
+                if diagnostic_result_is_conclusive(&error) {
+                    self.update_catalog_status_from_diagnostic(status);
+                }
+                ControlResponse::DiagnosticsQuick(DiagnosticsQuick {
+                    schema_version: 1,
+                    overall_status: status,
+                    catalog: DiagnosticResult {
+                        outcome: diagnostic_outcome_for_error(&error),
+                        duration_ms,
+                        error: Some(operation_error_to_public(&error, None)),
+                    },
+                })
+            }
+        }
+    }
+
+    fn support_bundle(&self, timeout: Duration) -> ControlResponse {
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return ControlResponse::Error(request_timed_out());
+        };
+        self.support_bundle_until(deadline)
+    }
+
+    fn support_bundle_until(&self, deadline: Instant) -> ControlResponse {
+        let diagnostics = match self.diagnostics_quick_until(deadline) {
+            ControlResponse::DiagnosticsQuick(diagnostics) => diagnostics,
+            ControlResponse::Error(error) => return ControlResponse::Error(error),
+            _ => unreachable!("diagnostics helper returns diagnostics or error"),
+        };
+        if Instant::now() >= deadline {
+            return ControlResponse::Error(request_timed_out());
+        }
+        let health = self.health();
+        let input = SupportBundleInput {
+            protocol_version: ObservabilityProtocolVersion::V1_3,
+            operating_system: observability_operating_system(),
+            architecture: observability_architecture(),
+            health: health_snapshot(&health),
+            diagnostics: diagnostics_snapshot(&diagnostics),
+            operations: self.state.operation_counts(),
+        };
+        match build_support_bundle(&input) {
+            Ok(bundle) if Instant::now() < deadline => {
+                ControlResponse::SupportBundle(SupportBundle {
+                    schema_version: rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION,
+                    archive: bundle.archive().to_vec(),
+                    sha256: bundle.sha256(),
+                    archive_bytes: bundle.archive_bytes(),
+                    contains_source: bundle.contains_source(),
+                })
+            }
+            Ok(_) => ControlResponse::Error(request_timed_out()),
+            Err(_) => ControlResponse::Error(internal_error()),
+        }
+    }
+
+    /// Executes the quick check through a separate read-only catalog connection.
+    #[must_use]
+    pub fn execute_diagnostics_path(&self, path: &std::path::Path) -> ControlResponse {
+        self.diagnostics_quick_path(path, self.limits.request_timeout)
     }
 
     /// Executes one typed control request.
@@ -1802,6 +2391,8 @@ impl ControlService {
     pub fn execute(&self, request: ControlRequest) -> ControlResponse {
         match request {
             ControlRequest::Health => ControlResponse::Health(self.health()),
+            ControlRequest::DiagnosticsQuick => self.diagnostics_quick(self.limits.request_timeout),
+            ControlRequest::SupportBundle => self.support_bundle(self.limits.request_timeout),
             ControlRequest::OperationSubmit(submission)
                 if !self.state.accepting_operations.load(Ordering::Acquire) =>
             {
@@ -1998,6 +2589,12 @@ async fn dispatch_async(
             Ok(ControlRequest::Health) => {
                 response_to_wire(ControlResponse::Health(service.health()))
             }
+            Ok(ControlRequest::DiagnosticsQuick) => {
+                run_diagnostic_request(service.clone(), false, envelope.timeout_ms).await
+            }
+            Ok(ControlRequest::SupportBundle) => {
+                run_diagnostic_request(service.clone(), true, envelope.timeout_ms).await
+            }
             Ok(request @ ControlRequest::OperationSubmit(_))
                 if !service.state.accepting_operations.load(Ordering::Acquire) =>
             {
@@ -2065,6 +2662,48 @@ async fn dispatch_async(
     }
 }
 
+async fn run_diagnostic_request(
+    service: ControlService,
+    support_bundle: bool,
+    requested_timeout_ms: Option<u32>,
+) -> daemon::response_envelope::Response {
+    let timeout = requested_timeout_ms.map_or(service.limits.request_timeout, |milliseconds| {
+        Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout)
+    });
+    let Some(deadline) = Instant::now().checked_add(timeout) else {
+        return response_to_wire(ControlResponse::Error(request_timed_out()));
+    };
+    let Some(actor) = service.diagnostic_actor.as_ref() else {
+        return response_to_wire(ControlResponse::Error(internal_error()));
+    };
+    let receiver = match actor.request(support_bundle, deadline) {
+        Ok(receiver) => receiver,
+        Err(ServiceError::QueueFull) if support_bundle => {
+            return response_to_wire(ControlResponse::Error(queue_full(1)));
+        }
+        Err(ServiceError::QueueFull) => {
+            return response_to_wire(ControlResponse::DiagnosticsQuick(DiagnosticsQuick {
+                schema_version: 1,
+                overall_status: HealthStatus::Degraded,
+                catalog: DiagnosticResult {
+                    outcome: DiagnosticOutcome::Unavailable,
+                    duration_ms: 0,
+                    error: Some(queue_full(1)),
+                },
+            }));
+        }
+        Err(ServiceError::ChannelClosed) => {
+            return response_to_wire(ControlResponse::Error(request_timed_out()));
+        }
+        Err(_) => return response_to_wire(ControlResponse::Error(internal_error())),
+    };
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receiver).await {
+        Ok(Ok(response)) => response_to_wire(response),
+        Ok(Err(_)) => response_to_wire(ControlResponse::Error(internal_error())),
+        Err(_) => response_to_wire(ControlResponse::Error(request_timed_out())),
+    }
+}
+
 async fn await_journal_response(
     service: &ControlService,
     response: impl std::future::Future<Output = Result<ControlResponse, ServiceError>>,
@@ -2087,6 +2726,154 @@ async fn await_journal_response(
         }
         Ok(Err(_)) => response_to_wire(ControlResponse::Error(internal_error())),
         Err(_) => response_to_wire(ControlResponse::Error(request_timed_out())),
+    }
+}
+
+fn duration_ms(duration: Duration) -> u32 {
+    u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
+}
+
+fn diagnostic_outcome_for_error(error: &OperationError) -> DiagnosticOutcome {
+    match error {
+        OperationError::DiagnosticTimedOut => DiagnosticOutcome::TimedOut,
+        OperationError::Busy | OperationError::WriterBusy | OperationError::ConcurrentUpdate => {
+            DiagnosticOutcome::Unavailable
+        }
+        _ => DiagnosticOutcome::Failed,
+    }
+}
+
+fn diagnostic_result_is_conclusive(error: &OperationError) -> bool {
+    !matches!(
+        error,
+        OperationError::DiagnosticTimedOut
+            | OperationError::Busy
+            | OperationError::WriterBusy
+            | OperationError::ConcurrentUpdate
+    )
+}
+
+fn diagnostic_health_status(error: &OperationError) -> HealthStatus {
+    match error {
+        OperationError::Busy
+        | OperationError::WriterBusy
+        | OperationError::ConcurrentUpdate
+        | OperationError::DiagnosticTimedOut => HealthStatus::Degraded,
+        OperationError::CorruptState
+        | OperationError::CorruptSchema
+        | OperationError::ForeignCatalog
+        | OperationError::MigrationChecksumMismatch
+        | OperationError::UnsupportedLegacySchema
+        | OperationError::UnsupportedSchemaVersion { .. } => HealthStatus::Failed,
+        _ => HealthStatus::Unavailable,
+    }
+}
+
+fn health_snapshot(health: &Health) -> HealthSnapshot {
+    HealthSnapshot {
+        ready: health.ready,
+        lifecycle: match health.lifecycle {
+            DaemonLifecycle::Starting => ObservabilityDaemonLifecycle::Starting,
+            DaemonLifecycle::Ready => ObservabilityDaemonLifecycle::Ready,
+            DaemonLifecycle::Draining => ObservabilityDaemonLifecycle::Draining,
+            DaemonLifecycle::Faulted => ObservabilityDaemonLifecycle::Faulted,
+            DaemonLifecycle::Stopped => ObservabilityDaemonLifecycle::Stopped,
+        },
+        accepting_operations: health.accepting_operations,
+        active_connections: health.active_connections,
+        connection_limit: health.connection_limit,
+        admitted_operations: health.admitted_operations,
+        queued_operations: health.queued_operations,
+        running_operations: health.running_operations,
+        operation_queue_limit: health.operation_queue_limit,
+        catalog_status: observability_health_status(health.catalog_status),
+        catalog_schema_version: health.catalog_schema_version,
+        generation_status: observability_health_status(health.generation_status),
+        adapter_status: observability_health_status(health.adapter_status),
+        watcher_status: observability_health_status(health.watcher_status),
+        endpoint_status: observability_health_status(health.endpoint_status),
+        endpoint_schema_version: health.endpoint_schema_version,
+        resource_pressure: match health.resource_pressure {
+            ResourcePressure::Normal => rootlight_observability::ResourcePressure::Normal,
+            ResourcePressure::Elevated => rootlight_observability::ResourcePressure::Elevated,
+            ResourcePressure::High => rootlight_observability::ResourcePressure::High,
+            ResourcePressure::Critical => rootlight_observability::ResourcePressure::Critical,
+            ResourcePressure::Unknown => rootlight_observability::ResourcePressure::Unknown,
+        },
+    }
+}
+
+const fn observability_health_status(
+    status: HealthStatus,
+) -> rootlight_observability::HealthStatus {
+    match status {
+        HealthStatus::Healthy => rootlight_observability::HealthStatus::Healthy,
+        HealthStatus::Degraded => rootlight_observability::HealthStatus::Degraded,
+        HealthStatus::Unavailable => rootlight_observability::HealthStatus::Unavailable,
+        HealthStatus::NotConfigured => rootlight_observability::HealthStatus::NotConfigured,
+        HealthStatus::Failed => rootlight_observability::HealthStatus::Failed,
+    }
+}
+
+fn diagnostics_snapshot(diagnostics: &DiagnosticsQuick) -> DiagnosticsQuickSnapshot {
+    DiagnosticsQuickSnapshot {
+        schema_version: diagnostics.schema_version,
+        overall_status: observability_health_status(diagnostics.overall_status),
+        catalog_quick_check: match diagnostics.catalog.outcome {
+            DiagnosticOutcome::Passed => rootlight_observability::DiagnosticOutcome::Passed,
+            DiagnosticOutcome::Failed => rootlight_observability::DiagnosticOutcome::Failed,
+            DiagnosticOutcome::TimedOut => rootlight_observability::DiagnosticOutcome::TimedOut,
+            DiagnosticOutcome::Unavailable => {
+                rootlight_observability::DiagnosticOutcome::Unavailable
+            }
+        },
+        duration_ms: diagnostics.catalog.duration_ms,
+        error_code: diagnostics
+            .catalog
+            .error
+            .as_ref()
+            .map(|error| observability_error_code(error.code())),
+    }
+}
+
+const fn observability_error_code(code: ErrorCode) -> ObservabilityErrorCode {
+    match code {
+        ErrorCode::InvalidArgument => ObservabilityErrorCode::InvalidArgument,
+        ErrorCode::NotFound => ObservabilityErrorCode::NotFound,
+        ErrorCode::Conflict => ObservabilityErrorCode::Conflict,
+        ErrorCode::StaleGeneration => ObservabilityErrorCode::StaleGeneration,
+        ErrorCode::UnsupportedCapability => ObservabilityErrorCode::UnsupportedCapability,
+        ErrorCode::IncompleteCoverage => ObservabilityErrorCode::IncompleteCoverage,
+        ErrorCode::BudgetExceeded => ObservabilityErrorCode::BudgetExceeded,
+        ErrorCode::ResourceExhausted => ObservabilityErrorCode::ResourceExhausted,
+        ErrorCode::Cancelled => ObservabilityErrorCode::Cancelled,
+        ErrorCode::AdapterFailed => ObservabilityErrorCode::AdapterFailed,
+        ErrorCode::IndexCorrupt => ObservabilityErrorCode::IndexCorrupt,
+        ErrorCode::MigrationRequired => ObservabilityErrorCode::MigrationRequired,
+        ErrorCode::PermissionDenied => ObservabilityErrorCode::PermissionDenied,
+        ErrorCode::ProtocolMismatch => ObservabilityErrorCode::ProtocolMismatch,
+        ErrorCode::Busy => ObservabilityErrorCode::Busy,
+        ErrorCode::Internal => ObservabilityErrorCode::Internal,
+        _ => ObservabilityErrorCode::Internal,
+    }
+}
+
+fn observability_operating_system() -> OperatingSystem {
+    match std::env::consts::OS {
+        "linux" => OperatingSystem::Linux,
+        "macos" => OperatingSystem::Macos,
+        "windows" => OperatingSystem::Windows,
+        _ => OperatingSystem::Other,
+    }
+}
+
+fn observability_architecture() -> ObservabilityArchitecture {
+    match std::env::consts::ARCH {
+        "aarch64" => ObservabilityArchitecture::Aarch64,
+        "arm" => ObservabilityArchitecture::Arm,
+        "x86" => ObservabilityArchitecture::X86,
+        "x86_64" => ObservabilityArchitecture::X86_64,
+        _ => ObservabilityArchitecture::Other,
     }
 }
 
@@ -2160,6 +2947,22 @@ fn request_from_wire(
 ) -> Result<ControlRequest, Box<PublicError>> {
     match request {
         Some(daemon::request_envelope::Request::Health(_)) => Ok(ControlRequest::Health),
+        Some(daemon::request_envelope::Request::DiagnosticsQuick(_)) => {
+            if selected_protocol_minor < 3 {
+                return Err(Box::new(protocol_mismatch(
+                    "quick diagnostics need protocol minor three",
+                )));
+            }
+            Ok(ControlRequest::DiagnosticsQuick)
+        }
+        Some(daemon::request_envelope::Request::SupportBundle(_)) => {
+            if selected_protocol_minor < 3 {
+                return Err(Box::new(protocol_mismatch(
+                    "support bundle needs protocol minor three",
+                )));
+            }
+            Ok(ControlRequest::SupportBundle)
+        }
         Some(daemon::request_envelope::Request::OperationSubmit(request)) => {
             operation_submission_from_wire(request, client_instance_id, selected_protocol_minor)
                 .map(ControlRequest::OperationSubmit)
@@ -2307,6 +3110,37 @@ fn response_to_wire(response: ControlResponse) -> daemon::response_envelope::Res
                 running_operations: health.running_operations,
                 operation_queue_limit: health.operation_queue_limit,
                 journal_healthy: health.journal_healthy,
+                catalog_status: health_status_to_wire(health.catalog_status) as i32,
+                catalog_schema_version: health.catalog_schema_version,
+                generation_status: health_status_to_wire(health.generation_status) as i32,
+                adapter_status: health_status_to_wire(health.adapter_status) as i32,
+                watcher_status: health_status_to_wire(health.watcher_status) as i32,
+                resource_pressure: resource_pressure_to_wire(health.resource_pressure) as i32,
+                endpoint_status: health_status_to_wire(health.endpoint_status) as i32,
+                endpoint_schema_version: health.endpoint_schema_version,
+            })
+        }
+        ControlResponse::DiagnosticsQuick(diagnostics) => {
+            daemon::response_envelope::Response::DiagnosticsQuick(
+                daemon::DiagnosticsQuickResponse {
+                    schema_version: diagnostics.schema_version,
+                    overall_status: health_status_to_wire(diagnostics.overall_status) as i32,
+                    results: vec![daemon::DiagnosticResult {
+                        check: daemon::DiagnosticCheck::CatalogQuickCheck as i32,
+                        outcome: diagnostic_outcome_to_wire(diagnostics.catalog.outcome) as i32,
+                        duration_ms: diagnostics.catalog.duration_ms,
+                        error: diagnostics.catalog.error.as_ref().map(public_error_to_wire),
+                    }],
+                },
+            )
+        }
+        ControlResponse::SupportBundle(bundle) => {
+            daemon::response_envelope::Response::SupportBundle(daemon::SupportBundleResponse {
+                schema_version: bundle.schema_version,
+                archive: bundle.archive,
+                sha256: bundle.sha256.to_vec(),
+                archive_bytes: bundle.archive_bytes,
+                contains_source: bundle.contains_source,
             })
         }
         ControlResponse::OperationSubmit(operation) => {
@@ -2338,6 +3172,35 @@ fn response_to_wire(response: ControlResponse) -> daemon::response_envelope::Res
         ControlResponse::Error(error) => {
             daemon::response_envelope::Response::Error(public_error_to_wire(&error))
         }
+    }
+}
+
+const fn health_status_to_wire(status: HealthStatus) -> daemon::HealthStatus {
+    match status {
+        HealthStatus::Healthy => daemon::HealthStatus::Healthy,
+        HealthStatus::Degraded => daemon::HealthStatus::Degraded,
+        HealthStatus::Unavailable => daemon::HealthStatus::Unavailable,
+        HealthStatus::NotConfigured => daemon::HealthStatus::NotConfigured,
+        HealthStatus::Failed => daemon::HealthStatus::Failed,
+    }
+}
+
+const fn resource_pressure_to_wire(pressure: ResourcePressure) -> daemon::ResourcePressure {
+    match pressure {
+        ResourcePressure::Normal => daemon::ResourcePressure::Normal,
+        ResourcePressure::Elevated => daemon::ResourcePressure::Elevated,
+        ResourcePressure::High => daemon::ResourcePressure::High,
+        ResourcePressure::Critical => daemon::ResourcePressure::Critical,
+        ResourcePressure::Unknown => daemon::ResourcePressure::Unknown,
+    }
+}
+
+const fn diagnostic_outcome_to_wire(outcome: DiagnosticOutcome) -> daemon::DiagnosticOutcome {
+    match outcome {
+        DiagnosticOutcome::Passed => daemon::DiagnosticOutcome::Passed,
+        DiagnosticOutcome::Failed => daemon::DiagnosticOutcome::Failed,
+        DiagnosticOutcome::TimedOut => daemon::DiagnosticOutcome::TimedOut,
+        DiagnosticOutcome::Unavailable => daemon::DiagnosticOutcome::Unavailable,
     }
 }
 
@@ -2433,6 +3296,9 @@ fn operation_error_to_public(
         ),
         OperationError::WriterBusy | OperationError::ConcurrentUpdate | OperationError::Busy => {
             (ErrorCode::Busy, "operation state is busy", true)
+        }
+        OperationError::DiagnosticTimedOut => {
+            (ErrorCode::Busy, "operation diagnostic timed out", true)
         }
         OperationError::UnsupportedSqlite { .. }
         | OperationError::UnsupportedSqliteCompileOptions
@@ -2887,6 +3753,146 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_and_support_bundle_are_source_free_and_wire_stable() {
+        let service = service();
+        service.state().set_catalog_status(HealthStatus::Healthy);
+        let diagnostics = service.execute(ControlRequest::DiagnosticsQuick);
+        let ControlResponse::DiagnosticsQuick(diagnostics) = diagnostics else {
+            panic!("diagnostics response expected");
+        };
+        assert_eq!(diagnostics.schema_version, 1);
+        assert_eq!(diagnostics.overall_status, HealthStatus::Healthy);
+        assert_eq!(diagnostics.catalog.outcome, DiagnosticOutcome::Passed);
+        assert!(diagnostics.catalog.error.is_none());
+
+        let bundle = service.execute(ControlRequest::SupportBundle);
+        let ControlResponse::SupportBundle(bundle) = bundle else {
+            panic!("support bundle response expected");
+        };
+        assert_eq!(bundle.schema_version, 1);
+        assert!(!bundle.contains_source);
+        assert_eq!(
+            bundle.archive_bytes,
+            u64::try_from(bundle.archive.len()).expect("bounded archive fits u64")
+        );
+        assert!(bundle.archive.len() <= rootlight_observability::MAX_SUPPORT_ARCHIVE_BYTES);
+
+        let wire = response_to_wire(ControlResponse::SupportBundle(bundle.clone()));
+        let daemon::response_envelope::Response::SupportBundle(wire) = wire else {
+            panic!("wire support bundle expected");
+        };
+        assert_eq!(wire.archive_bytes, bundle.archive_bytes);
+        assert_eq!(wire.sha256, bundle.sha256);
+        assert!(!wire.contains_source);
+    }
+
+    #[test]
+    fn diagnostic_actor_enforces_one_total_admission() {
+        let service = service();
+        let actor = DiagnosticActor::start(service).expect("diagnostic actor starts");
+        actor.handle.state.busy.store(true, Ordering::Release);
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(1))
+            .expect("test deadline derives");
+
+        assert!(matches!(
+            actor.handle().request(false, deadline),
+            Err(ServiceError::QueueFull)
+        ));
+        actor.handle.state.busy.store(false, Ordering::Release);
+        actor
+            .join_for_test()
+            .expect("diagnostic actor joins after stop");
+    }
+
+    #[test]
+    fn diagnostic_actor_stop_is_independent_of_service_clones() {
+        let service = service();
+        let actor = DiagnosticActor::start(service.clone()).expect("diagnostic actor starts");
+        let _retained = [service.clone(), service];
+        actor.stop();
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(1))
+            .expect("test deadline derives");
+
+        assert!(matches!(
+            actor.handle().request(false, deadline),
+            Err(ServiceError::ChannelClosed)
+        ));
+        actor
+            .join_for_test()
+            .expect("diagnostic actor joins with retained service clones");
+    }
+
+    #[test]
+    fn diagnostic_actor_discards_expired_commands_without_health_mutation() {
+        let service = service();
+        service.state().set_catalog_status(HealthStatus::Healthy);
+        let state = Arc::new(DiagnosticActorState {
+            stopping: AtomicBool::new(false),
+            busy: AtomicBool::new(true),
+        });
+        let worker_state = Arc::clone(&state);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (reply, response) = tokio::sync::oneshot::channel();
+        sender
+            .send(DiagnosticCommand::Execute {
+                support_bundle: false,
+                deadline: Instant::now()
+                    .checked_sub(Duration::from_millis(1))
+                    .expect("test deadline subtracts"),
+                reply,
+            })
+            .expect("expired command queues");
+        drop(sender);
+
+        diagnostic_actor_loop(service.clone(), receiver, worker_state);
+        let ControlResponse::Error(error) = response
+            .blocking_recv()
+            .expect("expired command returns a response")
+        else {
+            panic!("expired command must return an error");
+        };
+        assert_eq!(error.code(), ErrorCode::Busy);
+        assert_eq!(service.health().catalog_status, HealthStatus::Healthy);
+        assert!(!state.busy.load(Ordering::Acquire));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn diagnostic_actor_releases_capacity_after_a_timed_request() {
+        let temporary = private_tempdir();
+        let path = temporary.path().join("operations.sqlite");
+        let journal = Arc::new(OperationJournal::open(&path).expect("catalog opens"));
+        let service = ControlService::new(journal, [7; 16]).with_catalog_path(path);
+        let (service, actor) = service
+            .with_diagnostic_actor()
+            .expect("diagnostic actor starts");
+
+        let first = run_diagnostic_request(service.clone(), false, Some(100)).await;
+        let daemon::response_envelope::Response::DiagnosticsQuick(first) = first else {
+            panic!("first diagnostics response expected");
+        };
+        assert_eq!(first.results.len(), 1);
+        assert_eq!(
+            first.results[0].outcome,
+            daemon::DiagnosticOutcome::Passed as i32
+        );
+
+        let next = run_diagnostic_request(service, false, Some(100)).await;
+        let daemon::response_envelope::Response::DiagnosticsQuick(next) = next else {
+            panic!("second diagnostics response expected");
+        };
+        assert_eq!(next.results.len(), 1);
+        assert_eq!(
+            next.results[0].outcome,
+            daemon::DiagnosticOutcome::Passed as i32
+        );
+        actor
+            .join_for_test()
+            .expect("diagnostic actor joins after stop");
+    }
+
+    #[test]
     fn typed_and_wire_health_share_semantics() {
         let service = service();
         let typed = service.execute(ControlRequest::Health);
@@ -2914,6 +3920,14 @@ mod tests {
                 running_operations: 0,
                 operation_queue_limit: DEFAULT_OPERATION_QUEUE_LIMIT,
                 journal_healthy: true,
+                catalog_status: HealthStatus::Healthy,
+                catalog_schema_version: rootlight_operations::OPERATION_SCHEMA_VERSION,
+                generation_status: HealthStatus::NotConfigured,
+                adapter_status: HealthStatus::NotConfigured,
+                watcher_status: HealthStatus::NotConfigured,
+                resource_pressure: ResourcePressure::Unknown,
+                endpoint_status: HealthStatus::NotConfigured,
+                endpoint_schema_version: 2,
             })
         );
         assert!(matches!(
@@ -2944,6 +3958,8 @@ mod tests {
         assert!(!service.health().ready);
         state.connection_started();
         state.set_operation_counts(3, 2, 1);
+        state.set_catalog_status(HealthStatus::Healthy);
+        state.set_endpoint_status(HealthStatus::NotConfigured);
         state.set_lifecycle(DaemonLifecycle::Ready);
         let health = service.health();
         assert!(health.ready);
@@ -2951,6 +3967,13 @@ mod tests {
         assert_eq!(health.active_operations, 3);
         assert_eq!(health.queued_operations, 2);
         assert_eq!(health.running_operations, 1);
+        state.set_catalog_status(HealthStatus::Failed);
+        assert!(!service.health().ready);
+        assert!(!service.health().accepting_operations);
+        state.set_catalog_status(HealthStatus::Healthy);
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        state.set_endpoint_status(HealthStatus::Unavailable);
+        assert!(!service.health().ready);
         state.connection_finished();
         state.set_lifecycle(DaemonLifecycle::Draining);
         assert!(!service.health().accepting_operations);
@@ -3085,11 +4108,20 @@ mod tests {
         .expect("permit reserves");
         permit.start();
 
-        permit.persist();
+        permit.persist(false);
 
         assert_eq!(state.admitted_operations.load(Ordering::Acquire), 1);
         assert_eq!(state.queued_operations.load(Ordering::Acquire), 0);
         assert_eq!(state.running_operations.load(Ordering::Acquire), 0);
+        assert_eq!(state.persisting_operations.load(Ordering::Acquire), 1);
+        assert_eq!(
+            state.operation_counts(),
+            OperationsSummary {
+                queued: 0,
+                running: 0,
+                cancelling: 0,
+            }
+        );
         assert_eq!(
             client_admissions
                 .lock()
@@ -3100,6 +4132,8 @@ mod tests {
         );
         permit.finish();
         assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
+        assert_eq!(state.cancelling_operations.load(Ordering::Acquire), 0);
+        assert_eq!(state.persisting_operations.load(Ordering::Acquire), 0);
         assert!(
             client_admissions
                 .lock()
@@ -3107,6 +4141,39 @@ mod tests {
                 .admitted
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn cancelling_permit_reports_exact_cleanup_occupancy() {
+        let state = Arc::new(DaemonState::starting());
+        let client_admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
+        let owner = ClientInstanceId::new([6; 16]).expect("client identity is valid");
+        let mut permit = SchedulerPermit::reserve(
+            Arc::clone(&state),
+            Arc::clone(&client_admissions),
+            owner,
+            1,
+            1,
+        )
+        .expect("permit reserves");
+        permit.start();
+
+        permit.persist(true);
+
+        assert_eq!(state.running_operations.load(Ordering::Acquire), 0);
+        assert_eq!(state.cancelling_operations.load(Ordering::Acquire), 1);
+        assert_eq!(state.persisting_operations.load(Ordering::Acquire), 0);
+        assert_eq!(
+            state.operation_counts(),
+            OperationsSummary {
+                queued: 0,
+                running: 0,
+                cancelling: 1,
+            }
+        );
+        permit.finish();
+        assert_eq!(state.cancelling_operations.load(Ordering::Acquire), 0);
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
     }
 
     #[test]

@@ -31,6 +31,8 @@ message RequestEnvelope {
     OperationCancelRequest operation_cancel = 12;
     OperationSubmitRequest operation_submit = 13;
     OperationLeaseRenewRequest operation_lease_renew = 14;
+    DiagnosticsQuickRequest diagnostics_quick = 15;
+    SupportBundleRequest support_bundle = 16;
   }
 }
 
@@ -43,6 +45,8 @@ message ResponseEnvelope {
     OperationCancelResponse operation_cancel = 12;
     OperationSubmitResponse operation_submit = 13;
     OperationLeaseRenewResponse operation_lease_renew = 14;
+    DiagnosticsQuickResponse diagnostics_quick = 15;
+    SupportBundleResponse support_bundle = 16;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -60,6 +64,26 @@ enum DaemonLifecycle {
   STOPPED = 5;
 }
 
+// Closed status for one daemon subsystem.
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_HEALTHY = 1;
+  HEALTH_STATUS_DEGRADED = 2;
+  HEALTH_STATUS_UNAVAILABLE = 3;
+  HEALTH_STATUS_NOT_CONFIGURED = 4;
+  HEALTH_STATUS_FAILED = 5;
+}
+
+// Closed classification for bounded host resource pressure.
+enum ResourcePressure {
+  RESOURCE_PRESSURE_UNSPECIFIED = 0;
+  RESOURCE_PRESSURE_NORMAL = 1;
+  RESOURCE_PRESSURE_ELEVATED = 2;
+  RESOURCE_PRESSURE_HIGH = 3;
+  RESOURCE_PRESSURE_CRITICAL = 4;
+  RESOURCE_PRESSURE_UNKNOWN = 5;
+}
+
 // Source-free daemon health and readiness response.
 message HealthResponse {
   bool ready = 1;
@@ -74,6 +98,59 @@ message HealthResponse {
   uint32 running_operations = 10;
   uint32 operation_queue_limit = 11;
   bool journal_healthy = 12;
+  HealthStatus catalog_status = 13;
+  uint32 catalog_schema_version = 14;
+  HealthStatus generation_status = 15;
+  HealthStatus adapter_status = 16;
+  HealthStatus watcher_status = 17;
+  ResourcePressure resource_pressure = 18;
+  HealthStatus endpoint_status = 19;
+  uint32 endpoint_schema_version = 20;
+}
+
+// Requests bounded source-free catalog diagnostics.
+message DiagnosticsQuickRequest {}
+
+// Closed diagnostic checks supported by the current control plane.
+enum DiagnosticCheck {
+  DIAGNOSTIC_CHECK_UNSPECIFIED = 0;
+  DIAGNOSTIC_CHECK_CATALOG_QUICK_CHECK = 1;
+}
+
+// Closed outcome for one diagnostic check.
+enum DiagnosticOutcome {
+  DIAGNOSTIC_OUTCOME_UNSPECIFIED = 0;
+  DIAGNOSTIC_OUTCOME_PASSED = 1;
+  DIAGNOSTIC_OUTCOME_FAILED = 2;
+  DIAGNOSTIC_OUTCOME_TIMED_OUT = 3;
+  DIAGNOSTIC_OUTCOME_UNAVAILABLE = 4;
+}
+
+// One source-free bounded diagnostic result.
+message DiagnosticResult {
+  DiagnosticCheck check = 1;
+  DiagnosticOutcome outcome = 2;
+  uint32 duration_ms = 3;
+  optional rootlight.common.v1.PublicError error = 4;
+}
+
+// Bounded quick-diagnostics response.
+message DiagnosticsQuickResponse {
+  uint32 schema_version = 1;
+  HealthStatus overall_status = 2;
+  repeated DiagnosticResult results = 3;
+}
+
+// Requests a bounded source-free support bundle.
+message SupportBundleRequest {}
+
+// Returns one validated in-memory support archive.
+message SupportBundleResponse {
+  uint32 schema_version = 1;
+  bytes archive = 2;
+  bytes sha256 = 3;
+  uint64 archive_bytes = 4;
+  bool contains_source = 5;
 }
 
 // Durable operation lifecycle state.

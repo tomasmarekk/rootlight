@@ -5,15 +5,26 @@
 
 #![forbid(unsafe_code)]
 
-use std::{env, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
+use std::{
+    env,
+    io::Write as _,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    sync::Arc,
+    time::Duration,
+};
 
 use rootlight_client::{
-    Client, ClientError, ConnectPolicy, DaemonLifecycle as ClientDaemonLifecycle, Health,
-    OperationKind, OperationStage, OperationStatus, RecoveryClass,
+    Client, ClientError, ConnectPolicy, DaemonLifecycle as ClientDaemonLifecycle, DiagnosticsQuick,
+    Health, HealthStatus as ClientHealthStatus, OperationKind, OperationStage, OperationStatus,
+    RecoveryClass, ResourcePressure as ClientResourcePressure,
+    SupportBundle as ClientSupportBundle,
 };
 use rootlight_daemon_core::{
     ControlRequest, ControlResponse, ControlService, DaemonLifecycle, DaemonLimits,
-    DaemonOrchestrator, DaemonState, JournalActor, ServiceError,
+    DaemonOrchestrator, DaemonState, DiagnosticOutcome as DomainDiagnosticOutcome,
+    DiagnosticsQuick as DomainDiagnosticsQuick, HealthStatus as DomainHealthStatus, JournalActor,
+    ResourcePressure as DomainResourcePressure, ServiceError, SupportBundle as DomainSupportBundle,
 };
 use rootlight_error::{ErrorCode, PublicError};
 use rootlight_ids::OperationId;
@@ -85,6 +96,15 @@ fn execute_client(
 ) -> Result<CommandResult, CliError> {
     match (command, arguments) {
         ("health", []) => Ok(CommandResult::Health(client.health()?)),
+        ("health", [json]) if json == "--json" => Ok(CommandResult::Health(client.health()?)),
+        ("diagnostics", [quick]) if quick == "quick" => {
+            Ok(CommandResult::DiagnosticsQuick(client.diagnostics_quick()?))
+        }
+        ("support-bundle", [output, path]) if output == "--output" => {
+            let bundle = client.support_bundle()?;
+            write_support_bundle(Path::new(path), &bundle.archive)?;
+            Ok(CommandResult::SupportBundle(support_receipt(&bundle)))
+        }
         ("operation-submit", [operation]) => Ok(CommandResult::OperationSubmit(
             client.operation_submit(parse_operation(operation)?)?,
         )),
@@ -156,7 +176,8 @@ fn execute_standalone(
     let mut nonce = [0_u8; 16];
     getrandom::fill(&mut nonce).map_err(|_| CliError::RandomUnavailable)?;
     let _writer = CatalogWriterLock::acquire(&paths.writer_lock_path(), nonce)?;
-    let journal = Arc::new(OperationJournal::open(&paths.operation_journal_path())?);
+    let catalog_path = paths.operation_journal_path();
+    let journal = Arc::new(OperationJournal::open(&catalog_path)?);
     let limits = DaemonLimits::default();
     let state = Arc::new(DaemonState::starting());
     let actor = JournalActor::start(
@@ -165,7 +186,10 @@ fn execute_standalone(
         usize::try_from(limits.operation_queue_limit).map_err(|_| CliError::InvalidLimits)?,
     )?;
     let mut orchestrator = DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), limits)?;
-    let service = ControlService::with_state(journal, nonce, Arc::clone(&state), limits);
+    let service = ControlService::with_state(journal, nonce, Arc::clone(&state), limits)
+        .with_catalog_path(catalog_path);
+    state.set_catalog_status(DomainHealthStatus::Healthy);
+    state.set_endpoint_status(DomainHealthStatus::NotConfigured);
     state.set_lifecycle(DaemonLifecycle::Ready);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -195,6 +219,21 @@ async fn execute_standalone_command(
 ) -> Result<CommandResult, CliError> {
     match (command, arguments) {
         ("health", []) => response_to_result(service.execute(ControlRequest::Health)),
+        ("health", [json]) if json == "--json" => {
+            response_to_result(service.execute(ControlRequest::Health))
+        }
+        ("diagnostics", [quick]) if quick == "quick" => {
+            response_to_result(service.execute(ControlRequest::DiagnosticsQuick))
+        }
+        ("support-bundle", [output, path]) if output == "--output" => {
+            let response = control_response(service.execute(ControlRequest::SupportBundle))?;
+            let ControlResponse::SupportBundle(bundle) = response else {
+                return Err(CliError::UnexpectedResponse);
+            };
+            let bundle = support_bundle_from_domain(bundle);
+            write_support_bundle(Path::new(path), &bundle.archive)?;
+            Ok(CommandResult::SupportBundle(support_receipt(&bundle)))
+        }
         ("operation-submit", [operation]) => {
             let submission = standalone_submission(parse_operation(operation)?, None)?;
             let admission = orchestrator.schedule(submission).await?;
@@ -274,6 +313,12 @@ fn standalone_submission(
 fn response_to_result(response: ControlResponse) -> Result<CommandResult, CliError> {
     match control_response(response)? {
         ControlResponse::Health(health) => Ok(CommandResult::Health(health_from_domain(health))),
+        ControlResponse::DiagnosticsQuick(diagnostics) => Ok(CommandResult::DiagnosticsQuick(
+            diagnostics_from_domain(diagnostics),
+        )),
+        ControlResponse::SupportBundle(bundle) => Ok(CommandResult::SupportBundle(
+            support_receipt(&support_bundle_from_domain(bundle)),
+        )),
         ControlResponse::OperationSubmit(operation) => Ok(CommandResult::OperationSubmit(
             operation_from_domain(operation),
         )),
@@ -319,7 +364,144 @@ fn health_from_domain(health: rootlight_daemon_core::Health) -> Health {
         running_operations: health.running_operations,
         operation_queue_limit: health.operation_queue_limit,
         journal_healthy: health.journal_healthy,
+        catalog_status: health_status_from_domain(health.catalog_status),
+        catalog_schema_version: health.catalog_schema_version,
+        generation_status: health_status_from_domain(health.generation_status),
+        adapter_status: health_status_from_domain(health.adapter_status),
+        watcher_status: health_status_from_domain(health.watcher_status),
+        resource_pressure: match health.resource_pressure {
+            DomainResourcePressure::Normal => ClientResourcePressure::Normal,
+            DomainResourcePressure::Elevated => ClientResourcePressure::Elevated,
+            DomainResourcePressure::High => ClientResourcePressure::High,
+            DomainResourcePressure::Critical => ClientResourcePressure::Critical,
+            DomainResourcePressure::Unknown => ClientResourcePressure::Unknown,
+        },
+        endpoint_status: health_status_from_domain(health.endpoint_status),
+        endpoint_schema_version: health.endpoint_schema_version,
     }
+}
+
+const fn health_status_from_domain(status: DomainHealthStatus) -> ClientHealthStatus {
+    match status {
+        DomainHealthStatus::Healthy => ClientHealthStatus::Healthy,
+        DomainHealthStatus::Degraded => ClientHealthStatus::Degraded,
+        DomainHealthStatus::Unavailable => ClientHealthStatus::Unavailable,
+        DomainHealthStatus::NotConfigured => ClientHealthStatus::NotConfigured,
+        DomainHealthStatus::Failed => ClientHealthStatus::Failed,
+    }
+}
+
+fn diagnostics_from_domain(diagnostics: DomainDiagnosticsQuick) -> DiagnosticsQuick {
+    DiagnosticsQuick {
+        schema_version: diagnostics.schema_version,
+        overall_status: health_status_from_domain(diagnostics.overall_status),
+        catalog: rootlight_client::DiagnosticResult {
+            outcome: match diagnostics.catalog.outcome {
+                DomainDiagnosticOutcome::Passed => rootlight_client::DiagnosticOutcome::Passed,
+                DomainDiagnosticOutcome::Failed => rootlight_client::DiagnosticOutcome::Failed,
+                DomainDiagnosticOutcome::TimedOut => rootlight_client::DiagnosticOutcome::TimedOut,
+                DomainDiagnosticOutcome::Unavailable => {
+                    rootlight_client::DiagnosticOutcome::Unavailable
+                }
+            },
+            duration_ms: diagnostics.catalog.duration_ms,
+            error: diagnostics.catalog.error,
+        },
+    }
+}
+
+fn support_bundle_from_domain(bundle: DomainSupportBundle) -> ClientSupportBundle {
+    ClientSupportBundle {
+        schema_version: bundle.schema_version,
+        archive: bundle.archive,
+        sha256: bundle.sha256,
+        archive_bytes: bundle.archive_bytes,
+        contains_source: bundle.contains_source,
+    }
+}
+
+fn support_receipt(bundle: &ClientSupportBundle) -> SupportBundleReceipt {
+    SupportBundleReceipt {
+        schema_version: bundle.schema_version,
+        archive_bytes: bundle.archive_bytes,
+        sha256: hex_digest(bundle.sha256),
+        contains_source: bundle.contains_source,
+    }
+}
+
+fn hex_digest(digest: [u8; 32]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}")
+            .unwrap_or_else(|_| unreachable!("formatting into String cannot fail"));
+    }
+    encoded
+}
+
+fn write_support_bundle(path: &Path, archive: &[u8]) -> Result<(), CliError> {
+    write_support_bundle_with_writer(path, archive, |file, bytes| file.write_all(bytes))
+}
+
+fn create_private_support_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        options.mode(0o600);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_GENERIC_READ, FILE_GENERIC_WRITE, WRITE_DAC,
+        };
+
+        options
+            .access_mode((FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC).0)
+            .share_mode(0);
+    }
+    options.open(path)
+}
+
+fn write_support_bundle_with_writer(
+    path: &Path,
+    archive: &[u8],
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), CliError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.is_dir() || path.file_name().is_none() {
+        return Err(CliError::InvalidSupportPath);
+    }
+    let mut file = create_private_support_file(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            CliError::SupportOutputExists
+        } else {
+            CliError::SupportWrite(error)
+        }
+    })?;
+    rootlight_runtime::RuntimePaths::secure_private_output_file(&mut file)?;
+    write(&mut file, archive).map_err(CliError::SupportWrite)?;
+    file.sync_all().map_err(CliError::SupportWrite)?;
+    sync_support_parent(parent)
+}
+
+#[cfg(unix)]
+fn sync_support_parent(parent: &Path) -> Result<(), CliError> {
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(CliError::SupportWrite)
+}
+
+#[cfg(windows)]
+fn sync_support_parent(_parent: &Path) -> Result<(), CliError> {
+    Ok(())
 }
 
 fn operation_from_domain(operation: OperationRecord) -> OperationStatus {
@@ -452,12 +634,22 @@ impl CliEnvelope {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 enum CommandResult {
     Health(Health),
+    DiagnosticsQuick(DiagnosticsQuick),
+    SupportBundle(SupportBundleReceipt),
     OperationSubmit(OperationStatus),
     OperationStatus(OperationStatus),
     OperationCancel {
         accepted: bool,
         operation: OperationStatus,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SupportBundleReceipt {
+    schema_version: u32,
+    archive_bytes: u64,
+    sha256: String,
+    contains_source: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -489,11 +681,17 @@ impl ExitFamily {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: rootlight [--standalone] health|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
+        "usage: rootlight [--standalone] health [--json]|diagnostics quick|support-bundle --output <file>|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
     )]
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]
     IncompletePathOverride,
+    #[error("support bundle output path is invalid")]
+    InvalidSupportPath,
+    #[error("support bundle output already exists")]
+    SupportOutputExists,
+    #[error("support bundle output failed")]
+    SupportWrite(#[source] std::io::Error),
     #[error("secure random source is unavailable")]
     RandomUnavailable,
     #[error("daemon runtime setup failed")]
@@ -530,12 +728,15 @@ impl CliError {
         match self {
             Self::Usage
             | Self::IncompletePathOverride
+            | Self::InvalidSupportPath
+            | Self::SupportOutputExists
             | Self::InvalidOperation
             | Self::InvalidTimeout => ExitFamily::Usage,
             Self::Runtime(rootlight_runtime::RuntimeError::InsecureDirectory)
             | Self::Runtime(rootlight_runtime::RuntimeError::InvalidDiscovery)
             | Self::Runtime(rootlight_runtime::RuntimeError::InsecureEndpointArtifact)
             | Self::Runtime(rootlight_runtime::RuntimeError::InsecureLockFile)
+            | Self::Runtime(rootlight_runtime::RuntimeError::InsecureOutputFile)
             | Self::Runtime(rootlight_runtime::RuntimeError::WindowsSecurityPolicy)
             | Self::Runtime(rootlight_runtime::RuntimeError::InvalidEndpoint(_))
             | Self::Operations(rootlight_operations::OperationError::InsecureLockFile)
@@ -668,6 +869,83 @@ mod tests {
         assert_eq!(json["contract_version"], "1.0");
         assert_eq!(json["result"]["type"], "operation_status");
         assert_eq!(json["result"]["data"]["kind"], "control_probe");
+    }
+
+    #[test]
+    fn support_bundle_write_is_private_and_refuses_overwrite() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let output = temporary.path().join("support.zip");
+        write_support_bundle(&output, b"bundle").expect("bundle writes");
+        assert_eq!(std::fs::read(&output).expect("bundle reads"), b"bundle");
+        assert!(matches!(
+            write_support_bundle(&output, b"replacement"),
+            Err(CliError::SupportOutputExists)
+        ));
+        assert_eq!(
+            std::fs::read(&output).expect("bundle still reads"),
+            b"bundle"
+        );
+
+        let raced = temporary.path().join("raced.zip");
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let writers = [
+            (b"first".as_slice(), Arc::clone(&barrier)),
+            (b"second".as_slice(), Arc::clone(&barrier)),
+        ]
+        .into_iter()
+        .map(|(contents, barrier)| {
+            let raced = raced.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                write_support_bundle(&raced, contents)
+            })
+        })
+        .collect::<Vec<_>>();
+        barrier.wait();
+        let results = writers
+            .into_iter()
+            .map(|writer| writer.join().expect("support writer joins"))
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(CliError::SupportOutputExists)))
+                .count(),
+            1
+        );
+        let raced_contents = std::fs::read(&raced).expect("winning bundle reads");
+        assert!(matches!(raced_contents.as_slice(), b"first" | b"second"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            let mode = std::fs::metadata(&output)
+                .expect("bundle metadata reads")
+                .mode();
+            assert_eq!(mode & 0o077, 0);
+        }
+    }
+
+    #[test]
+    fn support_bundle_write_failure_leaves_private_reserved_output() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let output = temporary.path().join("partial.zip");
+        let error = write_support_bundle_with_writer(&output, b"complete", |file, _| {
+            file.write_all(b"partial")?;
+            Err(std::io::Error::other("injected support write failure"))
+        })
+        .expect_err("injected write fails");
+        assert!(matches!(error, CliError::SupportWrite(_)));
+        assert_eq!(
+            std::fs::read(&output).expect("reserved output reads"),
+            b"partial"
+        );
+        assert!(matches!(
+            write_support_bundle(&output, b"replacement"),
+            Err(CliError::SupportOutputExists)
+        ));
     }
 
     #[test]

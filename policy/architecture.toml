@@ -12,6 +12,7 @@ workspace_members = [
   "rootlight-ipc",
   "rootlight-ir",
   "rootlight-mcp-contract",
+  "rootlight-observability",
   "rootlight-operations",
   "rootlight-protocol",
   "rootlight-runtime",
@@ -45,6 +46,7 @@ allowed_internal_dependencies = [
   "rootlight-error",
   "rootlight-ids",
   "rootlight-ipc",
+  "rootlight-observability",
   "rootlight-protocol",
   "rootlight-runtime",
 ]
@@ -71,6 +73,7 @@ allowed_internal_dependencies = [
   "rootlight-error",
   "rootlight-ids",
   "rootlight-ipc",
+  "rootlight-observability",
   "rootlight-operations",
   "rootlight-protocol",
 ]
@@ -109,6 +112,11 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-mcp-contract"
 allowed_internal_dependencies = ["rootlight-error", "rootlight-ids", "rootlight-ir"]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-observability"
+allowed_internal_dependencies = []
 allow_build_script = false
 
 [[crates]]

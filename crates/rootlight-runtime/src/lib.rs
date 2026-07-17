@@ -227,6 +227,50 @@ impl RuntimePaths {
         self.endpoint_from_id(&self.endpoint_id(nonce), nonce)
     }
 
+    /// Applies and verifies the account-private policy on an exclusively opened output file.
+    ///
+    /// The caller must keep the handle open until content synchronization completes. On
+    /// Windows the handle must deny read, write, and delete sharing from creation onward so
+    /// inherited directory permissions cannot expose or replace the object before its protected
+    /// DACL is installed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] when handle metadata, ownership, permissions, reparse-point,
+    /// or Windows DACL validation fails.
+    pub fn secure_private_output_file(file: &mut File) -> Result<(), RuntimeError> {
+        let metadata = file.metadata().map_err(RuntimeError::Io)?;
+        if !metadata.file_type().is_file() {
+            return Err(RuntimeError::InsecureOutputFile);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(RuntimeError::Io)?;
+            let metadata = file.metadata().map_err(RuntimeError::Io)?;
+            if metadata.uid() != effective_user_id()
+                || metadata.nlink() != 1
+                || metadata.mode() & 0o077 != 0
+            {
+                return Err(RuntimeError::InsecureOutputFile);
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt as _;
+            use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+                return Err(RuntimeError::InsecureOutputFile);
+            }
+            apply_private_windows_dacl_to_file(file, PrivateScope::Account)?;
+            verify_private_windows_file_dacl(file, PrivateScope::Account)?;
+        }
+        Ok(())
+    }
+
     /// Writes a checked discovery record after the daemon endpoint is bound.
     ///
     /// # Errors
@@ -668,12 +712,10 @@ fn validate_discovery_metadata(metadata: &fs::Metadata) -> Result<(), RuntimeErr
 }
 
 #[cfg(windows)]
-fn apply_private_windows_dacl(path: &Path, scope: PrivateScope) -> Result<(), RuntimeError> {
-    use windows_permissions::{
-        LocalBox, SecurityDescriptor,
-        constants::{SeObjectType, SecurityInformation},
-        wrappers::SetNamedSecurityInfo,
-    };
+fn private_windows_descriptor(
+    scope: PrivateScope,
+) -> Result<windows_permissions::LocalBox<windows_permissions::SecurityDescriptor>, RuntimeError> {
+    use windows_permissions::{LocalBox, SecurityDescriptor};
 
     let expected_sids = windows_scope_sids(scope)?;
     let mut sddl = String::from("D:P");
@@ -684,6 +726,61 @@ fn apply_private_windows_dacl(path: &Path, scope: PrivateScope) -> Result<(), Ru
     let descriptor: LocalBox<SecurityDescriptor> = sddl
         .parse()
         .map_err(|_| RuntimeError::WindowsSecurityPolicy)?;
+    Ok(descriptor)
+}
+
+#[cfg(windows)]
+fn apply_private_windows_dacl_to_file(
+    file: &mut File,
+    scope: PrivateScope,
+) -> Result<(), RuntimeError> {
+    use windows_permissions::{
+        constants::{SeObjectType, SecurityInformation},
+        wrappers::SetSecurityInfo,
+    };
+
+    let descriptor = private_windows_descriptor(scope)?;
+    let dacl = descriptor
+        .dacl()
+        .ok_or(RuntimeError::WindowsSecurityPolicy)?;
+    SetSecurityInfo(
+        file,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        None,
+        None,
+        Some(dacl),
+        None,
+    )
+    .map_err(RuntimeError::Io)
+}
+
+#[cfg(windows)]
+fn verify_private_windows_file_dacl(file: &File, scope: PrivateScope) -> Result<(), RuntimeError> {
+    use windows_permissions::{
+        constants::{SeObjectType, SecurityInformation},
+        wrappers::GetSecurityInfo,
+    };
+
+    let expected_sids = windows_scope_sids(scope)?;
+    let descriptor = GetSecurityInfo(
+        file,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+    )
+    .map_err(RuntimeError::Io)?;
+    verify_windows_descriptor(&descriptor, &expected_sids)
+}
+
+#[cfg(windows)]
+fn apply_private_windows_dacl(path: &Path, scope: PrivateScope) -> Result<(), RuntimeError> {
+    use windows_permissions::{
+        LocalBox, SecurityDescriptor,
+        constants::{SeObjectType, SecurityInformation},
+        wrappers::SetNamedSecurityInfo,
+    };
+
+    let descriptor: LocalBox<SecurityDescriptor> = private_windows_descriptor(scope)?;
     let dacl = descriptor
         .dacl()
         .ok_or(RuntimeError::WindowsSecurityPolicy)?;
@@ -703,7 +800,7 @@ fn apply_private_windows_dacl(path: &Path, scope: PrivateScope) -> Result<(), Ru
 fn verify_private_windows_dacl(path: &Path, scope: PrivateScope) -> Result<(), RuntimeError> {
     use windows_permissions::{
         constants::{SeObjectType, SecurityInformation},
-        wrappers::{ConvertSecurityDescriptorToStringSecurityDescriptor, GetNamedSecurityInfo},
+        wrappers::GetNamedSecurityInfo,
     };
 
     let expected_sids = windows_scope_sids(scope)?;
@@ -713,11 +810,24 @@ fn verify_private_windows_dacl(path: &Path, scope: PrivateScope) -> Result<(), R
         SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
     )
     .map_err(RuntimeError::Io)?;
+    verify_windows_descriptor(&descriptor, &expected_sids)
+}
+
+#[cfg(windows)]
+fn verify_windows_descriptor(
+    descriptor: &windows_permissions::SecurityDescriptor,
+    expected_sids: &[String],
+) -> Result<(), RuntimeError> {
+    use windows_permissions::{
+        constants::SecurityInformation,
+        wrappers::ConvertSecurityDescriptorToStringSecurityDescriptor,
+    };
+
     let dacl = descriptor
         .dacl()
         .ok_or(RuntimeError::WindowsSecurityPolicy)?;
     let sddl =
-        ConvertSecurityDescriptorToStringSecurityDescriptor(&descriptor, SecurityInformation::Dacl)
+        ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, SecurityInformation::Dacl)
             .map_err(RuntimeError::Io)?;
     if !sddl.to_string_lossy().starts_with("D:P") {
         return Err(RuntimeError::WindowsSecurityPolicy);
@@ -884,6 +994,9 @@ pub enum RuntimeError {
     /// A persistent startup lock artifact violated the private-file policy.
     #[error("daemon startup lock artifact is insecure")]
     InsecureLockFile,
+    /// A user-selected protected output violated the private-file policy.
+    #[error("protected output file is insecure")]
+    InsecureOutputFile,
     /// Another process currently owns startup authority.
     #[error("daemon startup is already in progress")]
     LaunchBusy,
@@ -916,6 +1029,38 @@ mod tests {
         let paths = RuntimePaths::new(state, runtime).expect("explicit paths are valid");
         paths.prepare_owner().expect("private directories prepare");
         (temporary, paths)
+    }
+
+    #[test]
+    fn private_output_policy_validates_the_open_regular_file() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("support.zip");
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_GENERIC_READ, FILE_GENERIC_WRITE, WRITE_DAC,
+            };
+            options
+                .access_mode((FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC).0)
+                .share_mode(0);
+        }
+        let mut file = options.open(&path).expect("output file creates");
+
+        RuntimePaths::secure_private_output_file(&mut file).expect("output policy applies");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = file.metadata().expect("output metadata reads");
+            assert_eq!(metadata.mode() & 0o077, 0);
+            assert_eq!(metadata.nlink(), 1);
+        }
+        #[cfg(windows)]
+        verify_private_windows_file_dacl(&file, PrivateScope::Account)
+            .expect("output account DACL verifies through its handle");
     }
 
     #[test]
