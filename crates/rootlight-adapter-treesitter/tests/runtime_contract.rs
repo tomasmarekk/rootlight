@@ -11,19 +11,79 @@ use std::{
 };
 
 use rootlight_adapter_sdk::{
-    AdapterError, AnalysisLimits, BatchThresholds, BoundedSyntaxSink, EncodingId,
-    GenerationBoundSnapshot, IncludedRange, LanguageId, MemoryAdmissionPolicy, ParseRequest,
-    StreamLimits, execute_parse,
+    AdapterError, AnalysisLimits, BatchThresholds, EncodingId, GenerationBoundSnapshot,
+    IncludedRange, LanguageId, MemoryAdmissionPolicy, MemoryAdmissionStatus, ParseRequest,
+    RequestError, StreamLimits, execute_parse,
 };
 use rootlight_adapter_treesitter::{
     ParserSettings, ReuseInvalidation, ReuseStatus, RuntimeConfig, SourceEdit, TreeSitterProvider,
 };
 use rootlight_cancel::{Cancellation, CancellationReason};
+use rootlight_ids::content_hash;
 use rootlight_ir::{CoverageStatus, IrLimits, SourceRef, SourceSpan};
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
 
 const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+
+#[test]
+fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
+    let fixture = Fixture::new("admission.rs", b"fn admitted() {}\n");
+    let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
+    let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);
+    let settings = ParserSettings::new(64).expect("settings are bounded");
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "rust",
+        Vec::new(),
+    );
+
+    assert!(matches!(
+        provider.execute_with_previous(
+            &request,
+            None,
+            &[],
+            settings,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            &Cancellation::new(),
+        ),
+        Err(AdapterError::RejectedRequest(
+            RequestError::DeadlineRequired
+        ))
+    ));
+    assert!(matches!(
+        provider.execute_with_previous(
+            &request,
+            None,
+            &[],
+            settings,
+            MemoryAdmissionPolicy::RequireHardOrAccounted,
+            &deadline(Duration::from_secs(30)),
+        ),
+        Err(AdapterError::RejectedRequest(
+            RequestError::MemoryEnforcementUnavailable
+        ))
+    ));
+    assert_eq!(provider.stats().cache.entries, 0);
+
+    let output = provider
+        .execute_with_previous(
+            &request,
+            None,
+            &[],
+            settings,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            &deadline(Duration::from_secs(30)),
+        )
+        .expect("explicit M05 fallback admits incremental parsing");
+    assert_eq!(
+        output.output().memory_admission(),
+        MemoryAdmissionStatus::UnavailableM05Fallback
+    );
+    assert!(output.previous().is_some());
+}
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
@@ -167,6 +227,44 @@ fn included_ranges_report_the_unparsed_file_gap() {
 }
 
 #[test]
+fn partial_traversal_does_not_count_absolute_included_range_offsets_as_coverage() {
+    let mut source = vec![b' '; 100];
+    source.extend_from_slice(b"fn ranged() {}\n".repeat(6).as_slice());
+    source.resize(200, b' ');
+    let fixture = Fixture::new("offset-range.rs", &source);
+    let included = IncludedRange::new(
+        SourceSpan::new(fixture.snapshot.file(), 100, 200).expect("range is ordered"),
+        LanguageId::new("rust").expect("language is valid"),
+    );
+    let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);
+
+    for (max_nodes, max_depth, expected_code) in [
+        (1, 64, "syntax-node-limit"),
+        (1024, 1, "syntax-depth-limit"),
+    ] {
+        let limits = limits(MAX_SOURCE_BYTES, max_nodes, max_depth);
+        let request = request(
+            &fixture.snapshot,
+            &fixture.source,
+            &limits,
+            "rust",
+            vec![included.clone()],
+        );
+        let output = execute_parse(
+            &provider,
+            &request,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            &deadline(Duration::from_secs(30)),
+        )
+        .expect("bounded included range commits");
+
+        assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+        assert_eq!(output.report().coverage().covered_source_bytes(), 0);
+        assert_eq!(output.diagnostics()[0].code().as_str(), expected_code);
+    }
+}
+
+#[test]
 fn incremental_edit_reuses_only_an_exact_previous_identity() {
     let fixture = Fixture::new("incremental.rs", b"fn one() {}\n");
     let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
@@ -179,19 +277,14 @@ fn incremental_edit_reuses_only_an_exact_previous_identity() {
         "rust",
         Vec::new(),
     );
-    let mut first_sink = BoundedSyntaxSink::new(
-        fixture.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let cancellation = deadline(Duration::from_secs(30));
     let first = provider
-        .parse_with_previous(
+        .execute_with_previous(
             &first_request,
             None,
             &[],
             settings,
-            &mut first_sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         )
         .expect("initial parse succeeds");
@@ -209,18 +302,13 @@ fn incremental_edit_reuses_only_an_exact_previous_identity() {
         Vec::new(),
     );
     let edit = SourceEdit::new(3, 6, "two").expect("edit is ordered");
-    let mut second_sink = BoundedSyntaxSink::new(
-        updated.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let second = provider
-        .parse_with_previous(
+        .execute_with_previous(
             &second_request,
             Some(&previous),
             &[edit],
             settings,
-            &mut second_sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         )
         .expect("incremental parse succeeds");
@@ -235,6 +323,10 @@ fn incremental_edit_reuses_only_an_exact_previous_identity() {
         updated.source.content_hash()
     );
     assert_eq!(second.reuse_key().edits().len(), 1);
+    let edit_identity = second.reuse_key().edits()[0];
+    assert_eq!(edit_identity.replacement_bytes(), 3);
+    assert_eq!(edit_identity.replacement_hash(), content_hash(b"two"));
+    assert!(!format!("{:?}", second.reuse_key()).contains("two"));
     assert_eq!(provider.stats().checked_out_parsers, 0);
     assert_eq!(provider.stats().available_parsers, 1);
 }
@@ -254,35 +346,25 @@ fn provider_and_parser_settings_mismatches_invalidate_reuse() {
         Vec::new(),
     );
     let cancellation = deadline(Duration::from_secs(30));
-    let mut initial_sink = BoundedSyntaxSink::new(
-        fixture.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let initial = first_provider
-        .parse_with_previous(
+        .execute_with_previous(
             &request,
             None,
             &[],
             initial_settings,
-            &mut initial_sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         )
         .expect("initial parse succeeds");
     let previous = initial.previous().expect("initial tree is cached").clone();
 
-    let mut provider_sink = BoundedSyntaxSink::new(
-        fixture.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let provider_mismatch = other_provider
-        .parse_with_previous(
+        .execute_with_previous(
             &request,
             Some(&previous),
             &[],
             initial_settings,
-            &mut provider_sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         )
         .expect("provider mismatch falls back");
@@ -291,18 +373,13 @@ fn provider_and_parser_settings_mismatches_invalidate_reuse() {
         ReuseStatus::Invalidated(ReuseInvalidation::Provider)
     );
 
-    let mut settings_sink = BoundedSyntaxSink::new(
-        fixture.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let settings_mismatch = first_provider
-        .parse_with_previous(
+        .execute_with_previous(
             &request,
             Some(&previous),
             &[],
             ParserSettings::new(128).expect("alternate settings are bounded"),
-            &mut settings_sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         )
         .expect("settings mismatch falls back");
@@ -326,94 +403,69 @@ fn incremental_edit_work_is_bounded_before_cloning_or_intermediate_growth() {
         Vec::new(),
     );
     let cancellation = deadline(Duration::from_secs(30));
-    let mut initial_sink = BoundedSyntaxSink::new(
-        fixture.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let initial = provider
-        .parse_with_previous(
+        .execute_with_previous(
             &request,
             None,
             &[],
             settings,
-            &mut initial_sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         )
         .expect("initial bounded source parses");
     let previous = initial.previous().expect("initial tree is cached").clone();
 
-    let mut no_previous_sink = BoundedSyntaxSink::new(
-        fixture.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let insertion = SourceEdit::new(0, 0, "x").expect("test insertion is valid");
     assert!(matches!(
-        provider.parse_with_previous(
+        provider.execute_with_previous(
             &request,
             None,
             std::slice::from_ref(&insertion),
             settings,
-            &mut no_previous_sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         ),
         Err(AdapterError::ProviderFailed { code })
             if code.as_str() == "incremental-edit-without-previous"
     ));
 
-    let mut count_sink = BoundedSyntaxSink::new(
-        fixture.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let empty_edit = SourceEdit::new(0, 0, "").expect("empty replacement is valid");
     let too_many = vec![empty_edit; 5];
     assert!(matches!(
-        provider.parse_with_previous(
+        provider.execute_with_previous(
             &request,
             Some(&previous),
             &too_many,
             settings,
-            &mut count_sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         ),
         Err(AdapterError::ProviderFailed { code }) if code.as_str() == "incremental-edit-limit"
     ));
 
-    let mut replacement_sink = BoundedSyntaxSink::new(
-        fixture.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let oversized_replacement =
         SourceEdit::new(0, 0, "123456789").expect("replacement offsets are valid");
     assert!(matches!(
-        provider.parse_with_previous(
+        provider.execute_with_previous(
             &request,
             Some(&previous),
             &[oversized_replacement],
             settings,
-            &mut replacement_sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         ),
         Err(AdapterError::ProviderFailed { code })
             if code.as_str() == "incremental-replacement-limit"
     ));
 
-    let mut intermediate_sink = BoundedSyntaxSink::new(
-        fixture.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let remove_insertion = SourceEdit::new(0, 1, "").expect("test deletion is valid");
     assert!(matches!(
-        provider.parse_with_previous(
+        provider.execute_with_previous(
             &request,
             Some(&previous),
             &[insertion, remove_insertion],
             settings,
-            &mut intermediate_sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         ),
         Err(AdapterError::ProviderFailed { code })
@@ -490,19 +542,14 @@ fn cache_byte_eviction_invalidates_an_old_handle() {
         "rust",
         Vec::new(),
     );
-    let mut sink = BoundedSyntaxSink::new(
-        fixture.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let cancellation = deadline(Duration::from_secs(30));
     let first = provider
-        .parse_with_previous(
+        .execute_with_previous(
             &first_request,
             None,
             &[],
             settings,
-            &mut sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         )
         .expect("first cache parse succeeds");
@@ -518,36 +565,26 @@ fn cache_byte_eviction_invalidates_an_old_handle() {
         "rust",
         Vec::new(),
     );
-    let mut second_sink = BoundedSyntaxSink::new(
-        updated.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let edit = SourceEdit::new(3, 4, "b").expect("edit is valid");
     provider
-        .parse_with_previous(
+        .execute_with_previous(
             &second_request,
             Some(&old_handle),
             &[edit],
             settings,
-            &mut second_sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         )
         .expect("second cache parse succeeds");
     assert_eq!(provider.stats().cache.entries, 1);
 
-    let mut third_sink = BoundedSyntaxSink::new(
-        updated.source.clone(),
-        limits.syntax_stream().clone(),
-        limits.max_syntax_depth(),
-    );
     let third = provider
-        .parse_with_previous(
+        .execute_with_previous(
             &second_request,
             Some(&old_handle),
             &[],
             settings,
-            &mut third_sink,
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             &cancellation,
         )
         .expect("evicted handle falls back");

@@ -7,6 +7,15 @@ use rootlight_adapter_sdk::{DescriptorError, LabelError};
 
 use crate::RegistryError;
 
+const HARD_MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
+const HARD_MAX_SYNTAX_NODES: usize = 16 * 1024 * 1024;
+const HARD_MAX_SYNTAX_DEPTH: usize = 4096;
+const HARD_MAX_INCLUDED_RANGES: usize = 65_536;
+const HARD_MAX_INCREMENTAL_EDITS: usize = 65_536;
+const HARD_MAX_CONCURRENT_PARSES: usize = 256;
+const HARD_MAX_CACHE_BYTES: usize = u32::MAX as usize;
+const HARD_MAX_INPUT_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+
 /// Parser input scheduling options included in incremental reuse identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParserSettings {
@@ -21,6 +30,11 @@ impl ParserSettings {
     /// Returns [`RuntimeConfigError::Zero`] when `input_chunk_bytes` is zero.
     pub fn new(input_chunk_bytes: usize) -> Result<Self, RuntimeConfigError> {
         require_nonzero("input_chunk_bytes", input_chunk_bytes)?;
+        require_hard_maximum(
+            "input_chunk_bytes",
+            input_chunk_bytes,
+            HARD_MAX_INPUT_CHUNK_BYTES,
+        )?;
         Ok(Self { input_chunk_bytes })
     }
 
@@ -84,6 +98,29 @@ impl RuntimeConfig {
                 observed: max_source_bytes,
                 maximum: u32::MAX as usize,
             });
+        }
+        for (field, value, maximum) in [
+            ("max_source_bytes", max_source_bytes, HARD_MAX_SOURCE_BYTES),
+            ("max_syntax_nodes", max_syntax_nodes, HARD_MAX_SYNTAX_NODES),
+            ("max_syntax_depth", max_syntax_depth, HARD_MAX_SYNTAX_DEPTH),
+            (
+                "max_included_ranges",
+                max_included_ranges,
+                HARD_MAX_INCLUDED_RANGES,
+            ),
+            (
+                "max_incremental_edits",
+                max_incremental_edits,
+                HARD_MAX_INCREMENTAL_EDITS,
+            ),
+            (
+                "max_concurrent_parses",
+                max_concurrent_parses,
+                HARD_MAX_CONCURRENT_PARSES,
+            ),
+            ("max_cache_bytes", max_cache_bytes, HARD_MAX_CACHE_BYTES),
+        ] {
+            require_hard_maximum(field, value, maximum)?;
         }
         if default_settings.input_chunk_bytes > max_source_bytes {
             return Err(RuntimeConfigError::InputChunkTooLarge {
@@ -190,6 +227,16 @@ pub enum RuntimeConfigError {
     /// The process-local provider identity space was exhausted.
     #[error("Tree-sitter provider identity space is exhausted")]
     ProviderIdentityExhausted,
+    /// A capacity exceeded the audited in-process hard maximum.
+    #[error("{field} value {observed} exceeds hard maximum {maximum}")]
+    AboveHardMaximum {
+        /// Invalid capacity field.
+        field: &'static str,
+        /// Requested capacity.
+        observed: usize,
+        /// Audited hard maximum.
+        maximum: usize,
+    },
 }
 
 fn require_nonzero(field: &'static str, value: usize) -> Result<(), RuntimeConfigError> {
@@ -197,5 +244,57 @@ fn require_nonzero(field: &'static str, value: usize) -> Result<(), RuntimeConfi
         Err(RuntimeConfigError::Zero { field })
     } else {
         Ok(())
+    }
+}
+
+fn require_hard_maximum(
+    field: &'static str,
+    value: usize,
+    maximum: usize,
+) -> Result<(), RuntimeConfigError> {
+    if value > maximum {
+        Err(RuntimeConfigError::AboveHardMaximum {
+            field,
+            observed: value,
+            maximum,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extreme_capacities_are_rejected_without_panicking_or_allocating() {
+        let result = std::panic::catch_unwind(|| {
+            RuntimeConfig::new(
+                1024,
+                1024,
+                64,
+                4,
+                4,
+                usize::MAX,
+                4096,
+                ParserSettings::new(64).expect("baseline setting is valid"),
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Ok(Err(RuntimeConfigError::AboveHardMaximum {
+                field: "max_concurrent_parses",
+                ..
+            }))
+        ));
+        assert!(matches!(
+            ParserSettings::new(usize::MAX),
+            Err(RuntimeConfigError::AboveHardMaximum {
+                field: "input_chunk_bytes",
+                ..
+            })
+        ));
     }
 }

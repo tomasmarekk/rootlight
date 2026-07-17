@@ -894,10 +894,46 @@ pub fn execute_parse<P: ParseProvider + ?Sized>(
     memory_policy: MemoryAdmissionPolicy,
     cancellation: &Cancellation,
 ) -> Result<ParseOutput, AdapterError> {
+    execute_parse_transaction(
+        provider.capabilities(),
+        request,
+        memory_policy,
+        cancellation,
+        |sink, cancellation| {
+            provider
+                .parse(request, sink, cancellation)
+                .map(|report| (report, ()))
+        },
+    )
+    .map(|(output, ())| output)
+}
+
+/// Executes a parser transaction that returns provider-owned continuation data.
+///
+/// This is the safe admission path for incremental parsers whose successful
+/// operation returns metadata in addition to a [`ParseReport`]. The SDK applies
+/// the same deadline, capability, memory-policy, bounded-sink, report, and
+/// transactional commit checks as [`execute_parse`] before returning either
+/// the committed [`ParseOutput`] or the provider-owned continuation.
+///
+/// # Errors
+///
+/// Returns [`AdapterError`] under the same conditions as [`execute_parse`].
+/// Continuation data is dropped whenever admission, parsing, validation, or
+/// commit fails.
+pub fn execute_parse_transaction<T>(
+    capabilities: &ParseCapabilities,
+    request: &ParseRequest<'_>,
+    memory_policy: MemoryAdmissionPolicy,
+    cancellation: &Cancellation,
+    operation: impl FnOnce(
+        &mut dyn SyntaxFactSink,
+        &Cancellation,
+    ) -> Result<(ParseReport, T), AdapterError>,
+) -> Result<(ParseOutput, T), AdapterError> {
     validate_deadline_admission(cancellation)?;
-    validate_parse_capabilities(provider.capabilities(), request)?;
-    let memory_admission =
-        admit_memory(provider.capabilities().memory_enforcement(), memory_policy)?;
+    validate_parse_capabilities(capabilities, request)?;
+    let memory_admission = admit_memory(capabilities.memory_enforcement(), memory_policy)?;
     let mut sink = BoundedSyntaxSink::new(
         request.source().source_ref().clone(),
         request.limits().syntax_stream().clone(),
@@ -907,8 +943,8 @@ pub fn execute_parse<P: ParseProvider + ?Sized>(
         sink.discard();
         return Err(cancelled.into());
     }
-    let report = match provider.parse(request, &mut sink, cancellation) {
-        Ok(report) => report,
+    let (report, continuation) = match operation(&mut sink, cancellation) {
+        Ok(result) => result,
         Err(error) => {
             sink.discard();
             return Err(error);
@@ -928,19 +964,22 @@ pub fn execute_parse<P: ParseProvider + ?Sized>(
         return Err(error.into());
     }
     if let Err(error) = validate_memory_report(
-        provider.capabilities().memory_enforcement(),
+        capabilities.memory_enforcement(),
         report.resources().reported_memory_bytes(),
     ) {
         sink.discard();
         return Err(error.into());
     }
     let (facts, diagnostics) = sink.commit()?;
-    Ok(ParseOutput {
-        facts,
-        diagnostics,
-        report,
-        memory_admission,
-    })
+    Ok((
+        ParseOutput {
+            facts,
+            diagnostics,
+            report,
+            memory_admission,
+        },
+        continuation,
+    ))
 }
 
 /// Executes one analyzer transaction and commits only canonical valid IR.

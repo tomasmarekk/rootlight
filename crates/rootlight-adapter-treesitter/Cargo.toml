@@ -7,6 +7,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+blake3.workspace = true
 rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
@@ -19,7 +20,6 @@ tree-sitter-python.workspace = true
 tree-sitter-rust.workspace = true
 
 [dev-dependencies]
-blake3.workspace = true
 rootlight-vfs = { path = "../rootlight-vfs" }
 tempfile.workspace = true
 

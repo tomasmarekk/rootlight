@@ -23,7 +23,10 @@ impl ParserPool {
             inner: Arc::new(PoolInner {
                 capacity,
                 state: Mutex::new(PoolState {
-                    available: Vec::with_capacity(capacity),
+                    // Parsers are created lazily; reserving the configured
+                    // ceiling would turn invalid/extreme policy into an eager
+                    // allocation hazard before admission.
+                    available: Vec::new(),
                     created: 0,
                     checked_out: 0,
                 }),
@@ -192,6 +195,15 @@ mod tests {
         assert_eq!(state.created, 0);
         assert_eq!(state.checked_out, 0);
         assert!(state.available.is_empty());
+    }
+
+    #[test]
+    fn constructing_an_extreme_lazy_pool_does_not_preallocate() {
+        let result = std::panic::catch_unwind(|| ParserPool::new(usize::MAX));
+
+        let pool = result.expect("lazy pool construction does not panic");
+        assert_eq!(pool.stats().created, 0);
+        assert_eq!(pool.stats().available, 0);
     }
 
     fn deadline(duration: Duration) -> Cancellation {
