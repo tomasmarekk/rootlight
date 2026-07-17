@@ -33,6 +33,7 @@ use crate::{
 };
 
 const LOGICAL_TREE_NODE_BYTES: usize = 64;
+const CANCELLATION_CHECK_INTERVAL: usize = 256;
 static NEXT_PROVIDER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Bounded first-party Tree-sitter parser provider.
@@ -111,6 +112,7 @@ impl TreeSitterProvider {
         if settings.input_chunk_bytes() > self.config.max_source_bytes() {
             return Err(provider_failure("treesitter-settings"));
         }
+        validate_edit_admission(previous, edits, &self.config, cancellation)?;
         let family = self
             .registry
             .family_for_language(request.language())
@@ -175,8 +177,14 @@ impl TreeSitterProvider {
             settings,
             edits: edits.to_vec(),
         };
-        let (old_tree, mut reuse_status) =
-            prepare_reuse(cached.as_ref(), &identity, source_bytes, edits);
+        let (old_tree, mut reuse_status) = prepare_reuse(
+            cached.as_ref(),
+            &identity,
+            source_bytes,
+            edits,
+            self.config.max_source_bytes(),
+            cancellation,
+        )?;
 
         let mut lease = self.pool.acquire(cancellation).map_err(map_pool_error)?;
         let parser = lease.parser_mut().map_err(map_pool_error)?;
@@ -222,7 +230,9 @@ impl TreeSitterProvider {
             request,
             request.limits().max_syntax_nodes(),
             request.limits().max_syntax_depth(),
+            cancellation,
         )?;
+        cancellation.check()?;
         emit_primary_diagnostic(&traversal, request, sink, cancellation)?;
         let usage = sink.staged_usage();
         let coverage = CoverageReport::new(
@@ -499,54 +509,95 @@ fn invalid_identity() -> ParseIdentity {
     }
 }
 
+fn validate_edit_admission(
+    previous: Option<&PreviousParse>,
+    edits: &[SourceEdit],
+    config: &RuntimeConfig,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    if edits.is_empty() {
+        return Ok(());
+    }
+    if previous.is_none() {
+        return Err(provider_failure("incremental-edit-without-previous"));
+    }
+    if edits.len() > config.max_incremental_edits() {
+        return Err(provider_failure("incremental-edit-limit"));
+    }
+    let mut replacement_bytes = 0usize;
+    for (index, edit) in edits.iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        replacement_bytes = replacement_bytes
+            .checked_add(edit.replacement_bytes())
+            .ok_or_else(|| provider_failure("incremental-replacement-limit"))?;
+        if replacement_bytes > config.max_source_bytes() {
+            return Err(provider_failure("incremental-replacement-limit"));
+        }
+    }
+    cancellation.check()?;
+    Ok(())
+}
+
 fn prepare_reuse(
     cached: Option<&CachedParse>,
     current: &ParseIdentity,
     current_source: &[u8],
     edits: &[SourceEdit],
-) -> (Option<Tree>, ReuseStatus) {
+    max_source_bytes: usize,
+    cancellation: &Cancellation,
+) -> Result<(Option<Tree>, ReuseStatus), AdapterError> {
     let Some(cached) = cached else {
-        return (None, ReuseStatus::Fresh);
+        return Ok((None, ReuseStatus::Fresh));
     };
     if let Some(reason) = cached.invalidation {
-        return (None, ReuseStatus::Invalidated(reason));
+        return Ok((None, ReuseStatus::Invalidated(reason)));
     }
     if cached.identity.family != current.family {
-        return (None, ReuseStatus::Invalidated(ReuseInvalidation::Language));
+        return Ok((None, ReuseStatus::Invalidated(ReuseInvalidation::Language)));
     }
     if cached.identity.grammar_version != current.grammar_version {
-        return (
+        return Ok((
             None,
             ReuseStatus::Invalidated(ReuseInvalidation::GrammarVersion),
-        );
+        ));
     }
     if cached.identity.encoding != current.encoding {
-        return (None, ReuseStatus::Invalidated(ReuseInvalidation::Encoding));
+        return Ok((None, ReuseStatus::Invalidated(ReuseInvalidation::Encoding)));
     }
     if cached.identity.included_ranges != current.included_ranges {
-        return (
+        return Ok((
             None,
             ReuseStatus::Invalidated(ReuseInvalidation::IncludedRanges),
-        );
+        ));
     }
     if cached.identity.settings != current.settings {
-        return (
+        return Ok((
             None,
             ReuseStatus::Invalidated(ReuseInvalidation::ParserSettings),
-        );
+        ));
     }
     if cached.identity.content_hash != current.content_hash && edits.is_empty() {
-        return (
+        return Ok((
             None,
             ReuseStatus::Invalidated(ReuseInvalidation::MissingEdits),
-        );
+        ));
     }
     let Some(tree) = cached.tree.clone() else {
-        return (None, ReuseStatus::Invalidated(ReuseInvalidation::Evicted));
+        return Ok((None, ReuseStatus::Invalidated(ReuseInvalidation::Evicted)));
     };
-    match apply_edits(tree, &cached.source, current_source, edits) {
-        Ok(tree) => (Some(tree), ReuseStatus::Reused { changed_ranges: 0 }),
-        Err(reason) => (None, ReuseStatus::Invalidated(reason)),
+    match apply_edits(
+        tree,
+        &cached.source,
+        current_source,
+        edits,
+        max_source_bytes,
+        cancellation,
+    ) {
+        Ok(tree) => Ok((Some(tree), ReuseStatus::Reused { changed_ranges: 0 })),
+        Err(ApplyEditError::Invalidation(reason)) => Ok((None, ReuseStatus::Invalidated(reason))),
+        Err(ApplyEditError::Fatal(error)) => Err(error),
     }
 }
 
@@ -555,16 +606,24 @@ fn apply_edits(
     old_source: &[u8],
     new_source: &[u8],
     edits: &[SourceEdit],
-) -> Result<Tree, ReuseInvalidation> {
+    max_source_bytes: usize,
+    cancellation: &Cancellation,
+) -> Result<Tree, ApplyEditError> {
     let mut source = old_source.to_vec();
-    for edit in edits {
+    for (index, edit) in edits.iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation
+                .check()
+                .map_err(AdapterError::from)
+                .map_err(ApplyEditError::Fatal)?;
+        }
         if edit.start_byte() > edit.old_end_byte() || edit.old_end_byte() > source.len() {
-            return Err(ReuseInvalidation::EditOutsideSource);
+            return Err(ReuseInvalidation::EditOutsideSource.into());
         }
         if !source.is_char_boundary(edit.start_byte())
             || !source.is_char_boundary(edit.old_end_byte())
         {
-            return Err(ReuseInvalidation::EditNotCharacterBoundary);
+            return Err(ReuseInvalidation::EditNotCharacterBoundary.into());
         }
         let start_position = point_for_offset(&source, edit.start_byte())
             .ok_or(ReuseInvalidation::EditOutsideSource)?;
@@ -575,6 +634,17 @@ fn apply_edits(
             .start_byte()
             .checked_add(edit.replacement().len())
             .ok_or(ReuseInvalidation::AccountingOverflow)?;
+        let removed_bytes = edit.old_end_byte().saturating_sub(edit.start_byte());
+        let intermediate_bytes = source
+            .len()
+            .checked_sub(removed_bytes)
+            .and_then(|length| length.checked_add(edit.replacement_bytes()))
+            .ok_or(ReuseInvalidation::AccountingOverflow)?;
+        if intermediate_bytes > max_source_bytes {
+            return Err(ApplyEditError::Fatal(provider_failure(
+                "incremental-source-limit",
+            )));
+        }
         tree.edit(&InputEdit {
             start_byte: edit.start_byte(),
             old_end_byte: edit.old_end_byte(),
@@ -588,10 +658,25 @@ fn apply_edits(
             edit.replacement().iter().copied(),
         );
     }
+    cancellation
+        .check()
+        .map_err(AdapterError::from)
+        .map_err(ApplyEditError::Fatal)?;
     if source == new_source {
         Ok(tree)
     } else {
-        Err(ReuseInvalidation::EditResultMismatch)
+        Err(ReuseInvalidation::EditResultMismatch.into())
+    }
+}
+
+enum ApplyEditError {
+    Invalidation(ReuseInvalidation),
+    Fatal(AdapterError),
+}
+
+impl From<ReuseInvalidation> for ApplyEditError {
+    fn from(reason: ReuseInvalidation) -> Self {
+        Self::Invalidation(reason)
     }
 }
 
@@ -674,46 +759,33 @@ enum PrimaryDiagnostic {
     ErrorRecovery { start: usize, end: usize },
 }
 
+#[derive(Debug)]
+struct SyntaxTraversal {
+    processed_nodes: usize,
+    observed_depth: usize,
+    covered_source_bytes: usize,
+    error_span: Option<(usize, usize)>,
+    limited_nodes: bool,
+    limited_depth: bool,
+}
+
 fn inspect_tree(
     tree: &Tree,
     request: &ParseRequest<'_>,
     max_nodes: usize,
     max_depth: usize,
+    cancellation: &Cancellation,
 ) -> Result<TraversalReport, AdapterError> {
-    let root = tree.root_node();
-    let mut stack = vec![(root, 0usize)];
-    let mut processed_nodes = 0usize;
-    let mut observed_depth = 0usize;
-    let mut covered_source_bytes = 0usize;
-    let mut error_span = None;
-    let mut limited_nodes = false;
-    let mut limited_depth = false;
-    while let Some((node, depth)) = stack.pop() {
-        if processed_nodes >= max_nodes {
-            limited_nodes = true;
-            break;
-        }
-        processed_nodes = processed_nodes
-            .checked_add(1)
-            .ok_or_else(|| provider_failure("node-accounting"))?;
-        observed_depth = observed_depth.max(depth);
-        if node.child_count() == 0 {
-            covered_source_bytes = covered_source_bytes.max(node.end_byte());
-        }
-        if error_span.is_none() && (node.is_error() || node.is_missing()) {
-            error_span = Some((node.start_byte(), node.end_byte()));
-        }
-        if depth >= max_depth && node.child_count() > 0 {
-            limited_depth = true;
-            continue;
-        }
-        limited_nodes |= push_children_bounded(
-            node,
-            depth,
-            &mut stack,
-            max_nodes.saturating_sub(processed_nodes),
-        );
-    }
+    let traversal = traverse_syntax(tree, max_nodes, max_depth, cancellation)?;
+    cancellation.check()?;
+    let SyntaxTraversal {
+        processed_nodes,
+        observed_depth,
+        covered_source_bytes,
+        error_span,
+        limited_nodes,
+        limited_depth,
+    } = traversal;
     let source_len = request.source().bytes().len();
     let requested_covered_bytes = if request.included_ranges().is_empty() {
         source_len
@@ -768,6 +840,61 @@ fn inspect_tree(
         coverage,
         primary_diagnostic,
         fully_traversed: !limited_nodes && !limited_depth,
+    })
+}
+
+fn traverse_syntax(
+    tree: &Tree,
+    max_nodes: usize,
+    max_depth: usize,
+    cancellation: &Cancellation,
+) -> Result<SyntaxTraversal, AdapterError> {
+    cancellation.check()?;
+    let root = tree.root_node();
+    let mut stack = vec![(root, 0usize)];
+    let mut processed_nodes = 0usize;
+    let mut observed_depth = 0usize;
+    let mut covered_source_bytes = 0usize;
+    let mut error_span = None;
+    let mut limited_nodes = false;
+    let mut limited_depth = false;
+    while let Some((node, depth)) = stack.pop() {
+        if processed_nodes.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if processed_nodes >= max_nodes {
+            limited_nodes = true;
+            break;
+        }
+        processed_nodes = processed_nodes
+            .checked_add(1)
+            .ok_or_else(|| provider_failure("node-accounting"))?;
+        observed_depth = observed_depth.max(depth);
+        if node.child_count() == 0 {
+            covered_source_bytes = covered_source_bytes.max(node.end_byte());
+        }
+        if error_span.is_none() && (node.is_error() || node.is_missing()) {
+            error_span = Some((node.start_byte(), node.end_byte()));
+        }
+        if depth >= max_depth && node.child_count() > 0 {
+            limited_depth = true;
+            continue;
+        }
+        limited_nodes |= push_children_bounded(
+            node,
+            depth,
+            &mut stack,
+            max_nodes.saturating_sub(processed_nodes),
+        );
+    }
+    cancellation.check()?;
+    Ok(SyntaxTraversal {
+        processed_nodes,
+        observed_depth,
+        covered_source_bytes,
+        error_span,
+        limited_nodes,
+        limited_depth,
     })
 }
 
@@ -938,14 +1065,27 @@ mod tests {
                 tree.clone(),
                 "fn café() {}".as_bytes(),
                 b"fn xafe() {}",
-                &[split_scalar]
+                &[split_scalar],
+                usize::MAX,
+                &Cancellation::new(),
             ),
-            Err(ReuseInvalidation::EditNotCharacterBoundary)
+            Err(ApplyEditError::Invalidation(
+                ReuseInvalidation::EditNotCharacterBoundary
+            ))
         ));
         let mismatch = SourceEdit::new(3, 8, "other").expect("test edit is valid");
         assert!(matches!(
-            apply_edits(tree, "fn café() {}".as_bytes(), b"different", &[mismatch]),
-            Err(ReuseInvalidation::EditResultMismatch)
+            apply_edits(
+                tree,
+                "fn café() {}".as_bytes(),
+                b"different",
+                &[mismatch],
+                usize::MAX,
+                &Cancellation::new(),
+            ),
+            Err(ApplyEditError::Invalidation(
+                ReuseInvalidation::EditResultMismatch
+            ))
         ));
     }
 
@@ -961,13 +1101,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn traversal_and_edit_preparation_observe_cancellation() {
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+        let tree = language_tree(GrammarFamily::Rust, b"fn cancelled() {}");
+
+        assert!(matches!(
+            traverse_syntax(&tree, 1024, 64, &cancellation),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest
+            })
+        ));
+
+        let config = RuntimeConfig::new(
+            1024,
+            1024,
+            64,
+            4,
+            4,
+            1,
+            4096,
+            ParserSettings::new(64).expect("test parser setting is valid"),
+        )
+        .expect("test runtime configuration is valid");
+        let previous = PreviousParse {
+            provider_id: 1,
+            entry_id: 1,
+        };
+        let edit = SourceEdit::new(0, 0, "x").expect("test edit is valid");
+        assert!(matches!(
+            validate_edit_admission(Some(&previous), &[edit], &config, &cancellation),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest
+            })
+        ));
+    }
+
     fn assert_invalidated(
         cached: &CachedParse,
         current: ParseIdentity,
         expected: ReuseInvalidation,
     ) {
         assert!(matches!(
-            prepare_reuse(Some(cached), &current, &cached.source, &[]),
+            prepare_reuse(
+                Some(cached),
+                &current,
+                &cached.source,
+                &[],
+                usize::MAX,
+                &Cancellation::new(),
+            )
+            .expect("reuse identity validation succeeds"),
             (None, ReuseStatus::Invalidated(observed)) if observed == expected
         ));
     }
