@@ -2780,6 +2780,23 @@ pub struct ControlService {
     limits: DaemonLimits,
     diagnostic_actor: Option<DiagnosticActorHandle>,
     pending_admissions: Arc<Mutex<PendingAdmissionRegistry>>,
+    #[cfg(test)]
+    cancellation_handoff_hook: Option<CancellationHandoffTestHook>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct CancellationHandoffTestHook {
+    initial_not_found: Arc<tokio::sync::Barrier>,
+    resume: Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(test)]
+impl CancellationHandoffTestHook {
+    async fn pause_after_initial_not_found(&self) {
+        self.initial_not_found.wait().await;
+        self.resume.wait().await;
+    }
 }
 
 impl ControlService {
@@ -2809,6 +2826,8 @@ impl ControlService {
             limits,
             diagnostic_actor: None,
             pending_admissions: Arc::new(Mutex::new(PendingAdmissionRegistry::default())),
+            #[cfg(test)]
+            cancellation_handoff_hook: None,
         }
     }
 
@@ -3368,6 +3387,12 @@ async fn dispatch_async(
                         .await
                     {
                         Err(ServiceError::Operations(OperationError::NotFound)) => {
+                            #[cfg(test)]
+                            if let Some(hook) = &service.cancellation_handoff_hook {
+                                // The barriers make both sides of the handoff observable
+                                // without changing production scheduling or using sleeps.
+                                hook.pause_after_initial_not_found().await;
+                            }
                             let pending = service.cancel_pending_admission(operation)?;
                             match journal
                                 .control(ControlRequest::OperationCancel(operation))
@@ -5593,6 +5618,145 @@ mod tests {
                 .cancel_pending_admission(operation)
                 .expect("post-handoff lookup succeeds")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_retries_durable_state_after_pending_handoff_wins() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let limits = DaemonLimits::default();
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let initial_not_found = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let mut control_service =
+            ControlService::with_state(Arc::clone(&journal), [7; 16], Arc::clone(&state), limits);
+        control_service.cancellation_handoff_hook = Some(CancellationHandoffTestHook {
+            initial_not_found: Arc::clone(&initial_not_found),
+            resume: Arc::clone(&resume),
+        });
+        let service = Arc::new(control_service);
+        let mut orchestrator = DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), limits)
+            .expect("orchestrator starts");
+        let (submissions, mut submission_rx) = tokio::sync::mpsc::channel(1);
+        let commands = OrchestratorSenders::new(submissions);
+        let operation = OperationId::from_bytes([44; 16]);
+        let owner = ClientInstanceId::new([44; 16]).expect("client identity is valid");
+
+        let submission_dispatch = {
+            let service = Arc::clone(&service);
+            let actor = actor.handle();
+            let commands = commands.clone();
+            tokio::spawn(async move {
+                dispatch_async(
+                    service.as_ref(),
+                    &actor,
+                    &commands,
+                    daemon::RequestEnvelope {
+                        request_id: 1,
+                        instance_nonce: vec![7; 16],
+                        timeout_ms: None,
+                        request: Some(daemon::request_envelope::Request::OperationSubmit(
+                            daemon::OperationSubmitRequest {
+                                operation: Some(common::OperationId {
+                                    value: operation.as_bytes().to_vec(),
+                                }),
+                                kind: daemon::OperationKind::ControlProbe as i32,
+                                plan_hash: CONTROL_PROBE_PLAN_HASH.to_vec(),
+                                detached: true,
+                                timeout_ms: None,
+                                deadline_unix_ms: None,
+                                lease_expires_unix_ms: None,
+                            },
+                        )),
+                    },
+                    owner,
+                    PROTOCOL_MINOR,
+                )
+                .await
+            })
+        };
+        let admission = submission_rx
+            .recv()
+            .await
+            .expect("submission reaches the pending lane");
+        let cancellation_dispatch = {
+            let service = Arc::clone(&service);
+            let actor = actor.handle();
+            let commands = commands.clone();
+            tokio::spawn(async move {
+                dispatch_async(
+                    service.as_ref(),
+                    &actor,
+                    &commands,
+                    daemon::RequestEnvelope {
+                        request_id: 2,
+                        instance_nonce: vec![7; 16],
+                        timeout_ms: None,
+                        request: Some(daemon::request_envelope::Request::OperationCancel(
+                            daemon::OperationCancelRequest {
+                                operation: Some(common::OperationId {
+                                    value: operation.as_bytes().to_vec(),
+                                }),
+                            },
+                        )),
+                    },
+                    owner,
+                    PROTOCOL_MINOR,
+                )
+                .await
+            })
+        };
+
+        initial_not_found.wait().await;
+        orchestrator
+            .submit(admission)
+            .await
+            .expect("pending submission becomes durable");
+        assert!(
+            !service
+                .pending_admissions
+                .lock()
+                .expect("pending registry is available")
+                .by_operation
+                .contains_key(&operation)
+        );
+        resume.wait().await;
+
+        let cancellation = cancellation_dispatch
+            .await
+            .expect("cancellation dispatch joins");
+        let Some(daemon::response_envelope::Response::OperationCancel(cancellation)) =
+            cancellation.response
+        else {
+            panic!("durable retry must acknowledge cancellation");
+        };
+        assert!(cancellation.accepted);
+        assert!(
+            cancellation
+                .operation
+                .expect("cancelled operation is present")
+                .cancellation_requested
+        );
+        assert!(
+            journal
+                .status(operation)
+                .expect("durable operation loads")
+                .cancellation_requested
+        );
+        assert!(matches!(
+            submission_dispatch
+                .await
+                .expect("submission dispatch joins")
+                .response,
+            Some(daemon::response_envelope::Response::OperationSubmit(_))
+        ));
+
+        orchestrator
+            .shutdown()
+            .await
+            .expect("orchestrator shuts down");
+        actor.join().expect("actor joins");
     }
 
     #[tokio::test(start_paused = true)]
