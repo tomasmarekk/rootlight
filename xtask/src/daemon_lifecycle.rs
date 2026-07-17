@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
     sync::{Arc, Barrier},
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -18,6 +18,11 @@ use rootlight_client::{
 use rootlight_error::{ErrorCode, PublicValue};
 use rootlight_ids::OperationId;
 use rootlight_ipc::connect;
+use rootlight_observability::{
+    ControlMethod, DaemonLifecycle as TelemetryDaemonLifecycle, LogEvent,
+    MAX_STRUCTURED_LOG_LINE_BYTES, SpanKind, StructuredLogRecord, TELEMETRY_SCHEMA_VERSION,
+    TelemetryOutcome,
+};
 use rootlight_runtime::{RuntimeError, RuntimePaths};
 use serde_json::Value;
 
@@ -30,6 +35,7 @@ const EXPECTED_CLIENT_CONNECTION_LIMIT: u32 = 8;
 const EXPECTED_CLIENT_OPERATION_LIMIT: u32 = 32;
 const EXPECTED_OPERATION_WORKERS: usize = 4;
 const REFERENCE_CONTROL_P95_TARGET: Duration = Duration::from_millis(50);
+const MAX_DAEMON_STDERR_BYTES: usize = 1024 * 1024;
 
 pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     let rootlight = binary_path(bin_dir, "rootlight")?;
@@ -187,7 +193,24 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     )?;
     assert_error_code(&writer_conflict, "BUSY")?;
 
-    exercise_stalled_peer_shutdown(&paths, &mut process)?;
+    let evidence_client = Client::connect_or_start(&paths, [62; 16], ConnectPolicy::ExistingOnly)
+        .map_err(LifecycleError::Client)?;
+    let telemetry_health = evidence_client.health().map_err(LifecycleError::Client)?;
+    let first_support = evidence_client
+        .support_bundle()
+        .map_err(LifecycleError::Client)?;
+    let support = evidence_client
+        .support_bundle()
+        .map_err(LifecycleError::Client)?;
+    assert_support_telemetry(&telemetry_health, &first_support, &support)?;
+    assert_privacy_sentinels_absent(
+        "support archive",
+        &support.archive,
+        &environment.private_values(),
+    )?;
+
+    let daemon_stderr = exercise_stalled_peer_shutdown(&paths, &mut process)?;
+    validate_daemon_stderr(&daemon_stderr, &environment.private_values())?;
     wait_until_absent(&paths)?;
 
     exercise_crash_restart(&paths, &daemon, &rootlight, &environment)?;
@@ -221,11 +244,16 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     )?;
     assert_success_type(&daemon_submit, "operation_submit")?;
     assert_operation_submit_equivalent(&standalone_submit, &daemon_submit)?;
-    parity_daemon.shutdown()?;
+    let parity_stderr = parity_daemon.shutdown()?;
+    assert_privacy_sentinels_absent(
+        "parity daemon stderr",
+        &parity_stderr,
+        &daemon_environment.private_values(),
+    )?;
     wait_until_absent(&daemon_paths)?;
 
     println!(
-        "daemon lifecycle check passed: startup, 100 deterministic concurrent clients, per-client operation quota isolation, saturated-worker control responsiveness, health, retry-safe submission, cancellation, stable deadlines, attached lease renewal and expiry, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
+        "daemon lifecycle check passed: startup, 100 deterministic concurrent clients, per-client operation quota isolation, saturated-worker control responsiveness, health, retry-safe submission, cancellation, stable deadlines, attached lease renewal and expiry, schema-v2 support telemetry, bounded structured JSONL, privacy sentinels, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
     );
     control_latency.report();
     Ok(())
@@ -250,6 +278,13 @@ impl Environment {
             .env("ROOTLIGHT_STATE_DIR", &self.state)
             .env("ROOTLIGHT_RUNTIME_DIR", &self.runtime);
     }
+
+    fn private_values(&self) -> Vec<Vec<u8>> {
+        [self.state.as_path(), self.runtime.as_path()]
+            .into_iter()
+            .flat_map(path_privacy_encodings)
+            .collect()
+    }
 }
 
 fn isolated_paths(root: &Path, label: &str) -> Result<RuntimePaths, LifecycleError> {
@@ -266,6 +301,7 @@ fn isolated_environment(root: &Path, label: &str) -> Result<Environment, Lifecyc
 
 struct SupervisedDaemon {
     child: Child,
+    stderr_reader: Option<JoinHandle<Result<Vec<u8>, LifecycleError>>>,
 }
 
 impl SupervisedDaemon {
@@ -277,20 +313,39 @@ impl SupervisedDaemon {
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        let child = command.spawn().map_err(LifecycleError::SpawnDaemon)?;
-        Ok(Self { child })
+        let mut child = command.spawn().map_err(LifecycleError::SpawnDaemon)?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or(LifecycleError::MissingDaemonStderr)?;
+        let stderr_reader = match thread::Builder::new()
+            .name("rootlight-daemon-stderr".to_owned())
+            .spawn(move || read_bounded_stream(stderr))
+        {
+            Ok(reader) => reader,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(LifecycleError::SpawnDaemonStderrReader(error));
+            }
+        };
+        Ok(Self {
+            child,
+            stderr_reader: Some(stderr_reader),
+        })
     }
 
-    fn terminate(&mut self) -> Result<(), LifecycleError> {
+    fn terminate(&mut self) -> Result<Vec<u8>, LifecycleError> {
         self.child.kill().map_err(LifecycleError::TerminateChild)?;
         let status = wait_child(&mut self.child, STOP_TIMEOUT)?;
+        let stderr = self.take_stderr()?;
         if status.success() {
             return Err(LifecycleError::CrashExitSucceeded);
         }
-        Ok(())
+        Ok(stderr)
     }
 
-    fn shutdown(&mut self) -> Result<(), LifecycleError> {
+    fn shutdown(&mut self) -> Result<Vec<u8>, LifecycleError> {
         if let Some(mut input) = self.child.stdin.take() {
             input
                 .write_all(b"shutdown\n")
@@ -298,11 +353,22 @@ impl SupervisedDaemon {
             input.flush().map_err(LifecycleError::WriteShutdown)?;
         }
         let status = wait_child(&mut self.child, STOP_TIMEOUT)?;
+        let stderr = self.take_stderr()?;
         if !status.success() {
-            let stderr = read_child_stderr(&mut self.child)?;
-            return Err(LifecycleError::DaemonFailed { status, stderr });
+            return Err(LifecycleError::DaemonFailed {
+                status,
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            });
         }
-        Ok(())
+        Ok(stderr)
+    }
+
+    fn take_stderr(&mut self) -> Result<Vec<u8>, LifecycleError> {
+        self.stderr_reader
+            .take()
+            .ok_or(LifecycleError::MissingDaemonStderr)?
+            .join()
+            .map_err(|_| LifecycleError::DaemonStderrThreadPanicked)?
     }
 }
 
@@ -314,6 +380,9 @@ impl Drop for SupervisedDaemon {
                 let _ = self.child.kill();
                 let _ = self.child.wait();
             }
+        }
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
         }
     }
 }
@@ -364,8 +433,8 @@ fn exercise_simultaneous_autostart(
             command
                 .arg("health")
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
             command
                 .spawn()
                 .map_err(LifecycleError::SpawnCommand)
@@ -383,6 +452,8 @@ fn exercise_simultaneous_autostart(
     let deadline = Instant::now()
         .checked_add(START_TIMEOUT)
         .ok_or(LifecycleError::Clock)?;
+    let mut first_error = None;
+    let mut completed = Vec::with_capacity(CLIENT_COUNT);
     while !children.is_empty() {
         let mut index = 0_usize;
         while index < children.len() {
@@ -392,31 +463,71 @@ fn exercise_simultaneous_autostart(
                 .map_err(LifecycleError::WaitChild)?;
             if let Some(status) = status {
                 let (client_index, child) = children.swap_remove(index);
-                drop(child);
-                if !status.success() {
-                    return Err(LifecycleError::AutostartClient {
-                        index: client_index,
-                        source: Box::new(LifecycleError::CommandFailed {
-                            status,
-                            stderr: String::new(),
-                        }),
-                    });
-                }
+                completed.push((client_index, status, child));
             } else {
                 index = index.saturating_add(1);
             }
         }
         if !children.is_empty() && Instant::now() >= deadline {
-            for (_, mut child) in children {
+            for (_, mut child) in children.drain(..) {
                 let _ = child.kill();
                 let _ = child.wait();
             }
-            return Err(LifecycleError::CommandTimedOut);
+            first_error.get_or_insert(LifecycleError::CommandTimedOut);
         }
         if !children.is_empty() {
             thread::sleep(POLL_INTERVAL);
         }
     }
+    cleanup_autostarted_daemon(paths)?;
+    // Health envelopes are bounded below pipe capacity. Delaying reads until every
+    // concurrent Windows process exits prevents inherited sibling handles from
+    // keeping an otherwise-complete stdout or stderr pipe open indefinitely.
+    for (client_index, status, mut child) in completed {
+        let result = capture_autostart_client(client_index, status, &mut child);
+        if first_error.is_none()
+            && let Err(error) = result
+        {
+            first_error = Some(error);
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn capture_autostart_client(
+    client_index: usize,
+    status: ExitStatus,
+    child: &mut Child,
+) -> Result<(), LifecycleError> {
+    let stdout = child
+        .stdout
+        .take()
+        .map(read_stream)
+        .transpose()?
+        .unwrap_or_default();
+    let stderr = child
+        .stderr
+        .take()
+        .map(read_stream)
+        .transpose()?
+        .unwrap_or_default();
+    if !status.success() {
+        return Err(LifecycleError::AutostartClient {
+            index: client_index,
+            source: Box::new(LifecycleError::CommandFailed {
+                status,
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            }),
+        });
+    }
+    let envelope = parse_single_json(&stdout)?;
+    assert_success_type(&envelope, "health")
+}
+
+fn cleanup_autostarted_daemon(paths: &RuntimePaths) -> Result<(), LifecycleError> {
     let discovery = paths.discover().map_err(LifecycleError::Runtime)?;
     terminate_process(discovery.pid())?;
     wait_until_process_exit(discovery.pid())?;
@@ -448,7 +559,12 @@ fn exercise_crash_restart(
     assert_operation_state(&submitted, "running")?;
 
     let discovery = paths.discover().map_err(LifecycleError::Runtime)?;
-    process.terminate()?;
+    let crash_stderr = process.terminate()?;
+    assert_privacy_sentinels_absent(
+        "crashed daemon stderr",
+        &crash_stderr,
+        &environment.private_values(),
+    )?;
     paths
         .remove_stale_endpoint(discovery.instance_nonce())
         .map_err(LifecycleError::Runtime)?;
@@ -468,21 +584,27 @@ fn exercise_crash_restart(
     assert_success_type(&recovered, "operation_status")?;
     assert_operation_state(&recovered, "interrupted")?;
     assert_recovery_class(&recovered, "interrupted_by_restart")?;
-    restarted.shutdown()?;
+    let restarted_stderr = restarted.shutdown()?;
+    assert_privacy_sentinels_absent(
+        "restarted daemon stderr",
+        &restarted_stderr,
+        &environment.private_values(),
+    )?;
     wait_until_absent(paths)
 }
 
 fn exercise_stalled_peer_shutdown(
     paths: &RuntimePaths,
     process: &mut SupervisedDaemon,
-) -> Result<(), LifecycleError> {
+) -> Result<Vec<u8>, LifecycleError> {
     let discovery = paths.discover().map_err(LifecycleError::Runtime)?;
     let endpoint = discovery.endpoint(paths).map_err(LifecycleError::Runtime)?;
     let stalled = connect(&endpoint).map_err(LifecycleError::Ipc)?;
 
-    process.shutdown()?;
+    let stderr = process.shutdown()?;
     drop(stalled);
-    wait_until_absent(paths)
+    wait_until_absent(paths)?;
+    Ok(stderr)
 }
 
 fn exercise_concurrent_clients(paths: &RuntimePaths) -> Result<(), LifecycleError> {
@@ -1183,13 +1305,26 @@ fn read_stream(mut stream: impl io::Read) -> Result<Vec<u8>, LifecycleError> {
     Ok(bytes)
 }
 
-fn read_child_stderr(child: &mut Child) -> Result<String, LifecycleError> {
-    child
-        .stderr
-        .take()
-        .map(read_stream)
-        .transpose()
-        .map(|value| String::from_utf8_lossy(&value.unwrap_or_default()).into_owned())
+fn read_bounded_stream(mut stream: impl io::Read) -> Result<Vec<u8>, LifecycleError> {
+    let mut bytes = Vec::new();
+    let mut overflowed = false;
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let read = stream
+            .read(&mut chunk)
+            .map_err(LifecycleError::ReadOutput)?;
+        if read == 0 {
+            return if overflowed {
+                Err(LifecycleError::DaemonStderrTooLarge)
+            } else {
+                Ok(bytes)
+            };
+        }
+        let remaining = MAX_DAEMON_STDERR_BYTES.saturating_sub(bytes.len());
+        let retained = read.min(remaining);
+        bytes.extend_from_slice(&chunk[..retained]);
+        overflowed |= retained != read;
+    }
 }
 
 fn unix_time_ms() -> Result<u64, LifecycleError> {
@@ -1197,6 +1332,165 @@ fn unix_time_ms() -> Result<u64, LifecycleError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| LifecycleError::Clock)?;
     u64::try_from(elapsed.as_millis()).map_err(|_| LifecycleError::Clock)
+}
+
+fn assert_support_telemetry(
+    health: &Health,
+    first: &rootlight_client::SupportBundle,
+    second: &rootlight_client::SupportBundle,
+) -> Result<(), LifecycleError> {
+    if health.protocol_version != "1.4"
+        || first.schema_version != 2
+        || second.schema_version != 2
+        || first.contains_source
+        || second.contains_source
+    {
+        return Err(LifecycleError::InvalidSupportTelemetry);
+    }
+    let first = first
+        .telemetry
+        .as_ref()
+        .ok_or(LifecycleError::InvalidSupportTelemetry)?;
+    let second = second
+        .telemetry
+        .as_ref()
+        .ok_or(LifecycleError::InvalidSupportTelemetry)?;
+    let support_metric = second
+        .metrics
+        .ipc_requests
+        .iter()
+        .find(|metric| metric.method == ControlMethod::SupportBundle)
+        .ok_or(LifecycleError::InvalidSupportTelemetry)?;
+    let first_support_count = first
+        .metrics
+        .ipc_requests
+        .iter()
+        .find(|metric| metric.method == ControlMethod::SupportBundle)
+        .map_or(0, |metric| metric.succeeded_total);
+    let has_support_request_span = second.traces.iter().any(|span| {
+        span.kind
+            == SpanKind::IpcRequest {
+                method: ControlMethod::SupportBundle,
+            }
+            && span.outcome == TelemetryOutcome::Succeeded
+    });
+    let has_support_work_span = second.traces.iter().any(|span| {
+        span.kind == SpanKind::SupportBundle && span.outcome == TelemetryOutcome::Succeeded
+    });
+    if first.schema_version != TELEMETRY_SCHEMA_VERSION
+        || second.schema_version != TELEMETRY_SCHEMA_VERSION
+        || support_metric.succeeded_total <= first_support_count
+        || !has_support_request_span
+        || !has_support_work_span
+    {
+        return Err(LifecycleError::InvalidSupportTelemetry);
+    }
+    Ok(())
+}
+
+fn validate_daemon_stderr(bytes: &[u8], private_values: &[Vec<u8>]) -> Result<(), LifecycleError> {
+    if bytes.is_empty() {
+        return Err(LifecycleError::EmptyDaemonStderr);
+    }
+    if !bytes.ends_with(b"\n") {
+        return Err(LifecycleError::IncompleteDaemonStderr);
+    }
+    assert_privacy_sentinels_absent("daemon stderr", bytes, private_values)?;
+
+    let mut sequences = Vec::new();
+    let mut saw_starting = false;
+    let mut saw_ready = false;
+    let mut saw_support_completion = false;
+    let mut saw_draining = false;
+    let mut saw_stopped = false;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if line.len() > MAX_STRUCTURED_LOG_LINE_BYTES {
+            return Err(LifecycleError::OversizedDaemonLogLine(line.len()));
+        }
+        let payload = line
+            .strip_suffix(b"\n")
+            .ok_or(LifecycleError::IncompleteDaemonStderr)?;
+        let record: StructuredLogRecord =
+            serde_json::from_slice(payload).map_err(LifecycleError::DaemonLogJson)?;
+        if record.schema_version != TELEMETRY_SCHEMA_VERSION {
+            return Err(LifecycleError::InvalidDaemonLogSequence);
+        }
+        sequences.push(record.sequence);
+        match record.event {
+            LogEvent::LifecycleChanged {
+                lifecycle: TelemetryDaemonLifecycle::Starting,
+            } => saw_starting = true,
+            LogEvent::LifecycleChanged {
+                lifecycle: TelemetryDaemonLifecycle::Ready,
+            } => saw_ready = true,
+            LogEvent::DiagnosticCompleted {
+                method: ControlMethod::SupportBundle,
+                outcome: TelemetryOutcome::Succeeded,
+                ..
+            } => saw_support_completion = true,
+            LogEvent::LifecycleChanged {
+                lifecycle: TelemetryDaemonLifecycle::Draining,
+            } => saw_draining = true,
+            LogEvent::LifecycleChanged {
+                lifecycle: TelemetryDaemonLifecycle::Stopped,
+            } => saw_stopped = true,
+            _ => {}
+        }
+    }
+    if !sequences_are_strictly_increasing(&sequences) {
+        return Err(LifecycleError::InvalidDaemonLogSequence);
+    }
+    if saw_starting && saw_ready && saw_support_completion && saw_draining && saw_stopped {
+        Ok(())
+    } else {
+        Err(LifecycleError::MissingDaemonTelemetryEvidence)
+    }
+}
+
+fn sequences_are_strictly_increasing(sequences: &[u64]) -> bool {
+    sequences.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn path_privacy_encodings(path: &Path) -> Vec<Vec<u8>> {
+    let raw = path.to_string_lossy().into_owned();
+    let mut values = vec![raw.as_bytes().to_vec()];
+    if let Ok(encoded) = serde_json::to_string(&raw) {
+        let encoded = encoded.as_bytes();
+        if encoded.len() >= 2 {
+            values.push(encoded[1..encoded.len() - 1].to_vec());
+        }
+    }
+    values
+}
+
+fn assert_privacy_sentinels_absent(
+    surface: &'static str,
+    bytes: &[u8],
+    private_values: &[Vec<u8>],
+) -> Result<(), LifecycleError> {
+    let fixed = [
+        b"PRIVATE_SOURCE_BODY".as_slice(),
+        b"C:\\Users\\private\\repo".as_slice(),
+        br"C:\\Users\\private\\repo".as_slice(),
+        b"/home/private/repo".as_slice(),
+        b"prompt injection".as_slice(),
+        b"sk-secret-token".as_slice(),
+        b"client-capability-value".as_slice(),
+    ];
+    for sentinel in fixed.iter().copied().chain(
+        private_values
+            .iter()
+            .map(Vec::as_slice)
+            .filter(|value| !value.is_empty()),
+    ) {
+        if bytes
+            .windows(sentinel.len())
+            .any(|window| window == sentinel)
+        {
+            return Err(LifecycleError::PrivacySentinelFound(surface));
+        }
+    }
+    Ok(())
 }
 
 fn parse_single_json(bytes: &[u8]) -> Result<Value, LifecycleError> {
@@ -1342,6 +1636,30 @@ pub(crate) enum LifecycleError {
     Client(#[source] rootlight_client::ClientError),
     #[error("failed to spawn supervised daemon")]
     SpawnDaemon(#[source] io::Error),
+    #[error("supervised daemon stderr pipe is missing")]
+    MissingDaemonStderr,
+    #[error("failed to spawn supervised daemon stderr reader")]
+    SpawnDaemonStderrReader(#[source] io::Error),
+    #[error("supervised daemon stderr reader panicked")]
+    DaemonStderrThreadPanicked,
+    #[error("supervised daemon stderr exceeded its evidence bound")]
+    DaemonStderrTooLarge,
+    #[error("supervised daemon produced no structured stderr evidence")]
+    EmptyDaemonStderr,
+    #[error("supervised daemon stderr ended with an incomplete record")]
+    IncompleteDaemonStderr,
+    #[error("supervised daemon log line exceeded its bound: {0} bytes")]
+    OversizedDaemonLogLine(usize),
+    #[error("supervised daemon stderr was not valid structured JSON")]
+    DaemonLogJson(#[source] serde_json::Error),
+    #[error("supervised daemon log sequences were not strictly increasing")]
+    InvalidDaemonLogSequence,
+    #[error("supervised daemon telemetry evidence was incomplete")]
+    MissingDaemonTelemetryEvidence,
+    #[error("schema-v2 support telemetry evidence was invalid")]
+    InvalidSupportTelemetry,
+    #[error("privacy sentinel appeared in {0}")]
+    PrivacySentinelFound(&'static str),
     #[error("failed to spawn lifecycle command")]
     SpawnCommand(#[source] io::Error),
     #[error("failed to send supervised shutdown")]
@@ -1444,4 +1762,18 @@ pub(crate) enum LifecycleError {
     UnexpectedEnvelope,
     #[error("daemon operation-submit retry or standalone parity check failed")]
     OperationSubmitMismatch,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sequences_are_strictly_increasing;
+
+    #[test]
+    fn telemetry_sequence_order_rejects_reordering_and_duplicates() {
+        assert!(sequences_are_strictly_increasing(&[]));
+        assert!(sequences_are_strictly_increasing(&[1]));
+        assert!(sequences_are_strictly_increasing(&[1, 2, 3]));
+        assert!(!sequences_are_strictly_increasing(&[2, 1]));
+        assert!(!sequences_are_strictly_increasing(&[1, 1]));
+    }
 }

@@ -21,6 +21,7 @@ rootlight-ids = { path = "../crates/rootlight-ids", features = ["schema"] }
 rootlight-ipc = { path = "../crates/rootlight-ipc" }
 rootlight-ir = { path = "../crates/rootlight-ir", features = ["schema"] }
 rootlight-mcp-contract = { path = "../crates/rootlight-mcp-contract" }
+rootlight-observability = { path = "../crates/rootlight-observability" }
 rootlight-runtime = { path = "../crates/rootlight-runtime" }
 rootlight-protocol = { path = "../crates/rootlight-protocol" }
 schemars.workspace = true
