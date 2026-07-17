@@ -97,6 +97,8 @@ pub enum SyntaxFactKind {
     Module,
     /// Named declaration.
     Declaration,
+    /// Bounded declaration header or other parser-proven signature evidence.
+    Signature,
     /// Import, include, or module dependency.
     Import,
     /// Lexical or semantic scope.
