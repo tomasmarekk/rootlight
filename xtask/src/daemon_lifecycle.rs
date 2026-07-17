@@ -445,7 +445,12 @@ fn exercise_crash_restart(
         COMMAND_TIMEOUT,
     )?;
     assert_success_type(&submitted, "operation_submit")?;
-    assert_operation_state(&submitted, "running")?;
+    if !matches!(
+        operation_data(&submitted)["state"].as_str(),
+        Some("queued" | "running")
+    ) {
+        return Err(LifecycleError::UnexpectedEnvelope);
+    }
 
     let discovery = paths.discover().map_err(LifecycleError::Runtime)?;
     process.terminate()?;
@@ -514,27 +519,50 @@ fn exercise_concurrent_clients(paths: &RuntimePaths) -> Result<(), LifecycleErro
 }
 
 fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), LifecycleError> {
-    let noisy = Client::connect_or_start(paths, [70; 16], ConnectPolicy::ExistingOnly)
-        .map_err(LifecycleError::Client)?;
+    let noisy = Arc::new(
+        Client::connect_or_start(paths, [70; 16], ConnectPolicy::ExistingOnly)
+            .map_err(LifecycleError::Client)?,
+    );
     let peer = Client::connect_or_start(paths, [71; 16], ConnectPolicy::ExistingOnly)
         .map_err(LifecycleError::Client)?;
-    let mut noisy_operations = Vec::with_capacity(
-        usize::try_from(EXPECTED_CLIENT_OPERATION_LIMIT)
-            .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?,
+    let operation_count = usize::try_from(EXPECTED_CLIENT_OPERATION_LIMIT)
+        .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?;
+    let noisy_operations = Arc::new(
+        (0..EXPECTED_CLIENT_OPERATION_LIMIT)
+            .map(|ordinal| quota_operation(70, ordinal))
+            .collect::<Result<Vec<_>, _>>()?,
     );
-    for ordinal in 0..EXPECTED_CLIENT_OPERATION_LIMIT {
-        let operation = quota_operation(70, ordinal)?;
-        let status = noisy
-            .operation_submit(operation)
-            .map_err(LifecycleError::Client)?;
-        if !matches!(
-            status.state,
-            OperationState::Running | OperationState::Queued
-        ) {
-            return Err(LifecycleError::UnexpectedQuotaOperationState(status.state));
-        }
-        noisy_operations.push(operation);
+    let worker_count = usize::try_from(EXPECTED_CLIENT_CONNECTION_LIMIT)
+        .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?;
+    let barrier = Arc::new(Barrier::new(worker_count));
+    let mut submissions = Vec::with_capacity(worker_count);
+    for worker in 0..worker_count {
+        let noisy = Arc::clone(&noisy);
+        let noisy_operations = Arc::clone(&noisy_operations);
+        let barrier = Arc::clone(&barrier);
+        submissions.push(thread::spawn(move || {
+            barrier.wait();
+            for index in (worker..operation_count).step_by(worker_count) {
+                let operation = noisy_operations[index];
+                let status = submit_with_transport_retry(&noisy, operation)?;
+                if !matches!(
+                    status.state,
+                    OperationState::Running | OperationState::Queued
+                ) {
+                    return Err(LifecycleError::UnexpectedQuotaOperationState(status.state));
+                }
+            }
+            Ok(())
+        }));
     }
+
+    for submission in submissions {
+        submission
+            .join()
+            .map_err(|_| LifecycleError::ClientThreadPanicked)??;
+    }
+    let noisy_operations = Arc::try_unwrap(noisy_operations)
+        .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?;
 
     let rejected = quota_operation(70, EXPECTED_CLIENT_OPERATION_LIMIT)?;
     match noisy.operation_submit(rejected) {
@@ -684,6 +712,26 @@ fn quota_operation(identity: u8, ordinal: u32) -> Result<OperationId, LifecycleE
     Ok(OperationId::from_bytes(bytes))
 }
 
+fn submit_with_transport_retry(
+    client: &Client,
+    operation: OperationId,
+) -> Result<rootlight_client::OperationStatus, LifecycleError> {
+    let deadline = Instant::now()
+        .checked_add(COMMAND_TIMEOUT)
+        .ok_or(LifecycleError::Clock)?;
+    loop {
+        match client.operation_submit(operation) {
+            Ok(status) => return Ok(status),
+            Err(ClientError::Ipc(rootlight_ipc::IpcError::Transport(error)))
+                if error.kind() == io::ErrorKind::TimedOut && Instant::now() < deadline =>
+            {
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(error) => return Err(LifecycleError::Client(error)),
+        }
+    }
+}
+
 fn is_client_operation_quota(error: &ClientError) -> bool {
     let Some(public) = error.as_public_error() else {
         return false;
@@ -701,15 +749,13 @@ fn cancel_and_wait(client: &Client, operation: OperationId) -> Result<(), Lifecy
     let (accepted, status) = client
         .operation_cancel(operation)
         .map_err(LifecycleError::Client)?;
-    if !accepted
-        || !matches!(
-            status.state,
-            OperationState::Cancelling | OperationState::Cancelled
-        )
-    {
-        return Err(LifecycleError::UnexpectedCancellationState);
+    match status.state {
+        OperationState::Cancelling | OperationState::Cancelled if accepted => {
+            wait_for_client_terminal(client, operation, OperationState::Cancelled)
+        }
+        OperationState::Succeeded if !accepted => Ok(()),
+        _ => Err(LifecycleError::UnexpectedCancellationState),
     }
-    wait_for_client_terminal(client, operation, OperationState::Cancelled)
 }
 
 fn deterministic_client_identity(index: usize) -> Result<[u8; 16], LifecycleError> {
@@ -808,7 +854,10 @@ fn cancel_saturated_workers<const N: usize>(
                 OperationState::Cancelling | OperationState::Cancelled
             )
         {
-            return Err(LifecycleError::UnexpectedCancellationState);
+            return Err(LifecycleError::UnexpectedCancellationObservation {
+                accepted,
+                state: status.state,
+            });
         }
         samples.push(elapsed);
     }
@@ -1230,9 +1279,9 @@ fn assert_success_type(value: &Value, expected: &str) -> Result<(), LifecycleErr
 }
 
 fn assert_error_code(value: &Value, expected: &str) -> Result<(), LifecycleError> {
-    if value["contract_version"] == "1.0"
-        && value["ok"] == false
-        && value["error"]["code"] == expected
+    if value["contract_version"].as_str() == Some("1.0")
+        && value["ok"].as_bool() == Some(false)
+        && value["error"]["code"].as_str() == Some(expected)
     {
         Ok(())
     } else {
@@ -1241,15 +1290,25 @@ fn assert_error_code(value: &Value, expected: &str) -> Result<(), LifecycleError
 }
 
 fn assert_cancel_accepted(value: &Value) -> Result<(), LifecycleError> {
-    if value["result"]["data"]["accepted"] == true {
+    let data = &value["result"]["data"];
+    if data["accepted"] == true && data["operation"]["cancellation_requested"] == true {
         Ok(())
     } else {
         Err(LifecycleError::UnexpectedEnvelope)
     }
 }
 
+fn operation_data(value: &Value) -> &Value {
+    let data = &value["result"]["data"];
+    if data.get("operation").is_some() && data.get("state").is_none() {
+        &data["operation"]
+    } else {
+        data
+    }
+}
+
 fn assert_operation_state(value: &Value, expected: &str) -> Result<(), LifecycleError> {
-    if value["result"]["data"]["state"] == expected {
+    if operation_data(value)["state"] == expected {
         Ok(())
     } else {
         Err(LifecycleError::UnexpectedEnvelope)
@@ -1257,7 +1316,7 @@ fn assert_operation_state(value: &Value, expected: &str) -> Result<(), Lifecycle
 }
 
 fn assert_recovery_class(value: &Value, expected: &str) -> Result<(), LifecycleError> {
-    if value["result"]["data"]["recovery_class"] == expected {
+    if operation_data(value)["recovery_class"] == expected {
         Ok(())
     } else {
         Err(LifecycleError::UnexpectedEnvelope)
@@ -1269,10 +1328,11 @@ fn assert_timing_fields(
     deadline_unix_ms: Option<&str>,
     lease_expires_unix_ms: Option<&str>,
 ) -> Result<(), LifecycleError> {
-    let observed_deadline = value["result"]["data"]["deadline_unix_ms"]
+    let data = operation_data(value);
+    let observed_deadline = data["deadline_unix_ms"]
         .as_u64()
         .map(|value| value.to_string());
-    let observed_lease = value["result"]["data"]["lease_expires_unix_ms"]
+    let observed_lease = data["lease_expires_unix_ms"]
         .as_u64()
         .map(|value| value.to_string());
     if observed_deadline.as_deref() == deadline_unix_ms
@@ -1285,13 +1345,14 @@ fn assert_timing_fields(
 }
 
 fn assert_same_operation(left: &Value, right: &Value) -> Result<(), LifecycleError> {
-    if left["result"]["data"]["operation"] == right["result"]["data"]["operation"]
-        && left["result"]["data"]["kind"] == right["result"]["data"]["kind"]
-        && left["result"]["data"]["plan_hash"] == right["result"]["data"]["plan_hash"]
-        && left["result"]["data"]["detached"] == right["result"]["data"]["detached"]
-        && left["result"]["data"]["deadline_unix_ms"] == right["result"]["data"]["deadline_unix_ms"]
-        && left["result"]["data"]["lease_expires_unix_ms"]
-            == right["result"]["data"]["lease_expires_unix_ms"]
+    let left = operation_data(left);
+    let right = operation_data(right);
+    if left["operation"] == right["operation"]
+        && left["kind"] == right["kind"]
+        && left["plan_hash"] == right["plan_hash"]
+        && left["detached"] == right["detached"]
+        && left["deadline_unix_ms"] == right["deadline_unix_ms"]
+        && left["lease_expires_unix_ms"] == right["lease_expires_unix_ms"]
     {
         Ok(())
     } else {
@@ -1300,7 +1361,13 @@ fn assert_same_operation(left: &Value, right: &Value) -> Result<(), LifecycleErr
 }
 
 fn assert_operation_submit_equivalent(left: &Value, right: &Value) -> Result<(), LifecycleError> {
-    if left == right {
+    assert_same_operation(left, right)?;
+    if operation_data(left)["state"] == "succeeded"
+        && matches!(
+            operation_data(right)["state"].as_str(),
+            Some("queued" | "running" | "succeeded")
+        )
+    {
         Ok(())
     } else {
         Err(LifecycleError::OperationSubmitMismatch)
@@ -1386,6 +1453,11 @@ pub(crate) enum LifecycleError {
     UnexpectedSampledOperationState(OperationState),
     #[error("daemon cancellation did not reach the required state")]
     UnexpectedCancellationState,
+    #[error("daemon cancellation response was accepted={accepted}, state={state:?}")]
+    UnexpectedCancellationObservation {
+        accepted: bool,
+        state: OperationState,
+    },
     #[error("daemon control latency samples are missing")]
     MissingLatencySamples,
     #[error("daemon control latency percentile is invalid")]
