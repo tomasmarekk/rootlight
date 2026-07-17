@@ -8,11 +8,47 @@ use std::collections::{BTreeMap, BTreeSet};
 use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId, SymbolId};
 
 use crate::{
-    ContainerRef, CoverageScope, ExtensionCriticality, FactEvidence, FactRef,
+    ContainerRef, CoverageScope, ExtensionCriticality, ExtensionEnvelope, FactEvidence, FactRef,
     NORMALIZED_IR_VERSION, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint, SourceRef,
 };
 
-/// Resource limits applied to one decoded normalized IR document.
+const DEFAULT_MAX_NESTED_ITEMS_PER_RECORD: usize = 4_096;
+const DEFAULT_MAX_STRING_BYTES: usize = 32_768;
+const DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES: usize = 1024 * 1024;
+const DEFAULT_MAX_EXTENSION_ENVELOPE_BYTES: usize = 8 * 1024 * 1024;
+const JSON_ESCAPE_EXPANSION: usize = 6;
+const MAX_ENCODED_FACT_REF_BYTES: usize = 320;
+const FIXED_ENVELOPE_WIRE_BYTES: usize = 4 * 1024;
+const MIN_DEFAULT_EXTENSION_ENVELOPE_BYTES: usize = checked_default_envelope_bytes();
+
+const _: () = assert!(DEFAULT_MAX_EXTENSION_ENVELOPE_BYTES >= MIN_DEFAULT_EXTENSION_ENVELOPE_BYTES);
+
+const fn checked_default_envelope_bytes() -> usize {
+    let Some(metadata_bytes) = DEFAULT_MAX_STRING_BYTES.checked_mul(2) else {
+        panic!("default extension metadata byte calculation overflowed");
+    };
+    let Some(decoded_text_bytes) = DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES.checked_add(metadata_bytes)
+    else {
+        panic!("default extension text byte calculation overflowed");
+    };
+    let Some(escaped_text_bytes) = decoded_text_bytes.checked_mul(JSON_ESCAPE_EXPANSION) else {
+        panic!("default escaped extension text calculation overflowed");
+    };
+    let Some(nested_bytes) =
+        DEFAULT_MAX_NESTED_ITEMS_PER_RECORD.checked_mul(MAX_ENCODED_FACT_REF_BYTES)
+    else {
+        panic!("default nested extension evidence calculation overflowed");
+    };
+    let Some(variable_bytes) = escaped_text_bytes.checked_add(nested_bytes) else {
+        panic!("default variable extension byte calculation overflowed");
+    };
+    let Some(total_bytes) = variable_bytes.checked_add(FIXED_ENVELOPE_WIRE_BYTES) else {
+        panic!("default extension envelope byte calculation overflowed");
+    };
+    total_bytes
+}
+
+/// Resource limits applied to decoded IR documents and extension envelopes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct IrLimits {
@@ -21,6 +57,12 @@ pub struct IrLimits {
     /// The 512 MiB default leaves structural headroom above the 256 MiB
     /// non-payload string and 16 MiB extension-payload budgets.
     pub max_document_bytes: usize,
+    /// Maximum bytes in one encoded standalone extension envelope.
+    ///
+    /// The 8 MiB default covers six-byte worst-case JSON escaping for the
+    /// one-MiB payload and two maximum metadata strings, 320 encoded bytes for
+    /// each maximum nested fact reference, and fixed envelope metadata.
+    pub max_extension_envelope_bytes: usize,
     /// Maximum file records before deduplication.
     pub max_files: usize,
     /// Maximum entity records before deduplication.
@@ -65,6 +107,7 @@ impl Default for IrLimits {
     fn default() -> Self {
         Self {
             max_document_bytes: 512 * 1024 * 1024,
+            max_extension_envelope_bytes: DEFAULT_MAX_EXTENSION_ENVELOPE_BYTES,
             max_files: 100_000,
             max_entities: 1_000_000,
             max_occurrences: 5_000_000,
@@ -76,16 +119,59 @@ impl Default for IrLimits {
             max_diagnostics: 10_000,
             max_extensions: 10_000,
             max_total_records: 10_000_000,
-            max_nested_items_per_record: 4_096,
+            max_nested_items_per_record: DEFAULT_MAX_NESTED_ITEMS_PER_RECORD,
             max_total_nested_items: 10_000_000,
-            max_string_bytes: 32_768,
+            max_string_bytes: DEFAULT_MAX_STRING_BYTES,
             max_total_string_bytes: 256 * 1024 * 1024,
-            max_extension_payload_bytes: 1024 * 1024,
+            max_extension_payload_bytes: DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES,
             max_total_extension_bytes: 16 * 1024 * 1024,
             max_diagnostic_message_bytes: 4_096,
             max_total_diagnostic_bytes: 4 * 1024 * 1024,
         }
     }
+}
+
+pub(crate) enum StandaloneExtensionValidationError {
+    Limit,
+    Identity,
+}
+
+pub(crate) fn validate_standalone_extension_envelope(
+    envelope: &ExtensionEnvelope,
+    limits: &IrLimits,
+) -> Result<(), StandaloneExtensionValidationError> {
+    let nested_items = envelope.evidence.derivation.len();
+    if nested_items > limits.max_nested_items_per_record
+        || nested_items > limits.max_total_nested_items
+    {
+        return Err(StandaloneExtensionValidationError::Limit);
+    }
+
+    let namespace_bytes = envelope.namespace.len();
+    let version_bytes = envelope.version.len();
+    if namespace_bytes > limits.max_string_bytes || version_bytes > limits.max_string_bytes {
+        return Err(StandaloneExtensionValidationError::Limit);
+    }
+    let Some(total_string_bytes) = namespace_bytes.checked_add(version_bytes) else {
+        return Err(StandaloneExtensionValidationError::Limit);
+    };
+    if total_string_bytes > limits.max_total_string_bytes {
+        return Err(StandaloneExtensionValidationError::Limit);
+    }
+
+    let payload_bytes = envelope.payload.len();
+    if payload_bytes > limits.max_extension_payload_bytes
+        || payload_bytes > limits.max_total_extension_bytes
+    {
+        return Err(StandaloneExtensionValidationError::Limit);
+    }
+
+    if !valid_extension_namespace(&envelope.namespace)
+        || !valid_extension_version(&envelope.version)
+    {
+        return Err(StandaloneExtensionValidationError::Identity);
+    }
+    Ok(())
 }
 
 /// Identity of an extension namespace version understood by the core.
