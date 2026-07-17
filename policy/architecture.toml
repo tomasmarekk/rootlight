@@ -1,6 +1,7 @@
 schema_version = "1.0"
 workspace_members = [
   "rootlight",
+  "rootlight-adapter-sdk",
   "rootlight-cancel",
   "rootlight-client",
   "rootlight-config",
@@ -33,6 +34,15 @@ allowed_internal_dependencies = [
   "rootlight-operations",
   "rootlight-protocol",
   "rootlight-runtime",
+]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-adapter-sdk"
+allowed_internal_dependencies = [
+  "rootlight-cancel",
+  "rootlight-ir",
+  "rootlight-vfs",
 ]
 allow_build_script = false
 
