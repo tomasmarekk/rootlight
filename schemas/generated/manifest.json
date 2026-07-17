@@ -108,7 +108,7 @@
     },
     {
       "path": "schemas/generated/json/ir-extension-rootlight-lexical-1.schema.json",
-      "blake3": "fc2627d22d5e6bdff02086e98c1cf05152be2d89ddbd0143f098d30b7351a9d9"
+      "blake3": "b513422d0bb11c80fda6eaac11f20c6af74b41a4b0c1dc637b5636852f2706ff"
     },
     {
       "path": "schemas/generated/json/mcp-error-response-1.0.schema.json",

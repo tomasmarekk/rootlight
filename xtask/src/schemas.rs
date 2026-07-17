@@ -15,7 +15,7 @@ use prost_types::FileDescriptorSet;
 use rootlight_config::{ConfigDocumentSchema, ConfigDocumentSchemaV1_1};
 use rootlight_ir::{
     ExtensionEnvelope, IrDocument, IrDocumentSchema, LexicalEvidenceV1, NormalizedIrDocument,
-    decode_lexical_evidence_envelope,
+    decode_lexical_evidence, decode_lexical_evidence_envelope,
 };
 use rootlight_mcp_contract::{ErrorResponse, ResponseMetadata};
 use rootlight_protocol::generated::common::v1::ContractVersion as ProtocolContractVersion;
@@ -708,6 +708,18 @@ fn validate_generated_json_schemas(
     lexical_unknown_field["unknown"] = serde_json::json!(true);
     let mut lexical_unknown_subject_field = lexical_payload.clone();
     lexical_unknown_subject_field["subject"]["unknown"] = serde_json::json!(true);
+    let lexical_payload_runtime = lexical_payload_text.to_owned();
+    let lexical_wrong_format_runtime =
+        serde_json::to_string(&lexical_wrong_format).map_err(SchemaError::SerializeJson)?;
+    let lexical_overlong_signature_runtime =
+        serde_json::to_string(&lexical_overlong_signature).map_err(SchemaError::SerializeJson)?;
+    let lexical_overlong_summary_runtime =
+        serde_json::to_string(&lexical_overlong_summary).map_err(SchemaError::SerializeJson)?;
+    let lexical_unknown_field_runtime =
+        serde_json::to_string(&lexical_unknown_field).map_err(SchemaError::SerializeJson)?;
+    let lexical_unknown_subject_field_runtime =
+        serde_json::to_string(&lexical_unknown_subject_field)
+            .map_err(SchemaError::SerializeJson)?;
     let cases = [
         SchemaSemanticCase::valid(
             "config-1.0.schema.json",
@@ -797,35 +809,41 @@ fn validate_generated_json_schemas(
             "unsupported normalized IR minor",
             wrong_normalized_minor,
         ),
-        SchemaSemanticCase::valid(
+        SchemaSemanticCase::valid_with_runtime(
             "ir-extension-rootlight-lexical-1.schema.json",
             "frozen first-party lexical evidence",
             lexical_payload,
+            lexical_payload_runtime,
         ),
-        SchemaSemanticCase::invalid(
+        SchemaSemanticCase::invalid_with_runtime(
             "ir-extension-rootlight-lexical-1.schema.json",
             "signature uses the summary text format",
             lexical_wrong_format,
+            lexical_wrong_format_runtime,
         ),
-        SchemaSemanticCase::invalid(
+        SchemaSemanticCase::invalid_with_runtime(
             "ir-extension-rootlight-lexical-1.schema.json",
             "signature exceeds its retained text cap",
             lexical_overlong_signature,
+            lexical_overlong_signature_runtime,
         ),
-        SchemaSemanticCase::invalid(
+        SchemaSemanticCase::invalid_with_runtime(
             "ir-extension-rootlight-lexical-1.schema.json",
             "documentation summary exceeds its retained text cap",
             lexical_overlong_summary,
+            lexical_overlong_summary_runtime,
         ),
-        SchemaSemanticCase::invalid(
+        SchemaSemanticCase::invalid_with_runtime(
             "ir-extension-rootlight-lexical-1.schema.json",
             "lexical payload contains an unknown field",
             lexical_unknown_field,
+            lexical_unknown_field_runtime,
         ),
-        SchemaSemanticCase::invalid(
+        SchemaSemanticCase::invalid_with_runtime(
             "ir-extension-rootlight-lexical-1.schema.json",
             "lexical subject contains an unknown field",
             lexical_unknown_subject_field,
+            lexical_unknown_subject_field_runtime,
         ),
         SchemaSemanticCase::valid(
             "mcp-response-metadata-1.0.schema.json",
@@ -874,19 +892,20 @@ fn validate_generated_json_schemas(
             }
         })?;
         let schema_valid = validator.is_valid(&case.instance);
-        let serde_valid = match case.schema {
-            "ir-1.0.schema.json" => {
-                serde_json::from_value::<IrDocumentSchema>(case.instance.clone()).is_ok()
+        let runtime_valid = if let Some(payload) = &case.runtime_payload {
+            decode_lexical_evidence(payload).is_ok()
+        } else {
+            match case.schema {
+                "ir-1.0.schema.json" => {
+                    serde_json::from_value::<IrDocumentSchema>(case.instance.clone()).is_ok()
+                }
+                "ir-1.1.schema.json" => {
+                    serde_json::from_value::<NormalizedIrDocument>(case.instance.clone()).is_ok()
+                }
+                _ => case.expected_valid,
             }
-            "ir-1.1.schema.json" => {
-                serde_json::from_value::<NormalizedIrDocument>(case.instance.clone()).is_ok()
-            }
-            "ir-extension-rootlight-lexical-1.schema.json" => {
-                serde_json::from_value::<LexicalEvidenceV1>(case.instance.clone()).is_ok()
-            }
-            _ => case.expected_valid,
         };
-        if schema_valid != case.expected_valid || serde_valid != case.expected_valid {
+        if schema_valid != case.expected_valid || runtime_valid != case.expected_valid {
             return Err(SchemaError::GeneratedSchemaSemantics(format!(
                 "{}: {}",
                 case.schema, case.description
@@ -908,6 +927,7 @@ struct SchemaSemanticCase {
     description: &'static str,
     instance: serde_json::Value,
     expected_valid: bool,
+    runtime_payload: Option<String>,
 }
 
 impl SchemaSemanticCase {
@@ -917,6 +937,7 @@ impl SchemaSemanticCase {
             description,
             instance,
             expected_valid: true,
+            runtime_payload: None,
         }
     }
 
@@ -930,6 +951,37 @@ impl SchemaSemanticCase {
             description,
             instance,
             expected_valid: false,
+            runtime_payload: None,
+        }
+    }
+
+    fn valid_with_runtime(
+        schema: &'static str,
+        description: &'static str,
+        instance: serde_json::Value,
+        runtime_payload: String,
+    ) -> Self {
+        Self {
+            schema,
+            description,
+            instance,
+            expected_valid: true,
+            runtime_payload: Some(runtime_payload),
+        }
+    }
+
+    fn invalid_with_runtime(
+        schema: &'static str,
+        description: &'static str,
+        instance: serde_json::Value,
+        runtime_payload: String,
+    ) -> Self {
+        Self {
+            schema,
+            description,
+            instance,
+            expected_valid: false,
+            runtime_payload: Some(runtime_payload),
         }
     }
 }

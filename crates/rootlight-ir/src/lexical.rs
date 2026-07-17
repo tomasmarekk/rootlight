@@ -74,7 +74,6 @@ pub enum LexicalEvidenceFormat {
 /// Fields are private so every constructed or decoded value satisfies the
 /// version 1 byte, format, truncation, and hash invariants.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct LexicalEvidenceV1 {
     kind: LexicalEvidenceKind,
     subject: FactRef,
@@ -146,7 +145,13 @@ impl LexicalEvidenceV1 {
         &self.text
     }
 
-    /// Returns the hash of the complete text before truncation.
+    /// Returns the hash claimed for the complete text before truncation.
+    ///
+    /// Values created by [`Self::from_complete_text`] hash the complete input.
+    /// When [`Self::is_truncated`] is `true`, a decoder cannot independently
+    /// verify the unavailable suffix; the hash remains a producer claim bound
+    /// into the canonical payload and its deterministic envelope identity.
+    /// Nontruncated payloads are verified against the retained text.
     #[must_use]
     pub const fn complete_text_hash(&self) -> ContentHash {
         self.complete_text_hash
@@ -196,16 +201,6 @@ impl LexicalEvidenceV1 {
     }
 }
 
-impl<'de> Deserialize<'de> for LexicalEvidenceV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = WireLexicalEvidenceV1::deserialize(deserializer)?;
-        Self::from_wire(wire).map_err(serde::de::Error::custom)
-    }
-}
-
 #[cfg(feature = "schema")]
 impl schemars::JsonSchema for LexicalEvidenceV1 {
     fn schema_name() -> std::borrow::Cow<'static, str> {
@@ -233,7 +228,7 @@ impl schemars::JsonSchema for LexicalEvidenceV1 {
         );
         schemars::json_schema!({
             "title": "Rootlight lexical evidence extension version 1",
-            "description": "Bounded source-derived lexical evidence. Runtime decoding additionally enforces UTF-8 byte limits, canonical JSON, and complete-text hashes.",
+            "description": "Bounded source-derived lexical evidence. Runtime decoding additionally enforces UTF-8 byte limits, canonical JSON, and nontruncated complete-text hashes.",
             "oneOf": [signature, documentation, comment]
         })
     }
@@ -303,10 +298,28 @@ pub fn encode_lexical_evidence(
 
 /// Decodes an exact version 1 lexical payload from canonical JSON.
 ///
+/// The payload byte bound is checked before JSON decoding can allocate its text
+/// field. Direct Serde decoding into [`LexicalEvidenceV1`] is intentionally
+/// unavailable, so untrusted input must cross this bounded entry point.
+///
+/// Complete-text hashes are verified when the payload is not truncated. A
+/// truncated payload cannot prove the hash of the unavailable suffix and
+/// therefore carries the producer's hash claim.
+///
 /// # Errors
 ///
-/// Rejects oversized, malformed, noncanonical, hash-inconsistent, or otherwise
-/// invalid payloads with [`LexicalExtensionError`].
+/// Rejects oversized, malformed, noncanonical, nontruncated hash-inconsistent,
+/// or otherwise invalid payloads with [`LexicalExtensionError`].
+///
+/// Direct Serde decoding cannot bypass the payload preflight:
+///
+/// ```compile_fail
+/// use rootlight_ir::LexicalEvidenceV1;
+///
+/// fn decode_without_preflight(raw: &str) {
+///     let _: LexicalEvidenceV1 = serde_json::from_str(raw).unwrap();
+/// }
+/// ```
 pub fn decode_lexical_evidence(payload: &str) -> Result<LexicalEvidenceV1, LexicalExtensionError> {
     require_payload_bound(payload)?;
     let wire: WireLexicalEvidenceV1 =
@@ -708,6 +721,13 @@ mod tests {
         .expect("signature fixture is valid")
     }
 
+    fn decode_test_value(
+        value: serde_json::Value,
+    ) -> Result<LexicalEvidenceV1, LexicalExtensionError> {
+        let payload = serde_json::to_string(&value).expect("test value serializes");
+        decode_lexical_evidence(&payload)
+    }
+
     fn envelope(text: &str) -> ExtensionEnvelope {
         let (repository, generation, provenance, source, _) = owner();
         new_lexical_evidence_envelope(repository, generation, provenance, source, &signature(text))
@@ -857,7 +877,7 @@ mod tests {
             serde_json::to_value(signature("valid")).expect("fixture serializes");
         signature_value["text"] = serde_json::json!("x".repeat(MAX_LEXICAL_SIGNATURE_BYTES + 1));
         signature_value["truncated"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<LexicalEvidenceV1>(signature_value).is_err());
+        assert!(decode_test_value(signature_value).is_err());
 
         let summary = LexicalEvidenceV1::from_complete_text(
             LexicalEvidenceKind::DocumentationSummary,
@@ -869,21 +889,34 @@ mod tests {
         let mut summary_value = serde_json::to_value(summary).expect("fixture serializes");
         summary_value["text"] = serde_json::json!("x".repeat(MAX_LEXICAL_SUMMARY_BYTES + 1));
         summary_value["truncated"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<LexicalEvidenceV1>(summary_value).is_err());
+        assert!(decode_test_value(summary_value).is_err());
 
         let mut unknown_subject_field =
             serde_json::to_value(signature("valid")).expect("fixture serializes");
         unknown_subject_field["subject"]["unknown"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<LexicalEvidenceV1>(unknown_subject_field).is_err());
+        assert!(decode_test_value(unknown_subject_field).is_err());
 
         let mut impossible_truncation =
             serde_json::to_value(signature("valid")).expect("fixture serializes");
         impossible_truncation["truncated"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<LexicalEvidenceV1>(impossible_truncation).is_err());
+        assert!(decode_test_value(impossible_truncation).is_err());
     }
 
     #[test]
-    fn payload_decoder_rejects_malformed_noncanonical_oversized_and_wrong_hash() {
+    fn bounded_decoder_rejects_oversized_input_before_json_decoding() {
+        let observed = MAX_LEXICAL_PAYLOAD_BYTES + 1;
+        let oversized_malformed = "{".repeat(observed);
+        assert_eq!(
+            decode_lexical_evidence(&oversized_malformed),
+            Err(LexicalExtensionError::PayloadTooLarge {
+                observed,
+                limit: MAX_LEXICAL_PAYLOAD_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn payload_decoder_rejects_malformed_noncanonical_and_wrong_hash() {
         assert_eq!(
             decode_lexical_evidence("{"),
             Err(LexicalExtensionError::MalformedPayload)
@@ -895,11 +928,6 @@ mod tests {
             decode_lexical_evidence(&format!(" {canonical}")),
             Err(LexicalExtensionError::NoncanonicalPayload)
         );
-        let oversized = "x".repeat(MAX_LEXICAL_PAYLOAD_BYTES + 1);
-        assert!(matches!(
-            decode_lexical_evidence(&oversized),
-            Err(LexicalExtensionError::PayloadTooLarge { .. })
-        ));
 
         let mut wrong_hash: serde_json::Value =
             serde_json::from_str(&canonical).expect("canonical fixture parses");
