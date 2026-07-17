@@ -1627,10 +1627,12 @@ name = "rootlight-runtime"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "getrandom 0.3.4",
  "nix",
  "nt-token",
  "rootlight-ipc",
  "rootlight-protocol",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
