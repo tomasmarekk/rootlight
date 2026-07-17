@@ -744,7 +744,7 @@ fn validate_schema(
         .prepare(
             "SELECT type, name, sql
              FROM sqlite_schema
-             WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+             WHERE sql IS NOT NULL
              ORDER BY type, name",
         )
         .map_err(CatalogError::sqlite)?;
