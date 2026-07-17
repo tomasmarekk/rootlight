@@ -135,8 +135,7 @@ impl<'a> ParseRequest<'a> {
         included_ranges: Vec<IncludedRange>,
         limits: &'a AnalysisLimits,
     ) -> Result<Self, RequestError> {
-        validate_source_size(&source, limits)?;
-        validate_included_ranges(&source, &included_ranges, limits)?;
+        validate_request_input(&source, &included_ranges, limits)?;
         Ok(Self {
             source,
             language,
@@ -182,6 +181,8 @@ impl<'a> ParseRequest<'a> {
 pub struct AnalysisRequest<'a> {
     source: GenerationBoundSnapshot<'a>,
     language: LanguageId,
+    encoding: EncodingId,
+    included_ranges: Vec<IncludedRange>,
     tier: AnalysisTier,
     build_context: BuildContextIdentity,
     limits: &'a AnalysisLimits,
@@ -192,8 +193,11 @@ impl<'a> AnalysisRequest<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`RequestError::SourceTooLarge`] when the immutable file exceeds
-    /// its explicit request bound.
+    /// This compatibility constructor selects UTF-8 and full-file analysis.
+    /// Use [`Self::new_with_parse_context`] for embedded source ranges.
+    ///
+    /// Returns [`RequestError`] when the immutable source violates its explicit
+    /// request bound.
     pub fn new(
         source: GenerationBoundSnapshot<'a>,
         language: LanguageId,
@@ -201,10 +205,43 @@ impl<'a> AnalysisRequest<'a> {
         build_context: BuildContextIdentity,
         limits: &'a AnalysisLimits,
     ) -> Result<Self, RequestError> {
-        validate_source_size(&source, limits)?;
+        Self::new_with_parse_context(
+            source,
+            language,
+            EncodingId::utf8(),
+            Vec::new(),
+            tier,
+            build_context,
+            limits,
+        )
+    }
+
+    /// Creates a checked analysis request with explicit parser input context.
+    ///
+    /// Carrying encoding and included ranges through the analyzer boundary lets
+    /// parser-backed analyzers construct an equivalent [`ParseRequest`] without
+    /// weakening or duplicating request validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RequestError`] when source bytes or included ranges violate
+    /// the explicit analysis limits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_parse_context(
+        source: GenerationBoundSnapshot<'a>,
+        language: LanguageId,
+        encoding: EncodingId,
+        included_ranges: Vec<IncludedRange>,
+        tier: AnalysisTier,
+        build_context: BuildContextIdentity,
+        limits: &'a AnalysisLimits,
+    ) -> Result<Self, RequestError> {
+        validate_request_input(&source, &included_ranges, limits)?;
         Ok(Self {
             source,
             language,
+            encoding,
+            included_ranges,
             tier,
             build_context,
             limits,
@@ -221,6 +258,18 @@ impl<'a> AnalysisRequest<'a> {
     #[must_use]
     pub const fn language(&self) -> &LanguageId {
         &self.language
+    }
+
+    /// Returns the declared source encoding.
+    #[must_use]
+    pub const fn encoding(&self) -> &EncodingId {
+        &self.encoding
+    }
+
+    /// Returns sorted, disjoint embedded source ranges.
+    #[must_use]
+    pub fn included_ranges(&self) -> &[IncludedRange] {
+        &self.included_ranges
     }
 
     /// Returns the requested analysis tier.
@@ -240,6 +289,15 @@ impl<'a> AnalysisRequest<'a> {
     pub const fn limits(&self) -> &AnalysisLimits {
         self.limits
     }
+}
+
+fn validate_request_input(
+    source: &GenerationBoundSnapshot<'_>,
+    ranges: &[IncludedRange],
+    limits: &AnalysisLimits,
+) -> Result<(), RequestError> {
+    validate_source_size(source, limits)?;
+    validate_included_ranges(source, ranges, limits)
 }
 
 fn validate_source_size(

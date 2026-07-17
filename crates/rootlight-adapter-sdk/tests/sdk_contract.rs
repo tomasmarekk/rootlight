@@ -12,11 +12,11 @@ use std::{
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds,
     BoundedIrSink, BoundedSyntaxSink, CoverageReport, DiagnosticCode, DomainCoverage, EncodingId,
-    GenerationBoundSnapshot, IrBatch, IrBatchSink, IrRecord, LanguageId, MemoryAdmissionPolicy,
-    MemoryAdmissionStatus, MemoryEnforcement, ParseCapabilities, ParseProvider, ParseReport,
-    ParseRequest, ProducerDescriptor, ReportError, RequestError, ResourceKind, ResourceUsage,
-    SinkError, StreamEnd, StreamLimits, SyntaxFact, SyntaxFactBatch, SyntaxFactKind,
-    SyntaxFactSink, SyntaxKindLabel, WorkReport, execute_analysis, execute_parse,
+    GenerationBoundSnapshot, IncludedRange, IrBatch, IrBatchSink, IrRecord, LanguageId,
+    MemoryAdmissionPolicy, MemoryAdmissionStatus, MemoryEnforcement, ParseCapabilities,
+    ParseProvider, ParseReport, ParseRequest, ProducerDescriptor, ReportError, RequestError,
+    ResourceKind, ResourceUsage, SinkError, StreamEnd, StreamLimits, SyntaxFact, SyntaxFactBatch,
+    SyntaxFactKind, SyntaxFactSink, SyntaxKindLabel, WorkReport, execute_analysis, execute_parse,
     testkit::{MockLanguageAnalyzer, MockParseProvider},
 };
 use rootlight_cancel::{Cancellation, CancellationReason};
@@ -52,6 +52,77 @@ fn checked_snapshot_requires_exact_full_file_identity() {
     assert!(GenerationBoundSnapshot::new(&snapshot, &source).is_ok());
     assert!(GenerationBoundSnapshot::new(&snapshot, &partial).is_err());
     assert!(GenerationBoundSnapshot::new(&snapshot, &stale).is_err());
+}
+
+#[test]
+fn analysis_request_preserves_compatible_utf8_full_file_defaults() {
+    let (_temporary, snapshot, source) = source_fixture();
+    let limits = limits(2, IrLimits::default());
+    let request = analysis_request(&snapshot, &source, &limits);
+
+    assert_eq!(request.encoding().as_str(), "utf-8");
+    assert!(request.included_ranges().is_empty());
+}
+
+#[test]
+fn parser_and_analyzer_share_included_range_validation() {
+    let (_temporary, snapshot, source) = source_fixture();
+    let limits = limits(2, IrLimits::default());
+    let bound = GenerationBoundSnapshot::new(&snapshot, &source).expect("fixture snapshot binds");
+    let language = LanguageId::new("rust").expect("test language is safe");
+    let encoding = EncodingId::new("utf-8").expect("test encoding is safe");
+    let first =
+        SourceSpan::new(snapshot.file(), 0, 4).expect("first included range span is ordered");
+    let second =
+        SourceSpan::new(snapshot.file(), 8, 16).expect("second included range span is ordered");
+    let ranges = vec![
+        IncludedRange::new(first, language.clone()),
+        IncludedRange::new(second, language.clone()),
+    ];
+
+    let analysis = AnalysisRequest::new_with_parse_context(
+        bound.clone(),
+        language.clone(),
+        encoding.clone(),
+        ranges.clone(),
+        AnalysisTier::TierC,
+        BuildContextIdentity::new(snapshot.content_hash()),
+        &limits,
+    )
+    .expect("sorted disjoint analysis ranges are accepted");
+    assert_eq!(analysis.encoding(), &encoding);
+    assert_eq!(analysis.included_ranges(), ranges);
+
+    let overlapping = vec![
+        IncludedRange::new(first, language.clone()),
+        IncludedRange::new(
+            SourceSpan::new(snapshot.file(), 3, 10).expect("overlap fixture span is ordered"),
+            language.clone(),
+        ),
+    ];
+    let parse_error = ParseRequest::new(
+        bound.clone(),
+        language.clone(),
+        encoding.clone(),
+        overlapping.clone(),
+        &limits,
+    )
+    .expect_err("parser request rejects overlapping ranges");
+    let analysis_error = AnalysisRequest::new_with_parse_context(
+        bound,
+        language,
+        encoding,
+        overlapping,
+        AnalysisTier::TierC,
+        BuildContextIdentity::new(snapshot.content_hash()),
+        &limits,
+    )
+    .expect_err("analysis request rejects overlapping ranges");
+    assert_eq!(analysis_error, parse_error);
+    assert_eq!(
+        analysis_error,
+        RequestError::IncludedRangeOrder { index: 1 }
+    );
 }
 
 #[test]
