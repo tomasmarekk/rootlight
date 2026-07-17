@@ -1,8 +1,7 @@
 //! Explicit bounded decoders for externally supplied benchmark JSON.
 //!
-//! Public wire evidence is serialization-only. Inputs cross this module's byte,
-//! collection, string, digest, path, and aggregate-size checks before becoming
-//! public model values.
+//! Raw external inputs cross this module's byte, collection, string, digest,
+//! path, and aggregate-size checks before becoming trusted model values.
 
 use std::collections::BTreeSet;
 

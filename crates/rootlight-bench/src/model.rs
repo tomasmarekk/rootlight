@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Versioned semantic-quality rubric used by the M05 parser evidence slice.
 pub const SEMANTIC_QUALITY_RUBRIC_ID: &str = "m05-parser-semantic-eligibility-2.0";
@@ -18,7 +18,7 @@ pub const MAX_SEMANTIC_CALIBRATION_ERROR_PPM: u64 = 50_000;
 pub(crate) const MILLION_PPM: u64 = 1_000_000;
 
 /// A measurement's evidence classification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EvidenceValue<T> {
     /// A value measured by this recorded run.
@@ -61,7 +61,7 @@ impl<T> EvidenceValue<T> {
 }
 
 /// Availability of a correctness or telemetry requirement.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Availability {
     /// The requirement was measured and satisfied.
@@ -79,7 +79,7 @@ pub enum Availability {
 }
 
 /// Source-free environment facts required by the benchmark contract.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentEvidence {
     /// Environment schema version.
@@ -129,7 +129,7 @@ pub struct EnvironmentEvidence {
 }
 
 /// One immutable dataset input.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetEntry {
     /// Stable dataset-local ID.
@@ -151,7 +151,7 @@ pub struct DatasetEntry {
 }
 
 /// Versioned immutable dataset manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetManifest {
     /// Manifest schema version.
@@ -169,7 +169,7 @@ pub struct DatasetManifest {
 }
 
 /// Exact source and build identity for one run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildProvenance {
     /// Provenance schema version.
@@ -187,7 +187,7 @@ pub struct BuildProvenance {
 }
 
 /// Exact benchmark command and deterministic trial policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BenchmarkCommand {
     /// Command schema version.
@@ -207,7 +207,7 @@ pub struct BenchmarkCommand {
 }
 
 /// Terminal result for one retained raw sample.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SampleOutcome {
     /// The parser transaction committed.
@@ -224,7 +224,7 @@ pub enum SampleOutcome {
 }
 
 /// One retained parser benchmark sample.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawSample {
     /// Sample schema version.
@@ -260,7 +260,7 @@ pub struct RawSample {
 }
 
 /// Deterministic percentile and throughput summary for one metric family.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricDistribution {
     /// Number of successful measured samples.
@@ -284,7 +284,7 @@ pub struct MetricDistribution {
 }
 
 /// Aggregate result summary, including claim eligibility.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultSummary {
     /// Summary schema version.
@@ -306,7 +306,7 @@ pub struct ResultSummary {
 }
 
 /// Coverage evidence retained separately from performance summary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoverageEvidence {
     /// Coverage schema version.
@@ -322,7 +322,7 @@ pub struct CoverageEvidence {
 }
 
 /// Quality evidence and semantic eligibility rubric.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QualityEvidence {
     /// Quality schema version.
@@ -373,7 +373,7 @@ impl SemanticQualityMeasurement {
 }
 
 /// One retained agent trajectory; parser-only runs normally publish none.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentTrajectory {
     /// Trajectory schema version.

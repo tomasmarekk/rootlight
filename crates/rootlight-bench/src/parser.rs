@@ -650,7 +650,7 @@ fn summarize(
     })
 }
 
-fn semantic_fact_eligibility(samples: &[RawSample]) -> Availability {
+pub(crate) fn semantic_fact_eligibility(samples: &[RawSample]) -> Availability {
     let trials = samples
         .iter()
         .filter(|sample| sample.phase == "trial")

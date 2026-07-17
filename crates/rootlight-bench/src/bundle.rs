@@ -14,20 +14,21 @@ use std::{
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
+use crate::integrity::{is_fixed_artifact, validate_fixed_artifacts};
 use crate::{
     AgentTrajectory, BenchmarkCommand, BuildProvenance, CoverageEvidence, DatasetManifest,
     EnvironmentEvidence, QualityEvidence, RawSample, ResultSummary,
 };
 
-const ENVIRONMENT_FILE: &str = "environment.json";
-const DATASET_MANIFEST_FILE: &str = "dataset-manifest.json";
-const BUILD_PROVENANCE_FILE: &str = "build-provenance.json";
-const COMMAND_FILE: &str = "command.json";
-const RAW_SAMPLES_FILE: &str = "raw-samples.jsonl";
-const SUMMARY_FILE: &str = "summary.json";
-const COVERAGE_FILE: &str = "coverage.json";
-const QUALITY_FILE: &str = "quality.json";
-const AGENT_TRAJECTORIES_FILE: &str = "agent-trajectories.jsonl";
+pub(crate) const ENVIRONMENT_FILE: &str = "environment.json";
+pub(crate) const DATASET_MANIFEST_FILE: &str = "dataset-manifest.json";
+pub(crate) const BUILD_PROVENANCE_FILE: &str = "build-provenance.json";
+pub(crate) const COMMAND_FILE: &str = "command.json";
+pub(crate) const RAW_SAMPLES_FILE: &str = "raw-samples.jsonl";
+pub(crate) const SUMMARY_FILE: &str = "summary.json";
+pub(crate) const COVERAGE_FILE: &str = "coverage.json";
+pub(crate) const QUALITY_FILE: &str = "quality.json";
+pub(crate) const AGENT_TRAJECTORIES_FILE: &str = "agent-trajectories.jsonl";
 const CHECKSUMS_FILE: &str = "checksums.txt";
 const FIXED_ARTIFACT_COUNT: usize = 9;
 
@@ -400,6 +401,7 @@ pub fn verify_bundle_with_limits(
     if observed_paths != expected_paths {
         return Err(BundleError::ArtifactSetMismatch);
     }
+    let mut fixed_artifacts = BTreeMap::new();
     for (relative, checksum) in expected {
         let bytes = read_bounded(
             &destination.join(&relative),
@@ -409,7 +411,11 @@ pub fn verify_bundle_with_limits(
         if sha256_hex(&bytes) != checksum {
             return Err(BundleError::ChecksumMismatch);
         }
+        if is_fixed_artifact(&relative) {
+            fixed_artifacts.insert(relative, bytes);
+        }
     }
+    validate_fixed_artifacts(&fixed_artifacts, limits)?;
     Ok(())
 }
 
@@ -571,6 +577,7 @@ fn build_artifacts(
         artifacts.insert(format!("logs/{name}"), bytes);
     }
 
+    validate_fixed_artifacts(&artifacts, limits)?;
     check_count(artifacts.len() + 1, limits.max_file_count, "file_count")?;
     check_count(
         artifacts.len(),
@@ -1067,6 +1074,12 @@ pub enum BundleError {
     /// One artifact failed checksum verification.
     #[error("result artifact checksum mismatch")]
     ChecksumMismatch,
+    /// A fixed artifact is not strict canonical JSON for its schema.
+    #[error("result artifact encoding is invalid")]
+    InvalidArtifactEncoding,
+    /// Fixed artifacts contradict one another or their recorded run policy.
+    #[error("result artifact invariants are invalid")]
+    ArtifactInvariantViolation,
     /// The verifier encountered a link or special file.
     #[error("result bundle contains an unsupported artifact type")]
     UnsupportedArtifactType,
@@ -1116,15 +1129,15 @@ mod tests {
             dataset_manifest: DatasetManifest {
                 schema_version: "1.0".to_owned(),
                 dataset_id: "fixture".to_owned(),
-                revision: "sha256:00".to_owned(),
+                revision: format!("sha256:{}", sha256_hex(&[])),
                 scope_rule: "listed_entries".to_owned(),
                 loc_counting_rule: "physical_newlines".to_owned(),
                 entries: Vec::new(),
             },
             build_provenance: BuildProvenance {
                 schema_version: "1.0".to_owned(),
-                source_revision: "source".to_owned(),
-                binary_revision: "binary".to_owned(),
+                source_revision: "00".repeat(20),
+                binary_revision: format!("sha256:{}", "00".repeat(32)),
                 build_profile: "test".to_owned(),
                 features: Vec::new(),
                 target: "test-target".to_owned(),
@@ -1142,8 +1155,8 @@ mod tests {
             summary: ResultSummary {
                 schema_version: "1.0".to_owned(),
                 benchmark_id: "BENCH-PARSE-001".to_owned(),
-                semantic_eligibility: Availability::Unavailable {
-                    reason_code: "extraction_not_integrated".to_owned(),
+                semantic_eligibility: Availability::Failed {
+                    reason_code: "no_measured_samples".to_owned(),
                 },
                 families: BTreeMap::new(),
                 failed_samples: 0,
@@ -1162,9 +1175,9 @@ mod tests {
             },
             quality: QualityEvidence {
                 schema_version: "1.0".to_owned(),
-                rubric_id: "m05-parser-1.0".to_owned(),
-                semantic_eligibility: Availability::Unavailable {
-                    reason_code: "extraction_not_integrated".to_owned(),
+                rubric_id: crate::SEMANTIC_QUALITY_RUBRIC_ID.to_owned(),
+                semantic_eligibility: Availability::Failed {
+                    reason_code: "no_measured_samples".to_owned(),
                 },
                 precision_ppm: EvidenceValue::unavailable("not_measured"),
                 recall_ppm: EvidenceValue::unavailable("not_measured"),
@@ -1198,6 +1211,28 @@ mod tests {
             max_snapshot_bytes: 64 * 1024,
             max_dataset_source_bytes: 256 * 1024,
         }
+    }
+
+    fn rewrite_artifact_and_checksum(destination: &Path, artifact: &str, bytes: &[u8]) {
+        fs::write(destination.join(artifact), bytes).expect("tampered artifact is written");
+        let checksums = fs::read_to_string(destination.join(CHECKSUMS_FILE))
+            .expect("checksum manifest is readable");
+        let mut updated = String::new();
+        for line in checksums.lines() {
+            let (_, relative) = line
+                .split_once("  ")
+                .expect("fixture checksum line is canonical");
+            if relative == artifact {
+                use std::fmt::Write as _;
+                writeln!(updated, "{}  {artifact}", sha256_hex(bytes))
+                    .expect("writing to a string succeeds");
+            } else {
+                updated.push_str(line);
+                updated.push('\n');
+            }
+        }
+        fs::write(destination.join(CHECKSUMS_FILE), updated)
+            .expect("updated checksum manifest is written");
     }
 
     #[test]
@@ -1256,6 +1291,152 @@ mod tests {
 
         assert!(matches!(error, BundleError::ChecksumMismatch));
         assert_eq!(error.to_string(), "result artifact checksum mismatch");
+    }
+
+    #[test]
+    fn every_fixed_artifact_is_strictly_decoded_after_checksum_verification() {
+        for artifact in [
+            ENVIRONMENT_FILE,
+            DATASET_MANIFEST_FILE,
+            BUILD_PROVENANCE_FILE,
+            COMMAND_FILE,
+            RAW_SAMPLES_FILE,
+            SUMMARY_FILE,
+            COVERAGE_FILE,
+            QUALITY_FILE,
+            AGENT_TRAJECTORIES_FILE,
+        ] {
+            let temporary = tempfile::tempdir().expect("temporary root is available");
+            let destination = temporary.path().join("result");
+            publish_bundle(&fixture(), &destination).expect("bundle publishes");
+            rewrite_artifact_and_checksum(&destination, artifact, b"{}\n");
+
+            let error =
+                verify_bundle(&destination).expect_err("invalid fixed artifact is rejected");
+
+            assert!(
+                matches!(error, BundleError::InvalidArtifactEncoding),
+                "{artifact} returned {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn publication_rejects_schema_revision_count_and_availability_contradictions() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+
+        let mut invalid_schema = fixture();
+        invalid_schema.environment.schema_version = "2.0".to_owned();
+        assert!(matches!(
+            publish_bundle(&invalid_schema, &temporary.path().join("schema")),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+
+        let mut invalid_dataset_revision = fixture();
+        invalid_dataset_revision.dataset_manifest.revision = format!("sha256:{}", "11".repeat(32));
+        assert!(matches!(
+            publish_bundle(
+                &invalid_dataset_revision,
+                &temporary.path().join("dataset-revision")
+            ),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+
+        let mut invalid_binary_revision = fixture();
+        invalid_binary_revision.build_provenance.binary_revision =
+            format!("sha256:{}", "11".repeat(32));
+        assert!(matches!(
+            publish_bundle(
+                &invalid_binary_revision,
+                &temporary.path().join("binary-revision")
+            ),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+
+        let mut invalid_count = fixture();
+        invalid_count.summary.failed_samples = 1;
+        assert!(matches!(
+            publish_bundle(&invalid_count, &temporary.path().join("count")),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+
+        let mut invalid_availability = fixture();
+        invalid_availability.summary.semantic_eligibility = Availability::Available;
+        assert!(matches!(
+            publish_bundle(
+                &invalid_availability,
+                &temporary.path().join("availability")
+            ),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+    }
+
+    #[test]
+    fn unsafe_reason_labels_are_rejected_before_publication() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let mut bundle = fixture();
+        bundle.quality.precision_ppm = EvidenceValue::unavailable("../../host-path");
+
+        let error = publish_bundle(&bundle, &temporary.path().join("result"))
+            .expect_err("unsafe reason is rejected");
+
+        assert!(matches!(error, BundleError::InvalidArtifactEncoding));
+        assert!(!temporary.path().join("result").exists());
+    }
+
+    #[test]
+    fn verifier_rejects_checksum_valid_cross_artifact_contradictions() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let mut bundle = fixture();
+        publish_bundle(&bundle, &destination).expect("bundle publishes");
+        bundle.summary.semantic_eligibility = Availability::Available;
+        let bytes = json_bytes(&bundle.summary, 64 * 1024).expect("summary serializes");
+        rewrite_artifact_and_checksum(&destination, SUMMARY_FILE, &bytes);
+
+        let error = verify_bundle(&destination).expect_err("contradiction is rejected");
+
+        assert!(matches!(error, BundleError::ArtifactInvariantViolation));
+    }
+
+    #[test]
+    fn fixed_jsonl_decode_enforces_collection_limits_before_invariants() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        let sample = RawSample {
+            schema_version: "1.0".to_owned(),
+            ordinal: 0,
+            phase: "trial".to_owned(),
+            dataset_entry_id: "entry".to_owned(),
+            grammar_family: "rust".to_owned(),
+            elapsed_ns: 1,
+            source_bytes: 1,
+            physical_lines: 1,
+            syntax_nodes: 1,
+            syntax_facts: 1,
+            semantic_facts: EvidenceValue::unavailable("not_measured"),
+            process_tree_cpu_ns: EvidenceValue::unavailable("not_measured"),
+            process_tree_peak_rss_bytes: EvidenceValue::unavailable("not_measured"),
+            outcome: crate::SampleOutcome::Succeeded,
+            is_outlier: false,
+        };
+        let bytes = json_lines(&[sample.clone(), sample], 64 * 1024).expect("samples serialize");
+        rewrite_artifact_and_checksum(&destination, RAW_SAMPLES_FILE, &bytes);
+        let limits = BundleLimits {
+            max_raw_samples: 1,
+            ..constrained_limits()
+        };
+
+        let error = verify_bundle_with_limits(&destination, limits)
+            .expect_err("raw sample decode limit is enforced");
+
+        assert!(matches!(
+            error,
+            BundleError::LimitExceeded {
+                resource: "raw_sample_count"
+            }
+        ));
     }
 
     #[test]

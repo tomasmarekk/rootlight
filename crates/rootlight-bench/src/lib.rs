@@ -7,6 +7,7 @@
 
 mod bundle;
 mod decode;
+mod integrity;
 mod model;
 mod parser;
 mod sampler;
