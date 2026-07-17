@@ -49,6 +49,7 @@ const HARD_MAX_COMMAND_ARGUMENTS: usize = 256;
 const HARD_MAX_STRING_BYTES: usize = 4_096;
 const HARD_MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 const HARD_MAX_DATASET_SOURCE_BYTES: u64 = 1 << 40;
+const HARD_MAX_OPERATIONAL_LOG_RECORDS: usize = 100_000;
 
 /// Checked resource ceilings for bundle publication, verification, and inputs.
 ///
@@ -165,30 +166,135 @@ impl BundleLimits {
     }
 }
 
-/// UTF-8 log bytes screened for control characters and path-shaped tokens.
-///
-/// The type prevents common host-path disclosure through the result-bundle
-/// interface. Callers remain responsible for supplying operation summaries,
-/// never source excerpts, credentials, or other sensitive payloads.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceFreeLog(Vec<u8>);
+/// Closed source-free event vocabulary for operational benchmark logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OperationalEvent {
+    /// A benchmark run started.
+    BenchmarkStarted,
+    /// One benchmark sample started.
+    SampleStarted,
+    /// One benchmark sample completed.
+    SampleCompleted,
+    /// A benchmark run completed.
+    BenchmarkCompleted,
+    /// An immutable result bundle was published.
+    BundlePublished,
+}
 
-impl SourceFreeLog {
-    /// Creates a source-free log artifact.
+impl OperationalEvent {
+    /// Parses one allow-listed source-free event label.
     ///
     /// # Errors
     ///
-    /// Returns [`BundleError::InvalidLog`] for non-UTF-8, control characters,
-    /// path-shaped tokens, or an artifact above the absolute log-file ceiling.
-    pub fn new(bytes: Vec<u8>) -> Result<Self, BundleError> {
-        validate_log(&bytes, HARD_MAX_ARTIFACT_BYTES)?;
-        Ok(Self(bytes))
+    /// Returns [`BundleError::InvalidLog`] for values outside the closed
+    /// operational vocabulary.
+    pub fn from_label(label: &str) -> Result<Self, BundleError> {
+        match label {
+            "benchmark_started" => Ok(Self::BenchmarkStarted),
+            "sample_started" => Ok(Self::SampleStarted),
+            "sample_completed" => Ok(Self::SampleCompleted),
+            "benchmark_completed" => Ok(Self::BenchmarkCompleted),
+            "bundle_published" => Ok(Self::BundlePublished),
+            _ => Err(BundleError::InvalidLog),
+        }
+    }
+}
+
+/// Closed source-free terminal-status vocabulary for operational logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OperationalStatus {
+    /// The operation has started but is not terminal.
+    Started,
+    /// The operation succeeded.
+    Succeeded,
+    /// The operation failed.
+    Failed,
+    /// The operation exceeded its deadline.
+    TimedOut,
+    /// The operation was cancelled.
+    Cancelled,
+    /// Required telemetry was unavailable.
+    Unavailable,
+}
+
+impl OperationalStatus {
+    /// Parses one allow-listed source-free status label.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BundleError::InvalidLog`] for values outside the closed
+    /// operational vocabulary.
+    pub fn from_label(label: &str) -> Result<Self, BundleError> {
+        match label {
+            "started" => Ok(Self::Started),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            "timed_out" => Ok(Self::TimedOut),
+            "cancelled" => Ok(Self::Cancelled),
+            "unavailable" => Ok(Self::Unavailable),
+            _ => Err(BundleError::InvalidLog),
+        }
+    }
+}
+
+/// One source-free structured operational log record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationalLogRecord {
+    /// Monotonic record sequence within this artifact.
+    pub sequence: u64,
+    /// Closed operation event.
+    pub event: OperationalEvent,
+    /// Closed operation status.
+    pub status: OperationalStatus,
+    /// Optional sample ordinal.
+    pub sample_ordinal: Option<u64>,
+    /// Optional elapsed duration in monotonic nanoseconds.
+    pub elapsed_ns: Option<u64>,
+}
+
+/// Structured operational log without arbitrary string or byte payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationalLog {
+    records: Vec<OperationalLogRecord>,
+}
+
+impl OperationalLog {
+    /// Creates a bounded structured operational log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BundleError::InvalidLog`] if records are empty, exceed the
+    /// hard ceiling, or do not use strictly increasing sequence numbers.
+    pub fn new(records: Vec<OperationalLogRecord>) -> Result<Self, BundleError> {
+        if records.is_empty()
+            || records.len() > HARD_MAX_OPERATIONAL_LOG_RECORDS
+            || records
+                .windows(2)
+                .any(|pair| pair[0].sequence >= pair[1].sequence)
+        {
+            return Err(BundleError::InvalidLog);
+        }
+        Ok(Self { records })
     }
 
-    /// Returns the validated log bytes.
+    /// Returns the structured source-free records.
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+    pub fn records(&self) -> &[OperationalLogRecord] {
+        &self.records
+    }
+}
+
+impl Serialize for OperationalLog {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.records.serialize(serializer)
     }
 }
 
@@ -216,7 +322,7 @@ pub struct ResultBundle {
     /// Profile artifacts keyed by validated relative artifact name.
     pub profiles: BTreeMap<String, Vec<u8>>,
     /// Source-free log artifacts keyed by validated relative artifact name.
-    pub logs: BTreeMap<String, SourceFreeLog>,
+    pub logs: BTreeMap<String, OperationalLog>,
 }
 
 /// Publishes one immutable result bundle using the crate's hard defaults.
@@ -360,7 +466,7 @@ fn build_artifacts(
         "agent_trajectory_count",
     )?;
     validate_artifact_map(&bundle.profiles, limits.max_artifacts_per_class)?;
-    validate_log_map(&bundle.logs, limits)?;
+    validate_log_map(&bundle.logs, limits.max_artifacts_per_class)?;
 
     let serialized_limit =
         usize::try_from(limits.max_artifact_bytes).map_err(|_| BundleError::LimitExceeded {
@@ -417,13 +523,14 @@ fn build_artifacts(
     }
     let mut log_bytes = 0_u64;
     for (name, log) in &bundle.logs {
+        let bytes = json_bytes(log, serialized_limit)?;
         add_bytes(
             &mut log_bytes,
-            log.as_bytes().len(),
+            bytes.len(),
             limits.max_log_bytes,
             "log_bytes",
         )?;
-        artifacts.insert(format!("logs/{name}"), log.as_bytes().to_vec());
+        artifacts.insert(format!("logs/{name}"), bytes);
     }
 
     check_count(artifacts.len() + 1, limits.max_file_count, "file_count")?;
@@ -611,17 +718,12 @@ fn validate_artifact_map(
 }
 
 fn validate_log_map(
-    artifacts: &BTreeMap<String, SourceFreeLog>,
-    limits: BundleLimits,
+    artifacts: &BTreeMap<String, OperationalLog>,
+    max_count: usize,
 ) -> Result<(), BundleError> {
-    check_count(
-        artifacts.len(),
-        limits.max_artifacts_per_class,
-        "artifact_count",
-    )?;
-    for (name, log) in artifacts {
+    check_count(artifacts.len(), max_count, "artifact_count")?;
+    for name in artifacts.keys() {
         validate_artifact_name(name)?;
-        validate_log(log.as_bytes(), limits.max_artifact_bytes)?;
     }
     Ok(())
 }
@@ -650,30 +752,6 @@ fn validate_artifact_name(name: &str) -> Result<(), BundleError> {
         || name.eq_ignore_ascii_case(CHECKSUMS_FILE)
     {
         return Err(BundleError::InvalidArtifactName);
-    }
-    Ok(())
-}
-
-fn validate_log(bytes: &[u8], max_bytes: u64) -> Result<(), BundleError> {
-    check_bytes(bytes.len(), max_bytes, "artifact_bytes")?;
-    let text = std::str::from_utf8(bytes).map_err(|_| BundleError::InvalidLog)?;
-    if text
-        .chars()
-        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
-    {
-        return Err(BundleError::InvalidLog);
-    }
-    for token in text.split_whitespace() {
-        let path_shaped = token.starts_with('/')
-            || token.starts_with('\\')
-            || token.starts_with("~/")
-            || token.contains('\\')
-            || token.contains("://")
-            || token.contains("../")
-            || token.as_bytes().get(1).is_some_and(|byte| *byte == b':');
-        if path_shaped {
-            return Err(BundleError::InvalidLog);
-        }
     }
     Ok(())
 }
@@ -1248,16 +1326,14 @@ mod tests {
         ));
 
         let mut bundle = fixture();
-        bundle.logs.insert(
-            "first.log".to_owned(),
-            SourceFreeLog::new(vec![b'x'; 40]).expect("source-free fixture log is valid"),
-        );
-        bundle.logs.insert(
-            "second.log".to_owned(),
-            SourceFreeLog::new(vec![b'x'; 40]).expect("source-free fixture log is valid"),
-        );
+        bundle
+            .logs
+            .insert("first.log".to_owned(), large_operational_log(0, 8));
+        bundle
+            .logs
+            .insert("second.log".to_owned(), large_operational_log(100, 8));
         let mut limits = constrained_limits();
-        limits.max_log_bytes = 64;
+        limits.max_log_bytes = 512;
         let error =
             publish_bundle_with_limits(&bundle, &temporary.path().join("log-bytes"), limits)
                 .expect_err("log byte bound is enforced");
@@ -1408,20 +1484,31 @@ mod tests {
     }
 
     #[test]
-    fn log_type_rejects_host_paths_and_controls() {
-        for bytes in [
-            b"failed at C:\\Users\\person\\source.rs".as_slice(),
-            b"failed at /home/person/source.rs".as_slice(),
-            b"failed at ../source.rs".as_slice(),
-            b"invalid\0log".as_slice(),
+    fn operational_logs_reject_arbitrary_source_and_secret_labels() {
+        for value in [
+            "fn secret() {}",
+            "api_key=super-secret",
+            "C:\\Users\\person\\source.rs",
+            "/home/person/source.rs",
         ] {
             assert!(matches!(
-                SourceFreeLog::new(bytes.to_vec()),
+                OperationalEvent::from_label(value),
+                Err(BundleError::InvalidLog)
+            ));
+            assert!(matches!(
+                OperationalStatus::from_label(value),
                 Err(BundleError::InvalidLog)
             ));
         }
-        SourceFreeLog::new(b"parse_timeout reason_code=deadline_elapsed\n".to_vec())
-            .expect("source-free operation summary is accepted");
+        let log = OperationalLog::new(vec![OperationalLogRecord {
+            sequence: 0,
+            event: OperationalEvent::SampleCompleted,
+            status: OperationalStatus::TimedOut,
+            sample_ordinal: Some(4),
+            elapsed_ns: Some(1_000),
+        }])
+        .expect("closed operational record is accepted");
+        assert_eq!(log.records().len(), 1);
     }
 
     #[test]
@@ -1433,5 +1520,18 @@ mod tests {
             publish_bundle_with_limits(&fixture(), &temporary.path().join("result"), limits)
                 .expect_err("hard ceiling cannot be raised");
         assert!(matches!(error, BundleError::InvalidLimits));
+    }
+
+    fn large_operational_log(first_sequence: u64, count: u64) -> OperationalLog {
+        let records = (0..count)
+            .map(|offset| OperationalLogRecord {
+                sequence: first_sequence + offset,
+                event: OperationalEvent::SampleCompleted,
+                status: OperationalStatus::Succeeded,
+                sample_ordinal: Some(offset),
+                elapsed_ns: Some(1),
+            })
+            .collect();
+        OperationalLog::new(records).expect("bounded operational log is valid")
     }
 }
