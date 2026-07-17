@@ -21,6 +21,8 @@ use cap_std::{
 use rootlight_ids::{ContentHash, FileId, FileIdentity, RepositoryId, content_hash, derive_file};
 use rootlight_ir::SourceRef;
 
+pub mod platform;
+
 /// Hard ceiling for one VFS source capture, independent of caller configuration.
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum number of relative path components accepted by the VFS.

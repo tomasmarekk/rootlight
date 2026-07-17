@@ -1714,10 +1714,15 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
+ "nix",
+ "nt-token",
  "rootlight-ids",
  "rootlight-ir",
+ "rustix",
  "tempfile",
  "thiserror",
+ "windows",
+ "windows-permissions",
 ]
 
 [[package]]
