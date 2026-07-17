@@ -1016,13 +1016,19 @@ pub fn decode_legacy_ir_document(
         });
     }
 
-    let wire = serde_json::from_slice::<LegacyWireDocument>(encoded)
-        .map_err(classify_legacy_wire_error)?;
-    if wire.version.major() != IR_VERSION.major() {
+    // Probe before strict decoding so unsupported majors cannot materialize
+    // attacker-controlled producer strings from an otherwise valid envelope.
+    let version = serde_json::from_slice::<VersionProbe>(encoded)
+        .map_err(classify_legacy_wire_error)?
+        .version;
+    if version.major() != IR_VERSION.major() {
         return Err(LegacyIrDocumentDecodeError::UnsupportedMajor {
-            major: wire.version.major(),
+            major: version.major(),
         });
     }
+
+    let wire = serde_json::from_slice::<LegacyWireDocument>(encoded)
+        .map_err(classify_legacy_wire_error)?;
     wire.into_domain()
         .map_err(|()| LegacyIrDocumentDecodeError::InvalidDocument)
 }
@@ -1996,6 +2002,23 @@ mod tests {
             decode_legacy_ir_document(&encode_test_value(&additive), &IrLimits::default()),
             Err(LegacyIrDocumentDecodeError::UnsupportedMajor { major: 2 })
         );
+    }
+
+    #[test]
+    fn legacy_decoder_rejects_unsupported_major_before_dynamic_fields() {
+        let attacker_text = "/private/attacker.rs";
+        let mut unsupported = legacy_value();
+        unsupported["version"]["major"] = serde_json::json!(2);
+        unsupported["producer"]["name"] = serde_json::json!(attacker_text);
+
+        let error =
+            decode_legacy_ir_document(&encode_test_value(&unsupported), &IrLimits::default())
+                .expect_err("unsupported major rejects before producer validation");
+        assert_eq!(
+            error,
+            LegacyIrDocumentDecodeError::UnsupportedMajor { major: 2 }
+        );
+        assert!(!error.to_string().contains(attacker_text));
     }
 
     #[test]
