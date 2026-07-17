@@ -498,6 +498,10 @@ fn node_and_depth_limits_commit_explicit_partial_coverage() {
     .expect("node-limited parse commits");
     assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
     assert_eq!(output.diagnostics()[0].code().as_str(), "syntax-node-limit");
+    assert!(
+        output.facts().is_empty(),
+        "partial traversal must not start a structural query scan"
+    );
     assert_eq!(output.report().resources().syntax_nodes(), 2);
     assert_eq!(node_provider.stats().cache.entries, 0);
 
@@ -522,6 +526,10 @@ fn node_and_depth_limits_commit_explicit_partial_coverage() {
     assert_eq!(
         output.diagnostics()[0].code().as_str(),
         "syntax-depth-limit"
+    );
+    assert!(
+        output.facts().is_empty(),
+        "partial traversal must not start a structural query scan"
     );
     assert!(output.report().resources().max_syntax_depth() <= 2);
     assert_eq!(depth_provider.stats().cache.entries, 0);
