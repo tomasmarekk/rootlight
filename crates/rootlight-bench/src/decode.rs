@@ -37,6 +37,7 @@ fn decode_dataset_manifest_with_control(
     let limits = limits.validate().map_err(DecodeError::Limits)?;
     check_input_bytes(bytes, limits)?;
     reject_escaped_strings(bytes)?;
+    preflight_borrowed_strings(bytes, limits.max_string_bytes)?;
     let entry_count = preflight_array_field(
         bytes,
         "entries",
@@ -45,12 +46,13 @@ fn decode_dataset_manifest_with_control(
     )?;
     let mut budget = DecodeBudget::new(limits, fail_after_reservations)?;
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    let input = DatasetManifestSeed {
+    let decoded = DatasetManifestSeed {
         entry_count,
         budget: &mut budget,
     }
     .deserialize(&mut deserializer)
-    .map_err(map_seed_error)?;
+    .map_err(|_| ());
+    let input = decoded.map_err(|()| budget.take_seed_failure())?;
     deserializer.end().map_err(|_| DecodeError::InvalidJson)?;
     validate_string(input.schema_version, limits, StringKind::Label)?;
     if input.schema_version != RESULT_BUNDLE_SCHEMA_VERSION {
@@ -138,6 +140,7 @@ fn decode_benchmark_command_with_control(
     let limits = limits.validate().map_err(DecodeError::Limits)?;
     check_input_bytes(bytes, limits)?;
     reject_escaped_strings(bytes)?;
+    preflight_borrowed_strings(bytes, limits.max_string_bytes)?;
     let argument_count = preflight_array_field(
         bytes,
         "arguments",
@@ -149,11 +152,12 @@ fn decode_benchmark_command_with_control(
     }
     let mut budget = DecodeBudget::new(limits, fail_after_reservations)?;
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    let input = BenchmarkCommandSeed {
+    let decoded = BenchmarkCommandSeed {
         budget: &mut budget,
     }
     .deserialize(&mut deserializer)
-    .map_err(map_seed_error)?;
+    .map_err(|_| ());
+    let input = decoded.map_err(|()| budget.take_seed_failure())?;
     deserializer.end().map_err(|_| DecodeError::InvalidJson)?;
     validate_string(input.schema_version, limits, StringKind::Label)?;
     if input.schema_version != RESULT_BUNDLE_SCHEMA_VERSION {
@@ -176,6 +180,139 @@ fn check_input_bytes(bytes: &[u8], limits: BundleLimits) -> Result<(), DecodeErr
         });
     }
     Ok(())
+}
+
+const PREFLIGHT_STRING_EXCEEDED: &str = "benchmark input string length exceeded";
+const DECODE_FIELD_REJECTED: &str = "benchmark input field set is invalid";
+
+fn preflight_borrowed_strings(bytes: &[u8], maximum: usize) -> Result<(), DecodeError> {
+    let mut exceeded = false;
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let result = StringLengthSeed {
+        maximum,
+        exceeded: &mut exceeded,
+    }
+    .deserialize(&mut deserializer);
+    if exceeded {
+        return Err(DecodeError::LimitExceeded {
+            resource: "string_bytes",
+        });
+    }
+    result.map_err(|_| DecodeError::InvalidJson)?;
+    deserializer.end().map_err(|_| DecodeError::InvalidJson)
+}
+
+struct StringLengthSeed<'a> {
+    maximum: usize,
+    exceeded: &'a mut bool,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for StringLengthSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StringLengthVisitor {
+            maximum: self.maximum,
+            exceeded: self.exceeded,
+        })
+    }
+}
+
+struct StringLengthVisitor<'a> {
+    maximum: usize,
+    exceeded: &'a mut bool,
+}
+
+impl<'de> Visitor<'de> for StringLengthVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("strict JSON with bounded borrowed strings")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        StringLengthSeed {
+            maximum: self.maximum,
+            exceeded: self.exceeded,
+        }
+        .deserialize(deserializer)
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        if value.len() > self.maximum {
+            *self.exceeded = true;
+            Err(E::custom(PREFLIGHT_STRING_EXCEEDED))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Err(E::custom("benchmark input string was not borrowed"))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while let Some(()) = sequence.next_element_seed(StringLengthSeed {
+            maximum: self.maximum,
+            exceeded: &mut *self.exceeded,
+        })? {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while let Some(()) = map.next_key_seed(StringLengthSeed {
+            maximum: self.maximum,
+            exceeded: &mut *self.exceeded,
+        })? {
+            map.next_value_seed(StringLengthSeed {
+                maximum: self.maximum,
+                exceeded: &mut *self.exceeded,
+            })?;
+        }
+        Ok(())
+    }
 }
 
 fn preflight_array_field(
@@ -270,7 +407,7 @@ impl<'de> Visitor<'de> for ObjectPathCountVisitor<'_> {
         while let Some(key) = map.next_key::<&str>()? {
             if key == self.path[0] {
                 if count.is_some() {
-                    return Err(serde::de::Error::duplicate_field(self.path[0]));
+                    return Err(serde::de::Error::custom(DECODE_FIELD_REJECTED));
                 }
                 count = if self.path.len() == 1 {
                     Some(map.next_value_seed(CollectionCountSeed { kind: self.kind })?)
@@ -363,7 +500,7 @@ impl<'de> Visitor<'de> for ObjectArrayCountVisitor {
         while let Some(key) = map.next_key::<&str>()? {
             if key == self.field {
                 if count.is_some() {
-                    return Err(serde::de::Error::duplicate_field(self.field));
+                    return Err(serde::de::Error::custom(DECODE_FIELD_REJECTED));
                 }
                 count = Some(map.next_value_seed(ArrayCountSeed)?);
             } else {
@@ -470,6 +607,15 @@ struct DecodeBudget {
     max_retained_items: usize,
     reservations: usize,
     fail_after_reservations: Option<usize>,
+    seed_failure: Option<SeedFailure>,
+}
+
+// Serde erases visitor error types, so the budget retains the typed failure
+// without recovering it from an allocated error message.
+#[derive(Clone, Copy)]
+enum SeedFailure {
+    Allocation,
+    RetainedItems,
 }
 
 impl DecodeBudget {
@@ -493,15 +639,23 @@ impl DecodeBudget {
             max_retained_items,
             reservations: 0,
             fail_after_reservations,
+            seed_failure: None,
         })
     }
 
     fn reserve<T>(&mut self, values: &mut Vec<T>, additional: usize) -> Result<(), DecodeError> {
-        self.charge_items(additional)?;
-        self.before_reservation()?;
-        values
-            .try_reserve_exact(additional)
-            .map_err(|_| DecodeError::AllocationFailed)
+        if let Err(error) = self.charge_items(additional) {
+            self.record_seed_failure(&error);
+            return Err(error);
+        }
+        if let Err(error) = self.before_reservation() {
+            self.record_seed_failure(&error);
+            return Err(error);
+        }
+        values.try_reserve_exact(additional).map_err(|_| {
+            self.seed_failure = Some(SeedFailure::Allocation);
+            DecodeError::AllocationFailed
+        })
     }
 
     fn own(&mut self, value: &str) -> Result<String, DecodeError> {
@@ -547,6 +701,24 @@ impl DecodeBudget {
             })?;
         Ok(())
     }
+
+    fn take_seed_failure(&mut self) -> DecodeError {
+        match self.seed_failure.take() {
+            Some(SeedFailure::Allocation) => DecodeError::AllocationFailed,
+            Some(SeedFailure::RetainedItems) => DecodeError::LimitExceeded {
+                resource: "decoded_retained_items",
+            },
+            None => DecodeError::InvalidJson,
+        }
+    }
+
+    fn record_seed_failure(&mut self, error: &DecodeError) {
+        self.seed_failure = Some(match error {
+            DecodeError::AllocationFailed => SeedFailure::Allocation,
+            DecodeError::LimitExceeded { .. } => SeedFailure::RetainedItems,
+            _ => return,
+        });
+    }
 }
 
 fn reject_escaped_strings(bytes: &[u8]) -> Result<(), DecodeError> {
@@ -554,19 +726,6 @@ fn reject_escaped_strings(bytes: &[u8]) -> Result<(), DecodeError> {
         return Err(DecodeError::InvalidJson);
     }
     Ok(())
-}
-
-fn map_seed_error(error: serde_json::Error) -> DecodeError {
-    let message = error.to_string();
-    if message.starts_with(SEED_ALLOCATION_FAILED) {
-        DecodeError::AllocationFailed
-    } else if message.starts_with(SEED_LIMIT_EXCEEDED) {
-        DecodeError::LimitExceeded {
-            resource: "decoded_retained_items",
-        }
-    } else {
-        DecodeError::InvalidJson
-    }
 }
 
 fn seed_error<E: serde::de::Error>(error: DecodeError) -> E {
@@ -604,22 +763,77 @@ impl BorrowedDatasetManifest<'_> {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct BorrowedDatasetEntry<'a> {
-    #[serde(borrow)]
     id: &'a str,
-    #[serde(borrow)]
     grammar_family: &'a str,
-    #[serde(borrow)]
     language: &'a str,
-    #[serde(borrow)]
     relative_path: &'a str,
-    #[serde(borrow)]
     source_sha256: &'a str,
     source_bytes: u64,
     physical_lines: u64,
     generated: bool,
+}
+
+impl<'de> Deserialize<'de> for BorrowedDatasetEntry<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(BorrowedDatasetEntryVisitor)
+    }
+}
+
+struct BorrowedDatasetEntryVisitor;
+
+impl<'de> Visitor<'de> for BorrowedDatasetEntryVisitor {
+    type Value = BorrowedDatasetEntry<'de>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a strict borrowed dataset entry")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut id = None;
+        let mut grammar_family = None;
+        let mut language = None;
+        let mut relative_path = None;
+        let mut source_sha256 = None;
+        let mut source_bytes = None;
+        let mut physical_lines = None;
+        let mut generated = None;
+        while let Some(key) = map.next_key::<&'de str>()? {
+            match key {
+                "id" => set_field(&mut id, map.next_value::<&'de str>()?)?,
+                "grammar_family" => {
+                    set_field(&mut grammar_family, map.next_value::<&'de str>()?)?;
+                }
+                "language" => set_field(&mut language, map.next_value::<&'de str>()?)?,
+                "relative_path" => {
+                    set_field(&mut relative_path, map.next_value::<&'de str>()?)?;
+                }
+                "source_sha256" => {
+                    set_field(&mut source_sha256, map.next_value::<&'de str>()?)?;
+                }
+                "source_bytes" => set_field(&mut source_bytes, map.next_value()?)?,
+                "physical_lines" => set_field(&mut physical_lines, map.next_value()?)?,
+                "generated" => set_field(&mut generated, map.next_value()?)?,
+                _ => return Err(A::Error::custom(DECODE_FIELD_REJECTED)),
+            }
+        }
+        Ok(BorrowedDatasetEntry {
+            id: require_field(id)?,
+            grammar_family: require_field(grammar_family)?,
+            language: require_field(language)?,
+            relative_path: require_field(relative_path)?,
+            source_sha256: require_field(source_sha256)?,
+            source_bytes: require_field(source_bytes)?,
+            physical_lines: require_field(physical_lines)?,
+            generated: require_field(generated)?,
+        })
+    }
 }
 
 impl BorrowedDatasetEntry<'_> {
@@ -680,58 +894,43 @@ impl<'de> Visitor<'de> for DatasetManifestVisitor<'_> {
         let mut entries = None;
         while let Some(key) = map.next_key::<&str>()? {
             match key {
-                "schema_version" => set_field(
-                    &mut schema_version,
-                    map.next_value::<&str>()?,
-                    "schema_version",
-                )?,
+                "schema_version" => {
+                    set_field(&mut schema_version, map.next_value::<&str>()?)?;
+                }
                 "dataset_id" => {
-                    set_field(&mut dataset_id, map.next_value::<&str>()?, "dataset_id")?;
+                    set_field(&mut dataset_id, map.next_value::<&str>()?)?;
                 }
                 "revision" => {
-                    set_field(&mut revision, map.next_value::<&str>()?, "revision")?;
+                    set_field(&mut revision, map.next_value::<&str>()?)?;
                 }
                 "scope_rule" => {
-                    set_field(&mut scope_rule, map.next_value::<&str>()?, "scope_rule")?;
+                    set_field(&mut scope_rule, map.next_value::<&str>()?)?;
                 }
-                "loc_counting_rule" => set_field(
-                    &mut loc_counting_rule,
-                    map.next_value::<&str>()?,
-                    "loc_counting_rule",
-                )?,
+                "loc_counting_rule" => {
+                    set_field(&mut loc_counting_rule, map.next_value::<&str>()?)?;
+                }
                 "entries" => {
                     if entries.is_some() {
-                        return Err(A::Error::duplicate_field("entries"));
+                        return Err(A::Error::custom(DECODE_FIELD_REJECTED));
                     }
                     entries = Some(map.next_value_seed(DatasetEntriesSeed {
                         count: self.entry_count,
                         budget: self.budget,
                     })?);
                 }
-                _ => return Err(A::Error::unknown_field(key, DATASET_MANIFEST_FIELDS)),
+                _ => return Err(A::Error::custom(DECODE_FIELD_REJECTED)),
             }
         }
         Ok(BorrowedDatasetManifest {
-            schema_version: schema_version
-                .ok_or_else(|| A::Error::missing_field("schema_version"))?,
-            dataset_id: dataset_id.ok_or_else(|| A::Error::missing_field("dataset_id"))?,
-            revision: revision.ok_or_else(|| A::Error::missing_field("revision"))?,
-            scope_rule: scope_rule.ok_or_else(|| A::Error::missing_field("scope_rule"))?,
-            loc_counting_rule: loc_counting_rule
-                .ok_or_else(|| A::Error::missing_field("loc_counting_rule"))?,
-            entries: entries.ok_or_else(|| A::Error::missing_field("entries"))?,
+            schema_version: require_field(schema_version)?,
+            dataset_id: require_field(dataset_id)?,
+            revision: require_field(revision)?,
+            scope_rule: require_field(scope_rule)?,
+            loc_counting_rule: require_field(loc_counting_rule)?,
+            entries: require_field(entries)?,
         })
     }
 }
-
-const DATASET_MANIFEST_FIELDS: &[&str] = &[
-    "schema_version",
-    "dataset_id",
-    "revision",
-    "scope_rule",
-    "loc_counting_rule",
-    "entries",
-];
 
 struct DatasetEntriesSeed<'a> {
     count: usize,
@@ -853,57 +1052,44 @@ impl<'de> Visitor<'de> for BenchmarkCommandVisitor<'_> {
         let mut timeout_ms = None;
         while let Some(key) = map.next_key::<&str>()? {
             match key {
-                "schema_version" => set_field(
-                    &mut schema_version,
-                    map.next_value::<&str>()?,
-                    "schema_version",
-                )?,
+                "schema_version" => {
+                    set_field(&mut schema_version, map.next_value::<&str>()?)?;
+                }
                 "subcommand" => {
-                    set_field(&mut subcommand, map.next_value::<&str>()?, "subcommand")?;
+                    set_field(&mut subcommand, map.next_value::<&str>()?)?;
                 }
                 "arguments" => {
                     if arguments.is_some() {
-                        return Err(A::Error::duplicate_field("arguments"));
+                        return Err(A::Error::custom(DECODE_FIELD_REJECTED));
                     }
                     map.next_value_seed(EmptySequenceSeed)?;
                     arguments = Some(());
                 }
-                "seed" => set_field(&mut seed, map.next_value()?, "seed")?,
+                "seed" => set_field(&mut seed, map.next_value()?)?,
                 "warmup_rounds" => {
-                    set_field(&mut warmup_rounds, map.next_value()?, "warmup_rounds")?;
+                    set_field(&mut warmup_rounds, map.next_value()?)?;
                 }
                 "trial_rounds" => {
-                    set_field(&mut trial_rounds, map.next_value()?, "trial_rounds")?;
+                    set_field(&mut trial_rounds, map.next_value()?)?;
                 }
                 "timeout_ms" => {
-                    set_field(&mut timeout_ms, map.next_value()?, "timeout_ms")?;
+                    set_field(&mut timeout_ms, map.next_value()?)?;
                 }
-                _ => return Err(A::Error::unknown_field(key, BENCHMARK_COMMAND_FIELDS)),
+                _ => return Err(A::Error::custom(DECODE_FIELD_REJECTED)),
             }
         }
         let _ = self.budget;
-        arguments.ok_or_else(|| A::Error::missing_field("arguments"))?;
+        require_field(arguments)?;
         Ok(BorrowedBenchmarkCommand {
-            schema_version: schema_version
-                .ok_or_else(|| A::Error::missing_field("schema_version"))?,
-            subcommand: subcommand.ok_or_else(|| A::Error::missing_field("subcommand"))?,
-            seed: seed.ok_or_else(|| A::Error::missing_field("seed"))?,
-            warmup_rounds: warmup_rounds.ok_or_else(|| A::Error::missing_field("warmup_rounds"))?,
-            trial_rounds: trial_rounds.ok_or_else(|| A::Error::missing_field("trial_rounds"))?,
-            timeout_ms: timeout_ms.ok_or_else(|| A::Error::missing_field("timeout_ms"))?,
+            schema_version: require_field(schema_version)?,
+            subcommand: require_field(subcommand)?,
+            seed: require_field(seed)?,
+            warmup_rounds: require_field(warmup_rounds)?,
+            trial_rounds: require_field(trial_rounds)?,
+            timeout_ms: require_field(timeout_ms)?,
         })
     }
 }
-
-const BENCHMARK_COMMAND_FIELDS: &[&str] = &[
-    "schema_version",
-    "subcommand",
-    "arguments",
-    "seed",
-    "warmup_rounds",
-    "trial_rounds",
-    "timeout_ms",
-];
 
 struct EmptySequenceSeed;
 
@@ -938,15 +1124,15 @@ impl<'de> Visitor<'de> for EmptySequenceVisitor {
     }
 }
 
-fn set_field<T, E: serde::de::Error>(
-    slot: &mut Option<T>,
-    value: T,
-    name: &'static str,
-) -> Result<(), E> {
+fn set_field<T, E: serde::de::Error>(slot: &mut Option<T>, value: T) -> Result<(), E> {
     if slot.replace(value).is_some() {
-        return Err(E::duplicate_field(name));
+        return Err(E::custom(DECODE_FIELD_REJECTED));
     }
     Ok(())
+}
+
+fn require_field<T, E: serde::de::Error>(field: Option<T>) -> Result<T, E> {
+    field.ok_or_else(|| E::custom(DECODE_FIELD_REJECTED))
 }
 
 /// Strict benchmark-input decoding failure.
@@ -1101,10 +1287,10 @@ mod tests {
         let unknown = String::from_utf8(manifest(&digest, "src/lib.rs"))
             .expect("fixture is UTF-8")
             .replace("\"generated\":false", "\"generated\":false,\"extra\":true");
-        assert!(matches!(
-            decode_dataset_manifest(unknown.as_bytes(), BundleLimits::default()),
-            Err(DecodeError::InvalidJson)
-        ));
+        let error = decode_dataset_manifest(unknown.as_bytes(), BundleLimits::default())
+            .expect_err("nested unknown field is rejected");
+        assert!(matches!(error, DecodeError::InvalidJson));
+        assert!(!error.to_string().contains("extra"));
 
         assert!(matches!(
             decode_dataset_manifest(&manifest(&digest, "../outside.rs"), BundleLimits::default()),
@@ -1170,10 +1356,67 @@ mod tests {
         let unknown = String::from_utf8(valid.to_vec())
             .expect("fixture is UTF-8")
             .replace("\"timeout_ms\":1000", "\"timeout_ms\":1000,\"extra\":true");
+        let error = decode_benchmark_command(unknown.as_bytes(), BundleLimits::default())
+            .expect_err("top-level unknown field is rejected");
+        assert!(matches!(error, DecodeError::InvalidJson));
+        assert!(!error.to_string().contains("extra"));
+    }
+
+    #[test]
+    fn public_decoders_bound_max_input_unknown_keys_before_reservation() {
+        let limits = BundleLimits {
+            max_input_bytes: 4_096,
+            max_string_bytes: 128,
+            ..BundleLimits::default()
+        };
+        let command_prefix = concat!(
+            "{\"schema_version\":\"2.0\",\"subcommand\":\"m05-parser-evidence\",",
+            "\"arguments\":[],\"seed\":7,\"warmup_rounds\":1,\"trial_rounds\":2,",
+            "\"timeout_ms\":1000,\""
+        );
+        let command_suffix = "\":null}";
+        let command_key =
+            "c".repeat(limits.max_input_bytes - command_prefix.len() - command_suffix.len());
+        let command = format!("{command_prefix}{command_key}{command_suffix}");
+        assert_eq!(command.len(), limits.max_input_bytes);
+
+        let command_error =
+            decode_benchmark_command_with_control(command.as_bytes(), limits, Some(0))
+                .expect_err("oversized top-level key is rejected before retention");
+
         assert!(matches!(
-            decode_benchmark_command(unknown.as_bytes(), BundleLimits::default()),
-            Err(DecodeError::InvalidJson)
+            command_error,
+            DecodeError::LimitExceeded {
+                resource: "string_bytes"
+            }
         ));
+        assert!(!command_error.to_string().contains(&command_key));
+
+        let manifest_prefix = concat!(
+            "{\"schema_version\":\"2.0\",\"dataset_id\":\"fixture\",\"revision\":\"rev-1\",",
+            "\"scope_rule\":\"listed_entries\",\"loc_counting_rule\":\"physical_newlines\",",
+            "\"entries\":[{\"id\":\"entry-1\",\"grammar_family\":\"rust\",\"language\":\"rust\",",
+            "\"relative_path\":\"src/lib.rs\",\"source_sha256\":",
+            "\"abababababababababababababababababababababababababababababababab\",",
+            "\"source_bytes\":4,\"physical_lines\":1,\"generated\":false,\""
+        );
+        let manifest_suffix = "\":null}]}";
+        let manifest_key =
+            "m".repeat(limits.max_input_bytes - manifest_prefix.len() - manifest_suffix.len());
+        let manifest = format!("{manifest_prefix}{manifest_key}{manifest_suffix}");
+        assert_eq!(manifest.len(), limits.max_input_bytes);
+
+        let manifest_error =
+            decode_dataset_manifest_with_control(manifest.as_bytes(), limits, Some(0))
+                .expect_err("oversized nested key is rejected before retention");
+
+        assert!(matches!(
+            manifest_error,
+            DecodeError::LimitExceeded {
+                resource: "string_bytes"
+            }
+        ));
+        assert!(!manifest_error.to_string().contains(&manifest_key));
     }
 
     #[test]
