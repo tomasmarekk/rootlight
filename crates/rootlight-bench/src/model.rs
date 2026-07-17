@@ -101,9 +101,13 @@ pub struct EnvironmentEvidence {
     /// SQLite version and compile options.
     pub sqlite: EvidenceValue<String>,
     /// Adapter versions by stable adapter ID.
-    pub adapter_versions: BTreeMap<String, String>,
-    /// Grammar hashes by stable grammar ID.
-    pub grammar_hashes: BTreeMap<String, String>,
+    pub adapter_versions: EvidenceValue<BTreeMap<String, String>>,
+    /// Audited grammar versions by stable language ID.
+    pub grammar_versions: EvidenceValue<BTreeMap<String, String>>,
+    /// crates.io source-package checksums by stable language ID.
+    pub grammar_source_package_checksums: EvidenceValue<BTreeMap<String, String>>,
+    /// Generated parser and scanner hashes by stable component ID.
+    pub grammar_hashes: EvidenceValue<BTreeMap<String, String>>,
     /// Locale identity.
     pub locale: EvidenceValue<String>,
     /// Background-process policy.

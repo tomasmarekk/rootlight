@@ -29,6 +29,9 @@ pub struct GrammarDescriptor {
     family: GrammarFamily,
     language: LanguageId,
     grammar_version: &'static str,
+    grammar_source_sha256: &'static str,
+    parser_sha256: &'static str,
+    scanner_sha256: Option<&'static str>,
     abi_version: usize,
     encoding: EncodingId,
 }
@@ -50,6 +53,24 @@ impl GrammarDescriptor {
     #[must_use]
     pub const fn grammar_version(&self) -> &'static str {
         self.grammar_version
+    }
+
+    /// Returns the exact crates.io source-package SHA-256 from the lockfile.
+    #[must_use]
+    pub const fn grammar_source_sha256(&self) -> &'static str {
+        self.grammar_source_sha256
+    }
+
+    /// Returns the enforced generated `parser.c` SHA-256.
+    #[must_use]
+    pub const fn parser_sha256(&self) -> &'static str {
+        self.parser_sha256
+    }
+
+    /// Returns the enforced generated scanner SHA-256 when one is linked.
+    #[must_use]
+    pub const fn scanner_sha256(&self) -> Option<&'static str> {
+        self.scanner_sha256
     }
 
     /// Returns the generated parser ABI.
@@ -96,12 +117,15 @@ impl GrammarRegistry {
                     maximum: TREE_SITTER_MAX_ABI,
                 });
             }
-            let (language_id, grammar_version) = identity_for(family);
+            let identity = identity_for(family);
             descriptors.push(GrammarDescriptor {
                 family,
-                language: LanguageId::new(language_id)
+                language: LanguageId::new(identity.language_id)
                     .map_err(|_| RegistryError::InvalidBuiltInIdentity { family })?,
-                grammar_version,
+                grammar_version: identity.grammar_version,
+                grammar_source_sha256: identity.source_package_sha256,
+                parser_sha256: identity.parser_sha256,
+                scanner_sha256: identity.scanner_sha256,
                 abi_version,
                 encoding: EncodingId::new("utf-8")
                     .map_err(|_| RegistryError::InvalidBuiltInIdentity { family })?,
@@ -169,17 +193,58 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
     }
 }
 
-const fn identity_for(family: GrammarFamily) -> (&'static str, &'static str) {
+#[derive(Debug, Clone, Copy)]
+struct GrammarIdentity {
+    language_id: &'static str,
+    grammar_version: &'static str,
+    source_package_sha256: &'static str,
+    parser_sha256: &'static str,
+    scanner_sha256: Option<&'static str>,
+}
+
+const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
-        GrammarFamily::Rust => ("rust", "0.24.2"),
-        GrammarFamily::Python => ("python", "0.25.0"),
-        GrammarFamily::JavaScript => ("javascript", "0.25.0"),
-        GrammarFamily::Java => ("java", "0.23.5"),
+        GrammarFamily::Rust => GrammarIdentity {
+            language_id: "rust",
+            grammar_version: "0.24.2",
+            source_package_sha256: "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45",
+            parser_sha256: "9602518f9e57919910bf0e777e52f6bfc9325d4c182e998bdb4efd5682b76e4a",
+            scanner_sha256: Some(
+                "9609a2f92dbb7c32bc056fd8fb94e5478428f04496696aa08b048a9b66caf283",
+            ),
+        },
+        GrammarFamily::Python => GrammarIdentity {
+            language_id: "python",
+            grammar_version: "0.25.0",
+            source_package_sha256: "6bf85fd39652e740bf60f46f4cda9492c3a9ad75880575bf14960f775cb74a1c",
+            parser_sha256: "a895f10b3cf7b2608f3283b43cd5cfed70971c7ee4a0136abbaaccbc4a7a25e0",
+            scanner_sha256: Some(
+                "6db82134ac2d4c90a1a1475487a625cface02662ebda9b7478cad9c7147e9afe",
+            ),
+        },
+        GrammarFamily::JavaScript => GrammarIdentity {
+            language_id: "javascript",
+            grammar_version: "0.25.0",
+            source_package_sha256: "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5",
+            parser_sha256: "67209ca7ef6e1a4f74e29e48b5928455f892fe1821a3960fbcd62f4e972f7384",
+            scanner_sha256: Some(
+                "b3d3f64284d97bf80749c026862427782cf7ecc0b7dc094e6698ab311c9a42c7",
+            ),
+        },
+        GrammarFamily::Java => GrammarIdentity {
+            language_id: "java",
+            grammar_version: "0.23.5",
+            source_package_sha256: "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6",
+            parser_sha256: "4add5150cf4531eb5dd97f3343dcf65cd11704c84711348b328582b83424a0e4",
+            scanner_sha256: None,
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::PathBuf};
+
     use super::*;
 
     #[test]
@@ -198,6 +263,109 @@ mod tests {
                 (TREE_SITTER_MIN_ABI..=TREE_SITTER_MAX_ABI).contains(&descriptor.abi_version())
             );
             assert_eq!(descriptor.encoding().as_str(), "utf-8");
+            assert_eq!(descriptor.grammar_source_sha256().len(), 64);
+            assert!(
+                descriptor
+                    .grammar_source_sha256()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            );
         }
+    }
+
+    #[test]
+    fn published_grammar_metadata_matches_enforced_locks() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lock = fs::read_to_string(workspace.join("Cargo.lock"))
+            .expect("workspace lockfile is readable");
+        let grammar_lock = fs::read_to_string(workspace.join("adapters/grammars.lock"))
+            .expect("grammar lockfile is readable");
+        let (runtime_version, runtime_checksum) = locked_package(&lock, "tree-sitter");
+        assert_eq!(runtime_version, crate::TREE_SITTER_RUNTIME_VERSION);
+        let runtime_block = grammar_lock
+            .split_once("[[grammars]]")
+            .map(|(runtime, _grammars)| runtime)
+            .expect("grammar lock contains audited grammars");
+        assert_eq!(
+            quoted_field(runtime_block, "crate_version"),
+            crate::TREE_SITTER_RUNTIME_VERSION
+        );
+        assert_eq!(
+            quoted_field(runtime_block, "crates_io_checksum"),
+            runtime_checksum
+        );
+
+        let registry = GrammarRegistry::audited().expect("audited grammars initialize");
+        for (family, language, package) in [
+            (GrammarFamily::Rust, "rust", "tree-sitter-rust"),
+            (GrammarFamily::Python, "python", "tree-sitter-python"),
+            (
+                GrammarFamily::JavaScript,
+                "javascript",
+                "tree-sitter-javascript",
+            ),
+            (GrammarFamily::Java, "java", "tree-sitter-java"),
+        ] {
+            let descriptor = registry.get(family).expect("family is registered");
+            let (version, source_package_checksum) = locked_package(&lock, package);
+            let grammar = locked_grammar(&grammar_lock, language);
+            assert_eq!(descriptor.grammar_version(), version);
+            assert_eq!(descriptor.grammar_source_sha256(), source_package_checksum);
+            assert_eq!(quoted_field(grammar, "crate_version"), version);
+            assert_eq!(
+                quoted_field(grammar, "crates_io_checksum"),
+                source_package_checksum
+            );
+            assert_eq!(
+                descriptor.parser_sha256(),
+                quoted_field(grammar, "parser_sha256")
+            );
+            let scanner = quoted_field(grammar, "scanner_sha256");
+            assert_eq!(
+                descriptor.scanner_sha256(),
+                (scanner != "none").then_some(scanner)
+            );
+        }
+    }
+
+    fn locked_grammar<'a>(lock: &'a str, language: &str) -> &'a str {
+        let marker = format!("language = \"{language}\"");
+        let marker_start = lock.find(&marker).expect("locked grammar is present");
+        let block_start = lock[..marker_start]
+            .rfind("[[grammars]]")
+            .expect("grammar block starts before its language");
+        let block_tail = &lock[block_start..];
+        let block_end = block_tail[1..]
+            .find("[[grammars]]")
+            .map_or(block_tail.len(), |offset| offset + 1);
+        &block_tail[..block_end]
+    }
+
+    fn locked_package<'a>(lock: &'a str, package: &str) -> (&'a str, &'a str) {
+        let marker = format!("name = \"{package}\"");
+        let marker_start = lock.find(&marker).expect("locked package is present");
+        let block_start = lock[..marker_start]
+            .rfind("[[package]]")
+            .expect("package block starts before its name");
+        let block_tail = &lock[block_start..];
+        let block_end = block_tail[1..]
+            .find("[[package]]")
+            .map_or(block_tail.len(), |offset| offset + 1);
+        let block = &block_tail[..block_end];
+        (
+            quoted_field(block, "version"),
+            quoted_field(block, "checksum"),
+        )
+    }
+
+    fn quoted_field<'a>(block: &'a str, field: &str) -> &'a str {
+        let prefix = format!("{field} = \"");
+        let value = block
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("locked package field is present");
+        value
+            .strip_suffix('"')
+            .expect("locked package field is quoted")
     }
 }
