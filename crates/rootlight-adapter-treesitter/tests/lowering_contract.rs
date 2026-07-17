@@ -186,6 +186,15 @@ fn ambiguous_definition_capture_becomes_an_explicit_gap() {
         region.detail == "declaration-name-unavailable"
             && region.domain == rootlight_ir::FactDomain::Entities
     }));
+    let entity_coverage = output
+        .report()
+        .coverage()
+        .domains()
+        .iter()
+        .find(|domain| domain.domain() == rootlight_ir::FactDomain::Entities)
+        .expect("entity coverage is reported");
+    assert_eq!(entity_coverage.status(), CoverageStatus::Bounded);
+    assert_eq!(entity_coverage.skipped(), 1);
 
     let mut constrained_ir = IrLimits::default();
     constrained_ir.max_skipped_regions = 0;
@@ -441,6 +450,24 @@ fn included_ranges_and_parser_recovery_remain_explicit_coverage_gaps() {
             .iter()
             .any(|region| { region.detail == "syntax-error-recovery" })
     );
+    let file_coverage = output
+        .report()
+        .coverage()
+        .domains()
+        .iter()
+        .find(|domain| domain.domain() == rootlight_ir::FactDomain::Files)
+        .expect("file coverage is reported");
+    let diagnostic_coverage = output
+        .report()
+        .coverage()
+        .domains()
+        .iter()
+        .find(|domain| domain.domain() == rootlight_ir::FactDomain::Diagnostics)
+        .expect("diagnostic coverage is reported");
+    assert_eq!(file_coverage.status(), CoverageStatus::Unknown);
+    assert_eq!(file_coverage.skipped(), 1);
+    assert_eq!(diagnostic_coverage.status(), CoverageStatus::Unknown);
+    assert_eq!(diagnostic_coverage.skipped(), 1);
 }
 
 #[test]
@@ -904,6 +931,10 @@ fn python_and_javascript_file_modules_use_repository_paths() {
         assert_eq!(
             output.document().entities[0].kind,
             rootlight_ir::EntityKind::Module
+        );
+        assert!(
+            output.document().occurrences.is_empty(),
+            "an implicit file module has no declaration spelling"
         );
     }
 }

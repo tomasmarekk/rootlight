@@ -23,9 +23,9 @@ use rootlight_cancel::Cancellation;
 use rootlight_ids::{GenerationId, RepositoryId, SymbolId, content_hash, derive_repository};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageScope, CoverageStatus, EntityKind,
-    ExtensionSupport, FactDomain, FactEvidence, IrDocument, IrLimits, ProducerIdentity,
-    ProducerKind, RelationPredicate, SourceRef, SourceSpan, decode_ir_document,
-    validate_ir_document,
+    ExtensionSupport, FactDomain, FactEvidence, IrDocument, IrLimits, OccurrenceRole,
+    OccurrenceTarget, ProducerIdentity, ProducerKind, RelationPredicate, SourceRef, SourceSpan,
+    decode_ir_document, validate_ir_document,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
@@ -191,6 +191,69 @@ fn real_analyzer_reports_invalid_utf8_without_source_material() {
     assert!(!rendered.contains(case.path));
 }
 
+#[test]
+fn real_analyzer_distinguishes_same_declarations_in_sibling_scopes() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let extensions = ExtensionSupport::default();
+    let cases = [
+        (
+            CASES[0],
+            "struct A;\nstruct B;\nimpl A { fn same(&self) {} }\nimpl B { fn same(&self) {} }\n",
+            "struct A;\r\nstruct B;\r\nimpl A { fn same(&self) {   } }\r\nimpl B { fn same(&self) {\r\n} }\r\n",
+        ),
+        (
+            CASES[1],
+            "if True:\n    def same():\n        return 1\nif False:\n    def same():\n        return 2\n",
+            "if True:\r\n    def same():\r\n            return 1\r\nif False:\r\n    def same():\r\n            return 2\r\n",
+        ),
+        (
+            CASES[2],
+            "function outer() {\n  { const same = 1; }\n  { const same = 2; }\n}\n",
+            "function outer() {\r\n    { const same = 1;   }\r\n    { const same = 2;\r\n    }\r\n}\r\n",
+        ),
+        (
+            CASES[3],
+            "class Outer { void run() { { int same = 1; } { int same = 2; } } }\n",
+            "class Outer {\r\n  void run() {\r\n    { int same = 1;   }\r\n    { int same = 2;\r\n    }\r\n  }\r\n}\r\n",
+        ),
+    ];
+
+    for (case, before, after) in cases {
+        let fixture = Fixture::new(case, before.as_bytes());
+        let analyzer = analyzer(&provider, case);
+        let initial_request = request(&fixture.snapshot, &fixture.source, case, &limits);
+        let initial = analyze(&analyzer, &initial_request, &extensions);
+        validate_ir_document(initial.document(), limits.ir(), &extensions)
+            .unwrap_or_else(|error| panic!("{} scoped IR must validate: {error}", case.name));
+        let initial_ids = same_symbol_ids(initial.document());
+        assert_eq!(
+            initial_ids.len(),
+            2,
+            "{} sibling declarations must both survive lowering",
+            case.name
+        );
+        assert_ne!(
+            initial_ids[0], initial_ids[1],
+            "{} sibling declarations must have distinct identities",
+            case.name
+        );
+
+        let variant = fixture.rewrite(after.as_bytes());
+        let variant_request = request(&variant.snapshot, &variant.source, case, &limits);
+        let reparsed = analyze(&analyzer, &variant_request, &extensions);
+        validate_ir_document(reparsed.document(), limits.ir(), &extensions).unwrap_or_else(
+            |error| panic!("{} reparsed scoped IR must validate: {error}", case.name),
+        );
+        assert_eq!(
+            initial_ids,
+            same_symbol_ids(reparsed.document()),
+            "{} scoped symbol IDs changed after whitespace/CRLF-only edits",
+            case.name
+        );
+    }
+}
+
 fn assert_descriptor(analyzer: &TreeSitterAnalyzer, case: LanguageCase) {
     let descriptor = analyzer.descriptor();
     assert_eq!(descriptor.identity(), &producer_identity());
@@ -288,10 +351,36 @@ fn assert_contract(
         let record = records_by_domain
             .get(&reported.domain())
             .expect("every reported domain has a normalized coverage record");
+        let skipped_in_domain = document
+            .skipped_regions
+            .iter()
+            .filter(|region| region.domain == reported.domain())
+            .count();
+        let indexed_in_domain = match reported.domain() {
+            FactDomain::Files => document.files.len(),
+            FactDomain::Entities => document.entities.len(),
+            FactDomain::Occurrences => document.occurrences.len(),
+            FactDomain::Relations => document.relations.len(),
+            FactDomain::Provenance => document.provenance.len(),
+            FactDomain::SourceMappings => 0,
+            FactDomain::Diagnostics => document.diagnostics.len(),
+            FactDomain::Extensions => document.extensions.len(),
+        };
         assert_eq!(record.scope, CoverageScope::File(file.id));
         assert_eq!(record.domain, reported.domain());
         assert_eq!(record.tier, AnalysisTier::TierD);
         assert_eq!(record.status, reported.status());
+        assert_eq!(reported.skipped(), skipped_in_domain);
+        assert_eq!(reported.indexed(), indexed_in_domain);
+        assert_eq!(
+            reported.discovered(),
+            indexed_in_domain
+                .checked_add(skipped_in_domain)
+                .expect("domain accounting fits")
+        );
+        if skipped_in_domain > 0 {
+            assert_eq!(reported.status(), CoverageStatus::Bounded);
+        }
         assert_eq!(
             (record.discovered, record.indexed, record.skipped),
             (
@@ -323,6 +412,31 @@ fn assert_contract(
             .iter()
             .all(|relation| relation.predicate != RelationPredicate::Calls)
     );
+    if matches!(case.name, "python" | "javascript") {
+        let file_module = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Module && entity.canonical_name == case.path)
+            .expect("implicit file module is emitted");
+        assert!(document.occurrences.iter().all(|occurrence| {
+            occurrence.role != OccurrenceRole::Definition
+                || !matches!(
+                    occurrence.target,
+                    OccurrenceTarget::Resolved { symbol } if symbol == file_module.id
+                )
+        }));
+    }
+}
+
+fn same_symbol_ids(document: &rootlight_ir::NormalizedIrDocument) -> Vec<SymbolId> {
+    let mut ids = document
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "same")
+        .map(|entity| entity.id)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
 }
 
 fn symbol_ids(

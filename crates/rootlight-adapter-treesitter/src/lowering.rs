@@ -43,6 +43,8 @@ const RELATION_DOMAIN: &str = "rootlight.relation/v1";
 const COVERAGE_DOMAIN: &str = "rootlight.coverage/v1";
 const SKIPPED_REGION_DOMAIN: &str = "rootlight.skipped-region/v1";
 const DIAGNOSTIC_DOMAIN: &str = "rootlight.diagnostic/v1";
+const SCOPE_IDENTITY_CONTEXT: &str = "rootlight/scope-container/v1";
+const ENTITY_IDENTITY_GUARD_CONTEXT: &str = "rootlight/treesitter-entity-identity-guard/v1";
 
 /// Tree-sitter syntax analyzer backed by an injected parser-independent provider.
 #[derive(Clone)]
@@ -464,10 +466,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
         }
 
         let mut entities = BTreeMap::<SymbolId, EntityRecord>::new();
+        let mut identity_guards = BTreeMap::<SymbolId, [u8; 32]>::new();
         for entity in materialized.values() {
+            ensure_symbol_identity_collision_free(
+                &mut identity_guards,
+                entity.record.id,
+                entity.identity_guard,
+            )?;
             match entities.get(&entity.record.id) {
-                Some(existing)
-                    if entity_source_span(existing) <= entity_source_span(&entity.record) => {}
+                Some(existing) => {
+                    if !equivalent_entity_projection(existing, &entity.record) {
+                        return Err(provider_failure("treesitter-lowering-symbol-collision"));
+                    }
+                    if entity_source_span(existing) > entity_source_span(&entity.record) {
+                        entities.insert(entity.record.id, entity.record.clone());
+                    }
+                }
                 _ => {
                     entities.insert(entity.record.id, entity.record.clone());
                 }
@@ -493,10 +507,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             check_periodically(index, cancellation)?;
             let source = source_for_span(self.full_source, fact.span());
             if let Some(entity) = materialized.get(&fact.local_id()) {
-                let definition_fact = facts_by_id
-                    .get(&entity.definition_local_id)
-                    .ok_or_else(|| provider_failure("treesitter-lowering-definition"))?;
-                let definition_source = source_for_span(
+                let entity_source = source_for_span(
                     self.full_source,
                     entity
                         .record
@@ -506,19 +517,24 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .ok_or_else(|| provider_failure("treesitter-lowering-definition"))?
                         .span(),
                 );
-                let occurrence = declaration_occurrence(
-                    definition_fact,
-                    entity,
-                    provenance_id,
-                    syntax_confidence,
-                    &definition_source,
-                )?;
-                occurrences.insert(occurrence.id, occurrence);
+                if let Some(definition_local_id) = entity.definition_local_id {
+                    let definition_fact = facts_by_id
+                        .get(&definition_local_id)
+                        .ok_or_else(|| provider_failure("treesitter-lowering-definition"))?;
+                    let occurrence = declaration_occurrence(
+                        definition_fact,
+                        entity,
+                        provenance_id,
+                        syntax_confidence,
+                        &entity_source,
+                    )?;
+                    occurrences.insert(occurrence.id, occurrence);
+                }
                 let relation = containment_relation(
                     entity,
                     provenance_id,
                     containment_confidence,
-                    &definition_source,
+                    &entity_source,
                 )?;
                 relations.insert(relation.id, relation);
                 if let Some(signature) = entity.signature_evidence.as_deref() {
@@ -712,13 +728,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
         cancellation.check()?;
         let stats = DomainStats::new(
-            self.parse_output.facts(),
-            drafts.len(),
             entities.len(),
             occurrences.len(),
             relations.len(),
-            self.parse_output.diagnostics().len(),
-            skipped.len(),
+            diagnostics.len(),
+            &skipped,
             extensions.len(),
         )?;
         let parse_status = self.parse_output.report().coverage().status();
@@ -849,6 +863,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
         let mut drafts = HashMap::<u64, EntityDraft>::new();
         let mut nearest_entity_ancestor = HashMap::new();
+        let mut nearest_scope_ancestor = HashMap::<u64, Option<[u8; 32]>>::new();
+        let mut scope_sibling_counts =
+            HashMap::<(Option<u64>, Option<[u8; 32]>, String), usize>::new();
         for (index, fact) in ordered_facts.into_iter().enumerate() {
             check_periodically(index, cancellation)?;
             let parent_entity = fact.parent().and_then(|parent| {
@@ -857,8 +874,32 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .then_some(parent)
                     .or_else(|| nearest_entity_ancestor.get(&parent).copied().flatten())
             });
+            let parent_scope = fact
+                .parent()
+                .and_then(|parent| nearest_scope_ancestor.get(&parent).copied().flatten());
+            if fact.kind() == SyntaxFactKind::Scope {
+                let scope_key = (
+                    parent_entity,
+                    parent_scope,
+                    fact.syntax_kind().as_str().to_owned(),
+                );
+                let sibling = scope_sibling_counts
+                    .get(&scope_key)
+                    .copied()
+                    .unwrap_or_default();
+                let next_sibling = sibling
+                    .checked_add(1)
+                    .ok_or(SinkError::AccountingOverflow)?;
+                scope_sibling_counts.insert(scope_key, next_sibling);
+                let scope_identity =
+                    scope_identity(parent_scope, fact.syntax_kind().as_str(), sibling)?;
+                nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
+                nearest_scope_ancestor.insert(fact.local_id(), Some(scope_identity));
+                continue;
+            }
             let Some(kind) = entity_kind(fact) else {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
+                nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
                 continue;
             };
             let capture = captures.get(&fact.local_id()).cloned().unwrap_or_default();
@@ -869,14 +910,16 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 let Some(name) = captured_name(text, self.request.limits().ir().max_string_bytes)
                 else {
                     nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
+                    nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
                     continue;
                 };
-                (name, definition.local_id(), definition.span())
+                (name, Some(definition.local_id()), definition.span())
             } else if is_explicit_file_module(fact, self.request.language().as_str()) {
                 let name = self.request.source().path().as_str();
-                (name, fact.local_id(), fact.span())
+                (name, None, fact.span())
             } else {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
+                nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
                 continue;
             };
             let signature_capture = select_unique_capture(&capture.signatures);
@@ -913,6 +956,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 EntityDraft {
                     local_id: fact.local_id(),
                     parent_entity,
+                    scope_identity: parent_scope,
                     definition_local_id,
                     span: definition_span,
                     depth: fact.depth(),
@@ -926,6 +970,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 },
             );
             nearest_entity_ancestor.insert(fact.local_id(), Some(fact.local_id()));
+            nearest_scope_ancestor.insert(fact.local_id(), None);
         }
         let mut drafts: Vec<_> = drafts.into_values().collect();
         drafts.sort_by(|left, right| {
@@ -985,7 +1030,8 @@ struct EntityPlan {
 struct EntityDraft {
     local_id: u64,
     parent_entity: Option<u64>,
-    definition_local_id: u64,
+    scope_identity: Option<[u8; 32]>,
+    definition_local_id: Option<u64>,
     span: SourceSpan,
     depth: usize,
     kind: EntityKind,
@@ -1001,7 +1047,8 @@ struct EntityDraft {
 struct MaterializedEntity {
     record: EntityRecord,
     direct_parent: ContainerRef,
-    definition_local_id: u64,
+    identity_guard: [u8; 32],
+    definition_local_id: Option<u64>,
     signature_evidence: Option<String>,
     signature_span: Option<SourceSpan>,
 }
@@ -1014,7 +1061,7 @@ fn materialize_entity(
     maximum_string_bytes: usize,
     materialized: &HashMap<u64, MaterializedEntity>,
 ) -> Result<MaterializedEntity, AdapterError> {
-    let (container, container_identity, qualified_name) = match draft
+    let (container, mut container_identity, qualified_name) = match draft
         .parent_entity
         .and_then(|parent| materialized.get(&parent))
     {
@@ -1051,11 +1098,25 @@ fn materialize_entity(
             (ContainerRef::File(file), identity, draft.name.clone())
         }
     };
+    if let Some(scope_identity) = draft.scope_identity {
+        container_identity.push(3);
+        container_identity.extend_from_slice(&scope_identity);
+    }
     debug_assert_eq!(qualified_name.len(), draft.qualified_length);
+    let semantic_kind = entity_kind_label(draft.kind);
+    let identity_guard = entity_identity_guard(
+        full_source.repository(),
+        &draft.language,
+        semantic_kind,
+        &container_identity,
+        &draft.name,
+        draft.signature.as_bytes(),
+        build_context.digest().as_bytes(),
+    )?;
     let id = derive_symbol(SymbolIdentity {
         repository: full_source.repository(),
         language: &draft.language,
-        semantic_kind: entity_kind_label(draft.kind),
+        semantic_kind,
         container_identity: &container_identity,
         declared_identity: &draft.name,
         signature_discriminator: draft.signature.as_bytes(),
@@ -1081,12 +1142,99 @@ fn materialize_entity(
     };
     let entity = MaterializedEntity {
         direct_parent: container,
+        identity_guard,
         definition_local_id: draft.definition_local_id,
         signature_evidence: draft.signature_evidence.clone(),
         signature_span: draft.signature_span,
         record,
     };
     Ok(entity)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn entity_identity_guard(
+    repository: rootlight_ids::RepositoryId,
+    language: &str,
+    semantic_kind: &str,
+    container_identity: &[u8],
+    declared_identity: &str,
+    signature_discriminator: &[u8],
+    build_context_discriminator: &[u8],
+) -> Result<[u8; 32], AdapterError> {
+    let mut hasher = blake3::Hasher::new_derive_key(ENTITY_IDENTITY_GUARD_CONTEXT);
+    for field in [
+        repository.as_bytes().as_slice(),
+        language.as_bytes(),
+        semantic_kind.as_bytes(),
+        container_identity,
+        declared_identity.as_bytes(),
+        signature_discriminator,
+        build_context_discriminator,
+    ] {
+        let length = u64::try_from(field.len())
+            .map_err(|_| provider_failure("treesitter-lowering-accounting"))?;
+        hasher.update(&length.to_be_bytes());
+        hasher.update(field);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn ensure_symbol_identity_collision_free(
+    guards: &mut BTreeMap<SymbolId, [u8; 32]>,
+    symbol: SymbolId,
+    guard: [u8; 32],
+) -> Result<(), AdapterError> {
+    match guards.get(&symbol) {
+        Some(existing) if existing != &guard => {
+            Err(provider_failure("treesitter-lowering-symbol-collision"))
+        }
+        Some(_) => Ok(()),
+        None => {
+            guards.insert(symbol, guard);
+            Ok(())
+        }
+    }
+}
+
+fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bool {
+    left.id == right.id
+        && left.repository == right.repository
+        && left.generation == right.generation
+        && left.kind == right.kind
+        && left.language == right.language
+        && left.tier == right.tier
+        && left.canonical_name == right.canonical_name
+        && left.display_name == right.display_name
+        && left.qualified_name == right.qualified_name
+        && left.container == right.container
+        && left.visibility == right.visibility
+        && left.flags == right.flags
+        && left.provenance == right.provenance
+}
+
+fn scope_identity(
+    parent: Option<[u8; 32]>,
+    syntax_kind: &str,
+    sibling: usize,
+) -> Result<[u8; 32], AdapterError> {
+    let sibling =
+        u64::try_from(sibling).map_err(|_| provider_failure("treesitter-lowering-scope"))?;
+    let mut hasher = blake3::Hasher::new_derive_key(SCOPE_IDENTITY_CONTEXT);
+    match parent {
+        Some(parent) => {
+            hasher.update(&[1]);
+            hasher.update(&parent);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    let syntax_length = u64::try_from(syntax_kind.len())
+        .map_err(|_| provider_failure("treesitter-lowering-scope"))?;
+    hasher.update(&syntax_length.to_be_bytes());
+    hasher.update(syntax_kind.as_bytes());
+    hasher.update(&sibling.to_be_bytes());
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn entity_source_span(entity: &EntityRecord) -> Option<SourceSpan> {
@@ -1299,63 +1447,42 @@ fn coverage_records(
 }
 
 struct DomainStats {
-    entities_discovered: usize,
     entities_indexed: usize,
-    occurrences_discovered: usize,
     occurrences_indexed: usize,
-    relations_discovered: usize,
     relations_indexed: usize,
     diagnostics: usize,
     skipped_regions: usize,
+    skipped_by_domain: BTreeMap<FactDomain, usize>,
     extensions: usize,
 }
 
 impl DomainStats {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        facts: &[SyntaxFact],
-        entity_drafts: usize,
         entities_indexed: usize,
         occurrences_indexed: usize,
         relations_indexed: usize,
         diagnostics: usize,
-        skipped_regions: usize,
+        skipped_regions: &BTreeMap<FactId, SkippedRegion>,
         extensions: usize,
     ) -> Result<Self, AdapterError> {
-        let entities_discovered = facts
-            .iter()
-            .filter(|fact| {
-                matches!(
-                    fact.kind(),
-                    SyntaxFactKind::Module | SyntaxFactKind::Declaration
-                )
-            })
-            .count();
-        let occurrences_discovered = entity_drafts
-            .checked_add(
-                facts
-                    .iter()
-                    .filter(|fact| occurrence_role(fact).is_some())
-                    .count(),
-            )
-            .ok_or(SinkError::AccountingOverflow)?;
-        let relations_discovered = entity_drafts
-            .checked_add(
-                facts
-                    .iter()
-                    .filter(|fact| fact.kind() == SyntaxFactKind::Import)
-                    .count(),
-            )
-            .ok_or(SinkError::AccountingOverflow)?;
+        let mut skipped_by_domain = BTreeMap::new();
+        for region in skipped_regions.values() {
+            let count = skipped_by_domain
+                .get(&region.domain)
+                .copied()
+                .unwrap_or(0_usize)
+                .checked_add(1)
+                .ok_or(SinkError::AccountingOverflow)?;
+            skipped_by_domain.insert(region.domain, count);
+        }
         Ok(Self {
-            entities_discovered,
             entities_indexed,
-            occurrences_discovered,
             occurrences_indexed,
-            relations_discovered,
             relations_indexed,
             diagnostics,
-            skipped_regions,
+            skipped_regions: skipped_regions.len(),
+            skipped_by_domain,
             extensions,
         })
     }
@@ -1364,58 +1491,105 @@ impl DomainStats {
         &self,
         parse_status: CoverageStatus,
     ) -> Result<Vec<DomainCoverage>, AdapterError> {
+        let file_skipped = self.skipped(FactDomain::Files);
+        let provenance_skipped = self.skipped(FactDomain::Provenance);
+        let source_mapping_skipped = self.skipped(FactDomain::SourceMappings);
+        let diagnostics_skipped = self.skipped(FactDomain::Diagnostics);
+        let extension_skipped = self.skipped(FactDomain::Extensions);
+        let files_discovered = 1_usize
+            .checked_add(file_skipped)
+            .ok_or(SinkError::AccountingOverflow)?;
+        let provenance_discovered = 1_usize
+            .checked_add(provenance_skipped)
+            .ok_or(SinkError::AccountingOverflow)?;
+        let source_mappings_discovered = source_mapping_skipped;
+        let entities_skipped = self.skipped(FactDomain::Entities);
+        let occurrences_skipped = self.skipped(FactDomain::Occurrences);
+        let relations_skipped = self.skipped(FactDomain::Relations);
+        let entities_discovered = self
+            .entities_indexed
+            .checked_add(entities_skipped)
+            .ok_or(SinkError::AccountingOverflow)?;
+        let occurrences_discovered = self
+            .occurrences_indexed
+            .checked_add(occurrences_skipped)
+            .ok_or(SinkError::AccountingOverflow)?;
+        let relations_discovered = self
+            .relations_indexed
+            .checked_add(relations_skipped)
+            .ok_or(SinkError::AccountingOverflow)?;
         let diagnostics_discovered = self
             .diagnostics
-            .checked_add(self.skipped_regions)
+            .checked_add(diagnostics_skipped)
+            .ok_or(SinkError::AccountingOverflow)?;
+        let extensions_discovered = self
+            .extensions
+            .checked_add(extension_skipped)
             .ok_or(SinkError::AccountingOverflow)?;
         let domains = [
-            (FactDomain::Files, 1, 1, 0),
+            (FactDomain::Files, files_discovered, 1, file_skipped),
             (
                 FactDomain::Entities,
-                self.entities_discovered,
+                entities_discovered,
                 self.entities_indexed,
-                self.entities_discovered
-                    .checked_sub(self.entities_indexed)
-                    .ok_or_else(|| provider_failure("treesitter-lowering-coverage-invariant"))?,
+                entities_skipped,
             ),
             (
                 FactDomain::Occurrences,
-                self.occurrences_discovered,
+                occurrences_discovered,
                 self.occurrences_indexed,
-                self.occurrences_discovered
-                    .checked_sub(self.occurrences_indexed)
-                    .ok_or_else(|| provider_failure("treesitter-lowering-coverage-invariant"))?,
+                occurrences_skipped,
             ),
             (
                 FactDomain::Relations,
-                self.relations_discovered,
+                relations_discovered,
                 self.relations_indexed,
-                self.relations_discovered
-                    .checked_sub(self.relations_indexed)
-                    .ok_or_else(|| provider_failure("treesitter-lowering-coverage-invariant"))?,
+                relations_skipped,
             ),
-            (FactDomain::Provenance, 1, 1, 0),
-            (FactDomain::SourceMappings, 0, 0, 0),
+            (
+                FactDomain::Provenance,
+                provenance_discovered,
+                1,
+                provenance_skipped,
+            ),
+            (
+                FactDomain::SourceMappings,
+                source_mappings_discovered,
+                0,
+                source_mapping_skipped,
+            ),
             (
                 FactDomain::Diagnostics,
                 diagnostics_discovered,
-                diagnostics_discovered,
-                0,
+                self.diagnostics,
+                diagnostics_skipped,
             ),
-            (FactDomain::Extensions, self.extensions, self.extensions, 0),
+            (
+                FactDomain::Extensions,
+                extensions_discovered,
+                self.extensions,
+                extension_skipped,
+            ),
         ];
         domains
             .into_iter()
             .map(|(domain, discovered, indexed, skipped)| {
-                let status = if skipped > 0 {
-                    CoverageStatus::Bounded
-                } else {
-                    parse_status
+                let status = match (parse_status, skipped) {
+                    (CoverageStatus::Unknown, _) => CoverageStatus::Unknown,
+                    (status, 0) => status,
+                    (_, _) => CoverageStatus::Bounded,
                 };
                 DomainCoverage::new(domain, status, discovered, indexed, skipped)
                     .map_err(AdapterError::from)
             })
             .collect()
+    }
+
+    fn skipped(&self, domain: FactDomain) -> usize {
+        self.skipped_by_domain
+            .get(&domain)
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -2117,6 +2291,23 @@ mod tests {
             SyntaxFactKind::Signature,
             "rust.function.declaration"
         )));
+    }
+
+    #[test]
+    fn symbol_identity_guard_rejects_distinct_inputs_for_one_id() {
+        let symbol = SymbolId::from_bytes([7; 20]);
+        let mut guards = BTreeMap::new();
+        ensure_symbol_identity_collision_free(&mut guards, symbol, [1; 32])
+            .expect("first identity input is admitted");
+        ensure_symbol_identity_collision_free(&mut guards, symbol, [1; 32])
+            .expect("equivalent identity input deduplicates");
+        let error = ensure_symbol_identity_collision_free(&mut guards, symbol, [2; 32])
+            .expect_err("distinct identity inputs cannot share a symbol ID");
+        assert!(matches!(
+            error,
+            AdapterError::ProviderFailed { code }
+                if code.as_str() == "treesitter-lowering-symbol-collision"
+        ));
     }
 
     proptest! {

@@ -100,6 +100,58 @@ fn four_language_crlf_unicode_fixtures_match_structural_goldens() {
 }
 
 #[test]
+fn rust_impl_scopes_parent_same_named_methods() {
+    const SOURCE: &[u8] =
+        b"struct A;\nstruct B;\nimpl A { fn same(&self) {} }\nimpl B { fn same(&self) {} }\n";
+    let fixture = Fixture::new("impl-scopes.rs", SOURCE);
+    let limits = limits(4096, 128);
+    let provider = provider();
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "rust",
+        Vec::new(),
+    );
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        &deadline(),
+    )
+    .expect("impl-scope fixture parses");
+    let facts = output.facts();
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|fact| fact.syntax_kind().as_str() == "rust.impl.scope")
+            .count(),
+        2
+    );
+    let methods = facts
+        .iter()
+        .filter(|fact| {
+            if fact.syntax_kind().as_str() != "rust.function.declaration" {
+                return false;
+            }
+            let start = usize::try_from(fact.span().start_byte()).expect("span start fits");
+            let end = usize::try_from(fact.span().end_byte()).expect("span end fits");
+            SOURCE
+                .get(start..end)
+                .is_some_and(|text| text.starts_with(b"fn same"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(methods.len(), 2);
+    for method in methods {
+        let parent = method
+            .parent()
+            .and_then(|parent| facts.iter().find(|fact| fact.local_id() == parent))
+            .expect("same-named method has a captured parent");
+        assert_eq!(parent.syntax_kind().as_str(), "rust.impl.scope");
+    }
+}
+
+#[test]
 fn clean_and_incremental_extraction_are_logically_identical_for_every_family() {
     let limits = limits(4096, 128);
     let settings = ParserSettings::new(256).expect("test parser settings are valid");

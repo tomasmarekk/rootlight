@@ -97,8 +97,8 @@ impl StructuralRole {
         match self {
             Self::Root => Some(0),
             Self::Module => Some(1),
-            Self::Declaration => Some(2),
-            Self::Scope => Some(3),
+            Self::Scope => Some(2),
+            Self::Declaration => Some(3),
             _ => None,
         }
     }
@@ -284,6 +284,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Rust, "static_item") => Some("rust.static"),
         (GrammarFamily::Rust, "use_declaration") => Some("rust.use"),
         (GrammarFamily::Rust, "parameters") => Some("rust.parameters"),
+        (GrammarFamily::Rust, "impl_item") => Some("rust.impl"),
         (GrammarFamily::Rust, "block") => Some("rust.block"),
         (GrammarFamily::Rust, "identifier") => Some("rust.identifier"),
         (GrammarFamily::Rust, "type_identifier") => Some("rust.type_identifier"),
