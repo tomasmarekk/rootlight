@@ -20,7 +20,9 @@ tree-sitter-rust.workspace = true
 
 [dev-dependencies]
 blake3.workspace = true
+proptest.workspace = true
 rootlight-vfs = { path = "../rootlight-vfs" }
+serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]
