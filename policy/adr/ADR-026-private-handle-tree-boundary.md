@@ -1,8 +1,8 @@
 # ADR-026: Confine native private-tree operations to the VFS platform boundary
 
-**Status:** Proposed  
-**Owner:** @tomasmarekk  
-**Decision date:** not accepted  
+**Status:** Proposed
+**Owner:** @tomasmarekk
+**Decision date:** not accepted
 **Related baseline:** ADR-010, REQ-N-004, REQ-N-008, CMP-VFS, M05, M12, R-009
 
 ## Context

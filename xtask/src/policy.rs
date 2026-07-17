@@ -17,6 +17,7 @@ use yaml_rust2::{Yaml, YamlLoader};
 const SUPPLY_CHAIN_POLICY_PATH: &str = "policy/supply-chain.toml";
 const ACTION_POLICY_PATH: &str = "policy/github-actions.toml";
 const TOOLCHAIN_POLICY_PATH: &str = "policy/toolchain.toml";
+const UNSAFE_POLICY_PATH: &str = "policy/unsafe.toml";
 const WORKFLOW_ROOT: &str = ".github/workflows";
 const CURRENT_SCHEMA_VERSION: &str = "1.0";
 
@@ -32,16 +33,18 @@ pub(crate) fn check() -> Result<(), PolicyError> {
     let action_policy: ActionPolicy = read_policy(&workspace_root.join(ACTION_POLICY_PATH))?;
     let toolchain_policy: ToolchainPolicy =
         read_policy(&workspace_root.join(TOOLCHAIN_POLICY_PATH))?;
+    let unsafe_policy: UnsafePolicy = read_policy(&workspace_root.join(UNSAFE_POLICY_PATH))?;
 
     require_version(&supply_chain.schema_version, SUPPLY_CHAIN_POLICY_PATH)?;
     require_version(&action_policy.schema_version, ACTION_POLICY_PATH)?;
     require_version(&toolchain_policy.schema_version, TOOLCHAIN_POLICY_PATH)?;
+    require_version(&unsafe_policy.schema_version, UNSAFE_POLICY_PATH)?;
     validate_dependency_surfaces(&metadata, &supply_chain)?;
     crate::grammar_lock::check(&metadata, workspace_root)
         .map_err(|error| PolicyError::GrammarLock(Box::new(error)))?;
     validate_action_pins(workspace_root, &action_policy)?;
     validate_toolchain_policy(workspace_root, &toolchain_policy)?;
-    scan_workspace_unsafe(workspace_root, &metadata)?;
+    scan_workspace_unsafe(workspace_root, &metadata, &unsafe_policy)?;
 
     println!(
         "policy check passed for {} resolved packages and {} approved actions",
@@ -52,7 +55,18 @@ pub(crate) fn check() -> Result<(), PolicyError> {
 }
 
 pub(crate) fn check_unsafe_fixture(root: &Path) -> Result<(), PolicyError> {
-    scan_rust_tree(root)
+    let mut observed = BTreeMap::new();
+    scan_rust_tree(root, &mut observed)?;
+    if let Some((path, observation)) = observed
+        .into_iter()
+        .find(|(_, observation)| observation.count > 0)
+    {
+        return Err(PolicyError::UnsafeToken {
+            path,
+            line: observation.first_line,
+        });
+    }
+    Ok(())
 }
 
 fn read_policy<T>(path: &Path) -> Result<T, PolicyError>
@@ -514,19 +528,441 @@ fn sha256_hex(bytes: &[u8]) -> String {
     encoded
 }
 
-fn scan_workspace_unsafe(root: &Path, metadata: &Metadata) -> Result<(), PolicyError> {
+fn scan_workspace_unsafe(
+    root: &Path,
+    metadata: &Metadata,
+    policy: &UnsafePolicy,
+) -> Result<(), PolicyError> {
+    let root = fs::canonicalize(root).map_err(|source| PolicyError::Read {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let boundaries = validate_unsafe_boundaries(&root, metadata, policy)?;
+    let mut observed = BTreeMap::new();
+    let mut source_roots = BTreeSet::new();
     for package in metadata.workspace_packages() {
         for target in &package.targets {
-            let source = target.src_path.as_std_path();
+            let source = fs::canonicalize(target.src_path.as_std_path()).map_err(|source| {
+                PolicyError::Read {
+                    path: target.src_path.clone().into_std_path_buf(),
+                    source,
+                }
+            })?;
+            if !source.starts_with(&root) {
+                return Err(PolicyError::InvalidUnsafeBoundary {
+                    detail: format!(
+                        "workspace target source is outside root: {}",
+                        target.src_path
+                    ),
+                });
+            }
             if let Some(source_root) = source.parent() {
-                scan_rust_tree(source_root)?;
+                source_roots.insert(source_root.to_path_buf());
             }
         }
     }
-    scan_rust_tree(&root.join("tests/fixtures/unsafe"))
+    source_roots.insert(root.join("tests/fixtures/unsafe"));
+    for source_root in source_roots {
+        scan_rust_tree(&source_root, &mut observed)?;
+    }
+
+    for (path, observation) in &observed {
+        if observation.count == 0 {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(&root)
+            .map_err(|_| PolicyError::InvalidUnsafeBoundary {
+                detail: format!("workspace source is outside root: {}", path.display()),
+            })?
+            .to_path_buf();
+        let Some(boundary) = boundaries.get(&relative) else {
+            return Err(PolicyError::UnsafeToken {
+                path: path.clone(),
+                line: observation.first_line,
+            });
+        };
+        if boundary.status != UnsafeBoundaryStatus::Accepted {
+            return Err(PolicyError::UnsafeToken {
+                path: path.clone(),
+                line: observation.first_line,
+            });
+        }
+    }
+
+    for (source, boundary) in boundaries {
+        let absolute = root.join(&source);
+        let observation = observed.get(&absolute).copied().unwrap_or_default();
+        let expected = boundary.expected_source_tokens;
+        match boundary.status {
+            UnsafeBoundaryStatus::Proposed if expected != 0 || observation.count != 0 => {
+                return Err(PolicyError::UnsafeBoundaryCount {
+                    path: source,
+                    expected: 0,
+                    observed: observation.count,
+                });
+            }
+            UnsafeBoundaryStatus::Accepted if expected == 0 => {
+                return Err(PolicyError::InvalidUnsafeBoundary {
+                    detail: format!(
+                        "accepted boundary {} must expect at least one token",
+                        source.display()
+                    ),
+                });
+            }
+            UnsafeBoundaryStatus::Accepted | UnsafeBoundaryStatus::Proposed
+                if observation.count != expected =>
+            {
+                return Err(PolicyError::UnsafeBoundaryCount {
+                    path: source,
+                    expected,
+                    observed: observation.count,
+                });
+            }
+            UnsafeBoundaryStatus::Accepted | UnsafeBoundaryStatus::Proposed => {}
+        }
+    }
+    Ok(())
 }
 
-fn scan_rust_tree(root: &Path) -> Result<(), PolicyError> {
+fn validate_unsafe_boundaries<'a>(
+    root: &Path,
+    metadata: &Metadata,
+    policy: &'a UnsafePolicy,
+) -> Result<BTreeMap<PathBuf, &'a UnsafeBoundary>, PolicyError> {
+    let packages: BTreeMap<_, _> = metadata
+        .workspace_packages()
+        .iter()
+        .map(|package| (package.name.as_str(), *package))
+        .collect();
+    let mut by_source = BTreeMap::new();
+    let mut modules = BTreeSet::new();
+    for boundary in &policy.boundaries {
+        validate_relative_policy_path(&boundary.source)?;
+        validate_relative_policy_path(&boundary.adr)?;
+        if boundary.module.is_empty()
+            || boundary.owner != "@tomasmarekk"
+            || boundary.reason.trim().is_empty()
+        {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!("incomplete boundary for {}", boundary.source.display()),
+            });
+        }
+        let Some(package) = packages.get(boundary.package.as_str()) else {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!("unknown package {}", boundary.package),
+            });
+        };
+        let Some(manifest_parent) = package.manifest_path.as_std_path().parent() else {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!("package {} has no manifest parent", boundary.package),
+            });
+        };
+        let package_root =
+            fs::canonicalize(manifest_parent).map_err(|source| PolicyError::Read {
+                path: manifest_parent.to_path_buf(),
+                source,
+            })?;
+        let absolute_source =
+            canonical_policy_file(root, &boundary.source, "unsafe boundary source")?;
+        let absolute_adr = canonical_policy_file(root, &boundary.adr, "unsafe boundary ADR")?;
+        if !absolute_source.starts_with(&package_root)
+            || absolute_source.extension().and_then(|value| value.to_str()) != Some("rs")
+        {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!(
+                    "{} is stale or outside package {}",
+                    boundary.source.display(),
+                    boundary.package
+                ),
+            });
+        }
+        let expected_module =
+            boundary_module_name(&boundary.package, &package_root, &absolute_source)?;
+        if boundary.module != expected_module {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!(
+                    "{} must name module {expected_module}",
+                    boundary.source.display()
+                ),
+            });
+        }
+        validate_unsafe_boundary_governance(
+            package,
+            &package_root,
+            &absolute_source,
+            &absolute_adr,
+            boundary,
+        )?;
+        if !modules.insert(boundary.module.as_str())
+            || by_source
+                .insert(boundary.source.clone(), boundary)
+                .is_some()
+        {
+            return Err(PolicyError::DuplicateUnsafeBoundary {
+                path: boundary.source.clone(),
+            });
+        }
+    }
+    Ok(by_source)
+}
+
+fn canonical_policy_file(
+    root: &Path,
+    relative: &Path,
+    kind: &'static str,
+) -> Result<PathBuf, PolicyError> {
+    let requested = root.join(relative);
+    let canonical = fs::canonicalize(&requested).map_err(|source| PolicyError::Read {
+        path: requested.clone(),
+        source,
+    })?;
+    if !canonical.starts_with(root)
+        || canonical
+            .strip_prefix(root)
+            .is_ok_and(|observed| observed != relative)
+        || !canonical.is_file()
+    {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: format!("{kind} escapes or aliases {}", relative.display()),
+        });
+    }
+    Ok(canonical)
+}
+
+fn boundary_module_name(
+    package: &str,
+    package_root: &Path,
+    source: &Path,
+) -> Result<String, PolicyError> {
+    let relative = source
+        .strip_prefix(package_root)
+        .ok()
+        .and_then(|path| path.strip_prefix("src").ok())
+        .ok_or_else(|| PolicyError::InvalidUnsafeBoundary {
+            detail: format!(
+                "unsafe source {} is not below package src",
+                source.display()
+            ),
+        })?;
+    let mut components = relative.components().collect::<Vec<_>>();
+    let Some(Component::Normal(file_name)) = components.pop() else {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: format!("unsafe source {} has no Rust module name", source.display()),
+        });
+    };
+    let Some(file_name) = file_name.to_str() else {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: format!(
+                "unsafe source {} has a non-Unicode module name",
+                source.display()
+            ),
+        });
+    };
+    let mut module = package.to_owned();
+    for component in components {
+        let Component::Normal(component) = component else {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!(
+                    "unsafe source {} has an invalid module path",
+                    source.display()
+                ),
+            });
+        };
+        let Some(component) = component.to_str() else {
+            return Err(PolicyError::InvalidUnsafeBoundary {
+                detail: format!(
+                    "unsafe source {} has a non-Unicode module path",
+                    source.display()
+                ),
+            });
+        };
+        module.push_str("::");
+        module.push_str(component);
+    }
+    let stem = file_name
+        .strip_suffix(".rs")
+        .ok_or_else(|| PolicyError::InvalidUnsafeBoundary {
+            detail: format!("unsafe source {} is not a Rust module", source.display()),
+        })?;
+    if !matches!(stem, "lib" | "main" | "mod") {
+        module.push_str("::");
+        module.push_str(stem);
+    }
+    Ok(module)
+}
+
+fn validate_unsafe_boundary_governance(
+    package: &Package,
+    package_root: &Path,
+    source: &Path,
+    adr: &Path,
+    boundary: &UnsafeBoundary,
+) -> Result<(), PolicyError> {
+    let manifest_path = package.manifest_path.as_std_path();
+    let manifest_text = fs::read_to_string(manifest_path).map_err(|source| PolicyError::Read {
+        path: manifest_path.to_path_buf(),
+        source,
+    })?;
+    let manifest: toml::Value =
+        toml::from_str(&manifest_text).map_err(|source| PolicyError::Parse {
+            path: manifest_path.to_path_buf(),
+            source,
+        })?;
+    let source_text = fs::read_to_string(source).map_err(|error| PolicyError::Read {
+        path: source.to_path_buf(),
+        source: error,
+    })?;
+    let adr_text = fs::read_to_string(adr).map_err(|source| PolicyError::Read {
+        path: adr.to_path_buf(),
+        source,
+    })?;
+    let expected_status = match boundary.status {
+        UnsafeBoundaryStatus::Proposed => "**Status:** Proposed",
+        UnsafeBoundaryStatus::Accepted => "**Status:** Accepted",
+    };
+    let decision_date = adr_text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("**Decision date:** "));
+    if !adr_text.lines().any(|line| line.trim() == expected_status)
+        || !adr_decision_state_is_valid(boundary.status, decision_date)
+    {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: format!(
+                "{} does not declare a consistent {expected_status} decision",
+                boundary.adr.display()
+            ),
+        });
+    }
+
+    let target_root = package
+        .targets
+        .iter()
+        .filter_map(|target| {
+            let target_source = fs::canonicalize(target.src_path.as_std_path()).ok()?;
+            let target_parent = target_source.parent()?;
+            source
+                .starts_with(target_parent)
+                .then_some((target_parent.components().count(), target_source))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, source)| source)
+        .ok_or_else(|| PolicyError::InvalidUnsafeBoundary {
+            detail: format!(
+                "{} is not owned by a declared target in {}",
+                boundary.source.display(),
+                package.name
+            ),
+        })?;
+    if !target_root.starts_with(package_root) {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: format!("package {} target source escapes its package", package.name),
+        });
+    }
+    let target_text = fs::read_to_string(&target_root).map_err(|source| PolicyError::Read {
+        path: target_root.clone(),
+        source,
+    })?;
+    let lints = manifest.get("lints");
+    if !boundary_lint_state_is_valid(
+        boundary.status,
+        lints,
+        &target_text,
+        &source_text,
+        boundary.expected_source_tokens,
+        boundary.expected_geiger_count,
+    ) {
+        let requirement = match boundary.status {
+            UnsafeBoundaryStatus::Proposed => "retain workspace forbid and zero inventory",
+            UnsafeBoundaryStatus::Accepted => "declare the exact deny/allow inventory",
+        };
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: format!(
+                "{} boundary {} must {requirement}",
+                match boundary.status {
+                    UnsafeBoundaryStatus::Proposed => "proposed",
+                    UnsafeBoundaryStatus::Accepted => "accepted",
+                },
+                boundary.source.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn adr_decision_state_is_valid(status: UnsafeBoundaryStatus, decision_date: Option<&str>) -> bool {
+    match status {
+        UnsafeBoundaryStatus::Proposed => decision_date == Some("not accepted"),
+        UnsafeBoundaryStatus::Accepted => decision_date.is_some_and(|date| {
+            let bytes = date.as_bytes();
+            bytes.len() == 10
+                && bytes[4] == b'-'
+                && bytes[7] == b'-'
+                && bytes
+                    .iter()
+                    .enumerate()
+                    .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+        }),
+    }
+}
+
+fn boundary_lint_state_is_valid(
+    status: UnsafeBoundaryStatus,
+    lints: Option<&toml::Value>,
+    target_text: &str,
+    source_text: &str,
+    expected_source_tokens: usize,
+    expected_geiger_count: usize,
+) -> bool {
+    match status {
+        UnsafeBoundaryStatus::Proposed => {
+            let inherits_workspace = lints
+                .and_then(|value| value.get("workspace"))
+                .and_then(toml::Value::as_bool)
+                == Some(true);
+            inherits_workspace
+                && target_text.contains("#![forbid(unsafe_code)]")
+                && !source_text.contains("allow(unsafe_code)")
+                && expected_source_tokens == 0
+                && expected_geiger_count == 0
+        }
+        UnsafeBoundaryStatus::Accepted => {
+            let crate_denies = lints
+                .and_then(|value| value.get("rust"))
+                .and_then(|value| value.get("unsafe_code"))
+                .and_then(toml::Value::as_str)
+                == Some("deny");
+            crate_denies
+                && target_text.contains("#![deny(unsafe_code)]")
+                && source_text.contains("#![allow(unsafe_code)]")
+                && expected_source_tokens > 0
+                && expected_geiger_count > 0
+        }
+    }
+}
+
+fn validate_relative_policy_path(path: &Path) -> Result<(), PolicyError> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .as_os_str()
+            .to_str()
+            .is_none_or(|value| value.contains('\\'))
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: format!("invalid relative path {}", path.display()),
+        });
+    }
+    Ok(())
+}
+
+fn scan_rust_tree(
+    root: &Path,
+    observed: &mut BTreeMap<PathBuf, UnsafeObservation>,
+) -> Result<(), PolicyError> {
     if !root.exists() {
         return Ok(());
     }
@@ -550,20 +986,21 @@ fn scan_rust_tree(root: &Path) -> Result<(), PolicyError> {
             } else if file_type.is_file()
                 && path.extension().and_then(|value| value.to_str()) == Some("rs")
             {
-                scan_rust_file(&path)?;
+                observed.insert(path.clone(), scan_rust_file(&path)?);
             }
         }
     }
     Ok(())
 }
 
-fn scan_rust_file(path: &Path) -> Result<(), PolicyError> {
+fn scan_rust_file(path: &Path) -> Result<UnsafeObservation, PolicyError> {
     let text = fs::read_to_string(path).map_err(|source| PolicyError::Read {
         path: path.to_path_buf(),
         source,
     })?;
     let bytes = text.as_bytes();
     let mut index = 0;
+    let mut observation = UnsafeObservation::default();
     while index < bytes.len() {
         if starts_line_comment(bytes, index) {
             index = skip_line_comment(bytes, index + 2);
@@ -580,16 +1017,16 @@ fn scan_rust_file(path: &Path) -> Result<(), PolicyError> {
                 index += 1;
             }
             if &bytes[start..index] == b"unsafe" {
-                return Err(PolicyError::UnsafeToken {
-                    path: path.to_path_buf(),
-                    line: line_number(bytes, start),
-                });
+                observation.count = observation.count.saturating_add(1);
+                if observation.first_line == 0 {
+                    observation.first_line = line_number(bytes, start);
+                }
             }
         } else {
             index += 1;
         }
     }
-    Ok(())
+    Ok(observation)
 }
 
 fn starts_line_comment(bytes: &[u8], index: usize) -> bool {
@@ -737,6 +1174,40 @@ fn package_key(package: &Package) -> String {
     format!("{}@{}", package.name, package.version)
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct UnsafeObservation {
+    count: usize,
+    first_line: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnsafePolicy {
+    schema_version: String,
+    boundaries: Vec<UnsafeBoundary>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnsafeBoundary {
+    package: String,
+    module: String,
+    source: PathBuf,
+    status: UnsafeBoundaryStatus,
+    adr: PathBuf,
+    owner: String,
+    reason: String,
+    expected_source_tokens: usize,
+    expected_geiger_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum UnsafeBoundaryStatus {
+    Proposed,
+    Accepted,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SupplyChainPolicy {
@@ -880,6 +1351,16 @@ pub(crate) enum PolicyError {
         expected: String,
         observed: String,
     },
+    #[error("POLICY_UNSAFE_BOUNDARY: {detail}")]
+    InvalidUnsafeBoundary { detail: String },
+    #[error("POLICY_UNSAFE_BOUNDARY: duplicate boundary for {path}")]
+    DuplicateUnsafeBoundary { path: PathBuf },
+    #[error("POLICY_UNSAFE_COUNT: {path} expected {expected} unsafe tokens, observed {observed}")]
+    UnsafeBoundaryCount {
+        path: PathBuf,
+        expected: usize,
+        observed: usize,
+    },
     #[error("POLICY_UNSAFE: unsafe token in {path}:{line}")]
     UnsafeToken { path: PathBuf, line: usize },
 }
@@ -888,6 +1369,84 @@ pub(crate) enum PolicyError {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn unsafe_boundary_module_matches_its_package_source_path() {
+        let directory = tempdir().expect("temporary directory is available");
+        let package = directory.path().join("rootlight-vfs");
+        let module = package.join("src/platform");
+        fs::create_dir_all(&module).expect("module directory creates");
+        let source = module.join("os.rs");
+        fs::write(&source, "").expect("module source writes");
+        let package = fs::canonicalize(package).expect("package path canonicalizes");
+        let source = fs::canonicalize(source).expect("source path canonicalizes");
+
+        assert_eq!(
+            boundary_module_name("rootlight-vfs", &package, &source).expect("module name derives"),
+            "rootlight-vfs::platform::os"
+        );
+    }
+
+    #[test]
+    fn proposed_and_accepted_boundaries_require_exact_lint_states() {
+        let proposed_manifest: toml::Value =
+            toml::from_str("[lints]\nworkspace = true\n").expect("fixture parses");
+        let accepted_manifest: toml::Value =
+            toml::from_str("[lints.rust]\nunsafe_code = \"deny\"\n").expect("fixture parses");
+
+        assert!(boundary_lint_state_is_valid(
+            UnsafeBoundaryStatus::Proposed,
+            proposed_manifest.get("lints"),
+            "#![forbid(unsafe_code)]",
+            "fn safe() {}",
+            0,
+            0,
+        ));
+        assert!(!boundary_lint_state_is_valid(
+            UnsafeBoundaryStatus::Proposed,
+            accepted_manifest.get("lints"),
+            "#![deny(unsafe_code)]",
+            "fn safe() {}",
+            0,
+            0,
+        ));
+        assert!(boundary_lint_state_is_valid(
+            UnsafeBoundaryStatus::Accepted,
+            accepted_manifest.get("lints"),
+            "#![deny(unsafe_code)]",
+            "#![allow(unsafe_code)]\nunsafe fn native() {}",
+            2,
+            1,
+        ));
+        assert!(!boundary_lint_state_is_valid(
+            UnsafeBoundaryStatus::Accepted,
+            accepted_manifest.get("lints"),
+            "#![deny(unsafe_code)]",
+            "fn safe() {}",
+            0,
+            0,
+        ));
+    }
+
+    #[test]
+    fn unsafe_boundary_status_requires_a_consistent_decision_date() {
+        assert!(adr_decision_state_is_valid(
+            UnsafeBoundaryStatus::Proposed,
+            Some("not accepted")
+        ));
+        assert!(!adr_decision_state_is_valid(
+            UnsafeBoundaryStatus::Proposed,
+            Some("2026-07-17")
+        ));
+        assert!(adr_decision_state_is_valid(
+            UnsafeBoundaryStatus::Accepted,
+            Some("2026-07-17")
+        ));
+        assert!(!adr_decision_state_is_valid(
+            UnsafeBoundaryStatus::Accepted,
+            Some("not accepted")
+        ));
+    }
 
     #[test]
     fn unsafe_scan_ignores_comments_and_literals() {
@@ -899,7 +1458,7 @@ mod tests {
         )
         .expect("fixture writes");
 
-        assert!(scan_rust_file(&source).is_ok());
+        assert_eq!(scan_rust_file(&source).expect("safe source scans").count, 0);
     }
 
     #[test]
@@ -912,10 +1471,9 @@ mod tests {
         )
         .expect("fixture writes");
 
-        assert!(matches!(
-            scan_rust_file(&source),
-            Err(PolicyError::UnsafeToken { line: 1, .. })
-        ));
+        let observation = scan_rust_file(&source).expect("source inventory succeeds");
+        assert_eq!(observation.count, 1);
+        assert_eq!(observation.first_line, 1);
     }
 
     #[test]
@@ -928,10 +1486,9 @@ mod tests {
         )
         .expect("fixture writes");
 
-        assert!(matches!(
-            scan_rust_file(&source),
-            Err(PolicyError::UnsafeToken { line: 1, .. })
-        ));
+        let observation = scan_rust_file(&source).expect("source inventory succeeds");
+        assert_eq!(observation.count, 1);
+        assert_eq!(observation.first_line, 1);
     }
 
     #[test]
@@ -944,10 +1501,9 @@ mod tests {
         )
         .expect("fixture writes");
 
-        assert!(matches!(
-            scan_rust_file(&source),
-            Err(PolicyError::UnsafeToken { line: 1, .. })
-        ));
+        let observation = scan_rust_file(&source).expect("source inventory succeeds");
+        assert_eq!(observation.count, 1);
+        assert_eq!(observation.first_line, 1);
     }
 
     #[test]

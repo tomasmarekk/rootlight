@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import sys
+import tomllib
 
 
 def unsafe_count(unsafety: dict[str, object]) -> int:
@@ -24,7 +26,31 @@ def unsafe_count(unsafety: dict[str, object]) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--required-workspace-package", required=True)
+    parser.add_argument("--unsafe-policy", required=True)
     args = parser.parse_args()
+
+    policy_path = pathlib.Path(args.unsafe_policy)
+    policy = tomllib.loads(policy_path.read_text(encoding="utf-8"))
+    if policy.get("schema_version") != "1.0":
+        print("unsafe inventory policy has an unsupported version", file=sys.stderr)
+        return 1
+    approved_counts: dict[str, int] = {}
+    for boundary in policy.get("boundaries", []):
+        package = boundary.get("package")
+        status = boundary.get("status")
+        count = boundary.get("expected_geiger_count")
+        if (
+            not isinstance(package, str)
+            or status not in {"proposed", "accepted"}
+            or not isinstance(count, int)
+            or count < 0
+            or (status == "proposed" and count != 0)
+            or (status == "accepted" and count == 0)
+        ):
+            print("unsafe inventory policy contains an invalid boundary", file=sys.stderr)
+            return 1
+        if status == "accepted":
+            approved_counts[package] = approved_counts.get(package, 0) + count
 
     report = json.load(sys.stdin)
     if report.get("packages_without_metrics"):
@@ -44,7 +70,16 @@ def main() -> int:
             return 1
         workspace_packages.add(name)
         unsafety = entry.get("unsafety", {})
-        if not unsafety.get("forbids_unsafe") or unsafe_count(unsafety) != 0:
+        observed_count = unsafe_count(unsafety)
+        if name in approved_counts:
+            if observed_count != approved_counts[name]:
+                print(
+                    f"workspace package {name} expected "
+                    f"{approved_counts[name]} unsafe uses, observed {observed_count}",
+                    file=sys.stderr,
+                )
+                return 1
+        elif not unsafety.get("forbids_unsafe") or observed_count != 0:
             print(f"workspace package {name} permits or uses unsafe code", file=sys.stderr)
             return 1
 
