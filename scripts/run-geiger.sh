@@ -6,6 +6,11 @@ set -euo pipefail
 
 export CARGO_BUILD_JOBS=1
 output_root="${1:-artifacts/geiger}"
+geiger_version="$(cargo geiger --version)"
+if [[ "$geiger_version" != "cargo-geiger 0.13.0" ]]; then
+    printf 'unsupported cargo-geiger version: %s\n' "$geiger_version" >&2
+    exit 1
+fi
 rm -rf "$output_root"
 mkdir -p "$output_root"
 
@@ -85,6 +90,7 @@ while IFS=$'\t' read -r cargo_id package version manifest; do
         --output-format Json \
         2> "$output_root/$package-$version.log" \
         | python scripts/validate-geiger.py \
+            --cargo-geiger-version "$geiger_version" \
             --required-workspace-package-id "$cargo_id" \
             --workspace-inventory "$output_root/workspace-packages.json" \
             --unsafe-policy policy/unsafe.toml
