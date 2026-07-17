@@ -69,7 +69,7 @@ allowed_internal_dependencies = [
   "rootlight-ir",
   "rootlight-vfs",
 ]
-allow_build_script = false
+allow_build_script = true
 
 [[crates]]
 name = "rootlight-cancel"

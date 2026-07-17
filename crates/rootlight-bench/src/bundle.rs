@@ -338,7 +338,11 @@ pub fn publish_bundle(bundle: &ResultBundle, destination: &Path) -> Result<(), B
 /// Publishes one immutable result bundle with checked caller-selected limits.
 ///
 /// All artifacts are serialized and byte-accounted before a staging directory
-/// is created. The destination parent must already exist.
+/// is created. The destination parent must already exist. On Unix, staging and
+/// parent directories are synced around the atomic rename. Rust's standard
+/// library does not expose portable Windows directory-handle syncing, so
+/// Windows retains synced files plus same-filesystem rename as an explicit
+/// best-effort crash-durability fallback.
 ///
 /// # Errors
 ///
@@ -420,35 +424,69 @@ fn publish_bundle_with_fault(
         return Err(BundleError::DestinationExists);
     }
     let artifacts = build_artifacts(bundle, limits)?;
+    let parent = destination_parent(destination)?;
+    let file_name = destination
+        .file_name()
+        .ok_or(BundleError::InvalidDestination)?;
+    let final_destination = parent.join(file_name);
+    let staging = tempfile::Builder::new()
+        .prefix(".rootlight-result-partial-")
+        .tempdir_in(&parent)
+        .map_err(|source| BundleError::Io {
+            operation: "create staging directory",
+            source,
+        })?;
+
+    let preparation = write_bundle(&artifacts, staging.path(), fail_after_writes)
+        .and_then(|()| sync_directory(&staging.path().join("profiles"), "sync profiles directory"))
+        .and_then(|()| sync_directory(&staging.path().join("logs"), "sync logs directory"))
+        .and_then(|()| sync_directory(staging.path(), "sync staging directory"));
+    if let Err(error) = preparation {
+        close_staging(staging)?;
+        return Err(error);
+    }
+    if let Err(source) = fs::rename(staging.path(), &final_destination) {
+        close_staging(staging)?;
+        return Err(BundleError::Io {
+            operation: "publish result bundle",
+            source,
+        });
+    }
+    drop(staging);
+    sync_directory(&parent, "sync result parent directory")
+}
+
+fn close_staging(staging: tempfile::TempDir) -> Result<(), BundleError> {
+    staging.close().map_err(|source| BundleError::Io {
+        operation: "remove staging directory",
+        source,
+    })
+}
+
+fn destination_parent(destination: &Path) -> Result<std::path::PathBuf, BundleError> {
     let parent = destination
         .parent()
         .ok_or(BundleError::InvalidDestination)?;
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or(BundleError::InvalidDestination)?;
-    let staging = parent.join(format!(".{file_name}.partial-{}", std::process::id()));
-    fs::create_dir(&staging).map_err(|source| {
-        if source.kind() == io::ErrorKind::AlreadyExists {
-            BundleError::StagingExists
-        } else {
-            BundleError::Io {
-                operation: "create staging directory",
-                source,
-            }
-        }
-    })?;
-
-    let publication = write_bundle(&artifacts, &staging, fail_after_writes).and_then(|()| {
-        fs::rename(&staging, destination).map_err(|source| BundleError::Io {
-            operation: "publish result bundle",
+    if parent.as_os_str().is_empty() {
+        std::env::current_dir().map_err(|source| BundleError::Io {
+            operation: "resolve result parent directory",
             source,
         })
-    });
-    if publication.is_err() {
-        let _ = fs::remove_dir_all(&staging);
+    } else {
+        Ok(parent.to_owned())
     }
-    publication
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path, operation: &'static str) -> Result<(), BundleError> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| BundleError::Io { operation, source })
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path, _operation: &'static str) -> Result<(), BundleError> {
+    Ok(())
 }
 
 fn build_artifacts(
@@ -1039,6 +1077,8 @@ pub enum BundleError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::{
         Availability, BenchmarkCommand, BuildProvenance, CoverageEvidence, DatasetManifest,
@@ -1062,8 +1102,10 @@ mod tests {
                 binary_sha256: EvidenceValue::observed("00".repeat(32)),
                 feature_profile: "test".to_owned(),
                 sqlite: EvidenceValue::unavailable("not_in_scope"),
-                adapter_versions: BTreeMap::new(),
-                grammar_hashes: BTreeMap::new(),
+                adapter_versions: EvidenceValue::unavailable("not_sampled"),
+                grammar_versions: EvidenceValue::unavailable("not_sampled"),
+                grammar_source_package_checksums: EvidenceValue::unavailable("not_sampled"),
+                grammar_hashes: EvidenceValue::unavailable("not_sampled"),
                 locale: EvidenceValue::unavailable("not_sampled"),
                 background_process_policy: EvidenceValue::unavailable("not_sampled"),
                 clock_source: EvidenceValue::observed("std_instant".to_owned()),
@@ -1177,6 +1219,22 @@ mod tests {
     }
 
     #[test]
+    fn relative_destination_publishes_and_verifies_from_current_directory() {
+        static CURRENT_DIRECTORY: Mutex<()> = Mutex::new(());
+        let _lock = CURRENT_DIRECTORY
+            .lock()
+            .expect("current-directory test lock is available");
+        let original = std::env::current_dir().expect("current directory is available");
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        std::env::set_current_dir(temporary.path()).expect("temporary root becomes current");
+        let _restore = CurrentDirectoryGuard(original);
+
+        let destination = Path::new("result");
+        publish_bundle(&fixture(), destination).expect("relative bundle publishes");
+        verify_bundle(destination).expect("relative bundle verifies");
+    }
+
+    #[test]
     fn publication_never_overwrites_existing_evidence() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
@@ -1211,10 +1269,10 @@ mod tests {
 
         assert!(matches!(error, BundleError::InjectedWriteFailure));
         assert!(!destination.exists());
-        let staging = temporary
-            .path()
-            .join(format!(".result.partial-{}", std::process::id()));
-        assert!(!staging.exists());
+        let remaining = fs::read_dir(temporary.path())
+            .expect("temporary root is readable")
+            .count();
+        assert_eq!(remaining, 0);
     }
 
     #[test]
@@ -1533,5 +1591,13 @@ mod tests {
             })
             .collect();
         OperationalLog::new(records).expect("bounded operational log is valid")
+    }
+
+    struct CurrentDirectoryGuard(std::path::PathBuf);
+
+    impl Drop for CurrentDirectoryGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
     }
 }

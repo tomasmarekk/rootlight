@@ -21,3 +21,12 @@ pub use incremental::{
 pub use lowering::{TreeSitterAnalyzer, TreeSitterAnalyzerConfigError};
 pub use registry::{GrammarDescriptor, GrammarFamily, GrammarRegistry, RegistryError};
 pub use runtime::{CacheStats, RuntimeStats, TreeSitterProvider};
+
+/// Exact adapter crate version compiled into this runtime.
+pub const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Exact pinned Tree-sitter runtime crate version.
+///
+/// The workspace dependency is exact-pinned; keeping this adjacent to the
+/// adapter API makes evidence producers record the runtime they actually use.
+pub const TREE_SITTER_RUNTIME_VERSION: &str = "0.26.11";
