@@ -419,11 +419,10 @@ impl RuntimePaths {
 ///
 /// macOS publication fails closed when `/bin/chmod -N /dev/fd/0`, two-link empty-directory
 /// semantics, symlink-free parent traversal, no-replace rename, or directory synchronization are
-/// unavailable. Cleanup reopens every staging directory name without following links and verifies
-/// that its device and inode still match the held descriptor before removal. Call [`Self::abort`]
-/// to observe macOS cleanup errors; dropping an unpublished handle performs bounded best-effort
-/// cleanup, so abnormal termination, concurrent same-user mutation, or persistent filesystem
-/// errors can leave an owner-private staging tree.
+/// unavailable. macOS has no handle-bound, identity-conditional directory removal API, so cleanup
+/// never unlinks a replaceable staging name. It instead verifies the held directory descriptors,
+/// retains the owner-private staging tree, and returns a redacted cleanup error. Dropping a handle
+/// also retains the tree because it cannot report that error.
 #[derive(Debug)]
 pub struct PrivateOutputFile {
     file: File,
@@ -443,30 +442,12 @@ enum PrivateOutputState {
 struct MacosPrivateOutputState {
     parent: File,
     destination_name: std::ffi::OsString,
-    outer_name: std::ffi::OsString,
-    outer: Option<File>,
-    outer_present: bool,
-    inner_name: Option<std::ffi::OsString>,
-    inner: Option<File>,
-    inner_present: bool,
-    staged_name: &'static str,
-    staged_present: bool,
-    published: bool,
     #[cfg(test)]
-    cleanup_failure: Option<MacosCleanupStep>,
+    outer_name: std::ffi::OsString,
+    outer: File,
+    inner: Option<File>,
+    staged_name: &'static str,
 }
-
-#[cfg(all(test, target_os = "macos"))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MacosCleanupStep {
-    RemoveStagedFile,
-    RemoveInnerDirectory,
-    RemoveOuterDirectory,
-    SyncParent,
-}
-
-#[cfg(target_os = "macos")]
-const MACOS_CLEANUP_ATTEMPTS: usize = 3;
 
 impl PrivateOutputFile {
     /// Creates a new private output publication handle for `path`.
@@ -475,7 +456,9 @@ impl PrivateOutputFile {
     ///
     /// Returns [`RuntimeError::Io`] when the destination cannot be created exclusively, or
     /// [`RuntimeError::PrivateOutputSecurityPolicy`] when macOS cannot establish the staging
-    /// boundary required to prevent inherited ACLs from exposing content.
+    /// boundary required to prevent inherited ACLs from exposing content. A macOS setup failure
+    /// after creating a staging directory returns [`RuntimeError::PrivateOutputCleanup`] because
+    /// the owner-private orphan is retained instead of removed through a replaceable name.
     pub fn create(path: &Path) -> Result<Self, RuntimeError> {
         #[cfg(target_os = "macos")]
         {
@@ -521,7 +504,7 @@ impl PrivateOutputFile {
     fn create_macos(path: &Path) -> Result<Self, RuntimeError> {
         #[cfg(test)]
         {
-            Self::create_macos_impl(path, None)
+            Self::create_macos_impl(path, false)
         }
         #[cfg(not(test))]
         {
@@ -532,7 +515,7 @@ impl PrivateOutputFile {
     #[cfg(target_os = "macos")]
     fn create_macos_impl(
         path: &Path,
-        #[cfg(test)] injected_setup_cleanup_failure: Option<MacosCleanupStep>,
+        #[cfg(test)] inject_partial_setup_failure: bool,
     ) -> Result<Self, RuntimeError> {
         use rustix::fs::{Mode, OFlags};
 
@@ -541,36 +524,27 @@ impl PrivateOutputFile {
         let destination_name = macos_output_name(path)?;
         let parent = open_macos_output_parent(path)?;
         let (outer_name, outer) =
-            create_open_private_output_directory(&parent, ".rootlight-support-")?;
+            create_open_private_output_directory(&parent, ".rootlight-support-", false)?;
+        #[cfg(not(test))]
+        let _ = outer_name;
         let mut state = MacosPrivateOutputState {
             parent,
             destination_name,
-            outer_name,
-            outer: Some(outer),
-            outer_present: true,
-            inner_name: None,
-            inner: None,
-            inner_present: false,
-            staged_name: STAGED_NAME,
-            staged_present: false,
-            published: false,
             #[cfg(test)]
-            cleanup_failure: None,
+            outer_name,
+            outer,
+            inner: None,
+            staged_name: STAGED_NAME,
         };
 
         let setup = (|| {
-            let outer = state
-                .outer
-                .as_ref()
-                .ok_or_else(private_output_security_policy)?;
+            let outer = &state.outer;
             remove_macos_acl(outer)?;
             rustix::fs::fchmod(outer, Mode::RWXU).map_err(runtime_io)?;
             verify_private_staging_directory(outer)?;
 
-            let (inner_name, inner) = create_open_private_output_directory(outer, "private-")?;
-            state.inner_name = Some(inner_name);
+            let (_, inner) = create_open_private_output_directory(outer, "private-", false)?;
             state.inner = Some(inner);
-            state.inner_present = true;
 
             let inner = state
                 .inner
@@ -584,13 +558,11 @@ impl PrivateOutputFile {
                 Mode::RUSR | Mode::WUSR,
             )
             .map_err(runtime_io)?;
-            state.staged_present = true;
             let mut file = File::from(descriptor);
             RuntimePaths::secure_private_output_file(&mut file)?;
 
             #[cfg(test)]
-            if let Some(step) = injected_setup_cleanup_failure {
-                state.cleanup_failure = Some(step);
+            if inject_partial_setup_failure {
                 return Err(private_output_security_io(io::Error::other(
                     "injected macOS partial setup failure",
                 )));
@@ -604,7 +576,7 @@ impl PrivateOutputFile {
                 file,
                 state: PrivateOutputState::Staged(state),
             }),
-            Err(error) => Err(cleanup_after_macos_setup_failure(&mut state, error)),
+            Err(error) => Err(cleanup_after_macos_setup_failure(&state, error)),
         }
     }
 
@@ -613,11 +585,12 @@ impl PrivateOutputFile {
     /// # Errors
     ///
     /// Returns [`RuntimeError`] when file synchronization, exclusive publication, or required
-    /// directory synchronization fails. A macOS destination collision is reported as
-    /// [`RuntimeError::Io`] with [`io::ErrorKind::AlreadyExists`]. Once the macOS no-replace
-    /// rename succeeds, a later durability-sync or staging-cleanup error can be returned while the
-    /// destination is already visible. On other platforms the destination is visible from
-    /// [`Self::create`], and commit only flushes and synchronizes that existing file.
+    /// directory synchronization fails. On macOS, the atomic no-replace rename still publishes the
+    /// destination, but commit then returns [`RuntimeError::PrivateOutputCleanup`] because the
+    /// empty private staging directories are deliberately retained. A destination collision leaves
+    /// the existing destination unchanged and also reports the retained staging tree. On other
+    /// platforms the destination is visible from [`Self::create`], and commit only flushes and
+    /// synchronizes that existing file.
     pub fn commit(mut self) -> Result<(), RuntimeError> {
         let result = (|| {
             self.file.flush().map_err(RuntimeError::Io)?;
@@ -631,9 +604,6 @@ impl PrivateOutputFile {
                         .inner
                         .as_ref()
                         .ok_or_else(private_output_security_policy)?;
-                    if state.outer.is_none() {
-                        return Err(private_output_security_policy());
-                    }
                     inner.sync_all().map_err(RuntimeError::Io)?;
                     rustix::fs::renameat_with(
                         inner,
@@ -643,11 +613,9 @@ impl PrivateOutputFile {
                         rustix::fs::RenameFlags::NOREPLACE,
                     )
                     .map_err(|source| RuntimeError::Io(source.into()))?;
-                    state.staged_present = false;
-                    state.published = true;
                     inner.sync_all().map_err(RuntimeError::Io)?;
                     state.parent.sync_all().map_err(RuntimeError::Io)?;
-                    cleanup_macos_private_output(state, false)
+                    cleanup_macos_private_output(state)
                 }
             }
         })();
@@ -657,8 +625,8 @@ impl PrivateOutputFile {
             match result {
                 Ok(()) => Ok(()),
                 Err(error) => {
-                    let PrivateOutputState::Staged(state) = &mut self.state;
-                    cleanup_macos_private_output(state, !state.published)?;
+                    let PrivateOutputState::Staged(state) = &self.state;
+                    cleanup_macos_private_output(state)?;
                     Err(error)
                 }
             }
@@ -671,21 +639,21 @@ impl PrivateOutputFile {
 
     /// Abandons an unpublished output and reports cleanup failures.
     ///
-    /// On macOS this removes the staged file and both staging directories, then synchronizes the
-    /// parent directory. On other platforms publication happens during [`Self::create`], so abort
-    /// cannot retract the already-visible final inode and returns successfully without removing it.
+    /// On macOS this verifies and retains the owner-private staging tree because the platform
+    /// provides no identity-conditional directory removal operation. On other platforms
+    /// publication happens during [`Self::create`], so abort cannot retract the already-visible
+    /// final inode and returns successfully without removing it.
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::PrivateOutputCleanup`] when macOS cannot remove or durably record
-    /// removal of the staging tree. The subsequent destructor retries cleanup a bounded number of
-    /// times, but the original failure is still reported.
+    /// Returns [`RuntimeError::PrivateOutputCleanup`] with a redacted source when macOS retains the
+    /// staging tree rather than risk removing a substituted filesystem object.
     pub fn abort(self) -> Result<(), RuntimeError> {
         #[cfg(target_os = "macos")]
         {
-            let mut output = self;
-            let PrivateOutputState::Staged(state) = &mut output.state;
-            cleanup_macos_private_output(state, !state.published)
+            let output = self;
+            let PrivateOutputState::Staged(state) = &output.state;
+            cleanup_macos_private_output(state)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -708,14 +676,8 @@ impl Drop for PrivateOutputFile {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
         {
-            let PrivateOutputState::Staged(state) = &mut self.state;
-            // Explicit abort reports the first failure; Drop only covers transient failures and
-            // callers that cannot report an error during unwinding.
-            for _ in 0..MACOS_CLEANUP_ATTEMPTS {
-                if cleanup_macos_private_output(state, !state.published).is_ok() {
-                    break;
-                }
-            }
+            let PrivateOutputState::Staged(state) = &self.state;
+            let _ = cleanup_macos_private_output(state);
         }
     }
 }
@@ -794,6 +756,7 @@ fn open_macos_output_parent(path: &Path) -> Result<File, RuntimeError> {
 fn create_open_private_output_directory(
     parent: &File,
     prefix: &str,
+    inject_pre_open_failure: bool,
 ) -> Result<(std::ffi::OsString, File), RuntimeError> {
     use rustix::fs::{AtFlags, Mode};
 
@@ -814,26 +777,19 @@ fn create_open_private_output_directory(
             Ok(()) => {
                 // mkdirat applies the process umask, which can remove the owner permissions
                 // required to reopen the new directory for descriptor-bound hardening.
-                if let Err(source) = rustix::fs::chmodat(
-                    parent,
-                    name.as_str(),
-                    Mode::RWXU,
-                    AtFlags::SYMLINK_NOFOLLOW,
-                ) {
-                    let primary = runtime_io(source);
-                    return Err(cleanup_created_directory_after_setup_failure(
-                        parent,
-                        name.as_ref(),
-                        primary,
-                    ));
+                // After creation, failures retain the entry because macOS cannot unlink it by
+                // identity and the name could already refer to a replacement.
+                if rustix::fs::chmodat(parent, name.as_str(), Mode::RWXU, AtFlags::SYMLINK_NOFOLLOW)
+                    .is_err()
+                {
+                    return Err(retained_macos_staging_error());
+                }
+                if inject_pre_open_failure {
+                    return Err(retained_macos_staging_error());
                 }
                 return match open_private_output_directory_io(parent, name.as_ref()) {
                     Ok(directory) => Ok((name.into(), directory)),
-                    Err(primary) => Err(cleanup_created_directory_after_setup_failure(
-                        parent,
-                        name.as_ref(),
-                        RuntimeError::Io(primary),
-                    )),
+                    Err(_) => Err(retained_macos_staging_error()),
                 };
             }
             Err(source) if source == rustix::io::Errno::EXIST => {}
@@ -913,142 +869,46 @@ fn remove_macos_acl_with_program(directory: &File, program: &Path) -> Result<(),
 }
 
 #[cfg(target_os = "macos")]
-fn private_output_cleanup_io(source: io::Error) -> RuntimeError {
-    RuntimeError::PrivateOutputCleanup(source)
-}
-
-#[cfg(target_os = "macos")]
-fn cleanup_created_directory_after_setup_failure(
-    parent: &File,
-    name: &std::ffi::OsStr,
-    primary: RuntimeError,
-) -> RuntimeError {
-    use rustix::fs::AtFlags;
-
-    let first_cleanup = match rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR) {
-        Ok(()) => return primary,
-        Err(source) => private_output_cleanup_io(source.into()),
-    };
-    for _ in 1..MACOS_CLEANUP_ATTEMPTS {
-        if rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR).is_ok() {
-            break;
-        }
-    }
-    first_cleanup
+fn retained_macos_staging_error() -> RuntimeError {
+    RuntimeError::PrivateOutputCleanup(io::Error::other(
+        "macOS private staging tree retained because identity-bound removal is unavailable",
+    ))
 }
 
 #[cfg(target_os = "macos")]
 fn cleanup_after_macos_setup_failure(
-    state: &mut MacosPrivateOutputState,
+    state: &MacosPrivateOutputState,
     primary: RuntimeError,
 ) -> RuntimeError {
-    let first_cleanup = match cleanup_macos_private_output(state, true) {
-        Ok(()) => return primary,
-        Err(error) => error,
-    };
-    // A transient cleanup error must remain observable even when a bounded retry removes the
-    // residue successfully.
-    for _ in 1..MACOS_CLEANUP_ATTEMPTS {
-        if cleanup_macos_private_output(state, true).is_ok() {
-            break;
-        }
+    match cleanup_macos_private_output(state) {
+        Ok(()) => primary,
+        Err(cleanup) => cleanup,
     }
-    first_cleanup
 }
 
 #[cfg(target_os = "macos")]
-fn remove_linked_directory(
-    parent: &File,
-    name: &std::ffi::OsStr,
-    expected: &File,
-) -> Result<(), RuntimeError> {
-    use rustix::fs::AtFlags;
+fn verify_retained_macos_directory(directory: &File) -> Result<(), RuntimeError> {
+    use rustix::fs::FileType;
 
-    let observed =
-        open_private_output_directory_io(parent, name).map_err(private_output_cleanup_io)?;
-    let expected_metadata =
-        rustix::fs::fstat(expected).map_err(|source| private_output_cleanup_io(source.into()))?;
-    let observed_metadata =
-        rustix::fs::fstat(&observed).map_err(|source| private_output_cleanup_io(source.into()))?;
-    if expected_metadata.st_dev != observed_metadata.st_dev
-        || expected_metadata.st_ino != observed_metadata.st_ino
+    let metadata = rustix::fs::fstat(directory).map_err(|_| retained_macos_staging_error())?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::Directory
+        || metadata.st_uid != effective_user_id()
+        || metadata.st_mode & 0o077 != 0
     {
-        return Err(private_output_cleanup_io(io::Error::other(
-            "macOS staging directory identity changed",
-        )));
-    }
-    rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR)
-        .map_err(|source| private_output_cleanup_io(source.into()))
-}
-
-#[cfg(all(test, target_os = "macos"))]
-fn inject_cleanup_failure(
-    state: &mut MacosPrivateOutputState,
-    step: MacosCleanupStep,
-) -> Result<(), RuntimeError> {
-    if state.cleanup_failure == Some(step) {
-        state.cleanup_failure = None;
-        return Err(private_output_cleanup_io(io::Error::other(format!(
-            "injected macOS cleanup failure at {step:?}"
-        ))));
+        return Err(retained_macos_staging_error());
     }
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn cleanup_macos_private_output(
-    state: &mut MacosPrivateOutputState,
-    remove_staged_file: bool,
-) -> Result<(), RuntimeError> {
-    use rustix::fs::AtFlags;
-
-    if remove_staged_file && state.staged_present {
-        #[cfg(test)]
-        inject_cleanup_failure(state, MacosCleanupStep::RemoveStagedFile)?;
-        let inner = state
-            .inner
-            .as_ref()
-            .ok_or_else(private_output_security_policy)?;
-        rustix::fs::unlinkat(inner, state.staged_name, AtFlags::empty())
-            .map_err(|source| private_output_cleanup_io(source.into()))?;
-        state.staged_present = false;
+fn cleanup_macos_private_output(state: &MacosPrivateOutputState) -> Result<(), RuntimeError> {
+    // macOS directory removal is parent/name based, so a replacement can land after any metadata
+    // check. Verify the held private objects, but never unlink through their replaceable names.
+    if let Some(inner) = &state.inner {
+        verify_retained_macos_directory(inner)?;
     }
-
-    if state.inner_present {
-        #[cfg(test)]
-        inject_cleanup_failure(state, MacosCleanupStep::RemoveInnerDirectory)?;
-        let outer = state
-            .outer
-            .as_ref()
-            .ok_or_else(private_output_security_policy)?;
-        let inner_name = state
-            .inner_name
-            .as_deref()
-            .ok_or_else(private_output_security_policy)?;
-        let inner = state
-            .inner
-            .as_ref()
-            .ok_or_else(private_output_security_policy)?;
-        remove_linked_directory(outer, inner_name, inner)?;
-        state.inner_present = false;
-        drop(state.inner.take());
-    }
-
-    if state.outer_present {
-        #[cfg(test)]
-        inject_cleanup_failure(state, MacosCleanupStep::RemoveOuterDirectory)?;
-        let outer = state
-            .outer
-            .as_ref()
-            .ok_or_else(private_output_security_policy)?;
-        remove_linked_directory(&state.parent, &state.outer_name, outer)?;
-        state.outer_present = false;
-        drop(state.outer.take());
-    }
-
-    #[cfg(test)]
-    inject_cleanup_failure(state, MacosCleanupStep::SyncParent)?;
-    state.parent.sync_all().map_err(private_output_cleanup_io)
+    verify_retained_macos_directory(&state.outer)?;
+    Err(retained_macos_staging_error())
 }
 
 /// Exclusive short-lived authority for coordinating one daemon launch.
@@ -1693,6 +1553,59 @@ mod tests {
         parent.join(name)
     }
 
+    #[cfg(target_os = "macos")]
+    fn assert_retained_macos_staging_error(error: &RuntimeError) {
+        match error {
+            RuntimeError::PrivateOutputCleanup(source) => assert_eq!(
+                source.to_string(),
+                "macOS private staging tree retained because identity-bound removal is unavailable"
+            ),
+            other => panic!("unexpected macOS cleanup error: {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_private_macos_staging_entries(parent: &Path, expected: usize) {
+        let staging = fs::read_dir(parent)
+            .expect("support parent reads")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .is_some_and(|name| name.starts_with(".rootlight-support-"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(staging.len(), expected);
+        for path in staging {
+            assert_private_macos_tree(&path);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_private_macos_tree(root: &Path) {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            let metadata = fs::symlink_metadata(&path).expect("private staging metadata reads");
+            assert!(
+                metadata.file_type().is_dir() || metadata.file_type().is_file(),
+                "private staging contains a non-regular object"
+            );
+            assert_eq!(metadata.uid(), effective_user_id());
+            assert_eq!(metadata.mode() & 0o077, 0);
+            if metadata.file_type().is_dir() {
+                pending.extend(
+                    fs::read_dir(&path)
+                        .expect("private staging directory reads")
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path()),
+                );
+            }
+        }
+    }
+
     fn paths() -> (tempfile::TempDir, RuntimePaths) {
         let temporary = private_tempdir();
         let state = temporary.path().join("state");
@@ -1764,18 +1677,16 @@ mod tests {
         };
         let error = result.expect_err("overwrite is refused");
 
+        #[cfg(not(target_os = "macos"))]
         assert!(matches!(
             error,
             RuntimeError::Io(source) if source.kind() == io::ErrorKind::AlreadyExists
         ));
+        #[cfg(target_os = "macos")]
+        assert_retained_macos_staging_error(&error);
         assert_eq!(fs::read(path).expect("existing output reads"), b"existing");
         #[cfg(target_os = "macos")]
-        assert_eq!(
-            fs::read_dir(temporary.path())
-                .expect("temporary directory reads")
-                .count(),
-            1
-        );
+        assert_private_macos_staging_entries(temporary.path(), 1);
     }
 
     #[cfg(target_os = "macos")]
@@ -1855,15 +1766,13 @@ mod tests {
             let path = private_output_path(&temporary, "support.zip");
             let mut output = PrivateOutputFile::create(&path).expect("private output creates");
             output.write_all(b"bundle").expect("private output writes");
-            output.commit().expect("private output publishes");
+            let error = output
+                .commit()
+                .expect_err("published output reports retained staging");
 
+            assert_retained_macos_staging_error(&error);
             assert_eq!(fs::read(&path).expect("published output reads"), b"bundle");
-            assert_eq!(
-                fs::read_dir(temporary.path())
-                    .expect("temporary directory reads")
-                    .count(),
-                1
-            );
+            assert_private_macos_staging_entries(temporary.path(), 1);
             return;
         }
 
@@ -1884,7 +1793,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn unpublished_private_output_is_cleaned_up() {
+    fn unpublished_private_output_is_retained_privately() {
         let temporary = private_tempdir();
         let path = private_output_path(&temporary, "support.zip");
 
@@ -1893,12 +1802,7 @@ mod tests {
         drop(output);
 
         assert!(!path.exists());
-        assert_eq!(
-            fs::read_dir(temporary.path())
-                .expect("temporary directory reads")
-                .count(),
-            0
-        );
+        assert_private_macos_staging_entries(temporary.path(), 1);
     }
 
     #[cfg(target_os = "macos")]
@@ -1920,22 +1824,21 @@ mod tests {
             .expect("replacement directory becomes private");
         let replacement = fs::metadata(&outer_path).expect("replacement metadata reads");
 
-        let error = output
-            .abort()
-            .expect_err("replacement identity stops cleanup");
+        let error = output.abort().expect_err("staging retention reports");
 
-        assert!(matches!(error, RuntimeError::PrivateOutputCleanup(_)));
+        assert_retained_macos_staging_error(&error);
         let observed = fs::metadata(&outer_path).expect("replacement remains");
         assert_eq!(
             (observed.dev(), observed.ino()),
             (replacement.dev(), replacement.ino())
         );
         assert!(displaced_path.is_dir());
+        assert_private_macos_tree(&displaced_path);
         assert!(!path.exists());
         let source = std::error::Error::source(&error).expect("cleanup error retains a source");
         assert_eq!(
             source.to_string(),
-            "macOS staging directory identity changed"
+            "macOS private staging tree retained because identity-bound removal is unavailable"
         );
         assert!(
             !source
@@ -1946,46 +1849,46 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn private_output_partial_setup_cleanup_failure_is_reported() {
+    fn private_output_pre_open_failure_retains_private_orphan() {
         let temporary = private_tempdir();
         let path = private_output_path(&temporary, "support.zip");
+        let parent = open_macos_output_parent(&path).expect("output parent opens");
 
-        let error =
-            PrivateOutputFile::create_macos_impl(&path, Some(MacosCleanupStep::RemoveStagedFile))
-                .expect_err("injected setup cleanup failure reports");
+        let error = create_open_private_output_directory(&parent, ".rootlight-support-", true)
+            .expect_err("injected pre-open failure reports retained staging");
 
-        assert!(matches!(error, RuntimeError::PrivateOutputCleanup(_)));
+        assert_retained_macos_staging_error(&error);
         assert!(!path.exists());
-        assert_eq!(
-            fs::read_dir(temporary.path())
-                .expect("temporary directory reads")
-                .count(),
-            0
-        );
+        assert_private_macos_staging_entries(temporary.path(), 1);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn private_output_abort_reports_cleanup_failure_and_drop_retries() {
+    fn private_output_partial_setup_failure_reports_retained_private_orphan() {
+        let temporary = private_tempdir();
+        let path = private_output_path(&temporary, "support.zip");
+
+        let error = PrivateOutputFile::create_macos_impl(&path, true)
+            .expect_err("injected setup cleanup failure reports");
+
+        assert_retained_macos_staging_error(&error);
+        assert!(!path.exists());
+        assert_private_macos_staging_entries(temporary.path(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn private_output_abort_reports_retained_private_staging() {
         let temporary = private_tempdir();
         let path = private_output_path(&temporary, "support.zip");
         let mut output = PrivateOutputFile::create(&path).expect("private output creates");
         output.write_all(b"partial").expect("private output writes");
-        let PrivateOutputState::Staged(state) = &mut output.state;
-        state.cleanup_failure = Some(MacosCleanupStep::RemoveStagedFile);
 
-        let error = output
-            .abort()
-            .expect_err("injected cleanup failure reports");
+        let error = output.abort().expect_err("staging retention reports");
 
-        assert!(matches!(error, RuntimeError::PrivateOutputCleanup(_)));
+        assert_retained_macos_staging_error(&error);
         assert!(!path.exists());
-        assert_eq!(
-            fs::read_dir(temporary.path())
-                .expect("temporary directory reads")
-                .count(),
-            0
-        );
+        assert_private_macos_staging_entries(temporary.path(), 1);
     }
 
     #[cfg(target_os = "macos")]
@@ -1995,21 +1898,14 @@ mod tests {
         let path = private_output_path(&temporary, "support.zip");
         let mut output = PrivateOutputFile::create(&path).expect("private output creates");
         output.write_all(b"bundle").expect("private output writes");
-        let PrivateOutputState::Staged(state) = &mut output.state;
-        state.cleanup_failure = Some(MacosCleanupStep::RemoveInnerDirectory);
 
         let error = output
             .commit()
-            .expect_err("injected post-publication cleanup failure reports");
+            .expect_err("post-publication staging retention reports");
 
-        assert!(matches!(error, RuntimeError::PrivateOutputCleanup(_)));
+        assert_retained_macos_staging_error(&error);
         assert_eq!(fs::read(&path).expect("published output reads"), b"bundle");
-        assert_eq!(
-            fs::read_dir(temporary.path())
-                .expect("temporary directory reads")
-                .count(),
-            1
-        );
+        assert_private_macos_staging_entries(temporary.path(), 1);
     }
 
     #[cfg(target_os = "macos")]

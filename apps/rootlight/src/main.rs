@@ -849,6 +849,37 @@ const fn exit_family_for_code(code: ErrorCode) -> ExitFamily {
 mod tests {
     use super::*;
 
+    struct SupportTempdir {
+        _owner: tempfile::TempDir,
+        path: PathBuf,
+    }
+
+    impl SupportTempdir {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    fn support_tempdir() -> SupportTempdir {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("temporary directory becomes private");
+        }
+        #[cfg(target_os = "macos")]
+        let path =
+            std::fs::canonicalize(temporary.path()).expect("temporary directory canonicalizes");
+        #[cfg(not(target_os = "macos"))]
+        let path = temporary.path().to_path_buf();
+        SupportTempdir {
+            _owner: temporary,
+            path,
+        }
+    }
+
     fn operation_status() -> OperationStatus {
         OperationStatus {
             operation: OperationId::from_bytes([7; 16]),
@@ -880,14 +911,21 @@ mod tests {
 
     #[test]
     fn support_bundle_write_is_private_and_refuses_overwrite() {
-        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let temporary = support_tempdir();
         let output = temporary.path().join("support.zip");
-        write_support_bundle(&output, b"bundle").expect("bundle writes");
+        let first = write_support_bundle(&output, b"bundle");
+        #[cfg(not(target_os = "macos"))]
+        first.expect("bundle writes");
+        #[cfg(target_os = "macos")]
+        assert_retained_support_staging_error(&first.expect_err("staging retention reports"));
         assert_eq!(std::fs::read(&output).expect("bundle reads"), b"bundle");
-        assert!(matches!(
-            write_support_bundle(&output, b"replacement"),
-            Err(CliError::SupportOutputExists)
-        ));
+        let replacement = write_support_bundle(&output, b"replacement");
+        #[cfg(not(target_os = "macos"))]
+        assert!(matches!(replacement, Err(CliError::SupportOutputExists)));
+        #[cfg(target_os = "macos")]
+        assert_retained_support_staging_error(
+            &replacement.expect_err("collision staging retention reports"),
+        );
         assert_eq!(
             std::fs::read(&output).expect("bundle still reads"),
             b"bundle"
@@ -913,16 +951,28 @@ mod tests {
             .into_iter()
             .map(|writer| writer.join().expect("support writer joins"))
             .collect::<Vec<_>>();
-        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-        assert_eq!(
-            results
-                .iter()
-                .filter(|result| matches!(result, Err(CliError::SupportOutputExists)))
-                .count(),
-            1
-        );
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|result| matches!(result, Err(CliError::SupportOutputExists)))
+                    .count(),
+                1
+            );
+        }
         #[cfg(target_os = "macos")]
-        assert_no_support_staging_entries(temporary.path());
+        {
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|result| matches!(result, Err(CliError::SupportCleanup(_))))
+                    .count(),
+                2
+            );
+            assert_private_support_staging_entries(temporary.path(), 4);
+        }
         let raced_contents = std::fs::read(&raced).expect("winning bundle reads");
         assert!(matches!(raced_contents.as_slice(), b"first" | b"second"));
 
@@ -942,7 +992,7 @@ mod tests {
     fn support_output_argument_rejects_raw_directory_aliases() {
         use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
-        let temporary = private_support_tempdir();
+        let temporary = support_tempdir();
         for suffix in [
             b"trailing/".as_slice(),
             b"current/.".as_slice(),
@@ -967,7 +1017,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn support_bundle_write_failure_leaves_private_reserved_output() {
-        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let temporary = support_tempdir();
         let output = temporary.path().join("partial.zip");
         let error = write_support_bundle_with_writer(&output, b"complete", |file, _| {
             file.write_all(b"partial")?;
@@ -987,8 +1037,8 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn support_bundle_write_failure_does_not_publish_partial_output() {
-        let temporary = private_support_tempdir();
+    fn support_bundle_write_failure_retains_private_partial_staging() {
+        let temporary = support_tempdir();
         let output = temporary.path().join("partial.zip");
         let error = write_support_bundle_with_writer(&output, b"complete", |file, _| {
             file.write_all(b"partial")?;
@@ -996,14 +1046,17 @@ mod tests {
         })
         .expect_err("injected write fails");
 
-        assert!(matches!(error, CliError::SupportWrite(_)));
+        assert_retained_support_staging_error(&error);
         assert!(!output.exists());
-        assert_no_support_staging_entries(temporary.path());
-        write_support_bundle(&output, b"replacement").expect("retry publishes");
+        assert_private_support_staging_entries(temporary.path(), 1);
+        let retry =
+            write_support_bundle(&output, b"replacement").expect_err("staging retention reports");
+        assert_retained_support_staging_error(&retry);
         assert_eq!(
             std::fs::read(&output).expect("replacement reads"),
             b"replacement"
         );
+        assert_private_support_staging_entries(temporary.path(), 2);
     }
 
     #[cfg(target_os = "macos")]
@@ -1012,7 +1065,7 @@ mod tests {
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
         use std::process::Command;
 
-        let temporary = private_support_tempdir();
+        let temporary = support_tempdir();
         let acl = "others allow read,file_inherit,directory_inherit";
         let status = Command::new("/bin/chmod")
             .args(["+a", acl])
@@ -1034,7 +1087,9 @@ mod tests {
         );
 
         let output = temporary.path().join("support.zip");
-        write_support_bundle(&output, b"bundle").expect("bundle publishes privately");
+        let error =
+            write_support_bundle(&output, b"bundle").expect_err("staging retention reports");
+        assert_retained_support_staging_error(&error);
 
         let listing = macos_acl_listing(&output);
         assert!(
@@ -1052,17 +1107,7 @@ mod tests {
         );
         assert_eq!(metadata.nlink(), 1);
         assert_eq!(metadata.mode() & 0o077, 0);
-        assert_no_support_staging_entries(temporary.path());
-    }
-
-    #[cfg(target_os = "macos")]
-    fn private_support_tempdir() -> tempfile::TempDir {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let temporary = tempfile::tempdir().expect("temporary directory is available");
-        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
-            .expect("temporary directory becomes private");
-        temporary
+        assert_private_support_staging_entries(temporary.path(), 1);
     }
 
     #[cfg(target_os = "macos")]
@@ -1079,14 +1124,53 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn assert_no_support_staging_entries(parent: &Path) {
+    fn assert_retained_support_staging_error(error: &CliError) {
+        match error {
+            CliError::SupportCleanup(RuntimeError::PrivateOutputCleanup(source)) => assert_eq!(
+                source.to_string(),
+                "macOS private staging tree retained because identity-bound removal is unavailable"
+            ),
+            other => panic!("unexpected support staging error: {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_private_support_staging_entries(parent: &Path, expected: usize) {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let expected_uid = std::fs::metadata(parent)
+            .expect("support parent metadata reads")
+            .uid();
         let staging = std::fs::read_dir(parent)
             .expect("support parent reads")
             .filter_map(Result::ok)
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .filter(|name| name.starts_with(".rootlight-support-"))
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .is_some_and(|name| name.starts_with(".rootlight-support-"))
+            })
             .collect::<Vec<_>>();
-        assert!(staging.is_empty(), "staging entries remain: {staging:?}");
+        assert_eq!(staging.len(), expected);
+        let mut pending = staging;
+        while let Some(path) = pending.pop() {
+            let metadata =
+                std::fs::symlink_metadata(&path).expect("support staging metadata reads");
+            assert!(
+                metadata.file_type().is_dir() || metadata.file_type().is_file(),
+                "support staging contains a non-regular object"
+            );
+            assert_eq!(metadata.uid(), expected_uid);
+            assert_eq!(metadata.mode() & 0o077, 0);
+            if metadata.file_type().is_dir() {
+                pending.extend(
+                    std::fs::read_dir(&path)
+                        .expect("support staging directory reads")
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path()),
+                );
+            }
+        }
     }
 
     #[test]
