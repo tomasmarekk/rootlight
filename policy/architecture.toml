@@ -29,6 +29,7 @@ allowed_internal_dependencies = [
   "rootlight-error",
   "rootlight-ids",
   "rootlight-ipc",
+  "rootlight-observability",
   "rootlight-operations",
   "rootlight-protocol",
   "rootlight-runtime",
@@ -62,6 +63,7 @@ name = "rootlight-daemon"
 allowed_internal_dependencies = [
   "rootlight-daemon-core",
   "rootlight-ipc",
+  "rootlight-observability",
   "rootlight-operations",
   "rootlight-runtime",
 ]

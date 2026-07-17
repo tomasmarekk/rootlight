@@ -12,6 +12,7 @@ use rootlight_daemon_core::{
     DaemonState, DiagnosticActor, HealthStatus, JournalActor, handle_connection_async,
 };
 use rootlight_ipc::{AsyncLocalListener, FrameCodec};
+use rootlight_observability::{Telemetry, TelemetryOutput};
 use rootlight_operations::{CatalogWriterLock, OperationJournal};
 use rootlight_runtime::{DiscoveryRecord, RuntimePaths};
 
@@ -70,7 +71,8 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let catalog_path = paths.operation_journal_path();
     let journal = Arc::new(OperationJournal::open(&catalog_path)?);
     let limits = DaemonLimits::default();
-    let state = Arc::new(DaemonState::starting());
+    let telemetry = Arc::new(Telemetry::new(TelemetryOutput::StderrJson));
+    let state = Arc::new(DaemonState::starting_with_telemetry(telemetry));
     state.set_catalog_status(HealthStatus::Healthy);
     let actor = JournalActor::start(
         Arc::clone(&journal),
@@ -166,8 +168,8 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                 });
             }
             joined = connections.join_next(), if !connections.is_empty() => {
-                if let Some(Err(error)) = joined {
-                    eprintln!("rootlight-daemon: connection task failed: {error}");
+                if let Some(Err(_)) = joined {
+                    state.telemetry().record_connection_task_failed();
                 }
             }
         }
@@ -195,8 +197,8 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                     }
                 }
                 joined = connections.join_next(), if !connections.is_empty() => {
-                    if let Some(Err(error)) = joined {
-                        eprintln!("rootlight-daemon: connection task failed: {error}");
+                    if let Some(Err(_)) = joined {
+                        state.telemetry().record_connection_task_failed();
                     }
                 }
                 completed = orchestrator.complete_next(), if !orchestrator.is_idle() => {

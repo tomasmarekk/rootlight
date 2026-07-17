@@ -25,10 +25,12 @@ use rootlight_ipc::{
     write_response_async, write_server_hello, write_server_hello_async,
 };
 use rootlight_observability::{
-    Architecture as ObservabilityArchitecture, DaemonLifecycle as ObservabilityDaemonLifecycle,
-    DiagnosticsQuickSnapshot, ErrorCode as ObservabilityErrorCode, HealthSnapshot, OperatingSystem,
-    OperationsSummary, ProtocolVersion as ObservabilityProtocolVersion, SupportBundleInput,
-    build_support_bundle,
+    Architecture as ObservabilityArchitecture, ControlMethod,
+    DaemonLifecycle as ObservabilityDaemonLifecycle, DiagnosticsQuickSnapshot,
+    ErrorCode as ObservabilityErrorCode, HealthSnapshot, OperatingSystem, OperationsSummary,
+    ProtocolVersion as ObservabilityProtocolVersion, SpanKind, SupportBundleInput,
+    SupportBundleSchema, Telemetry, TelemetryOutcome, TelemetryOutput,
+    build_support_bundle_for_schema,
 };
 use rootlight_operations::{
     ClientInstanceId, OperationError, OperationJournal, OperationKind, OperationRecord,
@@ -58,6 +60,7 @@ const CAPABILITIES: &[&str] = &[
     "operation.status",
     "operation.submit",
     "support.bundle.v1",
+    "support.bundle.v2",
 ];
 /// Default simultaneous negotiated connection limit.
 pub const DEFAULT_CONNECTION_LIMIT: u32 = 128;
@@ -363,6 +366,7 @@ impl Default for DaemonLimits {
 /// Lock-free source-free counters shared by transport and orchestration.
 #[derive(Debug)]
 pub struct DaemonState {
+    telemetry: Arc<Telemetry>,
     lifecycle: AtomicU8,
     accepting_operations: AtomicBool,
     active_connections: AtomicU32,
@@ -381,7 +385,15 @@ impl DaemonState {
     /// Creates the initial starting state.
     #[must_use]
     pub fn starting() -> Self {
+        Self::starting_with_telemetry(Arc::new(Telemetry::new(TelemetryOutput::RetainedOnly)))
+    }
+
+    /// Creates the initial state with one explicitly configured telemetry recorder.
+    #[must_use]
+    pub fn starting_with_telemetry(telemetry: Arc<Telemetry>) -> Self {
+        telemetry.record_lifecycle(ObservabilityDaemonLifecycle::Starting);
         Self {
+            telemetry,
             lifecycle: AtomicU8::new(DaemonLifecycle::Starting.as_u8()),
             accepting_operations: AtomicBool::new(false),
             active_connections: AtomicU32::new(0),
@@ -397,6 +409,12 @@ impl DaemonState {
         }
     }
 
+    /// Returns the shared bounded telemetry recorder.
+    #[must_use]
+    pub fn telemetry(&self) -> Arc<Telemetry> {
+        Arc::clone(&self.telemetry)
+    }
+
     /// Returns the current lifecycle phase.
     #[must_use]
     pub fn lifecycle(&self) -> DaemonLifecycle {
@@ -407,7 +425,12 @@ impl DaemonState {
     pub fn set_lifecycle(&self, lifecycle: DaemonLifecycle) {
         self.accepting_operations
             .store(lifecycle == DaemonLifecycle::Ready, Ordering::Release);
-        self.lifecycle.store(lifecycle.as_u8(), Ordering::Release);
+        let previous =
+            DaemonLifecycle::from_u8(self.lifecycle.swap(lifecycle.as_u8(), Ordering::AcqRel));
+        if previous != lifecycle {
+            self.telemetry
+                .record_lifecycle(observability_daemon_lifecycle(lifecycle));
+        }
     }
 
     /// Records whether the journal remains available.
@@ -1079,7 +1102,7 @@ fn execute_journal_request(
     match request {
         ControlRequest::Health
         | ControlRequest::DiagnosticsQuick
-        | ControlRequest::SupportBundle => Ok(ControlResponse::Error(invalid_argument(
+        | ControlRequest::SupportBundle(_) => Ok(ControlResponse::Error(invalid_argument(
             "request is served outside the journal actor",
         ))),
         ControlRequest::OperationSubmit(submission) => journal
@@ -1209,7 +1232,7 @@ pub enum ControlRequest {
     /// Execute the bounded catalog quick check.
     DiagnosticsQuick,
     /// Build a bounded source-free support archive.
-    SupportBundle,
+    SupportBundle(SupportBundleSchema),
     /// Submit one durable operation for admission.
     OperationSubmit(OperationSubmission),
     /// Read one durable operation status.
@@ -1928,9 +1951,15 @@ impl DaemonOrchestrator {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum DiagnosticKind {
+    Quick,
+    SupportBundle(SupportBundleSchema),
+}
+
 enum DiagnosticCommand {
     Execute {
-        support_bundle: bool,
+        kind: DiagnosticKind,
         deadline: Instant,
         reply: tokio::sync::oneshot::Sender<ControlResponse>,
     },
@@ -1951,7 +1980,7 @@ struct DiagnosticActorHandle {
 impl DiagnosticActorHandle {
     fn request(
         &self,
-        support_bundle: bool,
+        kind: DiagnosticKind,
         deadline: Instant,
     ) -> Result<tokio::sync::oneshot::Receiver<ControlResponse>, ServiceError> {
         if self.state.stopping.load(Ordering::Acquire) {
@@ -1972,7 +2001,7 @@ impl DiagnosticActorHandle {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.sender
             .try_send(DiagnosticCommand::Execute {
-                support_bundle,
+                kind,
                 deadline,
                 reply,
             })
@@ -2064,7 +2093,7 @@ fn diagnostic_actor_loop(
             }
         };
         let DiagnosticCommand::Execute {
-            support_bundle,
+            kind,
             deadline,
             reply,
         } = command;
@@ -2073,10 +2102,9 @@ fn diagnostic_actor_loop(
             state.busy.store(false, Ordering::Release);
             continue;
         }
-        let response = if support_bundle {
-            service.support_bundle_until(deadline)
-        } else {
-            service.diagnostics_quick_until(deadline)
+        let response = match kind {
+            DiagnosticKind::Quick => service.diagnostics_quick_until(deadline),
+            DiagnosticKind::SupportBundle(schema) => service.support_bundle_until(schema, deadline),
         };
         let _ = reply.send(response);
         state.busy.store(false, Ordering::Release);
@@ -2186,9 +2214,10 @@ impl ControlService {
                     .map_or(PROTOCOL_MINOR, |version| version.minor);
                 CAPABILITIES
                     .iter()
-                    .filter(|value| {
-                        selected_minor >= 3
-                            || !matches!(**value, "diagnostics.quick" | "support.bundle.v1")
+                    .filter(|value| match **value {
+                        "diagnostics.quick" | "support.bundle.v1" => selected_minor >= 3,
+                        "support.bundle.v2" => selected_minor >= 4,
+                        _ => true,
                     })
                     .map(|value| (*value).to_owned())
                     .collect()
@@ -2340,14 +2369,18 @@ impl ControlService {
         }
     }
 
-    fn support_bundle(&self, timeout: Duration) -> ControlResponse {
+    fn support_bundle(&self, schema: SupportBundleSchema, timeout: Duration) -> ControlResponse {
         let Some(deadline) = Instant::now().checked_add(timeout) else {
             return ControlResponse::Error(request_timed_out());
         };
-        self.support_bundle_until(deadline)
+        self.support_bundle_until(schema, deadline)
     }
 
-    fn support_bundle_until(&self, deadline: Instant) -> ControlResponse {
+    fn support_bundle_until(
+        &self,
+        schema: SupportBundleSchema,
+        deadline: Instant,
+    ) -> ControlResponse {
         let diagnostics = match self.diagnostics_quick_until(deadline) {
             ControlResponse::DiagnosticsQuick(diagnostics) => diagnostics,
             ControlResponse::Error(error) => return ControlResponse::Error(error),
@@ -2357,18 +2390,28 @@ impl ControlService {
             return ControlResponse::Error(request_timed_out());
         }
         let health = self.health();
+        let schema_version = match schema {
+            SupportBundleSchema::V1 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION,
+            SupportBundleSchema::V2 => {
+                rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+            }
+        };
         let input = SupportBundleInput {
-            protocol_version: ObservabilityProtocolVersion::V1_3,
+            protocol_version: match schema {
+                SupportBundleSchema::V1 => ObservabilityProtocolVersion::V1_3,
+                SupportBundleSchema::V2 => ObservabilityProtocolVersion::V1_4,
+            },
             operating_system: observability_operating_system(),
             architecture: observability_architecture(),
             health: health_snapshot(&health),
             diagnostics: diagnostics_snapshot(&diagnostics),
             operations: self.state.operation_counts(),
+            telemetry: (schema == SupportBundleSchema::V2).then(|| self.state.telemetry.snapshot()),
         };
-        match build_support_bundle(&input) {
+        match build_support_bundle_for_schema(&input, schema) {
             Ok(bundle) if Instant::now() < deadline => {
                 ControlResponse::SupportBundle(SupportBundle {
-                    schema_version: rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION,
+                    schema_version,
                     archive: bundle.archive().to_vec(),
                     sha256: bundle.sha256(),
                     archive_bytes: bundle.archive_bytes(),
@@ -2392,7 +2435,9 @@ impl ControlService {
         match request {
             ControlRequest::Health => ControlResponse::Health(self.health()),
             ControlRequest::DiagnosticsQuick => self.diagnostics_quick(self.limits.request_timeout),
-            ControlRequest::SupportBundle => self.support_bundle(self.limits.request_timeout),
+            ControlRequest::SupportBundle(schema) => {
+                self.support_bundle(schema, self.limits.request_timeout)
+            }
             ControlRequest::OperationSubmit(submission)
                 if !self.state.accepting_operations.load(Ordering::Acquire) =>
             {
@@ -2572,6 +2617,12 @@ async fn dispatch_async(
     selected_protocol_minor: u32,
 ) -> daemon::ResponseEnvelope {
     let request_id = envelope.request_id;
+    let method = control_method_from_wire(envelope.request.as_ref());
+    let started = Instant::now();
+    let span = service
+        .state
+        .telemetry
+        .start_span(SpanKind::IpcRequest { method });
     let response = if envelope.timeout_ms == Some(0) {
         daemon::response_envelope::Response::Error(public_error_to_wire(&invalid_argument(
             "daemon request timeout is invalid",
@@ -2590,10 +2641,16 @@ async fn dispatch_async(
                 response_to_wire(ControlResponse::Health(service.health()))
             }
             Ok(ControlRequest::DiagnosticsQuick) => {
-                run_diagnostic_request(service.clone(), false, envelope.timeout_ms).await
+                run_diagnostic_request(service.clone(), DiagnosticKind::Quick, envelope.timeout_ms)
+                    .await
             }
-            Ok(ControlRequest::SupportBundle) => {
-                run_diagnostic_request(service.clone(), true, envelope.timeout_ms).await
+            Ok(ControlRequest::SupportBundle(schema)) => {
+                run_diagnostic_request(
+                    service.clone(),
+                    DiagnosticKind::SupportBundle(schema),
+                    envelope.timeout_ms,
+                )
+                .await
             }
             Ok(request @ ControlRequest::OperationSubmit(_))
                 if !service.state.accepting_operations.load(Ordering::Acquire) =>
@@ -2656,17 +2713,95 @@ async fn dispatch_async(
             Err(error) => daemon::response_envelope::Response::Error(public_error_to_wire(&error)),
         }
     };
+    let (outcome, error_code) = telemetry_outcome_from_wire(&response);
+    service
+        .state
+        .telemetry
+        .record_request(method, outcome, started.elapsed(), error_code);
+    span.finish(outcome, error_code);
     daemon::ResponseEnvelope {
         request_id,
         response: Some(response),
     }
 }
 
+fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>) -> ControlMethod {
+    match request {
+        Some(daemon::request_envelope::Request::Health(_)) => ControlMethod::Health,
+        Some(daemon::request_envelope::Request::DiagnosticsQuick(_)) => {
+            ControlMethod::DiagnosticsQuick
+        }
+        Some(daemon::request_envelope::Request::SupportBundle(_)) => ControlMethod::SupportBundle,
+        Some(daemon::request_envelope::Request::OperationSubmit(_)) => {
+            ControlMethod::OperationSubmit
+        }
+        Some(daemon::request_envelope::Request::OperationStatus(_)) => {
+            ControlMethod::OperationStatus
+        }
+        Some(daemon::request_envelope::Request::OperationCancel(_)) => {
+            ControlMethod::OperationCancel
+        }
+        Some(daemon::request_envelope::Request::OperationLeaseRenew(_)) => {
+            ControlMethod::OperationLeaseRenew
+        }
+        None => ControlMethod::Unknown,
+    }
+}
+
+fn telemetry_outcome_from_wire(
+    response: &daemon::response_envelope::Response,
+) -> (TelemetryOutcome, Option<ObservabilityErrorCode>) {
+    let daemon::response_envelope::Response::Error(error) = response else {
+        return (TelemetryOutcome::Succeeded, None);
+    };
+    let error_code = common::ErrorCode::try_from(error.code).ok();
+    let outcome = match error_code {
+        Some(common::ErrorCode::InvalidArgument)
+        | Some(common::ErrorCode::PermissionDenied)
+        | Some(common::ErrorCode::ProtocolMismatch)
+        | Some(common::ErrorCode::Busy)
+        | Some(common::ErrorCode::ResourceExhausted) => TelemetryOutcome::Rejected,
+        Some(common::ErrorCode::Cancelled) => TelemetryOutcome::Cancelled,
+        _ => TelemetryOutcome::Failed,
+    };
+    let stable_code = error_code.map(daemon_error_code_to_observability);
+    (outcome, stable_code)
+}
+
+const fn daemon_error_code_to_observability(code: common::ErrorCode) -> ObservabilityErrorCode {
+    match code {
+        common::ErrorCode::InvalidArgument => ObservabilityErrorCode::InvalidArgument,
+        common::ErrorCode::NotFound => ObservabilityErrorCode::NotFound,
+        common::ErrorCode::Conflict => ObservabilityErrorCode::Conflict,
+        common::ErrorCode::StaleGeneration => ObservabilityErrorCode::StaleGeneration,
+        common::ErrorCode::UnsupportedCapability => ObservabilityErrorCode::UnsupportedCapability,
+        common::ErrorCode::IncompleteCoverage => ObservabilityErrorCode::IncompleteCoverage,
+        common::ErrorCode::BudgetExceeded => ObservabilityErrorCode::BudgetExceeded,
+        common::ErrorCode::ResourceExhausted => ObservabilityErrorCode::ResourceExhausted,
+        common::ErrorCode::Cancelled => ObservabilityErrorCode::Cancelled,
+        common::ErrorCode::AdapterFailed => ObservabilityErrorCode::AdapterFailed,
+        common::ErrorCode::IndexCorrupt => ObservabilityErrorCode::IndexCorrupt,
+        common::ErrorCode::MigrationRequired => ObservabilityErrorCode::MigrationRequired,
+        common::ErrorCode::PermissionDenied => ObservabilityErrorCode::PermissionDenied,
+        common::ErrorCode::ProtocolMismatch => ObservabilityErrorCode::ProtocolMismatch,
+        common::ErrorCode::Busy => ObservabilityErrorCode::Busy,
+        common::ErrorCode::Internal | common::ErrorCode::Unspecified => {
+            ObservabilityErrorCode::Internal
+        }
+    }
+}
+
 async fn run_diagnostic_request(
     service: ControlService,
-    support_bundle: bool,
+    kind: DiagnosticKind,
     requested_timeout_ms: Option<u32>,
 ) -> daemon::response_envelope::Response {
+    let started = Instant::now();
+    let (method, span_kind) = match kind {
+        DiagnosticKind::Quick => (ControlMethod::DiagnosticsQuick, SpanKind::DiagnosticsQuick),
+        DiagnosticKind::SupportBundle(_) => (ControlMethod::SupportBundle, SpanKind::SupportBundle),
+    };
+    let span = service.state.telemetry.start_span(span_kind);
     let timeout = requested_timeout_ms.map_or(service.limits.request_timeout, |milliseconds| {
         Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout)
     });
@@ -2676,9 +2811,9 @@ async fn run_diagnostic_request(
     let Some(actor) = service.diagnostic_actor.as_ref() else {
         return response_to_wire(ControlResponse::Error(internal_error()));
     };
-    let receiver = match actor.request(support_bundle, deadline) {
+    let receiver = match actor.request(kind, deadline) {
         Ok(receiver) => receiver,
-        Err(ServiceError::QueueFull) if support_bundle => {
+        Err(ServiceError::QueueFull) if matches!(kind, DiagnosticKind::SupportBundle(_)) => {
             return response_to_wire(ControlResponse::Error(queue_full(1)));
         }
         Err(ServiceError::QueueFull) => {
@@ -2697,11 +2832,19 @@ async fn run_diagnostic_request(
         }
         Err(_) => return response_to_wire(ControlResponse::Error(internal_error())),
     };
-    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receiver).await {
-        Ok(Ok(response)) => response_to_wire(response),
-        Ok(Err(_)) => response_to_wire(ControlResponse::Error(internal_error())),
-        Err(_) => response_to_wire(ControlResponse::Error(request_timed_out())),
-    }
+    let response =
+        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receiver).await {
+            Ok(Ok(response)) => response_to_wire(response),
+            Ok(Err(_)) => response_to_wire(ControlResponse::Error(internal_error())),
+            Err(_) => response_to_wire(ControlResponse::Error(request_timed_out())),
+        };
+    let (outcome, error_code) = telemetry_outcome_from_wire(&response);
+    service
+        .state
+        .telemetry
+        .record_diagnostic(method, outcome, started.elapsed(), error_code);
+    span.finish(outcome, error_code);
+    response
 }
 
 async fn await_journal_response(
@@ -2769,16 +2912,22 @@ fn diagnostic_health_status(error: &OperationError) -> HealthStatus {
     }
 }
 
+const fn observability_daemon_lifecycle(
+    lifecycle: DaemonLifecycle,
+) -> ObservabilityDaemonLifecycle {
+    match lifecycle {
+        DaemonLifecycle::Starting => ObservabilityDaemonLifecycle::Starting,
+        DaemonLifecycle::Ready => ObservabilityDaemonLifecycle::Ready,
+        DaemonLifecycle::Draining => ObservabilityDaemonLifecycle::Draining,
+        DaemonLifecycle::Faulted => ObservabilityDaemonLifecycle::Faulted,
+        DaemonLifecycle::Stopped => ObservabilityDaemonLifecycle::Stopped,
+    }
+}
+
 fn health_snapshot(health: &Health) -> HealthSnapshot {
     HealthSnapshot {
         ready: health.ready,
-        lifecycle: match health.lifecycle {
-            DaemonLifecycle::Starting => ObservabilityDaemonLifecycle::Starting,
-            DaemonLifecycle::Ready => ObservabilityDaemonLifecycle::Ready,
-            DaemonLifecycle::Draining => ObservabilityDaemonLifecycle::Draining,
-            DaemonLifecycle::Faulted => ObservabilityDaemonLifecycle::Faulted,
-            DaemonLifecycle::Stopped => ObservabilityDaemonLifecycle::Stopped,
-        },
+        lifecycle: observability_daemon_lifecycle(health.lifecycle),
         accepting_operations: health.accepting_operations,
         active_connections: health.active_connections,
         connection_limit: health.connection_limit,
@@ -2961,7 +3110,13 @@ fn request_from_wire(
                     "support bundle needs protocol minor three",
                 )));
             }
-            Ok(ControlRequest::SupportBundle)
+            Ok(ControlRequest::SupportBundle(
+                if selected_protocol_minor >= 4 {
+                    SupportBundleSchema::V2
+                } else {
+                    SupportBundleSchema::V1
+                },
+            ))
         }
         Some(daemon::request_envelope::Request::OperationSubmit(request)) => {
             operation_submission_from_wire(request, client_instance_id, selected_protocol_minor)
@@ -3765,7 +3920,7 @@ mod tests {
         assert_eq!(diagnostics.catalog.outcome, DiagnosticOutcome::Passed);
         assert!(diagnostics.catalog.error.is_none());
 
-        let bundle = service.execute(ControlRequest::SupportBundle);
+        let bundle = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V1));
         let ControlResponse::SupportBundle(bundle) = bundle else {
             panic!("support bundle response expected");
         };
@@ -3796,7 +3951,7 @@ mod tests {
             .expect("test deadline derives");
 
         assert!(matches!(
-            actor.handle().request(false, deadline),
+            actor.handle().request(DiagnosticKind::Quick, deadline),
             Err(ServiceError::QueueFull)
         ));
         actor.handle.state.busy.store(false, Ordering::Release);
@@ -3816,7 +3971,7 @@ mod tests {
             .expect("test deadline derives");
 
         assert!(matches!(
-            actor.handle().request(false, deadline),
+            actor.handle().request(DiagnosticKind::Quick, deadline),
             Err(ServiceError::ChannelClosed)
         ));
         actor
@@ -3837,7 +3992,7 @@ mod tests {
         let (reply, response) = tokio::sync::oneshot::channel();
         sender
             .send(DiagnosticCommand::Execute {
-                support_bundle: false,
+                kind: DiagnosticKind::Quick,
                 deadline: Instant::now()
                     .checked_sub(Duration::from_millis(1))
                     .expect("test deadline subtracts"),
@@ -3868,7 +4023,7 @@ mod tests {
             .with_diagnostic_actor()
             .expect("diagnostic actor starts");
 
-        let first = run_diagnostic_request(service.clone(), false, Some(100)).await;
+        let first = run_diagnostic_request(service.clone(), DiagnosticKind::Quick, Some(100)).await;
         let daemon::response_envelope::Response::DiagnosticsQuick(first) = first else {
             panic!("first diagnostics response expected");
         };
@@ -3878,7 +4033,7 @@ mod tests {
             daemon::DiagnosticOutcome::Passed as i32
         );
 
-        let next = run_diagnostic_request(service, false, Some(100)).await;
+        let next = run_diagnostic_request(service, DiagnosticKind::Quick, Some(100)).await;
         let daemon::response_envelope::Response::DiagnosticsQuick(next) = next else {
             panic!("second diagnostics response expected");
         };
@@ -3890,6 +4045,61 @@ mod tests {
         actor
             .join_for_test()
             .expect("diagnostic actor joins after stop");
+    }
+
+    #[tokio::test]
+    async fn async_dispatch_records_bounded_request_metrics_and_spans() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let state = Arc::new(DaemonState::starting());
+        state.set_catalog_status(HealthStatus::Healthy);
+        state.set_endpoint_status(HealthStatus::NotConfigured);
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let service = ControlService::with_state(
+            journal,
+            [7; 16],
+            Arc::clone(&state),
+            DaemonLimits::default(),
+        );
+        let (submissions, _receiver) = tokio::sync::mpsc::channel(4);
+
+        let response = dispatch_async(
+            &service,
+            &actor.handle(),
+            &submissions,
+            daemon::RequestEnvelope {
+                request_id: 1,
+                instance_nonce: vec![7; 16],
+                timeout_ms: Some(100),
+                request: Some(daemon::request_envelope::Request::Health(
+                    daemon::HealthRequest {},
+                )),
+            },
+            ClientInstanceId::SYSTEM,
+            PROTOCOL_MINOR,
+        )
+        .await;
+        assert!(matches!(
+            response.response,
+            Some(daemon::response_envelope::Response::Health(_))
+        ));
+
+        let snapshot = state.telemetry().snapshot();
+        let health = snapshot
+            .metrics
+            .ipc_requests
+            .iter()
+            .find(|metric| metric.method == ControlMethod::Health)
+            .expect("health metric exists");
+        assert_eq!(health.succeeded_total, 1);
+        assert!(snapshot.traces.iter().any(|span| {
+            span.kind
+                == SpanKind::IpcRequest {
+                    method: ControlMethod::Health,
+                }
+                && span.outcome == TelemetryOutcome::Succeeded
+        }));
+        actor.join().expect("actor joins");
     }
 
     #[test]

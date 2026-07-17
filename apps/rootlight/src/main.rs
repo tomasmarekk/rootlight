@@ -226,7 +226,9 @@ async fn execute_standalone_command(
             response_to_result(service.execute(ControlRequest::DiagnosticsQuick))
         }
         ("support-bundle", [output, path]) if output == "--output" => {
-            let response = control_response(service.execute(ControlRequest::SupportBundle))?;
+            let response = control_response(service.execute(ControlRequest::SupportBundle(
+                rootlight_observability::SupportBundleSchema::V2,
+            )))?;
             let ControlResponse::SupportBundle(bundle) = response else {
                 return Err(CliError::UnexpectedResponse);
             };
@@ -417,6 +419,7 @@ fn support_bundle_from_domain(bundle: DomainSupportBundle) -> ClientSupportBundl
         sha256: bundle.sha256,
         archive_bytes: bundle.archive_bytes,
         contains_source: bundle.contains_source,
+        telemetry: None,
     }
 }
 

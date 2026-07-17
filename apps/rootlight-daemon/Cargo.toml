@@ -10,6 +10,7 @@ publish = false
 getrandom.workspace = true
 rootlight-daemon-core = { path = "../../crates/rootlight-daemon-core" }
 rootlight-ipc = { path = "../../crates/rootlight-ipc" }
+rootlight-observability = { path = "../../crates/rootlight-observability" }
 rootlight-operations = { path = "../../crates/rootlight-operations" }
 rootlight-runtime = { path = "../../crates/rootlight-runtime" }
 thiserror.workspace = true

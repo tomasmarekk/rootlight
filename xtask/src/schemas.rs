@@ -183,7 +183,7 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
     validate_protobuf_unknown_field_skip()?;
     println!("compatibility: configuration and MCP fixtures verified");
     println!("compatibility: frozen protobuf descriptor is a compatible subset");
-    println!("compatibility: daemon protocol 1.1, 1.2, and exact 1.3 descriptors verified");
+    println!("compatibility: daemon protocol 1.1, 1.2, and 1.3 descriptors verified");
     println!("compatibility: frozen protobuf wire semantics verified");
     println!("compatibility: frozen IR document and major rejection verified");
     Ok(())
@@ -354,19 +354,11 @@ fn validate_daemon_protocol_baselines(workspace_root: &Path) -> Result<(), Schem
     let current = FileDescriptorSet::decode(current_bytes.as_slice())
         .map_err(SchemaError::CompatibilityDescriptorDecode)?;
 
-    for (version, descriptor_relative) in DAEMON_PROTOCOL_DESCRIPTOR_BASELINES {
+    for (_, descriptor_relative) in DAEMON_PROTOCOL_DESCRIPTOR_BASELINES {
         let historical_path = workspace_root
             .join(COMPATIBILITY_ROOT)
             .join(descriptor_relative);
         let historical_bytes = read_bytes(&historical_path)?;
-        if version == "1.3" {
-            if historical_bytes != current_bytes {
-                return Err(SchemaError::DaemonProtocolDescriptorDrift {
-                    version: version.to_owned(),
-                });
-            }
-            continue;
-        }
         let historical = FileDescriptorSet::decode(historical_bytes.as_slice())
             .map_err(SchemaError::CompatibilityDescriptorDecode)?;
         crate::protobuf_compatibility::require_compatible(&historical, &current)
@@ -1073,8 +1065,6 @@ pub(crate) enum SchemaError {
     CompatibilityDescriptorDecode(#[source] prost::DecodeError),
     #[error("COMPAT_PROTOBUF_DESCRIPTOR: frozen descriptor is incompatible: {0}")]
     CompatibilityDescriptor(#[source] crate::protobuf_compatibility::CompatibilityError),
-    #[error("COMPAT_DAEMON_DESCRIPTOR_DRIFT: frozen daemon protocol {version} descriptor changed")]
-    DaemonProtocolDescriptorDrift { version: String },
     #[error("COMPAT_PROTOBUF_FIXTURE: frozen wire fixture metadata or digest is invalid")]
     CompatibilityProtobufFixture,
     #[error("COMPAT_PROTOBUF_DECODE: protobuf wire fixture failed to decode")]

@@ -13,6 +13,7 @@ rootlight-daemon-core = { path = "../../crates/rootlight-daemon-core" }
 rootlight-error = { path = "../../crates/rootlight-error" }
 rootlight-ids = { path = "../../crates/rootlight-ids" }
 rootlight-ipc = { path = "../../crates/rootlight-ipc" }
+rootlight-observability = { path = "../../crates/rootlight-observability" }
 rootlight-operations = { path = "../../crates/rootlight-operations" }
 rootlight-protocol = { path = "../../crates/rootlight-protocol" }
 rootlight-runtime = { path = "../../crates/rootlight-runtime" }
