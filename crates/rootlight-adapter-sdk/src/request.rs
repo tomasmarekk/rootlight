@@ -3,7 +3,7 @@
 //! The checked snapshot wrapper binds concrete VFS bytes to a full-file
 //! repository generation reference before an adapter can observe them.
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use rootlight_ir::{AnalysisTier, BuildContextIdentity, SourceRef, SourceSpan};
 use rootlight_vfs::{RelativePath, SourceSnapshot};
@@ -117,7 +117,7 @@ pub struct ParseRequest<'a> {
     source: GenerationBoundSnapshot<'a>,
     language: LanguageId,
     encoding: EncodingId,
-    included_ranges: Vec<IncludedRange>,
+    included_ranges: Arc<Vec<IncludedRange>>,
     limits: &'a AnalysisLimits,
 }
 
@@ -140,7 +140,7 @@ impl<'a> ParseRequest<'a> {
             source,
             language,
             encoding,
-            included_ranges,
+            included_ranges: Arc::new(included_ranges),
             limits,
         })
     }
@@ -166,7 +166,16 @@ impl<'a> ParseRequest<'a> {
     /// Returns sorted, disjoint embedded source ranges.
     #[must_use]
     pub fn included_ranges(&self) -> &[IncludedRange] {
-        &self.included_ranges
+        self.included_ranges.as_slice()
+    }
+
+    /// Returns shared ownership of the checked included-range identities.
+    ///
+    /// Parser implementations can retain this immutable owner for incremental
+    /// reuse metadata without cloning language labels embedded in each range.
+    #[must_use]
+    pub fn shared_included_ranges(&self) -> Arc<Vec<IncludedRange>> {
+        Arc::clone(&self.included_ranges)
     }
 
     /// Returns explicit analysis limits.
@@ -182,7 +191,7 @@ pub struct AnalysisRequest<'a> {
     source: GenerationBoundSnapshot<'a>,
     language: LanguageId,
     encoding: EncodingId,
-    included_ranges: Vec<IncludedRange>,
+    included_ranges: Arc<Vec<IncludedRange>>,
     generated: Option<bool>,
     tier: AnalysisTier,
     build_context: BuildContextIdentity,
@@ -242,7 +251,7 @@ impl<'a> AnalysisRequest<'a> {
             source,
             language,
             encoding,
-            included_ranges,
+            included_ranges: Arc::new(included_ranges),
             generated: None,
             tier,
             build_context,
@@ -283,7 +292,23 @@ impl<'a> AnalysisRequest<'a> {
     /// Returns sorted, disjoint embedded source ranges.
     #[must_use]
     pub fn included_ranges(&self) -> &[IncludedRange] {
-        &self.included_ranges
+        self.included_ranges.as_slice()
+    }
+
+    /// Creates the equivalent parser request with shared range ownership.
+    ///
+    /// The analysis request has already validated this parser input context,
+    /// so the derived request preserves it without repeating validation or
+    /// cloning language labels embedded in each included range.
+    #[must_use]
+    pub fn to_parse_request(&self) -> ParseRequest<'a> {
+        ParseRequest {
+            source: self.source.clone(),
+            language: self.language.clone(),
+            encoding: self.encoding.clone(),
+            included_ranges: Arc::clone(&self.included_ranges),
+            limits: self.limits,
+        }
     }
 
     /// Returns the repository-owned generated-source classification, if known.
