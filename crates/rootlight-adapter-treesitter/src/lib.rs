@@ -7,6 +7,7 @@
 
 mod config;
 mod incremental;
+mod lowering;
 mod pool;
 mod query_pack;
 mod registry;
@@ -17,5 +18,6 @@ pub use incremental::{
     ParseReuseKey, ParseWithPrevious, PreviousParse, ReuseInvalidation, ReuseStatus, SourceEdit,
     SourceEditError, SourceEditIdentity,
 };
+pub use lowering::{TreeSitterAnalyzer, TreeSitterAnalyzerConfigError};
 pub use registry::{GrammarDescriptor, GrammarFamily, GrammarRegistry, RegistryError};
 pub use runtime::{CacheStats, RuntimeStats, TreeSitterProvider};

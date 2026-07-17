@@ -1455,6 +1455,7 @@ dependencies = [
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-vfs",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tree-sitter",
