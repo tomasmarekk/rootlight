@@ -475,6 +475,7 @@ fn write_support_bundle_with_writer(
     archive: &[u8],
     write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
 ) -> Result<(), CliError> {
+    ensure_secure_support_output_available()?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -493,6 +494,16 @@ fn write_support_bundle_with_writer(
     write(&mut file, archive).map_err(CliError::SupportWrite)?;
     file.sync_all().map_err(CliError::SupportWrite)?;
     sync_support_parent(parent)
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_secure_support_output_available() -> Result<(), CliError> {
+    Err(CliError::MacOsSupportOutputUnsupported)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_secure_support_output_available() -> Result<(), CliError> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -691,6 +702,9 @@ enum CliError {
     IncompletePathOverride,
     #[error("support bundle output path is invalid")]
     InvalidSupportPath,
+    #[cfg(target_os = "macos")]
+    #[error("support bundle file output is unavailable on macOS")]
+    MacOsSupportOutputUnsupported,
     #[error("support bundle output already exists")]
     SupportOutputExists,
     #[error("support bundle output failed")]
@@ -735,6 +749,8 @@ impl CliError {
             | Self::SupportOutputExists
             | Self::InvalidOperation
             | Self::InvalidTimeout => ExitFamily::Usage,
+            #[cfg(target_os = "macos")]
+            Self::MacOsSupportOutputUnsupported => ExitFamily::SecurityPolicy,
             Self::Runtime(rootlight_runtime::RuntimeError::InsecureDirectory)
             | Self::Runtime(rootlight_runtime::RuntimeError::InvalidDiscovery)
             | Self::Runtime(rootlight_runtime::RuntimeError::InsecureEndpointArtifact)
@@ -874,6 +890,7 @@ mod tests {
         assert_eq!(json["result"]["data"]["kind"], "control_probe");
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn support_bundle_write_is_private_and_refuses_overwrite() {
         let temporary = tempfile::tempdir().expect("temporary directory is available");
@@ -931,6 +948,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn support_bundle_write_failure_leaves_private_reserved_output() {
         let temporary = tempfile::tempdir().expect("temporary directory is available");
@@ -949,6 +967,21 @@ mod tests {
             write_support_bundle(&output, b"replacement"),
             Err(CliError::SupportOutputExists)
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn support_bundle_output_fails_closed_before_creation_on_macos() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let output = temporary.path().join("support.zip");
+
+        let error =
+            write_support_bundle(&output, b"bundle").expect_err("macOS support output is rejected");
+
+        assert!(matches!(error, CliError::MacOsSupportOutputUnsupported));
+        assert!(!output.exists());
+        assert_eq!(error.exit_family(), ExitFamily::SecurityPolicy);
+        assert_eq!(error.public_error().code(), ErrorCode::PermissionDenied);
     }
 
     #[test]
