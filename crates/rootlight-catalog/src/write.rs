@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use rootlight_ids::content_hash;
 use rootlight_ir::{FactEvidence, NormalizedIrDocument, OccurrenceTarget, SourceRef};
 use rootlight_storage::{
     GenerationContext, GenerationResource, GenerationSnapshot, GenerationStats,
@@ -372,6 +373,13 @@ fn insert_header(
                 codec::sqlite_i64(stats.stored_rows())?,
                 codec::sqlite_i64(stats.text_bytes())?,
             ],
+        )
+        .map_err(CatalogError::sqlite)?;
+    let document = serde_json::to_vec(generation.document()).map_err(CatalogError::json)?;
+    transaction
+        .execute(
+            "INSERT INTO application_meta(key, value) VALUES ('document_hash', ?1)",
+            [content_hash(&document).as_bytes().as_slice()],
         )
         .map_err(CatalogError::sqlite)?;
     Ok(())

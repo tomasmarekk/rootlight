@@ -340,6 +340,31 @@ fn tampered_source_hash_is_detected_during_reconstruction() {
 }
 
 #[test]
+fn same_cardinality_semantic_tamper_is_detected() {
+    let directory = TempDir::new().expect("temporary generation directory is created");
+    write_fixture(directory.path());
+    let path = directory.path().join(ORACLE_FILENAME);
+    let connection = Connection::open(&path).expect("oracle opens for semantic tamper fixture");
+    connection
+        .execute(
+            "UPDATE occurrences
+             SET role = CASE role WHEN 'read' THEN 'write' ELSE 'read' END",
+            [],
+        )
+        .expect("same-cardinality semantic tamper is applied");
+    drop(connection);
+
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let reader = OracleReader::open_in(directory.path(), &context)
+        .expect("structurally valid tampered oracle opens");
+    let error = reader
+        .read(&context)
+        .expect_err("sealed document hash rejects semantic tamper");
+    assert_eq!(error.kind(), CatalogErrorKind::Corrupt);
+}
+
+#[test]
 fn forged_payload_counts_are_rejected_before_record_allocation() {
     let directory = TempDir::new().expect("temporary generation directory is created");
     write_fixture(directory.path());

@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
-      "blake3": "602b887aae25f06374a0def299c22d56ec8b456e94de2c4321b31d4a449832ac"
+      "blake3": "b89718a113ced8a3152901e51dede210fa672c7480c402f9cb7277a9f40d5d41"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",

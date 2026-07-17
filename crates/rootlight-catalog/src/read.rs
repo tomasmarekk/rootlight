@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use rootlight_ids::{FactId, SymbolId};
+use rootlight_ids::{FactId, SymbolId, content_hash};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageRecord, CoverageStatus, EntityFlag, EntityKind,
     EntityRecord, EntityVisibility, EvidenceKind, ExtensionSupport, FactDomain, FactEvidence,
@@ -17,7 +17,7 @@ use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationContext, GenerationMetadata, GenerationResource,
     GenerationSnapshot, GenerationStats,
 };
-use rusqlite::{Connection, Row, types::FromSql};
+use rusqlite::{Connection, OptionalExtension, Row, types::FromSql};
 
 use crate::{CatalogError, CatalogErrorKind, codec, write};
 
@@ -280,6 +280,7 @@ pub(crate) fn read_generation(
         }
     }
 
+    validate_document_hash(&transaction, &document)?;
     let snapshot = GenerationSnapshot::new(
         metadata,
         document,
@@ -293,6 +294,30 @@ pub(crate) fn read_generation(
     }
     transaction.commit().map_err(CatalogError::sqlite)?;
     Ok(snapshot)
+}
+
+fn validate_document_hash(
+    connection: &Connection,
+    document: &NormalizedIrDocument,
+) -> Result<(), CatalogError> {
+    let expected: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT value
+             FROM application_meta
+             WHERE key = 'document_hash' AND length(value) = 32",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(CatalogError::sqlite)?;
+    let expected = expected
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))
+        .and_then(codec::content_hash)?;
+    let encoded = serde_json::to_vec(document).map_err(CatalogError::json)?;
+    if content_hash(&encoded) != expected {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    Ok(())
 }
 
 fn validate_payload_cardinality(
