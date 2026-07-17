@@ -3,7 +3,7 @@
 //! Handles identify provider-owned bounded cache entries. They never own or
 //! expose native trees, and an evicted entry invalidates reuse explicitly.
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use rootlight_adapter_sdk::{IncludedRange, ParseOutput};
 use rootlight_ids::ContentHash;
@@ -164,7 +164,7 @@ pub struct ParseReuseKey {
     pub(crate) family: GrammarFamily,
     pub(crate) grammar_version: &'static str,
     pub(crate) encoding: String,
-    pub(crate) included_ranges: Vec<IncludedRange>,
+    pub(crate) included_ranges: Arc<Vec<IncludedRange>>,
     pub(crate) settings: ParserSettings,
     pub(crate) edits: Vec<SourceEditIdentity>,
 }
@@ -203,7 +203,7 @@ impl ParseReuseKey {
     /// Returns the exact checked included ranges.
     #[must_use]
     pub fn included_ranges(&self) -> &[IncludedRange] {
-        &self.included_ranges
+        self.included_ranges.as_slice()
     }
 
     /// Returns parser scheduling settings.
@@ -311,6 +311,6 @@ pub(crate) struct ParseIdentity {
     pub(crate) family: GrammarFamily,
     pub(crate) grammar_version: &'static str,
     pub(crate) encoding: String,
-    pub(crate) included_ranges: Vec<IncludedRange>,
+    pub(crate) included_ranges: Arc<Vec<IncludedRange>>,
     pub(crate) settings: ParserSettings,
 }

@@ -135,11 +135,10 @@ impl ParseProvider for MockParseProvider {
                     diagnostic_index += 1;
                 }
             }
-            sink.push(SyntaxFactBatch::new(
-                sink.next_sequence(),
-                facts,
-                diagnostics,
-            ))?;
+            sink.push_cancellable(
+                SyntaxFactBatch::new(sink.next_sequence(), facts, diagnostics),
+                cancellation,
+            )?;
             emitted_batches += 1;
         }
         cancellation.check()?;

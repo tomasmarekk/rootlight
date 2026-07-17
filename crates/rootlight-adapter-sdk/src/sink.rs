@@ -3,9 +3,9 @@
 //! Batch sequences are transport-only. Successful reports validate explicit
 //! end markers before staged output is deterministically committed.
 
-use std::{cmp::Ordering, fmt, mem};
+use std::{cmp::Ordering, convert::Infallible, fmt, mem};
 
-use rootlight_cancel::Cancellation;
+use rootlight_cancel::{Cancellation, Cancelled};
 use rootlight_ir::{
     AnalysisTier, CoverageRecord, CoverageStatus, DiagnosticRecord, DiagnosticSeverity,
     EntityRecord, ExtensionEnvelope, ExtensionSupport, FactEvidence, FileRecord, IrLimits,
@@ -29,6 +29,7 @@ use crate::{
 
 const MAX_SYNTAX_KIND_BYTES: usize = 128;
 const MAX_DIAGNOSTIC_CODE_BYTES: usize = 128;
+const CANCELLATION_CHECK_INTERVAL: usize = 256;
 // The logical weight is deliberately platform-independent; it bounds staged
 // output without exposing allocator layout as part of the SDK contract.
 const LOGICAL_RECORD_OVERHEAD: usize = 64;
@@ -479,6 +480,28 @@ pub trait SyntaxFactSink {
     ///
     /// Returns [`SinkError`] for sequence, source, or resource violations.
     fn push(&mut self, batch: SyntaxFactBatch) -> Result<(), SinkError>;
+
+    /// Stages one batch with cooperative checkpoints around sink-owned work.
+    ///
+    /// The default preserves compatibility for existing sinks by checking
+    /// cancellation at the call boundaries. Sinks that perform input-sized
+    /// validation, accounting, or copying should override this method with
+    /// checkpoints inside those bounded work units.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] for cancellation or the same sink violations
+    /// as [`SyntaxFactSink::push`].
+    fn push_cancellable(
+        &mut self,
+        batch: SyntaxFactBatch,
+        cancellation: &Cancellation,
+    ) -> Result<(), AdapterError> {
+        cancellation.check()?;
+        self.push(batch)?;
+        cancellation.check()?;
+        Ok(())
+    }
 }
 
 /// Backpressured normalized-IR sink implemented by the SDK executor.
@@ -616,6 +639,18 @@ enum SinkState {
     Closed,
 }
 
+#[derive(Debug)]
+enum CheckpointedSinkError<E> {
+    Sink(SinkError),
+    Interrupted(E),
+}
+
+impl<E> From<SinkError> for CheckpointedSinkError<E> {
+    fn from(error: SinkError) -> Self {
+        Self::Sink(error)
+    }
+}
+
 /// Transactional in-memory syntax sink with fixed and cumulative quotas.
 #[derive(Debug)]
 pub struct BoundedSyntaxSink {
@@ -654,21 +689,109 @@ impl BoundedSyntaxSink {
         self.state = SinkState::Closed;
     }
 
-    fn commit(&mut self) -> Result<(Vec<SyntaxFact>, Vec<AdapterDiagnostic>), SinkError> {
-        self.ensure_open()?;
-        self.facts.sort_by_key(SyntaxFact::local_id);
-        let collision = self.facts.windows(2).find_map(|pair| {
-            (pair[0].local_id == pair[1].local_id && pair[0] != pair[1]).then_some(pair[0].local_id)
-        });
-        if let Some(local_id) = collision {
-            self.discard();
-            return Err(SinkError::DuplicateSyntaxFact { local_id });
+    fn commit(
+        &mut self,
+        cancellation: &Cancellation,
+    ) -> Result<(Vec<SyntaxFact>, Vec<AdapterDiagnostic>), AdapterError> {
+        let result = self.commit_checked(|| cancellation.check());
+        match result {
+            Ok(output) => Ok(output),
+            Err(error) => {
+                self.discard();
+                Err(map_checkpointed_error(error))
+            }
         }
-        self.facts.dedup_by_key(|fact| fact.local_id);
-        self.diagnostics.sort_by(compare_diagnostics);
-        self.diagnostics.dedup();
+    }
+
+    fn commit_checked<E>(
+        &mut self,
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<(Vec<SyntaxFact>, Vec<AdapterDiagnostic>), CheckpointedSinkError<E>> {
+        run_checkpoint(&mut checkpoint)?;
+        self.ensure_open()?;
+        sort_cancellable_by(&mut self.facts, &mut checkpoint, |left, right| {
+            left.local_id.cmp(&right.local_id)
+        })?;
+        let facts = deduplicate_syntax_facts(mem::take(&mut self.facts), &mut checkpoint)?;
+        sort_cancellable_by(&mut self.diagnostics, &mut checkpoint, compare_diagnostics)?;
+        let diagnostics = deduplicate_sorted(mem::take(&mut self.diagnostics), &mut checkpoint)?;
+        run_checkpoint(&mut checkpoint)?;
         self.state = SinkState::Closed;
-        Ok((mem::take(&mut self.facts), mem::take(&mut self.diagnostics)))
+        Ok((facts, diagnostics))
+    }
+
+    fn push_checked<E>(
+        &mut self,
+        batch: SyntaxFactBatch,
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<(), CheckpointedSinkError<E>> {
+        run_checkpoint(&mut checkpoint)?;
+        self.ensure_open()?;
+        validate_sequence(self.next_sequence, batch.sequence)?;
+        if batch.facts.is_empty() && batch.diagnostics.is_empty() {
+            return Err(SinkError::EmptyBatch.into());
+        }
+        for (index, fact) in batch.facts.iter().enumerate() {
+            if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                run_checkpoint(&mut checkpoint)?;
+            }
+            if !span_within_source(fact.span, &self.source) {
+                return Err(SinkError::SourceMismatch.into());
+            }
+            if fact.depth > self.max_syntax_depth {
+                return Err(SinkError::StreamLimit {
+                    resource: ResourceKind::SyntaxDepth,
+                    observed: fact.depth,
+                    limit: self.max_syntax_depth,
+                }
+                .into());
+            }
+        }
+        for (index, diagnostic) in batch.diagnostics.iter().enumerate() {
+            if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                run_checkpoint(&mut checkpoint)?;
+            }
+            if diagnostic
+                .source
+                .as_ref()
+                .is_some_and(|source| !source_within_source(source, &self.source))
+            {
+                return Err(SinkError::SourceMismatch.into());
+            }
+        }
+        let batch_usage = syntax_batch_usage_checked(&batch, &mut checkpoint)?;
+        validate_batch_usage(batch_usage, &self.limits)?;
+        let next_usage = self.usage.checked_add(batch_usage)?;
+        validate_stream_usage(next_usage, &self.limits)?;
+        let next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or(SinkError::AccountingOverflow)?;
+
+        run_checkpoint(&mut checkpoint)?;
+        self.facts
+            .try_reserve_exact(batch.facts.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        run_checkpoint(&mut checkpoint)?;
+        self.diagnostics
+            .try_reserve_exact(batch.diagnostics.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        let original_fact_count = self.facts.len();
+        let original_diagnostic_count = self.diagnostics.len();
+        let append_result = append_syntax_batch(
+            &mut self.facts,
+            &mut self.diagnostics,
+            batch,
+            &mut checkpoint,
+        );
+        if let Err(error) = append_result {
+            self.facts.truncate(original_fact_count);
+            self.diagnostics.truncate(original_diagnostic_count);
+            return Err(error);
+        }
+        self.usage = next_usage;
+        self.next_sequence = next_sequence;
+        Ok(())
     }
 
     fn ensure_open(&self) -> Result<(), SinkError> {
@@ -694,45 +817,20 @@ impl SyntaxFactSink for BoundedSyntaxSink {
     }
 
     fn push(&mut self, batch: SyntaxFactBatch) -> Result<(), SinkError> {
-        self.ensure_open()?;
-        validate_sequence(self.next_sequence, batch.sequence)?;
-        if batch.facts.is_empty() && batch.diagnostics.is_empty() {
-            return Err(SinkError::EmptyBatch);
+        match self.push_checked(batch, || Ok::<(), Infallible>(())) {
+            Ok(()) => Ok(()),
+            Err(CheckpointedSinkError::Sink(error)) => Err(error),
+            Err(CheckpointedSinkError::Interrupted(never)) => match never {},
         }
-        for fact in &batch.facts {
-            if !span_within_source(fact.span, &self.source) {
-                return Err(SinkError::SourceMismatch);
-            }
-            if fact.depth > self.max_syntax_depth {
-                return Err(SinkError::StreamLimit {
-                    resource: ResourceKind::SyntaxDepth,
-                    observed: fact.depth,
-                    limit: self.max_syntax_depth,
-                });
-            }
-        }
-        for diagnostic in &batch.diagnostics {
-            if diagnostic
-                .source
-                .as_ref()
-                .is_some_and(|source| !source_within_source(source, &self.source))
-            {
-                return Err(SinkError::SourceMismatch);
-            }
-        }
-        let batch_usage = syntax_batch_usage(&batch)?;
-        validate_batch_usage(batch_usage, &self.limits)?;
-        let next_usage = self.usage.checked_add(batch_usage)?;
-        validate_stream_usage(next_usage, &self.limits)?;
-        let next_sequence = self
-            .next_sequence
-            .checked_add(1)
-            .ok_or(SinkError::AccountingOverflow)?;
-        self.facts.extend(batch.facts);
-        self.diagnostics.extend(batch.diagnostics);
-        self.usage = next_usage;
-        self.next_sequence = next_sequence;
-        Ok(())
+    }
+
+    fn push_cancellable(
+        &mut self,
+        batch: SyntaxFactBatch,
+        cancellation: &Cancellation,
+    ) -> Result<(), AdapterError> {
+        self.push_checked(batch, || cancellation.check())
+            .map_err(map_checkpointed_error)
     }
 }
 
@@ -972,7 +1070,11 @@ pub fn execute_parse_transaction<T>(
         sink.discard();
         return Err(error.into());
     }
-    let (facts, diagnostics) = sink.commit()?;
+    let (facts, diagnostics) = sink.commit(cancellation)?;
+    if let Err(cancelled) = cancellation.check() {
+        sink.discard();
+        return Err(cancelled.into());
+    }
     Ok((
         ParseOutput {
             facts,
@@ -1179,19 +1281,35 @@ fn validate_sequence(expected: u64, observed: u64) -> Result<(), SinkError> {
 }
 
 fn syntax_batch_usage(batch: &SyntaxFactBatch) -> Result<StreamUsage, SinkError> {
-    let fact_strings = batch.facts.iter().try_fold(0_usize, |total, fact| {
-        total
+    match syntax_batch_usage_checked(batch, &mut || Ok::<(), Infallible>(())) {
+        Ok(usage) => Ok(usage),
+        Err(CheckpointedSinkError::Sink(error)) => Err(error),
+        Err(CheckpointedSinkError::Interrupted(never)) => match never {},
+    }
+}
+
+fn syntax_batch_usage_checked<E>(
+    batch: &SyntaxFactBatch,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<StreamUsage, CheckpointedSinkError<E>> {
+    let mut fact_strings = 0_usize;
+    for (index, fact) in batch.facts.iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            run_checkpoint(checkpoint)?;
+        }
+        fact_strings = fact_strings
             .checked_add(fact.syntax_kind.0.len())
-            .ok_or(SinkError::AccountingOverflow)
-    })?;
-    let diagnostic_bytes = batch
-        .diagnostics
-        .iter()
-        .try_fold(0_usize, |total, diagnostic| {
-            total
-                .checked_add(diagnostic.code.0.len())
-                .ok_or(SinkError::AccountingOverflow)
-        })?;
+            .ok_or(SinkError::AccountingOverflow)?;
+    }
+    let mut diagnostic_bytes = 0_usize;
+    for (index, diagnostic) in batch.diagnostics.iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            run_checkpoint(checkpoint)?;
+        }
+        diagnostic_bytes = diagnostic_bytes
+            .checked_add(diagnostic.code.0.len())
+            .ok_or(SinkError::AccountingOverflow)?;
+    }
     let string_bytes = fact_strings
         .checked_add(diagnostic_bytes)
         .ok_or(SinkError::AccountingOverflow)?;
@@ -1214,6 +1332,159 @@ fn syntax_batch_usage(batch: &SyntaxFactBatch) -> Result<StreamUsage, SinkError>
         diagnostic_bytes,
         string_bytes,
     ))
+}
+
+fn append_syntax_batch<E>(
+    facts: &mut Vec<SyntaxFact>,
+    diagnostics: &mut Vec<AdapterDiagnostic>,
+    batch: SyntaxFactBatch,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), CheckpointedSinkError<E>> {
+    for (index, fact) in batch.facts.into_iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            run_checkpoint(checkpoint)?;
+        }
+        facts.push(fact);
+    }
+    for (index, diagnostic) in batch.diagnostics.into_iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            run_checkpoint(checkpoint)?;
+        }
+        diagnostics.push(diagnostic);
+    }
+    run_checkpoint(checkpoint)
+}
+
+fn deduplicate_syntax_facts<E>(
+    facts: Vec<SyntaxFact>,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Vec<SyntaxFact>, CheckpointedSinkError<E>> {
+    let mut deduplicated = Vec::<SyntaxFact>::new();
+    run_checkpoint(checkpoint)?;
+    deduplicated
+        .try_reserve_exact(facts.len())
+        .map_err(|_| SinkError::AllocationFailed)?;
+    for (index, fact) in facts.into_iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            run_checkpoint(checkpoint)?;
+        }
+        if let Some(previous) = deduplicated.last()
+            && previous.local_id == fact.local_id
+        {
+            if previous != &fact {
+                return Err(SinkError::DuplicateSyntaxFact {
+                    local_id: fact.local_id,
+                }
+                .into());
+            }
+            continue;
+        }
+        deduplicated.push(fact);
+    }
+    run_checkpoint(checkpoint)?;
+    Ok(deduplicated)
+}
+
+fn deduplicate_sorted<T: PartialEq, E>(
+    values: Vec<T>,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Vec<T>, CheckpointedSinkError<E>> {
+    let mut deduplicated = Vec::new();
+    run_checkpoint(checkpoint)?;
+    deduplicated
+        .try_reserve_exact(values.len())
+        .map_err(|_| SinkError::AllocationFailed)?;
+    for (index, value) in values.into_iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            run_checkpoint(checkpoint)?;
+        }
+        if deduplicated
+            .last()
+            .is_some_and(|previous| previous == &value)
+        {
+            continue;
+        }
+        deduplicated.push(value);
+    }
+    run_checkpoint(checkpoint)?;
+    Ok(deduplicated)
+}
+
+fn sort_cancellable_by<T, E>(
+    values: &mut [T],
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+    compare: impl Fn(&T, &T) -> Ordering + Copy,
+) -> Result<(), CheckpointedSinkError<E>> {
+    run_checkpoint(checkpoint)?;
+    let mut work = 0_usize;
+    for root in (0..values.len() / 2).rev() {
+        sift_down(values, root, values.len(), checkpoint, compare, &mut work)?;
+    }
+    for end in (1..values.len()).rev() {
+        checkpoint_sort_work(&mut work, checkpoint)?;
+        values.swap(0, end);
+        sift_down(values, 0, end, checkpoint, compare, &mut work)?;
+    }
+    run_checkpoint(checkpoint)
+}
+
+fn sift_down<T, E>(
+    values: &mut [T],
+    mut root: usize,
+    end: usize,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+    compare: impl Fn(&T, &T) -> Ordering + Copy,
+    work: &mut usize,
+) -> Result<(), CheckpointedSinkError<E>> {
+    loop {
+        let Some(left) = root.checked_mul(2).and_then(|index| index.checked_add(1)) else {
+            return Ok(());
+        };
+        if left >= end {
+            return Ok(());
+        }
+        let mut greatest = root;
+        checkpoint_sort_work(work, checkpoint)?;
+        if compare(&values[greatest], &values[left]) == Ordering::Less {
+            greatest = left;
+        }
+        let right = left.saturating_add(1);
+        if right < end {
+            checkpoint_sort_work(work, checkpoint)?;
+            if compare(&values[greatest], &values[right]) == Ordering::Less {
+                greatest = right;
+            }
+        }
+        if greatest == root {
+            return Ok(());
+        }
+        values.swap(root, greatest);
+        root = greatest;
+    }
+}
+
+fn checkpoint_sort_work<E>(
+    work: &mut usize,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), CheckpointedSinkError<E>> {
+    if work.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+        run_checkpoint(checkpoint)?;
+    }
+    *work = work.saturating_add(1);
+    Ok(())
+}
+
+fn run_checkpoint<E>(
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), CheckpointedSinkError<E>> {
+    checkpoint().map_err(CheckpointedSinkError::Interrupted)
+}
+
+fn map_checkpointed_error(error: CheckpointedSinkError<Cancelled>) -> AdapterError {
+    match error {
+        CheckpointedSinkError::Sink(error) => error.into(),
+        CheckpointedSinkError::Interrupted(cancelled) => cancelled.into(),
+    }
 }
 
 fn validate_batch_usage(usage: StreamUsage, limits: &StreamLimits) -> Result<(), SinkError> {
@@ -1414,4 +1685,158 @@ fn evidence_matches(evidence: &FactEvidence, source: &SourceRef) -> bool {
         .source
         .as_ref()
         .is_none_or(|candidate| source_within_source(candidate, source))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rootlight_cancel::CancellationReason;
+
+    #[test]
+    fn cancellable_push_prioritizes_existing_cancellation_over_sink_validation() {
+        let mut sink = syntax_sink(1);
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+
+        assert!(matches!(
+            sink.push_cancellable(
+                SyntaxFactBatch::new(0, Vec::new(), Vec::new()),
+                &cancellation,
+            ),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
+        assert_eq!(sink.next_sequence(), 0);
+        assert_eq!(sink.staged_usage(), StreamUsage::default());
+    }
+
+    #[test]
+    fn checkpointed_push_rolls_back_an_interrupted_partial_append() {
+        let fact_count = CANCELLATION_CHECK_INTERVAL * 4;
+        let mut sink = syntax_sink(fact_count);
+        let batch = SyntaxFactBatch::new(
+            0,
+            (0..fact_count)
+                .map(|index| syntax_fact(u64::try_from(index).expect("test index fits u64")))
+                .collect(),
+            Vec::new(),
+        );
+        let mut checkpoints = 0usize;
+
+        let result = sink.push_checked(batch, || {
+            checkpoints += 1;
+            if checkpoints == 13 { Err(()) } else { Ok(()) }
+        });
+
+        assert!(matches!(
+            result,
+            Err(CheckpointedSinkError::Interrupted(()))
+        ));
+        assert_eq!(sink.next_sequence(), 0);
+        assert_eq!(sink.staged_usage(), StreamUsage::default());
+        assert!(sink.facts.is_empty());
+        assert!(sink.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn checkpointed_commit_stops_inside_canonical_sort() {
+        let fact_count = CANCELLATION_CHECK_INTERVAL * 4;
+        let mut sink = syntax_sink(fact_count);
+        let facts = (0..fact_count)
+            .rev()
+            .map(|index| syntax_fact(u64::try_from(index).expect("test index fits u64")))
+            .collect();
+        sink.push(SyntaxFactBatch::new(0, facts, Vec::new()))
+            .expect("test facts fit the sink");
+        let mut checkpoints = 0usize;
+
+        let result = sink.commit_checked(|| {
+            checkpoints += 1;
+            if checkpoints == 3 { Err(()) } else { Ok(()) }
+        });
+
+        assert!(matches!(
+            result,
+            Err(CheckpointedSinkError::Interrupted(()))
+        ));
+        assert_eq!(checkpoints, 3);
+        assert_eq!(sink.state, SinkState::Open);
+    }
+
+    #[test]
+    fn checkpointed_sort_matches_canonical_order() {
+        let mut values = (0..4097_u64)
+            .map(|value| value.wrapping_mul(7919) % 4097)
+            .collect::<Vec<_>>();
+        let mut expected = values.clone();
+        expected.sort_unstable();
+
+        sort_cancellable_by(&mut values, &mut || Ok::<(), Infallible>(()), Ord::cmp)
+            .expect("checkpointed sort succeeds");
+
+        assert_eq!(values, expected);
+    }
+
+    fn syntax_sink(max_records: usize) -> BoundedSyntaxSink {
+        let batch = crate::BatchThresholds::new(
+            max_records,
+            max_records.saturating_mul(LOGICAL_RECORD_OVERHEAD + MAX_SYNTAX_KIND_BYTES),
+            1,
+            MAX_DIAGNOSTIC_CODE_BYTES,
+        )
+        .expect("test batch limits are nonzero");
+        let stream = StreamLimits::new(
+            1,
+            max_records,
+            max_records.saturating_mul(LOGICAL_RECORD_OVERHEAD + MAX_SYNTAX_KIND_BYTES),
+            1,
+            MAX_DIAGNOSTIC_CODE_BYTES,
+            max_records.saturating_mul(MAX_SYNTAX_KIND_BYTES),
+            batch,
+        )
+        .expect("test stream limits are nonzero");
+        BoundedSyntaxSink::new(source_ref(), stream, 8)
+    }
+
+    fn syntax_fact(local_id: u64) -> SyntaxFact {
+        SyntaxFact::new(
+            local_id,
+            None,
+            SyntaxFactKind::Declaration,
+            SourceSpan::new(
+                "file1_mj52q2t6rtn7fisze2ehwnyu4smi6oe4unpyfla"
+                    .parse()
+                    .expect("test file identity is valid"),
+                0,
+                1,
+            )
+            .expect("test span is ordered"),
+            0,
+            SyntaxKindLabel::new("function_item").expect("test syntax kind is valid"),
+        )
+    }
+
+    fn source_ref() -> SourceRef {
+        SourceRef::new(
+            "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                .parse()
+                .expect("test repository identity is valid"),
+            "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by"
+                .parse()
+                .expect("test generation identity is valid"),
+            SourceSpan::new(
+                "file1_mj52q2t6rtn7fisze2ehwnyu4smi6oe4unpyfla"
+                    .parse()
+                    .expect("test file identity is valid"),
+                0,
+                1,
+            )
+            .expect("test span is ordered"),
+            "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+                .parse()
+                .expect("test content hash is valid"),
+            None,
+        )
+    }
 }

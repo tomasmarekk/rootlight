@@ -273,6 +273,9 @@ pub enum SinkError {
     /// Usage accounting could not be represented.
     #[error("stream usage accounting overflowed")]
     AccountingOverflow,
+    /// The sink could not reserve bounded staging memory.
+    #[error("stream staging allocation failed")]
+    AllocationFailed,
 }
 
 /// Invalid coverage, resource, or explicit end-of-stream report.
