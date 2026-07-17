@@ -13,6 +13,15 @@ rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+rustix = { workspace = true, features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+nt-token.workspace = true
+windows.workspace = true
+windows-permissions.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 
