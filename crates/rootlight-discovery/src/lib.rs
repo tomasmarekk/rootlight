@@ -75,12 +75,12 @@ impl DiscoveryLimits {
     /// Derives conservative discovery bounds from the immutable core config.
     #[must_use]
     pub fn from_config(config: &ConfigSnapshot) -> Self {
-        let resources = config.resources();
+        let analysis = config.analysis();
         Self {
             max_entries: MAX_DISCOVERY_ENTRIES.min(100_000),
             max_depth: MAX_DISCOVERY_DEPTH.min(128),
-            max_file_bytes: resources
-                .max_source_bytes
+            max_file_bytes: analysis
+                .max_source_file_bytes
                 .min(rootlight_vfs::MAX_SNAPSHOT_BYTES),
             max_diagnostics: MAX_DISCOVERY_DIAGNOSTICS.min(1_000),
         }
@@ -786,6 +786,38 @@ mod tests {
 
     fn limits() -> DiscoveryLimits {
         DiscoveryLimits::new(1_000, 16, 1024 * 1024, 100).expect("test limits are valid")
+    }
+
+    #[test]
+    fn configured_analysis_bytes_drive_discovery_without_response_budget_coupling() {
+        let current = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: r#"
+version = "1.1"
+[resources]
+max_source_bytes = 1
+[analysis]
+max_source_file_bytes = 2097152
+"#,
+        }])
+        .expect("configuration 1.1 resolves");
+        let current_limits = DiscoveryLimits::from_config(&current);
+
+        assert_eq!(current.resources().max_source_bytes, 1);
+        assert_eq!(current_limits.max_file_bytes, 2 * 1024 * 1024);
+
+        let legacy = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: "version = \"1.0\"\n[resources]\nmax_source_bytes = 1048576\n",
+        }])
+        .expect("configuration 1.0 resolves");
+        let legacy_limits = DiscoveryLimits::from_config(&legacy);
+
+        assert_eq!(legacy.resources().max_source_bytes, 1024 * 1024);
+        assert_eq!(
+            legacy_limits.max_file_bytes,
+            rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES
+        );
     }
 
     #[test]

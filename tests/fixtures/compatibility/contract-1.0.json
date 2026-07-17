@@ -14,7 +14,8 @@
       "max_results": 50
     },
     "analysis": {
-      "default_tier": "structural"
+      "default_tier": "structural",
+      "max_source_file_bytes": 8388608
     }
   },
   "mcp_response_metadata": {
