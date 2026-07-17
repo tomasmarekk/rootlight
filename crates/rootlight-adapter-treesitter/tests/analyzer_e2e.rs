@@ -22,7 +22,7 @@ use rootlight_adapter_treesitter::{
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{GenerationId, RepositoryId, SymbolId, content_hash, derive_repository};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CoverageScope, CoverageStatus, EntityKind,
+    AnalysisTier, BuildContextIdentity, CoverageScope, CoverageStatus, EntityFlag, EntityKind,
     ExtensionSupport, FactDomain, FactEvidence, IrDocument, IrLimits, OccurrenceRole,
     OccurrenceTarget, ProducerIdentity, ProducerKind, RelationPredicate, SourceRef, SourceSpan,
     decode_ir_document, validate_ir_document,
@@ -192,65 +192,131 @@ fn real_analyzer_reports_invalid_utf8_without_source_material() {
 }
 
 #[test]
-fn real_analyzer_distinguishes_same_declarations_in_sibling_scopes() {
+fn real_analyzer_keeps_rust_methods_bound_to_stable_impl_headers() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let extensions = ExtensionSupport::default();
+    let case = CASES[0];
+    let before =
+        "struct A;\nstruct B;\nimpl A { fn same(&self) {} }\nimpl B { fn same(&self) {} }\n";
+    let inserted = "struct C;\nimpl C { fn other(&self) {} }\nstruct A;\nstruct B;\nimpl A { fn same(&self) {} }\nimpl B { fn same(&self) {} }\n";
+    let reordered =
+        "struct A;\nstruct B;\nimpl B { fn same(&self) {} }\nimpl A { fn same(&self) {} }\n";
+    let fixture = Fixture::new(case, before.as_bytes());
+    let analyzer = analyzer(&provider, case);
+    let initial_request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let initial = analyze(&analyzer, &initial_request, &extensions);
+    validate_ir_document(initial.document(), limits.ir(), &extensions)
+        .expect("initial Rust impl IR must validate");
+    let initial_symbols = same_symbols_by_qualified_name(initial.document());
+    assert_eq!(
+        initial_symbols
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["A::same", "B::same"]
+    );
+    assert!(
+        initial_symbols
+            .values()
+            .all(|(_, kind)| *kind == EntityKind::Method)
+    );
+    assert_ne!(
+        initial_symbols["A::same"].0, initial_symbols["B::same"].0,
+        "methods in distinct semantic impl scopes must have distinct IDs"
+    );
+
+    for (description, source) in [
+        ("inserting an unrelated earlier impl", inserted),
+        ("reordering sibling impls", reordered),
+    ] {
+        let variant = fixture.rewrite(source.as_bytes());
+        let variant_request = request(&variant.snapshot, &variant.source, case, &limits);
+        let reparsed = analyze(&analyzer, &variant_request, &extensions);
+        validate_ir_document(reparsed.document(), limits.ir(), &extensions)
+            .expect("reparsed Rust impl IR must validate");
+        let reparsed_symbols = same_symbols_by_qualified_name(reparsed.document());
+        for qualified_name in ["A::same", "B::same"] {
+            assert_eq!(
+                reparsed_symbols.get(qualified_name),
+                initial_symbols.get(qualified_name),
+                "{qualified_name} changed identity after {description}"
+            );
+        }
+    }
+}
+
+#[test]
+fn real_analyzer_keeps_unique_symbol_identity_after_anonymous_scope_insertion() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let extensions = ExtensionSupport::default();
+    let case = CASES[2];
+    let before = "function outer() {\n  { const keep = 1; }\n}\n";
+    let inserted = "function outer() {\n  { const unrelated = 0; }\n  { const keep = 1; }\n}\n";
+    let fixture = Fixture::new(case, before.as_bytes());
+    let analyzer = analyzer(&provider, case);
+    let initial_request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let initial = analyze(&analyzer, &initial_request, &extensions);
+    let initial_id = symbol_id_named(initial.document(), "keep");
+
+    let variant = fixture.rewrite(inserted.as_bytes());
+    let variant_request = request(&variant.snapshot, &variant.source, case, &limits);
+    let reparsed = analyze(&analyzer, &variant_request, &extensions);
+    assert_eq!(
+        symbol_id_named(reparsed.document(), "keep"),
+        initial_id,
+        "an unrelated earlier anonymous block must not perturb an unchanged symbol ID"
+    );
+}
+
+#[test]
+fn real_analyzer_rejects_ambiguous_anonymous_scope_identity_without_source_material() {
+    const SECRET: &str = "scope-secret-marker";
     let provider = Arc::new(provider());
     let limits = limits();
     let extensions = ExtensionSupport::default();
     let cases = [
         (
-            CASES[0],
-            "struct A;\nstruct B;\nimpl A { fn same(&self) {} }\nimpl B { fn same(&self) {} }\n",
-            "struct A;\r\nstruct B;\r\nimpl A { fn same(&self) {   } }\r\nimpl B { fn same(&self) {\r\n} }\r\n",
-        ),
-        (
             CASES[1],
-            "if True:\n    def same():\n        return 1\nif False:\n    def same():\n        return 2\n",
-            "if True:\r\n    def same():\r\n            return 1\r\nif False:\r\n    def same():\r\n            return 2\r\n",
+            format!(
+                "# {SECRET}\nif True:\n    def same():\n        return 1\nif False:\n    def same():\n        return 2\n"
+            ),
         ),
         (
             CASES[2],
-            "function outer() {\n  { const same = 1; }\n  { const same = 2; }\n}\n",
-            "function outer() {\r\n    { const same = 1;   }\r\n    { const same = 2;\r\n    }\r\n}\r\n",
+            format!(
+                "// {SECRET}\nfunction outer() {{\n  {{ const same = 1; }}\n  {{ const same = 2; }}\n}}\n"
+            ),
         ),
         (
             CASES[3],
-            "class Outer { void run() { { int same = 1; } { int same = 2; } } }\n",
-            "class Outer {\r\n  void run() {\r\n    { int same = 1;   }\r\n    { int same = 2;\r\n    }\r\n  }\r\n}\r\n",
+            format!(
+                "// {SECRET}\nclass Outer {{ void run() {{ {{ int same = 1; }} {{ int same = 2; }} }} }}\n"
+            ),
         ),
     ];
 
-    for (case, before, after) in cases {
-        let fixture = Fixture::new(case, before.as_bytes());
+    for (case, source) in cases {
+        let fixture = Fixture::new(case, source.as_bytes());
         let analyzer = analyzer(&provider, case);
-        let initial_request = request(&fixture.snapshot, &fixture.source, case, &limits);
-        let initial = analyze(&analyzer, &initial_request, &extensions);
-        validate_ir_document(initial.document(), limits.ir(), &extensions)
-            .unwrap_or_else(|error| panic!("{} scoped IR must validate: {error}", case.name));
-        let initial_ids = same_symbol_ids(initial.document());
-        assert_eq!(
-            initial_ids.len(),
-            2,
-            "{} sibling declarations must both survive lowering",
-            case.name
-        );
-        assert_ne!(
-            initial_ids[0], initial_ids[1],
-            "{} sibling declarations must have distinct identities",
-            case.name
-        );
-
-        let variant = fixture.rewrite(after.as_bytes());
-        let variant_request = request(&variant.snapshot, &variant.source, case, &limits);
-        let reparsed = analyze(&analyzer, &variant_request, &extensions);
-        validate_ir_document(reparsed.document(), limits.ir(), &extensions).unwrap_or_else(
-            |error| panic!("{} reparsed scoped IR must validate: {error}", case.name),
-        );
-        assert_eq!(
-            initial_ids,
-            same_symbol_ids(reparsed.document()),
-            "{} scoped symbol IDs changed after whitespace/CRLF-only edits",
-            case.name
-        );
+        let analysis_request = request(&fixture.snapshot, &fixture.source, case, &limits);
+        let error = execute_analysis(
+            &analyzer,
+            &analysis_request,
+            extensions.clone(),
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            &deadline(),
+        )
+        .expect_err("ambiguous anonymous scope identity must fail conservatively");
+        assert!(matches!(
+            &error,
+            AdapterError::ProviderFailed { code }
+                if code.as_str() == "treesitter-lowering-symbol-collision"
+        ));
+        let rendered = format!("{error:?}\n{error}");
+        assert!(!rendered.contains(SECRET));
+        assert!(!rendered.contains(case.path));
     }
 }
 
@@ -418,6 +484,7 @@ fn assert_contract(
             .iter()
             .find(|entity| entity.kind == EntityKind::Module && entity.canonical_name == case.path)
             .expect("implicit file module is emitted");
+        assert_eq!(file_module.flags, vec![EntityFlag::Synthetic]);
         assert!(document.occurrences.iter().all(|occurrence| {
             occurrence.role != OccurrenceRole::Definition
                 || !matches!(
@@ -428,15 +495,34 @@ fn assert_contract(
     }
 }
 
-fn same_symbol_ids(document: &rootlight_ir::NormalizedIrDocument) -> Vec<SymbolId> {
-    let mut ids = document
+fn same_symbols_by_qualified_name(
+    document: &rootlight_ir::NormalizedIrDocument,
+) -> BTreeMap<String, (SymbolId, EntityKind)> {
+    document
         .entities
         .iter()
         .filter(|entity| entity.canonical_name == "same")
-        .map(|entity| entity.id)
-        .collect::<Vec<_>>();
-    ids.sort_unstable();
-    ids
+        .map(|entity| (entity.qualified_name.clone(), (entity.id, entity.kind)))
+        .collect()
+}
+
+fn symbol_id_named(
+    document: &rootlight_ir::NormalizedIrDocument,
+    canonical_name: &str,
+) -> SymbolId {
+    let mut matching = document
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == canonical_name);
+    let id = matching
+        .next()
+        .unwrap_or_else(|| panic!("missing entity named {canonical_name}"))
+        .id;
+    assert!(
+        matching.next().is_none(),
+        "fixture must produce one entity named {canonical_name}"
+    );
+    id
 }
 
 fn symbol_ids(

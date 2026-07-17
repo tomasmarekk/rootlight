@@ -21,9 +21,10 @@ use rootlight_adapter_treesitter::TreeSitterAnalyzer;
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, content_hash, derive_repository};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticSeverity, ExtensionSupport,
-    FactEvidence, IrDocument, IrLimits, LexicalEvidenceKind, OccurrenceRole, ProducerIdentity,
-    RelationPredicate, SourceRef, SourceSpan, decode_ir_document, decode_lexical_evidence_envelope,
+    AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticSeverity, EntityFlag,
+    ExtensionSupport, FactEvidence, IrDocument, IrLimits, LexicalEvidenceKind, OccurrenceRole,
+    ProducerIdentity, RelationPredicate, SourceRef, SourceSpan, decode_ir_document,
+    decode_lexical_evidence_envelope,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
@@ -931,6 +932,10 @@ fn python_and_javascript_file_modules_use_repository_paths() {
         assert_eq!(
             output.document().entities[0].kind,
             rootlight_ir::EntityKind::Module
+        );
+        assert_eq!(
+            output.document().entities[0].flags,
+            vec![EntityFlag::Synthetic]
         );
         assert!(
             output.document().occurrences.is_empty(),

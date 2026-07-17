@@ -22,8 +22,8 @@ use rootlight_ids::{
 };
 use rootlight_ir::{
     AnalysisTier, Confidence, ContainerRef, CoverageRecord, CoverageScope, CoverageStatus,
-    DiagnosticRecord, DiagnosticSeverity, EntityKind, EntityRecord, EntityVisibility, EvidenceKind,
-    ExtensionEnvelope, FactDomain, FactEvidence, FactRef, FileRecord, IrLimits,
+    DiagnosticRecord, DiagnosticSeverity, EntityFlag, EntityKind, EntityRecord, EntityVisibility,
+    EvidenceKind, ExtensionEnvelope, FactDomain, FactEvidence, FactRef, FileRecord, IrLimits,
     LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION, LexicalEvidenceFormat,
     LexicalEvidenceKind, LexicalEvidenceV1, MAX_LEXICAL_SIGNATURE_BYTES, OccurrenceRecord,
     OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord,
@@ -44,6 +44,8 @@ const COVERAGE_DOMAIN: &str = "rootlight.coverage/v1";
 const SKIPPED_REGION_DOMAIN: &str = "rootlight.skipped-region/v1";
 const DIAGNOSTIC_DOMAIN: &str = "rootlight.diagnostic/v1";
 const SCOPE_IDENTITY_CONTEXT: &str = "rootlight/scope-container/v1";
+const SCOPE_HEADER_CONTEXT: &str = "rootlight/treesitter-scope-header/v1";
+const SCOPE_COLLISION_GUARD_CONTEXT: &str = "rootlight/treesitter-scope-collision-guard/v1";
 const ENTITY_IDENTITY_GUARD_CONTEXT: &str = "rootlight/treesitter-entity-identity-guard/v1";
 
 /// Tree-sitter syntax analyzer backed by an injected parser-independent provider.
@@ -861,11 +863,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
         }
 
+        let mut first_entity_child_start = HashMap::<u64, u64>::new();
+        for fact in &ordered_facts {
+            if entity_kind(fact).is_some()
+                && let Some(parent) = fact.parent()
+            {
+                first_entity_child_start
+                    .entry(parent)
+                    .and_modify(|start| *start = (*start).min(fact.span().start_byte()))
+                    .or_insert(fact.span().start_byte());
+            }
+        }
         let mut drafts = HashMap::<u64, EntityDraft>::new();
         let mut nearest_entity_ancestor = HashMap::new();
-        let mut nearest_scope_ancestor = HashMap::<u64, Option<[u8; 32]>>::new();
-        let mut scope_sibling_counts =
-            HashMap::<(Option<u64>, Option<[u8; 32]>, String), usize>::new();
+        let mut nearest_scope_ancestor = HashMap::<u64, Option<ScopeContext>>::new();
         for (index, fact) in ordered_facts.into_iter().enumerate() {
             check_periodically(index, cancellation)?;
             let parent_entity = fact.parent().and_then(|parent| {
@@ -876,32 +887,71 @@ impl<'context, 'source> Lowering<'context, 'source> {
             });
             let parent_scope = fact
                 .parent()
-                .and_then(|parent| nearest_scope_ancestor.get(&parent).copied().flatten());
+                .and_then(|parent| nearest_scope_ancestor.get(&parent).cloned().flatten());
             if fact.kind() == SyntaxFactKind::Scope {
-                let scope_key = (
-                    parent_entity,
-                    parent_scope,
-                    fact.syntax_kind().as_str().to_owned(),
-                );
-                let sibling = scope_sibling_counts
-                    .get(&scope_key)
-                    .copied()
-                    .unwrap_or_default();
-                let next_sibling = sibling
-                    .checked_add(1)
-                    .ok_or(SinkError::AccountingOverflow)?;
-                scope_sibling_counts.insert(scope_key, next_sibling);
-                let scope_identity =
-                    scope_identity(parent_scope, fact.syntax_kind().as_str(), sibling)?;
+                let stable_header = self.stable_scope_header(
+                    fact,
+                    first_entity_child_start.get(&fact.local_id()).copied(),
+                )?;
+                // Only reviewed semantic headers enter public symbol identity. Positional
+                // ordinals would silently rebind unchanged symbols after sibling edits.
+                let stable_identity = stable_header
+                    .as_ref()
+                    .map(|header| {
+                        scope_identity(
+                            parent_scope
+                                .as_ref()
+                                .and_then(|scope| scope.stable_identity),
+                            fact.syntax_kind().as_str(),
+                            header.digest,
+                        )
+                    })
+                    .transpose()?
+                    .or_else(|| {
+                        parent_scope
+                            .as_ref()
+                            .and_then(|scope| scope.stable_identity)
+                    });
+                // Anonymous scopes intentionally inherit their nearest stable identity. The
+                // span-local guard prevents distinct anonymous declarations from coalescing
+                // silently without making source position part of the durable SymbolId.
+                let collision_guard = scope_collision_guard(
+                    parent_scope
+                        .as_ref()
+                        .and_then(|scope| scope.collision_guard),
+                    fact.syntax_kind().as_str(),
+                    fact.span(),
+                )?;
+                let context = ScopeContext {
+                    stable_identity,
+                    collision_guard: Some(collision_guard),
+                    qualified_prefix: stable_header
+                        .as_ref()
+                        .map(|header| Arc::<str>::from(header.qualified_prefix.as_str()))
+                        .or_else(|| {
+                            parent_scope
+                                .as_ref()
+                                .and_then(|scope| scope.qualified_prefix.clone())
+                        }),
+                    kind: stable_header
+                        .as_ref()
+                        .map(|header| header.kind)
+                        .or_else(|| parent_scope.as_ref().and_then(|scope| scope.kind)),
+                };
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
-                nearest_scope_ancestor.insert(fact.local_id(), Some(scope_identity));
+                nearest_scope_ancestor.insert(fact.local_id(), Some(context));
                 continue;
             }
-            let Some(kind) = entity_kind(fact) else {
+            let Some(mut kind) = entity_kind(fact) else {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
                 continue;
             };
+            if parent_scope.as_ref().and_then(|scope| scope.kind) == Some(StableScopeKind::RustImpl)
+                && fact.syntax_kind().as_str() == "rust.function.declaration"
+            {
+                kind = EntityKind::Method;
+            }
             let capture = captures.get(&fact.local_id()).cloned().unwrap_or_default();
             let definition = select_unique_capture(&capture.definitions);
             let (name, definition_local_id, definition_span) = if let Some(definition) = definition
@@ -935,13 +985,23 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 (String::new(), None, None)
             };
             let language = language_for_fact(self.request, fact).as_str().to_owned();
+            let qualified_prefix = parent_scope
+                .as_ref()
+                .and_then(|scope| scope.qualified_prefix.as_deref());
             let qualified_length = match parent_entity.and_then(|parent| drafts.get(&parent)) {
                 Some(parent) => parent
                     .qualified_length
                     .checked_add(2)
                     .and_then(|length| length.checked_add(name.len()))
                     .ok_or(SinkError::AccountingOverflow)?,
-                None => name.len(),
+                None => match qualified_prefix {
+                    Some(prefix) => prefix
+                        .len()
+                        .checked_add(2)
+                        .and_then(|length| length.checked_add(name.len()))
+                        .ok_or(SinkError::AccountingOverflow)?,
+                    None => name.len(),
+                },
             };
             require_resource_limit(
                 ResourceKind::StringBytes,
@@ -956,7 +1016,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 EntityDraft {
                     local_id: fact.local_id(),
                     parent_entity,
-                    scope_identity: parent_scope,
+                    scope_identity: parent_scope
+                        .as_ref()
+                        .and_then(|scope| scope.stable_identity),
+                    scope_collision_guard: parent_scope
+                        .as_ref()
+                        .and_then(|scope| scope.collision_guard),
+                    qualified_prefix: qualified_prefix.map(str::to_owned),
+                    synthetic: definition_local_id.is_none(),
                     definition_local_id,
                     span: definition_span,
                     depth: fact.depth(),
@@ -1006,6 +1073,48 @@ impl<'context, 'source> Lowering<'context, 'source> {
             .get(start..end)
             .ok_or_else(|| provider_failure("treesitter-lowering-span"))
     }
+
+    fn stable_scope_header(
+        &self,
+        scope: &SyntaxFact,
+        first_entity_start: Option<u64>,
+    ) -> Result<Option<StableScopeHeader>, AdapterError> {
+        if scope.syntax_kind().as_str() != "rust.impl.scope" {
+            return Ok(None);
+        }
+        let Some(end) = first_entity_start else {
+            return Ok(None);
+        };
+        let start = usize::try_from(scope.span().start_byte())
+            .map_err(|_| provider_failure("treesitter-lowering-scope"))?;
+        let end =
+            usize::try_from(end).map_err(|_| provider_failure("treesitter-lowering-scope"))?;
+        let Some(prefix) = self.source_text.get(start..end) else {
+            return Err(provider_failure("treesitter-lowering-scope"));
+        };
+        let Some(opening_brace) = prefix.rfind('{') else {
+            return Ok(None);
+        };
+        let Some(canonical) = canonical_signature(
+            &prefix[..opening_brace],
+            self.request.limits().ir().max_string_bytes,
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(qualified_prefix) = canonical.strip_prefix("impl") else {
+            return Ok(None);
+        };
+        if qualified_prefix.is_empty() {
+            return Ok(None);
+        }
+        let digest = blake3::derive_key(SCOPE_HEADER_CONTEXT, canonical.as_bytes());
+        Ok(Some(StableScopeHeader {
+            digest,
+            qualified_prefix: qualified_prefix.to_owned(),
+            kind: StableScopeKind::RustImpl,
+        }))
+    }
 }
 
 struct LoweredOutput {
@@ -1031,6 +1140,9 @@ struct EntityDraft {
     local_id: u64,
     parent_entity: Option<u64>,
     scope_identity: Option<[u8; 32]>,
+    scope_collision_guard: Option<[u8; 32]>,
+    qualified_prefix: Option<String>,
+    synthetic: bool,
     definition_local_id: Option<u64>,
     span: SourceSpan,
     depth: usize,
@@ -1051,6 +1163,25 @@ struct MaterializedEntity {
     definition_local_id: Option<u64>,
     signature_evidence: Option<String>,
     signature_span: Option<SourceSpan>,
+}
+
+#[derive(Clone, Default)]
+struct ScopeContext {
+    stable_identity: Option<[u8; 32]>,
+    collision_guard: Option<[u8; 32]>,
+    qualified_prefix: Option<Arc<str>>,
+    kind: Option<StableScopeKind>,
+}
+
+struct StableScopeHeader {
+    digest: [u8; 32],
+    qualified_prefix: String,
+    kind: StableScopeKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StableScopeKind {
+    RustImpl,
 }
 
 fn materialize_entity(
@@ -1095,7 +1226,17 @@ fn materialize_entity(
             let mut identity = Vec::with_capacity(1 + file.as_bytes().len());
             identity.push(1);
             identity.extend_from_slice(file.as_bytes());
-            (ContainerRef::File(file), identity, draft.name.clone())
+            let qualified_name = match draft.qualified_prefix.as_deref() {
+                Some(prefix) => {
+                    let mut qualified = String::with_capacity(draft.qualified_length);
+                    qualified.push_str(prefix);
+                    qualified.push_str("::");
+                    qualified.push_str(&draft.name);
+                    qualified
+                }
+                None => draft.name.clone(),
+            };
+            (ContainerRef::File(file), identity, qualified_name)
         }
     };
     if let Some(scope_identity) = draft.scope_identity {
@@ -1112,6 +1253,7 @@ fn materialize_entity(
         &draft.name,
         draft.signature.as_bytes(),
         build_context.digest().as_bytes(),
+        draft.scope_collision_guard.as_ref(),
     )?;
     let id = derive_symbol(SymbolIdentity {
         repository: full_source.repository(),
@@ -1136,7 +1278,11 @@ fn materialize_entity(
         qualified_name,
         container: Some(container),
         visibility: EntityVisibility::Unknown,
-        flags: Vec::new(),
+        flags: if draft.synthetic {
+            vec![EntityFlag::Synthetic]
+        } else {
+            Vec::new()
+        },
         provenance,
         evidence: direct_evidence(source),
     };
@@ -1160,6 +1306,7 @@ fn entity_identity_guard(
     declared_identity: &str,
     signature_discriminator: &[u8],
     build_context_discriminator: &[u8],
+    scope_collision_guard: Option<&[u8; 32]>,
 ) -> Result<[u8; 32], AdapterError> {
     let mut hasher = blake3::Hasher::new_derive_key(ENTITY_IDENTITY_GUARD_CONTEXT);
     for field in [
@@ -1175,6 +1322,15 @@ fn entity_identity_guard(
             .map_err(|_| provider_failure("treesitter-lowering-accounting"))?;
         hasher.update(&length.to_be_bytes());
         hasher.update(field);
+    }
+    match scope_collision_guard {
+        Some(guard) => {
+            hasher.update(&[1]);
+            hasher.update(guard);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
     }
     Ok(*hasher.finalize().as_bytes())
 }
@@ -1215,10 +1371,8 @@ fn equivalent_entity_projection(left: &EntityRecord, right: &EntityRecord) -> bo
 fn scope_identity(
     parent: Option<[u8; 32]>,
     syntax_kind: &str,
-    sibling: usize,
+    header: [u8; 32],
 ) -> Result<[u8; 32], AdapterError> {
-    let sibling =
-        u64::try_from(sibling).map_err(|_| provider_failure("treesitter-lowering-scope"))?;
     let mut hasher = blake3::Hasher::new_derive_key(SCOPE_IDENTITY_CONTEXT);
     match parent {
         Some(parent) => {
@@ -1233,7 +1387,31 @@ fn scope_identity(
         .map_err(|_| provider_failure("treesitter-lowering-scope"))?;
     hasher.update(&syntax_length.to_be_bytes());
     hasher.update(syntax_kind.as_bytes());
-    hasher.update(&sibling.to_be_bytes());
+    hasher.update(&header);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn scope_collision_guard(
+    parent: Option<[u8; 32]>,
+    syntax_kind: &str,
+    span: SourceSpan,
+) -> Result<[u8; 32], AdapterError> {
+    let mut hasher = blake3::Hasher::new_derive_key(SCOPE_COLLISION_GUARD_CONTEXT);
+    match parent {
+        Some(parent) => {
+            hasher.update(&[1]);
+            hasher.update(&parent);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    let syntax_length = u64::try_from(syntax_kind.len())
+        .map_err(|_| provider_failure("treesitter-lowering-scope"))?;
+    hasher.update(&syntax_length.to_be_bytes());
+    hasher.update(syntax_kind.as_bytes());
+    hasher.update(&span.start_byte().to_be_bytes());
+    hasher.update(&span.end_byte().to_be_bytes());
     Ok(*hasher.finalize().as_bytes())
 }
 
