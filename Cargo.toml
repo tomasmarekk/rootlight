@@ -2,6 +2,7 @@
 members = [
     "apps/rootlight",
     "apps/rootlight-daemon",
+    "crates/rootlight-adapter-sdk",
     "crates/rootlight-cancel",
     "crates/rootlight-client",
     "crates/rootlight-config",

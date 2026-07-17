@@ -1434,6 +1434,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootlight-adapter-sdk"
+version = "0.1.0"
+dependencies = [
+ "rootlight-cancel",
+ "rootlight-ir",
+ "rootlight-vfs",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "rootlight-cancel"
 version = "0.1.0"
 dependencies = [
