@@ -10,6 +10,11 @@ mod read;
 mod schema;
 mod write;
 
+#[cfg(test)]
+extern crate self as rootlight_catalog;
+#[cfg(test)]
+mod oracle_roundtrip_tests;
+
 use std::{
     error::Error,
     fmt, io,
@@ -98,8 +103,10 @@ impl Catalog {
     ///
     /// # Errors
     ///
-    /// Returns [`CatalogError`] for private-file, SQLite baseline, defensive
-    /// configuration, schema identity, integrity, or contention failures.
+    /// Production builds return
+    /// [`CatalogErrorKind::UnsupportedPrivateFileBoundary`] before filesystem
+    /// mutation while ADR-026 remains proposed. Test builds additionally
+    /// exercise the schema scaffold.
     pub fn open_in(state_root: &Path) -> Result<Self, CatalogError> {
         let path = state_root.join(CATALOG_FILENAME);
         let connection = schema::open_control(&path)?;
@@ -137,8 +144,10 @@ impl OracleWriter {
     ///
     /// # Errors
     ///
-    /// Returns [`CatalogError`] for existing files, private-file failures,
-    /// SQLite baseline failures, or schema initialization failures.
+    /// Production builds return
+    /// [`CatalogErrorKind::UnsupportedPrivateFileBoundary`] before filesystem
+    /// mutation while ADR-026 remains proposed. Test builds additionally
+    /// exercise existing-file, SQLite, and schema failures.
     pub fn create_in(generation_directory: &Path) -> Result<Self, CatalogError> {
         let path = generation_directory.join(ORACLE_FILENAME);
         let connection = schema::create_oracle(&path)?;
@@ -207,8 +216,10 @@ impl OracleReader {
     ///
     /// # Errors
     ///
-    /// Returns [`CatalogError`] for cancellation, missing or foreign files,
-    /// incompatible schema, failed integrity checks, or corrupt metadata.
+    /// Production builds return
+    /// [`CatalogErrorKind::UnsupportedPrivateFileBoundary`] before filesystem
+    /// inspection while ADR-026 remains proposed. Test builds additionally
+    /// exercise cancellation, compatibility, integrity, and metadata failures.
     pub fn open_in(
         generation_directory: &Path,
         context: &GenerationContext<'_>,
@@ -306,6 +317,8 @@ pub enum CatalogErrorKind {
     UnsupportedSqlite,
     /// SQLite refused a mandatory defensive setting.
     UnsupportedConfiguration,
+    /// ADR-026 has no accepted handle-bound SQLite file implementation.
+    UnsupportedPrivateFileBoundary,
     /// The database file is linked, non-regular, or not private.
     InsecureFile,
     /// Generation metadata or normalized IR was invalid.
@@ -426,6 +439,9 @@ impl fmt::Display for CatalogError {
             CatalogErrorKind::UnsupportedSqlite => "bundled SQLite is unsupported",
             CatalogErrorKind::UnsupportedConfiguration => {
                 "SQLite defensive configuration is unsupported"
+            }
+            CatalogErrorKind::UnsupportedPrivateFileBoundary => {
+                "private SQLite file boundary is unavailable"
             }
             CatalogErrorKind::InsecureFile => "database file is not private",
             CatalogErrorKind::InvalidGeneration => "generation data is invalid",

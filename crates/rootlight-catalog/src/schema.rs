@@ -519,6 +519,7 @@ pub(crate) fn oracle_compatibility() -> SchemaCompatibility {
 }
 
 pub(crate) fn open_control(path: &Path) -> Result<Connection, CatalogError> {
+    require_private_file_boundary(cfg!(test))?;
     let created = create_private_file(path, false)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let connection = Connection::open_with_flags(path, flags).map_err(CatalogError::sqlite)?;
@@ -541,6 +542,7 @@ pub(crate) fn open_control(path: &Path) -> Result<Connection, CatalogError> {
 }
 
 pub(crate) fn create_oracle(path: &Path) -> Result<Connection, CatalogError> {
+    require_private_file_boundary(cfg!(test))?;
     create_private_file(path, true)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let connection = Connection::open_with_flags(path, flags).map_err(CatalogError::sqlite)?;
@@ -558,6 +560,7 @@ pub(crate) fn open_oracle_reader(
     path: &Path,
     context: &GenerationContext<'_>,
 ) -> Result<Connection, CatalogError> {
+    require_private_file_boundary(cfg!(test))?;
     validate_private_file(path)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let connection = Connection::open_with_flags(path, flags).map_err(|error| {
@@ -979,6 +982,16 @@ fn pragma_u32(connection: &Connection, pragma: &str) -> Result<u32, CatalogError
     u32::try_from(value).map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
 }
 
+fn require_private_file_boundary(test_scaffold: bool) -> Result<(), CatalogError> {
+    if test_scaffold {
+        Ok(())
+    } else {
+        Err(CatalogError::new(
+            CatalogErrorKind::UnsupportedPrivateFileBoundary,
+        ))
+    }
+}
+
 fn create_private_file(path: &Path, exclusive: bool) -> Result<bool, CatalogError> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create_new(true);
@@ -1054,5 +1067,16 @@ mod tests {
         assert_ne!(control.checksum(), oracle.checksum());
         assert_eq!(control.checksum().as_bytes().len(), 32);
         assert_eq!(oracle.checksum().as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn proposed_private_file_boundary_fails_closed() {
+        let error =
+            require_private_file_boundary(false).expect_err("proposed boundary is unavailable");
+
+        assert_eq!(
+            error.kind(),
+            CatalogErrorKind::UnsupportedPrivateFileBoundary
+        );
     }
 }

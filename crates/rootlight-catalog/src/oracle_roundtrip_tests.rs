@@ -1,4 +1,4 @@
-//! Black-box persistence tests for the private catalog and sealed oracle.
+//! Persistence tests for the fail-closed catalog scaffold and sealed oracle.
 //!
 //! Fixtures exercise canonical rebuilds, bounded work, defensive reopen, and
 //! typed rejection of invalid or tampered generation data.
