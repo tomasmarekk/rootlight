@@ -1,7 +1,8 @@
-//! Account-private filesystem trees backed by stable operating-system handles.
+//! Proposed account-private filesystem tree types.
 //!
-//! The public surface never exposes raw handles or paths. Platform-specific
-//! code owns creation, identity, publication, and cleanup as one boundary.
+//! ADR-026 is not accepted, so the platform boundary remains a zero-mutation
+//! scaffold. Every creation, publication, synchronization, and removal
+//! operation fails closed on every target.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -18,7 +19,9 @@ mod os;
 /// Maximum platform name units accepted for one private-tree entry.
 pub const MAX_PRIVATE_NAME_UNITS: usize = 255;
 
-/// Exact identity of an object on one mounted filesystem.
+/// Reserved representation for a future exact platform object identity.
+///
+/// No value is returned while ADR-026 remains proposed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PlatformFileIdentity {
     volume: u64,
@@ -26,48 +29,59 @@ pub struct PlatformFileIdentity {
 }
 
 impl PlatformFileIdentity {
-    /// Returns the platform volume or device identity.
+    /// Returns the reserved platform volume or device identity.
     #[must_use]
     pub const fn volume(self) -> u64 {
         self.volume
     }
 
-    /// Returns the complete platform file identity.
+    /// Returns the reserved full-width file identity.
     #[must_use]
     pub const fn file(self) -> u128 {
         self.file
     }
-
-    #[cfg(all(unix, not(target_vendor = "apple")))]
-    const fn new(volume: u64, file: u128) -> Self {
-        Self { volume, file }
-    }
 }
 
-/// A private directory tree that has not yet been published.
+/// An unpublished private-directory owner reserved by ADR-026.
 ///
-/// Dropping this value attempts handle-bound recursive cleanup. Call
-/// [`PrivateDirectory::remove`] when cleanup errors must be observed.
+/// The proposed implementation is unavailable on every platform. Dropping a
+/// value only drops retained Rust owners; it never attempts filesystem cleanup.
+///
+/// Correctly scoped callers will continue to compile when an accepted
+/// implementation replaces the scaffold:
+///
+/// ```no_run
+/// use std::{ffi::OsStr, io::Write as _};
+///
+/// use cap_std::fs::Dir;
+/// use rootlight_vfs::platform::PrivateDirectory;
+///
+/// # fn stage(parent: &Dir, destination: &Dir) -> Result<(), Box<dyn std::error::Error>> {
+/// let directory = PrivateDirectory::create(parent, OsStr::new("staging"))?;
+/// {
+///     let mut file = directory.create_file(OsStr::new("bundle"))?;
+///     file.write_all(b"evidence")?;
+///     file.sync_all()?;
+/// }
+/// let _published =
+///     directory.publish_noreplace(destination, OsStr::new("bundle-ready"))?;
+/// # Ok(())
+/// # }
+/// ```
+#[must_use = "dropping an unpublished private tree discards its owner without publishing it"]
 pub struct PrivateDirectory<'parent> {
     inner: Option<os::Directory>,
-    // A live child prevents its parent from being published or removed.
     parent: PhantomData<&'parent ()>,
 }
 
 impl PrivateDirectory<'static> {
-    /// Creates an empty account-private directory beneath an opened parent.
-    ///
-    /// On Unix, the supplied parent must itself be owned by the effective user
-    /// and deny group and other access. This protects the source entry for
-    /// handle-relative publication APIs that still name that entry.
+    /// Fails closed without inspecting or mutating the supplied parent.
     ///
     /// # Errors
     ///
-    /// Returns [`PlatformError::InvalidName`] for a non-component name,
-    /// [`PlatformError::InsecureParent`] when the parent cannot protect the
-    /// staging entry, [`PlatformError::UnsupportedPlatform`] when the platform
-    /// boundary is not implemented, or [`PlatformError::Io`] for filesystem
-    /// failures.
+    /// Returns [`PlatformError::InvalidName`] for a non-component name.
+    /// Every valid name returns [`PlatformError::UnsupportedPlatform`] until
+    /// ADR-026 is accepted and implemented.
     pub fn create(parent: &Dir, name: &OsStr) -> Result<Self, PlatformError> {
         let name = PrivateName::parse(name)?;
         os::create_directory(parent, &name).map(|inner| Self {
@@ -78,12 +92,11 @@ impl PrivateDirectory<'static> {
 }
 
 impl<'parent> PrivateDirectory<'parent> {
-    /// Creates an empty private child directory.
+    /// Fails closed without creating a child directory.
     ///
     /// # Errors
     ///
-    /// Returns a typed validation, policy, unsupported-platform, or filesystem
-    /// error without exposing an unverified child handle.
+    /// Returns a typed name-validation or unsupported-platform error.
     pub fn create_directory<'directory>(
         &'directory self,
         name: &OsStr,
@@ -95,14 +108,11 @@ impl<'parent> PrivateDirectory<'parent> {
         })
     }
 
-    /// Creates a new private regular file without following links.
-    ///
-    /// The returned file is policy-verified before callers can write bytes.
+    /// Fails closed without creating a file.
     ///
     /// # Errors
     ///
-    /// Returns a typed validation, policy, unsupported-platform, or filesystem
-    /// error without exposing an unverified file handle.
+    /// Returns a typed name-validation or unsupported-platform error.
     pub fn create_file<'directory>(
         &'directory self,
         name: &OsStr,
@@ -114,33 +124,29 @@ impl<'parent> PrivateDirectory<'parent> {
         })
     }
 
-    /// Returns the exact identity read from the retained directory handle.
+    /// Returns the reserved identity from the retained scaffold state.
+    ///
+    /// Safe callers cannot obtain a directory while creation is unsupported.
     #[must_use]
     pub fn identity(&self) -> PlatformFileIdentity {
         os::directory_identity(self.inner())
     }
 
-    /// Flushes directory metadata through the retained handle.
+    /// Fails closed without performing a filesystem synchronization.
     ///
     /// # Errors
     ///
-    /// Returns [`PlatformError::Io`] when the platform cannot flush the handle.
+    /// Returns [`PlatformError::UnsupportedPlatform`].
     pub fn sync_all(&self) -> Result<(), PlatformError> {
         os::sync_directory(self.inner())
     }
 
-    /// Atomically publishes this tree without replacing an existing entry.
-    ///
-    /// The destination is addressed relative to the supplied opened parent.
-    /// A pre-commit failure removes the still-private source tree. A successful
-    /// rename followed by a destination-directory flush failure is represented
-    /// separately because the tree is already visible.
+    /// Fails closed without publishing or cleaning up a source tree.
     ///
     /// # Errors
     ///
-    /// Returns [`PublishError::NotCommitted`] when the rename did not commit, or
-    /// [`PublishError::CommittedButDurabilityUnknown`] when the rename committed
-    /// but the destination directory could not be flushed.
+    /// Returns [`PublishError::NotCommitted`] with
+    /// [`PlatformError::UnsupportedPlatform`].
     pub fn publish_noreplace(
         mut self,
         destination_parent: &Dir,
@@ -159,22 +165,14 @@ impl<'parent> PrivateDirectory<'parent> {
                 self.inner = Some(directory);
                 Err(PublishError::NotCommitted { source })
             }
-            #[cfg(all(unix, not(target_vendor = "apple")))]
-            Err(os::PublishFailure::Committed { directory, source }) => {
-                Err(PublishError::CommittedButDurabilityUnknown {
-                    directory: PublishedPrivateDirectory { inner: directory },
-                    source,
-                })
-            }
         }
     }
 
-    /// Recursively removes this exact private tree.
+    /// Fails closed without removing a filesystem object.
     ///
     /// # Errors
     ///
-    /// Returns a platform error if handle-bound cleanup cannot complete. The
-    /// implementation leaves an orphan rather than deleting a mismatched entry.
+    /// Returns [`PlatformError::UnsupportedPlatform`].
     pub fn remove(mut self) -> Result<(), PlatformError> {
         let Some(inner) = self.inner.take() else {
             return Err(PlatformError::SecurityPolicy);
@@ -185,7 +183,7 @@ impl<'parent> PrivateDirectory<'parent> {
     fn inner(&self) -> &os::Directory {
         self.inner
             .as_ref()
-            .expect("private directory always owns its platform handle")
+            .expect("safe construction always installs scaffold state")
     }
 }
 
@@ -199,31 +197,51 @@ impl fmt::Debug for PrivateDirectory<'_> {
 
 impl Drop for PrivateDirectory<'_> {
     fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            let _ = os::remove_directory(inner);
-        }
+        // Field destruction closes any future retained owner without a path
+        // lookup or cleanup mutation.
     }
 }
 
-/// A private regular file created inside a [`PrivateDirectory`].
+/// A private-file owner reserved by ADR-026.
+///
+/// The explicit destructor keeps the parent borrow live until the file owner is
+/// dropped. Publication or removal while a writer remains in scope therefore
+/// does not compile:
+///
+/// ```compile_fail
+/// use std::{ffi::OsStr, io::Write as _};
+///
+/// use cap_std::fs::Dir;
+/// use rootlight_vfs::platform::PrivateDirectory;
+///
+/// # fn invalid(parent: &Dir) -> Result<(), Box<dyn std::error::Error>> {
+/// let directory = PrivateDirectory::create(parent, OsStr::new("staging"))?;
+/// let mut file = directory.create_file(OsStr::new("bundle"))?;
+/// directory.remove()?;
+/// file.flush()?;
+/// # Ok(())
+/// # }
+/// ```
+#[must_use = "keep the private-file owner alive until writing and synchronization finish"]
 pub struct PrivateFile<'parent> {
     inner: os::File,
-    // Publication cannot consume the containing tree while this writer exists.
     parent: PhantomData<&'parent ()>,
 }
 
 impl PrivateFile<'_> {
-    /// Returns the exact identity read from the retained file handle.
+    /// Returns the reserved identity from the retained scaffold state.
+    ///
+    /// Safe callers cannot obtain a file while creation is unsupported.
     #[must_use]
     pub fn identity(&self) -> PlatformFileIdentity {
         os::file_identity(&self.inner)
     }
 
-    /// Flushes file data and metadata through the retained handle.
+    /// Fails closed without performing a filesystem synchronization.
     ///
     /// # Errors
     ///
-    /// Returns [`PlatformError::Io`] when the platform cannot flush the handle.
+    /// Returns [`PlatformError::UnsupportedPlatform`].
     pub fn sync_all(&self) -> Result<(), PlatformError> {
         os::sync_file(&self.inner)
     }
@@ -239,23 +257,33 @@ impl Write for PrivateFile<'_> {
     }
 }
 
-/// A successfully published private directory retained by its exact handle.
+impl Drop for PrivateFile<'_> {
+    fn drop(&mut self) {
+        // The explicit destructor makes dropck retain the parent borrow through
+        // destruction; the field owner itself closes any future handle.
+    }
+}
+
+/// A published-directory owner reserved by ADR-026.
+///
+/// No value can be produced while publication remains unsupported.
+#[must_use = "retain the published directory owner while its exact identity is needed"]
 pub struct PublishedPrivateDirectory {
     inner: os::PublishedDirectory,
 }
 
 impl PublishedPrivateDirectory {
-    /// Returns the exact identity of the published directory.
+    /// Returns the reserved identity from the retained scaffold state.
     #[must_use]
     pub fn identity(&self) -> PlatformFileIdentity {
         os::published_identity(&self.inner)
     }
 
-    /// Flushes the published directory through its retained handle.
+    /// Fails closed without performing a filesystem synchronization.
     ///
     /// # Errors
     ///
-    /// Returns [`PlatformError::Io`] when the platform cannot flush the handle.
+    /// Returns [`PlatformError::UnsupportedPlatform`].
     pub fn sync_all(&self) -> Result<(), PlatformError> {
         os::sync_published_directory(&self.inner)
     }
@@ -277,7 +305,7 @@ impl fmt::Debug for PublishedPrivateDirectory {
     }
 }
 
-/// Failures returned by private-tree creation and handle operations.
+/// Failures returned by the proposed private-tree boundary.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PlatformError {
@@ -287,13 +315,13 @@ pub enum PlatformError {
     /// The supplied staging parent did not enforce the account-private policy.
     #[error("private-tree parent is not account-private")]
     InsecureParent,
-    /// The opened object did not satisfy the account-private policy.
+    /// Scaffold state was missing or did not satisfy the proposed policy.
     #[error("private-tree object failed account-private verification")]
     SecurityPolicy,
-    /// This target has no approved implementation for the required guarantees.
+    /// ADR-026 has no accepted platform implementation.
     #[error("private-tree platform boundary is unsupported")]
     UnsupportedPlatform,
-    /// A handle-relative filesystem operation failed.
+    /// A future handle-relative filesystem operation failed.
     #[error("private-tree operation {operation} failed")]
     Io {
         /// Stable source-free operation label.
@@ -313,28 +341,25 @@ impl PlatformError {
             Self::Io { source, .. } if source.kind() == io::ErrorKind::AlreadyExists
         )
     }
-
-    #[cfg(all(unix, not(target_vendor = "apple")))]
-    fn io(operation: &'static str, source: io::Error) -> Self {
-        Self::Io { operation, source }
-    }
 }
 
-/// Failures returned while publishing a private tree.
+/// Failures reserved for future private-tree publication.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PublishError {
-    /// Publication did not commit and the private source was scheduled for cleanup.
+    /// Publication did not commit.
     #[error("private tree was not published")]
     NotCommitted {
-        /// Validation, policy, or operating-system failure before commit.
+        /// Validation, policy, or unsupported-platform cause.
         #[source]
         source: PlatformError,
     },
     /// Publication committed, but destination-directory durability is unknown.
+    ///
+    /// The Proposed scaffold never returns this variant.
     #[error("private tree was published but destination durability is unknown")]
     CommittedButDurabilityUnknown {
-        /// Handle for the already-published exact directory.
+        /// Owner for the already-published exact directory.
         directory: PublishedPrivateDirectory,
         /// Destination-directory flush failure.
         #[source]
@@ -366,11 +391,6 @@ impl PrivateName {
             return Err(PlatformError::InvalidName);
         }
         Ok(Self(name.to_os_string()))
-    }
-
-    #[cfg(all(unix, not(target_vendor = "apple")))]
-    fn as_os_str(&self) -> &OsStr {
-        &self.0
     }
 }
 
@@ -447,9 +467,8 @@ mod tests {
         );
     }
 
-    #[cfg(any(windows, target_vendor = "apple"))]
     #[test]
-    fn unapproved_native_boundaries_fail_closed() {
+    fn proposed_boundary_fails_closed_without_creating_an_entry() {
         let temporary = tempfile::tempdir().expect("temporary directory is created");
         let parent = Dir::open_ambient_dir(temporary.path(), cap_std::ambient_authority())
             .expect("temporary parent opens");
@@ -458,5 +477,12 @@ mod tests {
             PrivateDirectory::create(&parent, OsStr::new("staging")),
             Err(PlatformError::UnsupportedPlatform)
         ));
+        assert!(!temporary.path().join("staging").exists());
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("temporary directory reads")
+                .count(),
+            0
+        );
     }
 }
