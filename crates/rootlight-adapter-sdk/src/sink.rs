@@ -1035,6 +1035,14 @@ pub fn execute_analysis<A: LanguageAnalyzer + ?Sized>(
         sink.discard();
         return Err(error.into());
     }
+    if report.coverage().tier() != analyzer.descriptor().tier() {
+        sink.discard();
+        return Err(ReportError::AnalysisTierMismatch {
+            expected: analyzer.descriptor().tier(),
+            observed: report.coverage().tier(),
+        }
+        .into());
+    }
     if let Err(error) = validate_memory_report(
         analyzer.descriptor().memory_enforcement(),
         report.resources().reported_memory_bytes(),

@@ -5,6 +5,7 @@
 
 use crate::sink::DiagnosticCode;
 use rootlight_cancel::{CancellationReason, Cancelled};
+use rootlight_ir::AnalysisTier;
 
 /// A bounded label field understood by the SDK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +314,14 @@ pub enum ReportError {
     /// An accountable in-process adapter omitted its reported memory counter.
     #[error("accounted in-process adapter omitted its reported memory counter")]
     MissingMemoryAccounting,
+    /// The analyzer's coverage report claimed a different tier from its descriptor.
+    #[error("analysis report tier {observed:?} differs from provider tier {expected:?}")]
+    AnalysisTierMismatch {
+        /// Tier declared by the immutable provider descriptor.
+        expected: AnalysisTier,
+        /// Tier claimed by the completed coverage report.
+        observed: AnalysisTier,
+    },
     /// The report usage did not match the staged stream.
     #[error("reported stream usage does not match staged usage")]
     StreamUsageMismatch,

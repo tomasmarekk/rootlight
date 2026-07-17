@@ -322,7 +322,7 @@ fn invocation_admission_requires_deadline_and_parser_checkpoints() {
     let analyzer = MockLanguageAnalyzer::new(
         descriptor,
         vec![IrRecord::File(file), IrRecord::Provenance(provenance)],
-        complete_coverage(source_len(&source)),
+        analysis_coverage(AnalysisTier::TierC, source_len(&source)),
         0,
     );
     assert_eq!(
@@ -643,7 +643,7 @@ fn unavailable_memory_requires_explicit_visible_fallback() {
     let analyzer = MockLanguageAnalyzer::new(
         fallback_descriptor,
         vec![IrRecord::File(file), IrRecord::Provenance(provenance)],
-        complete_coverage(source_len(&source)),
+        analysis_coverage(AnalysisTier::TierC, source_len(&source)),
         0,
     );
     assert_eq!(
@@ -710,7 +710,7 @@ fn canonical_ir_is_independent_of_allowed_batch_order() {
     let limits = limits(1, ir_limits);
     let request = analysis_request(&snapshot, &source, &limits);
     let (file, provenance, descriptor) = minimal_ir_records(&source);
-    let coverage = complete_coverage(source_len(&source));
+    let coverage = analysis_coverage(AnalysisTier::TierC, source_len(&source));
     let first = MockLanguageAnalyzer::new(
         descriptor.clone(),
         vec![
@@ -747,6 +747,71 @@ fn canonical_ir_is_independent_of_allowed_batch_order() {
     assert_eq!(first_output.document(), second_output.document());
     assert_eq!(first_output.document().files.len(), 1);
     assert_eq!(first_output.document().provenance.len(), 1);
+}
+
+#[test]
+fn all_analysis_tiers_share_the_checked_ir_transaction_contract() {
+    let (_temporary, snapshot, source) = source_fixture();
+    let limits = limits(2, IrLimits::default());
+
+    for tier in [
+        AnalysisTier::TierA,
+        AnalysisTier::TierB,
+        AnalysisTier::TierC,
+        AnalysisTier::TierD,
+    ] {
+        let request = analysis_request_for_tier(&snapshot, &source, &limits, tier);
+        let (file, provenance, descriptor) = minimal_ir_records_for_tier(&source, tier);
+        let analyzer = MockLanguageAnalyzer::new(
+            descriptor,
+            vec![IrRecord::File(file), IrRecord::Provenance(provenance)],
+            analysis_coverage(tier, source_len(&source)),
+            0,
+        );
+        let output = execute_analysis(
+            &analyzer,
+            &request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::default(),
+            &deadline(),
+        )
+        .expect("each declared tier commits through the same normalized IR boundary");
+
+        assert_eq!(output.report().coverage().tier(), tier);
+        assert_eq!(output.document().provenance.len(), 1);
+        assert_eq!(output.document().provenance[0].tier, tier);
+        assert_eq!(output.document().files.len(), 1);
+    }
+}
+
+#[test]
+fn analyzer_report_cannot_claim_a_different_tier() {
+    let (_temporary, snapshot, source) = source_fixture();
+    let limits = limits(2, IrLimits::default());
+    let request = analysis_request_for_tier(&snapshot, &source, &limits, AnalysisTier::TierC);
+    let (file, provenance, descriptor) = minimal_ir_records_for_tier(&source, AnalysisTier::TierC);
+    let analyzer = MockLanguageAnalyzer::new(
+        descriptor,
+        vec![IrRecord::File(file), IrRecord::Provenance(provenance)],
+        analysis_coverage(AnalysisTier::TierD, source_len(&source)),
+        0,
+    );
+
+    assert_eq!(
+        execute_analysis(
+            &analyzer,
+            &request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::default(),
+            &deadline(),
+        ),
+        Err(AdapterError::InvalidReport(
+            ReportError::AnalysisTierMismatch {
+                expected: AnalysisTier::TierC,
+                observed: AnalysisTier::TierD,
+            }
+        ))
+    );
 }
 
 #[test]
@@ -828,7 +893,7 @@ fn invalid_ir_errors_do_not_retain_extension_payloads() {
             IrRecord::Provenance(provenance),
             IrRecord::Extension(extension),
         ],
-        complete_coverage(source_len(&source)),
+        analysis_coverage(AnalysisTier::TierC, source_len(&source)),
         0,
     );
 
@@ -965,6 +1030,17 @@ fn minimal_ir_records(
     rootlight_ir::ProvenanceRecord,
     ProducerDescriptor,
 ) {
+    minimal_ir_records_for_tier(source, AnalysisTier::TierC)
+}
+
+fn minimal_ir_records_for_tier(
+    source: &SourceRef,
+    tier: AnalysisTier,
+) -> (
+    rootlight_ir::FileRecord,
+    rootlight_ir::ProvenanceRecord,
+    ProducerDescriptor,
+) {
     let provenance_id = "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga"
         .parse()
         .expect("checked provenance identity parses");
@@ -979,7 +1055,7 @@ fn minimal_ir_records(
         binary_digest: source.content_hash(),
         frontend_version: Some("sdk-test-grammar-1".to_owned()),
         language: "rust".to_owned(),
-        tier: AnalysisTier::TierC,
+        tier,
         build_context: BuildContextIdentity::new(source.content_hash()),
         input_sources: vec![source.clone()],
         evidence_sources: vec![source.clone()],
@@ -1103,10 +1179,19 @@ fn analysis_request<'a>(
     source: &SourceRef,
     limits: &'a AnalysisLimits,
 ) -> AnalysisRequest<'a> {
+    analysis_request_for_tier(snapshot, source, limits, AnalysisTier::TierC)
+}
+
+fn analysis_request_for_tier<'a>(
+    snapshot: &'a SourceSnapshot,
+    source: &SourceRef,
+    limits: &'a AnalysisLimits,
+    tier: AnalysisTier,
+) -> AnalysisRequest<'a> {
     AnalysisRequest::new(
         GenerationBoundSnapshot::new(snapshot, source).expect("fixture snapshot binds"),
         LanguageId::new("rust").expect("test language is safe"),
-        AnalysisTier::TierC,
+        tier,
         BuildContextIdentity::new(snapshot.content_hash()),
         limits,
     )
@@ -1123,6 +1208,18 @@ fn complete_coverage(source_bytes: usize) -> CoverageReport {
         Vec::new(),
     )
     .expect("complete test coverage is valid")
+}
+
+fn analysis_coverage(tier: AnalysisTier, source_bytes: usize) -> CoverageReport {
+    CoverageReport::new(
+        tier,
+        CoverageStatus::Complete,
+        source_bytes,
+        source_bytes,
+        0,
+        Vec::new(),
+    )
+    .expect("complete analysis coverage is valid")
 }
 
 fn source_len(source: &SourceRef) -> usize {
