@@ -16,6 +16,11 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct IrLimits {
+    /// Maximum bytes in the encoded JSON document before decoding.
+    ///
+    /// The 512 MiB default leaves structural headroom above the 256 MiB
+    /// non-payload string and 16 MiB extension-payload budgets.
+    pub max_document_bytes: usize,
     /// Maximum file records before deduplication.
     pub max_files: usize,
     /// Maximum entity records before deduplication.
@@ -59,6 +64,7 @@ pub struct IrLimits {
 impl Default for IrLimits {
     fn default() -> Self {
         Self {
+            max_document_bytes: 512 * 1024 * 1024,
             max_files: 100_000,
             max_entities: 1_000_000,
             max_occurrences: 5_000_000,
@@ -1417,15 +1423,21 @@ mod tests {
 
     use super::*;
     use crate::{
-        ContainerRef, CoverageStatus, ExtensionIdentifier, IrLimits,
-        UnknownNoncriticalExtensionPolicy,
+        ContainerRef, CoverageStatus, ExtensionIdentifier, IrDocument, IrLimits,
+        UnknownNoncriticalExtensionPolicy, decode_ir_document,
     };
 
     fn fixture() -> NormalizedIrDocument {
-        serde_json::from_str(include_str!(
-            "../../../tests/fixtures/compatibility/ir/1.1/document.json"
-        ))
-        .expect("frozen normalized IR fixture decodes")
+        let decoded = decode_ir_document(
+            include_bytes!("../../../tests/fixtures/compatibility/ir/1.1/document.json"),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("frozen normalized IR fixture decodes");
+        let IrDocument::NormalizedV1_1(document) = decoded else {
+            panic!("normalized fixture must dispatch to version 1.1");
+        };
+        document
     }
 
     fn canonical(document: NormalizedIrDocument) -> NormalizedIrDocument {

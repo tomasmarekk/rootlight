@@ -7,8 +7,9 @@ use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, RepositoryId, Sym
 use serde::{Deserialize, Serialize, de};
 
 use crate::{
-    AnalysisTier, BuildContextIdentity, Confidence, CoverageStatus, EvidenceKind, IR_VERSION,
-    IrDocumentSchema, IrVersion, ProducerIdentity, SourceRef,
+    AnalysisTier, BuildContextIdentity, Confidence, CoverageStatus, EvidenceKind, ExtensionSupport,
+    IR_VERSION, IrDocumentSchema, IrLimits, IrVersion, ProducerIdentity, SourceRef,
+    canonicalize_ir_document,
 };
 
 /// The exact normalized fact-document version.
@@ -809,7 +810,7 @@ pub struct ExtensionEnvelope {
 }
 
 /// A strict version 1.1 normalized fact document.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedIrDocument {
@@ -873,7 +874,7 @@ pub enum IrDocument {
 }
 
 impl IrDocument {
-    /// Returns the exact version selected by the dispatch decoder.
+    /// Returns the exact version selected by the bounded dispatch decoder.
     #[must_use]
     pub const fn version(&self) -> IrVersion {
         match self {
@@ -895,169 +896,323 @@ impl Serialize for IrDocument {
     }
 }
 
-impl<'de> Deserialize<'de> for IrDocument {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = DispatchDocument::deserialize(deserializer)?;
-        match wire.version {
-            IR_VERSION => wire.into_legacy().map(Self::LegacyV1_0),
-            NORMALIZED_IR_VERSION => wire.into_normalized().map(Self::NormalizedV1_1),
-            version => Err(de::Error::custom(format_args!(
-                "unsupported IR version {}.{}",
-                version.major(),
-                version.minor()
-            ))),
+/// Bounded IR document decoding failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum IrDocumentDecodeError {
+    /// The encoded document exceeded its configured byte ceiling.
+    #[error("encoded IR document contains {observed} bytes, limit is {limit}")]
+    EncodedDocumentTooLarge {
+        /// Observed encoded byte length.
+        observed: usize,
+        /// Configured encoded byte ceiling.
+        limit: usize,
+    },
+    /// The input was not a strict supported IR JSON document.
+    #[error("encoded IR document is malformed")]
+    MalformedDocument,
+    /// The document declared a version other than exactly 1.0 or 1.1.
+    #[error("unsupported IR version {major}.{minor}")]
+    UnsupportedVersion {
+        /// Unsupported major component.
+        major: u16,
+        /// Unsupported minor component.
+        minor: u16,
+    },
+    /// The fields did not match the shape selected by the declared version.
+    #[error("encoded IR document does not match its declared version")]
+    InvalidDocumentShape,
+    /// A normalized 1.1 document failed quota or semantic validation.
+    #[error("normalized IR document is invalid")]
+    InvalidNormalizedDocument,
+}
+
+/// Decodes, validates, and dispatches one byte-bounded IR JSON document.
+///
+/// The encoded byte ceiling is checked before Serde can materialize any
+/// document string or collection. Version 1.0 returns the frozen legacy
+/// envelope. Version 1.1 is validated against raw quotas and returned in
+/// deterministic canonical order under the supplied extension policy.
+///
+/// The frozen [`IrDocumentSchema`] and individual record types retain
+/// `Deserialize` for schema and fixture composition. Those trait
+/// implementations do not apply document-wide [`IrLimits`] and are not
+/// substitutes for this untrusted-input boundary.
+///
+/// Direct Serde decoding is intentionally unavailable:
+///
+/// ```compile_fail
+/// use rootlight_ir::IrDocument;
+///
+/// fn decode_without_limits(encoded: &[u8]) {
+///     let _: IrDocument = serde_json::from_slice(encoded).unwrap();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use rootlight_ir::NormalizedIrDocument;
+///
+/// fn decode_normalized_without_limits(encoded: &[u8]) {
+///     let _: NormalizedIrDocument = serde_json::from_slice(encoded).unwrap();
+/// }
+/// ```
+///
+/// # Errors
+///
+/// Returns [`IrDocumentDecodeError::EncodedDocumentTooLarge`] before JSON
+/// decoding when `encoded` exceeds [`IrLimits::max_document_bytes`]. Malformed
+/// JSON and unsupported versions are rejected without exposing input content.
+/// Version-shape mismatches and invalid normalized quotas, references,
+/// provenance, source mappings, coverage, or extensions are also rejected.
+pub fn decode_ir_document(
+    encoded: &[u8],
+    limits: &IrLimits,
+    extensions: &ExtensionSupport,
+) -> Result<IrDocument, IrDocumentDecodeError> {
+    let observed = encoded.len();
+    if observed > limits.max_document_bytes {
+        return Err(IrDocumentDecodeError::EncodedDocumentTooLarge {
+            observed,
+            limit: limits.max_document_bytes,
+        });
+    }
+
+    // Serde skips all unrecognized fields during this pass, so an unsupported
+    // version does not materialize attacker-controlled document collections.
+    let version = serde_json::from_slice::<VersionProbe>(encoded)
+        .map_err(|_| IrDocumentDecodeError::MalformedDocument)?
+        .version;
+    if version != IR_VERSION && version != NORMALIZED_IR_VERSION {
+        return Err(IrDocumentDecodeError::UnsupportedVersion {
+            major: version.major(),
+            minor: version.minor(),
+        });
+    }
+
+    match version {
+        IR_VERSION => {
+            let wire = serde_json::from_slice::<LegacyWireDocument>(encoded)
+                .map_err(classify_wire_error)?;
+            IrDocumentSchema::new(
+                wire.version,
+                wire.generation,
+                wire.producer,
+                wire.build_context,
+                wire.coverage,
+                wire.evidence,
+            )
+            .map(IrDocument::LegacyV1_0)
+            .map_err(|_| IrDocumentDecodeError::InvalidDocumentShape)
         }
+        NORMALIZED_IR_VERSION => {
+            let wire = serde_json::from_slice::<NormalizedWireDocument>(encoded)
+                .map_err(classify_wire_error)?;
+            let document = wire.into();
+            canonicalize_ir_document(document, limits, extensions)
+                .map(IrDocument::NormalizedV1_1)
+                .map_err(|_| IrDocumentDecodeError::InvalidNormalizedDocument)
+        }
+        version => Err(IrDocumentDecodeError::UnsupportedVersion {
+            major: version.major(),
+            minor: version.minor(),
+        }),
     }
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DispatchDocument {
+struct VersionProbe {
     version: IrVersion,
-    generation: GenerationId,
-    repository: Option<RepositoryId>,
-    producer: Option<ProducerIdentity>,
-    build_context: Option<BuildContextIdentity>,
-    coverage: Option<CoverageStatus>,
-    evidence: Option<EvidenceKind>,
-    files: Option<Vec<FileRecord>>,
-    entities: Option<Vec<EntityRecord>>,
-    occurrences: Option<Vec<OccurrenceRecord>>,
-    relations: Option<Vec<RelationRecord>>,
-    provenance: Option<Vec<ProvenanceRecord>>,
-    source_mappings: Option<Vec<SourceMappingRecord>>,
-    coverage_records: Option<Vec<CoverageRecord>>,
-    skipped_regions: Option<Vec<SkippedRegion>>,
-    diagnostics: Option<Vec<DiagnosticRecord>>,
-    extensions: Option<Vec<ExtensionEnvelope>>,
 }
 
-impl DispatchDocument {
-    fn into_legacy<E>(self) -> Result<IrDocumentSchema, E>
-    where
-        E: de::Error,
-    {
-        if self.repository.is_some()
-            || self.files.is_some()
-            || self.entities.is_some()
-            || self.occurrences.is_some()
-            || self.relations.is_some()
-            || self.provenance.is_some()
-            || self.source_mappings.is_some()
-            || self.coverage_records.is_some()
-            || self.skipped_regions.is_some()
-            || self.diagnostics.is_some()
-            || self.extensions.is_some()
-        {
-            return Err(E::custom("IR version 1.0 contains version 1.1 fields"));
-        }
-        let producer = self.producer.ok_or_else(|| E::missing_field("producer"))?;
-        let build_context = self
-            .build_context
-            .ok_or_else(|| E::missing_field("build_context"))?;
-        let coverage = self.coverage.ok_or_else(|| E::missing_field("coverage"))?;
-        let evidence = self.evidence.ok_or_else(|| E::missing_field("evidence"))?;
-        IrDocumentSchema::new(
-            self.version,
-            self.generation,
-            producer,
-            build_context,
-            coverage,
-            evidence,
-        )
-        .map_err(E::custom)
-    }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyWireDocument {
+    version: IrVersion,
+    generation: GenerationId,
+    producer: ProducerIdentity,
+    build_context: BuildContextIdentity,
+    coverage: CoverageStatus,
+    evidence: EvidenceKind,
+}
 
-    fn into_normalized<E>(self) -> Result<NormalizedIrDocument, E>
-    where
-        E: de::Error,
-    {
-        if self.producer.is_some()
-            || self.build_context.is_some()
-            || self.coverage.is_some()
-            || self.evidence.is_some()
-        {
-            return Err(E::custom(
-                "IR version 1.1 contains legacy version 1.0 fields",
-            ));
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NormalizedWireDocument {
+    version: NormalizedIrVersion,
+    repository: RepositoryId,
+    generation: GenerationId,
+    files: Vec<FileRecord>,
+    entities: Vec<EntityRecord>,
+    occurrences: Vec<OccurrenceRecord>,
+    relations: Vec<RelationRecord>,
+    provenance: Vec<ProvenanceRecord>,
+    source_mappings: Vec<SourceMappingRecord>,
+    coverage_records: Vec<CoverageRecord>,
+    skipped_regions: Vec<SkippedRegion>,
+    diagnostics: Vec<DiagnosticRecord>,
+    extensions: Vec<ExtensionEnvelope>,
+}
+
+impl From<NormalizedWireDocument> for NormalizedIrDocument {
+    fn from(wire: NormalizedWireDocument) -> Self {
+        Self {
+            version: wire.version,
+            repository: wire.repository,
+            generation: wire.generation,
+            files: wire.files,
+            entities: wire.entities,
+            occurrences: wire.occurrences,
+            relations: wire.relations,
+            provenance: wire.provenance,
+            source_mappings: wire.source_mappings,
+            coverage_records: wire.coverage_records,
+            skipped_regions: wire.skipped_regions,
+            diagnostics: wire.diagnostics,
+            extensions: wire.extensions,
         }
-        Ok(NormalizedIrDocument {
-            version: NormalizedIrVersion::new(),
-            repository: self
-                .repository
-                .ok_or_else(|| E::missing_field("repository"))?,
-            generation: self.generation,
-            files: self.files.ok_or_else(|| E::missing_field("files"))?,
-            entities: self.entities.ok_or_else(|| E::missing_field("entities"))?,
-            occurrences: self
-                .occurrences
-                .ok_or_else(|| E::missing_field("occurrences"))?,
-            relations: self
-                .relations
-                .ok_or_else(|| E::missing_field("relations"))?,
-            provenance: self
-                .provenance
-                .ok_or_else(|| E::missing_field("provenance"))?,
-            source_mappings: self
-                .source_mappings
-                .ok_or_else(|| E::missing_field("source_mappings"))?,
-            coverage_records: self
-                .coverage_records
-                .ok_or_else(|| E::missing_field("coverage_records"))?,
-            skipped_regions: self
-                .skipped_regions
-                .ok_or_else(|| E::missing_field("skipped_regions"))?,
-            diagnostics: self
-                .diagnostics
-                .ok_or_else(|| E::missing_field("diagnostics"))?,
-            extensions: self
-                .extensions
-                .ok_or_else(|| E::missing_field("extensions"))?,
-        })
+    }
+}
+
+fn classify_wire_error(error: serde_json::Error) -> IrDocumentDecodeError {
+    if error.is_data() {
+        IrDocumentDecodeError::InvalidDocumentShape
+    } else {
+        IrDocumentDecodeError::MalformedDocument
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use rootlight_ids::{GenerationId, derive_repository};
+    use rootlight_ids::FactId;
 
     use super::*;
 
-    #[test]
-    fn normalized_document_requires_exact_version() {
-        let repository = derive_repository(b"repository").id();
-        let generation = GenerationId::from_bytes([2; 20]);
-        let document = NormalizedIrDocument::empty(repository, generation);
-        let mut value = serde_json::to_value(document).expect("normalized document serializes");
+    const LEGACY_FIXTURE: &[u8] =
+        include_bytes!("../../../tests/fixtures/compatibility/ir/1.0/document.json");
+    const NORMALIZED_FIXTURE: &[u8] =
+        include_bytes!("../../../tests/fixtures/compatibility/ir/1.1/document.json");
 
-        value["version"]["minor"] = serde_json::json!(2);
-        assert!(serde_json::from_value::<NormalizedIrDocument>(value).is_err());
+    fn legacy_value() -> serde_json::Value {
+        serde_json::from_slice(LEGACY_FIXTURE).expect("legacy fixture JSON parses")
+    }
+
+    fn normalized_value() -> serde_json::Value {
+        serde_json::from_slice(NORMALIZED_FIXTURE).expect("normalized fixture JSON parses")
+    }
+
+    fn encode_test_value(value: &serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(value).expect("test value serializes")
+    }
+
+    fn decode(encoded: &[u8], limits: &IrLimits) -> Result<IrDocument, IrDocumentDecodeError> {
+        decode_ir_document(encoded, limits, &ExtensionSupport::default())
     }
 
     #[test]
-    fn dispatch_rejects_unsupported_minor_instead_of_reinterpreting_shape() {
-        let repository = derive_repository(b"repository").id();
-        let generation = GenerationId::from_bytes([2; 20]);
-        let mut value = serde_json::to_value(NormalizedIrDocument::empty(repository, generation))
-            .expect("normalized document serializes");
-
-        value["version"]["minor"] = serde_json::json!(2);
-        let error = serde_json::from_value::<IrDocument>(value)
-            .expect_err("unsupported minor must be rejected");
-        assert!(error.to_string().contains("unsupported IR version 1.2"));
+    fn bounded_dispatch_accepts_exact_legacy_and_normalized_versions() {
+        assert!(matches!(
+            decode(LEGACY_FIXTURE, &IrLimits::default()),
+            Ok(IrDocument::LegacyV1_0(_))
+        ));
+        assert!(matches!(
+            decode(NORMALIZED_FIXTURE, &IrLimits::default()),
+            Ok(IrDocument::NormalizedV1_1(_))
+        ));
     }
 
     #[test]
-    fn dispatch_selects_normalized_document() {
-        let repository = derive_repository(b"repository").id();
-        let generation = GenerationId::from_bytes([2; 20]);
-        let value = serde_json::to_value(NormalizedIrDocument::empty(repository, generation))
-            .expect("normalized document serializes");
+    fn bounded_dispatch_rejects_malformed_and_unsupported_versions() {
+        assert_eq!(
+            decode(b"{", &IrLimits::default()),
+            Err(IrDocumentDecodeError::MalformedDocument)
+        );
 
-        let decoded = serde_json::from_value::<IrDocument>(value).expect("version 1.1 dispatches");
-        assert!(matches!(decoded, IrDocument::NormalizedV1_1(_)));
+        let mut value = normalized_value();
+        value["version"]["minor"] = serde_json::json!(2);
+        assert_eq!(
+            decode(&encode_test_value(&value), &IrLimits::default()),
+            Err(IrDocumentDecodeError::UnsupportedVersion { major: 1, minor: 2 })
+        );
+    }
+
+    #[test]
+    fn exact_dispatch_rejects_cross_version_fields_even_when_null() {
+        let mut legacy = legacy_value();
+        legacy["repository"] = serde_json::Value::Null;
+        assert_eq!(
+            decode(&encode_test_value(&legacy), &IrLimits::default()),
+            Err(IrDocumentDecodeError::InvalidDocumentShape)
+        );
+
+        let mut normalized = normalized_value();
+        normalized["producer"] = serde_json::Value::Null;
+        assert_eq!(
+            decode(&encode_test_value(&normalized), &IrLimits::default()),
+            Err(IrDocumentDecodeError::InvalidDocumentShape)
+        );
+    }
+
+    #[test]
+    fn oversized_malformed_input_rejects_before_json_decoding() {
+        let limits = IrLimits {
+            max_document_bytes: 4,
+            ..IrLimits::default()
+        };
+        assert_eq!(
+            decode(b"{{{{{", &limits),
+            Err(IrDocumentDecodeError::EncodedDocumentTooLarge {
+                observed: 5,
+                limit: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn normalized_decode_canonicalizes_equal_duplicates() {
+        let mut value = normalized_value();
+        let duplicate = value["entities"][0].clone();
+        value["entities"]
+            .as_array_mut()
+            .expect("fixture entities are an array")
+            .push(duplicate);
+
+        let decoded = decode(&encode_test_value(&value), &IrLimits::default())
+            .expect("equal duplicates canonicalize");
+        let IrDocument::NormalizedV1_1(document) = decoded else {
+            panic!("normalized fixture must dispatch to version 1.1");
+        };
+        assert_eq!(document.entities.len(), 1);
+    }
+
+    #[test]
+    fn invalid_normalized_quotas_and_references_never_return_documents() {
+        let limits = IrLimits {
+            max_files: 0,
+            ..IrLimits::default()
+        };
+        assert_eq!(
+            decode(NORMALIZED_FIXTURE, &limits),
+            Err(IrDocumentDecodeError::InvalidNormalizedDocument)
+        );
+
+        let mut invalid_reference = normalized_value();
+        invalid_reference["entities"][0]["provenance"] =
+            serde_json::to_value(FactId::from_bytes([99; 20])).expect("fact ID serializes");
+        assert_eq!(
+            decode(&encode_test_value(&invalid_reference), &IrLimits::default()),
+            Err(IrDocumentDecodeError::InvalidNormalizedDocument)
+        );
+    }
+
+    #[test]
+    fn decode_errors_do_not_expose_attacker_controlled_namespaces() {
+        let sensitive_namespace = "/private/attacker.rs";
+        let mut value = normalized_value();
+        value["extensions"][0]["namespace"] = serde_json::json!(sensitive_namespace);
+
+        let error = decode(&encode_test_value(&value), &IrLimits::default())
+            .expect_err("invalid namespace is rejected");
+        assert_eq!(error, IrDocumentDecodeError::InvalidNormalizedDocument);
+        assert!(!error.to_string().contains(sensitive_namespace));
     }
 }

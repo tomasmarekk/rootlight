@@ -690,9 +690,22 @@ pub enum LexicalExtensionError {
 mod tests {
     use super::*;
     use crate::{
-        ExtensionSupport, IrLimits, NormalizedIrDocument, SourceSpan,
-        UnknownNoncriticalExtensionPolicy, canonicalize_ir_document,
+        ExtensionSupport, IrDocument, IrLimits, NormalizedIrDocument, SourceSpan,
+        UnknownNoncriticalExtensionPolicy, canonicalize_ir_document, decode_ir_document,
     };
+
+    fn normalized_fixture() -> NormalizedIrDocument {
+        let decoded = decode_ir_document(
+            include_bytes!("../../../tests/fixtures/compatibility/ir/1.1/document.json"),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("frozen normalized IR fixture decodes");
+        let IrDocument::NormalizedV1_1(document) = decoded else {
+            panic!("normalized fixture must dispatch to version 1.1");
+        };
+        document
+    }
 
     fn owner() -> (RepositoryId, GenerationId, FactId, SourceRef, FactRef) {
         let repository = RepositoryId::from_bytes([1; 16]);
@@ -1100,10 +1113,7 @@ mod tests {
 
     #[test]
     fn skipping_lexical_extension_preserves_valid_common_ir() {
-        let mut document: NormalizedIrDocument = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/compatibility/ir/1.1/document.json"
-        ))
-        .expect("frozen normalized IR fixture decodes");
+        let mut document = normalized_fixture();
         let subject = FactRef::Entity(document.entities[0].id);
         let source = document.entities[0]
             .evidence
@@ -1141,10 +1151,7 @@ mod tests {
 
     #[test]
     fn frozen_extension_fixture_matches_constructor() {
-        let document: NormalizedIrDocument = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/compatibility/ir/1.1/document.json"
-        ))
-        .expect("frozen normalized IR fixture decodes");
+        let document = normalized_fixture();
         let subject = FactRef::Entity(document.entities[0].id);
         let source = document.entities[0]
             .evidence

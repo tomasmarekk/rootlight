@@ -14,8 +14,9 @@ use prost::Message;
 use prost_types::FileDescriptorSet;
 use rootlight_config::{ConfigDocumentSchema, ConfigDocumentSchemaV1_1};
 use rootlight_ir::{
-    ExtensionEnvelope, IrDocument, IrDocumentSchema, LexicalEvidenceV1, NormalizedIrDocument,
-    decode_lexical_evidence, decode_lexical_evidence_envelope,
+    ExtensionEnvelope, ExtensionSupport, IrDocument, IrDocumentSchema, IrLimits, LexicalEvidenceV1,
+    NormalizedIrDocument, decode_ir_document, decode_lexical_evidence,
+    decode_lexical_evidence_envelope,
 };
 use rootlight_mcp_contract::{ErrorResponse, ResponseMetadata};
 use rootlight_protocol::generated::common::v1::ContractVersion as ProtocolContractVersion;
@@ -354,7 +355,14 @@ fn validate_normalized_ir_baseline(workspace_root: &Path) -> Result<(), SchemaEr
     let document_path = workspace_root
         .join(COMPATIBILITY_ROOT)
         .join("ir/1.1/document.json");
-    let document = read_json_value(&document_path)?;
+    let document_bytes = read_bytes(&document_path)?;
+    let document: serde_json::Value =
+        serde_json::from_slice(&document_bytes).map_err(|source| {
+            SchemaError::ParseCompatibilityFixture {
+                path: document_path,
+                source,
+            }
+        })?;
     let schema_path = workspace_root
         .join(SCHEMA_ROOT)
         .join("json/ir-1.1.schema.json");
@@ -372,20 +380,14 @@ fn validate_normalized_ir_baseline(workspace_root: &Path) -> Result<(), SchemaEr
         }
     })?;
     let schema_valid = validator.is_valid(&document);
-    let normalized = serde_json::from_value::<NormalizedIrDocument>(document.clone());
-    let semantic_valid = normalized.as_ref().is_ok_and(|document| {
-        rootlight_ir::validate_ir_document(
-            document,
-            &rootlight_ir::IrLimits::default(),
-            &rootlight_ir::ExtensionSupport::default(),
-        )
-        .is_ok()
-    });
-    let decode_valid = semantic_valid
-        && matches!(
-            serde_json::from_value::<IrDocument>(document),
-            Ok(IrDocument::NormalizedV1_1(_))
-        );
+    let decode_valid = matches!(
+        decode_ir_document(
+            &document_bytes,
+            &IrLimits::default(),
+            &ExtensionSupport::default()
+        ),
+        Ok(IrDocument::NormalizedV1_1(_))
+    );
     if !schema_valid || !decode_valid {
         return Err(SchemaError::CompatibilityIrValidity {
             version: "1.1".to_owned(),
@@ -900,7 +902,16 @@ fn validate_generated_json_schemas(
                     serde_json::from_value::<IrDocumentSchema>(case.instance.clone()).is_ok()
                 }
                 "ir-1.1.schema.json" => {
-                    serde_json::from_value::<NormalizedIrDocument>(case.instance.clone()).is_ok()
+                    let encoded =
+                        serde_json::to_vec(&case.instance).map_err(SchemaError::SerializeJson)?;
+                    matches!(
+                        decode_ir_document(
+                            &encoded,
+                            &IrLimits::default(),
+                            &ExtensionSupport::default()
+                        ),
+                        Ok(IrDocument::NormalizedV1_1(_))
+                    )
                 }
                 _ => case.expected_valid,
             }
@@ -912,8 +923,17 @@ fn validate_generated_json_schemas(
             )));
         }
     }
-    if serde_json::from_value::<IrDocument>(ir_document(1, 0)).is_err()
-        || serde_json::from_value::<IrDocument>(ir_document(1, 2)).is_ok()
+    let legacy = serde_json::to_vec(&ir_document(1, 0)).map_err(SchemaError::SerializeJson)?;
+    let unsupported = serde_json::to_vec(&ir_document(1, 2)).map_err(SchemaError::SerializeJson)?;
+    if !matches!(
+        decode_ir_document(&legacy, &IrLimits::default(), &ExtensionSupport::default()),
+        Ok(IrDocument::LegacyV1_0(_))
+    ) || decode_ir_document(
+        &unsupported,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .is_ok()
     {
         return Err(SchemaError::GeneratedSchemaSemantics(
             "explicit IR dispatch accepted an unsupported minor".to_owned(),
