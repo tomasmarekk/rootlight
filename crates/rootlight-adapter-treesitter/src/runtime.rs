@@ -1,7 +1,9 @@
 //! Bounded Tree-sitter parsing, pooling, incremental reuse, and diagnostics.
 //!
-//! Cooperative cancellation runs inside Tree-sitter's progress callback.
-//! Native allocation remains an explicit M05 fallback until M13 isolation.
+//! Rust-owned scans, copies, sorts, staging, and commits use bounded cooperative
+//! checkpoints, while Tree-sitter parsing uses its native progress callback.
+//! `changed_ranges` performs eager native work before Rust iterator checkpoints;
+//! hard preemption and native-allocation isolation remain M13 responsibilities.
 
 use std::{
     collections::VecDeque,
@@ -13,10 +15,10 @@ use std::{
 };
 
 use rootlight_adapter_sdk::{
-    AdapterDiagnostic, AdapterError, CoverageReport, DiagnosticCode, EncodingId,
-    MemoryAdmissionPolicy, MemoryEnforcement, ParseCapabilities, ParseProvider, ParseReport,
-    ParseRequest, RemainingBudget, RequestError, ResourceKind, ResourceUsage, StreamEnd,
-    SyntaxFact, SyntaxFactBatch, SyntaxFactSink, SyntaxKindLabel, WorkReport,
+    AdapterDiagnostic, AdapterError, CoverageReport, DiagnosticCode, EncodingId, IncludedRange,
+    LanguageId, MemoryAdmissionPolicy, MemoryEnforcement, ParseCapabilities, ParseProvider,
+    ParseReport, ParseRequest, RemainingBudget, RequestError, ResourceKind, ResourceUsage,
+    StreamEnd, SyntaxFact, SyntaxFactBatch, SyntaxFactSink, SyntaxKindLabel, WorkReport,
     execute_parse_transaction,
 };
 use rootlight_cancel::Cancellation;
@@ -198,23 +200,22 @@ impl TreeSitterProvider {
             self.config.max_included_ranges(),
         )?;
         validate_utf8_cancellable(source_bytes, cancellation)?;
-        if request
-            .included_ranges()
-            .iter()
-            .any(|range| range.language() != request.language())
-        {
-            return Err(provider_failure("included-language"));
-        }
+        validate_included_range_languages(
+            request.included_ranges(),
+            request.language(),
+            cancellation,
+        )?;
         let descriptor = self
             .registry
             .get(family)
             .ok_or_else(|| provider_failure("grammar-missing"))?;
+        let included_ranges = range_identities(request.included_ranges(), cancellation)?;
         let identity = ParseIdentity {
             content_hash: request.source().source_ref().content_hash(),
             family,
             grammar_version: descriptor.grammar_version(),
             encoding: request.encoding().as_str().to_owned(),
-            included_ranges: range_identities(request),
+            included_ranges: Arc::clone(&included_ranges),
             settings,
         };
         let cached = self.resolve_previous(previous, cancellation)?;
@@ -228,7 +229,7 @@ impl TreeSitterProvider {
             family,
             grammar_version: identity.grammar_version,
             encoding: identity.encoding.clone(),
-            included_ranges: identity.included_ranges.clone(),
+            included_ranges,
             settings,
             edits: source_edit_identities(edits, cancellation)?,
         };
@@ -593,7 +594,7 @@ impl ParseCache {
         &mut self,
         provider_id: u64,
         identity: ParseIdentity,
-        source: Arc<[u8]>,
+        source: Arc<Vec<u8>>,
         tree: &Tree,
         nodes: usize,
     ) -> Result<Option<PreviousParse>, ()> {
@@ -646,7 +647,7 @@ impl ParseCache {
 struct CachedParse {
     entry_id: u64,
     identity: ParseIdentity,
-    source: Arc<[u8]>,
+    source: Arc<Vec<u8>>,
     tree: Option<Tree>,
     accounted_bytes: usize,
     invalidation: Option<ReuseInvalidation>,
@@ -657,7 +658,7 @@ impl CachedParse {
         Self {
             entry_id: 0,
             identity: invalid_identity(),
-            source: Arc::from([]),
+            source: Arc::new(Vec::new()),
             tree: None,
             accounted_bytes: 0,
             invalidation: Some(invalidation),
@@ -682,7 +683,7 @@ fn invalid_identity() -> ParseIdentity {
         family: GrammarFamily::Rust,
         grammar_version: "",
         encoding: String::new(),
-        included_ranges: Vec::new(),
+        included_ranges: Arc::new(Vec::new()),
         settings: ParserSettings::new(1).expect("hard-coded parser setting is nonzero"),
     }
 }
@@ -723,9 +724,12 @@ fn source_edit_identities(
     cancellation: &Cancellation,
 ) -> Result<Vec<SourceEditIdentity>, AdapterError> {
     let mut identities = Vec::new();
-    identities
-        .try_reserve_exact(edits.len())
-        .map_err(|_| provider_failure("incremental-identity-allocation"))?;
+    try_reserve_exact_cancellable(
+        &mut identities,
+        edits.len(),
+        cancellation,
+        "incremental-identity-allocation",
+    )?;
     for edit in edits {
         cancellation.check()?;
         let mut hasher = blake3::Hasher::new();
@@ -971,9 +975,12 @@ fn rebuild_edited_source(
 ) -> Result<(), AdapterError> {
     cancellation.check()?;
     scratch.clear();
-    scratch
-        .try_reserve_exact(expected_length)
-        .map_err(|_| provider_failure("incremental-source-allocation"))?;
+    try_reserve_exact_cancellable(
+        scratch,
+        expected_length,
+        cancellation,
+        "incremental-source-allocation",
+    )?;
     append_bytes_cancellable(
         scratch,
         source
@@ -1002,8 +1009,7 @@ fn copy_bytes_cancellable(
 ) -> Result<Vec<u8>, AdapterError> {
     cancellation.check()?;
     let mut copy = Vec::new();
-    copy.try_reserve_exact(source.len())
-        .map_err(|_| provider_failure(allocation_code))?;
+    try_reserve_exact_cancellable(&mut copy, source.len(), cancellation, allocation_code)?;
     append_bytes_cancellable(&mut copy, source, cancellation)?;
     Ok(copy)
 }
@@ -1060,6 +1066,7 @@ fn count_changed_ranges(
     maximum: usize,
     cancellation: &Cancellation,
 ) -> Result<usize, AdapterError> {
+    cancellation.check()?;
     let mut count = 0usize;
     for range in old_tree.changed_ranges(new_tree) {
         if count.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
@@ -1080,9 +1087,9 @@ fn count_changed_ranges(
 fn copy_source_for_cache(
     source: &[u8],
     cancellation: &Cancellation,
-) -> Result<Arc<[u8]>, AdapterError> {
+) -> Result<Arc<Vec<u8>>, AdapterError> {
     let copy = copy_bytes_cancellable(source, cancellation, "cache-allocation")?;
-    Ok(Arc::from(copy))
+    Ok(Arc::new(copy))
 }
 
 fn tree_sitter_ranges(
@@ -1092,9 +1099,12 @@ fn tree_sitter_ranges(
 ) -> Result<Vec<Range>, AdapterError> {
     cancellation.check()?;
     let mut ranges = Vec::new();
-    ranges
-        .try_reserve_exact(request.included_ranges().len())
-        .map_err(|_| provider_failure("range-allocation"))?;
+    try_reserve_exact_cancellable(
+        &mut ranges,
+        request.included_ranges().len(),
+        cancellation,
+        "range-allocation",
+    )?;
     let mut cursor = 0usize;
     let mut point = Point { row: 0, column: 0 };
     for included in request.included_ranges() {
@@ -1197,8 +1207,42 @@ fn advance_source_point(
     Ok(())
 }
 
-fn range_identities(request: &ParseRequest<'_>) -> Vec<rootlight_adapter_sdk::IncludedRange> {
-    request.included_ranges().to_vec()
+fn validate_included_range_languages(
+    ranges: &[IncludedRange],
+    language: &LanguageId,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    for (index, range) in ranges.iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if range.language() != language {
+            return Err(provider_failure("included-language"));
+        }
+    }
+    cancellation.check()?;
+    Ok(())
+}
+
+fn range_identities(
+    ranges: &[IncludedRange],
+    cancellation: &Cancellation,
+) -> Result<Arc<Vec<IncludedRange>>, AdapterError> {
+    let mut identities = Vec::new();
+    try_reserve_exact_cancellable(
+        &mut identities,
+        ranges.len(),
+        cancellation,
+        "range-identity-allocation",
+    )?;
+    for (index, range) in ranges.iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        identities.push(range.clone());
+    }
+    cancellation.check()?;
+    Ok(Arc::new(identities))
 }
 
 #[derive(Debug)]
@@ -1275,9 +1319,12 @@ fn normalize_query_candidates(
         .checked_add(expanded_roots)
         .ok_or_else(|| provider_failure("query-fact-accounting"))?;
     let mut restricted = Vec::new();
-    restricted
-        .try_reserve_exact(maximum_expansion.min(max_facts))
-        .map_err(|_| provider_failure("query-fact-allocation"))?;
+    try_reserve_exact_cancellable(
+        &mut restricted,
+        maximum_expansion.min(max_facts),
+        cancellation,
+        "query-fact-allocation",
+    )?;
     let mut limited = false;
     'candidate: for (index, candidate) in candidates.into_iter().enumerate() {
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
@@ -1326,9 +1373,12 @@ fn normalize_query_candidates(
     dedup_query_candidates(&mut restricted, cancellation)?;
 
     let mut selected = Vec::new();
-    selected
-        .try_reserve_exact(restricted.len())
-        .map_err(|_| provider_failure("query-fact-allocation"))?;
+    try_reserve_exact_cancellable(
+        &mut selected,
+        restricted.len(),
+        cancellation,
+        "query-fact-allocation",
+    )?;
     let mut group_start = 0usize;
     while group_start < restricted.len() {
         if group_start.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
@@ -1370,9 +1420,12 @@ fn normalize_query_candidates(
     }
 
     let mut drafts = Vec::new();
-    drafts
-        .try_reserve_exact(selected.len())
-        .map_err(|_| provider_failure("query-fact-allocation"))?;
+    try_reserve_exact_cancellable(
+        &mut drafts,
+        selected.len(),
+        cancellation,
+        "query-fact-allocation",
+    )?;
     for (index, candidate) in selected.into_iter().enumerate() {
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
             cancellation.check()?;
@@ -1395,9 +1448,12 @@ fn normalize_query_candidates(
     }
     assign_fact_parents(&mut drafts, cancellation)?;
     let mut facts = Vec::new();
-    facts
-        .try_reserve_exact(drafts.len())
-        .map_err(|_| provider_failure("query-fact-allocation"))?;
+    try_reserve_exact_cancellable(
+        &mut facts,
+        drafts.len(),
+        cancellation,
+        "query-fact-allocation",
+    )?;
     for (index, draft) in drafts.into_iter().enumerate() {
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
             cancellation.check()?;
@@ -1448,9 +1504,12 @@ fn sort_cancellable_by<T: Copy>(
 
     cancellation.check()?;
     let mut scratch = Vec::new();
-    scratch
-        .try_reserve_exact(values.len())
-        .map_err(|_| provider_failure("query-sort-allocation"))?;
+    try_reserve_exact_cancellable(
+        &mut scratch,
+        values.len(),
+        cancellation,
+        "query-sort-allocation",
+    )?;
     let mut width = CANCELLATION_CHECK_INTERVAL;
     while width < values.len() {
         cancellation.check()?;
@@ -1593,9 +1652,12 @@ fn assign_fact_parents(
 ) -> Result<(), AdapterError> {
     cancellation.check()?;
     let mut order = Vec::new();
-    order
-        .try_reserve_exact(drafts.len())
-        .map_err(|_| provider_failure("query-parent-allocation"))?;
+    try_reserve_exact_cancellable(
+        &mut order,
+        drafts.len(),
+        cancellation,
+        "query-parent-allocation",
+    )?;
     for index in 0..drafts.len() {
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
             cancellation.check()?;
@@ -1665,9 +1727,7 @@ fn assign_fact_parents(
         drafts[index].parent = parent;
         drafts[index].depth = depth;
         if drafts[index].role.container_rank().is_some() {
-            active
-                .try_reserve(1)
-                .map_err(|_| provider_failure("query-parent-allocation"))?;
+            try_reserve_cancellable(&mut active, 1, cancellation, "query-parent-allocation")?;
             active.push(index);
         }
     }
@@ -1710,9 +1770,12 @@ fn plan_fact_batches(
     let remaining = budget.remaining();
     let batch = budget.batch();
     let mut ranges = Vec::new();
-    ranges
-        .try_reserve_exact(facts.len().min(remaining.batches()))
-        .map_err(|_| provider_failure("query-batch-allocation"))?;
+    try_reserve_exact_cancellable(
+        &mut ranges,
+        facts.len().min(remaining.batches()),
+        cancellation,
+        "query-batch-allocation",
+    )?;
     let mut batch_start = 0usize;
     let mut batch_records = 0usize;
     let mut batch_output = 0usize;
@@ -1818,9 +1881,12 @@ fn emit_fact_plan(
             .checked_sub(range.start)
             .ok_or_else(|| provider_failure("query-batch-invariant"))?;
         let mut batch_facts = Vec::new();
-        batch_facts
-            .try_reserve_exact(batch_length)
-            .map_err(|_| provider_failure("query-batch-allocation"))?;
+        try_reserve_exact_cancellable(
+            &mut batch_facts,
+            batch_length,
+            cancellation,
+            "query-batch-allocation",
+        )?;
         for index in 0..batch_length {
             if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
                 cancellation.check()?;
@@ -1832,11 +1898,10 @@ fn emit_fact_plan(
             );
         }
         consumed = range.end;
-        sink.push(SyntaxFactBatch::new(
-            sink.next_sequence(),
-            batch_facts,
-            Vec::new(),
-        ))?;
+        sink.push_cancellable(
+            SyntaxFactBatch::new(sink.next_sequence(), batch_facts, Vec::new()),
+            cancellation,
+        )?;
     }
     cancellation.check()?;
     if consumed != expected_emitted {
@@ -1858,11 +1923,10 @@ fn emit_extraction_limit_diagnostic(
         Some(request.source().source_ref().clone()),
         CoverageStatus::Bounded,
     );
-    sink.push(SyntaxFactBatch::new(
-        sink.next_sequence(),
-        Vec::new(),
-        vec![diagnostic],
-    ))?;
+    sink.push_cancellable(
+        SyntaxFactBatch::new(sink.next_sequence(), Vec::new(), vec![diagnostic]),
+        cancellation,
+    )?;
     Ok(())
 }
 
@@ -1902,20 +1966,7 @@ fn inspect_tree(
     let requested_covered_bytes = if request.included_ranges().is_empty() {
         source_len
     } else {
-        request
-            .included_ranges()
-            .iter()
-            .try_fold(0usize, |total, range| {
-                let span = range.span();
-                let length = span
-                    .end_byte()
-                    .checked_sub(span.start_byte())
-                    .and_then(|length| usize::try_from(length).ok())
-                    .ok_or_else(|| provider_failure("range-accounting"))?;
-                total
-                    .checked_add(length)
-                    .ok_or_else(|| provider_failure("range-accounting"))
-            })?
+        included_range_source_bytes(request.included_ranges(), cancellation)?
     };
     let (coverage, skipped_regions, primary_diagnostic) = if limited_nodes {
         (
@@ -1953,6 +2004,29 @@ fn inspect_tree(
         primary_diagnostic,
         fully_traversed: !limited_nodes && !limited_depth,
     })
+}
+
+fn included_range_source_bytes(
+    ranges: &[IncludedRange],
+    cancellation: &Cancellation,
+) -> Result<usize, AdapterError> {
+    let mut total = 0usize;
+    for (index, range) in ranges.iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        let span = range.span();
+        let length = span
+            .end_byte()
+            .checked_sub(span.start_byte())
+            .and_then(|length| usize::try_from(length).ok())
+            .ok_or_else(|| provider_failure("range-accounting"))?;
+        total = total
+            .checked_add(length)
+            .ok_or_else(|| provider_failure("range-accounting"))?;
+    }
+    cancellation.check()?;
+    Ok(total)
 }
 
 fn traverse_syntax(
@@ -2017,9 +2091,12 @@ fn push_children_bounded<'tree>(
     let child_capacity = remaining.saturating_sub(stack.len());
     let total_children = node.child_count();
     let child_count = total_children.min(child_capacity);
-    stack
-        .try_reserve(child_count)
-        .map_err(|_| provider_failure("syntax-traversal-allocation"))?;
+    try_reserve_cancellable(
+        stack,
+        child_count,
+        cancellation,
+        "syntax-traversal-allocation",
+    )?;
     for index in (0..child_count).rev() {
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
             cancellation.check()?;
@@ -2068,11 +2145,10 @@ fn emit_primary_diagnostic(
         source,
         coverage,
     );
-    sink.push(SyntaxFactBatch::new(
-        sink.next_sequence(),
-        Vec::new(),
-        vec![diagnostic],
-    ))?;
+    sink.push_cancellable(
+        SyntaxFactBatch::new(sink.next_sequence(), Vec::new(), vec![diagnostic]),
+        cancellation,
+    )?;
     Ok(())
 }
 
@@ -2104,6 +2180,30 @@ fn provider_failure(code: &'static str) -> AdapterError {
     }
 }
 
+fn try_reserve_exact_cancellable<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    cancellation: &Cancellation,
+    allocation_code: &'static str,
+) -> Result<(), AdapterError> {
+    cancellation.check()?;
+    values
+        .try_reserve_exact(additional)
+        .map_err(|_| provider_failure(allocation_code))
+}
+
+fn try_reserve_cancellable<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    cancellation: &Cancellation,
+    allocation_code: &'static str,
+) -> Result<(), AdapterError> {
+    cancellation.check()?;
+    values
+        .try_reserve(additional)
+        .map_err(|_| provider_failure(allocation_code))
+}
+
 fn require_provider_limit(
     resource: ResourceKind,
     observed: usize,
@@ -2133,7 +2233,7 @@ mod tests {
         let cached = CachedParse {
             entry_id: 1,
             identity: base.clone(),
-            source: Arc::from(&b"fn one() {}"[..]),
+            source: Arc::new(b"fn one() {}".to_vec()),
             tree: Some(tree),
             accounted_bytes: 1,
             invalidation: None,
@@ -2148,13 +2248,13 @@ mod tests {
         changed.encoding = "other".to_owned();
         assert_invalidated(&cached, changed, ReuseInvalidation::Encoding);
         let mut changed = base.clone();
-        changed
-            .included_ranges
-            .push(rootlight_adapter_sdk::IncludedRange::new(
+        Arc::make_mut(&mut changed.included_ranges).push(
+            rootlight_adapter_sdk::IncludedRange::new(
                 SourceSpan::new(rootlight_ids::FileId::from_bytes([1; 20]), 0, 1)
                     .expect("test span is ordered"),
                 rootlight_adapter_sdk::LanguageId::new("rust").expect("test language is valid"),
-            ));
+            ),
+        );
         assert_invalidated(&cached, changed, ReuseInvalidation::IncludedRanges);
         let mut changed = base.clone();
         changed.settings = ParserSettings::new(2).expect("test setting is nonzero");
@@ -2394,6 +2494,89 @@ mod tests {
 
         assert!(matches!(
             plan_fact_batches(&facts, sink.remaining_budget(), &cancellation),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest
+            })
+        ));
+    }
+
+    #[test]
+    fn cancelled_reservation_precedes_capacity_failure() {
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+        let mut values = Vec::<u8>::new();
+
+        assert!(matches!(
+            try_reserve_exact_cancellable(
+                &mut values,
+                usize::MAX,
+                &cancellation,
+                "query-batch-allocation",
+            ),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest
+            })
+        ));
+    }
+
+    #[test]
+    fn included_range_work_observes_cancellation() {
+        let file = rootlight_ids::FileId::from_bytes([5; 20]);
+        let language = LanguageId::new("rust").expect("test language is valid");
+        let ranges = vec![
+            IncludedRange::new(
+                SourceSpan::new(file, 0, 2).expect("test span is ordered"),
+                language.clone(),
+            ),
+            IncludedRange::new(
+                SourceSpan::new(file, 4, 7).expect("test span is ordered"),
+                language.clone(),
+            ),
+        ];
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+
+        assert_cancelled(validate_included_range_languages(
+            &ranges,
+            &language,
+            &cancellation,
+        ));
+        assert_cancelled(range_identities(&ranges, &cancellation));
+        assert_cancelled(included_range_source_bytes(&ranges, &cancellation));
+    }
+
+    #[test]
+    fn included_range_copy_and_coverage_preserve_semantics() {
+        let file = rootlight_ids::FileId::from_bytes([6; 20]);
+        let language = LanguageId::new("rust").expect("test language is valid");
+        let ranges = vec![
+            IncludedRange::new(
+                SourceSpan::new(file, 0, 2).expect("test span is ordered"),
+                language.clone(),
+            ),
+            IncludedRange::new(
+                SourceSpan::new(file, 4, 7).expect("test span is ordered"),
+                language.clone(),
+            ),
+        ];
+        let cancellation = Cancellation::new();
+
+        validate_included_range_languages(&ranges, &language, &cancellation)
+            .expect("matching languages are accepted");
+        let identities =
+            range_identities(&ranges, &cancellation).expect("bounded identity copy succeeds");
+
+        assert_eq!(identities.as_slice(), ranges.as_slice());
+        assert_eq!(
+            included_range_source_bytes(&ranges, &cancellation)
+                .expect("bounded coverage accounting succeeds"),
+            5
+        );
+    }
+
+    fn assert_cancelled<T>(result: Result<T, AdapterError>) {
+        assert!(matches!(
+            result,
             Err(AdapterError::Cancelled {
                 reason: rootlight_cancel::CancellationReason::ClientRequest
             })
