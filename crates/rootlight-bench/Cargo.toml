@@ -25,8 +25,14 @@ thiserror.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
 rustix = { workspace = true, features = ["fs"] }
 
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
 [target.'cfg(windows)'.dependencies]
+nt-token.workspace = true
 renamore.workspace = true
+windows.workspace = true
+windows-permissions.workspace = true
 
 [lints]
 workspace = true

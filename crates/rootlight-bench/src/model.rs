@@ -372,7 +372,11 @@ impl SemanticQualityMeasurement {
     }
 }
 
-/// One retained agent trajectory; parser-only runs normally publish none.
+/// Reserved agent-trajectory shape.
+///
+/// Result-bundle schema 2.0 requires the trajectory artifact to remain empty;
+/// a later schema must replace free-form tool-call text with a closed,
+/// source-free record before trajectories can be published.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentTrajectory {
@@ -382,7 +386,7 @@ pub struct AgentTrajectory {
     pub task_id: String,
     /// Terminal eligibility.
     pub eligibility: Availability,
-    /// Tool calls retained as source-free structured records.
+    /// Reserved tool-call payload; schema 2.0 rejects every non-empty trajectory.
     pub tool_calls: Vec<String>,
     /// Total model tokens, when measured.
     pub total_tokens: EvidenceValue<u64>,

@@ -10,8 +10,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::bundle::{
     AGENT_TRAJECTORIES_FILE, BUILD_PROVENANCE_FILE, BundleError, COMMAND_FILE, COVERAGE_FILE,
-    DATASET_MANIFEST_FILE, ENVIRONMENT_FILE, QUALITY_FILE, RAW_SAMPLES_FILE, SUMMARY_FILE,
-    json_bytes, json_lines,
+    DATASET_MANIFEST_FILE, ENVIRONMENT_FILE, FIXED_ARTIFACTS, QUALITY_FILE, RAW_SAMPLES_FILE,
+    SUMMARY_FILE, json_bytes, json_lines,
 };
 use crate::decode::{CollectionKind, preflight_artifact_collection};
 use crate::parser::{
@@ -24,18 +24,6 @@ use crate::{
     RESULT_BUNDLE_SCHEMA_VERSION, RawSample, ResultSummary, SEMANTIC_QUALITY_RUBRIC_ID,
     SampleOutcome, decode_benchmark_command, decode_dataset_manifest,
 };
-
-const FIXED_ARTIFACTS: [&str; 9] = [
-    ENVIRONMENT_FILE,
-    DATASET_MANIFEST_FILE,
-    BUILD_PROVENANCE_FILE,
-    COMMAND_FILE,
-    RAW_SAMPLES_FILE,
-    SUMMARY_FILE,
-    COVERAGE_FILE,
-    QUALITY_FILE,
-    AGENT_TRAJECTORIES_FILE,
-];
 
 #[derive(Debug)]
 struct FixedArtifacts {
@@ -56,15 +44,6 @@ pub(crate) fn is_fixed_artifact(relative: &str) -> bool {
 
 pub(crate) trait FixedArtifactSource {
     fn artifact_bytes(&self, name: &str) -> Option<&[u8]>;
-}
-
-impl<B> FixedArtifactSource for BTreeMap<String, B>
-where
-    B: AsRef<[u8]>,
-{
-    fn artifact_bytes(&self, name: &str) -> Option<&[u8]> {
-        self.get(name).map(AsRef::as_ref)
-    }
 }
 
 pub(crate) fn validate_fixed_artifacts<S>(
@@ -175,23 +154,14 @@ where
             schedule.len(),
             limits,
             "raw_sample_count",
-            None,
         )?,
         schedule,
         summary: decode_json(fixed_bytes(artifacts, SUMMARY_FILE)?, limits)?,
         coverage: decode_json(fixed_bytes(artifacts, COVERAGE_FILE)?, limits)?,
         quality: decode_json(fixed_bytes(artifacts, QUALITY_FILE)?, limits)?,
-        agent_trajectories: decode_json_lines(
+        agent_trajectories: decode_agent_trajectories(
             fixed_bytes(artifacts, AGENT_TRAJECTORIES_FILE)?,
-            limits.max_agent_trajectories,
             limits,
-            "agent_trajectory_count",
-            Some((
-                &["tool_calls"],
-                CollectionKind::Array,
-                limits.max_command_arguments,
-                "trajectory_tool_call_count",
-            )),
         )?,
     })
 }
@@ -247,7 +217,6 @@ fn decode_json_lines<T: DeserializeOwned + serde::Serialize>(
     maximum_count: usize,
     limits: BundleLimits,
     resource: &'static str,
-    collection_preflight: Option<(&[&'static str], CollectionKind, usize, &'static str)>,
 ) -> Result<Vec<T>, BundleError> {
     if bytes.is_empty() {
         return Ok(Vec::new());
@@ -273,9 +242,6 @@ fn decode_json_lines<T: DeserializeOwned + serde::Serialize>(
         if values.len() >= maximum_count {
             return Err(BundleError::LimitExceeded { resource });
         }
-        if let Some((path, kind, maximum, resource)) = collection_preflight {
-            preflight_artifact_collection(line, path, kind, maximum, resource, true)?;
-        }
         let value =
             serde_json::from_slice(line).map_err(|_| BundleError::InvalidArtifactEncoding)?;
         values.push(value);
@@ -288,6 +254,40 @@ fn decode_json_lines<T: DeserializeOwned + serde::Serialize>(
         return Err(BundleError::InvalidArtifactEncoding);
     }
     Ok(values)
+}
+
+fn decode_agent_trajectories(
+    bytes: &[u8],
+    limits: BundleLimits,
+) -> Result<Vec<AgentTrajectory>, BundleError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    validate_artifact_size(bytes, limits)?;
+    if !bytes.ends_with(b"\n") {
+        return Err(BundleError::InvalidArtifactEncoding);
+    }
+    let lines = bytes[..bytes.len() - 1].split(|byte| *byte == b'\n');
+    let line_count = lines.clone().count();
+    if line_count > limits.max_agent_trajectories {
+        return Err(BundleError::LimitExceeded {
+            resource: "agent_trajectory_count",
+        });
+    }
+    for line in lines {
+        if line.is_empty() || line.contains(&b'\r') {
+            return Err(BundleError::InvalidArtifactEncoding);
+        }
+        preflight_artifact_collection(
+            line,
+            &["tool_calls"],
+            CollectionKind::Array,
+            limits.max_command_arguments,
+            "trajectory_tool_call_count",
+            true,
+        )?;
+    }
+    Err(BundleError::UnsupportedTrajectorySchema)
 }
 
 fn validate_canonical_json(
@@ -689,21 +689,10 @@ fn validate_quality(
 
 fn validate_trajectories(
     trajectories: &[AgentTrajectory],
-    limits: BundleLimits,
+    _limits: BundleLimits,
 ) -> Result<(), BundleError> {
-    for trajectory in trajectories {
-        validate_schema(&trajectory.schema_version)?;
-        validate_label(&trajectory.task_id, limits)?;
-        validate_availability(&trajectory.eligibility, limits)?;
-        validate_evidence_reason(&trajectory.total_tokens, limits)?;
-        if trajectory.tool_calls.len() > limits.max_command_arguments {
-            return Err(BundleError::LimitExceeded {
-                resource: "trajectory_tool_call_count",
-            });
-        }
-        for tool_call in &trajectory.tool_calls {
-            validate_text(tool_call, limits)?;
-        }
+    if !trajectories.is_empty() {
+        return Err(BundleError::UnsupportedTrajectorySchema);
     }
     Ok(())
 }

@@ -40,7 +40,18 @@ pub(crate) const COVERAGE_FILE: &str = "coverage.json";
 pub(crate) const QUALITY_FILE: &str = "quality.json";
 pub(crate) const AGENT_TRAJECTORIES_FILE: &str = "agent-trajectories.jsonl";
 const CHECKSUMS_FILE: &str = "checksums.txt";
-const FIXED_ARTIFACT_COUNT: usize = 9;
+pub(crate) const FIXED_ARTIFACTS: [&str; 9] = [
+    ENVIRONMENT_FILE,
+    DATASET_MANIFEST_FILE,
+    BUILD_PROVENANCE_FILE,
+    COMMAND_FILE,
+    RAW_SAMPLES_FILE,
+    SUMMARY_FILE,
+    COVERAGE_FILE,
+    QUALITY_FILE,
+    AGENT_TRAJECTORIES_FILE,
+];
+const FIXED_ARTIFACT_COUNT: usize = FIXED_ARTIFACTS.len();
 
 const HARD_MAX_RAW_SAMPLES: usize = 250_000;
 const HARD_MAX_AGENT_TRAJECTORIES: usize = 25_000;
@@ -383,7 +394,7 @@ pub struct ResultBundle {
     pub coverage: CoverageEvidence,
     /// Quality evidence.
     pub quality: QualityEvidence,
-    /// Retained agent trajectories.
+    /// Reserved agent trajectories; schema 2.0 requires this to be empty.
     pub agent_trajectories: Vec<AgentTrajectory>,
     /// Profile artifacts keyed by validated relative artifact name.
     pub profiles: BTreeMap<String, Vec<u8>>,
@@ -396,7 +407,9 @@ pub struct ResultBundle {
 /// # Errors
 ///
 /// Returns [`BundleError`] for invalid input, exceeded limits, serialization,
-/// existing destinations, or filesystem publication failures.
+/// existing destinations, or filesystem publication failures. A
+/// [`BundleError::PublicationDurabilityUnknown`] result means the verified
+/// destination was installed and must not be retried as though it were absent.
 pub fn publish_bundle(bundle: &ResultBundle, destination: &Path) -> Result<(), BundleError> {
     publish_bundle_with_limits(bundle, destination, BundleLimits::default())
 }
@@ -406,17 +419,26 @@ pub fn publish_bundle(bundle: &ResultBundle, destination: &Path) -> Result<(), B
 /// All artifacts are serialized and byte-accounted before a staging directory
 /// is created. The destination parent must already exist. Publication writes
 /// and syncs a complete checksummed sibling directory, then atomically installs
-/// that directory without replacing an existing destination. A process crash
-/// before installation can leave an inert staging sibling but never exposes a
-/// partial destination. On Unix, staging and parent directories are synced
-/// around installation. Rust's standard library does not expose portable
-/// Windows directory-handle syncing, so Windows retains synced files plus the
-/// atomic no-replace directory rename as a best-effort durability fallback.
+/// that directory without replacing an existing destination. After the rename,
+/// publication reopens the destination through the original parent handle and
+/// proves that its stable filesystem identity matches the still-open staging
+/// handle. Name substitution or Windows ambient-path redirection therefore
+/// fails closed and is never reported as successful. A process crash before
+/// installation can leave an inert staging sibling but never exposes this
+/// operation's partial content as a successful destination. The staging tree
+/// is restricted to the publishing account, and each directory and file has
+/// its ownership and policy verified before sensitive content is written. On
+/// Unix, staging and parent directories are synced around installation. Rust's
+/// standard library does not expose portable Windows directory-handle syncing,
+/// so Windows retains synced files plus the atomic no-replace directory rename
+/// as a best-effort durability fallback.
 ///
 /// # Errors
 ///
 /// Returns [`BundleError`] for invalid input, exceeded limits, serialization,
-/// existing destinations, or filesystem publication failures.
+/// existing destinations, or filesystem publication failures. A
+/// [`BundleError::PublicationDurabilityUnknown`] result means the verified
+/// destination was installed and must not be retried as though it were absent.
 pub fn publish_bundle_with_limits(
     bundle: &ResultBundle,
     destination: &Path,
@@ -507,28 +529,35 @@ where
     if !observed.matches_expected_paths(&expected) {
         return Err(BundleError::ArtifactSetMismatch);
     }
-    preflight_artifact_classes(&expected, &observed, limits)?;
-    let mut fixed_artifacts = BTreeMap::new();
-    let mut profiles = BTreeMap::new();
-    let mut logs = BTreeMap::new();
-    for (relative, checksum) in expected {
+    let class_counts = preflight_artifact_classes(&expected, &observed, limits)?;
+    let mut fixed_artifacts = FixedArtifactBytes::new();
+    let mut profiles = Vec::new();
+    profiles
+        .try_reserve_exact(class_counts.profiles)
+        .map_err(|_| BundleError::AllocationFailed)?;
+    let mut logs = Vec::new();
+    logs.try_reserve_exact(class_counts.logs)
+        .map_err(|_| BundleError::AllocationFailed)?;
+    for entry in &expected.entries {
         let bytes = read_bounded(
             observed
-                .file_mut(&relative)
+                .file_mut(entry.relative)
                 .ok_or(BundleError::ArtifactSetMismatch)?,
             limits.max_artifact_bytes,
             "read result artifact",
         )?;
-        if sha256_hex(&bytes) != checksum {
+        if !checksum_matches(&bytes, entry.checksum) {
             return Err(BundleError::ChecksumMismatch);
         }
-        if is_fixed_artifact(&relative) {
-            fixed_artifacts.insert(relative, bytes);
-        } else if let Some(name) = relative.strip_prefix("profiles/") {
-            profiles.insert(name.to_owned(), bytes);
-        } else if let Some(name) = relative.strip_prefix("logs/") {
+        if is_fixed_artifact(entry.relative) {
+            fixed_artifacts.insert(entry.relative, bytes)?;
+        } else if entry.relative.strip_prefix("profiles/").is_some() {
+            profiles.push(bytes);
+        } else if entry.relative.strip_prefix("logs/").is_some() {
             let log = decode_operational_log(&bytes, limits)?;
-            logs.insert(name.to_owned(), log);
+            logs.push(log);
+        } else {
+            return Err(BundleError::ArtifactSetMismatch);
         }
     }
     validate_fixed_artifacts(&fixed_artifacts, limits)?;
@@ -538,16 +567,23 @@ where
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ArtifactClassCounts {
+    profiles: usize,
+    logs: usize,
+}
+
 fn preflight_artifact_classes(
-    expected: &BTreeMap<String, String>,
+    expected: &ParsedChecksums<'_>,
     observed: &OpenedArtifacts,
     limits: BundleLimits,
-) -> Result<(), BundleError> {
+) -> Result<ArtifactClassCounts, BundleError> {
     let mut profile_count = 0_usize;
     let mut log_count = 0_usize;
     let mut profile_bytes = 0_u64;
     let mut log_bytes = 0_u64;
-    for relative in expected.keys() {
+    for entry in &expected.entries {
+        let relative = entry.relative;
         let size = observed
             .size(relative)
             .ok_or(BundleError::ArtifactSetMismatch)?;
@@ -589,7 +625,10 @@ fn preflight_artifact_classes(
             resource: "log_bytes",
         });
     }
-    Ok(())
+    Ok(ArtifactClassCounts {
+        profiles: profile_count,
+        logs: log_count,
+    })
 }
 
 fn decode_operational_log(
@@ -626,7 +665,21 @@ fn publish_bundle_with_fault(
     limits: BundleLimits,
     fail_after_writes: Option<usize>,
 ) -> Result<(), BundleError> {
-    publish_bundle_with_control(bundle, destination, limits, fail_after_writes, || {})
+    publish_bundle_with_control(
+        bundle,
+        destination,
+        limits,
+        fail_after_writes,
+        |_, _| Ok(()),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicationControlPoint {
+    Install,
+    StagingCleanup,
+    RecoveryParentSync,
+    CommittedParentSync,
 }
 
 fn publish_bundle_with_control<F>(
@@ -634,14 +687,14 @@ fn publish_bundle_with_control<F>(
     destination: &Path,
     limits: BundleLimits,
     fail_after_writes: Option<usize>,
-    before_install: F,
+    mut control: F,
 ) -> Result<(), BundleError>
 where
-    F: FnOnce(),
+    F: FnMut(PublicationControlPoint, &mut std::path::PathBuf) -> io::Result<()>,
 {
     let limits = limits.validate()?;
     let artifacts = build_artifacts(bundle, limits)?;
-    let parent_path = destination_parent(destination)?;
+    let mut parent_path = destination_parent(destination)?;
     let destination_name = destination
         .file_name()
         .ok_or(BundleError::InvalidDestination)?;
@@ -679,20 +732,148 @@ where
         .and_then(|()| sync_cap_directory(&staging.directory, "sync staging directory"))
         .and_then(|()| sync_cap_directory(&parent, "sync result parent directory"));
     if let Err(error) = preparation {
-        remove_staging_directory(staging)?;
-        sync_cap_directory(&parent, "sync result parent directory")?;
-        return Err(error);
+        return Err(recover_failed_publication(
+            staging,
+            &parent,
+            &mut parent_path,
+            error,
+            &mut control,
+        ));
     }
-    before_install();
+    if let Err(source) = control(PublicationControlPoint::Install, &mut parent_path) {
+        return Err(recover_failed_publication(
+            staging,
+            &parent,
+            &mut parent_path,
+            BundleError::Io {
+                operation: "prepare result installation",
+                source,
+            },
+            &mut control,
+        ));
+    }
     if let Err(error) =
         install_staged_bundle(&parent, &parent_path, &staging.name, destination_name)
     {
-        remove_staging_directory(staging)?;
-        sync_cap_directory(&parent, "sync result parent directory")?;
-        return Err(error);
+        return Err(recover_failed_publication(
+            staging,
+            &parent,
+            &mut parent_path,
+            error,
+            &mut control,
+        ));
+    }
+    if !installed_directory_matches(&staging.directory, &parent, destination_name) {
+        drop(staging);
+        let primary = BundleError::PublicationIdentityMismatch;
+        let sync = control(
+            PublicationControlPoint::RecoveryParentSync,
+            &mut parent_path,
+        )
+        .and_then(|()| sync_cap_directory_io(&parent));
+        return Err(match sync {
+            Ok(()) => primary,
+            Err(source) => publication_recovery_error(primary, None, Some(source)),
+        });
     }
     drop(staging);
-    sync_cap_directory(&parent, "sync result parent directory")
+    control(
+        PublicationControlPoint::CommittedParentSync,
+        &mut parent_path,
+    )
+    .and_then(|()| sync_cap_directory_io(&parent))
+    .map_err(|source| BundleError::PublicationDurabilityUnknown { source })
+}
+
+fn recover_failed_publication<F>(
+    staging: StagingDirectory,
+    parent: &cap_std::fs::Dir,
+    parent_path: &mut std::path::PathBuf,
+    primary: BundleError,
+    control: &mut F,
+) -> BundleError
+where
+    F: FnMut(PublicationControlPoint, &mut std::path::PathBuf) -> io::Result<()>,
+{
+    let cleanup = match control(PublicationControlPoint::StagingCleanup, parent_path) {
+        Ok(()) => remove_staging_directory_io(staging),
+        Err(source) => {
+            drop(staging);
+            Err(source)
+        }
+    };
+    let sync = control(PublicationControlPoint::RecoveryParentSync, parent_path)
+        .and_then(|()| sync_cap_directory_io(parent));
+    if cleanup.is_ok() && sync.is_ok() {
+        primary
+    } else {
+        publication_recovery_error(primary, cleanup.err(), sync.err())
+    }
+}
+
+fn publication_recovery_error(
+    primary: BundleError,
+    cleanup_source: Option<io::Error>,
+    sync_source: Option<io::Error>,
+) -> BundleError {
+    let (primary_operation, primary_source) = match primary {
+        BundleError::Io { operation, source } => (operation, Some(source)),
+        BundleError::DestinationExists => ("result destination already exists", None),
+        BundleError::InjectedWriteFailure => ("injected result write failure", None),
+        BundleError::PublicationIdentityMismatch => (
+            "installed result directory identity does not match staging",
+            None,
+        ),
+        _ => ("result publication failed", None),
+    };
+    BundleError::PublicationRecoveryFailed {
+        primary_operation,
+        primary_source,
+        cleanup_source,
+        sync_source,
+    }
+}
+
+fn installed_directory_matches(
+    staging: &cap_std::fs::Dir,
+    parent: &cap_std::fs::Dir,
+    destination_name: &OsStr,
+) -> bool {
+    let Ok(installed) = parent.open_dir_nofollow(destination_name) else {
+        return false;
+    };
+    let (Ok(staging_metadata), Ok(installed_metadata)) =
+        (staging.dir_metadata(), installed.dir_metadata())
+    else {
+        return false;
+    };
+    if !staging_metadata.is_dir()
+        || staging_metadata.file_type().is_symlink()
+        || !installed_metadata.is_dir()
+        || installed_metadata.file_type().is_symlink()
+    {
+        return false;
+    }
+    same_directory_identity(&staging_metadata, &installed_metadata)
+}
+
+#[cfg(unix)]
+fn same_directory_identity(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
+    use cap_std::fs::MetadataExt as _;
+
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn same_directory_identity(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
+    use cap_fs_ext::MetadataExt as _;
+
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_directory_identity(_left: &cap_std::fs::Metadata, _right: &cap_std::fs::Metadata) -> bool {
+    false
 }
 
 struct StagingDirectory {
@@ -714,9 +895,13 @@ fn create_staging_directory(parent: &cap_std::fs::Dir) -> Result<StagingDirector
             name.push(char::from(HEX[usize::from(byte >> 4)]));
             name.push(char::from(HEX[usize::from(byte & 0x0f)]));
         }
-        match parent.create_dir(&name) {
+        match create_private_directory(parent, &name) {
             Ok(()) => {
                 let directory = open_staging_directory(parent, &name)?;
+                // The name can be replaced in a shared parent. Until the
+                // opened object passes ownership and policy checks, leaving a
+                // residue is safer than deleting an unverified object.
+                verify_and_restrict_staging_directory(&directory)?;
                 return Ok(StagingDirectory { name, directory });
             }
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
@@ -729,6 +914,195 @@ fn create_staging_directory(parent: &cap_std::fs::Dir) -> Result<StagingDirector
         }
     }
     Err(BundleError::StagingExists)
+}
+
+#[cfg(unix)]
+fn create_private_directory(parent: &cap_std::fs::Dir, name: &str) -> io::Result<()> {
+    use cap_std::fs::DirBuilderExt as _;
+
+    let mut builder = cap_std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    parent.create_dir_with(name, &builder)
+}
+
+#[cfg(not(unix))]
+fn create_private_directory(parent: &cap_std::fs::Dir, name: &str) -> io::Result<()> {
+    parent.create_dir(name)
+}
+
+#[cfg(unix)]
+fn verify_and_restrict_staging_directory(directory: &cap_std::fs::Dir) -> Result<(), BundleError> {
+    use cap_std::fs::MetadataExt as _;
+
+    let metadata = directory.dir_metadata().map_err(|source| BundleError::Io {
+        operation: "inspect result staging object security",
+        source,
+    })?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(BundleError::ResultSecurityPolicy);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_and_restrict_staging_directory(directory: &cap_std::fs::Dir) -> Result<(), BundleError> {
+    let mut handle = directory
+        .try_clone()
+        .map_err(|source| BundleError::Io {
+            operation: "clone staging directory handle",
+            source,
+        })?
+        .into_std_file();
+    restrict_private_windows_object(&mut handle, true)
+}
+
+#[cfg(windows)]
+fn restrict_private_windows_object(
+    handle: &mut std::fs::File,
+    inherit_to_children: bool,
+) -> Result<(), BundleError> {
+    use windows_permissions::{
+        LocalBox, SecurityDescriptor,
+        constants::{SeObjectType, SecurityInformation},
+        wrappers::{GetSecurityInfo, SetSecurityInfo},
+    };
+
+    let (current_sid, token_owner_sid) = current_windows_account_sids()?;
+    let before = GetSecurityInfo(
+        &*handle,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner,
+    )
+    .map_err(|source| BundleError::Io {
+        operation: "inspect result staging object owner",
+        source,
+    })?;
+    let owner = before
+        .owner()
+        .ok_or(BundleError::ResultSecurityPolicy)?
+        .to_string();
+    if owner != current_sid && owner != token_owner_sid {
+        return Err(BundleError::ResultSecurityPolicy);
+    }
+
+    let inheritance = if inherit_to_children { "OICI" } else { "" };
+    let sddl_length = current_sid
+        .len()
+        .checked_mul(2)
+        .and_then(|length| length.checked_add(16))
+        .and_then(|length| length.checked_add(inheritance.len()))
+        .ok_or(BundleError::AllocationFailed)?;
+    let mut sddl = String::new();
+    sddl.try_reserve_exact(sddl_length)
+        .map_err(|_| BundleError::AllocationFailed)?;
+    sddl.push_str("O:");
+    sddl.push_str(&current_sid);
+    sddl.push_str("D:P(A;");
+    sddl.push_str(inheritance);
+    sddl.push_str(";FA;;;");
+    sddl.push_str(&current_sid);
+    sddl.push(')');
+    let descriptor: LocalBox<SecurityDescriptor> = sddl
+        .parse()
+        .map_err(|_| BundleError::ResultSecurityPolicy)?;
+    let dacl = descriptor.dacl().ok_or(BundleError::ResultSecurityPolicy)?;
+    let secured_owner = descriptor
+        .owner()
+        .ok_or(BundleError::ResultSecurityPolicy)?;
+    SetSecurityInfo(
+        &mut *handle,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner | SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        Some(secured_owner),
+        None,
+        Some(dacl),
+        None,
+    )
+    .map_err(|source| BundleError::Io {
+        operation: "restrict result staging object",
+        source,
+    })?;
+    let secured = GetSecurityInfo(
+        &*handle,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner | SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+    )
+    .map_err(|source| BundleError::Io {
+        operation: "verify result staging object security",
+        source,
+    })?;
+    let expected_flags = if inherit_to_children {
+        windows_permissions::constants::AceFlags::ContainerInherit
+            | windows_permissions::constants::AceFlags::ObjectInherit
+    } else {
+        windows_permissions::constants::AceFlags::empty()
+    };
+    verify_private_windows_descriptor(&secured, &current_sid, expected_flags)
+}
+
+#[cfg(windows)]
+fn current_windows_account_sids() -> Result<(String, String), BundleError> {
+    use nt_token::OwnedToken;
+    use windows::Win32::Security::TOKEN_QUERY;
+
+    let token = OwnedToken::from_current_process(TOKEN_QUERY)
+        .map_err(|_| BundleError::ResultSecurityPolicy)?;
+    let user = token
+        .user()
+        .and_then(|sid| sid.to_string())
+        .map_err(|_| BundleError::ResultSecurityPolicy)?;
+    let owner = token
+        .owner()
+        .and_then(|sid| sid.to_string())
+        .map_err(|_| BundleError::ResultSecurityPolicy)?;
+    Ok((user, owner))
+}
+
+#[cfg(windows)]
+fn verify_private_windows_descriptor(
+    descriptor: &windows_permissions::SecurityDescriptor,
+    current_sid: &str,
+    expected_flags: windows_permissions::constants::AceFlags,
+) -> Result<(), BundleError> {
+    use windows_permissions::constants::{AccessRights, AceType, SecurityInformation};
+    use windows_permissions::wrappers::ConvertSecurityDescriptorToStringSecurityDescriptor;
+
+    let owner = descriptor
+        .owner()
+        .ok_or(BundleError::ResultSecurityPolicy)?
+        .to_string();
+    let dacl = descriptor.dacl().ok_or(BundleError::ResultSecurityPolicy)?;
+    let sddl =
+        ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, SecurityInformation::Dacl)
+            .map_err(|source| BundleError::Io {
+                operation: "encode result staging object security",
+                source,
+            })?;
+    let ace = dacl.get_ace(0).ok_or(BundleError::ResultSecurityPolicy)?;
+    let ace_sid = ace
+        .sid()
+        .ok_or(BundleError::ResultSecurityPolicy)?
+        .to_string();
+    if owner != current_sid
+        || !sddl.to_string_lossy().starts_with("D:P")
+        || dacl.len() != 1
+        || ace.ace_type() != AceType::ACCESS_ALLOWED_ACE_TYPE
+        || ace.mask() != AccessRights::FileAllAccess
+        || ace.flags() != expected_flags
+        || ace_sid != current_sid
+    {
+        return Err(BundleError::ResultSecurityPolicy);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn verify_and_restrict_staging_directory(_directory: &cap_std::fs::Dir) -> Result<(), BundleError> {
+    Err(BundleError::ResultSecurityPolicy)
 }
 
 #[cfg(not(windows))]
@@ -750,12 +1124,18 @@ fn open_staging_directory(
     name: &str,
 ) -> Result<cap_std::fs::Dir, BundleError> {
     use cap_std::fs::OpenOptionsExt as _;
+    use windows::Win32::{
+        Foundation::GENERIC_READ,
+        Storage::FileSystem::{WRITE_DAC, WRITE_OWNER},
+    };
 
     // FILE_FLAG_BACKUP_SEMANTICS opens the directory while preserving the
     // default delete-sharing mode needed for an atomic rename by another handle.
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     let mut options = cap_std::fs::OpenOptions::new();
-    options.read(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    options
+        .access_mode(GENERIC_READ.0 | WRITE_DAC.0 | WRITE_OWNER.0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
     cap_fs_ext::OpenOptionsFollowExt::follow(&mut options, cap_fs_ext::FollowSymlinks::No);
     parent
         .open_with(name, &options)
@@ -766,14 +1146,20 @@ fn open_staging_directory(
         })
 }
 
-fn remove_staging_directory(staging: StagingDirectory) -> Result<(), BundleError> {
-    staging
-        .directory
-        .remove_open_dir_all()
-        .map_err(|source| BundleError::Io {
-            operation: "remove staging directory",
-            source,
-        })
+fn create_private_subdirectory(
+    parent: &cap_std::fs::Dir,
+    name: &str,
+    operation: &'static str,
+) -> Result<cap_std::fs::Dir, BundleError> {
+    create_private_directory(parent, name)
+        .map_err(|source| BundleError::Io { operation, source })?;
+    let directory = open_staging_directory(parent, name)?;
+    verify_and_restrict_staging_directory(&directory)?;
+    Ok(directory)
+}
+
+fn remove_staging_directory_io(staging: StagingDirectory) -> io::Result<()> {
+    staging.directory.remove_open_dir_all()
 }
 
 fn install_staged_bundle(
@@ -793,9 +1179,9 @@ fn install_staged_bundle(
     .map_err(io::Error::from);
 
     #[cfg(windows)]
-    // MoveFileExW has no directory-handle-relative form. The parent remains
-    // open, the source name is cryptographically unguessable, and the
-    // exclusive operation still guarantees that the destination is untouched.
+    // MoveFileExW has no directory-handle-relative form, so success remains
+    // provisional until the destination is reopened through the original
+    // parent handle and matched to the staging handle.
     let result = renamore::rename_exclusive(
         parent_path.join(staging_name),
         parent_path.join(destination_name),
@@ -850,10 +1236,7 @@ fn sync_cap_directory(
     directory: &cap_std::fs::Dir,
     operation: &'static str,
 ) -> Result<(), BundleError> {
-    directory
-        .try_clone()
-        .and_then(|directory| directory.into_std_file().sync_all())
-        .map_err(|source| BundleError::Io { operation, source })
+    sync_cap_directory_io(directory).map_err(|source| BundleError::Io { operation, source })
 }
 
 #[cfg(not(unix))]
@@ -861,6 +1244,18 @@ fn sync_cap_directory(
     _directory: &cap_std::fs::Dir,
     _operation: &'static str,
 ) -> Result<(), BundleError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_cap_directory_io(directory: &cap_std::fs::Dir) -> io::Result<()> {
+    directory
+        .try_clone()
+        .and_then(|directory| directory.into_std_file().sync_all())
+}
+
+#[cfg(not(unix))]
+fn sync_cap_directory_io(_directory: &cap_std::fs::Dir) -> io::Result<()> {
     Ok(())
 }
 
@@ -927,6 +1322,9 @@ fn build_artifacts<'a>(
         limits.max_agent_trajectories,
         "agent_trajectory_count",
     )?;
+    if !bundle.agent_trajectories.is_empty() {
+        return Err(BundleError::UnsupportedTrajectorySchema);
+    }
     validate_artifact_map(&bundle.profiles, limits.max_artifacts_per_class)?;
     validate_log_map(&bundle.logs, limits.max_artifacts_per_class)?;
     let artifact_count = FIXED_ARTIFACT_COUNT
@@ -1237,24 +1635,20 @@ fn write_bundle(
     staging: &cap_std::fs::Dir,
     fail_after_writes: Option<usize>,
 ) -> Result<(), BundleError> {
-    staging
-        .create_dir("profiles")
-        .map_err(|source| BundleError::Io {
-            operation: "create profiles directory",
-            source,
-        })?;
-    staging
-        .create_dir("logs")
-        .map_err(|source| BundleError::Io {
-            operation: "create logs directory",
-            source,
-        })?;
+    let profiles = create_private_subdirectory(staging, "profiles", "create profiles directory")?;
+    let logs = create_private_subdirectory(staging, "logs", "create logs directory")?;
 
     for (write_count, (relative, bytes)) in artifacts.entries.iter().enumerate() {
         if fail_after_writes == Some(write_count) {
             return Err(BundleError::InjectedWriteFailure);
         }
-        write_new(staging, relative, bytes.as_ref())?;
+        if let Some(name) = relative.strip_prefix("profiles/") {
+            write_new(&profiles, name, bytes.as_ref())?;
+        } else if let Some(name) = relative.strip_prefix("logs/") {
+            write_new(&logs, name, bytes.as_ref())?;
+        } else {
+            write_new(staging, relative, bytes.as_ref())?;
+        }
     }
     Ok(())
 }
@@ -1370,6 +1764,22 @@ impl io::Write for BoundedBuffer {
 fn write_new(directory: &cap_std::fs::Dir, path: &str, bytes: &[u8]) -> Result<(), BundleError> {
     let mut options = cap_std::fs::OpenOptions::new();
     options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt as _;
+
+        options.mode(0o600);
+    }
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt as _;
+        use windows::Win32::{
+            Foundation::{GENERIC_READ, GENERIC_WRITE},
+            Storage::FileSystem::{WRITE_DAC, WRITE_OWNER},
+        };
+
+        options.access_mode(GENERIC_READ.0 | GENERIC_WRITE.0 | WRITE_DAC.0 | WRITE_OWNER.0);
+    }
     cap_fs_ext::OpenOptionsFollowExt::follow(&mut options, cap_fs_ext::FollowSymlinks::No);
     let mut file = directory
         .open_with(path, &options)
@@ -1377,6 +1787,7 @@ fn write_new(directory: &cap_std::fs::Dir, path: &str, bytes: &[u8]) -> Result<(
             operation: "create result artifact",
             source,
         })?;
+    verify_and_restrict_artifact_file(&file)?;
     file.write_all(bytes).map_err(|source| BundleError::Io {
         operation: "write result artifact",
         source,
@@ -1385,6 +1796,41 @@ fn write_new(directory: &cap_std::fs::Dir, path: &str, bytes: &[u8]) -> Result<(
         operation: "sync result artifact",
         source,
     })
+}
+
+#[cfg(unix)]
+fn verify_and_restrict_artifact_file(file: &cap_std::fs::File) -> Result<(), BundleError> {
+    use cap_std::fs::MetadataExt as _;
+
+    let metadata = file.metadata().map_err(|source| BundleError::Io {
+        operation: "inspect result artifact security",
+        source,
+    })?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(BundleError::ResultSecurityPolicy);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_and_restrict_artifact_file(file: &cap_std::fs::File) -> Result<(), BundleError> {
+    let mut handle = file
+        .try_clone()
+        .map_err(|source| BundleError::Io {
+            operation: "clone result artifact handle",
+            source,
+        })?
+        .into_std();
+    restrict_private_windows_object(&mut handle, false)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn verify_and_restrict_artifact_file(_file: &cap_std::fs::File) -> Result<(), BundleError> {
+    Err(BundleError::ResultSecurityPolicy)
 }
 
 fn validate_artifact_map(
@@ -1437,21 +1883,31 @@ fn validate_artifact_name(name: &str) -> Result<(), BundleError> {
     Ok(())
 }
 
-fn parse_checksums(
-    text: &str,
-    limits: BundleLimits,
-) -> Result<BTreeMap<String, String>, BundleError> {
+#[derive(Debug, Clone, Copy)]
+struct ChecksumEntry<'a> {
+    checksum: &'a str,
+    relative: &'a str,
+}
+
+struct ParsedChecksums<'a> {
+    entries: Vec<ChecksumEntry<'a>>,
+}
+
+fn parse_checksums(text: &str, limits: BundleLimits) -> Result<ParsedChecksums<'_>, BundleError> {
     if text.is_empty() || !text.ends_with('\n') || text.as_bytes().contains(&b'\r') {
         return Err(BundleError::InvalidChecksumManifest);
     }
-    let mut checksums = BTreeMap::new();
+    let line_count = text.lines().count();
+    check_count(line_count, limits.max_checksum_lines, "checksum_line_count")?;
+    if line_count == 0 {
+        return Err(BundleError::InvalidChecksumManifest);
+    }
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(line_count)
+        .map_err(|_| BundleError::AllocationFailed)?;
     let mut previous: Option<&str> = None;
-    for (index, line) in text.lines().enumerate() {
-        if index >= limits.max_checksum_lines {
-            return Err(BundleError::LimitExceeded {
-                resource: "checksum_line_count",
-            });
-        }
+    for line in text.lines() {
         let (checksum, relative) = line
             .split_once("  ")
             .ok_or(BundleError::InvalidChecksumManifest)?;
@@ -1462,18 +1918,13 @@ fn parse_checksums(
         if !canonical_checksum
             || !valid_checksum_path(relative)
             || previous.is_some_and(|prior| relative <= prior)
-            || checksums
-                .insert(relative.to_owned(), checksum.to_owned())
-                .is_some()
         {
             return Err(BundleError::InvalidChecksumManifest);
         }
+        entries.push(ChecksumEntry { checksum, relative });
         previous = Some(relative);
     }
-    if checksums.is_empty() {
-        return Err(BundleError::InvalidChecksumManifest);
-    }
-    Ok(checksums)
+    Ok(ParsedChecksums { entries })
 }
 
 fn valid_checksum_path(relative: &str) -> bool {
@@ -1525,13 +1976,46 @@ impl OpenedArtifacts {
         Some(&mut self.entries[index].file)
     }
 
-    fn matches_expected_paths(&self, expected: &BTreeMap<String, String>) -> bool {
+    fn matches_expected_paths(&self, expected: &ParsedChecksums<'_>) -> bool {
         self.entries
             .iter()
             .filter(|entry| entry.relative != CHECKSUMS_FILE)
             .map(|entry| entry.relative.as_str())
-            .eq(expected.keys().map(String::as_str))
+            .eq(expected.entries.iter().map(|entry| entry.relative))
     }
+}
+
+struct FixedArtifactBytes {
+    entries: [Option<Vec<u8>>; FIXED_ARTIFACT_COUNT],
+}
+
+impl FixedArtifactBytes {
+    fn new() -> Self {
+        Self {
+            entries: std::array::from_fn(|_| None),
+        }
+    }
+
+    fn insert(&mut self, relative: &str, bytes: Vec<u8>) -> Result<(), BundleError> {
+        let index = fixed_artifact_index(relative).ok_or(BundleError::ArtifactSetMismatch)?;
+        if self.entries[index].replace(bytes).is_some() {
+            return Err(BundleError::InvalidChecksumManifest);
+        }
+        Ok(())
+    }
+}
+
+impl FixedArtifactSource for FixedArtifactBytes {
+    fn artifact_bytes(&self, name: &str) -> Option<&[u8]> {
+        let index = fixed_artifact_index(name)?;
+        self.entries[index].as_deref()
+    }
+}
+
+fn fixed_artifact_index(relative: &str) -> Option<usize> {
+    FIXED_ARTIFACTS
+        .iter()
+        .position(|candidate| *candidate == relative)
 }
 
 struct PendingDirectory {
@@ -1802,6 +2286,7 @@ fn add_bytes(
     Ok(())
 }
 
+#[cfg(test)]
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut output = String::with_capacity(64);
@@ -1810,6 +2295,30 @@ fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(output, "{byte:02x}");
     }
     output
+}
+
+fn checksum_matches(bytes: &[u8], checksum: &str) -> bool {
+    let encoded = checksum.as_bytes();
+    if encoded.len() != 64 {
+        return false;
+    }
+    Sha256::digest(bytes)
+        .iter()
+        .enumerate()
+        .all(|(index, byte)| {
+            let offset = index * 2;
+            decode_hex(encoded[offset])
+                .zip(decode_hex(encoded[offset + 1]))
+                .is_some_and(|(high, low)| *byte == (high << 4 | low))
+        })
+}
+
+fn decode_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 /// Immutable result publication or verification failure.
@@ -1837,6 +2346,31 @@ pub enum BundleError {
     /// The operation-owned staging directory already exists.
     #[error("result staging directory already exists")]
     StagingExists,
+    /// A staging-tree object is not account-owned and owner-only.
+    #[error("result staging object security policy is invalid")]
+    ResultSecurityPolicy,
+    /// The installed directory is not the opened, verified staging object.
+    #[error("installed result directory identity does not match staging")]
+    PublicationIdentityMismatch,
+    /// Publication failed and staging cleanup or recovery syncing also failed.
+    #[error("result publication failed during {primary_operation}; staging recovery also failed")]
+    PublicationRecoveryFailed {
+        /// Stable source-free description of the primary failure.
+        primary_operation: &'static str,
+        /// Primary I/O source, when the primary failure was an I/O operation.
+        primary_source: Option<io::Error>,
+        /// Staging cleanup source, when cleanup failed.
+        cleanup_source: Option<io::Error>,
+        /// Parent-directory sync source, when recovery syncing failed.
+        sync_source: Option<io::Error>,
+    },
+    /// The destination is installed but its parent-directory sync failed.
+    #[error("result bundle is installed but parent-directory durability is unknown")]
+    PublicationDurabilityUnknown {
+        /// Parent-directory sync failure.
+        #[source]
+        source: io::Error,
+    },
     /// The destination cannot be represented safely.
     #[error("result destination is invalid")]
     InvalidDestination,
@@ -1876,6 +2410,9 @@ pub enum BundleError {
     /// The quality rubric is incompatible with the current bundle schema.
     #[error("result bundle quality rubric is unsupported")]
     UnsupportedRubricVersion,
+    /// Agent trajectories are reserved for a later closed, source-free schema.
+    #[error("result bundle agent trajectory schema is unsupported")]
+    UnsupportedTrajectorySchema,
     /// Fixed artifacts contradict one another or their recorded run policy.
     #[error("result artifact invariants are invalid")]
     ArtifactInvariantViolation,
@@ -2140,6 +2677,21 @@ mod tests {
             .expect("updated checksum manifest is written");
     }
 
+    fn only_staging_path(parent: &Path) -> std::path::PathBuf {
+        let mut staging = fs::read_dir(parent)
+            .expect("publication parent is readable")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| name.starts_with(".rootlight-result-partial-"))
+            });
+        let path = staging.next().expect("one staging directory exists");
+        assert!(staging.next().is_none());
+        path
+    }
+
     #[test]
     fn equivalent_bundles_publish_identical_artifacts() {
         let first = tempfile::tempdir().expect("temporary root is available");
@@ -2205,8 +2757,11 @@ mod tests {
                     &destination,
                     BundleLimits::default(),
                     None,
-                    || {
-                        barrier.wait();
+                    |point, _| {
+                        if point == PublicationControlPoint::Install {
+                            barrier.wait();
+                        }
+                        Ok(())
                     },
                 )
             }));
@@ -2239,10 +2794,13 @@ mod tests {
             &destination,
             BundleLimits::default(),
             None,
-            || {
-                fs::create_dir(&destination).expect("racing destination is created");
-                fs::write(destination.join("sentinel"), b"not rootlight evidence")
-                    .expect("racing destination content is written");
+            |point, _| {
+                if point == PublicationControlPoint::Install {
+                    fs::create_dir(&destination).expect("racing destination is created");
+                    fs::write(destination.join("sentinel"), b"not rootlight evidence")
+                        .expect("racing destination content is written");
+                }
+                Ok(())
             },
         )
         .expect_err("racing destination is rejected");
@@ -2257,6 +2815,80 @@ mod tests {
                 .expect("temporary root is readable")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn publication_rejects_a_substituted_staging_name_without_deleting_it() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let displaced = temporary.path().join("verified-staging");
+
+        let error = publish_bundle_with_control(
+            &fixture(),
+            &destination,
+            BundleLimits::default(),
+            None,
+            |point, _| {
+                if point == PublicationControlPoint::Install {
+                    let staging = only_staging_path(temporary.path());
+                    fs::rename(&staging, &displaced).expect("verified staging is displaced");
+                    fs::create_dir(&staging).expect("foreign staging replacement is created");
+                    fs::write(staging.join("sentinel"), b"foreign staging")
+                        .expect("foreign staging sentinel is written");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("staging identity substitution fails closed");
+
+        assert!(matches!(error, BundleError::PublicationIdentityMismatch));
+        assert_eq!(
+            fs::read(destination.join("sentinel")).expect("foreign destination remains"),
+            b"foreign staging"
+        );
+        assert!(displaced.join(CHECKSUMS_FILE).is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publication_rejects_ambient_parent_redirection_without_cleanup() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let redirected_parent = temporary.path().join("redirected-parent");
+        fs::create_dir(&redirected_parent).expect("redirected parent is created");
+
+        let error = publish_bundle_with_control(
+            &fixture(),
+            &destination,
+            BundleLimits::default(),
+            None,
+            |point, install_parent| {
+                if point == PublicationControlPoint::Install {
+                    let staging = only_staging_path(temporary.path());
+                    let staging_name = staging.file_name().expect("staging name exists").to_owned();
+                    let redirected_staging = redirected_parent.join(staging_name);
+                    fs::create_dir(&redirected_staging).expect("redirected staging is created");
+                    fs::write(redirected_staging.join("sentinel"), b"redirected")
+                        .expect("redirected sentinel is written");
+                    *install_parent = redirected_parent.clone();
+                }
+                Ok(())
+            },
+        )
+        .expect_err("ambient parent redirection fails closed");
+
+        assert!(matches!(error, BundleError::PublicationIdentityMismatch));
+        assert!(!destination.exists());
+        assert!(
+            only_staging_path(temporary.path())
+                .join(CHECKSUMS_FILE)
+                .is_file()
+        );
+        assert_eq!(
+            fs::read(redirected_parent.join("result").join("sentinel"))
+                .expect("redirected foreign destination remains"),
+            b"redirected"
         );
     }
 
@@ -2567,26 +3199,81 @@ mod tests {
         ));
 
         let jsonl_destination = temporary.path().join("jsonl-result");
-        let mut bundle = fixture();
-        bundle.agent_trajectories.push(AgentTrajectory {
-            schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
-            task_id: "task".to_owned(),
-            eligibility: Availability::Unavailable {
-                reason_code: "not_measured".to_owned(),
-            },
-            tool_calls: Vec::new(),
-            total_tokens: EvidenceValue::unavailable("not_measured"),
-        });
-        publish_bundle(&bundle, &jsonl_destination).expect("trajectory bundle publishes");
-        let trajectory = fs::read(jsonl_destination.join(AGENT_TRAJECTORIES_FILE))
-            .expect("trajectory is readable");
-        let mut noncanonical = Vec::with_capacity(trajectory.len() + 1);
-        noncanonical.push(b' ');
-        noncanonical.extend_from_slice(&trajectory);
-        rewrite_artifact_and_checksum(&jsonl_destination, AGENT_TRAJECTORIES_FILE, &noncanonical);
+        publish_bundle(&fixture(), &jsonl_destination).expect("empty trajectory bundle publishes");
+        rewrite_artifact_and_checksum(&jsonl_destination, AGENT_TRAJECTORIES_FILE, b" {}\n");
         assert!(matches!(
             verify_bundle(&jsonl_destination),
             Err(BundleError::InvalidArtifactEncoding)
+        ));
+    }
+
+    #[test]
+    fn schema_two_rejects_every_agent_trajectory_payload() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let cases = [
+            ("empty", None),
+            ("source", Some("fn private_source() {}")),
+            ("path", Some("C:\\private\\source.rs")),
+            ("url", Some("https://example.invalid/private")),
+            ("secret", Some("authorization=bearer-secret-value")),
+        ];
+
+        for (name, payload) in cases {
+            let destination = temporary.path().join(name);
+            let mut bundle = fixture();
+            bundle.agent_trajectories.push(AgentTrajectory {
+                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
+                task_id: "task".to_owned(),
+                eligibility: Availability::Unavailable {
+                    reason_code: "not_measured".to_owned(),
+                },
+                tool_calls: payload.into_iter().map(str::to_owned).collect(),
+                total_tokens: EvidenceValue::unavailable("not_measured"),
+            });
+
+            let error = publish_bundle(&bundle, &destination)
+                .expect_err("schema 2.0 rejects every non-empty trajectory artifact");
+
+            assert!(matches!(error, BundleError::UnsupportedTrajectorySchema));
+            assert!(!destination.exists());
+            if let Some(payload) = payload {
+                assert!(!error.to_string().contains(payload));
+            }
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_checksum_valid_schema_two_trajectories_after_limits() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        publish_bundle(&fixture(), &destination).expect("empty trajectory bundle publishes");
+        let trajectory = AgentTrajectory {
+            schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
+            task_id: "task".to_owned(),
+            eligibility: Availability::Available,
+            tool_calls: vec!["closed-shape-placeholder".to_owned()],
+            total_tokens: EvidenceValue::unavailable("not_measured"),
+        };
+        let canonical = json_lines(std::slice::from_ref(&trajectory), 64 * 1024)
+            .expect("trajectory serializes");
+        rewrite_artifact_and_checksum(&destination, AGENT_TRAJECTORIES_FILE, &canonical);
+        assert!(matches!(
+            verify_bundle(&destination),
+            Err(BundleError::UnsupportedTrajectorySchema)
+        ));
+
+        let two = json_lines(&[trajectory.clone(), trajectory], 64 * 1024)
+            .expect("two trajectories serialize");
+        rewrite_artifact_and_checksum(&destination, AGENT_TRAJECTORIES_FILE, &two);
+        let limits = BundleLimits {
+            max_agent_trajectories: 1,
+            ..constrained_limits()
+        };
+        assert!(matches!(
+            verify_bundle_with_limits(&destination, limits),
+            Err(BundleError::LimitExceeded {
+                resource: "agent_trajectory_count"
+            })
         ));
     }
 
@@ -2898,6 +3585,203 @@ mod tests {
     }
 
     #[test]
+    fn publication_preserves_primary_failure_and_recovery_context() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+
+        let error = publish_bundle_with_control(
+            &fixture(),
+            &destination,
+            BundleLimits::default(),
+            Some(0),
+            |point, _| match point {
+                PublicationControlPoint::StagingCleanup => {
+                    Err(io::Error::other("injected cleanup failure"))
+                }
+                PublicationControlPoint::RecoveryParentSync => {
+                    Err(io::Error::other("injected recovery sync failure"))
+                }
+                _ => Ok(()),
+            },
+        )
+        .expect_err("write, cleanup, and recovery sync faults are reported");
+
+        assert!(matches!(
+            error,
+            BundleError::PublicationRecoveryFailed {
+                primary_operation: "injected result write failure",
+                primary_source: None,
+                cleanup_source: Some(_),
+                sync_source: Some(_),
+            }
+        ));
+        assert!(!destination.exists());
+        assert!(only_staging_path(temporary.path()).is_dir());
+    }
+
+    #[test]
+    fn failed_claim_never_deletes_the_foreign_destination() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+
+        let error = publish_bundle_with_control(
+            &fixture(),
+            &destination,
+            BundleLimits::default(),
+            None,
+            |point, _| match point {
+                PublicationControlPoint::Install => {
+                    fs::create_dir(&destination).expect("foreign destination is created");
+                    fs::write(destination.join("sentinel"), b"foreign")
+                        .expect("foreign sentinel is written");
+                    Ok(())
+                }
+                PublicationControlPoint::StagingCleanup => {
+                    Err(io::Error::other("injected cleanup failure"))
+                }
+                _ => Ok(()),
+            },
+        )
+        .expect_err("foreign destination and failed cleanup are reported");
+
+        assert!(matches!(
+            error,
+            BundleError::PublicationRecoveryFailed {
+                primary_operation: "result destination already exists",
+                primary_source: None,
+                cleanup_source: Some(_),
+                sync_source: None,
+            }
+        ));
+        assert_eq!(
+            fs::read(destination.join("sentinel")).expect("foreign destination remains"),
+            b"foreign"
+        );
+    }
+
+    #[test]
+    fn committed_parent_sync_failure_reports_unknown_durability() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+
+        let error = publish_bundle_with_control(
+            &fixture(),
+            &destination,
+            BundleLimits::default(),
+            None,
+            |point, _| {
+                if point == PublicationControlPoint::CommittedParentSync {
+                    Err(io::Error::other("injected committed sync failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("post-install sync failure has a typed outcome");
+
+        assert!(matches!(
+            error,
+            BundleError::PublicationDurabilityUnknown { .. }
+        ));
+        verify_bundle(&destination).expect("the committed destination remains verifiable");
+        assert_eq!(
+            fs::read_dir(temporary.path())
+                .expect("publication parent is readable")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn staging_directory_is_private_before_artifact_writes() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let parent =
+            cap_std::fs::Dir::open_ambient_dir(temporary.path(), cap_std::ambient_authority())
+                .expect("temporary parent opens");
+        let staging = create_staging_directory(&parent).expect("private staging is created");
+
+        #[cfg(unix)]
+        {
+            use cap_std::fs::MetadataExt as _;
+
+            let metadata = staging
+                .directory
+                .dir_metadata()
+                .expect("staging metadata is readable");
+            assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
+            assert_eq!(metadata.mode() & 0o077, 0);
+        }
+        #[cfg(windows)]
+        {
+            use windows_permissions::{
+                constants::{AceFlags, SeObjectType, SecurityInformation},
+                wrappers::GetSecurityInfo,
+            };
+
+            let handle = staging
+                .directory
+                .try_clone()
+                .expect("staging handle clones")
+                .into_std_file();
+            let descriptor = GetSecurityInfo(
+                &handle,
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Owner
+                    | SecurityInformation::Dacl
+                    | SecurityInformation::ProtectedDacl,
+            )
+            .expect("staging security is readable");
+            let (current_sid, _) =
+                current_windows_account_sids().expect("current account SID is available");
+            verify_private_windows_descriptor(
+                &descriptor,
+                &current_sid,
+                AceFlags::ContainerInherit | AceFlags::ObjectInherit,
+            )
+            .expect("staging is owner-only");
+
+            let child =
+                create_private_subdirectory(&staging.directory, "child", "create test child")
+                    .expect("child directory is created");
+            write_new(&child, "artifact", b"private").expect("child artifact is created");
+            let child_descriptor = GetSecurityInfo(
+                &child
+                    .try_clone()
+                    .expect("child handle clones")
+                    .into_std_file(),
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Owner
+                    | SecurityInformation::Dacl
+                    | SecurityInformation::ProtectedDacl,
+            )
+            .expect("child security is readable");
+            verify_private_windows_descriptor(
+                &child_descriptor,
+                &current_sid,
+                AceFlags::ContainerInherit | AceFlags::ObjectInherit,
+            )
+            .expect("child directory is account-owned and account-only");
+            let artifact = child.open("artifact").expect("child artifact opens");
+            let artifact_descriptor = GetSecurityInfo(
+                &artifact.into_std(),
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Owner
+                    | SecurityInformation::Dacl
+                    | SecurityInformation::ProtectedDacl,
+            )
+            .expect("artifact security is readable");
+            verify_private_windows_descriptor(
+                &artifact_descriptor,
+                &current_sid,
+                AceFlags::empty(),
+            )
+            .expect("child artifact is account-owned and account-only");
+        }
+
+        remove_staging_directory_io(staging).expect("staging cleanup succeeds");
+    }
+
+    #[test]
     fn publication_rejects_each_bounded_collection() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let limits = constrained_limits();
@@ -3183,6 +4067,38 @@ mod tests {
         assert!(matches!(
             verify_bundle(&crlf_destination),
             Err(BundleError::InvalidChecksumManifest)
+        ));
+    }
+
+    #[test]
+    fn checksum_manifest_is_precounted_and_retains_borrowed_fields() {
+        let text = concat!(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "  agent-trajectories.jsonl\n",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "  build-provenance.json\n",
+        );
+        let parsed = parse_checksums(text, constrained_limits()).expect("manifest is canonical");
+        let start = text.as_ptr() as usize;
+        let end = start + text.len();
+
+        assert_eq!(parsed.entries.len(), 2);
+        for entry in parsed.entries {
+            let checksum = entry.checksum.as_ptr() as usize;
+            let relative = entry.relative.as_ptr() as usize;
+            assert!((start..end).contains(&checksum));
+            assert!((start..end).contains(&relative));
+        }
+
+        let limits = BundleLimits {
+            max_checksum_lines: 1,
+            ..constrained_limits()
+        };
+        assert!(matches!(
+            parse_checksums("invalid\ninvalid\n", limits),
+            Err(BundleError::LimitExceeded {
+                resource: "checksum_line_count"
+            })
         ));
     }
 
