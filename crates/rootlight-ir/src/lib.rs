@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod normalized;
+mod validation;
 
 pub use normalized::{
     ContainerRef, CoverageRecord, CoverageScope, DiagnosticRecord, DiagnosticSeverity, EntityFlag,
@@ -15,6 +16,10 @@ pub use normalized::{
     NormalizedIrDocument, NormalizedIrVersion, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
     ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord,
     SkippedRegion, SkippedRegionReason, SourceMappingKind, SourceMappingRecord,
+};
+pub use validation::{
+    ExtensionIdentifier, ExtensionSupport, IrDocumentValidationError, IrLimits,
+    UnknownNoncriticalExtensionPolicy, canonicalize_ir_document, validate_ir_document,
 };
 
 use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId};
@@ -206,7 +211,7 @@ impl<'de> Deserialize<'de> for LineRange {
 }
 
 /// A generation-bound reference to immutable repository source.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SourceRef {
     repository: RepositoryId,

@@ -186,7 +186,8 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
     println!("compatibility: frozen protobuf descriptor is a compatible subset");
     println!("compatibility: daemon protocol 1.1, 1.2, and 1.3 descriptors verified");
     println!("compatibility: frozen protobuf wire semantics verified");
-    println!("compatibility: frozen IR document and major rejection verified");
+    println!("compatibility: frozen IR 1.0 and normalized IR 1.1 documents verified");
+    println!("compatibility: unsupported IR major and minor versions rejected");
     Ok(())
 }
 
@@ -352,7 +353,16 @@ fn validate_normalized_ir_baseline(workspace_root: &Path) -> Result<(), SchemaEr
         }
     })?;
     let schema_valid = validator.is_valid(&document);
-    let decode_valid = serde_json::from_value::<NormalizedIrDocument>(document.clone()).is_ok()
+    let normalized = serde_json::from_value::<NormalizedIrDocument>(document.clone());
+    let semantic_valid = normalized.as_ref().is_ok_and(|document| {
+        rootlight_ir::validate_ir_document(
+            document,
+            &rootlight_ir::IrLimits::default(),
+            &rootlight_ir::ExtensionSupport::default(),
+        )
+        .is_ok()
+    });
+    let decode_valid = semantic_valid
         && matches!(
             serde_json::from_value::<IrDocument>(document),
             Ok(IrDocument::NormalizedV1_1(_))
