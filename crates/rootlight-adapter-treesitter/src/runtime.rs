@@ -197,8 +197,7 @@ impl TreeSitterProvider {
             request.included_ranges().len(),
             self.config.max_included_ranges(),
         )?;
-        let source_text =
-            std::str::from_utf8(source_bytes).map_err(|_| provider_failure("invalid-utf8"))?;
+        validate_utf8_cancellable(source_bytes, cancellation)?;
         if request
             .included_ranges()
             .iter()
@@ -247,7 +246,7 @@ impl TreeSitterProvider {
         parser
             .set_language(&language_for(family))
             .map_err(|_| provider_failure("grammar-abi"))?;
-        let included_ranges = tree_sitter_ranges(request, source_text, cancellation)?;
+        let included_ranges = tree_sitter_ranges(request, source_bytes, cancellation)?;
         parser
             .set_included_ranges(&included_ranges)
             .map_err(|_| provider_failure("included-ranges"))?;
@@ -393,9 +392,10 @@ impl TreeSitterProvider {
             initial_plan
         };
         let emitted = plan.emitted;
-        emit_fact_plan(&normalized.facts, plan, sink, cancellation)?;
+        let fact_count = normalized.facts.len();
+        emit_fact_plan(normalized.facts, plan, sink, cancellation)?;
         Ok(ExtractionReport {
-            limited: query_limited || sink_limited || emitted < normalized.facts.len(),
+            limited: query_limited || sink_limited || emitted < fact_count,
         })
     }
 
@@ -809,7 +809,11 @@ fn apply_edits(
     max_source_bytes: usize,
     cancellation: &Cancellation,
 ) -> Result<Tree, ApplyEditError> {
-    let mut source = old_source.to_vec();
+    validate_utf8_cancellable(old_source, cancellation).map_err(ApplyEditError::Fatal)?;
+    let mut source =
+        copy_bytes_cancellable(old_source, cancellation, "incremental-source-allocation")
+            .map_err(ApplyEditError::Fatal)?;
+    let mut scratch = Vec::new();
     for (index, edit) in edits.iter().enumerate() {
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
             cancellation
@@ -820,16 +824,22 @@ fn apply_edits(
         if edit.start_byte() > edit.old_end_byte() || edit.old_end_byte() > source.len() {
             return Err(ReuseInvalidation::EditOutsideSource.into());
         }
-        if !source.is_char_boundary(edit.start_byte())
-            || !source.is_char_boundary(edit.old_end_byte())
+        if !is_utf8_char_boundary(&source, edit.start_byte())
+            || !is_utf8_char_boundary(&source, edit.old_end_byte())
         {
             return Err(ReuseInvalidation::EditNotCharacterBoundary.into());
         }
-        let start_position = point_for_offset(&source, edit.start_byte())
-            .ok_or(ReuseInvalidation::EditOutsideSource)?;
-        let old_end_position = point_for_offset(&source, edit.old_end_byte())
-            .ok_or(ReuseInvalidation::EditOutsideSource)?;
-        let replacement_end = point_after_replacement(start_position, edit.replacement());
+        let (start_position, old_end_position) = points_for_offsets(
+            &source,
+            edit.start_byte(),
+            edit.old_end_byte(),
+            cancellation,
+        )
+        .map_err(ApplyEditError::Fatal)?
+        .ok_or(ReuseInvalidation::EditOutsideSource)?;
+        let replacement_end =
+            point_after_replacement(start_position, edit.replacement(), cancellation)
+                .map_err(ApplyEditError::Fatal)?;
         let new_end_byte = edit
             .start_byte()
             .checked_add(edit.replacement().len())
@@ -845,6 +855,14 @@ fn apply_edits(
                 "incremental-source-limit",
             )));
         }
+        rebuild_edited_source(
+            &source,
+            &mut scratch,
+            edit,
+            intermediate_bytes,
+            cancellation,
+        )
+        .map_err(ApplyEditError::Fatal)?;
         tree.edit(&InputEdit {
             start_byte: edit.start_byte(),
             old_end_byte: edit.old_end_byte(),
@@ -853,16 +871,13 @@ fn apply_edits(
             old_end_position,
             new_end_position: replacement_end,
         });
-        source.splice(
-            edit.start_byte()..edit.old_end_byte(),
-            edit.replacement().iter().copied(),
-        );
+        std::mem::swap(&mut source, &mut scratch);
     }
     cancellation
         .check()
         .map_err(AdapterError::from)
         .map_err(ApplyEditError::Fatal)?;
-    if source == new_source {
+    if bytes_equal_cancellable(&source, new_source, cancellation).map_err(ApplyEditError::Fatal)? {
         Ok(tree)
     } else {
         Err(ReuseInvalidation::EditResultMismatch.into())
@@ -880,33 +895,163 @@ impl From<ReuseInvalidation> for ApplyEditError {
     }
 }
 
-fn point_after_replacement(start: Point, replacement: &[u8]) -> Point {
+fn point_after_replacement(
+    start: Point,
+    replacement: &[u8],
+    cancellation: &Cancellation,
+) -> Result<Point, AdapterError> {
     let mut row = start.row;
     let mut column = start.column;
-    for byte in replacement {
-        if *byte == b'\n' {
-            row = row.saturating_add(1);
-            column = 0;
-        } else {
-            column = column.saturating_add(1);
+    for_each_byte_chunk(replacement, cancellation, |chunk| {
+        for byte in chunk {
+            if *byte == b'\n' {
+                row = row
+                    .checked_add(1)
+                    .ok_or_else(|| provider_failure("incremental-point"))?;
+                column = 0;
+            } else {
+                column = column
+                    .checked_add(1)
+                    .ok_or_else(|| provider_failure("incremental-point"))?;
+            }
         }
-    }
-    Point { row, column }
+        Ok(())
+    })?;
+    Ok(Point { row, column })
 }
 
-fn point_for_offset(source: &[u8], offset: usize) -> Option<Point> {
-    let prefix = source.get(..offset)?;
+fn points_for_offsets(
+    source: &[u8],
+    start: usize,
+    end: usize,
+    cancellation: &Cancellation,
+) -> Result<Option<(Point, Point)>, AdapterError> {
+    let prefix = match source.get(..end) {
+        Some(prefix) if start <= end => prefix,
+        _ => return Ok(None),
+    };
     let mut row = 0usize;
     let mut column = 0usize;
-    for byte in prefix {
-        if *byte == b'\n' {
-            row = row.checked_add(1)?;
-            column = 0;
-        } else {
-            column = column.checked_add(1)?;
+    let mut offset = 0usize;
+    let mut start_point = (start == 0).then_some(Point { row, column });
+    for chunk in prefix.chunks(CANCELLATION_BYTE_INTERVAL) {
+        cancellation.check()?;
+        for byte in chunk {
+            if offset == start {
+                start_point = Some(Point { row, column });
+            }
+            if *byte == b'\n' {
+                row = row
+                    .checked_add(1)
+                    .ok_or_else(|| provider_failure("incremental-point"))?;
+                column = 0;
+            } else {
+                column = column
+                    .checked_add(1)
+                    .ok_or_else(|| provider_failure("incremental-point"))?;
+            }
+            offset = offset
+                .checked_add(1)
+                .ok_or_else(|| provider_failure("incremental-point"))?;
         }
     }
-    Some(Point { row, column })
+    if offset == start {
+        start_point = Some(Point { row, column });
+    }
+    cancellation.check()?;
+    Ok(start_point.map(|start_point| (start_point, Point { row, column })))
+}
+
+fn rebuild_edited_source(
+    source: &[u8],
+    scratch: &mut Vec<u8>,
+    edit: &SourceEdit,
+    expected_length: usize,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    cancellation.check()?;
+    scratch.clear();
+    scratch
+        .try_reserve_exact(expected_length)
+        .map_err(|_| provider_failure("incremental-source-allocation"))?;
+    append_bytes_cancellable(
+        scratch,
+        source
+            .get(..edit.start_byte())
+            .ok_or_else(|| provider_failure("incremental-source-range"))?,
+        cancellation,
+    )?;
+    append_bytes_cancellable(scratch, edit.replacement(), cancellation)?;
+    append_bytes_cancellable(
+        scratch,
+        source
+            .get(edit.old_end_byte()..)
+            .ok_or_else(|| provider_failure("incremental-source-range"))?,
+        cancellation,
+    )?;
+    if scratch.len() != expected_length {
+        return Err(provider_failure("incremental-source-accounting"));
+    }
+    Ok(())
+}
+
+fn copy_bytes_cancellable(
+    source: &[u8],
+    cancellation: &Cancellation,
+    allocation_code: &'static str,
+) -> Result<Vec<u8>, AdapterError> {
+    cancellation.check()?;
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(source.len())
+        .map_err(|_| provider_failure(allocation_code))?;
+    append_bytes_cancellable(&mut copy, source, cancellation)?;
+    Ok(copy)
+}
+
+fn append_bytes_cancellable(
+    destination: &mut Vec<u8>,
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    for_each_byte_chunk(source, cancellation, |chunk| {
+        destination.extend_from_slice(chunk);
+        Ok(())
+    })
+}
+
+fn for_each_byte_chunk(
+    source: &[u8],
+    cancellation: &Cancellation,
+    mut visit: impl FnMut(&[u8]) -> Result<(), AdapterError>,
+) -> Result<(), AdapterError> {
+    for chunk in source.chunks(CANCELLATION_BYTE_INTERVAL) {
+        cancellation.check()?;
+        visit(chunk)?;
+    }
+    cancellation.check()?;
+    Ok(())
+}
+
+fn bytes_equal_cancellable(
+    left: &[u8],
+    right: &[u8],
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    cancellation.check()?;
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left, right) in left
+        .chunks(CANCELLATION_BYTE_INTERVAL)
+        .zip(right.chunks(CANCELLATION_BYTE_INTERVAL))
+    {
+        cancellation.check()?;
+        if left != right {
+            return Ok(false);
+        }
+    }
+    cancellation.check()?;
+    Ok(true)
 }
 
 fn count_changed_ranges(
@@ -936,24 +1081,20 @@ fn copy_source_for_cache(
     source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<Arc<[u8]>, AdapterError> {
-    cancellation.check()?;
-    let mut copy = Vec::new();
-    copy.try_reserve_exact(source.len())
-        .map_err(|_| provider_failure("cache-allocation"))?;
-    for chunk in source.chunks(CANCELLATION_BYTE_INTERVAL) {
-        cancellation.check()?;
-        copy.extend_from_slice(chunk);
-    }
-    cancellation.check()?;
+    let copy = copy_bytes_cancellable(source, cancellation, "cache-allocation")?;
     Ok(Arc::from(copy))
 }
 
 fn tree_sitter_ranges(
     request: &ParseRequest<'_>,
-    source: &str,
+    source: &[u8],
     cancellation: &Cancellation,
 ) -> Result<Vec<Range>, AdapterError> {
-    let mut ranges = Vec::with_capacity(request.included_ranges().len());
+    cancellation.check()?;
+    let mut ranges = Vec::new();
+    ranges
+        .try_reserve_exact(request.included_ranges().len())
+        .map_err(|_| provider_failure("range-allocation"))?;
     let mut cursor = 0usize;
     let mut point = Point { row: 0, column: 0 };
     for included in request.included_ranges() {
@@ -962,24 +1103,15 @@ fn tree_sitter_ranges(
         let start =
             usize::try_from(span.start_byte()).map_err(|_| provider_failure("range-offset"))?;
         let end = usize::try_from(span.end_byte()).map_err(|_| provider_failure("range-offset"))?;
-        if start < cursor || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+        if start < cursor
+            || !is_utf8_char_boundary(source, start)
+            || !is_utf8_char_boundary(source, end)
+        {
             return Err(provider_failure("range-boundary"));
         }
-        advance_source_point(
-            source.as_bytes(),
-            &mut cursor,
-            start,
-            &mut point,
-            cancellation,
-        )?;
+        advance_source_point(source, &mut cursor, start, &mut point, cancellation)?;
         let start_point = point;
-        advance_source_point(
-            source.as_bytes(),
-            &mut cursor,
-            end,
-            &mut point,
-            cancellation,
-        )?;
+        advance_source_point(source, &mut cursor, end, &mut point, cancellation)?;
         ranges.push(Range {
             start_byte: start,
             end_byte: end,
@@ -989,6 +1121,49 @@ fn tree_sitter_ranges(
     }
     cancellation.check()?;
     Ok(ranges)
+}
+
+fn validate_utf8_cancellable(
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    let mut offset = 0usize;
+    while offset < source.len() {
+        cancellation.check()?;
+        let end = offset
+            .checked_add(CANCELLATION_BYTE_INTERVAL)
+            .unwrap_or(source.len())
+            .min(source.len());
+        match std::str::from_utf8(
+            source
+                .get(offset..end)
+                .ok_or_else(|| provider_failure("invalid-utf8"))?,
+        ) {
+            Ok(_) => offset = end,
+            Err(error) if error.error_len().is_some() => {
+                return Err(provider_failure("invalid-utf8"));
+            }
+            Err(error) => {
+                offset = offset
+                    .checked_add(error.valid_up_to())
+                    .ok_or_else(|| provider_failure("invalid-utf8"))?;
+                if end == source.len() || error.valid_up_to() == 0 {
+                    return Err(provider_failure("invalid-utf8"));
+                }
+            }
+        }
+    }
+    cancellation.check()?;
+    Ok(())
+}
+
+fn is_utf8_char_boundary(source: &[u8], index: usize) -> bool {
+    // Callers validate the complete buffer first, so only continuation bytes
+    // can identify non-boundaries.
+    index == source.len()
+        || source
+            .get(index)
+            .is_some_and(|byte| !matches!(*byte, 0x80..=0xbf))
 }
 
 fn advance_source_point(
@@ -1070,20 +1245,26 @@ fn normalize_query_candidates(
     max_facts: usize,
     cancellation: &Cancellation,
 ) -> Result<NormalizedFacts, AdapterError> {
-    cancellation.check()?;
-    candidates.sort_unstable_by(|left, right| {
+    sort_cancellable_by(&mut candidates, cancellation, |left, right| {
         (left.start, left.end, left.role, left.syntax).cmp(&(
             right.start,
             right.end,
             right.role,
             right.syntax,
         ))
-    });
-    candidates.dedup();
-    let root_count = candidates
-        .iter()
-        .filter(|candidate| candidate.role == StructuralRole::Root)
-        .count();
+    })?;
+    dedup_query_candidates(&mut candidates, cancellation)?;
+    let mut root_count = 0usize;
+    for (index, candidate) in candidates.iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if candidate.role == StructuralRole::Root {
+            root_count = root_count
+                .checked_add(1)
+                .ok_or_else(|| provider_failure("query-fact-accounting"))?;
+        }
+    }
     let range_count = request.included_ranges().len();
     let additional_ranges = if range_count == 0 { 0 } else { range_count - 1 };
     let expanded_roots = root_count
@@ -1134,15 +1315,15 @@ fn normalize_query_candidates(
             break;
         }
     }
-    restricted.sort_unstable_by(|left, right| {
+    sort_cancellable_by(&mut restricted, cancellation, |left, right| {
         (left.start, left.end, left.role, left.syntax).cmp(&(
             right.start,
             right.end,
             right.role,
             right.syntax,
         ))
-    });
-    restricted.dedup();
+    })?;
+    dedup_query_candidates(&mut restricted, cancellation)?;
 
     let mut selected = Vec::new();
     selected
@@ -1160,19 +1341,31 @@ fn normalize_query_candidates(
             && restricted[group_end].start == start
             && restricted[group_end].end == end
         {
+            if (group_end - group_start).is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                cancellation.check()?;
+            }
             group_end += 1;
         }
         let group = &restricted[group_start..group_end];
-        let has_definition = group
-            .iter()
-            .any(|candidate| candidate.role == StructuralRole::Definition);
-        let has_documentation = group
-            .iter()
-            .any(|candidate| candidate.role == StructuralRole::Documentation);
-        selected.extend(group.iter().copied().filter(|candidate| {
-            !(has_definition && candidate.role == StructuralRole::Reference
+        let mut has_definition = false;
+        let mut has_documentation = false;
+        for (index, candidate) in group.iter().enumerate() {
+            if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                cancellation.check()?;
+            }
+            has_definition |= candidate.role == StructuralRole::Definition;
+            has_documentation |= candidate.role == StructuralRole::Documentation;
+        }
+        for (index, candidate) in group.iter().copied().enumerate() {
+            if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                cancellation.check()?;
+            }
+            if !(has_definition && candidate.role == StructuralRole::Reference
                 || has_documentation && candidate.role == StructuralRole::Comment)
-        }));
+            {
+                selected.push(candidate);
+            }
+        }
         group_start = group_end;
     }
 
@@ -1201,38 +1394,170 @@ fn normalize_query_candidates(
         });
     }
     assign_fact_parents(&mut drafts, cancellation)?;
-    let facts = drafts
-        .into_iter()
-        .enumerate()
-        .map(|(index, draft)| {
-            let local_id = u64::try_from(index)
-                .ok()
-                .and_then(|index| index.checked_add(1))
-                .ok_or_else(|| provider_failure("query-fact-identity"))?;
-            let parent = draft
-                .parent
-                .map(|parent| {
-                    u64::try_from(parent)
-                        .ok()
-                        .and_then(|parent| parent.checked_add(1))
-                        .ok_or_else(|| provider_failure("query-fact-identity"))
-                })
-                .transpose()?;
-            let start = u64::try_from(draft.start).map_err(|_| provider_failure("query-span"))?;
-            let end = u64::try_from(draft.end).map_err(|_| provider_failure("query-span"))?;
-            let span = SourceSpan::new(request.source().source_ref().span().file(), start, end)
-                .map_err(|_| provider_failure("query-span"))?;
-            Ok::<SyntaxFact, AdapterError>(SyntaxFact::new(
-                local_id,
-                parent,
-                draft.role.fact_kind(),
-                span,
-                draft.depth,
-                draft.syntax_kind,
-            ))
-        })
-        .collect::<Result<Vec<_>, AdapterError>>()?;
+    let mut facts = Vec::new();
+    facts
+        .try_reserve_exact(drafts.len())
+        .map_err(|_| provider_failure("query-fact-allocation"))?;
+    for (index, draft) in drafts.into_iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        let local_id = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or_else(|| provider_failure("query-fact-identity"))?;
+        let parent = draft
+            .parent
+            .map(|parent| {
+                u64::try_from(parent)
+                    .ok()
+                    .and_then(|parent| parent.checked_add(1))
+                    .ok_or_else(|| provider_failure("query-fact-identity"))
+            })
+            .transpose()?;
+        let start = u64::try_from(draft.start).map_err(|_| provider_failure("query-span"))?;
+        let end = u64::try_from(draft.end).map_err(|_| provider_failure("query-span"))?;
+        let span = SourceSpan::new(request.source().source_ref().span().file(), start, end)
+            .map_err(|_| provider_failure("query-span"))?;
+        facts.push(SyntaxFact::new(
+            local_id,
+            parent,
+            draft.role.fact_kind(),
+            span,
+            draft.depth,
+            draft.syntax_kind,
+        ));
+    }
+    cancellation.check()?;
     Ok(NormalizedFacts { facts, limited })
+}
+
+fn sort_cancellable_by<T: Copy>(
+    values: &mut Vec<T>,
+    cancellation: &Cancellation,
+    compare: impl Fn(&T, &T) -> std::cmp::Ordering + Copy,
+) -> Result<(), AdapterError> {
+    for chunk in values.chunks_mut(CANCELLATION_CHECK_INTERVAL) {
+        cancellation.check()?;
+        chunk.sort_unstable_by(compare);
+    }
+    if values.len() <= CANCELLATION_CHECK_INTERVAL {
+        cancellation.check()?;
+        return Ok(());
+    }
+
+    cancellation.check()?;
+    let mut scratch = Vec::new();
+    scratch
+        .try_reserve_exact(values.len())
+        .map_err(|_| provider_failure("query-sort-allocation"))?;
+    let mut width = CANCELLATION_CHECK_INTERVAL;
+    while width < values.len() {
+        cancellation.check()?;
+        scratch.clear();
+        let run_width = width
+            .checked_mul(2)
+            .unwrap_or(values.len())
+            .min(values.len());
+        let mut run_start = 0usize;
+        while run_start < values.len() {
+            cancellation.check()?;
+            let middle = run_start.saturating_add(width).min(values.len());
+            let run_end = run_start.saturating_add(run_width).min(values.len());
+            let left = values
+                .get(run_start..middle)
+                .ok_or_else(|| provider_failure("query-sort-invariant"))?;
+            let right = values
+                .get(middle..run_end)
+                .ok_or_else(|| provider_failure("query-sort-invariant"))?;
+            merge_sorted_runs(left, right, &mut scratch, cancellation, compare)?;
+            run_start = run_end;
+        }
+        std::mem::swap(values, &mut scratch);
+        width = run_width;
+    }
+    cancellation.check()?;
+    Ok(())
+}
+
+fn merge_sorted_runs<T: Copy>(
+    left_values: &[T],
+    right_values: &[T],
+    output: &mut Vec<T>,
+    cancellation: &Cancellation,
+    compare: impl Fn(&T, &T) -> std::cmp::Ordering,
+) -> Result<(), AdapterError> {
+    let mut left = 0usize;
+    let mut right = 0usize;
+    let mut merged = 0usize;
+    while left < left_values.len() && right < right_values.len() {
+        if merged.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        let left_value = *left_values
+            .get(left)
+            .ok_or_else(|| provider_failure("query-sort-invariant"))?;
+        let right_value = *right_values
+            .get(right)
+            .ok_or_else(|| provider_failure("query-sort-invariant"))?;
+        if compare(&left_value, &right_value).is_le() {
+            output.push(left_value);
+            left += 1;
+        } else {
+            output.push(right_value);
+            right += 1;
+        }
+        merged += 1;
+    }
+    for value in &left_values[left..] {
+        if merged.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        output.push(*value);
+        merged += 1;
+    }
+    for value in &right_values[right..] {
+        if merged.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        output.push(*value);
+        merged += 1;
+    }
+    Ok(())
+}
+
+fn dedup_query_candidates(
+    candidates: &mut Vec<QueryCandidate>,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    if candidates.len() < 2 {
+        cancellation.check()?;
+        return Ok(());
+    }
+    let mut write = 1usize;
+    for read in 1..candidates.len() {
+        if read.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        let candidate = *candidates
+            .get(read)
+            .ok_or_else(|| provider_failure("query-dedup-invariant"))?;
+        let duplicate = candidates
+            .get(write - 1)
+            .is_some_and(|previous| *previous == candidate);
+        if !duplicate {
+            let slot = candidates
+                .get_mut(write)
+                .ok_or_else(|| provider_failure("query-dedup-invariant"))?;
+            *slot = candidate;
+            write = write
+                .checked_add(1)
+                .ok_or_else(|| provider_failure("query-dedup-invariant"))?;
+        }
+    }
+    candidates.truncate(write);
+    cancellation.check()?;
+    Ok(())
 }
 
 fn push_candidate_bounded(
@@ -1266,8 +1591,18 @@ fn assign_fact_parents(
     drafts: &mut [FactDraft],
     cancellation: &Cancellation,
 ) -> Result<(), AdapterError> {
-    let mut order = (0..drafts.len()).collect::<Vec<_>>();
-    order.sort_unstable_by(|&left, &right| {
+    cancellation.check()?;
+    let mut order = Vec::new();
+    order
+        .try_reserve_exact(drafts.len())
+        .map_err(|_| provider_failure("query-parent-allocation"))?;
+    for index in 0..drafts.len() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        order.push(index);
+    }
+    sort_cancellable_by(&mut order, cancellation, |&left, &right| {
         (
             drafts[left].start,
             std::cmp::Reverse(drafts[left].end),
@@ -1282,12 +1617,13 @@ fn assign_fact_parents(
                 drafts[right].role,
                 drafts[right].syntax_kind.as_str(),
             ))
-    });
+    })?;
     let mut active = Vec::<usize>::new();
     for (position, index) in order.into_iter().enumerate() {
         if position.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
             cancellation.check()?;
         }
+        let mut inspected = 0usize;
         while active.last().is_some_and(|&parent| {
             !span_contains(
                 drafts[parent].start,
@@ -1296,13 +1632,27 @@ fn assign_fact_parents(
                 drafts[index].end,
             )
         }) {
+            if inspected.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                cancellation.check()?;
+            }
             active.pop();
+            inspected = inspected
+                .checked_add(1)
+                .ok_or_else(|| provider_failure("query-parent-accounting"))?;
         }
-        let parent = active
-            .iter()
-            .rev()
-            .copied()
-            .find(|&parent| parent_is_valid(&drafts[parent], &drafts[index]));
+        let mut parent = None;
+        for candidate in active.iter().rev().copied() {
+            if inspected.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                cancellation.check()?;
+            }
+            inspected = inspected
+                .checked_add(1)
+                .ok_or_else(|| provider_failure("query-parent-accounting"))?;
+            if parent_is_valid(&drafts[candidate], &drafts[index]) {
+                parent = Some(candidate);
+                break;
+            }
+        }
         let depth = parent
             .map(|parent| {
                 drafts[parent]
@@ -1315,6 +1665,9 @@ fn assign_fact_parents(
         drafts[index].parent = parent;
         drafts[index].depth = depth;
         if drafts[index].role.container_rank().is_some() {
+            active
+                .try_reserve(1)
+                .map_err(|_| provider_failure("query-parent-allocation"))?;
             active.push(index);
         }
     }
@@ -1357,6 +1710,9 @@ fn plan_fact_batches(
     let remaining = budget.remaining();
     let batch = budget.batch();
     let mut ranges = Vec::new();
+    ranges
+        .try_reserve_exact(facts.len().min(remaining.batches()))
+        .map_err(|_| provider_failure("query-batch-allocation"))?;
     let mut batch_start = 0usize;
     let mut batch_records = 0usize;
     let mut batch_output = 0usize;
@@ -1444,20 +1800,48 @@ fn fact_usage(fact: &SyntaxFact) -> Result<FactUsage, AdapterError> {
 }
 
 fn emit_fact_plan(
-    facts: &[SyntaxFact],
+    facts: Vec<SyntaxFact>,
     plan: FactPlan,
     sink: &mut dyn SyntaxFactSink,
     cancellation: &Cancellation,
 ) -> Result<(), AdapterError> {
+    let mut facts = facts.into_iter();
+    let mut consumed = 0usize;
+    let expected_emitted = plan.emitted;
     for range in plan.batches {
         cancellation.check()?;
+        if range.start != consumed {
+            return Err(provider_failure("query-batch-invariant"));
+        }
+        let batch_length = range
+            .end
+            .checked_sub(range.start)
+            .ok_or_else(|| provider_failure("query-batch-invariant"))?;
+        let mut batch_facts = Vec::new();
+        batch_facts
+            .try_reserve_exact(batch_length)
+            .map_err(|_| provider_failure("query-batch-allocation"))?;
+        for index in 0..batch_length {
+            if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                cancellation.check()?;
+            }
+            batch_facts.push(
+                facts
+                    .next()
+                    .ok_or_else(|| provider_failure("query-batch-invariant"))?,
+            );
+        }
+        consumed = range.end;
         sink.push(SyntaxFactBatch::new(
             sink.next_sequence(),
-            facts[range].to_vec(),
+            batch_facts,
             Vec::new(),
         ))?;
     }
     cancellation.check()?;
+    if consumed != expected_emitted {
+        return Err(provider_failure("query-batch-invariant"));
+    }
     Ok(())
 }
 
@@ -1609,7 +1993,8 @@ fn traverse_syntax(
             depth,
             &mut stack,
             max_nodes.saturating_sub(processed_nodes),
-        );
+            cancellation,
+        )?;
     }
     cancellation.check()?;
     Ok(SyntaxTraversal {
@@ -1626,11 +2011,19 @@ fn push_children_bounded<'tree>(
     depth: usize,
     stack: &mut Vec<(Node<'tree>, usize)>,
     remaining: usize,
-) -> bool {
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    cancellation.check()?;
     let child_capacity = remaining.saturating_sub(stack.len());
     let total_children = node.child_count();
     let child_count = total_children.min(child_capacity);
+    stack
+        .try_reserve(child_count)
+        .map_err(|_| provider_failure("syntax-traversal-allocation"))?;
     for index in (0..child_count).rev() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
         let Ok(index) = u32::try_from(index) else {
             continue;
         };
@@ -1638,7 +2031,8 @@ fn push_children_bounded<'tree>(
             stack.push((child, depth.saturating_add(1)));
         }
     }
-    total_children > child_capacity
+    cancellation.check()?;
+    Ok(total_children > child_capacity)
 }
 
 fn emit_primary_diagnostic(
@@ -1727,19 +2121,10 @@ fn require_provider_limit(
     }
 }
 
-trait ByteBoundary {
-    fn is_char_boundary(&self, index: usize) -> bool;
-}
-
-impl ByteBoundary for [u8] {
-    fn is_char_boundary(&self, index: usize) -> bool {
-        std::str::from_utf8(self).is_ok_and(|text| text.is_char_boundary(index))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::Cell, time::Duration};
 
     #[test]
     fn every_reuse_identity_dimension_has_a_distinct_invalidation() {
@@ -1814,14 +2199,91 @@ mod tests {
 
     #[test]
     fn source_points_use_utf8_byte_columns_and_crlf_rows() {
+        let cancellation = Cancellation::new();
         assert_eq!(
-            point_for_offset("é\r\nx".as_bytes(), 4),
-            Some(Point { row: 1, column: 0 })
+            points_for_offsets("é\r\nx".as_bytes(), 4, 4, &cancellation)
+                .expect("point scan succeeds"),
+            Some((Point { row: 1, column: 0 }, Point { row: 1, column: 0 }))
         );
         assert_eq!(
-            point_for_offset("é\r\nx".as_bytes(), 5),
-            Some(Point { row: 1, column: 1 })
+            points_for_offsets("é\r\nx".as_bytes(), 4, 5, &cancellation)
+                .expect("point scan succeeds"),
+            Some((Point { row: 1, column: 0 }, Point { row: 1, column: 1 }))
         );
+    }
+
+    #[test]
+    fn chunked_utf8_validation_preserves_scalars_across_checkpoints() {
+        let mut source = vec![b'a'; CANCELLATION_BYTE_INTERVAL - 1];
+        source.extend_from_slice("é".as_bytes());
+
+        validate_utf8_cancellable(&source, &Cancellation::new())
+            .expect("a scalar split across validation chunks remains valid");
+        source.pop();
+        assert!(matches!(
+            validate_utf8_cancellable(&source, &Cancellation::new()),
+            Err(AdapterError::ProviderFailed { code }) if code.as_str() == "invalid-utf8"
+        ));
+    }
+
+    #[test]
+    fn byte_chunk_work_observes_a_deadline_established_after_work_begins() {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let cancellation = Cancellation::with_deadline(deadline);
+        let source = vec![b'x'; CANCELLATION_BYTE_INTERVAL * 2];
+        let mut visited = 0usize;
+
+        let result = for_each_byte_chunk(&source, &cancellation, |_| {
+            visited += 1;
+            if visited == 1 {
+                assert!(cancellation.check_at(deadline).is_err());
+            }
+            Ok(())
+        });
+
+        assert_eq!(visited, 1);
+        assert!(matches!(
+            result,
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::DeadlineExceeded
+            })
+        ));
+    }
+
+    #[test]
+    fn cancellable_sort_observes_a_deadline_established_inside_a_sort_run() {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let cancellation = Cancellation::with_deadline(deadline);
+        let established = Cell::new(false);
+        let mut values = (0..4096_u64).rev().collect::<Vec<_>>();
+
+        let result = sort_cancellable_by(&mut values, &cancellation, |left, right| {
+            if !established.replace(true) {
+                assert!(cancellation.check_at(deadline).is_err());
+            }
+            left.cmp(right)
+        });
+
+        assert!(matches!(
+            result,
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::DeadlineExceeded
+            })
+        ));
+    }
+
+    #[test]
+    fn cancellable_sort_matches_the_canonical_order() {
+        let mut values = (0..4097_u64)
+            .map(|value| value.wrapping_mul(7919) % 4097)
+            .collect::<Vec<_>>();
+        let mut expected = values.clone();
+        expected.sort_unstable();
+
+        sort_cancellable_by(&mut values, &Cancellation::new(), Ord::cmp)
+            .expect("bounded sort succeeds");
+
+        assert_eq!(values, expected);
     }
 
     #[test]
