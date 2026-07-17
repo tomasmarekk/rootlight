@@ -41,6 +41,10 @@
       "blake3": "f59ca69f01b2c9be2d62f687e2a2ffac6bcc726ce30bdfd28f478bcbdcc01d7d"
     },
     {
+      "path": "tests/fixtures/compatibility/ir/1.1/document.json",
+      "blake3": "27df2406e26018dae5db7dbf612a829db1d668fea3230ab718c2dc2023d59c0e"
+    },
+    {
       "path": "tests/fixtures/compatibility/protobuf/1.0/contract-version.bin",
       "blake3": "8d51dfa93db52b10f98b12fa72c69841f9cd4a015d862cf2cd2de1b4b6fda540"
     },
@@ -89,6 +93,10 @@
     {
       "path": "schemas/generated/json/ir-1.0.schema.json",
       "blake3": "1585261fd729028f453dd3a9d2b83891e2584c3b13662e1a62c74e93e00b2085"
+    },
+    {
+      "path": "schemas/generated/json/ir-1.1.schema.json",
+      "blake3": "9815111822daab89e54ce1083937e52f2d288af6286819355ac0e62cca0873aa"
     },
     {
       "path": "schemas/generated/json/mcp-error-response-1.0.schema.json",

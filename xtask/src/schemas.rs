@@ -13,7 +13,7 @@ use cargo_metadata::MetadataCommand;
 use prost::Message;
 use prost_types::FileDescriptorSet;
 use rootlight_config::ConfigDocumentSchema;
-use rootlight_ir::IrDocumentSchema;
+use rootlight_ir::{IrDocument, IrDocumentSchema, NormalizedIrDocument};
 use rootlight_mcp_contract::{ErrorResponse, ResponseMetadata};
 use rootlight_protocol::generated::common::v1::ContractVersion as ProtocolContractVersion;
 use schemars::{JsonSchema, generate::SchemaSettings};
@@ -35,8 +35,9 @@ const COMPATIBILITY_FILES: [&str; 4] = [
     "contract-1.0.json",
     "contract-2.0-rejected.json",
 ];
-const COMPATIBILITY_BASELINES: [&str; 4] = [
+const COMPATIBILITY_BASELINES: [&str; 5] = [
     "ir/1.0/document.json",
+    "ir/1.1/document.json",
     "protobuf/1.0/contract-version.bin",
     "protobuf/1.0/contract-version.json",
     "protobuf/1.0/rootlight.desc",
@@ -60,7 +61,7 @@ pub(crate) fn generate(mode: GenerateMode) -> Result<(), SchemaError> {
 
     generate_protobuf(&workspace_root, staged_root)?;
     generate_json_schemas(staged_root)?;
-    validate_generated_json_schemas(staged_root)?;
+    validate_generated_json_schemas(&workspace_root, staged_root)?;
     generate_manifest(&workspace_root, staged_root)?;
 
     match mode {
@@ -286,6 +287,7 @@ fn validate_production_baselines(
     })?;
     let ir = read_json_value(&workspace_root.join(COMPATIBILITY_ROOT).join(ir_path))?;
     validate_ir_document(workspace_root, &fixture.contract_version, &ir, true)?;
+    validate_normalized_ir_baseline(workspace_root)?;
 
     let protobuf =
         fixture
@@ -321,6 +323,44 @@ fn validate_ir_document(
         return Err(SchemaError::CompatibilityIrValidity {
             version: fixture_version.to_owned(),
             expected_valid,
+            schema_valid,
+            decode_valid,
+        });
+    }
+    Ok(())
+}
+
+fn validate_normalized_ir_baseline(workspace_root: &Path) -> Result<(), SchemaError> {
+    let document_path = workspace_root
+        .join(COMPATIBILITY_ROOT)
+        .join("ir/1.1/document.json");
+    let document = read_json_value(&document_path)?;
+    let schema_path = workspace_root
+        .join(SCHEMA_ROOT)
+        .join("json/ir-1.1.schema.json");
+    let schema: serde_json::Value =
+        serde_json::from_slice(&read_bytes(&schema_path)?).map_err(|source| {
+            SchemaError::ParseGeneratedJson {
+                path: schema_path,
+                source,
+            }
+        })?;
+    let validator = jsonschema::draft202012::new(&schema).map_err(|source| {
+        SchemaError::CompileGeneratedSchema {
+            name: "ir-1.1.schema.json".to_owned(),
+            detail: source.to_string(),
+        }
+    })?;
+    let schema_valid = validator.is_valid(&document);
+    let decode_valid = serde_json::from_value::<NormalizedIrDocument>(document.clone()).is_ok()
+        && matches!(
+            serde_json::from_value::<IrDocument>(document),
+            Ok(IrDocument::NormalizedV1_1(_))
+        );
+    if !schema_valid || !decode_valid {
+        return Err(SchemaError::CompatibilityIrValidity {
+            version: "1.1".to_owned(),
+            expected_valid: true,
             schema_valid,
             decode_valid,
         });
@@ -515,6 +555,7 @@ fn generate_json_schemas(staged_root: &Path) -> Result<(), SchemaError> {
     let schema_root = staged_root.join(SCHEMA_ROOT).join("json");
     write_schema::<ConfigDocumentSchema>(&schema_root.join("config-1.0.schema.json"))?;
     write_schema::<IrDocumentSchema>(&schema_root.join("ir-1.0.schema.json"))?;
+    write_schema::<NormalizedIrDocument>(&schema_root.join("ir-1.1.schema.json"))?;
     write_schema::<ResponseMetadata>(&schema_root.join("mcp-response-metadata-1.0.schema.json"))?;
     write_schema::<ErrorResponse>(&schema_root.join("mcp-error-response-1.0.schema.json"))?;
     Ok(())
@@ -530,7 +571,10 @@ fn write_schema<T: JsonSchema>(path: &Path) -> Result<(), SchemaError> {
     write_bytes(path, &bytes)
 }
 
-fn validate_generated_json_schemas(staged_root: &Path) -> Result<(), SchemaError> {
+fn validate_generated_json_schemas(
+    workspace_root: &Path,
+    staged_root: &Path,
+) -> Result<(), SchemaError> {
     let schema_root = staged_root.join(SCHEMA_ROOT).join("json");
     let ir_document = |major: u64, minor: u64| {
         serde_json::json!({
@@ -548,6 +592,13 @@ fn validate_generated_json_schemas(staged_root: &Path) -> Result<(), SchemaError
             "evidence": "syntax"
         })
     };
+    let normalized_ir = read_json_value(
+        &workspace_root
+            .join(COMPATIBILITY_ROOT)
+            .join("ir/1.1/document.json"),
+    )?;
+    let mut wrong_normalized_minor = normalized_ir.clone();
+    wrong_normalized_minor["version"]["minor"] = serde_json::json!(2);
     let cases = [
         SchemaSemanticCase::valid(
             "config-1.0.schema.json",
@@ -589,6 +640,16 @@ fn validate_generated_json_schemas(staged_root: &Path) -> Result<(), SchemaError
             value["producer"]["name"] = serde_json::json!("path/shaped");
             value
         }),
+        SchemaSemanticCase::valid(
+            "ir-1.1.schema.json",
+            "normalized fact document",
+            normalized_ir,
+        ),
+        SchemaSemanticCase::invalid(
+            "ir-1.1.schema.json",
+            "unsupported normalized IR minor",
+            wrong_normalized_minor,
+        ),
         SchemaSemanticCase::valid(
             "mcp-response-metadata-1.0.schema.json",
             "valid response metadata",
@@ -635,12 +696,29 @@ fn validate_generated_json_schemas(staged_root: &Path) -> Result<(), SchemaError
                 detail: source.to_string(),
             }
         })?;
-        if validator.is_valid(&case.instance) != case.expected_valid {
+        let schema_valid = validator.is_valid(&case.instance);
+        let serde_valid = match case.schema {
+            "ir-1.0.schema.json" => {
+                serde_json::from_value::<IrDocumentSchema>(case.instance.clone()).is_ok()
+            }
+            "ir-1.1.schema.json" => {
+                serde_json::from_value::<NormalizedIrDocument>(case.instance.clone()).is_ok()
+            }
+            _ => case.expected_valid,
+        };
+        if schema_valid != case.expected_valid || serde_valid != case.expected_valid {
             return Err(SchemaError::GeneratedSchemaSemantics(format!(
                 "{}: {}",
                 case.schema, case.description
             )));
         }
+    }
+    if serde_json::from_value::<IrDocument>(ir_document(1, 0)).is_err()
+        || serde_json::from_value::<IrDocument>(ir_document(1, 2)).is_ok()
+    {
+        return Err(SchemaError::GeneratedSchemaSemantics(
+            "explicit IR dispatch accepted an unsupported minor".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -787,6 +865,7 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/protobuf/rootlight.desc"),
         format!("{SCHEMA_ROOT}/json/config-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/ir-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/ir-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-response-metadata-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-error-response-1.0.schema.json"),
     ]);

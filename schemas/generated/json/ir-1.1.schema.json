@@ -1,0 +1,2115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NormalizedIrDocument",
+  "description": "A strict version 1.1 normalized fact document.",
+  "type": "object",
+  "properties": {
+    "coverage_records": {
+      "description": "Coverage records by scope and fact domain.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoverageRecord"
+      }
+    },
+    "diagnostics": {
+      "description": "Bounded diagnostics.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DiagnosticRecord"
+      }
+    },
+    "entities": {
+      "description": "Owned common semantic entities.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EntityRecord"
+      }
+    },
+    "extensions": {
+      "description": "Namespaced critical and noncritical extension envelopes.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ExtensionEnvelope"
+      }
+    },
+    "files": {
+      "description": "Owned immutable files.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FileRecord"
+      }
+    },
+    "generation": {
+      "description": "Single immutable generation owning every record and reference.",
+      "$ref": "#/$defs/GenerationId"
+    },
+    "occurrences": {
+      "description": "Owned source occurrences.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/OccurrenceRecord"
+      }
+    },
+    "provenance": {
+      "description": "Deduplicated producer and derivation provenance.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProvenanceRecord"
+      }
+    },
+    "relations": {
+      "description": "Owned typed relations.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RelationRecord"
+      }
+    },
+    "repository": {
+      "description": "Single repository owning every record and reference.",
+      "$ref": "#/$defs/RepositoryId"
+    },
+    "skipped_regions": {
+      "description": "Explicitly skipped source regions.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SkippedRegion"
+      }
+    },
+    "source_mappings": {
+      "description": "Generated and expanded source mappings.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SourceMappingRecord"
+      }
+    },
+    "version": {
+      "description": "Exact version 1.1 wire marker.",
+      "$ref": "#/$defs/NormalizedIrVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "repository",
+    "generation",
+    "files",
+    "entities",
+    "occurrences",
+    "relations",
+    "provenance",
+    "source_mappings",
+    "coverage_records",
+    "skipped_regions",
+    "diagnostics",
+    "extensions"
+  ],
+  "$defs": {
+    "AnalysisTier": {
+      "description": "Declared language-analysis tier for one producer or result.",
+      "oneOf": [
+        {
+          "description": "Compiler-assisted project semantics.",
+          "type": "string",
+          "const": "tier_a"
+        },
+        {
+          "description": "Full structural semantics.",
+          "type": "string",
+          "const": "tier_b"
+        },
+        {
+          "description": "Symbols and imports.",
+          "type": "string",
+          "const": "tier_c"
+        },
+        {
+          "description": "Syntax fallback.",
+          "type": "string",
+          "const": "tier_d"
+        }
+      ]
+    },
+    "BuildContextIdentity": {
+      "description": "Stable digest identifying one build-context interpretation.",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/ContentHash"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "digest"
+      ]
+    },
+    "Confidence": {
+      "description": "Fixed-point confidence from 0 through 1000 inclusive.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 1000,
+      "minimum": 0
+    },
+    "ContainerRef": {
+      "description": "A typed semantic container reference.",
+      "oneOf": [
+        {
+          "description": "The owning repository.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/RepositoryId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "repository"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "description": "A containing file.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/FileId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "file"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "description": "A containing semantic entity.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/SymbolId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "entity"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        }
+      ]
+    },
+    "ContentHash": {
+      "type": "string",
+      "pattern": "^b3_[a-z2-7]{58}$"
+    },
+    "CoverageRecord": {
+      "description": "One bounded coverage result for a fact domain.",
+      "type": "object",
+      "properties": {
+        "discovered": {
+          "description": "Discovered units in the scope and domain.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "domain": {
+          "description": "Covered fact domain.",
+          "$ref": "#/$defs/FactDomain"
+        },
+        "evidence": {
+          "description": "Source or derivation evidence for the coverage fact.",
+          "$ref": "#/$defs/FactEvidence"
+        },
+        "generation": {
+          "description": "Owning immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "id": {
+          "description": "Stable coverage fact identity.",
+          "$ref": "#/$defs/FactId"
+        },
+        "indexed": {
+          "description": "Successfully indexed units.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "provenance": {
+          "description": "Deduplicated provenance record.",
+          "$ref": "#/$defs/FactId"
+        },
+        "repository": {
+          "description": "Owning repository.",
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "scope": {
+          "description": "Covered repository, file, or entity.",
+          "$ref": "#/$defs/CoverageScope"
+        },
+        "skipped": {
+          "description": "Explicitly skipped or failed units.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "description": "Declared completeness.",
+          "$ref": "#/$defs/CoverageStatus"
+        },
+        "tier": {
+          "description": "Analysis tier supporting the coverage result.",
+          "$ref": "#/$defs/AnalysisTier"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repository",
+        "generation",
+        "scope",
+        "domain",
+        "tier",
+        "status",
+        "discovered",
+        "indexed",
+        "skipped",
+        "provenance",
+        "evidence"
+      ]
+    },
+    "CoverageScope": {
+      "description": "A typed scope for one coverage record.",
+      "oneOf": [
+        {
+          "description": "Repository-wide coverage.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/RepositoryId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "repository"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "description": "File-specific coverage.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/FileId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "file"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "description": "Entity-specific coverage.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/SymbolId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "entity"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        }
+      ]
+    },
+    "CoverageStatus": {
+      "description": "Completeness of a bounded fact or result set.",
+      "oneOf": [
+        {
+          "description": "The declared domain was completely analyzed.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "A documented bound truncated the domain.",
+          "type": "string",
+          "const": "bounded"
+        },
+        {
+          "description": "A representative sample was analyzed.",
+          "type": "string",
+          "const": "sampled"
+        },
+        {
+          "description": "Completeness could not be established.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "DiagnosticRecord": {
+      "description": "One bounded analysis diagnostic.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Stable producer-defined diagnostic code.",
+          "type": "string"
+        },
+        "coverage_effect": {
+          "description": "Coverage status after applying the diagnostic.",
+          "$ref": "#/$defs/CoverageStatus"
+        },
+        "evidence": {
+          "description": "Source or derivation evidence for the diagnostic fact.",
+          "$ref": "#/$defs/FactEvidence"
+        },
+        "generation": {
+          "description": "Owning immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "id": {
+          "description": "Stable diagnostic fact identity.",
+          "$ref": "#/$defs/FactId"
+        },
+        "message": {
+          "description": "Bounded source-free diagnostic message.",
+          "type": "string"
+        },
+        "provenance": {
+          "description": "Deduplicated provenance record.",
+          "$ref": "#/$defs/FactId"
+        },
+        "repository": {
+          "description": "Owning repository.",
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "severity": {
+          "description": "Diagnostic severity.",
+          "$ref": "#/$defs/DiagnosticSeverity"
+        },
+        "source": {
+          "description": "Optional source region affected by the diagnostic.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repository",
+        "generation",
+        "code",
+        "message",
+        "severity",
+        "coverage_effect",
+        "provenance",
+        "evidence"
+      ]
+    },
+    "DiagnosticSeverity": {
+      "description": "A bounded diagnostic severity.",
+      "oneOf": [
+        {
+          "description": "Informational diagnostic.",
+          "type": "string",
+          "const": "info"
+        },
+        {
+          "description": "Recoverable warning.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Error that caused partial analysis.",
+          "type": "string",
+          "const": "error"
+        }
+      ]
+    },
+    "EntityFlag": {
+      "description": "A common boolean entity characteristic.",
+      "oneOf": [
+        {
+          "description": "Generated from another source.",
+          "type": "string",
+          "const": "generated"
+        },
+        {
+          "description": "External to the indexed repository.",
+          "type": "string",
+          "const": "external"
+        },
+        {
+          "description": "Test-only or test-related.",
+          "type": "string",
+          "const": "test"
+        },
+        {
+          "description": "Exported from its module or package.",
+          "type": "string",
+          "const": "exported"
+        },
+        {
+          "description": "Deprecated by its producer.",
+          "type": "string",
+          "const": "deprecated"
+        },
+        {
+          "description": "Synthesized without a direct source declaration.",
+          "type": "string",
+          "const": "synthetic"
+        }
+      ]
+    },
+    "EntityKind": {
+      "description": "A closed common entity kind understood by the Rootlight core.",
+      "oneOf": [
+        {
+          "description": "A repository root.",
+          "type": "string",
+          "const": "repository"
+        },
+        {
+          "description": "A checked-out worktree.",
+          "type": "string",
+          "const": "worktree"
+        },
+        {
+          "description": "A package or distribution unit.",
+          "type": "string",
+          "const": "package"
+        },
+        {
+          "description": "A configuration-specific build target.",
+          "type": "string",
+          "const": "build_target"
+        },
+        {
+          "description": "A physical directory.",
+          "type": "string",
+          "const": "directory"
+        },
+        {
+          "description": "An immutable generation file.",
+          "type": "string",
+          "const": "file"
+        },
+        {
+          "description": "A language module.",
+          "type": "string",
+          "const": "module"
+        },
+        {
+          "description": "A language namespace.",
+          "type": "string",
+          "const": "namespace"
+        },
+        {
+          "description": "A class-like type.",
+          "type": "string",
+          "const": "class"
+        },
+        {
+          "description": "A struct-like type.",
+          "type": "string",
+          "const": "struct"
+        },
+        {
+          "description": "An enumeration.",
+          "type": "string",
+          "const": "enum"
+        },
+        {
+          "description": "A union type.",
+          "type": "string",
+          "const": "union"
+        },
+        {
+          "description": "A type alias.",
+          "type": "string",
+          "const": "type_alias"
+        },
+        {
+          "description": "A trait.",
+          "type": "string",
+          "const": "trait"
+        },
+        {
+          "description": "An interface.",
+          "type": "string",
+          "const": "interface"
+        },
+        {
+          "description": "A protocol.",
+          "type": "string",
+          "const": "protocol"
+        },
+        {
+          "description": "A free function.",
+          "type": "string",
+          "const": "function"
+        },
+        {
+          "description": "A method.",
+          "type": "string",
+          "const": "method"
+        },
+        {
+          "description": "A constructor.",
+          "type": "string",
+          "const": "constructor"
+        },
+        {
+          "description": "A closure.",
+          "type": "string",
+          "const": "closure"
+        },
+        {
+          "description": "A field.",
+          "type": "string",
+          "const": "field"
+        },
+        {
+          "description": "A property.",
+          "type": "string",
+          "const": "property"
+        },
+        {
+          "description": "A constant.",
+          "type": "string",
+          "const": "constant"
+        },
+        {
+          "description": "A variable.",
+          "type": "string",
+          "const": "variable"
+        },
+        {
+          "description": "A callable parameter.",
+          "type": "string",
+          "const": "parameter"
+        },
+        {
+          "description": "A type parameter.",
+          "type": "string",
+          "const": "type_parameter"
+        },
+        {
+          "description": "An import clause.",
+          "type": "string",
+          "const": "import"
+        },
+        {
+          "description": "An export clause.",
+          "type": "string",
+          "const": "export"
+        },
+        {
+          "description": "A service route or endpoint.",
+          "type": "string",
+          "const": "route"
+        },
+        {
+          "description": "A service boundary.",
+          "type": "string",
+          "const": "service"
+        },
+        {
+          "description": "A message topic or queue.",
+          "type": "string",
+          "const": "message_topic"
+        },
+        {
+          "description": "A database object.",
+          "type": "string",
+          "const": "database_object"
+        },
+        {
+          "description": "A test declaration.",
+          "type": "string",
+          "const": "test"
+        },
+        {
+          "description": "A configuration key.",
+          "type": "string",
+          "const": "configuration_key"
+        },
+        {
+          "description": "A source-control commit.",
+          "type": "string",
+          "const": "commit"
+        },
+        {
+          "description": "A source-control change.",
+          "type": "string",
+          "const": "change"
+        },
+        {
+          "description": "A derived architecture community.",
+          "type": "string",
+          "const": "community_view"
+        },
+        {
+          "description": "A symbol outside the indexed repository.",
+          "type": "string",
+          "const": "external_symbol"
+        }
+      ]
+    },
+    "EntityRecord": {
+      "description": "One common semantic entity owned by the document repository and generation.",
+      "type": "object",
+      "properties": {
+        "canonical_name": {
+          "description": "Canonical name used by language identity rules.",
+          "type": "string"
+        },
+        "container": {
+          "description": "Optional semantic container.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContainerRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "display_name": {
+          "description": "Original source spelling for presentation.",
+          "type": "string"
+        },
+        "evidence": {
+          "description": "Source or derivation evidence for the entity fact.",
+          "$ref": "#/$defs/FactEvidence"
+        },
+        "flags": {
+          "description": "Common entity characteristics.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EntityFlag"
+          }
+        },
+        "generation": {
+          "description": "Owning immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "id": {
+          "description": "Stable semantic entity identity.",
+          "$ref": "#/$defs/SymbolId"
+        },
+        "kind": {
+          "description": "Closed common entity kind.",
+          "$ref": "#/$defs/EntityKind"
+        },
+        "language": {
+          "description": "Normalized language or data-format identity.",
+          "type": "string"
+        },
+        "provenance": {
+          "description": "Deduplicated provenance record.",
+          "$ref": "#/$defs/FactId"
+        },
+        "qualified_name": {
+          "description": "Display-oriented qualified name.",
+          "type": "string"
+        },
+        "repository": {
+          "description": "Owning repository.",
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "tier": {
+          "description": "Analysis tier supporting this entity.",
+          "$ref": "#/$defs/AnalysisTier"
+        },
+        "visibility": {
+          "description": "Common visibility projection.",
+          "$ref": "#/$defs/EntityVisibility"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repository",
+        "generation",
+        "kind",
+        "language",
+        "tier",
+        "canonical_name",
+        "display_name",
+        "qualified_name",
+        "visibility",
+        "flags",
+        "provenance",
+        "evidence"
+      ]
+    },
+    "EntityVisibility": {
+      "description": "A common entity visibility projection.",
+      "oneOf": [
+        {
+          "description": "Visible outside its owning package or module.",
+          "type": "string",
+          "const": "public"
+        },
+        {
+          "description": "Visible to a restricted set of consumers.",
+          "type": "string",
+          "const": "restricted"
+        },
+        {
+          "description": "Visible only within its owning scope.",
+          "type": "string",
+          "const": "private"
+        },
+        {
+          "description": "Visibility is not expressible in the common projection.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "EvidenceKind": {
+      "description": "Evidence class supporting a normalized fact.",
+      "oneOf": [
+        {
+          "description": "Direct syntax declaration or occurrence.",
+          "type": "string",
+          "const": "syntax"
+        },
+        {
+          "description": "Compiler or precise index evidence.",
+          "type": "string",
+          "const": "compiler"
+        },
+        {
+          "description": "Language-server evidence.",
+          "type": "string",
+          "const": "language_server"
+        },
+        {
+          "description": "Imported SCIP evidence.",
+          "type": "string",
+          "const": "scip"
+        },
+        {
+          "description": "Bounded deterministic derivation from base facts.",
+          "type": "string",
+          "const": "derived"
+        }
+      ]
+    },
+    "ExtensionCriticality": {
+      "description": "Extension criticality understood by compatibility policy.",
+      "oneOf": [
+        {
+          "description": "A decoder must understand the extension before accepting the document.",
+          "type": "string",
+          "const": "critical"
+        },
+        {
+          "description": "A decoder may preserve or skip the extension without changing common facts.",
+          "type": "string",
+          "const": "noncritical"
+        }
+      ]
+    },
+    "ExtensionEnvelope": {
+      "description": "One namespaced, length-bounded extension envelope.",
+      "type": "object",
+      "properties": {
+        "criticality": {
+          "description": "Compatibility behavior for unknown payloads.",
+          "$ref": "#/$defs/ExtensionCriticality"
+        },
+        "evidence": {
+          "description": "Source or derivation evidence for the extension fact.",
+          "$ref": "#/$defs/FactEvidence"
+        },
+        "generation": {
+          "description": "Owning immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "id": {
+          "description": "Stable extension fact identity.",
+          "$ref": "#/$defs/FactId"
+        },
+        "namespace": {
+          "description": "Reverse-DNS or similarly collision-resistant namespace.",
+          "type": "string"
+        },
+        "payload": {
+          "description": "Opaque canonical UTF-8 payload owned by the extension namespace.",
+          "type": "string"
+        },
+        "provenance": {
+          "description": "Deduplicated provenance record.",
+          "$ref": "#/$defs/FactId"
+        },
+        "repository": {
+          "description": "Owning repository.",
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "version": {
+          "description": "Namespace-specific payload version.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repository",
+        "generation",
+        "namespace",
+        "version",
+        "criticality",
+        "payload",
+        "provenance",
+        "evidence"
+      ]
+    },
+    "FactDomain": {
+      "description": "A normalized fact domain used for coverage reporting.",
+      "oneOf": [
+        {
+          "description": "File facts.",
+          "type": "string",
+          "const": "files"
+        },
+        {
+          "description": "Entity facts.",
+          "type": "string",
+          "const": "entities"
+        },
+        {
+          "description": "Occurrence facts.",
+          "type": "string",
+          "const": "occurrences"
+        },
+        {
+          "description": "Relation facts.",
+          "type": "string",
+          "const": "relations"
+        },
+        {
+          "description": "Provenance facts.",
+          "type": "string",
+          "const": "provenance"
+        },
+        {
+          "description": "Source-mapping facts.",
+          "type": "string",
+          "const": "source_mappings"
+        },
+        {
+          "description": "Diagnostics and skipped regions.",
+          "type": "string",
+          "const": "diagnostics"
+        },
+        {
+          "description": "Extension facts.",
+          "type": "string",
+          "const": "extensions"
+        }
+      ]
+    },
+    "FactEvidence": {
+      "description": "Source or derivation evidence required for a normalized fact.",
+      "type": "object",
+      "properties": {
+        "derivation": {
+          "description": "Base facts supporting a derived fact.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "source": {
+          "description": "Direct immutable source evidence, when present.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "derivation"
+      ]
+    },
+    "FactId": {
+      "type": "string",
+      "pattern": "^fact1_[a-z2-7]{39}$"
+    },
+    "FactRef": {
+      "description": "A typed reference to a base fact used by a derivation.",
+      "oneOf": [
+        {
+          "description": "A file fact.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/FileId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "file"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "description": "A semantic entity fact.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/SymbolId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "entity"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "description": "A non-entity fact identified by [`FactId`].",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/FactId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "fact"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        }
+      ]
+    },
+    "FileId": {
+      "type": "string",
+      "pattern": "^file1_[a-z2-7]{39}$"
+    },
+    "FileRecord": {
+      "description": "One immutable file owned by the document repository and generation.",
+      "type": "object",
+      "properties": {
+        "byte_length": {
+          "description": "Authoritative file length in bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "content_hash": {
+          "description": "Immutable content hash used by every source reference.",
+          "$ref": "#/$defs/ContentHash"
+        },
+        "encoding": {
+          "description": "Declared source encoding.",
+          "type": "string"
+        },
+        "evidence": {
+          "description": "Source or derivation evidence for the file fact.",
+          "$ref": "#/$defs/FactEvidence"
+        },
+        "generated": {
+          "description": "Whether the file is generated.",
+          "type": "boolean"
+        },
+        "generation": {
+          "description": "Owning immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "id": {
+          "description": "Stable repository-scoped file identity.",
+          "$ref": "#/$defs/FileId"
+        },
+        "language": {
+          "description": "Normalized language or data-format identity.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Canonical repository-relative path.",
+          "type": "string"
+        },
+        "provenance": {
+          "description": "Deduplicated provenance record.",
+          "$ref": "#/$defs/FactId"
+        },
+        "repository": {
+          "description": "Owning repository.",
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repository",
+        "generation",
+        "path",
+        "content_hash",
+        "byte_length",
+        "language",
+        "encoding",
+        "generated",
+        "provenance",
+        "evidence"
+      ]
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "LineRange": {
+      "description": "A validated one-based inclusive source line range.",
+      "type": "object",
+      "properties": {
+        "end_line": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "start_line": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "start_line",
+        "end_line"
+      ]
+    },
+    "NormalizedIrVersion": {
+      "type": "object",
+      "properties": {
+        "major": {
+          "type": "integer",
+          "const": 1
+        },
+        "minor": {
+          "type": "integer",
+          "const": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "major",
+        "minor"
+      ]
+    },
+    "OccurrenceRecord": {
+      "description": "One source occurrence owned by the document repository and generation.",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "description": "Calibrated fixed-point confidence.",
+          "$ref": "#/$defs/Confidence"
+        },
+        "enclosing": {
+          "description": "Optional enclosing semantic entity.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SymbolId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "description": "Source or derivation evidence for the occurrence fact.",
+          "$ref": "#/$defs/FactEvidence"
+        },
+        "file": {
+          "description": "File containing the occurrence.",
+          "$ref": "#/$defs/FileId"
+        },
+        "generation": {
+          "description": "Owning immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "id": {
+          "description": "Stable occurrence fact identity.",
+          "$ref": "#/$defs/FactId"
+        },
+        "provenance": {
+          "description": "Deduplicated provenance record.",
+          "$ref": "#/$defs/FactId"
+        },
+        "repository": {
+          "description": "Owning repository.",
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "role": {
+          "description": "Closed common occurrence role.",
+          "$ref": "#/$defs/OccurrenceRole"
+        },
+        "source": {
+          "description": "Authoritative occurrence source span.",
+          "$ref": "#/$defs/SourceRef"
+        },
+        "syntactic_text_hash": {
+          "description": "Hash of the occurrence spelling.",
+          "$ref": "#/$defs/ContentHash"
+        },
+        "syntax_kind": {
+          "description": "Producer-defined syntax kind label.",
+          "type": "string"
+        },
+        "target": {
+          "description": "Resolved, ambiguous, or unresolved target.",
+          "$ref": "#/$defs/OccurrenceTarget"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repository",
+        "generation",
+        "file",
+        "source",
+        "role",
+        "target",
+        "syntactic_text_hash",
+        "syntax_kind",
+        "provenance",
+        "confidence",
+        "evidence"
+      ]
+    },
+    "OccurrenceRole": {
+      "description": "A closed role for a source occurrence.",
+      "oneOf": [
+        {
+          "description": "A defining occurrence.",
+          "type": "string",
+          "const": "definition"
+        },
+        {
+          "description": "A non-defining declaration.",
+          "type": "string",
+          "const": "declaration"
+        },
+        {
+          "description": "A general reference.",
+          "type": "string",
+          "const": "reference"
+        },
+        {
+          "description": "A call site.",
+          "type": "string",
+          "const": "call_site"
+        },
+        {
+          "description": "A type use.",
+          "type": "string",
+          "const": "type_use"
+        },
+        {
+          "description": "An import use.",
+          "type": "string",
+          "const": "import_use"
+        },
+        {
+          "description": "A write.",
+          "type": "string",
+          "const": "write"
+        },
+        {
+          "description": "A read.",
+          "type": "string",
+          "const": "read"
+        },
+        {
+          "description": "An inheritance use.",
+          "type": "string",
+          "const": "inheritance_use"
+        },
+        {
+          "description": "An implementation use.",
+          "type": "string",
+          "const": "implementation_use"
+        },
+        {
+          "description": "A decorator or annotation use.",
+          "type": "string",
+          "const": "decorator_use"
+        },
+        {
+          "description": "A macro use.",
+          "type": "string",
+          "const": "macro_use"
+        },
+        {
+          "description": "A route use.",
+          "type": "string",
+          "const": "route_use"
+        },
+        {
+          "description": "A test use.",
+          "type": "string",
+          "const": "test_use"
+        },
+        {
+          "description": "Documentation evidence.",
+          "type": "string",
+          "const": "documentation"
+        },
+        {
+          "description": "String-literal evidence.",
+          "type": "string",
+          "const": "string_evidence"
+        }
+      ]
+    },
+    "OccurrenceTarget": {
+      "description": "A resolved, bounded-candidate, or unresolved occurrence target.",
+      "oneOf": [
+        {
+          "description": "One resolved semantic target.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "resolved"
+            },
+            "symbol": {
+              "description": "Resolved symbol.",
+              "$ref": "#/$defs/SymbolId"
+            }
+          },
+          "required": [
+            "kind",
+            "symbol"
+          ]
+        },
+        {
+          "description": "A bounded set of possible semantic targets.",
+          "type": "object",
+          "properties": {
+            "completeness": {
+              "description": "Completeness of the materialized set.",
+              "$ref": "#/$defs/CoverageStatus"
+            },
+            "kind": {
+              "type": "string",
+              "const": "candidates"
+            },
+            "symbols": {
+              "description": "Materialized candidate symbols.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SymbolId"
+              }
+            },
+            "total_count": {
+              "description": "Candidate count before any declared truncation.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "symbols",
+            "total_count",
+            "completeness"
+          ]
+        },
+        {
+          "description": "An unresolved site retained without inventing a target.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unresolved"
+            },
+            "text_hash": {
+              "description": "Hash of the source spelling or other untrusted target text.",
+              "$ref": "#/$defs/ContentHash"
+            }
+          },
+          "required": [
+            "kind",
+            "text_hash"
+          ]
+        }
+      ]
+    },
+    "ProducerIdentity": {
+      "description": "Stable identity of the component that produced facts.",
+      "type": "object",
+      "properties": {
+        "configuration_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.+-]+$"
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.+-]+$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "configuration_hash"
+      ]
+    },
+    "ProducerKind": {
+      "description": "A producer class retained in deduplicated provenance.",
+      "oneOf": [
+        {
+          "description": "A resilient parser.",
+          "type": "string",
+          "const": "parser"
+        },
+        {
+          "description": "A compiler or semantic frontend.",
+          "type": "string",
+          "const": "compiler"
+        },
+        {
+          "description": "A SCIP producer.",
+          "type": "string",
+          "const": "scip"
+        },
+        {
+          "description": "A build manifest.",
+          "type": "string",
+          "const": "build_manifest"
+        },
+        {
+          "description": "Source-control evidence.",
+          "type": "string",
+          "const": "git"
+        },
+        {
+          "description": "A runtime trace.",
+          "type": "string",
+          "const": "runtime_trace"
+        },
+        {
+          "description": "A deterministic rule.",
+          "type": "string",
+          "const": "rule"
+        },
+        {
+          "description": "A bounded heuristic.",
+          "type": "string",
+          "const": "heuristic"
+        },
+        {
+          "description": "User configuration.",
+          "type": "string",
+          "const": "user_configuration"
+        },
+        {
+          "description": "A derivation from base facts.",
+          "type": "string",
+          "const": "derivation"
+        }
+      ]
+    },
+    "ProvenanceRecord": {
+      "description": "One deduplicated producer and derivation provenance record.",
+      "type": "object",
+      "properties": {
+        "binary_digest": {
+          "description": "Digest of the producing binary or immutable package.",
+          "$ref": "#/$defs/ContentHash"
+        },
+        "build_context": {
+          "description": "Build-context interpretation used by the producer.",
+          "$ref": "#/$defs/BuildContextIdentity"
+        },
+        "derivation_parents": {
+          "description": "Base facts or provenance records used by a derivation.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactRef"
+          }
+        },
+        "evidence_sources": {
+          "description": "Source evidence directly supporting produced facts.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceRef"
+          }
+        },
+        "frontend_version": {
+          "description": "Grammar, compiler, or frontend version label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation": {
+          "description": "Owning immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "id": {
+          "description": "Stable provenance fact identity.",
+          "$ref": "#/$defs/FactId"
+        },
+        "input_sources": {
+          "description": "Source inputs consumed by the producer.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceRef"
+          }
+        },
+        "language": {
+          "description": "Normalized language or data-format identity.",
+          "type": "string"
+        },
+        "producer": {
+          "description": "Stable producer identity and configuration.",
+          "$ref": "#/$defs/ProducerIdentity"
+        },
+        "producer_kind": {
+          "description": "Producer class.",
+          "$ref": "#/$defs/ProducerKind"
+        },
+        "repository": {
+          "description": "Owning repository.",
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "rule": {
+          "description": "Optional deterministic rule or resolver identifier.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tier": {
+          "description": "Analysis tier supplied by the producer.",
+          "$ref": "#/$defs/AnalysisTier"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repository",
+        "generation",
+        "producer_kind",
+        "producer",
+        "binary_digest",
+        "language",
+        "tier",
+        "build_context",
+        "input_sources",
+        "evidence_sources",
+        "derivation_parents"
+      ]
+    },
+    "RelationEndpoint": {
+      "description": "A typed endpoint for a normalized relation.",
+      "oneOf": [
+        {
+          "description": "A repository endpoint.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/RepositoryId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "repository"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "description": "A file endpoint.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/FileId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "file"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "description": "A semantic entity endpoint.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/SymbolId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "entity"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "description": "An occurrence endpoint.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/FactId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "occurrence"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        }
+      ]
+    },
+    "RelationPredicate": {
+      "description": "A closed common predicate for normalized relations.",
+      "oneOf": [
+        {
+          "description": "Structural containment.",
+          "type": "string",
+          "const": "contains"
+        },
+        {
+          "description": "A container declares a symbol.",
+          "type": "string",
+          "const": "declares"
+        },
+        {
+          "description": "A symbol has a definition occurrence.",
+          "type": "string",
+          "const": "defines_at"
+        },
+        {
+          "description": "An occurrence or symbol refers to a target.",
+          "type": "string",
+          "const": "refers_to"
+        },
+        {
+          "description": "A site or callable invokes a callable.",
+          "type": "string",
+          "const": "calls"
+        },
+        {
+          "description": "A site may dispatch to a runtime target.",
+          "type": "string",
+          "const": "dispatch_candidate"
+        },
+        {
+          "description": "A file or module imports another target.",
+          "type": "string",
+          "const": "imports"
+        },
+        {
+          "description": "A module or package exports a symbol.",
+          "type": "string",
+          "const": "exports"
+        },
+        {
+          "description": "A fact uses a type.",
+          "type": "string",
+          "const": "uses_type"
+        },
+        {
+          "description": "A callable returns a type.",
+          "type": "string",
+          "const": "returns_type"
+        },
+        {
+          "description": "A parameter has a type.",
+          "type": "string",
+          "const": "parameter_type"
+        },
+        {
+          "description": "A type extends another type.",
+          "type": "string",
+          "const": "extends"
+        },
+        {
+          "description": "A type implements another type.",
+          "type": "string",
+          "const": "implements"
+        },
+        {
+          "description": "A type satisfies a protocol or constraint.",
+          "type": "string",
+          "const": "satisfies"
+        },
+        {
+          "description": "A type embeds another type.",
+          "type": "string",
+          "const": "embeds"
+        },
+        {
+          "description": "A type mixes in another type.",
+          "type": "string",
+          "const": "mixes_in"
+        },
+        {
+          "description": "A method overrides another declaration.",
+          "type": "string",
+          "const": "overrides"
+        },
+        {
+          "description": "A callable or occurrence reads a value.",
+          "type": "string",
+          "const": "reads"
+        },
+        {
+          "description": "A callable or occurrence writes a value.",
+          "type": "string",
+          "const": "writes"
+        },
+        {
+          "description": "A callable throws an error type.",
+          "type": "string",
+          "const": "throws"
+        },
+        {
+          "description": "A callable handles an error type.",
+          "type": "string",
+          "const": "handles_error"
+        },
+        {
+          "description": "A test exercises a target.",
+          "type": "string",
+          "const": "tests"
+        },
+        {
+          "description": "A target depends on another target.",
+          "type": "string",
+          "const": "depends_on"
+        },
+        {
+          "description": "A client calls a route.",
+          "type": "string",
+          "const": "calls_route"
+        },
+        {
+          "description": "A handler serves a route.",
+          "type": "string",
+          "const": "serves_route"
+        },
+        {
+          "description": "A callable or service publishes to a topic.",
+          "type": "string",
+          "const": "publishes"
+        },
+        {
+          "description": "A callable or service consumes from a topic.",
+          "type": "string",
+          "const": "consumes"
+        },
+        {
+          "description": "A callable or service reads a database object.",
+          "type": "string",
+          "const": "reads_table"
+        },
+        {
+          "description": "A callable or service writes a database object.",
+          "type": "string",
+          "const": "writes_table"
+        },
+        {
+          "description": "A fact binds to a foreign declaration.",
+          "type": "string",
+          "const": "binds_to"
+        },
+        {
+          "description": "A callable invokes a foreign declaration.",
+          "type": "string",
+          "const": "calls_foreign"
+        },
+        {
+          "description": "Generated content originates from another fact.",
+          "type": "string",
+          "const": "generated_from"
+        },
+        {
+          "description": "A fact changed in a source-control change.",
+          "type": "string",
+          "const": "changed_in"
+        },
+        {
+          "description": "A fact was renamed from another fact.",
+          "type": "string",
+          "const": "lineage_renamed_from"
+        },
+        {
+          "description": "A fact was moved from another fact.",
+          "type": "string",
+          "const": "lineage_moved_from"
+        },
+        {
+          "description": "A fact was split from another fact.",
+          "type": "string",
+          "const": "lineage_split_from"
+        },
+        {
+          "description": "A fact was merged from another fact.",
+          "type": "string",
+          "const": "lineage_merged_from"
+        },
+        {
+          "description": "Two facts co-changed within a bounded history window.",
+          "type": "string",
+          "const": "co_changed_with"
+        },
+        {
+          "description": "A fact has ownership evidence.",
+          "type": "string",
+          "const": "owned_by"
+        },
+        {
+          "description": "A fact belongs to a derived architecture view.",
+          "type": "string",
+          "const": "member_of_view"
+        }
+      ]
+    },
+    "RelationRecord": {
+      "description": "One typed relation owned by the document repository and generation.",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "description": "Calibrated fixed-point confidence.",
+          "$ref": "#/$defs/Confidence"
+        },
+        "evidence": {
+          "description": "Source or derivation evidence for the relation fact.",
+          "$ref": "#/$defs/FactEvidence"
+        },
+        "evidence_kind": {
+          "description": "Evidence class supporting the relation.",
+          "$ref": "#/$defs/EvidenceKind"
+        },
+        "generation": {
+          "description": "Owning immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "id": {
+          "description": "Stable relation fact identity.",
+          "$ref": "#/$defs/FactId"
+        },
+        "object": {
+          "description": "Typed relation object.",
+          "$ref": "#/$defs/RelationEndpoint"
+        },
+        "predicate": {
+          "description": "Closed common predicate.",
+          "$ref": "#/$defs/RelationPredicate"
+        },
+        "provenance": {
+          "description": "Deduplicated provenance record.",
+          "$ref": "#/$defs/FactId"
+        },
+        "repository": {
+          "description": "Owning repository.",
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "subject": {
+          "description": "Typed relation subject.",
+          "$ref": "#/$defs/RelationEndpoint"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repository",
+        "generation",
+        "subject",
+        "predicate",
+        "object",
+        "confidence",
+        "evidence_kind",
+        "provenance",
+        "evidence"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "SkippedRegion": {
+      "description": "One explicitly skipped source region.",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "Bounded source-free detail.",
+          "type": "string"
+        },
+        "domain": {
+          "description": "Affected fact domain.",
+          "$ref": "#/$defs/FactDomain"
+        },
+        "evidence": {
+          "description": "Source or derivation evidence for the skipped-region fact.",
+          "$ref": "#/$defs/FactEvidence"
+        },
+        "generation": {
+          "description": "Owning immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "id": {
+          "description": "Stable skipped-region fact identity.",
+          "$ref": "#/$defs/FactId"
+        },
+        "provenance": {
+          "description": "Deduplicated provenance record.",
+          "$ref": "#/$defs/FactId"
+        },
+        "reason": {
+          "description": "Closed skip reason.",
+          "$ref": "#/$defs/SkippedRegionReason"
+        },
+        "repository": {
+          "description": "Owning repository.",
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "source": {
+          "description": "Skipped source region.",
+          "$ref": "#/$defs/SourceRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repository",
+        "generation",
+        "source",
+        "domain",
+        "reason",
+        "detail",
+        "provenance",
+        "evidence"
+      ]
+    },
+    "SkippedRegionReason": {
+      "description": "A closed reason for a skipped source region.",
+      "oneOf": [
+        {
+          "description": "A configured byte or node bound was reached.",
+          "type": "string",
+          "const": "resource_limit"
+        },
+        {
+          "description": "Source could not be parsed completely.",
+          "type": "string",
+          "const": "parse_error"
+        },
+        {
+          "description": "Required build context was unavailable.",
+          "type": "string",
+          "const": "missing_build_context"
+        },
+        {
+          "description": "The adapter failed without invalidating other facts.",
+          "type": "string",
+          "const": "adapter_failure"
+        },
+        {
+          "description": "The source encoding was unsupported.",
+          "type": "string",
+          "const": "unsupported_encoding"
+        },
+        {
+          "description": "The source construct was unsupported.",
+          "type": "string",
+          "const": "unsupported_construct"
+        }
+      ]
+    },
+    "SourceMappingKind": {
+      "description": "The semantic direction of a generated or expanded source mapping.",
+      "oneOf": [
+        {
+          "description": "Generated source maps to its handwritten origin.",
+          "type": "string",
+          "const": "generated_to_origin"
+        },
+        {
+          "description": "Expanded source maps to its invocation.",
+          "type": "string",
+          "const": "expansion_to_invocation"
+        },
+        {
+          "description": "An invocation maps to its original declaration or schema.",
+          "type": "string",
+          "const": "invocation_to_origin"
+        }
+      ]
+    },
+    "SourceMappingRecord": {
+      "description": "One source-to-source origin mapping.",
+      "type": "object",
+      "properties": {
+        "evidence": {
+          "description": "Source or derivation evidence for the mapping fact.",
+          "$ref": "#/$defs/FactEvidence"
+        },
+        "from": {
+          "description": "Generated or expanded source reference.",
+          "$ref": "#/$defs/SourceRef"
+        },
+        "generation": {
+          "description": "Owning immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "id": {
+          "description": "Stable source-mapping fact identity.",
+          "$ref": "#/$defs/FactId"
+        },
+        "kind": {
+          "description": "Mapping direction.",
+          "$ref": "#/$defs/SourceMappingKind"
+        },
+        "provenance": {
+          "description": "Deduplicated provenance record.",
+          "$ref": "#/$defs/FactId"
+        },
+        "repository": {
+          "description": "Owning repository.",
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "to": {
+          "description": "Invocation or handwritten origin reference.",
+          "$ref": "#/$defs/SourceRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repository",
+        "generation",
+        "from",
+        "to",
+        "kind",
+        "provenance",
+        "evidence"
+      ]
+    },
+    "SourceRef": {
+      "description": "A generation-bound reference to immutable repository source.",
+      "type": "object",
+      "properties": {
+        "content_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "generation": {
+          "$ref": "#/$defs/GenerationId"
+        },
+        "line_hint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LineRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repository": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "span": {
+          "$ref": "#/$defs/SourceSpan"
+        }
+      },
+      "required": [
+        "repository",
+        "generation",
+        "span",
+        "content_hash"
+      ]
+    },
+    "SourceSpan": {
+      "description": "A validated half-open source byte span within one file.",
+      "type": "object",
+      "properties": {
+        "end_byte": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "file": {
+          "$ref": "#/$defs/FileId"
+        },
+        "start_byte": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "file",
+        "start_byte",
+        "end_byte"
+      ]
+    },
+    "SymbolId": {
+      "type": "string",
+      "pattern": "^sym1_[a-z2-7]{39}$"
+    }
+  }
+}

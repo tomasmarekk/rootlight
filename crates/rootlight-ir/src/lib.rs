@@ -1,10 +1,21 @@
 //! Cross-language contract primitives for Rootlight's normalized IR.
 //!
-//! P0 defines only the common version, source, evidence, confidence, coverage,
-//! producer, and extension boundaries. Language entities and relations remain
-//! owned by their later roadmap tasks.
+//! The frozen version 1.0 envelope remains available for compatibility. Version
+//! 1.1 adds language-neutral files, entities, occurrences, relations, provenance,
+//! source mappings, coverage, diagnostics, and extension envelopes.
 
 #![forbid(unsafe_code)]
+
+mod normalized;
+
+pub use normalized::{
+    ContainerRef, CoverageRecord, CoverageScope, DiagnosticRecord, DiagnosticSeverity, EntityFlag,
+    EntityKind, EntityRecord, EntityVisibility, ExtensionCriticality, ExtensionEnvelope,
+    FactDomain, FactEvidence, FactRef, FileRecord, IrDocument, NORMALIZED_IR_VERSION,
+    NormalizedIrDocument, NormalizedIrVersion, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
+    ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord,
+    SkippedRegion, SkippedRegionReason, SourceMappingKind, SourceMappingRecord,
+};
 
 use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId};
 use serde::{Deserialize, Serialize};
@@ -442,8 +453,8 @@ impl BuildContextIdentity {
 }
 
 /// Versioned P0 envelope for normalized IR contract fixtures.
-#[cfg(feature = "schema")]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct IrDocumentSchema {
     /// IR contract version used by the document.
@@ -460,7 +471,6 @@ pub struct IrDocumentSchema {
     evidence: EvidenceKind,
 }
 
-#[cfg(feature = "schema")]
 impl IrDocumentSchema {
     /// Creates a checked normalized-IR contract envelope.
     ///
@@ -524,7 +534,6 @@ impl IrDocumentSchema {
     }
 }
 
-#[cfg(feature = "schema")]
 impl<'de> Deserialize<'de> for IrDocumentSchema {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

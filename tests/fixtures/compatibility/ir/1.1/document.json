@@ -1,0 +1,420 @@
+{
+  "version": {
+    "major": 1,
+    "minor": 1
+  },
+  "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+  "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+  "files": [
+    {
+      "id": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+      "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+      "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+      "path": "src/lib.rs",
+      "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+      "byte_length": 26,
+      "language": "rust",
+      "encoding": "utf-8",
+      "generated": false,
+      "provenance": "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga",
+      "evidence": {
+        "source": {
+          "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "span": {
+            "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+            "start_byte": 0,
+            "end_byte": 26
+          },
+          "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+          "line_hint": {
+            "start_line": 1,
+            "end_line": 1
+          }
+        },
+        "derivation": []
+      }
+    }
+  ],
+  "entities": [
+    {
+      "id": "sym1_cylbmfqwcylbmfqwcylbmfqwcylbmfqwntdenqa",
+      "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+      "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+      "kind": "function",
+      "language": "rust",
+      "tier": "tier_c",
+      "canonical_name": "fixture",
+      "display_name": "fixture",
+      "qualified_name": "crate::fixture",
+      "container": {
+        "kind": "file",
+        "id": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq"
+      },
+      "visibility": "public",
+      "flags": [
+        "exported"
+      ],
+      "provenance": "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga",
+      "evidence": {
+        "source": {
+          "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "span": {
+            "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+            "start_byte": 0,
+            "end_byte": 7
+          },
+          "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+          "line_hint": {
+            "start_line": 1,
+            "end_line": 1
+          }
+        },
+        "derivation": []
+      }
+    }
+  ],
+  "occurrences": [
+    {
+      "id": "fact1_aibaeaqcaibaeaqcaibaeaqcaibaeaqc6umabai",
+      "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+      "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+      "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+      "source": {
+        "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+        "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+        "span": {
+          "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+          "start_byte": 0,
+          "end_byte": 7
+        },
+        "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+        "line_hint": {
+          "start_line": 1,
+          "end_line": 1
+        }
+      },
+      "role": "definition",
+      "enclosing": "sym1_cylbmfqwcylbmfqwcylbmfqwcylbmfqwntdenqa",
+      "target": {
+        "kind": "resolved",
+        "symbol": "sym1_cylbmfqwcylbmfqwcylbmfqwcylbmfqwntdenqa"
+      },
+      "syntactic_text_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+      "syntax_kind": "identifier",
+      "provenance": "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga",
+      "confidence": 1000,
+      "evidence": {
+        "source": {
+          "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "span": {
+            "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+            "start_byte": 0,
+            "end_byte": 7
+          },
+          "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+          "line_hint": {
+            "start_line": 1,
+            "end_line": 1
+          }
+        },
+        "derivation": []
+      }
+    }
+  ],
+  "relations": [
+    {
+      "id": "fact1_ambqgaydambqgaydambqgaydambqgaydfxl6kpq",
+      "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+      "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+      "subject": {
+        "kind": "file",
+        "id": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq"
+      },
+      "predicate": "declares",
+      "object": {
+        "kind": "entity",
+        "id": "sym1_cylbmfqwcylbmfqwcylbmfqwcylbmfqwntdenqa"
+      },
+      "confidence": 1000,
+      "evidence_kind": "syntax",
+      "provenance": "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga",
+      "evidence": {
+        "source": {
+          "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "span": {
+            "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+            "start_byte": 0,
+            "end_byte": 7
+          },
+          "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+          "line_hint": {
+            "start_line": 1,
+            "end_line": 1
+          }
+        },
+        "derivation": []
+      }
+    }
+  ],
+  "provenance": [
+    {
+      "id": "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga",
+      "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+      "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+      "producer_kind": "parser",
+      "producer": {
+        "name": "rootlight-fixture",
+        "version": "1.1",
+        "configuration_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+      },
+      "binary_digest": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+      "frontend_version": "fixture-grammar-1",
+      "language": "rust",
+      "tier": "tier_c",
+      "build_context": {
+        "digest": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+      },
+      "input_sources": [
+        {
+          "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "span": {
+            "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+            "start_byte": 0,
+            "end_byte": 26
+          },
+          "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+          "line_hint": {
+            "start_line": 1,
+            "end_line": 1
+          }
+        }
+      ],
+      "evidence_sources": [
+        {
+          "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "span": {
+            "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+            "start_byte": 0,
+            "end_byte": 26
+          },
+          "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+          "line_hint": {
+            "start_line": 1,
+            "end_line": 1
+          }
+        }
+      ],
+      "derivation_parents": [],
+      "rule": null
+    }
+  ],
+  "source_mappings": [
+    {
+      "id": "fact1_aqcaibaeaqcaibaeaqcaibaeaqcaibaewmkt4la",
+      "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+      "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+      "from": {
+        "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+        "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+        "span": {
+          "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+          "start_byte": 0,
+          "end_byte": 7
+        },
+        "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+        "line_hint": {
+          "start_line": 1,
+          "end_line": 1
+        }
+      },
+      "to": {
+        "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+        "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+        "span": {
+          "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+          "start_byte": 8,
+          "end_byte": 15
+        },
+        "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+        "line_hint": {
+          "start_line": 1,
+          "end_line": 1
+        }
+      },
+      "kind": "generated_to_origin",
+      "provenance": "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga",
+      "evidence": {
+        "source": {
+          "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "span": {
+            "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+            "start_byte": 0,
+            "end_byte": 7
+          },
+          "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+          "line_hint": {
+            "start_line": 1,
+            "end_line": 1
+          }
+        },
+        "derivation": []
+      }
+    }
+  ],
+  "coverage_records": [
+    {
+      "id": "fact1_aucqkbifaucqkbifaucqkbifaucqkbifci2mxua",
+      "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+      "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+      "scope": {
+        "kind": "repository",
+        "id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+      },
+      "domain": "entities",
+      "tier": "tier_c",
+      "status": "bounded",
+      "discovered": 2,
+      "indexed": 1,
+      "skipped": 1,
+      "provenance": "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga",
+      "evidence": {
+        "source": {
+          "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "span": {
+            "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+            "start_byte": 0,
+            "end_byte": 26
+          },
+          "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+          "line_hint": {
+            "start_line": 1,
+            "end_line": 1
+          }
+        },
+        "derivation": []
+      }
+    }
+  ],
+  "skipped_regions": [
+    {
+      "id": "fact1_aydambqgaydambqgaydambqgaydambqgdwzdyji",
+      "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+      "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+      "source": {
+        "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+        "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+        "span": {
+          "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+          "start_byte": 20,
+          "end_byte": 26
+        },
+        "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+        "line_hint": {
+          "start_line": 1,
+          "end_line": 1
+        }
+      },
+      "domain": "entities",
+      "reason": "unsupported_construct",
+      "detail": "fixture omission",
+      "provenance": "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga",
+      "evidence": {
+        "source": {
+          "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "span": {
+            "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+            "start_byte": 20,
+            "end_byte": 26
+          },
+          "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+          "line_hint": {
+            "start_line": 1,
+            "end_line": 1
+          }
+        },
+        "derivation": []
+      }
+    }
+  ],
+  "diagnostics": [
+    {
+      "id": "fact1_a4dqobyha4dqobyha4dqobyha4dqobyhl3tfewq",
+      "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+      "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+      "code": "FIXTURE_PARTIAL",
+      "message": "one fixture region was skipped",
+      "severity": "warning",
+      "source": {
+        "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+        "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+        "span": {
+          "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+          "start_byte": 20,
+          "end_byte": 26
+        },
+        "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+        "line_hint": {
+          "start_line": 1,
+          "end_line": 1
+        }
+      },
+      "coverage_effect": "bounded",
+      "provenance": "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga",
+      "evidence": {
+        "source": {
+          "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "span": {
+            "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+            "start_byte": 20,
+            "end_byte": 26
+          },
+          "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+          "line_hint": {
+            "start_line": 1,
+            "end_line": 1
+          }
+        },
+        "derivation": []
+      }
+    }
+  ],
+  "extensions": [
+    {
+      "id": "fact1_baeaqcaibaeaqcaibaeaqcaibaeaqcai4pro3da",
+      "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+      "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+      "namespace": "dev.rootlight.fixture",
+      "version": "1.0",
+      "criticality": "noncritical",
+      "payload": "{}",
+      "provenance": "fact1_aeaqcaibaeaqcaibaeaqcaibaeaqcaibwbicmga",
+      "evidence": {
+        "source": {
+          "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "span": {
+            "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+            "start_byte": 0,
+            "end_byte": 26
+          },
+          "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+          "line_hint": {
+            "start_line": 1,
+            "end_line": 1
+          }
+        },
+        "derivation": []
+      }
+    }
+  ]
+}
