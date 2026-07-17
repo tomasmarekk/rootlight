@@ -101,8 +101,9 @@ fn execute_client(
             Ok(CommandResult::DiagnosticsQuick(client.diagnostics_quick()?))
         }
         ("support-bundle", [output, path]) if output == "--output" => {
+            let path = support_output_path(path)?;
             let bundle = client.support_bundle()?;
-            write_support_bundle(Path::new(path), &bundle.archive)?;
+            write_support_bundle(path, &bundle.archive)?;
             Ok(CommandResult::SupportBundle(support_receipt(&bundle)))
         }
         ("operation-submit", [operation]) => Ok(CommandResult::OperationSubmit(
@@ -226,6 +227,7 @@ async fn execute_standalone_command(
             response_to_result(service.execute(ControlRequest::DiagnosticsQuick))
         }
         ("support-bundle", [output, path]) if output == "--output" => {
+            let path = support_output_path(path)?;
             let response = control_response(service.execute(ControlRequest::SupportBundle(
                 rootlight_observability::SupportBundleSchema::V2,
             )))?;
@@ -233,7 +235,7 @@ async fn execute_standalone_command(
                 return Err(CliError::UnexpectedResponse);
             };
             let bundle = support_bundle_from_domain(bundle);
-            write_support_bundle(Path::new(path), &bundle.archive)?;
+            write_support_bundle(path, &bundle.archive)?;
             Ok(CommandResult::SupportBundle(support_receipt(&bundle)))
         }
         ("operation-submit", [operation]) => {
@@ -452,6 +454,39 @@ fn write_support_bundle_with_writer(
     archive: &[u8],
     write: impl FnOnce(&mut PrivateOutputFile, &[u8]) -> std::io::Result<()>,
 ) -> Result<(), CliError> {
+    validate_support_output_path(path)?;
+    let mut output = PrivateOutputFile::create(path).map_err(map_support_output_error)?;
+    if let Err(source) = write(&mut output, archive) {
+        return match output.abort() {
+            Ok(()) => Err(CliError::SupportWrite(source)),
+            Err(cleanup) => Err(CliError::SupportCleanup(cleanup)),
+        };
+    }
+    output.commit().map_err(map_support_output_error)
+}
+
+fn support_output_path(argument: &std::ffi::OsStr) -> Result<&Path, CliError> {
+    let path = Path::new(argument);
+    validate_support_output_path(path)?;
+    Ok(path)
+}
+
+fn validate_support_output_path(path: &Path) -> Result<(), CliError> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let final_component = path
+            .as_os_str()
+            .as_bytes()
+            .rsplit(|byte| *byte == b'/')
+            .next()
+            .unwrap_or_default();
+        if final_component.is_empty() || final_component == b"." || final_component == b".." {
+            return Err(CliError::InvalidSupportPath);
+        }
+    }
+
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -459,9 +494,7 @@ fn write_support_bundle_with_writer(
     if !parent.is_dir() || path.file_name().is_none() {
         return Err(CliError::InvalidSupportPath);
     }
-    let mut output = PrivateOutputFile::create(path).map_err(map_support_output_error)?;
-    write(&mut output, archive).map_err(CliError::SupportWrite)?;
-    output.commit().map_err(map_support_output_error)
+    Ok(())
 }
 
 fn map_support_output_error(error: RuntimeError) -> CliError {
@@ -470,6 +503,7 @@ fn map_support_output_error(error: RuntimeError) -> CliError {
             CliError::SupportOutputExists
         }
         RuntimeError::Io(source) => CliError::SupportWrite(source),
+        error @ RuntimeError::PrivateOutputCleanup(_) => CliError::SupportCleanup(error),
         error => CliError::Runtime(error),
     }
 }
@@ -662,6 +696,8 @@ enum CliError {
     SupportOutputExists,
     #[error("support bundle output failed")]
     SupportWrite(#[source] std::io::Error),
+    #[error("support bundle staging cleanup failed")]
+    SupportCleanup(#[source] RuntimeError),
     #[error("secure random source is unavailable")]
     RandomUnavailable,
     #[error("daemon runtime setup failed")]
@@ -707,7 +743,7 @@ impl CliError {
             | Self::Runtime(rootlight_runtime::RuntimeError::InsecureEndpointArtifact)
             | Self::Runtime(rootlight_runtime::RuntimeError::InsecureLockFile)
             | Self::Runtime(rootlight_runtime::RuntimeError::InsecureOutputFile)
-            | Self::Runtime(rootlight_runtime::RuntimeError::PrivateOutputSecurityPolicy)
+            | Self::Runtime(rootlight_runtime::RuntimeError::PrivateOutputSecurityPolicy(_))
             | Self::Runtime(rootlight_runtime::RuntimeError::WindowsSecurityPolicy)
             | Self::Runtime(rootlight_runtime::RuntimeError::InvalidEndpoint(_))
             | Self::Operations(rootlight_operations::OperationError::InsecureLockFile)
@@ -901,6 +937,33 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn support_output_argument_rejects_raw_directory_aliases() {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+        let temporary = private_support_tempdir();
+        for suffix in [
+            b"trailing/".as_slice(),
+            b"current/.".as_slice(),
+            b"parent/..".as_slice(),
+        ] {
+            let mut raw = temporary.path().as_os_str().as_bytes().to_vec();
+            raw.push(b'/');
+            raw.extend_from_slice(suffix);
+            let argument = std::ffi::OsString::from_vec(raw);
+            assert!(argument.as_os_str().as_bytes().ends_with(suffix));
+
+            let error =
+                support_output_path(&argument).expect_err("raw directory alias is rejected");
+            assert!(matches!(error, CliError::InvalidSupportPath));
+            let envelope = CliEnvelope::failure(error.exit_family(), error.public_error());
+            let json = serde_json::to_value(envelope).expect("CLI envelope serializes");
+            assert_eq!(json["exit_family"], "usage");
+            assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+        }
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn support_bundle_write_failure_leaves_private_reserved_output() {
@@ -1037,5 +1100,18 @@ mod tests {
         assert_eq!(json["exit_family"], "usage");
         assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
         assert!(json.get("result").is_none());
+    }
+
+    #[test]
+    fn support_cleanup_failure_is_reported_as_a_distinct_internal_error() {
+        let error = map_support_output_error(RuntimeError::PrivateOutputCleanup(
+            std::io::Error::other("injected support cleanup failure"),
+        ));
+
+        assert!(matches!(error, CliError::SupportCleanup(_)));
+        let envelope = CliEnvelope::failure(error.exit_family(), error.public_error());
+        let json = serde_json::to_value(envelope).expect("CLI envelope serializes");
+        assert_eq!(json["exit_family"], "internal");
+        assert_eq!(json["error"]["code"], "INTERNAL");
     }
 }
