@@ -62,6 +62,7 @@ fn analysis_request_preserves_compatible_utf8_full_file_defaults() {
 
     assert_eq!(request.encoding().as_str(), "utf-8");
     assert!(request.included_ranges().is_empty());
+    assert_eq!(request.generated_status(), None);
 }
 
 #[test]
@@ -92,6 +93,10 @@ fn parser_and_analyzer_share_included_range_validation() {
     .expect("sorted disjoint analysis ranges are accepted");
     assert_eq!(analysis.encoding(), &encoding);
     assert_eq!(analysis.included_ranges(), ranges);
+    assert_eq!(analysis.generated_status(), None);
+
+    let classified = analysis.clone().with_generated_status(true);
+    assert_eq!(classified.generated_status(), Some(true));
 
     let overlapping = vec![
         IncludedRange::new(first, language.clone()),

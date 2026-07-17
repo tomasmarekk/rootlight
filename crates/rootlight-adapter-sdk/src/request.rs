@@ -183,6 +183,7 @@ pub struct AnalysisRequest<'a> {
     language: LanguageId,
     encoding: EncodingId,
     included_ranges: Vec<IncludedRange>,
+    generated: Option<bool>,
     tier: AnalysisTier,
     build_context: BuildContextIdentity,
     limits: &'a AnalysisLimits,
@@ -242,10 +243,23 @@ impl<'a> AnalysisRequest<'a> {
             language,
             encoding,
             included_ranges,
+            generated: None,
             tier,
             build_context,
             limits,
         })
+    }
+
+    /// Records whether the source was classified as generated.
+    ///
+    /// Compatibility constructors intentionally leave this classification
+    /// unknown. Analyzers that require it must reject the request until a
+    /// caller supplies the repository-owned classification through this
+    /// builder.
+    #[must_use]
+    pub const fn with_generated_status(mut self, generated: bool) -> Self {
+        self.generated = Some(generated);
+        self
     }
 
     /// Returns the immutable generation-bound source.
@@ -270,6 +284,12 @@ impl<'a> AnalysisRequest<'a> {
     #[must_use]
     pub fn included_ranges(&self) -> &[IncludedRange] {
         &self.included_ranges
+    }
+
+    /// Returns the repository-owned generated-source classification, if known.
+    #[must_use]
+    pub const fn generated_status(&self) -> Option<bool> {
+        self.generated
     }
 
     /// Returns the requested analysis tier.
