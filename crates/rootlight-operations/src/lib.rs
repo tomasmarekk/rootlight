@@ -18,7 +18,7 @@ pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_error::PublicError;
 use rootlight_ids::OperationId;
 use rusqlite::{
-    Connection, OptionalExtension, Transaction,
+    Connection, OpenFlags, OptionalExtension, Transaction,
     config::DbConfig,
     hooks::{AuthAction, Authorization},
     params,
@@ -1233,6 +1233,50 @@ impl OperationJournal {
         validate_schema(&connection, storage)
     }
 
+    /// Revalidates a persistent catalog through a separate read-only connection.
+    ///
+    /// This path never acquires the journal's writer mutex, so bounded diagnostics
+    /// cannot block status, cancellation, or durable completion on that lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError`] for open, policy, identity, schema, or integrity failures.
+    pub fn quick_check_path(path: &Path) -> Result<(), OperationError> {
+        Self::quick_check_path_with_timeout(path, CATALOG_BUSY_TIMEOUT)
+    }
+
+    /// Revalidates a persistent catalog with a monotonic SQLite progress deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError`] for open, timeout, policy, identity, schema, or
+    /// integrity failures.
+    pub fn quick_check_path_with_timeout(
+        path: &Path,
+        timeout: Duration,
+    ) -> Result<(), OperationError> {
+        if timeout.is_zero() {
+            return Err(OperationError::DiagnosticTimedOut);
+        }
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(OperationError::DiagnosticTimedOut)?;
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI;
+        let connection = Connection::open_with_flags(path, flags).map_err(map_sqlite_error)?;
+        connection.busy_handler(None).map_err(map_sqlite_error)?;
+        connection
+            .progress_handler(1_000, Some(move || Instant::now() >= deadline))
+            .map_err(map_sqlite_error)?;
+        configure_read_only_diagnostic_connection(&connection)?;
+        check_diagnostic_deadline(deadline)?;
+        map_diagnostic_timeout(validate_catalog_identity(&connection))?;
+        check_diagnostic_deadline(deadline)?;
+        map_diagnostic_timeout(validate_schema(&connection, CatalogStorage::Persistent))?;
+        check_diagnostic_deadline(deadline)
+    }
+
     fn recover_nonterminal(&self, now_unix_ms: u64) -> Result<(), OperationError> {
         loop {
             let changed = self.recover_nonterminal_batch(now_unix_ms, 256)?;
@@ -1411,6 +1455,54 @@ fn configure_catalog_connection(
         )
         .map_err(map_sqlite_error)?;
     validate_catalog_connection(connection, storage)
+}
+
+fn remaining_diagnostic_time(deadline: Instant) -> Result<Duration, OperationError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(OperationError::DiagnosticTimedOut)
+}
+
+fn check_diagnostic_deadline(deadline: Instant) -> Result<(), OperationError> {
+    remaining_diagnostic_time(deadline).map(|_| ())
+}
+
+fn map_diagnostic_timeout<T>(result: Result<T, OperationError>) -> Result<T, OperationError> {
+    match result {
+        Err(OperationError::Sqlite(error))
+            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) =>
+        {
+            Err(OperationError::DiagnosticTimedOut)
+        }
+        result => result,
+    }
+}
+
+fn configure_read_only_diagnostic_connection(
+    connection: &Connection,
+) -> Result<(), OperationError> {
+    for (config, enabled) in [
+        (DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY, true),
+        (DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true),
+        (DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false),
+        (DbConfig::SQLITE_DBCONFIG_DQS_DDL, false),
+        (DbConfig::SQLITE_DBCONFIG_DQS_DML, false),
+        (DbConfig::SQLITE_DBCONFIG_ENABLE_ATTACH_CREATE, false),
+        (DbConfig::SQLITE_DBCONFIG_ENABLE_ATTACH_WRITE, false),
+    ] {
+        let observed = connection
+            .set_db_config(config, enabled)
+            .map_err(map_sqlite_error)?;
+        if observed != enabled {
+            return Err(OperationError::UnsupportedSqliteConfiguration);
+        }
+    }
+    connection
+        .execute_batch("PRAGMA query_only = ON; PRAGMA temp_store = MEMORY;")
+        .map_err(map_sqlite_error)?;
+    install_catalog_authorizer(connection)?;
+    Ok(())
 }
 
 fn catalog_storage(connection: &Connection) -> Result<CatalogStorage, OperationError> {
@@ -2560,6 +2652,9 @@ pub enum OperationError {
     /// SQLite remained busy or locked past the bounded wait.
     #[error("operation journal is busy")]
     Busy,
+    /// A bounded diagnostic exceeded its monotonic deadline.
+    #[error("operation journal diagnostic timed out")]
+    DiagnosticTimedOut,
     /// Persisted operation state failed validation.
     #[error("operation journal contains invalid state")]
     CorruptState,
@@ -2636,6 +2731,11 @@ pub type SharedOperationJournal = Arc<OperationJournal>;
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{Arc, Barrier},
+        thread,
+    };
+
     use super::*;
     use rootlight_error::ErrorCode;
     use tempfile::tempdir;
@@ -2703,6 +2803,176 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn lifecycle_transition_matrix_matches_the_closed_model() {
+        let states = [
+            OperationState::Queued,
+            OperationState::Running,
+            OperationState::Cancelling,
+            OperationState::Succeeded,
+            OperationState::Failed,
+            OperationState::Cancelled,
+            OperationState::Interrupted,
+        ];
+        let expected = [
+            (OperationState::Queued, OperationState::Running),
+            (OperationState::Queued, OperationState::Failed),
+            (OperationState::Queued, OperationState::Interrupted),
+            (OperationState::Running, OperationState::Cancelling),
+            (OperationState::Running, OperationState::Succeeded),
+            (OperationState::Running, OperationState::Failed),
+            (OperationState::Running, OperationState::Interrupted),
+            (OperationState::Cancelling, OperationState::Cancelled),
+            (OperationState::Cancelling, OperationState::Failed),
+            (OperationState::Cancelling, OperationState::Interrupted),
+        ];
+
+        for from in states {
+            for to in states {
+                assert_eq!(
+                    legal_transition(from, to),
+                    expected.contains(&(from, to)),
+                    "unexpected lifecycle edge {from:?} -> {to:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_states_are_absorbing_and_revision_stable() {
+        let terminal_states = [
+            OperationState::Succeeded,
+            OperationState::Failed,
+            OperationState::Cancelled,
+            OperationState::Interrupted,
+        ];
+
+        for (index, terminal) in terminal_states.into_iter().enumerate() {
+            let seed = u8::try_from(index + 40).expect("fixture seed fits u8");
+            let journal = OperationJournal::open_in_memory().expect("journal opens");
+            journal
+                .enqueue(operation(seed))
+                .expect("operation enqueues");
+            let before = match terminal {
+                OperationState::Succeeded => {
+                    journal
+                        .start_execution(operation(seed))
+                        .expect("operation starts");
+                    journal
+                        .transition(operation(seed), terminal, None)
+                        .expect("operation succeeds")
+                }
+                OperationState::Failed => {
+                    let error = PublicError::builder(ErrorCode::Internal, "operation failed")
+                        .operation(operation(seed))
+                        .build()
+                        .expect("public error builds");
+                    journal
+                        .transition(operation(seed), terminal, Some(&error))
+                        .expect("operation fails")
+                }
+                OperationState::Cancelled => {
+                    journal
+                        .request_cancellation(operation(seed), CancellationReason::ClientRequest)
+                        .expect("queued cancellation wins")
+                        .operation
+                }
+                OperationState::Interrupted => journal
+                    .interrupt_deadline(operation(seed))
+                    .expect("operation is interrupted"),
+                OperationState::Queued | OperationState::Running | OperationState::Cancelling => {
+                    unreachable!("terminal fixture set is closed")
+                }
+            };
+
+            let repeated_cancel = journal
+                .request_cancellation(operation(seed), CancellationReason::Shutdown)
+                .expect("terminal cancellation is idempotent");
+            assert!(!repeated_cancel.accepted);
+            assert_eq!(repeated_cancel.operation, before);
+            assert_eq!(
+                journal
+                    .status(operation(seed))
+                    .expect("terminal status loads"),
+                before
+            );
+            for next in terminal_states {
+                let result = journal.transition(operation(seed), next, None);
+                if terminal == OperationState::Interrupted && next == OperationState::Succeeded {
+                    assert_eq!(result.expect("late success observes interruption"), before);
+                } else if terminal == OperationState::Cancelled && next == OperationState::Succeeded
+                {
+                    assert!(matches!(result, Err(OperationError::CancellationWon)));
+                } else {
+                    assert!(
+                        matches!(
+                            result,
+                            Err(OperationError::IllegalTransition { .. })
+                                | Err(OperationError::InvalidTerminalError)
+                        ),
+                        "terminal edge {terminal:?} -> {next:?} unexpectedly changed state"
+                    );
+                }
+                assert_eq!(
+                    journal
+                        .status(operation(seed))
+                        .expect("terminal status loads"),
+                    before
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_cancellation_has_one_durable_winner() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        journal.enqueue(operation(44)).expect("operation enqueues");
+        journal
+            .start_execution(operation(44))
+            .expect("operation starts");
+        let barrier = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for reason in [
+            CancellationReason::ClientRequest,
+            CancellationReason::Shutdown,
+        ] {
+            let journal = Arc::clone(&journal);
+            let barrier = Arc::clone(&barrier);
+            workers.push(thread::spawn(move || {
+                barrier.wait();
+                journal.request_cancellation(operation(44), reason)
+            }));
+        }
+        barrier.wait();
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("cancellation worker joins"))
+            .collect::<Vec<_>>();
+
+        let accepted = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Ok(value) if value.accepted))
+            .count();
+        assert_eq!(accepted, 1);
+        assert!(outcomes.iter().all(|outcome| matches!(
+            outcome,
+            Ok(CancellationOutcome { .. }) | Err(OperationError::ConcurrentUpdate)
+        )));
+
+        let observed = journal.status(operation(44)).expect("status loads");
+        assert_eq!(observed.state, OperationState::Cancelling);
+        assert!(observed.cancellation_requested);
+        assert_eq!(observed.revision, 3);
+        assert!(matches!(
+            observed.cancellation_reason,
+            Some(CancellationReason::ClientRequest | CancellationReason::Shutdown)
+        ));
+        assert!(matches!(
+            journal.transition(operation(44), OperationState::Succeeded, None),
+            Err(OperationError::CancellationWon)
+        ));
     }
 
     #[test]
@@ -3338,6 +3608,62 @@ mod tests {
                 OperationError::Busy
             ));
         }
+    }
+
+    #[test]
+    fn read_only_quick_check_uses_an_independent_catalog_connection() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let journal = OperationJournal::open(&path).expect("catalog opens");
+        let connection = journal.lock_connection().expect("catalog lock is healthy");
+
+        OperationJournal::quick_check_path(&path).expect("read-only quick check passes");
+        drop(connection);
+        journal
+            .quick_check()
+            .expect("writer connection remains healthy");
+    }
+
+    #[test]
+    fn read_only_quick_check_honors_zero_timeout_before_opening() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        OperationJournal::open(&path).expect("catalog opens");
+
+        assert!(matches!(
+            OperationJournal::quick_check_path_with_timeout(&path, Duration::ZERO),
+            Err(OperationError::DiagnosticTimedOut)
+        ));
+    }
+
+    #[test]
+    fn read_only_quick_check_caps_nonzero_lock_contention_to_the_caller_budget() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        OperationJournal::open(&path).expect("catalog opens");
+        let lock = Connection::open(&path).expect("contending connection opens");
+        lock.busy_timeout(Duration::ZERO)
+            .expect("lock connection timeout configures");
+        lock.execute_batch("PRAGMA journal_mode = DELETE; BEGIN EXCLUSIVE;")
+            .expect("exclusive catalog lock starts");
+        let budget = Duration::from_millis(25);
+        let started = Instant::now();
+
+        let result = OperationJournal::quick_check_path_with_timeout(&path, budget);
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(
+                result,
+                Err(OperationError::Busy | OperationError::DiagnosticTimedOut)
+            ),
+            "unexpected contention result: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "caller budget took {elapsed:?}"
+        );
+        drop(lock);
     }
 
     #[test]
