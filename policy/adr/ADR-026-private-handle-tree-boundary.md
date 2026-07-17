@@ -2,7 +2,12 @@
 
 **Status:** Proposed
 **Owner:** @tomasmarekk
+**Proposal date:** 2026-07-17
 **Decision date:** not accepted
+**Package:** rootlight-vfs@0.1.0
+**Manifest:** crates/rootlight-vfs/Cargo.toml
+**Module:** rootlight-vfs::platform::os
+**Source:** crates/rootlight-vfs/src/platform/os.rs
 **Related baseline:** ADR-010, REQ-N-004, REQ-N-008, CMP-VFS, M05, M12, R-009
 
 ## Context
