@@ -3274,6 +3274,55 @@ mod tests {
     }
 
     #[test]
+    fn verifier_bounds_unknown_keys_before_wire_decoding() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        let limits = constrained_limits();
+        let unknown_key = "x".repeat(limits.max_string_bytes + 1);
+        let mut environment = fs::read_to_string(destination.join(ENVIRONMENT_FILE))
+            .expect("environment is readable");
+        assert!(environment.ends_with("}\n"));
+        environment.truncate(environment.len() - 2);
+        use std::fmt::Write as _;
+        writeln!(environment, ",\"{unknown_key}\":null}}").expect("writing to a string succeeds");
+        rewrite_artifact_and_checksum(&destination, ENVIRONMENT_FILE, environment.as_bytes());
+
+        let error = verify_bundle_with_limits(&destination, limits)
+            .expect_err("oversized unknown key is rejected during bounded preflight");
+
+        assert!(matches!(
+            error,
+            BundleError::LimitExceeded {
+                resource: "string_bytes"
+            }
+        ));
+        assert!(!error.to_string().contains(&unknown_key));
+    }
+
+    #[test]
+    fn verifier_preserves_fixed_decode_allocation_failures() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        let mut bundle = fixture();
+        bundle.environment.adapter_versions = EvidenceValue::observed(BTreeMap::from([
+            (
+                "rootlight-adapter-treesitter".to_owned(),
+                "1.0.0".to_owned(),
+            ),
+            ("tree-sitter-runtime".to_owned(), "1.0.0".to_owned()),
+        ]));
+        publish_bundle(&bundle, &destination).expect("bundle with retained map publishes");
+
+        crate::integrity::set_decode_reservation_fail_after(Some(0));
+        let error = verify_bundle(&destination)
+            .expect_err("fixed-artifact allocation failure is preserved");
+        crate::integrity::set_decode_reservation_fail_after(None);
+
+        assert!(matches!(error, BundleError::AllocationFailed));
+    }
+
+    #[test]
     fn schema_two_rejects_every_agent_trajectory_payload() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let cases = [

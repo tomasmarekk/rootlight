@@ -26,8 +26,11 @@ use crate::{
     SampleOutcome, decode_benchmark_command, decode_dataset_manifest,
 };
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+const WIRE_FIELD_REJECTED: &str = "fixed artifact field set is invalid";
+const WIRE_STATUS_REJECTED: &str = "fixed artifact status is invalid";
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 enum WireEvidence<'a, T> {
     Observed {
         value: T,
@@ -41,8 +44,8 @@ enum WireEvidence<'a, T> {
     },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 enum WireAvailability<'a> {
     Available,
     Failed {
@@ -55,8 +58,8 @@ enum WireAvailability<'a> {
     },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 enum WireSampleOutcome<'a> {
     Succeeded,
     Failed {
@@ -65,6 +68,184 @@ enum WireSampleOutcome<'a> {
     },
     TimedOut,
     Cancelled,
+}
+
+impl<'de, T> Deserialize<'de> for WireEvidence<'de, T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(WireEvidenceVisitor(std::marker::PhantomData))
+    }
+}
+
+struct WireEvidenceVisitor<T>(std::marker::PhantomData<T>);
+
+impl<'de, T> Visitor<'de> for WireEvidenceVisitor<T>
+where
+    T: Deserialize<'de>,
+{
+    type Value = WireEvidence<'de, T>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a strict fixed-artifact evidence value")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        // Canonical serialization always emits the tag first. Requiring that
+        // order lets the decoder select one closed shape without buffering.
+        if map.next_key::<&'de str>()? != Some("status") {
+            return Err(A::Error::custom(WIRE_FIELD_REJECTED));
+        }
+        let status = map.next_value::<&'de str>()?;
+        match status {
+            "observed" => {
+                require_wire_field(&mut map, "value")?;
+                let value = map.next_value::<T>()?;
+                reject_trailing_wire_fields(&mut map)?;
+                Ok(WireEvidence::Observed { value })
+            }
+            "target" => {
+                require_wire_field(&mut map, "value")?;
+                let value = map.next_value::<T>()?;
+                reject_trailing_wire_fields(&mut map)?;
+                Ok(WireEvidence::Target { value })
+            }
+            "unavailable" => {
+                require_wire_field(&mut map, "reason_code")?;
+                let reason_code = map.next_value::<&'de str>()?;
+                reject_trailing_wire_fields(&mut map)?;
+                Ok(WireEvidence::Unavailable { reason_code })
+            }
+            _ => Err(A::Error::custom(WIRE_STATUS_REJECTED)),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WireAvailability<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(WireAvailabilityVisitor)
+    }
+}
+
+struct WireAvailabilityVisitor;
+
+impl<'de> Visitor<'de> for WireAvailabilityVisitor {
+    type Value = WireAvailability<'de>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a strict fixed-artifact availability value")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        if map.next_key::<&'de str>()? != Some("status") {
+            return Err(A::Error::custom(WIRE_FIELD_REJECTED));
+        }
+        let status = map.next_value::<&'de str>()?;
+        match status {
+            "available" => {
+                reject_trailing_wire_fields(&mut map)?;
+                Ok(WireAvailability::Available)
+            }
+            "failed" => {
+                require_wire_field(&mut map, "reason_code")?;
+                let reason_code = map.next_value::<&'de str>()?;
+                reject_trailing_wire_fields(&mut map)?;
+                Ok(WireAvailability::Failed { reason_code })
+            }
+            "unavailable" => {
+                require_wire_field(&mut map, "reason_code")?;
+                let reason_code = map.next_value::<&'de str>()?;
+                reject_trailing_wire_fields(&mut map)?;
+                Ok(WireAvailability::Unavailable { reason_code })
+            }
+            _ => Err(A::Error::custom(WIRE_STATUS_REJECTED)),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WireSampleOutcome<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(WireSampleOutcomeVisitor)
+    }
+}
+
+struct WireSampleOutcomeVisitor;
+
+impl<'de> Visitor<'de> for WireSampleOutcomeVisitor {
+    type Value = WireSampleOutcome<'de>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a strict fixed-artifact sample outcome")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        if map.next_key::<&'de str>()? != Some("status") {
+            return Err(A::Error::custom(WIRE_FIELD_REJECTED));
+        }
+        let status = map.next_value::<&'de str>()?;
+        match status {
+            "succeeded" => {
+                reject_trailing_wire_fields(&mut map)?;
+                Ok(WireSampleOutcome::Succeeded)
+            }
+            "failed" => {
+                require_wire_field(&mut map, "error_code")?;
+                let error_code = map.next_value::<&'de str>()?;
+                reject_trailing_wire_fields(&mut map)?;
+                Ok(WireSampleOutcome::Failed { error_code })
+            }
+            "timed_out" => {
+                reject_trailing_wire_fields(&mut map)?;
+                Ok(WireSampleOutcome::TimedOut)
+            }
+            "cancelled" => {
+                reject_trailing_wire_fields(&mut map)?;
+                Ok(WireSampleOutcome::Cancelled)
+            }
+            _ => Err(A::Error::custom(WIRE_STATUS_REJECTED)),
+        }
+    }
+}
+
+fn require_wire_field<'de, A>(map: &mut A, expected: &str) -> Result<(), A::Error>
+where
+    A: MapAccess<'de>,
+{
+    if map.next_key::<&'de str>()? == Some(expected) {
+        Ok(())
+    } else {
+        Err(A::Error::custom(WIRE_FIELD_REJECTED))
+    }
+}
+
+fn reject_trailing_wire_fields<'de, A>(map: &mut A) -> Result<(), A::Error>
+where
+    A: MapAccess<'de>,
+{
+    if map.next_key::<&'de str>()?.is_none() {
+        Ok(())
+    } else {
+        Err(A::Error::custom(WIRE_FIELD_REJECTED))
+    }
 }
 
 #[derive(Debug)]
@@ -213,11 +394,39 @@ where
     }
 }
 
+const DECODE_ALLOCATION_FAILED: &str = "fixed-artifact reservation failed";
+
+// Serde's visitor error type erases reservation failures. The out-of-band flag
+// preserves that classification without inspecting an allocated error string.
+thread_local! {
+    static DECODE_ALLOCATION_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+fn signal_decode_allocation_failure() -> &'static str {
+    DECODE_ALLOCATION_FAILURE.with(|failed| failed.set(true));
+    DECODE_ALLOCATION_FAILED
+}
+
+fn map_decode_result<T>(
+    decode: impl FnOnce() -> Result<T, serde_json::Error>,
+) -> Result<T, BundleError> {
+    let previous = DECODE_ALLOCATION_FAILURE.with(|failed| failed.replace(false));
+    let result = decode();
+    let allocation_failed = DECODE_ALLOCATION_FAILURE.with(|failed| failed.replace(previous));
+    if allocation_failed {
+        Err(BundleError::AllocationFailed)
+    } else {
+        result.map_err(|_| BundleError::InvalidArtifactEncoding)
+    }
+}
+
 fn try_reserve_decode<T>(values: &mut Vec<T>, additional: usize) -> Result<(), &'static str> {
     before_decode_reservation()?;
-    values
-        .try_reserve(additional)
-        .map_err(|_| "fixed-artifact reservation failed")
+    values.try_reserve(additional).map_err(|_| {
+        let _ = signal_decode_allocation_failure();
+        DECODE_ALLOCATION_FAILED
+    })
 }
 
 fn before_decode_reservation() -> Result<(), &'static str> {
@@ -225,7 +434,7 @@ fn before_decode_reservation() -> Result<(), &'static str> {
     DECODE_RESERVATION_FAIL_AFTER.with(|remaining| {
         if let Some(value) = remaining.get() {
             if value == 0 {
-                return Err("injected fixed-artifact reservation failure");
+                return Err(signal_decode_allocation_failure());
             }
             remaining.set(Some(value - 1));
         }
@@ -250,169 +459,258 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[cfg(test)]
+pub(crate) fn set_decode_reservation_fail_after(value: Option<usize>) {
+    DECODE_RESERVATION_FAIL_AFTER.with(|remaining| remaining.set(value));
+    if value.is_none() {
+        DECODE_ALLOCATION_FAILURE.with(|failed| failed.set(false));
+    }
+}
+
+macro_rules! impl_wire_struct_deserialize {
+    ($name:ident { $($field:ident: $field_type:ty),+ $(,)? }) => {
+        impl<'de> Deserialize<'de> for $name<'de> {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct WireStructVisitor;
+
+                impl<'de> Visitor<'de> for WireStructVisitor {
+                    type Value = $name<'de>;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        formatter.write_str("a strict fixed-artifact object")
+                    }
+
+                    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+                    where
+                        A: MapAccess<'de>,
+                    {
+                        $(let mut $field: Option<$field_type> = None;)+
+                        while let Some(field) = map.next_key::<&'de str>()? {
+                            match field {
+                                $(
+                                    stringify!($field) => {
+                                        if $field.is_some() {
+                                            return Err(A::Error::custom(WIRE_FIELD_REJECTED));
+                                        }
+                                        $field = Some(map.next_value::<$field_type>()?);
+                                    }
+                                )+
+                                _ => return Err(A::Error::custom(WIRE_FIELD_REJECTED)),
+                            }
+                        }
+                        Ok($name {
+                            $(
+                                $field: $field
+                                    .ok_or_else(|| A::Error::custom(WIRE_FIELD_REJECTED))?,
+                            )+
+                        })
+                    }
+                }
+
+                deserializer.deserialize_map(WireStructVisitor)
+            }
+        }
+    };
+}
+
+#[derive(Debug, Serialize)]
 struct WireEnvironment<'a> {
-    #[serde(borrow)]
     schema_version: &'a str,
-    #[serde(borrow)]
     cpu_model: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     cpu_topology: WireEvidence<'a, &'a str>,
     ram_bytes: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     operating_system: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     kernel: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     filesystem: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     storage_device: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     power_mode: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     container_limits: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     compiler: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     binary_sha256: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     feature_profile: &'a str,
-    #[serde(borrow)]
     sqlite: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     adapter_versions: WireEvidence<'a, FallibleMap<'a, &'a str>>,
-    #[serde(borrow)]
     grammar_versions: WireEvidence<'a, FallibleMap<'a, &'a str>>,
-    #[serde(borrow)]
     grammar_source_package_checksums: WireEvidence<'a, FallibleMap<'a, &'a str>>,
-    #[serde(borrow)]
     grammar_hashes: WireEvidence<'a, FallibleMap<'a, &'a str>>,
-    #[serde(borrow)]
     locale: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     background_process_policy: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     clock_source: WireEvidence<'a, &'a str>,
-    #[serde(borrow)]
     process_tree_accounting: WireAvailability<'a>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+impl_wire_struct_deserialize!(WireEnvironment {
+    schema_version: &'de str,
+    cpu_model: WireEvidence<'de, &'de str>,
+    cpu_topology: WireEvidence<'de, &'de str>,
+    ram_bytes: WireEvidence<'de, u64>,
+    operating_system: WireEvidence<'de, &'de str>,
+    kernel: WireEvidence<'de, &'de str>,
+    filesystem: WireEvidence<'de, &'de str>,
+    storage_device: WireEvidence<'de, &'de str>,
+    power_mode: WireEvidence<'de, &'de str>,
+    container_limits: WireEvidence<'de, &'de str>,
+    compiler: WireEvidence<'de, &'de str>,
+    binary_sha256: WireEvidence<'de, &'de str>,
+    feature_profile: &'de str,
+    sqlite: WireEvidence<'de, &'de str>,
+    adapter_versions: WireEvidence<'de, FallibleMap<'de, &'de str>>,
+    grammar_versions: WireEvidence<'de, FallibleMap<'de, &'de str>>,
+    grammar_source_package_checksums: WireEvidence<'de, FallibleMap<'de, &'de str>>,
+    grammar_hashes: WireEvidence<'de, FallibleMap<'de, &'de str>>,
+    locale: WireEvidence<'de, &'de str>,
+    background_process_policy: WireEvidence<'de, &'de str>,
+    clock_source: WireEvidence<'de, &'de str>,
+    process_tree_accounting: WireAvailability<'de>,
+});
+
+#[derive(Debug, Serialize)]
 struct WireBuildProvenance<'a> {
-    #[serde(borrow)]
     schema_version: &'a str,
-    #[serde(borrow)]
     source_revision: &'a str,
-    #[serde(borrow)]
     binary_revision: &'a str,
-    #[serde(borrow)]
     build_profile: &'a str,
-    #[serde(borrow)]
     features: FallibleVec<&'a str>,
-    #[serde(borrow)]
     target: &'a str,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+impl_wire_struct_deserialize!(WireBuildProvenance {
+    schema_version: &'de str,
+    source_revision: &'de str,
+    binary_revision: &'de str,
+    build_profile: &'de str,
+    features: FallibleVec<&'de str>,
+    target: &'de str,
+});
+
+#[derive(Debug, Serialize)]
 struct WireMetricDistribution<'a> {
     sample_count: u64,
-    #[serde(borrow)]
     p50_ns: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     p95_ns: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     p99_ns: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     physical_lines_per_second: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     files_per_second: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     syntax_nodes_per_second: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     syntax_facts_per_source_byte_ppm: WireEvidence<'a, u64>,
     outlier_count: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+impl_wire_struct_deserialize!(WireMetricDistribution {
+    sample_count: u64,
+    p50_ns: WireEvidence<'de, u64>,
+    p95_ns: WireEvidence<'de, u64>,
+    p99_ns: WireEvidence<'de, u64>,
+    physical_lines_per_second: WireEvidence<'de, u64>,
+    files_per_second: WireEvidence<'de, u64>,
+    syntax_nodes_per_second: WireEvidence<'de, u64>,
+    syntax_facts_per_source_byte_ppm: WireEvidence<'de, u64>,
+    outlier_count: u64,
+});
+
+#[derive(Debug, Serialize)]
 struct WireSummary<'a> {
-    #[serde(borrow)]
     schema_version: &'a str,
-    #[serde(borrow)]
     benchmark_id: &'a str,
-    #[serde(borrow)]
     semantic_eligibility: WireAvailability<'a>,
-    #[serde(borrow)]
     families: FallibleMap<'a, WireMetricDistribution<'a>>,
     failed_samples: u64,
     timed_out_samples: u64,
     cancelled_samples: u64,
-    #[serde(borrow)]
     confidence_intervals: WireAvailability<'a>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+impl_wire_struct_deserialize!(WireSummary {
+    schema_version: &'de str,
+    benchmark_id: &'de str,
+    semantic_eligibility: WireAvailability<'de>,
+    families: FallibleMap<'de, WireMetricDistribution<'de>>,
+    failed_samples: u64,
+    timed_out_samples: u64,
+    cancelled_samples: u64,
+    confidence_intervals: WireAvailability<'de>,
+});
+
+#[derive(Debug, Serialize)]
 struct WireCoverage<'a> {
-    #[serde(borrow)]
     schema_version: &'a str,
     attempted_entries: u64,
     committed_entries: u64,
-    #[serde(borrow)]
     skipped: FallibleMap<'a, &'a str>,
-    #[serde(borrow)]
     parser_status: FallibleMap<'a, &'a str>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+impl_wire_struct_deserialize!(WireCoverage {
+    schema_version: &'de str,
+    attempted_entries: u64,
+    committed_entries: u64,
+    skipped: FallibleMap<'de, &'de str>,
+    parser_status: FallibleMap<'de, &'de str>,
+});
+
+#[derive(Debug, Serialize)]
 struct WireQuality<'a> {
-    #[serde(borrow)]
     schema_version: &'a str,
-    #[serde(borrow)]
     rubric_id: &'a str,
-    #[serde(borrow)]
     semantic_eligibility: WireAvailability<'a>,
-    #[serde(borrow)]
     precision_ppm: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     recall_ppm: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     expected_calibration_error_ppm: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     unsupported_cases: FallibleMap<'a, &'a str>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+impl_wire_struct_deserialize!(WireQuality {
+    schema_version: &'de str,
+    rubric_id: &'de str,
+    semantic_eligibility: WireAvailability<'de>,
+    precision_ppm: WireEvidence<'de, u64>,
+    recall_ppm: WireEvidence<'de, u64>,
+    expected_calibration_error_ppm: WireEvidence<'de, u64>,
+    unsupported_cases: FallibleMap<'de, &'de str>,
+});
+
+#[derive(Debug, Serialize)]
 struct WireRawSample<'a> {
-    #[serde(borrow)]
     schema_version: &'a str,
     ordinal: u64,
-    #[serde(borrow)]
     phase: &'a str,
-    #[serde(borrow)]
     dataset_entry_id: &'a str,
-    #[serde(borrow)]
     grammar_family: &'a str,
     elapsed_ns: u64,
     source_bytes: u64,
     physical_lines: u64,
     syntax_nodes: u64,
     syntax_facts: u64,
-    #[serde(borrow)]
     semantic_facts: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     process_tree_cpu_ns: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     process_tree_peak_rss_bytes: WireEvidence<'a, u64>,
-    #[serde(borrow)]
     outcome: WireSampleOutcome<'a>,
     is_outlier: bool,
 }
+
+impl_wire_struct_deserialize!(WireRawSample {
+    schema_version: &'de str,
+    ordinal: u64,
+    phase: &'de str,
+    dataset_entry_id: &'de str,
+    grammar_family: &'de str,
+    elapsed_ns: u64,
+    source_bytes: u64,
+    physical_lines: u64,
+    syntax_nodes: u64,
+    syntax_facts: u64,
+    semantic_facts: WireEvidence<'de, u64>,
+    process_tree_cpu_ns: WireEvidence<'de, u64>,
+    process_tree_peak_rss_bytes: WireEvidence<'de, u64>,
+    outcome: WireSampleOutcome<'de>,
+    is_outlier: bool,
+});
 
 impl WireRawSample<'_> {
     fn into_owned(self) -> Result<RawSample, BundleError> {
@@ -513,12 +811,14 @@ impl WireAvailability<'_> {
 
 const DECODE_BYTES_EXCEEDED: &str = "fixed decoded byte retention exceeded";
 const DECODE_ITEMS_EXCEEDED: &str = "fixed decoded item retention exceeded";
+const DECODE_STRING_EXCEEDED: &str = "fixed decoded string length exceeded";
 
 struct FixedDecodeBudget {
     retained_bytes: u64,
     retained_items: u64,
     max_retained_bytes: u64,
     max_retained_items: u64,
+    max_string_bytes: usize,
 }
 
 impl FixedDecodeBudget {
@@ -528,6 +828,7 @@ impl FixedDecodeBudget {
             retained_items: 0,
             max_retained_bytes: limits.max_total_bytes,
             max_retained_items: limits.max_total_bytes,
+            max_string_bytes: limits.max_string_bytes,
         }
     }
 
@@ -566,6 +867,9 @@ impl FixedDecodeBudget {
     }
 
     fn charge_bytes<E: serde::de::Error>(&mut self, bytes: usize) -> Result<(), E> {
+        if bytes > self.max_string_bytes {
+            return Err(E::custom(DECODE_STRING_EXCEEDED));
+        }
         let bytes = u64::try_from(bytes).map_err(|_| E::custom(DECODE_BYTES_EXCEEDED))?;
         self.retained_bytes = self
             .retained_bytes
@@ -594,6 +898,10 @@ fn map_budget_error(error: serde_json::Error) -> BundleError {
     } else if message.starts_with(DECODE_ITEMS_EXCEEDED) {
         BundleError::LimitExceeded {
             resource: "decoded_retained_items",
+        }
+    } else if message.starts_with(DECODE_STRING_EXCEEDED) {
+        BundleError::LimitExceeded {
+            resource: "string_bytes",
         }
     } else {
         BundleError::InvalidArtifactEncoding
@@ -881,8 +1189,7 @@ where
     T: Deserialize<'a> + Serialize,
 {
     validate_json_bytes(bytes, limits)?;
-    let value = serde_json::from_slice(&bytes[..bytes.len() - 1])
-        .map_err(|_| BundleError::InvalidArtifactEncoding)?;
+    let value = map_decode_result(|| serde_json::from_slice(&bytes[..bytes.len() - 1]))?;
     validate_canonical_json(bytes, &value, limits)?;
     Ok(value)
 }
@@ -917,8 +1224,7 @@ fn decode_raw_samples(
         if values.len() >= maximum_count {
             return Err(BundleError::LimitExceeded { resource });
         }
-        let value: WireRawSample<'_> =
-            serde_json::from_slice(line).map_err(|_| BundleError::InvalidArtifactEncoding)?;
+        let value: WireRawSample<'_> = map_decode_result(|| serde_json::from_slice(line))?;
         values.push(value.into_owned()?);
     }
     let canonical_limit =
@@ -1648,6 +1954,8 @@ fn hex_digest(digest: impl AsRef<[u8]>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     #[test]
@@ -1657,6 +1965,7 @@ mod tests {
             retained_items: 0,
             max_retained_bytes: 3,
             max_retained_items: 2,
+            max_string_bytes: 64,
         };
         budget
             .inspect_json(br#""ab""#)
@@ -1673,6 +1982,7 @@ mod tests {
             retained_items: 0,
             max_retained_bytes: 64,
             max_retained_items: 2,
+            max_string_bytes: 64,
         };
         assert!(matches!(
             item_budget.inspect_json(br#"[0,1,2]"#),
@@ -1689,20 +1999,117 @@ mod tests {
             retained_items: 0,
             max_retained_bytes: 64,
             max_retained_items: 64,
+            max_string_bytes: 64,
         };
         assert!(matches!(
             budget.inspect_json(br#""source\u002fsecret""#),
             Err(BundleError::InvalidArtifactEncoding)
         ));
 
-        DECODE_RESERVATION_FAIL_AFTER.with(|remaining| remaining.set(Some(0)));
+        set_decode_reservation_fail_after(Some(0));
         let decoded = serde_json::from_slice::<FallibleMap<'_, u64>>(br#"{"entry":1}"#);
-        DECODE_RESERVATION_FAIL_AFTER.with(|remaining| remaining.set(None));
-        let error = decoded.expect_err("injected collection reservation is reported");
-        assert!(
-            error
-                .to_string()
-                .starts_with("injected fixed-artifact reservation failure")
+        set_decode_reservation_fail_after(None);
+        assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn tagged_wire_visitors_reject_unknown_fields_without_buffering() {
+        let mut flooded_availability = String::from("{\"status\":\"available\"");
+        for index in 0..4_096 {
+            write!(flooded_availability, ",\"unknown_{index:04}\":null")
+                .expect("writing to a string succeeds");
+        }
+        flooded_availability.push_str("}\n");
+
+        set_decode_reservation_fail_after(Some(0));
+        assert!(matches!(
+            decode_json::<WireAvailability<'_>>(
+                flooded_availability.as_bytes(),
+                BundleLimits::default()
+            ),
+            Err(BundleError::InvalidArtifactEncoding)
+        ));
+        DECODE_RESERVATION_FAIL_AFTER.with(|remaining| assert_eq!(remaining.get(), Some(0)));
+        set_decode_reservation_fail_after(None);
+
+        for evidence in [
+            br#"{"status":"observed","value":1,"unknown":null}
+"#
+            .as_slice(),
+            br#"{"status":"observed","status":"observed","value":1}
+"#,
+        ] {
+            assert!(matches!(
+                decode_json::<WireEvidence<'_, u64>>(evidence, BundleLimits::default()),
+                Err(BundleError::InvalidArtifactEncoding)
+            ));
+        }
+        assert!(matches!(
+            decode_json::<WireSampleOutcome<'_>>(
+                br#"{"status":"succeeded","unknown":null}
+"#,
+                BundleLimits::default()
+            ),
+            Err(BundleError::InvalidArtifactEncoding)
+        ));
+    }
+
+    #[test]
+    fn allocation_failures_survive_generic_and_raw_decode_entrypoints() {
+        set_decode_reservation_fail_after(Some(0));
+        let fixed = decode_json::<WireEvidence<'_, FallibleMap<'_, &'_ str>>>(
+            br#"{"status":"observed","value":{"entry":"1"}}
+"#,
+            BundleLimits::default(),
         );
+        set_decode_reservation_fail_after(None);
+        assert!(matches!(fixed, Err(BundleError::AllocationFailed)));
+
+        set_decode_reservation_fail_after(Some(0));
+        let raw = decode_raw_samples(
+            valid_raw_sample().as_bytes(),
+            1,
+            BundleLimits::default(),
+            "raw_sample_count",
+        );
+        set_decode_reservation_fail_after(None);
+        assert!(matches!(raw, Err(BundleError::AllocationFailed)));
+    }
+
+    #[test]
+    fn raw_sample_outcome_rejects_unknown_field_flood_without_retention() {
+        let mut outcome = String::from("{\"status\":\"succeeded\"");
+        for index in 0..4_096 {
+            write!(outcome, ",\"unknown_{index:04}\":null").expect("writing to a string succeeds");
+        }
+        outcome.push('}');
+        let raw = valid_raw_sample().replace("{\"status\":\"succeeded\"}", &outcome);
+
+        set_decode_reservation_fail_after(Some(0));
+        assert!(matches!(
+            decode_raw_samples(
+                raw.as_bytes(),
+                1,
+                BundleLimits::default(),
+                "raw_sample_count"
+            ),
+            Err(BundleError::InvalidArtifactEncoding)
+        ));
+        DECODE_RESERVATION_FAIL_AFTER.with(|remaining| assert_eq!(remaining.get(), Some(0)));
+        set_decode_reservation_fail_after(None);
+    }
+
+    fn valid_raw_sample() -> String {
+        concat!(
+            "{\"schema_version\":\"2.0\",\"ordinal\":0,\"phase\":\"measured\",",
+            "\"dataset_entry_id\":\"entry\",\"grammar_family\":\"rust\",\"elapsed_ns\":1,",
+            "\"source_bytes\":1,\"physical_lines\":1,\"syntax_nodes\":1,\"syntax_facts\":1,",
+            "\"semantic_facts\":{\"status\":\"unavailable\",\"reason_code\":\"not_measured\"},",
+            "\"process_tree_cpu_ns\":{\"status\":\"unavailable\",\"reason_code\":\"not_measured\"},",
+            "\"process_tree_peak_rss_bytes\":{\"status\":\"unavailable\",",
+            "\"reason_code\":\"not_measured\"},\"outcome\":{\"status\":\"succeeded\"},",
+            "\"is_outlier\":false}\n"
+        )
+        .to_owned()
     }
 }
