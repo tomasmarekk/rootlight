@@ -27,7 +27,7 @@
 ]
 
 (use_declaration) @import
-(function_item) @signature
+(parameters) @signature
 (block) @scope
 (identifier) @reference
 (type_identifier) @reference

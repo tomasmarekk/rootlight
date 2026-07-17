@@ -14,9 +14,20 @@
 ]
 
 [(import_statement) (import_from_statement)] @import
-[(function_definition) (class_definition)] @signature
+(parameters) @signature
 (block) @scope
 (identifier) @reference
 (comment) @comment
-(expression_statement (string) @documentation)
+
+(module
+  . (expression_statement (string) @documentation))
+
+(function_definition
+  body: (block
+    . (expression_statement (string) @documentation)))
+
+(class_definition
+  body: (block
+    . (expression_statement (string) @documentation)))
+
 (string) @string

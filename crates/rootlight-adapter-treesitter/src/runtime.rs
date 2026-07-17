@@ -15,8 +15,9 @@ use std::{
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, CoverageReport, DiagnosticCode, EncodingId,
     MemoryAdmissionPolicy, MemoryEnforcement, ParseCapabilities, ParseProvider, ParseReport,
-    ParseRequest, RequestError, ResourceKind, ResourceUsage, StreamEnd, SyntaxFactBatch,
-    SyntaxFactSink, WorkReport, execute_parse_transaction,
+    ParseRequest, RemainingBudget, RequestError, ResourceKind, ResourceUsage, StreamEnd,
+    SyntaxFact, SyntaxFactBatch, SyntaxFactSink, SyntaxKindLabel, WorkReport,
+    execute_parse_transaction,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::ContentHash;
@@ -30,7 +31,7 @@ use crate::{
         ReuseStatus, SourceEdit, SourceEditIdentity,
     },
     pool::{ParserPool, PoolError},
-    query_pack::QueryPackRegistry,
+    query_pack::{QueryCandidate, QueryPackRegistry, StructuralRole},
     registry::language_for,
 };
 
@@ -288,13 +289,27 @@ impl TreeSitterProvider {
         )?;
         cancellation.check()?;
         emit_primary_diagnostic(&traversal, request, sink, cancellation)?;
+        let extraction = if traversal.fully_traversed {
+            self.extract_syntax_facts(family, &tree, request, sink, cancellation)?
+        } else {
+            ExtractionReport { limited: false }
+        };
         let usage = sink.staged_usage();
+        let coverage_status = if extraction.limited && traversal.coverage != CoverageStatus::Unknown
+        {
+            CoverageStatus::Bounded
+        } else {
+            traversal.coverage
+        };
         let coverage = CoverageReport::new(
             AnalysisTier::TierD,
-            traversal.coverage,
+            coverage_status,
             source_bytes.len(),
             traversal.covered_source_bytes,
-            traversal.skipped_regions,
+            traversal
+                .skipped_regions
+                .checked_add(usize::from(extraction.limited))
+                .ok_or_else(|| provider_failure("coverage-accounting"))?,
             Vec::new(),
         )
         .map_err(AdapterError::InvalidReport)?;
@@ -326,6 +341,59 @@ impl TreeSitterProvider {
             pending,
             reuse_status,
             reuse_key,
+        })
+    }
+
+    fn extract_syntax_facts(
+        &self,
+        family: GrammarFamily,
+        tree: &Tree,
+        request: &ParseRequest<'_>,
+        sink: &mut dyn SyntaxFactSink,
+        cancellation: &Cancellation,
+    ) -> Result<ExtractionReport, AdapterError> {
+        cancellation.check()?;
+        let budget = sink.remaining_budget();
+        let max_facts = budget
+            .remaining()
+            .batches()
+            .checked_mul(budget.batch().max_records())
+            .ok_or_else(|| provider_failure("query-fact-accounting"))?
+            .min(budget.remaining().records());
+        let pack = self
+            .query_packs
+            .get(family)
+            .ok_or_else(|| provider_failure("query-pack-missing"))?;
+        let extraction = pack.extract(
+            family,
+            tree,
+            request.source().bytes(),
+            request.limits().max_syntax_nodes(),
+            max_facts,
+            cancellation,
+        )?;
+        let normalized = normalize_query_candidates(
+            extraction.candidates,
+            request,
+            extraction.fact_limit,
+            cancellation,
+        )?;
+        let initial_plan = plan_fact_batches(&normalized.facts, sink.remaining_budget())?;
+        let limited = extraction.limit.is_some()
+            || normalized.limited
+            || initial_plan.emitted < normalized.facts.len();
+        if limited {
+            emit_extraction_limit_diagnostic(request, sink, cancellation)?;
+        }
+        let plan = if limited {
+            plan_fact_batches(&normalized.facts, sink.remaining_budget())?
+        } else {
+            initial_plan
+        };
+        let emitted = plan.emitted;
+        emit_fact_plan(&normalized.facts, plan, sink, cancellation)?;
+        Ok(ExtractionReport {
+            limited: limited || emitted < normalized.facts.len(),
         })
     }
 
@@ -965,6 +1033,449 @@ struct TraversalReport {
     coverage: CoverageStatus,
     primary_diagnostic: Option<PrimaryDiagnostic>,
     fully_traversed: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExtractionReport {
+    limited: bool,
+}
+
+#[derive(Debug)]
+struct NormalizedFacts {
+    facts: Vec<SyntaxFact>,
+    limited: bool,
+}
+
+#[derive(Debug)]
+struct FactDraft {
+    start: usize,
+    end: usize,
+    role: StructuralRole,
+    syntax_kind: SyntaxKindLabel,
+    parent: Option<usize>,
+}
+
+#[derive(Debug)]
+struct FactPlan {
+    batches: Vec<std::ops::Range<usize>>,
+    emitted: usize,
+}
+
+fn normalize_query_candidates(
+    mut candidates: Vec<QueryCandidate>,
+    request: &ParseRequest<'_>,
+    max_facts: usize,
+    cancellation: &Cancellation,
+) -> Result<NormalizedFacts, AdapterError> {
+    cancellation.check()?;
+    candidates.sort_unstable_by(|left, right| {
+        (left.start, left.end, left.role, left.syntax).cmp(&(
+            right.start,
+            right.end,
+            right.role,
+            right.syntax,
+        ))
+    });
+    candidates.dedup();
+    let root_count = candidates
+        .iter()
+        .filter(|candidate| candidate.role == StructuralRole::Root)
+        .count();
+    let range_count = request.included_ranges().len();
+    let additional_ranges = if range_count == 0 { 0 } else { range_count - 1 };
+    let expanded_roots = root_count
+        .checked_mul(additional_ranges)
+        .ok_or_else(|| provider_failure("query-fact-accounting"))?;
+    let maximum_expansion = candidates
+        .len()
+        .checked_add(expanded_roots)
+        .ok_or_else(|| provider_failure("query-fact-accounting"))?;
+    let mut restricted = Vec::new();
+    restricted
+        .try_reserve_exact(maximum_expansion.min(max_facts))
+        .map_err(|_| provider_failure("query-fact-allocation"))?;
+    let mut limited = false;
+    'candidate: for (index, candidate) in candidates.into_iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        if request.included_ranges().is_empty() {
+            if !push_candidate_bounded(&mut restricted, candidate, max_facts) {
+                limited = true;
+                break;
+            }
+            continue;
+        }
+        if candidate.role == StructuralRole::Root {
+            for included in request.included_ranges() {
+                if restricted.len().is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                    cancellation.check()?;
+                }
+                let span = included.span();
+                let expanded = QueryCandidate {
+                    start: usize::try_from(span.start_byte())
+                        .map_err(|_| provider_failure("query-span"))?,
+                    end: usize::try_from(span.end_byte())
+                        .map_err(|_| provider_failure("query-span"))?,
+                    ..candidate
+                };
+                if !push_candidate_bounded(&mut restricted, expanded, max_facts) {
+                    limited = true;
+                    break 'candidate;
+                }
+            }
+        } else if candidate_within_included_range(&candidate, request)?
+            && !push_candidate_bounded(&mut restricted, candidate, max_facts)
+        {
+            limited = true;
+            break;
+        }
+    }
+    restricted.sort_unstable_by(|left, right| {
+        (left.start, left.end, left.role, left.syntax).cmp(&(
+            right.start,
+            right.end,
+            right.role,
+            right.syntax,
+        ))
+    });
+    restricted.dedup();
+
+    let mut selected = Vec::new();
+    selected
+        .try_reserve_exact(restricted.len())
+        .map_err(|_| provider_failure("query-fact-allocation"))?;
+    let mut group_start = 0usize;
+    while group_start < restricted.len() {
+        if group_start.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        let start = restricted[group_start].start;
+        let end = restricted[group_start].end;
+        let mut group_end = group_start + 1;
+        while group_end < restricted.len()
+            && restricted[group_end].start == start
+            && restricted[group_end].end == end
+        {
+            group_end += 1;
+        }
+        let group = &restricted[group_start..group_end];
+        let has_definition = group
+            .iter()
+            .any(|candidate| candidate.role == StructuralRole::Definition);
+        let has_documentation = group
+            .iter()
+            .any(|candidate| candidate.role == StructuralRole::Documentation);
+        selected.extend(group.iter().copied().filter(|candidate| {
+            !(has_definition && candidate.role == StructuralRole::Reference)
+                && !(has_documentation && candidate.role == StructuralRole::Comment)
+        }));
+        group_start = group_end;
+    }
+
+    let mut drafts = Vec::new();
+    drafts
+        .try_reserve_exact(selected.len())
+        .map_err(|_| provider_failure("query-fact-allocation"))?;
+    for (index, candidate) in selected.into_iter().enumerate() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        let base = match (candidate.syntax, candidate.role) {
+            ("python.module", StructuralRole::Module) => "python.file",
+            ("javascript.program", StructuralRole::Module) => "javascript.file",
+            _ => candidate.syntax,
+        };
+        let label = format!("{base}.{}", candidate.role.label());
+        drafts.push(FactDraft {
+            start: candidate.start,
+            end: candidate.end,
+            role: candidate.role,
+            syntax_kind: SyntaxKindLabel::new(&label)
+                .map_err(|_| provider_failure("query-syntax-label"))?,
+            parent: None,
+        });
+    }
+    assign_fact_parents(&mut drafts, cancellation)?;
+    let mut depths = Vec::new();
+    depths
+        .try_reserve_exact(drafts.len())
+        .map_err(|_| provider_failure("query-fact-allocation"))?;
+    for index in 0..drafts.len() {
+        if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        depths.push(fact_depth(index, &drafts)?);
+    }
+    let facts = drafts
+        .into_iter()
+        .zip(depths)
+        .enumerate()
+        .map(|(index, (draft, depth))| {
+            let local_id = u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_add(1))
+                .ok_or_else(|| provider_failure("query-fact-identity"))?;
+            let parent = draft
+                .parent
+                .map(|parent| {
+                    u64::try_from(parent)
+                        .ok()
+                        .and_then(|parent| parent.checked_add(1))
+                        .ok_or_else(|| provider_failure("query-fact-identity"))
+                })
+                .transpose()?;
+            let start = u64::try_from(draft.start).map_err(|_| provider_failure("query-span"))?;
+            let end = u64::try_from(draft.end).map_err(|_| provider_failure("query-span"))?;
+            let span = SourceSpan::new(request.source().source_ref().span().file(), start, end)
+                .map_err(|_| provider_failure("query-span"))?;
+            Ok::<SyntaxFact, AdapterError>(SyntaxFact::new(
+                local_id,
+                parent,
+                draft.role.fact_kind(),
+                span,
+                depth,
+                draft.syntax_kind,
+            ))
+        })
+        .collect::<Result<Vec<_>, AdapterError>>()?;
+    Ok(NormalizedFacts { facts, limited })
+}
+
+fn push_candidate_bounded(
+    candidates: &mut Vec<QueryCandidate>,
+    candidate: QueryCandidate,
+    maximum: usize,
+) -> bool {
+    if candidates.len() >= maximum {
+        false
+    } else {
+        candidates.push(candidate);
+        true
+    }
+}
+
+fn candidate_within_included_range(
+    candidate: &QueryCandidate,
+    request: &ParseRequest<'_>,
+) -> Result<bool, AdapterError> {
+    let start = u64::try_from(candidate.start).map_err(|_| provider_failure("query-span"))?;
+    let end = u64::try_from(candidate.end).map_err(|_| provider_failure("query-span"))?;
+    let ranges = request.included_ranges();
+    let index = ranges.partition_point(|included| included.span().end_byte() <= start);
+    Ok(ranges.get(index).is_some_and(|included| {
+        let span = included.span();
+        start >= span.start_byte() && end <= span.end_byte()
+    }))
+}
+
+fn assign_fact_parents(
+    drafts: &mut [FactDraft],
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    let mut order = (0..drafts.len()).collect::<Vec<_>>();
+    order.sort_unstable_by(|&left, &right| {
+        (
+            drafts[left].start,
+            std::cmp::Reverse(drafts[left].end),
+            hierarchy_rank(drafts[left].role),
+            drafts[left].role,
+            drafts[left].syntax_kind.as_str(),
+        )
+            .cmp(&(
+                drafts[right].start,
+                std::cmp::Reverse(drafts[right].end),
+                hierarchy_rank(drafts[right].role),
+                drafts[right].role,
+                drafts[right].syntax_kind.as_str(),
+            ))
+    });
+    let mut active = Vec::<usize>::new();
+    for (position, index) in order.into_iter().enumerate() {
+        if position.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        while active.last().is_some_and(|&parent| {
+            !span_contains(
+                drafts[parent].start,
+                drafts[parent].end,
+                drafts[index].start,
+                drafts[index].end,
+            )
+        }) {
+            active.pop();
+        }
+        drafts[index].parent = active
+            .iter()
+            .rev()
+            .copied()
+            .find(|&parent| parent_is_valid(&drafts[parent], &drafts[index]));
+        if drafts[index].role.container_rank().is_some() {
+            active.push(index);
+        }
+    }
+    cancellation.check()?;
+    Ok(())
+}
+
+fn fact_depth(index: usize, drafts: &[FactDraft]) -> Result<usize, AdapterError> {
+    let mut depth = 0usize;
+    let mut current = drafts
+        .get(index)
+        .ok_or_else(|| provider_failure("query-parent"))?
+        .parent;
+    while let Some(parent) = current {
+        depth = depth
+            .checked_add(1)
+            .ok_or_else(|| provider_failure("query-depth-accounting"))?;
+        if depth > drafts.len() {
+            return Err(provider_failure("query-parent-cycle"));
+        }
+        current = drafts
+            .get(parent)
+            .ok_or_else(|| provider_failure("query-parent"))?
+            .parent;
+    }
+    Ok(depth)
+}
+
+const fn hierarchy_rank(role: StructuralRole) -> u8 {
+    match role.container_rank() {
+        Some(rank) => rank,
+        None => 4,
+    }
+}
+
+fn parent_is_valid(parent: &FactDraft, child: &FactDraft) -> bool {
+    let Some(parent_rank) = parent.role.container_rank() else {
+        return false;
+    };
+    if !span_contains(parent.start, parent.end, child.start, child.end) {
+        return false;
+    }
+    let strict = parent.start < child.start || parent.end > child.end;
+    strict || parent_rank < hierarchy_rank(child.role)
+}
+
+const fn span_contains(
+    outer_start: usize,
+    outer_end: usize,
+    inner_start: usize,
+    inner_end: usize,
+) -> bool {
+    outer_start <= inner_start && outer_end >= inner_end
+}
+
+fn plan_fact_batches(
+    facts: &[SyntaxFact],
+    budget: RemainingBudget,
+) -> Result<FactPlan, AdapterError> {
+    let remaining = budget.remaining();
+    let batch = budget.batch();
+    let mut ranges = Vec::new();
+    let mut batch_start = 0usize;
+    let mut batch_records = 0usize;
+    let mut batch_output = 0usize;
+    let mut total_records = 0usize;
+    let mut total_output = 0usize;
+    let mut total_strings = 0usize;
+
+    for (index, fact) in facts.iter().enumerate() {
+        let usage = SyntaxFactBatch::new(0, vec![fact.clone()], Vec::new()).usage()?;
+        if usage.records() > batch.max_records() || usage.output_bytes() > batch.max_output_bytes()
+        {
+            break;
+        }
+        let next_batch_records = batch_records
+            .checked_add(usage.records())
+            .ok_or_else(|| provider_failure("query-batch-accounting"))?;
+        let next_batch_output = batch_output
+            .checked_add(usage.output_bytes())
+            .ok_or_else(|| provider_failure("query-batch-accounting"))?;
+        if batch_records > 0
+            && (next_batch_records > batch.max_records()
+                || next_batch_output > batch.max_output_bytes())
+        {
+            ranges.push(batch_start..index);
+            batch_start = index;
+            batch_records = 0;
+            batch_output = 0;
+        }
+        if batch_records == 0 && ranges.len() >= remaining.batches() {
+            break;
+        }
+        let next_total_records = total_records
+            .checked_add(usage.records())
+            .ok_or_else(|| provider_failure("query-stream-accounting"))?;
+        let next_total_output = total_output
+            .checked_add(usage.output_bytes())
+            .ok_or_else(|| provider_failure("query-stream-accounting"))?;
+        let next_total_strings = total_strings
+            .checked_add(usage.string_bytes())
+            .ok_or_else(|| provider_failure("query-stream-accounting"))?;
+        if next_total_records > remaining.records()
+            || next_total_output > remaining.output_bytes()
+            || next_total_strings > remaining.string_bytes()
+        {
+            break;
+        }
+        batch_records = batch_records
+            .checked_add(usage.records())
+            .ok_or_else(|| provider_failure("query-batch-accounting"))?;
+        batch_output = batch_output
+            .checked_add(usage.output_bytes())
+            .ok_or_else(|| provider_failure("query-batch-accounting"))?;
+        total_records = next_total_records;
+        total_output = next_total_output;
+        total_strings = next_total_strings;
+    }
+    let emitted = total_records;
+    if batch_records > 0 {
+        ranges.push(batch_start..emitted);
+    }
+    Ok(FactPlan {
+        batches: ranges,
+        emitted,
+    })
+}
+
+fn emit_fact_plan(
+    facts: &[SyntaxFact],
+    plan: FactPlan,
+    sink: &mut dyn SyntaxFactSink,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    for range in plan.batches {
+        cancellation.check()?;
+        sink.push(SyntaxFactBatch::new(
+            sink.next_sequence(),
+            facts[range].to_vec(),
+            Vec::new(),
+        ))?;
+    }
+    cancellation.check()?;
+    Ok(())
+}
+
+fn emit_extraction_limit_diagnostic(
+    request: &ParseRequest<'_>,
+    sink: &mut dyn SyntaxFactSink,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    cancellation.check()?;
+    let diagnostic = AdapterDiagnostic::new(
+        DiagnosticCode::new("syntax-extraction-limit")
+            .map_err(|_| provider_failure("diagnostic-code"))?,
+        DiagnosticSeverity::Warning,
+        Some(request.source().source_ref().clone()),
+        CoverageStatus::Bounded,
+    );
+    sink.push(SyntaxFactBatch::new(
+        sink.next_sequence(),
+        Vec::new(),
+        vec![diagnostic],
+    ))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
