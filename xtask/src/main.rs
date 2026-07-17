@@ -7,6 +7,7 @@
 
 mod architecture;
 mod daemon_lifecycle;
+mod grammar_lock;
 mod ids;
 mod policy;
 mod protobuf_compatibility;

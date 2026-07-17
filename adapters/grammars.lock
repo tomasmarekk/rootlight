@@ -1,0 +1,101 @@
+schema_version = "1.0"
+
+[runtime]
+crate_name = "tree-sitter"
+crate_version = "0.26.11"
+crates_io_checksum = "af1c71c1c4cc0920b20d6b0f6572e7682cd07a6a2faec71067a31fa394c586df"
+repository = "https://github.com/tree-sitter/tree-sitter"
+tag = "v0.26.11"
+commit = "64402de2857cc197ecc4ca3bc144ea91fda7e72e"
+abi_minimum = 13
+abi_current = 15
+license = "MIT"
+license_source = "https://github.com/tree-sitter/tree-sitter/blob/64402de2857cc197ecc4ca3bc144ea91fda7e72e/LICENSE"
+license_sha256 = "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78"
+msrv = "1.77"
+offline_behavior = "builds from the Cargo cache without network access; build.rs compiles the bundled C11 runtime"
+capabilities = ["included-ranges", "incremental-edits", "progress-callback", "error-recovery"]
+
+[[grammars]]
+language = "rust"
+crate_name = "tree-sitter-rust"
+crate_version = "0.24.2"
+crates_io_checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
+repository = "https://github.com/tree-sitter/tree-sitter-rust"
+tag = "v0.24.2"
+commit = "77a3747266f4d621d0757825e6b11edcbf991ca5"
+parser_sha256 = "9602518f9e57919910bf0e777e52f6bfc9325d4c182e998bdb4efd5682b76e4a"
+scanner_sha256 = "9609a2f92dbb7c32bc056fd8fb94e5478428f04496696aa08b048a9b66caf283"
+abi = 15
+license = "MIT"
+license_source = "https://github.com/tree-sitter/tree-sitter-rust/blob/77a3747266f4d621d0757825e6b11edcbf991ca5/LICENSE"
+license_sha256 = "31d5b6f4243d5c7c6e1c4ebbbb9f6407bd1457a08bcc4f706521710341acba36"
+modifications = "none"
+test_corpus = "upstream:test/corpus plus Rootlight four-family golden fixtures"
+msrv = "not declared; verified by Rootlight MSRV 1.90"
+offline_behavior = "builds from the Cargo cache without network access; build.rs compiles bundled parser.c and scanner.c"
+capabilities = ["declarations", "imports", "scopes", "occurrences", "comments", "strings"]
+audit_notes = ["published .cargo_vcs_info SHA is unresolved", "all 15 published include files and Cargo.toml.orig are byte-identical to tag commit"]
+
+[[grammars]]
+language = "python"
+crate_name = "tree-sitter-python"
+crate_version = "0.25.0"
+crates_io_checksum = "6bf85fd39652e740bf60f46f4cda9492c3a9ad75880575bf14960f775cb74a1c"
+repository = "https://github.com/tree-sitter/tree-sitter-python"
+tag = "v0.25.0"
+commit = "293fdc02038ee2bf0e2e206711b69c90ac0d413f"
+parser_sha256 = "a895f10b3cf7b2608f3283b43cd5cfed70971c7ee4a0136abbaaccbc4a7a25e0"
+scanner_sha256 = "6db82134ac2d4c90a1a1475487a625cface02662ebda9b7478cad9c7147e9afe"
+abi = 15
+license = "MIT"
+license_source = "https://github.com/tree-sitter/tree-sitter-python/blob/293fdc02038ee2bf0e2e206711b69c90ac0d413f/LICENSE"
+license_sha256 = "d724405ce238a22c0d35769c5a36b386ad5958192efe8bbb304fb2896254575f"
+modifications = "none"
+test_corpus = "upstream:test/corpus plus Rootlight four-family golden fixtures"
+msrv = "not declared; verified by Rootlight MSRV 1.90"
+offline_behavior = "builds from the Cargo cache without network access; build.rs compiles bundled parser.c and scanner.c"
+capabilities = ["declarations", "imports", "scopes", "occurrences", "comments", "strings"]
+audit_notes = []
+
+[[grammars]]
+language = "javascript"
+crate_name = "tree-sitter-javascript"
+crate_version = "0.25.0"
+crates_io_checksum = "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5"
+repository = "https://github.com/tree-sitter/tree-sitter-javascript"
+tag = "v0.25.0"
+commit = "44c892e0be055ac465d5eeddae6d3e194424e7de"
+parser_sha256 = "67209ca7ef6e1a4f74e29e48b5928455f892fe1821a3960fbcd62f4e972f7384"
+scanner_sha256 = "b3d3f64284d97bf80749c026862427782cf7ecc0b7dc094e6698ab311c9a42c7"
+abi = 15
+license = "MIT"
+license_source = "https://github.com/tree-sitter/tree-sitter-javascript/blob/44c892e0be055ac465d5eeddae6d3e194424e7de/LICENSE"
+license_sha256 = "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1"
+modifications = "none"
+test_corpus = "upstream:test/corpus plus Rootlight four-family golden fixtures"
+msrv = "not declared; verified by Rootlight MSRV 1.90"
+offline_behavior = "builds from the Cargo cache without network access; build.rs compiles bundled parser.c and scanner.c"
+capabilities = ["declarations", "imports", "scopes", "occurrences", "comments", "strings"]
+audit_notes = []
+
+[[grammars]]
+language = "java"
+crate_name = "tree-sitter-java"
+crate_version = "0.23.5"
+crates_io_checksum = "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6"
+repository = "https://github.com/tree-sitter/tree-sitter-java"
+tag = "v0.23.5"
+commit = "94703d5a6bed02b98e438d7cad1136c01a60ba2c"
+parser_sha256 = "4add5150cf4531eb5dd97f3343dcf65cd11704c84711348b328582b83424a0e4"
+scanner_sha256 = "none"
+abi = 14
+license = "MIT"
+license_source = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE"
+license_sha256 = "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7"
+modifications = "none"
+test_corpus = "upstream:test/corpus plus Rootlight four-family golden fixtures"
+msrv = "not declared; verified by Rootlight MSRV 1.90"
+offline_behavior = "builds from the Cargo cache without network access; build.rs compiles bundled parser.c"
+capabilities = ["declarations", "imports", "scopes", "occurrences", "comments", "strings"]
+audit_notes = ["published crate omits LICENSE", "exact tag LICENSE is copied into Rootlight distribution notices and hash-verified"]

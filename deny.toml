@@ -68,6 +68,11 @@ crate = "blake3@1.8.5"
 allow = ["pure", "std"]
 exact = true
 
+[[bans.features]]
+crate = "tree-sitter@0.26.11"
+allow = ["std"]
+exact = true
+
 [bans.workspace-dependencies]
 duplicates = "deny"
 include-path-dependencies = false

@@ -37,6 +37,8 @@ pub(crate) fn check() -> Result<(), PolicyError> {
     require_version(&action_policy.schema_version, ACTION_POLICY_PATH)?;
     require_version(&toolchain_policy.schema_version, TOOLCHAIN_POLICY_PATH)?;
     validate_dependency_surfaces(&metadata, &supply_chain)?;
+    crate::grammar_lock::check(&metadata, workspace_root)
+        .map_err(|error| PolicyError::GrammarLock(Box::new(error)))?;
     validate_action_pins(workspace_root, &action_policy)?;
     validate_toolchain_policy(workspace_root, &toolchain_policy)?;
     scan_workspace_unsafe(workspace_root, &metadata)?;
@@ -794,6 +796,8 @@ struct ToolchainItem {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PolicyError {
+    #[error(transparent)]
+    GrammarLock(Box<crate::grammar_lock::GrammarLockError>),
     #[error("failed to read policy input at {path}")]
     Read {
         path: PathBuf,
