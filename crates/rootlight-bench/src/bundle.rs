@@ -8,12 +8,16 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
+    fmt,
     fs::{self, File, OpenOptions, TryLockError},
     io::{self, Read as _, Seek as _, Write as _},
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{IgnoredAny, SeqAccess, Visitor},
+};
 use sha2::{Digest as _, Sha256};
 
 use crate::integrity::{is_fixed_artifact, validate_fixed_artifacts};
@@ -309,8 +313,53 @@ impl<'de> Deserialize<'de> for OperationalLog {
     where
         D: serde::Deserializer<'de>,
     {
-        let records = Vec::<OperationalLogRecord>::deserialize(deserializer)?;
-        Self::new(records).map_err(serde::de::Error::custom)
+        deserializer.deserialize_seq(OperationalLogVisitor)
+    }
+}
+
+struct OperationalLogVisitor;
+
+impl<'de> Visitor<'de> for OperationalLogVisitor {
+    type Value = OperationalLog;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a bounded operational log array")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let hinted = sequence.size_hint().unwrap_or(0);
+        if hinted > HARD_MAX_OPERATIONAL_LOG_RECORDS {
+            return Err(serde::de::Error::custom(
+                "operational log record limit exceeded",
+            ));
+        }
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(hinted)
+            .map_err(|_| serde::de::Error::custom("operational log allocation failed"))?;
+        loop {
+            if records.len() == HARD_MAX_OPERATIONAL_LOG_RECORDS {
+                if sequence.next_element::<IgnoredAny>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "operational log record limit exceeded",
+                    ));
+                }
+                break;
+            }
+            let Some(record) = sequence.next_element::<OperationalLogRecord>()? else {
+                break;
+            };
+            if records.len() == records.capacity() {
+                records
+                    .try_reserve(1)
+                    .map_err(|_| serde::de::Error::custom("operational log allocation failed"))?;
+            }
+            records.push(record);
+        }
+        OperationalLog::new(records).map_err(serde::de::Error::custom)
     }
 }
 

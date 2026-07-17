@@ -3,9 +3,12 @@
 //! Raw external inputs cross this module's byte, collection, string, digest,
 //! path, and aggregate-size checks before becoming trusted model values.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt};
 
-use serde::Deserialize;
+use serde::{
+    Deserialize,
+    de::{DeserializeSeed as _, IgnoredAny, MapAccess, SeqAccess, Visitor},
+};
 
 use crate::{
     BenchmarkCommand, BundleLimits, DatasetEntry, DatasetManifest, RESULT_BUNDLE_SCHEMA_VERSION,
@@ -25,6 +28,12 @@ pub fn decode_dataset_manifest(
 ) -> Result<DatasetManifest, DecodeError> {
     let limits = limits.validate().map_err(DecodeError::Limits)?;
     check_input_bytes(bytes, limits)?;
+    preflight_array_field(
+        bytes,
+        "entries",
+        limits.max_manifest_entries,
+        "manifest_entry_count",
+    )?;
     let input: DatasetManifestInput =
         serde_json::from_slice(bytes).map_err(|_| DecodeError::InvalidJson)?;
     validate_string(&input.schema_version, limits, StringKind::Label)?;
@@ -119,6 +128,12 @@ pub fn decode_benchmark_command(
 ) -> Result<BenchmarkCommand, DecodeError> {
     let limits = limits.validate().map_err(DecodeError::Limits)?;
     check_input_bytes(bytes, limits)?;
+    preflight_array_field(
+        bytes,
+        "arguments",
+        limits.max_command_arguments,
+        "command_argument_count",
+    )?;
     let input: BenchmarkCommandInput =
         serde_json::from_slice(bytes).map_err(|_| DecodeError::InvalidJson)?;
     validate_string(&input.schema_version, limits, StringKind::Label)?;
@@ -158,6 +173,105 @@ fn check_input_bytes(bytes: &[u8], limits: BundleLimits) -> Result<(), DecodeErr
         });
     }
     Ok(())
+}
+
+fn preflight_array_field(
+    bytes: &[u8],
+    field: &'static str,
+    maximum: usize,
+    resource: &'static str,
+) -> Result<(), DecodeError> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let count = ObjectArrayCountSeed { field }
+        .deserialize(&mut deserializer)
+        .map_err(|_| DecodeError::InvalidJson)?
+        .ok_or(DecodeError::InvalidJson)?;
+    deserializer.end().map_err(|_| DecodeError::InvalidJson)?;
+    if count > maximum {
+        return Err(DecodeError::LimitExceeded { resource });
+    }
+    Ok(())
+}
+
+struct ObjectArrayCountSeed {
+    field: &'static str,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for ObjectArrayCountSeed {
+    type Value = Option<usize>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ObjectArrayCountVisitor { field: self.field })
+    }
+}
+
+struct ObjectArrayCountVisitor {
+    field: &'static str,
+}
+
+impl<'de> Visitor<'de> for ObjectArrayCountVisitor {
+    type Value = Option<usize>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a benchmark JSON object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut count = None;
+        while let Some(key) = map.next_key::<&str>()? {
+            if key == self.field {
+                if count.is_some() {
+                    return Err(serde::de::Error::duplicate_field(self.field));
+                }
+                count = Some(map.next_value_seed(ArrayCountSeed)?);
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(count)
+    }
+}
+
+struct ArrayCountSeed;
+
+impl<'de> serde::de::DeserializeSeed<'de> for ArrayCountSeed {
+    type Value = usize;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(ArrayCountVisitor)
+    }
+}
+
+struct ArrayCountVisitor;
+
+impl<'de> Visitor<'de> for ArrayCountVisitor {
+    type Value = usize;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a benchmark JSON array")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut count = 0_usize;
+        while sequence.next_element::<IgnoredAny>()?.is_some() {
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| serde::de::Error::custom("array count overflow"))?;
+        }
+        Ok(count)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -423,6 +537,23 @@ mod tests {
         }"#;
         decode_benchmark_command(valid, BundleLimits::default())
             .expect("bounded source-free command decodes");
+
+        let too_many = String::from_utf8(valid.to_vec())
+            .expect("fixture is UTF-8")
+            .replace(
+                "\"arguments\":[\"dataset=fixture\"]",
+                "\"arguments\":[\"dataset=fixture\",7]",
+            );
+        let limits = BundleLimits {
+            max_command_arguments: 1,
+            ..BundleLimits::default()
+        };
+        assert!(matches!(
+            decode_benchmark_command(too_many.as_bytes(), limits),
+            Err(DecodeError::LimitExceeded {
+                resource: "command_argument_count"
+            })
+        ));
 
         let path_shaped = br#"{
             "schema_version":"2.0",
