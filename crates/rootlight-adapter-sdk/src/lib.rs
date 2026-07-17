@@ -32,5 +32,5 @@ pub use sink::{
     AdapterDiagnostic, AnalysisOutput, BoundedIrSink, BoundedSyntaxSink, DiagnosticCode, IrBatch,
     IrBatchSink, IrRecord, IrRemainingBudget, LanguageAnalyzer, ParseOutput, ParseProvider,
     SyntaxFact, SyntaxFactBatch, SyntaxFactKind, SyntaxFactSink, SyntaxKindLabel, execute_analysis,
-    execute_parse,
+    execute_parse, execute_parse_transaction,
 };

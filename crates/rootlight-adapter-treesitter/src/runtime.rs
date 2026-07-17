@@ -7,15 +7,16 @@ use std::{
     collections::VecDeque,
     ops::ControlFlow,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
 
 use rootlight_adapter_sdk::{
-    AdapterDiagnostic, AdapterError, CoverageReport, DiagnosticCode, EncodingId, MemoryEnforcement,
-    ParseCapabilities, ParseProvider, ParseReport, ParseRequest, RequestError, ResourceKind,
-    ResourceUsage, StreamEnd, SyntaxFactBatch, SyntaxFactSink, WorkReport,
+    AdapterDiagnostic, AdapterError, CoverageReport, DiagnosticCode, EncodingId,
+    MemoryAdmissionPolicy, MemoryEnforcement, ParseCapabilities, ParseProvider, ParseReport,
+    ParseRequest, RequestError, ResourceKind, ResourceUsage, StreamEnd, SyntaxFactBatch,
+    SyntaxFactSink, WorkReport, execute_parse_transaction,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::ContentHash;
@@ -26,7 +27,7 @@ use crate::{
     GrammarFamily, GrammarRegistry, ParserSettings, RuntimeConfig, RuntimeConfigError,
     incremental::{
         ParseIdentity, ParseReuseKey, ParseWithPrevious, PreviousParse, ReuseInvalidation,
-        ReuseStatus, SourceEdit,
+        ReuseStatus, SourceEdit, SourceEditIdentity,
     },
     pool::{ParserPool, PoolError},
     registry::language_for,
@@ -34,6 +35,7 @@ use crate::{
 
 const LOGICAL_TREE_NODE_BYTES: usize = 64;
 const CANCELLATION_CHECK_INTERVAL: usize = 256;
+const CANCELLATION_BYTE_INTERVAL: usize = 64 * 1024;
 static NEXT_PROVIDER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Bounded first-party Tree-sitter parser provider.
@@ -88,18 +90,58 @@ impl TreeSitterProvider {
         })
     }
 
-    /// Parses with an optional provider-owned previous tree and checked edits.
+    /// Executes an admitted incremental parse and commits bounded output.
     ///
     /// Invalid or stale reuse input falls back to a clean parse and returns an
-    /// explicit [`ReuseInvalidation`]. The caller still supplies an SDK sink;
-    /// its executor remains the transaction commit boundary.
+    /// explicit [`ReuseInvalidation`]. The caller explicitly selects memory
+    /// admission, and the SDK enforces the same capability, deadline, report,
+    /// and transactional sink checks as a clean [`rootlight_adapter_sdk::execute_parse`].
     ///
     /// # Errors
     ///
-    /// Returns [`AdapterError`] for unsupported language/encoding, cancellation,
-    /// parser-pool failure, native parser failure, or sink/resource rejection.
+    /// Returns [`AdapterError`] for rejected admission, unsupported input,
+    /// cancellation, parser-pool failure, native parser failure, or
+    /// sink/resource rejection.
+    pub fn execute_with_previous(
+        &self,
+        request: &ParseRequest<'_>,
+        previous: Option<&PreviousParse>,
+        edits: &[SourceEdit],
+        settings: ParserSettings,
+        memory_policy: MemoryAdmissionPolicy,
+        cancellation: &Cancellation,
+    ) -> Result<ParseWithPrevious, AdapterError> {
+        let (output, continuation) = execute_parse_transaction(
+            &self.capabilities,
+            request,
+            memory_policy,
+            cancellation,
+            |sink, cancellation| {
+                self.parse_with_previous_raw(request, previous, edits, settings, sink, cancellation)
+                    .map(RawParseWithPrevious::into_transaction_parts)
+            },
+        )?;
+        let previous = match continuation.pending {
+            Some(pending) => self.cache_insert(
+                pending.identity,
+                request.source().bytes(),
+                &pending.tree,
+                pending.nodes,
+                cancellation,
+            )?,
+            None => None,
+        };
+        Ok(ParseWithPrevious {
+            output,
+            previous,
+            reuse_status: continuation.reuse_status,
+            reuse_key: continuation.reuse_key,
+        })
+    }
+
+    /// Performs provider work inside an SDK-owned admitted transaction.
     #[allow(clippy::too_many_lines)]
-    pub fn parse_with_previous(
+    fn parse_with_previous_raw(
         &self,
         request: &ParseRequest<'_>,
         previous: Option<&PreviousParse>,
@@ -107,7 +149,7 @@ impl TreeSitterProvider {
         settings: ParserSettings,
         sink: &mut dyn SyntaxFactSink,
         cancellation: &Cancellation,
-    ) -> Result<ParseWithPrevious, AdapterError> {
+    ) -> Result<RawParseWithPrevious, AdapterError> {
         cancellation.check()?;
         if settings.input_chunk_bytes() > self.config.max_source_bytes() {
             return Err(provider_failure("treesitter-settings"));
@@ -162,7 +204,7 @@ impl TreeSitterProvider {
             included_ranges: range_identities(request),
             settings,
         };
-        let cached = self.resolve_previous(previous)?;
+        let cached = self.resolve_previous(previous, cancellation)?;
         let previous_hash = cached
             .as_ref()
             .filter(|entry| entry.invalidation.is_none())
@@ -175,7 +217,7 @@ impl TreeSitterProvider {
             encoding: identity.encoding.clone(),
             included_ranges: identity.included_ranges.clone(),
             settings,
-            edits: edits.to_vec(),
+            edits: source_edit_identities(edits, cancellation)?,
         };
         let (old_tree, mut reuse_status) = prepare_reuse(
             cached.as_ref(),
@@ -191,7 +233,7 @@ impl TreeSitterProvider {
         parser
             .set_language(&language_for(family))
             .map_err(|_| provider_failure("grammar-abi"))?;
-        let included_ranges = tree_sitter_ranges(request, source_text)?;
+        let included_ranges = tree_sitter_ranges(request, source_text, cancellation)?;
         parser
             .set_included_ranges(&included_ranges)
             .map_err(|_| provider_failure("included-ranges"))?;
@@ -220,9 +262,9 @@ impl TreeSitterProvider {
         cancellation.check()?;
 
         if matches!(reuse_status, ReuseStatus::Reused { .. }) {
-            let changed_ranges = old_tree
-                .as_ref()
-                .map_or(0, |old| old.changed_ranges(&tree).count());
+            let changed_ranges = old_tree.as_ref().map_or(Ok(0), |old| {
+                count_changed_ranges(old, &tree, self.config.max_syntax_nodes(), cancellation)
+            })?;
             reuse_status = ReuseStatus::Reused { changed_ranges };
         }
         let traversal = inspect_tree(
@@ -258,14 +300,18 @@ impl TreeSitterProvider {
             StreamEnd::new(sink.next_sequence(), usage),
         )
         .map_err(AdapterError::InvalidReport)?;
-        let previous = if traversal.fully_traversed {
-            self.cache_insert(identity, source_bytes, &tree, traversal.processed_nodes)?
+        let pending = if traversal.fully_traversed {
+            Some(PendingParse {
+                identity,
+                tree,
+                nodes: traversal.processed_nodes,
+            })
         } else {
             None
         };
-        Ok(ParseWithPrevious {
+        Ok(RawParseWithPrevious {
             report,
-            previous,
+            pending,
             reuse_status,
             reuse_key,
         })
@@ -290,7 +336,9 @@ impl TreeSitterProvider {
     fn resolve_previous(
         &self,
         previous: Option<&PreviousParse>,
+        cancellation: &Cancellation,
     ) -> Result<Option<CachedParse>, AdapterError> {
+        cancellation.check()?;
         let Some(previous) = previous else {
             return Ok(None);
         };
@@ -301,9 +349,11 @@ impl TreeSitterProvider {
             .cache
             .lock()
             .map_err(|_| provider_failure("cache-state"))?;
-        Ok(cache
+        let resolved = cache
             .get(previous.entry_id)
-            .or_else(|| Some(CachedParse::invalidation(ReuseInvalidation::Evicted))))
+            .or_else(|| Some(CachedParse::invalidation(ReuseInvalidation::Evicted)));
+        cancellation.check()?;
+        Ok(resolved)
     }
 
     fn cache_insert(
@@ -312,15 +362,59 @@ impl TreeSitterProvider {
         source: &[u8],
         tree: &Tree,
         nodes: usize,
+        cancellation: &Cancellation,
     ) -> Result<Option<PreviousParse>, AdapterError> {
+        cancellation.check()?;
+        let accounted_bytes = nodes
+            .checked_mul(LOGICAL_TREE_NODE_BYTES)
+            .and_then(|tree_bytes| source.len().checked_add(tree_bytes))
+            .ok_or_else(|| provider_failure("cache-accounting"))?;
+        if accounted_bytes > self.config.max_cache_bytes() {
+            return Ok(None);
+        }
+        let source = copy_source_for_cache(source, cancellation)?;
+        cancellation.check()?;
         let mut cache = self
             .cache
             .lock()
             .map_err(|_| provider_failure("cache-state"))?;
+        cancellation.check()?;
         cache
             .insert(self.provider_id, identity, source, tree, nodes)
             .map_err(|_| provider_failure("cache-accounting"))
     }
+}
+
+struct RawParseWithPrevious {
+    report: ParseReport,
+    pending: Option<PendingParse>,
+    reuse_status: ReuseStatus,
+    reuse_key: ParseReuseKey,
+}
+
+impl RawParseWithPrevious {
+    fn into_transaction_parts(self) -> (ParseReport, RawContinuation) {
+        (
+            self.report,
+            RawContinuation {
+                pending: self.pending,
+                reuse_status: self.reuse_status,
+                reuse_key: self.reuse_key,
+            },
+        )
+    }
+}
+
+struct RawContinuation {
+    pending: Option<PendingParse>,
+    reuse_status: ReuseStatus,
+    reuse_key: ParseReuseKey,
+}
+
+struct PendingParse {
+    identity: ParseIdentity,
+    tree: Tree,
+    nodes: usize,
 }
 
 impl ParseProvider for TreeSitterProvider {
@@ -334,7 +428,7 @@ impl ParseProvider for TreeSitterProvider {
         sink: &mut dyn SyntaxFactSink,
         cancellation: &Cancellation,
     ) -> Result<ParseReport, AdapterError> {
-        self.parse_with_previous(
+        self.parse_with_previous_raw(
             request,
             None,
             &[],
@@ -415,7 +509,7 @@ impl ParseCache {
         &mut self,
         provider_id: u64,
         identity: ParseIdentity,
-        source: &[u8],
+        source: Arc<[u8]>,
         tree: &Tree,
         nodes: usize,
     ) -> Result<Option<PreviousParse>, ()> {
@@ -440,7 +534,7 @@ impl ParseCache {
         self.entries.push_back(CachedParse {
             entry_id,
             identity,
-            source: source.to_vec(),
+            source,
             tree: Some(tree.clone()),
             accounted_bytes,
             invalidation: None,
@@ -468,7 +562,7 @@ impl ParseCache {
 struct CachedParse {
     entry_id: u64,
     identity: ParseIdentity,
-    source: Vec<u8>,
+    source: Arc<[u8]>,
     tree: Option<Tree>,
     accounted_bytes: usize,
     invalidation: Option<ReuseInvalidation>,
@@ -479,7 +573,7 @@ impl CachedParse {
         Self {
             entry_id: 0,
             identity: invalid_identity(),
-            source: Vec::new(),
+            source: Arc::from([]),
             tree: None,
             accounted_bytes: 0,
             invalidation: Some(invalidation),
@@ -538,6 +632,28 @@ fn validate_edit_admission(
     }
     cancellation.check()?;
     Ok(())
+}
+
+fn source_edit_identities(
+    edits: &[SourceEdit],
+    cancellation: &Cancellation,
+) -> Result<Vec<SourceEditIdentity>, AdapterError> {
+    let mut identities = Vec::new();
+    identities
+        .try_reserve_exact(edits.len())
+        .map_err(|_| provider_failure("incremental-identity-allocation"))?;
+    for edit in edits {
+        cancellation.check()?;
+        let mut hasher = blake3::Hasher::new();
+        for chunk in edit.replacement().chunks(CANCELLATION_BYTE_INTERVAL) {
+            cancellation.check()?;
+            hasher.update(chunk);
+        }
+        let replacement_hash = ContentHash::from_bytes(*hasher.finalize().as_bytes());
+        identities.push(SourceEditIdentity::from_edit(edit, replacement_hash));
+    }
+    cancellation.check()?;
+    Ok(identities)
 }
 
 fn prepare_reuse(
@@ -709,32 +825,117 @@ fn point_for_offset(source: &[u8], offset: usize) -> Option<Point> {
     Some(Point { row, column })
 }
 
+fn count_changed_ranges(
+    old_tree: &Tree,
+    new_tree: &Tree,
+    maximum: usize,
+    cancellation: &Cancellation,
+) -> Result<usize, AdapterError> {
+    let mut count = 0usize;
+    for range in old_tree.changed_ranges(new_tree) {
+        if count.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        let _ = range;
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| provider_failure("changed-range-limit"))?;
+        if count > maximum {
+            return Err(provider_failure("changed-range-limit"));
+        }
+    }
+    cancellation.check()?;
+    Ok(count)
+}
+
+fn copy_source_for_cache(
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<Arc<[u8]>, AdapterError> {
+    cancellation.check()?;
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(source.len())
+        .map_err(|_| provider_failure("cache-allocation"))?;
+    for chunk in source.chunks(CANCELLATION_BYTE_INTERVAL) {
+        cancellation.check()?;
+        copy.extend_from_slice(chunk);
+    }
+    cancellation.check()?;
+    Ok(Arc::from(copy))
+}
+
 fn tree_sitter_ranges(
     request: &ParseRequest<'_>,
     source: &str,
+    cancellation: &Cancellation,
 ) -> Result<Vec<Range>, AdapterError> {
-    request
-        .included_ranges()
-        .iter()
-        .map(|included| {
-            let span = included.span();
-            let start =
-                usize::try_from(span.start_byte()).map_err(|_| provider_failure("range-offset"))?;
-            let end =
-                usize::try_from(span.end_byte()).map_err(|_| provider_failure("range-offset"))?;
-            if !source.is_char_boundary(start) || !source.is_char_boundary(end) {
-                return Err(provider_failure("range-boundary"));
+    let mut ranges = Vec::with_capacity(request.included_ranges().len());
+    let mut cursor = 0usize;
+    let mut point = Point { row: 0, column: 0 };
+    for included in request.included_ranges() {
+        cancellation.check()?;
+        let span = included.span();
+        let start =
+            usize::try_from(span.start_byte()).map_err(|_| provider_failure("range-offset"))?;
+        let end = usize::try_from(span.end_byte()).map_err(|_| provider_failure("range-offset"))?;
+        if start < cursor || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+            return Err(provider_failure("range-boundary"));
+        }
+        advance_source_point(
+            source.as_bytes(),
+            &mut cursor,
+            start,
+            &mut point,
+            cancellation,
+        )?;
+        let start_point = point;
+        advance_source_point(
+            source.as_bytes(),
+            &mut cursor,
+            end,
+            &mut point,
+            cancellation,
+        )?;
+        ranges.push(Range {
+            start_byte: start,
+            end_byte: end,
+            start_point,
+            end_point: point,
+        });
+    }
+    cancellation.check()?;
+    Ok(ranges)
+}
+
+fn advance_source_point(
+    source: &[u8],
+    cursor: &mut usize,
+    target: usize,
+    point: &mut Point,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    let bytes = source
+        .get(*cursor..target)
+        .ok_or_else(|| provider_failure("range-offset"))?;
+    for chunk in bytes.chunks(CANCELLATION_BYTE_INTERVAL) {
+        cancellation.check()?;
+        for byte in chunk {
+            if *byte == b'\n' {
+                point.row = point
+                    .row
+                    .checked_add(1)
+                    .ok_or_else(|| provider_failure("range-point"))?;
+                point.column = 0;
+            } else {
+                point.column = point
+                    .column
+                    .checked_add(1)
+                    .ok_or_else(|| provider_failure("range-point"))?;
             }
-            Ok(Range {
-                start_byte: start,
-                end_byte: end,
-                start_point: point_for_offset(source.as_bytes(), start)
-                    .ok_or_else(|| provider_failure("range-offset"))?,
-                end_point: point_for_offset(source.as_bytes(), end)
-                    .ok_or_else(|| provider_failure("range-offset"))?,
-            })
-        })
-        .collect()
+        }
+    }
+    *cursor = target;
+    Ok(())
 }
 
 fn range_identities(request: &ParseRequest<'_>) -> Vec<rootlight_adapter_sdk::IncludedRange> {
@@ -763,7 +964,6 @@ enum PrimaryDiagnostic {
 struct SyntaxTraversal {
     processed_nodes: usize,
     observed_depth: usize,
-    covered_source_bytes: usize,
     error_span: Option<(usize, usize)>,
     limited_nodes: bool,
     limited_depth: bool,
@@ -781,7 +981,6 @@ fn inspect_tree(
     let SyntaxTraversal {
         processed_nodes,
         observed_depth,
-        covered_source_bytes,
         error_span,
         limited_nodes,
         limited_depth,
@@ -831,10 +1030,10 @@ fn inspect_tree(
     Ok(TraversalReport {
         processed_nodes,
         max_depth: observed_depth.min(max_depth),
-        covered_source_bytes: if primary_diagnostic.is_none() {
-            requested_covered_bytes
+        covered_source_bytes: if limited_nodes || limited_depth {
+            0
         } else {
-            covered_source_bytes.min(requested_covered_bytes)
+            requested_covered_bytes
         },
         skipped_regions,
         coverage,
@@ -854,7 +1053,6 @@ fn traverse_syntax(
     let mut stack = vec![(root, 0usize)];
     let mut processed_nodes = 0usize;
     let mut observed_depth = 0usize;
-    let mut covered_source_bytes = 0usize;
     let mut error_span = None;
     let mut limited_nodes = false;
     let mut limited_depth = false;
@@ -870,9 +1068,6 @@ fn traverse_syntax(
             .checked_add(1)
             .ok_or_else(|| provider_failure("node-accounting"))?;
         observed_depth = observed_depth.max(depth);
-        if node.child_count() == 0 {
-            covered_source_bytes = covered_source_bytes.max(node.end_byte());
-        }
         if error_span.is_none() && (node.is_error() || node.is_missing()) {
             error_span = Some((node.start_byte(), node.end_byte()));
         }
@@ -891,7 +1086,6 @@ fn traverse_syntax(
     Ok(SyntaxTraversal {
         processed_nodes,
         observed_depth,
-        covered_source_bytes,
         error_span,
         limited_nodes,
         limited_depth,
@@ -1025,7 +1219,7 @@ mod tests {
         let cached = CachedParse {
             entry_id: 1,
             identity: base.clone(),
-            source: b"fn one() {}".to_vec(),
+            source: Arc::from(&b"fn one() {}"[..]),
             tree: Some(tree),
             accounted_bytes: 1,
             invalidation: None,
@@ -1109,6 +1303,19 @@ mod tests {
 
         assert!(matches!(
             traverse_syntax(&tree, 1024, 64, &cancellation),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest
+            })
+        ));
+        let changed = language_tree(GrammarFamily::Rust, b"fn changed() {}");
+        assert!(matches!(
+            count_changed_ranges(&tree, &changed, 1024, &cancellation),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest
+            })
+        ));
+        assert!(matches!(
+            copy_source_for_cache(b"source", &cancellation),
             Err(AdapterError::Cancelled {
                 reason: rootlight_cancel::CancellationReason::ClientRequest
             })

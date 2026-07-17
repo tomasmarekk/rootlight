@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use rootlight_adapter_sdk::IncludedRange;
+use rootlight_adapter_sdk::{IncludedRange, ParseOutput};
 use rootlight_ids::ContentHash;
 
 use crate::{GrammarFamily, ParserSettings};
@@ -85,6 +85,58 @@ impl fmt::Debug for SourceEdit {
     }
 }
 
+/// Source-free identity of one validated incremental replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceEditIdentity {
+    start_byte: usize,
+    old_end_byte: usize,
+    new_end_byte: usize,
+    replacement_bytes: usize,
+    replacement_hash: ContentHash,
+}
+
+impl SourceEditIdentity {
+    pub(crate) fn from_edit(edit: &SourceEdit, replacement_hash: ContentHash) -> Self {
+        Self {
+            start_byte: edit.start_byte(),
+            old_end_byte: edit.old_end_byte(),
+            new_end_byte: edit.new_end_byte(),
+            replacement_bytes: edit.replacement_bytes(),
+            replacement_hash,
+        }
+    }
+
+    /// Returns the replacement start byte.
+    #[must_use]
+    pub const fn start_byte(self) -> usize {
+        self.start_byte
+    }
+
+    /// Returns the exclusive end byte in the previous sequential source.
+    #[must_use]
+    pub const fn old_end_byte(self) -> usize {
+        self.old_end_byte
+    }
+
+    /// Returns the exclusive end byte after applying the replacement.
+    #[must_use]
+    pub const fn new_end_byte(self) -> usize {
+        self.new_end_byte
+    }
+
+    /// Returns the replacement byte length.
+    #[must_use]
+    pub const fn replacement_bytes(self) -> usize {
+        self.replacement_bytes
+    }
+
+    /// Returns the replacement content hash without retaining source bytes.
+    #[must_use]
+    pub const fn replacement_hash(self) -> ContentHash {
+        self.replacement_hash
+    }
+}
+
 /// Invalid parser-independent incremental edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -114,7 +166,7 @@ pub struct ParseReuseKey {
     pub(crate) encoding: String,
     pub(crate) included_ranges: Vec<IncludedRange>,
     pub(crate) settings: ParserSettings,
-    pub(crate) edits: Vec<SourceEdit>,
+    pub(crate) edits: Vec<SourceEditIdentity>,
 }
 
 impl ParseReuseKey {
@@ -160,9 +212,9 @@ impl ParseReuseKey {
         self.settings
     }
 
-    /// Returns the validated sequential edit sequence.
+    /// Returns source-free identities for the validated sequential edits.
     #[must_use]
-    pub fn edits(&self) -> &[SourceEdit] {
+    pub fn edits(&self) -> &[SourceEditIdentity] {
         &self.edits
     }
 }
@@ -212,10 +264,10 @@ pub enum ReuseStatus {
     Invalidated(ReuseInvalidation),
 }
 
-/// Successful parse report plus its bounded previous-parse continuation.
+/// Committed parse output plus its bounded previous-parse continuation.
 #[derive(Debug, Clone)]
 pub struct ParseWithPrevious {
-    pub(crate) report: rootlight_adapter_sdk::ParseReport,
+    pub(crate) output: ParseOutput,
     pub(crate) previous: Option<PreviousParse>,
     pub(crate) reuse_status: ReuseStatus,
     pub(crate) reuse_key: ParseReuseKey,
@@ -225,7 +277,13 @@ impl ParseWithPrevious {
     /// Returns the transactional parse report.
     #[must_use]
     pub const fn report(&self) -> &rootlight_adapter_sdk::ParseReport {
-        &self.report
+        self.output.report()
+    }
+
+    /// Returns the committed transactional parser output.
+    #[must_use]
+    pub const fn output(&self) -> &ParseOutput {
+        &self.output
     }
 
     /// Returns a cache-backed handle when the parsed tree fit the cache budget.

@@ -14,7 +14,7 @@ mod runtime;
 pub use config::{ParserSettings, RuntimeConfig, RuntimeConfigError};
 pub use incremental::{
     ParseReuseKey, ParseWithPrevious, PreviousParse, ReuseInvalidation, ReuseStatus, SourceEdit,
-    SourceEditError,
+    SourceEditError, SourceEditIdentity,
 };
 pub use registry::{GrammarDescriptor, GrammarFamily, GrammarRegistry, RegistryError};
 pub use runtime::{CacheStats, RuntimeStats, TreeSitterProvider};
