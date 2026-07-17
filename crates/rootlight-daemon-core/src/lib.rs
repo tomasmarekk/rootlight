@@ -2570,12 +2570,15 @@ pub async fn handle_connection_async(
     codec: FrameCodec,
     stream: &mut AsyncLocalStream,
 ) -> Result<(), ServiceError> {
+    let negotiation = service.state.telemetry.start_span(SpanKind::IpcNegotiation);
     let hello = read_client_hello_async(codec, stream).await?;
     let selected_protocol = match validate_client_hello(&hello, service.instance_nonce) {
         Ok(selected_protocol) => selected_protocol,
         Err(error) => {
+            let error_code = observability_error_code(error.code());
             let response = service.server_hello(None, Some(error.as_ref()));
             write_server_hello_async(codec, stream, &response).await?;
+            negotiation.finish(TelemetryOutcome::Rejected, Some(error_code));
             return Ok(());
         }
     };
@@ -2585,8 +2588,10 @@ pub async fn handle_connection_async(
         Ok(permit) => permit,
         Err(ServiceError::ClientConnectionLimit { limit }) => {
             let error = client_connection_limit(limit);
+            let error_code = observability_error_code(error.code());
             let response = service.server_hello(None, Some(&error));
             write_server_hello_async(codec, stream, &response).await?;
+            negotiation.finish(TelemetryOutcome::Rejected, Some(error_code));
             return Ok(());
         }
         Err(error) => return Err(error),
@@ -2594,6 +2599,7 @@ pub async fn handle_connection_async(
     let selected_protocol_minor = selected_protocol.minor;
     let response = service.server_hello(Some(selected_protocol), None);
     write_server_hello_async(codec, stream, &response).await?;
+    negotiation.finish(TelemetryOutcome::Succeeded, None);
     let envelope = read_request_async(codec, stream).await?;
     let response = dispatch_async(
         &service,
@@ -4581,7 +4587,7 @@ mod tests {
 
         let reconnected_handler = spawn_connection_handler(
             listener,
-            service,
+            Arc::clone(&service),
             actor.handle(),
             submissions,
             Arc::clone(&client_connections),
@@ -4614,6 +4620,15 @@ mod tests {
                 .expect("admission state is available")
                 .is_empty()
         );
+        let telemetry = service.state.telemetry().snapshot();
+        assert!(telemetry.traces.iter().any(|span| {
+            span.kind == SpanKind::IpcNegotiation && span.outcome == TelemetryOutcome::Succeeded
+        }));
+        assert!(telemetry.traces.iter().any(|span| {
+            span.kind == SpanKind::IpcNegotiation
+                && span.outcome == TelemetryOutcome::Rejected
+                && span.error_code == Some(ObservabilityErrorCode::ResourceExhausted)
+        }));
         actor.join().expect("actor joins");
     }
 

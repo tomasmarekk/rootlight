@@ -458,6 +458,11 @@ pub enum LogEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error_code: Option<ErrorCode>,
     },
+    /// One accepted connection was rejected by the global process bound.
+    ConnectionRejected {
+        /// Stable source-free failure code.
+        error_code: ErrorCode,
+    },
     /// One accepted connection task failed outside a request response.
     ConnectionTaskFailed {
         /// Stable source-free failure code.
@@ -904,6 +909,13 @@ impl Telemetry {
         });
     }
 
+    /// Records global connection load shedding without retaining peer data.
+    pub fn record_connection_rejected(&self) {
+        self.record_log(LogEvent::ConnectionRejected {
+            error_code: ErrorCode::ResourceExhausted,
+        });
+    }
+
     /// Records a connection task failure without retaining error text.
     pub fn record_connection_task_failed(&self) {
         self.record_log(LogEvent::ConnectionTaskFailed {
@@ -1068,7 +1080,9 @@ fn classify_log_event(event: LogEvent) -> (LogSeverity, TelemetryTarget) {
         }
         | LogEvent::ConnectionTaskFailed { .. } => (LogSeverity::Error, TelemetryTarget::Ipc),
         LogEvent::DaemonFailed { .. } => (LogSeverity::Error, TelemetryTarget::Daemon),
-        LogEvent::RequestCompleted { .. } => (LogSeverity::Warn, TelemetryTarget::Ipc),
+        LogEvent::ConnectionRejected { .. } | LogEvent::RequestCompleted { .. } => {
+            (LogSeverity::Warn, TelemetryTarget::Ipc)
+        }
         LogEvent::DiagnosticCompleted {
             outcome: TelemetryOutcome::Succeeded,
             ..
@@ -1564,6 +1578,26 @@ mod tests {
         ] {
             assert!(!String::from_utf8_lossy(&bytes).contains(forbidden));
         }
+    }
+
+    #[test]
+    fn connection_rejection_record_is_closed_and_source_free() {
+        let telemetry = Telemetry::default();
+        telemetry.record_connection_rejected();
+
+        let snapshot = telemetry.snapshot();
+        let record = snapshot
+            .logs
+            .first()
+            .expect("connection rejection retained");
+        assert_eq!(record.severity, LogSeverity::Warn);
+        assert_eq!(record.target, TelemetryTarget::Ipc);
+        assert_eq!(
+            record.event,
+            LogEvent::ConnectionRejected {
+                error_code: ErrorCode::ResourceExhausted,
+            }
+        );
     }
 
     #[test]

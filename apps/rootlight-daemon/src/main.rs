@@ -143,7 +143,10 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                 let stream = accepted?;
                 let permit = match Arc::clone(&connection_slots).try_acquire_owned() {
                     Ok(permit) => permit,
-                    Err(_) => continue,
+                    Err(_) => {
+                        state.telemetry().record_connection_rejected();
+                        continue;
+                    }
                 };
                 state.connection_started();
                 let service = Arc::clone(&service);
