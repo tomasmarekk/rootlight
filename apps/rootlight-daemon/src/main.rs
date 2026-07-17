@@ -98,10 +98,8 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let mut connections = tokio::task::JoinSet::new();
     let command_capacity =
         usize::try_from(limits.operation_queue_limit).map_err(|_| DaemonError::InvalidLimits)?;
-    let renewal_capacity = limits.control_queue_limit;
     let (submission_tx, mut submission_rx) = tokio::sync::mpsc::channel(command_capacity);
-    let (renewal_tx, mut renewal_rx) = tokio::sync::mpsc::channel(renewal_capacity);
-    let command_senders = OrchestratorSenders::new(submission_tx, renewal_tx);
+    let command_senders = OrchestratorSenders::new(submission_tx);
     let shutdown = shutdown_signal(mode);
     tokio::pin!(shutdown);
 
@@ -118,15 +116,6 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                     }
                 };
                 if let Err(error) = orchestrator.process_event(event).await {
-                    state.set_journal_healthy(false);
-                    return Err(error.into());
-                }
-            }
-            renewal = renewal_rx.recv() => {
-                let Some(admission) = renewal else { continue; };
-                if let Err(error) = orchestrator.renew_lease(admission).await
-                    && error.is_fatal_submission_failure()
-                {
                     state.set_journal_healthy(false);
                     return Err(error.into());
                 }
@@ -185,22 +174,13 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     drop(command_senders);
     let drain = async {
         let mut submissions_closed = false;
-        let mut renewals_closed = false;
         loop {
             let handlers_done = state.active_connections() == 0 && connections.is_empty();
-            if handlers_done && submissions_closed && renewals_closed {
+            if handlers_done && submissions_closed {
                 break;
             }
             tokio::select! {
                 biased;
-                renewal = renewal_rx.recv(), if !renewals_closed => {
-                    match renewal {
-                        Some(admission) => {
-                            let _ = orchestrator.renew_lease(admission).await;
-                        }
-                        None => renewals_closed = true,
-                    }
-                }
                 submission = submission_rx.recv(), if !submissions_closed => {
                     match submission {
                         Some(admission) => {

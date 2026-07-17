@@ -1126,9 +1126,9 @@ fn execute_journal_request(
         ControlRequest::OperationStatus(operation) => journal
             .status(operation)
             .map(ControlResponse::OperationStatus),
-        ControlRequest::OperationLeaseRenew { .. } => Ok(ControlResponse::Error(invalid_argument(
-            "operation lease renewal requires asynchronous orchestration",
-        ))),
+        ControlRequest::OperationLeaseRenew { operation, .. } => {
+            Ok(ControlResponse::Error(lease_renewal_unsupported(operation)))
+        }
         ControlRequest::OperationCancel(operation) => {
             journal.cancel(operation).map(|(accepted, operation)| {
                 ControlResponse::OperationCancel {
@@ -1532,20 +1532,13 @@ pub enum OperationPreparationError {
 #[derive(Debug, Clone)]
 pub struct OrchestratorSenders {
     submissions: tokio::sync::mpsc::Sender<OperationAdmission>,
-    renewals: tokio::sync::mpsc::Sender<LeaseRenewalAdmission>,
 }
 
 impl OrchestratorSenders {
-    /// Creates independent bounded submission and lease-renewal lanes.
+    /// Creates the bounded operation-submission lane.
     #[must_use]
-    pub const fn new(
-        submissions: tokio::sync::mpsc::Sender<OperationAdmission>,
-        renewals: tokio::sync::mpsc::Sender<LeaseRenewalAdmission>,
-    ) -> Self {
-        Self {
-            submissions,
-            renewals,
-        }
+    pub const fn new(submissions: tokio::sync::mpsc::Sender<OperationAdmission>) -> Self {
+        Self { submissions }
     }
 }
 
@@ -1831,20 +1824,7 @@ pub struct LeaseRenewalAdmission {
 }
 
 impl LeaseRenewalAdmission {
-    fn prepare(
-        operation: OperationId,
-        owner: ClientInstanceId,
-        expiry_unix_ms: u64,
-    ) -> Result<
-        (
-            Self,
-            tokio::sync::oneshot::Receiver<Result<OperationRecord, PublicError>>,
-        ),
-        OperationPreparationError,
-    > {
-        Self::prepare_at(operation, owner, expiry_unix_ms, capture_admission_clock()?)
-    }
-
+    #[cfg(test)]
     fn prepare_at(
         operation: OperationId,
         owner: ClientInstanceId,
@@ -3274,9 +3254,9 @@ impl ControlService {
                     ControlResponse::Error(operation_error_to_public(&error, Some(operation)))
                 }
             },
-            ControlRequest::OperationLeaseRenew { .. } => ControlResponse::Error(invalid_argument(
-                "operation lease renewal requires asynchronous orchestration",
-            )),
+            ControlRequest::OperationLeaseRenew { operation, .. } => {
+                ControlResponse::Error(lease_renewal_unsupported(operation))
+            }
             ControlRequest::OperationCancel(operation) => match self.journal.cancel(operation) {
                 Ok((accepted, operation)) => ControlResponse::OperationCancel {
                     accepted,
@@ -3317,7 +3297,7 @@ impl ControlService {
                 selected_protocol_minor,
             ) {
                 Ok(DecodedRequest::Control(request)) => response_to_wire(self.execute(request)),
-                Ok(DecodedRequest::Submission(_) | DecodedRequest::LeaseRenewal { .. }) => {
+                Ok(DecodedRequest::Submission(_)) => {
                     daemon::response_envelope::Response::Error(public_error_to_wire(
                         &invalid_argument(
                             "operation lifecycle mutation requires asynchronous orchestration",
@@ -3498,35 +3478,6 @@ async fn dispatch_async(
                     Ok(ControlResponse::OperationSubmit(operation))
                 };
                 await_journal_response(service, response, timeout_ms).await
-            }
-            Ok(DecodedRequest::LeaseRenewal {
-                operation,
-                owner,
-                expiry_unix_ms,
-            }) => {
-                let response = async {
-                    let (admission, receiver) =
-                        LeaseRenewalAdmission::prepare(operation, owner, expiry_unix_ms).map_err(
-                            |error| ServiceError::Public(operation_preparation_public(error)),
-                        )?;
-                    commands
-                        .renewals
-                        .try_send(admission)
-                        .map_err(|error| match error {
-                            tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                                ServiceError::QueueFull
-                            }
-                            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                                ServiceError::ChannelClosed
-                            }
-                        })?;
-                    let operation = receiver
-                        .await
-                        .map_err(|_| ServiceError::ChannelClosed)?
-                        .map_err(|error| ServiceError::Public(Box::new(error)))?;
-                    Ok(ControlResponse::OperationLeaseRenew(operation))
-                };
-                await_journal_response(service, response, envelope.timeout_ms).await
             }
             Ok(DecodedRequest::Control(ControlRequest::OperationCancel(operation))) => {
                 let response = async {
@@ -3846,11 +3797,6 @@ fn validate_client_hello(
 enum DecodedRequest {
     Control(ControlRequest),
     Submission(PreparedOperationSubmission),
-    LeaseRenewal {
-        operation: OperationId,
-        owner: ClientInstanceId,
-        expiry_unix_ms: u64,
-    },
 }
 
 fn request_from_wire(
@@ -3903,11 +3849,8 @@ fn request_from_wire(
                     "operation lease expiry is invalid",
                 )));
             }
-            Ok(DecodedRequest::LeaseRenewal {
-                operation: parse_operation(request.operation)?,
-                owner: client_instance_id,
-                expiry_unix_ms: request.lease_expires_unix_ms,
-            })
+            let operation = parse_operation(request.operation)?;
+            Err(Box::new(lease_renewal_unsupported(operation)))
         }
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
     }
@@ -4454,6 +4397,16 @@ fn invalid_argument(message: &'static str) -> PublicError {
     PublicError::builder(ErrorCode::InvalidArgument, message)
         .build()
         .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
+}
+
+fn lease_renewal_unsupported(operation: OperationId) -> PublicError {
+    PublicError::builder(
+        ErrorCode::UnsupportedCapability,
+        "operation lease renewal is unsupported",
+    )
+    .operation(operation)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
 }
 
 fn permission_denied(message: &'static str) -> PublicError {
@@ -5396,8 +5349,7 @@ mod tests {
         ));
         let client_connections = Arc::new(ClientConnectionAdmissions::new(limits));
         let (submissions, _submission_rx) = tokio::sync::mpsc::channel(4);
-        let (renewals, _renewal_rx) = tokio::sync::mpsc::channel(4);
-        let commands = OrchestratorSenders::new(submissions, renewals);
+        let commands = OrchestratorSenders::new(submissions);
 
         let first_handler = spawn_connection_handler(
             Arc::clone(&listener),
@@ -5668,6 +5620,38 @@ mod tests {
     }
 
     #[test]
+    fn lease_renewal_boundaries_are_explicitly_unsupported() {
+        let operation = OperationId::from_bytes([39; 16]);
+        let owner = ClientInstanceId::new([39; 16]).expect("owner is valid");
+        let decoded = request_from_wire(
+            Some(daemon::request_envelope::Request::OperationLeaseRenew(
+                daemon::OperationLeaseRenewRequest {
+                    operation: Some(common::OperationId {
+                        value: operation.as_bytes().to_vec(),
+                    }),
+                    lease_expires_unix_ms: 1,
+                },
+            )),
+            owner,
+            PROTOCOL_MINOR,
+        );
+        let Err(error) = decoded else {
+            panic!("wire renewal must remain unsupported");
+        };
+        assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+
+        let response = service().execute(ControlRequest::OperationLeaseRenew {
+            operation,
+            owner,
+            expiry_unix_ms: 1,
+        });
+        let ControlResponse::Error(error) = response else {
+            panic!("direct renewal must remain unsupported");
+        };
+        assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+    }
+
+    #[test]
     fn pending_admission_generations_cancel_and_cleanup_independently() {
         let service = service();
         let operation = OperationId::from_bytes([16; 16]);
@@ -5715,8 +5699,7 @@ mod tests {
             stopping: Arc::new(AtomicBool::new(false)),
         };
         let (submissions, _submission_rx) = tokio::sync::mpsc::channel(1);
-        let (renewals, _renewal_rx) = tokio::sync::mpsc::channel(1);
-        let commands = OrchestratorSenders::new(submissions, renewals);
+        let commands = OrchestratorSenders::new(submissions);
         let operation = OperationId::from_bytes([38; 16]);
         let envelope = daemon::RequestEnvelope {
             request_id: 1,

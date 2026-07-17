@@ -924,6 +924,9 @@ impl OperationJournal {
         if current.detached || current.owner != owner {
             return Err(OperationError::LeaseOwnerMismatch);
         }
+        if current.cancellation_requested {
+            return Err(OperationError::CancellationWon);
+        }
         if current.lease_expires_unix_ms == Some(expiry_unix_ms) {
             return Ok(current);
         }
@@ -3184,6 +3187,43 @@ mod tests {
             .expect("stale expiry is ignored");
         assert_eq!(observed.state, OperationState::Queued);
         assert_eq!(observed.lease_expires_unix_ms, Some(renewed_expiry));
+    }
+
+    #[test]
+    fn cancellation_winner_rejects_lease_renewal_without_mutation() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let owner = ClientInstanceId::new([9; 16]).expect("owner is valid");
+        let initial_expiry = unix_time_ms()
+            .expect("clock is valid")
+            .checked_add(30_000)
+            .expect("initial expiry fits");
+        journal
+            .submit(attached_submission(
+                operation(35),
+                owner,
+                None,
+                initial_expiry,
+            ))
+            .expect("lease submits");
+        journal
+            .start_execution(operation(35))
+            .expect("operation starts");
+        let cancelling = journal
+            .request_cancellation(operation(35), CancellationReason::ClientRequest)
+            .expect("cancellation wins")
+            .operation;
+        let renewed_expiry = initial_expiry
+            .checked_add(30_000)
+            .expect("renewed expiry fits");
+
+        assert!(matches!(
+            journal.renew_lease(operation(35), owner, renewed_expiry),
+            Err(OperationError::CancellationWon)
+        ));
+        assert_eq!(
+            journal.status(operation(35)).expect("status loads"),
+            cancelling
+        );
     }
 
     #[test]

@@ -148,10 +148,15 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     lease_client
         .operation_submit_attached(lease_operation, None, initial_lease)
         .map_err(LifecycleError::Client)?;
-    let renewed = lease_client
-        .operation_renew_lease(lease_operation, renewed_lease)
-        .map_err(LifecycleError::Client)?;
-    if renewed.lease_expires_unix_ms != Some(renewed_lease) {
+    let renewal = match lease_client.operation_renew_lease(lease_operation, renewed_lease) {
+        Ok(_) => return Err(LifecycleError::UnexpectedEnvelope),
+        Err(error) => error,
+    };
+    if renewal
+        .as_public_error()
+        .map(rootlight_error::PublicError::code)
+        != Some(ErrorCode::UnsupportedCapability)
+    {
         return Err(LifecycleError::UnexpectedEnvelope);
     }
     let lease_operation = lease_operation.to_string();
@@ -225,7 +230,7 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     wait_until_absent(&daemon_paths)?;
 
     println!(
-        "daemon lifecycle check passed: startup, 100 deterministic concurrent clients, per-client operation quota isolation, saturated-worker control responsiveness, health, retry-safe submission, cancellation, stable deadlines, attached lease renewal and expiry, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
+        "daemon lifecycle check passed: startup, 100 deterministic concurrent clients, per-client operation quota isolation, saturated-worker control responsiveness, health, retry-safe submission, cancellation, stable deadlines, explicit lease-renewal rejection and attached lease expiry, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
     );
     control_latency.report();
     Ok(())
