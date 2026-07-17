@@ -33,7 +33,7 @@ use rootlight_operations::{
     OperationStage as JournalStage, OperationState as JournalState, OperationSubmission, PlanHash,
     RecoveryClass as JournalRecoveryClass,
 };
-use rootlight_runtime::RuntimePaths;
+use rootlight_runtime::{PrivateOutputFile, RuntimeError, RuntimePaths};
 use serde::Serialize;
 
 const CLI_CONTRACT_VERSION: &str = "1.0";
@@ -447,35 +447,11 @@ fn write_support_bundle(path: &Path, archive: &[u8]) -> Result<(), CliError> {
     write_support_bundle_with_writer(path, archive, |file, bytes| file.write_all(bytes))
 }
 
-fn create_private_support_file(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-
-        options.mode(0o600);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        use windows::Win32::Storage::FileSystem::{
-            FILE_GENERIC_READ, FILE_GENERIC_WRITE, WRITE_DAC,
-        };
-
-        options
-            .access_mode((FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC).0)
-            .share_mode(0);
-    }
-    options.open(path)
-}
-
 fn write_support_bundle_with_writer(
     path: &Path,
     archive: &[u8],
-    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+    write: impl FnOnce(&mut PrivateOutputFile, &[u8]) -> std::io::Result<()>,
 ) -> Result<(), CliError> {
-    ensure_secure_support_output_available()?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -483,39 +459,19 @@ fn write_support_bundle_with_writer(
     if !parent.is_dir() || path.file_name().is_none() {
         return Err(CliError::InvalidSupportPath);
     }
-    let mut file = create_private_support_file(path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
+    let mut output = PrivateOutputFile::create(path).map_err(map_support_output_error)?;
+    write(&mut output, archive).map_err(CliError::SupportWrite)?;
+    output.commit().map_err(map_support_output_error)
+}
+
+fn map_support_output_error(error: RuntimeError) -> CliError {
+    match error {
+        RuntimeError::Io(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
             CliError::SupportOutputExists
-        } else {
-            CliError::SupportWrite(error)
         }
-    })?;
-    rootlight_runtime::RuntimePaths::secure_private_output_file(&mut file)?;
-    write(&mut file, archive).map_err(CliError::SupportWrite)?;
-    file.sync_all().map_err(CliError::SupportWrite)?;
-    sync_support_parent(parent)
-}
-
-#[cfg(target_os = "macos")]
-fn ensure_secure_support_output_available() -> Result<(), CliError> {
-    Err(CliError::MacOsSupportOutputUnsupported)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn ensure_secure_support_output_available() -> Result<(), CliError> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_support_parent(parent: &Path) -> Result<(), CliError> {
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(CliError::SupportWrite)
-}
-
-#[cfg(windows)]
-fn sync_support_parent(_parent: &Path) -> Result<(), CliError> {
-    Ok(())
+        RuntimeError::Io(source) => CliError::SupportWrite(source),
+        error => CliError::Runtime(error),
+    }
 }
 
 fn operation_from_domain(operation: OperationRecord) -> OperationStatus {
@@ -702,9 +658,6 @@ enum CliError {
     IncompletePathOverride,
     #[error("support bundle output path is invalid")]
     InvalidSupportPath,
-    #[cfg(target_os = "macos")]
-    #[error("support bundle file output is unavailable on macOS")]
-    MacOsSupportOutputUnsupported,
     #[error("support bundle output already exists")]
     SupportOutputExists,
     #[error("support bundle output failed")]
@@ -749,13 +702,12 @@ impl CliError {
             | Self::SupportOutputExists
             | Self::InvalidOperation
             | Self::InvalidTimeout => ExitFamily::Usage,
-            #[cfg(target_os = "macos")]
-            Self::MacOsSupportOutputUnsupported => ExitFamily::SecurityPolicy,
             Self::Runtime(rootlight_runtime::RuntimeError::InsecureDirectory)
             | Self::Runtime(rootlight_runtime::RuntimeError::InvalidDiscovery)
             | Self::Runtime(rootlight_runtime::RuntimeError::InsecureEndpointArtifact)
             | Self::Runtime(rootlight_runtime::RuntimeError::InsecureLockFile)
             | Self::Runtime(rootlight_runtime::RuntimeError::InsecureOutputFile)
+            | Self::Runtime(rootlight_runtime::RuntimeError::PrivateOutputSecurityPolicy)
             | Self::Runtime(rootlight_runtime::RuntimeError::WindowsSecurityPolicy)
             | Self::Runtime(rootlight_runtime::RuntimeError::InvalidEndpoint(_))
             | Self::Operations(rootlight_operations::OperationError::InsecureLockFile)
@@ -934,6 +886,8 @@ mod tests {
                 .count(),
             1
         );
+        #[cfg(target_os = "macos")]
+        assert_no_support_staging_entries(temporary.path());
         let raced_contents = std::fs::read(&raced).expect("winning bundle reads");
         assert!(matches!(raced_contents.as_slice(), b"first" | b"second"));
 
@@ -971,17 +925,106 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn support_bundle_output_fails_closed_before_creation_on_macos() {
-        let temporary = tempfile::tempdir().expect("temporary directory is available");
-        let output = temporary.path().join("support.zip");
+    fn support_bundle_write_failure_does_not_publish_partial_output() {
+        let temporary = private_support_tempdir();
+        let output = temporary.path().join("partial.zip");
+        let error = write_support_bundle_with_writer(&output, b"complete", |file, _| {
+            file.write_all(b"partial")?;
+            Err(std::io::Error::other("injected support write failure"))
+        })
+        .expect_err("injected write fails");
 
-        let error =
-            write_support_bundle(&output, b"bundle").expect_err("macOS support output is rejected");
-
-        assert!(matches!(error, CliError::MacOsSupportOutputUnsupported));
+        assert!(matches!(error, CliError::SupportWrite(_)));
         assert!(!output.exists());
-        assert_eq!(error.exit_family(), ExitFamily::SecurityPolicy);
-        assert_eq!(error.public_error().code(), ErrorCode::PermissionDenied);
+        assert_no_support_staging_entries(temporary.path());
+        write_support_bundle(&output, b"replacement").expect("retry publishes");
+        assert_eq!(
+            std::fs::read(&output).expect("replacement reads"),
+            b"replacement"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn support_bundle_removes_inherited_macos_acl_before_publication() {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        use std::process::Command;
+
+        let temporary = private_support_tempdir();
+        let acl = "others allow read,file_inherit,directory_inherit";
+        let status = Command::new("/bin/chmod")
+            .args(["+a", &acl])
+            .arg(temporary.path())
+            .env_clear()
+            .env("LC_ALL", "C")
+            .status()
+            .expect("inheritable ACL applies");
+        assert!(status.success());
+
+        let control = temporary.path().join("control.zip");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        options.open(&control).expect("control file creates");
+        let inherited = macos_acl_listing(&control);
+        assert!(
+            inherited.contains("inherited"),
+            "control file did not inherit the test ACL: {inherited}"
+        );
+
+        let output = temporary.path().join("support.zip");
+        write_support_bundle(&output, b"bundle").expect("bundle publishes privately");
+
+        let listing = macos_acl_listing(&output);
+        assert!(
+            !listing.contains("inherited")
+                && !listing.lines().skip(1).any(|line| line.contains(':')),
+            "published archive retained an ACL: {listing}"
+        );
+        assert_eq!(std::fs::read(&output).expect("bundle reads"), b"bundle");
+        let metadata = std::fs::metadata(&output).expect("bundle metadata reads");
+        assert_eq!(
+            metadata.uid(),
+            std::fs::metadata(temporary.path())
+                .expect("parent metadata reads")
+                .uid()
+        );
+        assert_eq!(metadata.nlink(), 1);
+        assert_eq!(metadata.mode() & 0o077, 0);
+        assert_no_support_staging_entries(temporary.path());
+    }
+
+    #[cfg(target_os = "macos")]
+    fn private_support_tempdir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("temporary directory becomes private");
+        temporary
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_acl_listing(path: &Path) -> String {
+        let output = std::process::Command::new("/bin/ls")
+            .args(["-led"])
+            .arg(path)
+            .env_clear()
+            .env("LC_ALL", "C")
+            .output()
+            .expect("ACL listing runs");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).expect("ACL listing is utf-8")
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_no_support_staging_entries(parent: &Path) {
+        let staging = std::fs::read_dir(parent)
+            .expect("support parent reads")
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with(".rootlight-support-"))
+            .collect::<Vec<_>>();
+        assert!(staging.is_empty(), "staging entries remain: {staging:?}");
     }
 
     #[test]
