@@ -467,20 +467,22 @@ pub fn verify_bundle_with_limits(
     destination: &Path,
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
-    verify_bundle_with_control(destination, limits, || {}, |_| {}, || {})
+    verify_bundle_with_control(destination, limits, || {}, |_| {}, || {}, |_| {})
 }
 
-fn verify_bundle_with_control<R, F, C>(
+fn verify_bundle_with_control<R, F, C, A>(
     destination: &Path,
     limits: BundleLimits,
     after_root_open: R,
     before_file_open: F,
     after_collection: C,
+    before_artifact_retention: A,
 ) -> Result<(), BundleError>
 where
     R: FnOnce(),
     F: FnMut(&str),
     C: FnOnce(),
+    A: FnMut(&str),
 {
     let limits = limits.validate()?;
     let parent_path = destination_parent(destination)?;
@@ -508,6 +510,7 @@ where
     after_root_open();
     let mut observed = collect_files(root, limits, before_file_open)?;
     after_collection();
+    let mut budget = VerificationBudget::default();
     let checksum_size = observed
         .size(CHECKSUMS_FILE)
         .ok_or(BundleError::ArtifactSetMismatch)?;
@@ -516,12 +519,12 @@ where
             resource: "checksum_bytes",
         });
     }
-    let checksum_bytes = read_bounded(
-        observed
-            .file_mut(CHECKSUMS_FILE)
-            .ok_or(BundleError::ArtifactSetMismatch)?,
+    let checksum_bytes = observed.read_bounded(
+        CHECKSUMS_FILE,
         limits.max_checksum_bytes,
         "read checksum manifest",
+        &mut budget,
+        limits,
     )?;
     let checksum_text =
         std::str::from_utf8(&checksum_bytes).map_err(|_| BundleError::InvalidChecksumManifest)?;
@@ -529,134 +532,58 @@ where
     if !observed.matches_expected_paths(&expected) {
         return Err(BundleError::ArtifactSetMismatch);
     }
-    let class_counts = preflight_artifact_classes(&expected, &observed, limits)?;
+    preflight_artifact_classes(&expected)?;
     let mut fixed_artifacts = FixedArtifactBytes::new();
-    let mut profiles = Vec::new();
-    profiles
-        .try_reserve_exact(class_counts.profiles)
-        .map_err(|_| BundleError::AllocationFailed)?;
-    let mut logs = Vec::new();
-    logs.try_reserve_exact(class_counts.logs)
-        .map_err(|_| BundleError::AllocationFailed)?;
+    let mut before_artifact_retention = before_artifact_retention;
     for entry in &expected.entries {
-        let bytes = read_bounded(
-            observed
-                .file_mut(entry.relative)
-                .ok_or(BundleError::ArtifactSetMismatch)?,
+        let bytes = observed.read_bounded(
+            entry.relative,
             limits.max_artifact_bytes,
             "read result artifact",
+            &mut budget,
+            limits,
         )?;
         if !checksum_matches(&bytes, entry.checksum) {
             return Err(BundleError::ChecksumMismatch);
         }
+        before_artifact_retention(entry.relative);
         if is_fixed_artifact(entry.relative) {
             fixed_artifacts.insert(entry.relative, bytes)?;
-        } else if entry.relative.strip_prefix("profiles/").is_some() {
-            profiles.push(bytes);
-        } else if entry.relative.strip_prefix("logs/").is_some() {
-            let log = decode_operational_log(&bytes, limits)?;
-            logs.push(log);
         } else {
             return Err(BundleError::ArtifactSetMismatch);
         }
     }
     validate_fixed_artifacts(&fixed_artifacts, limits)?;
-    // Keep non-fixed artifacts alive through all semantic verification so
-    // class-level validation cannot accidentally regress to checksum-only.
-    drop((profiles, logs));
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ArtifactClassCounts {
-    profiles: usize,
-    logs: usize,
+#[derive(Debug, Default)]
+struct VerificationBudget {
+    total_bytes: u64,
 }
 
-fn preflight_artifact_classes(
-    expected: &ParsedChecksums<'_>,
-    observed: &OpenedArtifacts,
-    limits: BundleLimits,
-) -> Result<ArtifactClassCounts, BundleError> {
-    let mut profile_count = 0_usize;
-    let mut log_count = 0_usize;
-    let mut profile_bytes = 0_u64;
-    let mut log_bytes = 0_u64;
+impl VerificationBudget {
+    fn charge(&mut self, size: u64, limits: BundleLimits) -> Result<(), BundleError> {
+        add_u64_bytes(
+            &mut self.total_bytes,
+            size,
+            limits.max_total_bytes,
+            "total_bytes",
+        )?;
+        Ok(())
+    }
+}
+
+fn preflight_artifact_classes(expected: &ParsedChecksums<'_>) -> Result<(), BundleError> {
     for entry in &expected.entries {
         let relative = entry.relative;
-        let size = observed
-            .size(relative)
-            .ok_or(BundleError::ArtifactSetMismatch)?;
         if relative.starts_with("profiles/") {
-            profile_count = profile_count
-                .checked_add(1)
-                .ok_or(BundleError::LimitExceeded {
-                    resource: "artifact_count",
-                })?;
-            profile_bytes = profile_bytes
-                .checked_add(size)
-                .ok_or(BundleError::LimitExceeded {
-                    resource: "profile_bytes",
-                })?;
+            return Err(BundleError::UnsupportedProfileSchema);
         } else if relative.starts_with("logs/") {
-            log_count = log_count.checked_add(1).ok_or(BundleError::LimitExceeded {
-                resource: "artifact_count",
-            })?;
-            log_bytes = log_bytes
-                .checked_add(size)
-                .ok_or(BundleError::LimitExceeded {
-                    resource: "log_bytes",
-                })?;
+            return Err(BundleError::UnsupportedLogSchema);
         }
     }
-    check_count(
-        profile_count,
-        limits.max_artifacts_per_class,
-        "artifact_count",
-    )?;
-    check_count(log_count, limits.max_artifacts_per_class, "artifact_count")?;
-    if profile_bytes > limits.max_profile_bytes {
-        return Err(BundleError::LimitExceeded {
-            resource: "profile_bytes",
-        });
-    }
-    if log_bytes > limits.max_log_bytes {
-        return Err(BundleError::LimitExceeded {
-            resource: "log_bytes",
-        });
-    }
-    Ok(ArtifactClassCounts {
-        profiles: profile_count,
-        logs: log_count,
-    })
-}
-
-fn decode_operational_log(
-    bytes: &[u8],
-    limits: BundleLimits,
-) -> Result<OperationalLog, BundleError> {
-    let length = u64::try_from(bytes.len()).map_err(|_| BundleError::LimitExceeded {
-        resource: "log_bytes",
-    })?;
-    if length > limits.max_artifact_bytes
-        || bytes.len() <= 1
-        || !bytes.ends_with(b"\n")
-        || bytes[..bytes.len() - 1]
-            .iter()
-            .any(|byte| matches!(byte, b'\n' | b'\r'))
-    {
-        return Err(BundleError::InvalidLog);
-    }
-    let log = serde_json::from_slice::<OperationalLog>(&bytes[..bytes.len() - 1])
-        .map_err(|_| BundleError::InvalidLog)?;
-    let limit =
-        usize::try_from(limits.max_artifact_bytes).map_err(|_| BundleError::LimitExceeded {
-            resource: "artifact_bytes",
-        })?;
-    if json_bytes(&log, limit)? != bytes {
-        return Err(BundleError::InvalidLog);
-    }
-    Ok(log)
+    Ok(())
 }
 
 fn publish_bundle_with_fault(
@@ -1325,14 +1252,23 @@ fn build_artifacts<'a>(
     if !bundle.agent_trajectories.is_empty() {
         return Err(BundleError::UnsupportedTrajectorySchema);
     }
-    validate_artifact_map(&bundle.profiles, limits.max_artifacts_per_class)?;
-    validate_log_map(&bundle.logs, limits.max_artifacts_per_class)?;
-    let artifact_count = FIXED_ARTIFACT_COUNT
-        .checked_add(bundle.profiles.len())
-        .and_then(|count| count.checked_add(bundle.logs.len()))
-        .ok_or(BundleError::LimitExceeded {
-            resource: "file_count",
-        })?;
+    check_count(
+        bundle.profiles.len(),
+        limits.max_artifacts_per_class,
+        "artifact_count",
+    )?;
+    if !bundle.profiles.is_empty() {
+        return Err(BundleError::UnsupportedProfileSchema);
+    }
+    check_count(
+        bundle.logs.len(),
+        limits.max_artifacts_per_class,
+        "artifact_count",
+    )?;
+    if !bundle.logs.is_empty() {
+        return Err(BundleError::UnsupportedLogSchema);
+    }
+    let artifact_count = FIXED_ARTIFACT_COUNT;
     check_count(
         artifact_count
             .checked_add(1)
@@ -1357,10 +1293,15 @@ fn build_artifacts<'a>(
         limits.max_directory_entries,
         "directory_entry_count",
     )?;
-    let checksum_bytes = checksum_manifest_size(bundle)?;
+    let checksum_bytes = checksum_manifest_size()?;
     if checksum_bytes > limits.max_checksum_bytes {
         return Err(BundleError::LimitExceeded {
             resource: "checksum_bytes",
+        });
+    }
+    if checksum_bytes > limits.max_artifact_bytes {
+        return Err(BundleError::LimitExceeded {
+            resource: "artifact_bytes",
         });
     }
     let mut retained_bytes = checksum_bytes;
@@ -1369,17 +1310,6 @@ fn build_artifacts<'a>(
             resource: "total_bytes",
         });
     }
-    let mut profile_bytes = 0_u64;
-    for bytes in bundle.profiles.values() {
-        check_bytes(bytes.len(), limits.max_artifact_bytes, "artifact_bytes")?;
-        add_bytes(
-            &mut profile_bytes,
-            bytes.len(),
-            limits.max_profile_bytes,
-            "profile_bytes",
-        )?;
-    }
-
     let mut artifacts = ArtifactSet::with_capacity(artifact_count.checked_add(1).ok_or(
         BundleError::LimitExceeded {
             resource: "file_count",
@@ -1413,44 +1343,6 @@ fn build_artifacts<'a>(
         json_lines,
         &bundle.agent_trajectories
     );
-
-    for (name, bytes) in &bundle.profiles {
-        artifacts.push(
-            class_artifact_path("profiles/", name)?,
-            Cow::Borrowed(bytes),
-            &mut retained_bytes,
-            limits,
-        )?;
-    }
-    let mut log_bytes = 0_u64;
-    for (name, log) in &bundle.logs {
-        let remaining_log =
-            limits
-                .max_log_bytes
-                .checked_sub(log_bytes)
-                .ok_or(BundleError::LimitExceeded {
-                    resource: "log_bytes",
-                })?;
-        let bytes = serialize_with_budget(
-            retained_bytes,
-            limits,
-            Some((remaining_log, "log_bytes")),
-            |limit| json_bytes(log, limit),
-        )?;
-        decode_operational_log(&bytes, limits)?;
-        add_bytes(
-            &mut log_bytes,
-            bytes.len(),
-            limits.max_log_bytes,
-            "log_bytes",
-        )?;
-        artifacts.push(
-            class_artifact_path("logs/", name)?,
-            Cow::Owned(bytes),
-            &mut retained_bytes,
-            limits,
-        )?;
-    }
 
     artifacts.sort()?;
     validate_fixed_artifacts(&artifacts, limits)?;
@@ -1554,7 +1446,7 @@ fn checksum_buffer_error(checksums: &BoundedBuffer) -> BundleError {
     }
 }
 
-fn checksum_manifest_size(bundle: &ResultBundle) -> Result<u64, BundleError> {
+fn checksum_manifest_size() -> Result<u64, BundleError> {
     let mut size = 0_u64;
     for relative in [
         ENVIRONMENT_FILE,
@@ -1568,25 +1460,6 @@ fn checksum_manifest_size(bundle: &ResultBundle) -> Result<u64, BundleError> {
         AGENT_TRAJECTORIES_FILE,
     ] {
         add_checksum_line_size(&mut size, relative.len())?;
-    }
-    for name in bundle.profiles.keys() {
-        let length =
-            "profiles/"
-                .len()
-                .checked_add(name.len())
-                .ok_or(BundleError::LimitExceeded {
-                    resource: "checksum_bytes",
-                })?;
-        add_checksum_line_size(&mut size, length)?;
-    }
-    for name in bundle.logs.keys() {
-        let length = "logs/"
-            .len()
-            .checked_add(name.len())
-            .ok_or(BundleError::LimitExceeded {
-                resource: "checksum_bytes",
-            })?;
-        add_checksum_line_size(&mut size, length)?;
     }
     Ok(size)
 }
@@ -1614,20 +1487,6 @@ fn fallible_string(value: &str) -> Result<String, BundleError> {
         .map_err(|_| BundleError::AllocationFailed)?;
     owned.push_str(value);
     Ok(owned)
-}
-
-fn class_artifact_path(prefix: &str, name: &str) -> Result<String, BundleError> {
-    let length = prefix
-        .len()
-        .checked_add(name.len())
-        .ok_or(BundleError::InvalidArtifactName)?;
-    let mut relative = String::new();
-    relative
-        .try_reserve_exact(length)
-        .map_err(|_| BundleError::AllocationFailed)?;
-    relative.push_str(prefix);
-    relative.push_str(name);
-    Ok(relative)
 }
 
 fn write_bundle(
@@ -1833,28 +1692,6 @@ fn verify_and_restrict_artifact_file(_file: &cap_std::fs::File) -> Result<(), Bu
     Err(BundleError::ResultSecurityPolicy)
 }
 
-fn validate_artifact_map(
-    artifacts: &BTreeMap<String, Vec<u8>>,
-    max_count: usize,
-) -> Result<(), BundleError> {
-    check_count(artifacts.len(), max_count, "artifact_count")?;
-    for name in artifacts.keys() {
-        validate_artifact_name(name)?;
-    }
-    Ok(())
-}
-
-fn validate_log_map(
-    artifacts: &BTreeMap<String, OperationalLog>,
-    max_count: usize,
-) -> Result<(), BundleError> {
-    check_count(artifacts.len(), max_count, "artifact_count")?;
-    for name in artifacts.keys() {
-        validate_artifact_name(name)?;
-    }
-    Ok(())
-}
-
 fn validate_artifact_name(name: &str) -> Result<(), BundleError> {
     let normalized_stem = name
         .split_once('.')
@@ -1968,12 +1805,27 @@ impl OpenedArtifacts {
             .map(|index| self.entries[index].size)
     }
 
-    fn file_mut(&mut self, relative: &str) -> Option<&mut cap_std::fs::File> {
+    fn read_bounded(
+        &mut self,
+        relative: &str,
+        limit: u64,
+        operation: &'static str,
+        budget: &mut VerificationBudget,
+        limits: BundleLimits,
+    ) -> Result<Vec<u8>, BundleError> {
         let index = self
             .entries
             .binary_search_by_key(&relative, |entry| entry.relative.as_str())
-            .ok()?;
-        Some(&mut self.entries[index].file)
+            .map_err(|_| BundleError::ArtifactSetMismatch)?;
+        let entry = &mut self.entries[index];
+        read_bounded(
+            &mut entry.file,
+            entry.size,
+            limit,
+            operation,
+            budget,
+            limits,
+        )
     }
 
     fn matches_expected_paths(&self, expected: &ParsedChecksums<'_>) -> bool {
@@ -2149,6 +2001,7 @@ where
                 if !metadata.is_file() || metadata.file_type().is_symlink() {
                     return Err(BundleError::UnsupportedArtifactType);
                 }
+                verify_single_link(&file, &metadata)?;
                 check_artifact_size(metadata.len(), limits.max_artifact_bytes)?;
                 visited_files = visited_files
                     .checked_add(1)
@@ -2221,8 +2074,11 @@ fn check_artifact_size(size: u64, limit: u64) -> Result<(), BundleError> {
 
 fn read_bounded(
     file: &mut cap_std::fs::File,
+    expected_size: u64,
     limit: u64,
     operation: &'static str,
+    budget: &mut VerificationBudget,
+    limits: BundleLimits,
 ) -> Result<Vec<u8>, BundleError> {
     let metadata = file
         .metadata()
@@ -2230,41 +2086,93 @@ fn read_bounded(
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(BundleError::UnsupportedArtifactType);
     }
+    verify_single_link(file, &metadata)?;
+    if metadata.len() != expected_size {
+        return Err(BundleError::ArtifactSizeChanged);
+    }
     check_artifact_size(metadata.len(), limit)?;
+    budget.charge(metadata.len(), limits)?;
     let capacity = usize::try_from(metadata.len()).map_err(|_| BundleError::LimitExceeded {
-        resource: "artifact_bytes",
-    })?;
-    let read_limit = limit.checked_add(1).ok_or(BundleError::LimitExceeded {
         resource: "artifact_bytes",
     })?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(capacity)
         .map_err(|_| BundleError::AllocationFailed)?;
-    file.take(read_limit)
-        .read_to_end(&mut bytes)
+    bytes.resize(capacity, 0);
+    if let Err(source) = file.read_exact(&mut bytes) {
+        if source.kind() == io::ErrorKind::UnexpectedEof {
+            return Err(BundleError::ArtifactSizeChanged);
+        }
+        return Err(BundleError::Io { operation, source });
+    }
+    let mut trailing = [0_u8; 1];
+    if file
+        .read(&mut trailing)
+        .map_err(|source| BundleError::Io { operation, source })?
+        != 0
+    {
+        return Err(BundleError::ArtifactSizeChanged);
+    }
+    let final_metadata = file
+        .metadata()
         .map_err(|source| BundleError::Io { operation, source })?;
-    if u64::try_from(bytes.len()).map_or(true, |length| length > limit) {
-        return Err(BundleError::LimitExceeded {
-            resource: "artifact_bytes",
-        });
+    if !final_metadata.is_file()
+        || final_metadata.file_type().is_symlink()
+        || final_metadata.len() != expected_size
+    {
+        return Err(BundleError::ArtifactSizeChanged);
     }
-    if u64::try_from(bytes.len()).ok() != Some(metadata.len()) {
-        return Err(BundleError::ChecksumMismatch);
-    }
+    verify_single_link(file, &final_metadata)?;
     Ok(bytes)
 }
 
-fn check_count(count: usize, limit: usize, resource: &'static str) -> Result<(), BundleError> {
-    if count > limit {
-        return Err(BundleError::LimitExceeded { resource });
+#[cfg(unix)]
+fn verify_single_link(
+    _file: &cap_std::fs::File,
+    metadata: &cap_std::fs::Metadata,
+) -> Result<(), BundleError> {
+    use cap_std::fs::MetadataExt as _;
+
+    if metadata.nlink() != 1 {
+        return Err(BundleError::UnsupportedArtifactLinkCount);
     }
     Ok(())
 }
 
-fn check_bytes(length: usize, limit: u64, resource: &'static str) -> Result<(), BundleError> {
-    let length = u64::try_from(length).map_err(|_| BundleError::LimitExceeded { resource })?;
-    if length > limit {
+#[cfg(windows)]
+fn verify_single_link(
+    file: &cap_std::fs::File,
+    _metadata: &cap_std::fs::Metadata,
+) -> Result<(), BundleError> {
+    let handle = file
+        .try_clone()
+        .map_err(|source| BundleError::Io {
+            operation: "clone result artifact handle",
+            source,
+        })?
+        .into_std();
+    let information =
+        winapi_util::file::information(&handle).map_err(|source| BundleError::Io {
+            operation: "inspect result artifact link count",
+            source,
+        })?;
+    if information.number_of_links() != 1 {
+        return Err(BundleError::UnsupportedArtifactLinkCount);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn verify_single_link(
+    _file: &cap_std::fs::File,
+    _metadata: &cap_std::fs::Metadata,
+) -> Result<(), BundleError> {
+    Err(BundleError::UnsupportedArtifactType)
+}
+
+fn check_count(count: usize, limit: usize, resource: &'static str) -> Result<(), BundleError> {
+    if count > limit {
         return Err(BundleError::LimitExceeded { resource });
     }
     Ok(())
@@ -2277,6 +2185,21 @@ fn add_bytes(
     resource: &'static str,
 ) -> Result<(), BundleError> {
     let length = u64::try_from(length).map_err(|_| BundleError::LimitExceeded { resource })?;
+    *total = total
+        .checked_add(length)
+        .ok_or(BundleError::LimitExceeded { resource })?;
+    if *total > limit {
+        return Err(BundleError::LimitExceeded { resource });
+    }
+    Ok(())
+}
+
+fn add_u64_bytes(
+    total: &mut u64,
+    length: u64,
+    limit: u64,
+    resource: &'static str,
+) -> Result<(), BundleError> {
     *total = total
         .checked_add(length)
         .ok_or(BundleError::LimitExceeded { resource })?;
@@ -2401,6 +2324,9 @@ pub enum BundleError {
     /// One artifact failed checksum verification.
     #[error("result artifact checksum mismatch")]
     ChecksumMismatch,
+    /// An opened artifact changed size after the verifier pinned its identity.
+    #[error("result artifact size changed during verification")]
+    ArtifactSizeChanged,
     /// A fixed artifact is not strict canonical JSON for its schema.
     #[error("result artifact encoding is invalid")]
     InvalidArtifactEncoding,
@@ -2413,12 +2339,21 @@ pub enum BundleError {
     /// Agent trajectories are reserved for a later closed, source-free schema.
     #[error("result bundle agent trajectory schema is unsupported")]
     UnsupportedTrajectorySchema,
+    /// Profiles are reserved for a later closed, source-free schema.
+    #[error("result bundle profile schema is unsupported")]
+    UnsupportedProfileSchema,
+    /// Operational logs are reserved for a later closed, source-free schema.
+    #[error("result bundle operational log schema is unsupported")]
+    UnsupportedLogSchema,
     /// Fixed artifacts contradict one another or their recorded run policy.
     #[error("result artifact invariants are invalid")]
     ArtifactInvariantViolation,
     /// The verifier encountered a link or special file.
     #[error("result bundle contains an unsupported artifact type")]
     UnsupportedArtifactType,
+    /// A regular artifact has more than one filesystem name.
+    #[error("result bundle contains a multiply linked artifact")]
+    UnsupportedArtifactLinkCount,
     /// Test-only failure after a bounded number of writes.
     #[error("injected result write failure")]
     InjectedWriteFailure,
@@ -2445,13 +2380,13 @@ mod tests {
                 cpu_model: EvidenceValue::unavailable("not_sampled"),
                 cpu_topology: EvidenceValue::unavailable("not_sampled"),
                 ram_bytes: EvidenceValue::unavailable("not_sampled"),
-                operating_system: EvidenceValue::observed("test".to_owned()),
+                operating_system: EvidenceValue::observed("linux".to_owned()),
                 kernel: EvidenceValue::unavailable("not_sampled"),
                 filesystem: EvidenceValue::unavailable("not_sampled"),
                 storage_device: EvidenceValue::unavailable("not_sampled"),
                 power_mode: EvidenceValue::unavailable("not_sampled"),
                 container_limits: EvidenceValue::unavailable("not_sampled"),
-                compiler: EvidenceValue::observed("rustc-test".to_owned()),
+                compiler: EvidenceValue::observed("rustc-1.90.0".to_owned()),
                 binary_sha256: EvidenceValue::observed("00".repeat(32)),
                 feature_profile: "test".to_owned(),
                 sqlite: EvidenceValue::unavailable("not_in_scope"),
@@ -2461,9 +2396,9 @@ mod tests {
                 grammar_hashes: EvidenceValue::unavailable("not_sampled"),
                 locale: EvidenceValue::unavailable("not_sampled"),
                 background_process_policy: EvidenceValue::unavailable("not_sampled"),
-                clock_source: EvidenceValue::observed("std_instant".to_owned()),
+                clock_source: EvidenceValue::observed("std_instant_monotonic".to_owned()),
                 process_tree_accounting: Availability::Unavailable {
-                    reason_code: "no_platform_sampler".to_owned(),
+                    reason_code: "platform_process_tree_sampler_not_integrated".to_owned(),
                 },
             },
             dataset_manifest: DatasetManifest {
@@ -2484,7 +2419,7 @@ mod tests {
             },
             command: BenchmarkCommand {
                 schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
-                subcommand: "m05-parser".to_owned(),
+                subcommand: "m05-parser-evidence".to_owned(),
                 arguments: Vec::new(),
                 seed: 7,
                 warmup_rounds: 1,
@@ -2677,6 +2612,30 @@ mod tests {
             .expect("updated checksum manifest is written");
     }
 
+    fn add_artifact_and_checksum(destination: &Path, artifact: &str, bytes: &[u8]) {
+        let path = destination.join(artifact);
+        fs::create_dir_all(path.parent().expect("artifact has a parent"))
+            .expect("artifact parent is created");
+        fs::write(path, bytes).expect("additional artifact is written");
+        let checksums = fs::read_to_string(destination.join(CHECKSUMS_FILE))
+            .expect("checksum manifest is readable");
+        let mut lines = checksums.lines().map(str::to_owned).collect::<Vec<_>>();
+        lines.push(format!("{}  {artifact}", sha256_hex(bytes)));
+        lines.sort_unstable_by(|left, right| {
+            let (_, left) = left
+                .split_once("  ")
+                .expect("fixture checksum line is canonical");
+            let (_, right) = right
+                .split_once("  ")
+                .expect("fixture checksum line is canonical");
+            left.cmp(right)
+        });
+        let mut updated = lines.join("\n");
+        updated.push('\n');
+        fs::write(destination.join(CHECKSUMS_FILE), updated)
+            .expect("extended checksum manifest is written");
+    }
+
     fn only_staging_path(parent: &Path) -> std::path::PathBuf {
         let mut staging = fs::read_dir(parent)
             .expect("publication parent is readable")
@@ -2708,6 +2667,74 @@ mod tests {
         assert_eq!(first_checksums, second_checksums);
         verify_bundle(&first_result).expect("first bundle verifies");
         verify_bundle(&second_result).expect("second bundle verifies");
+    }
+
+    #[test]
+    fn schema_two_compatibility_fixture_matches_canonical_publication() {
+        let frozen_artifacts: [(&str, &[u8]); 10] = [
+            (
+                AGENT_TRAJECTORIES_FILE,
+                include_bytes!(
+                    "../../../tests/fixtures/compatibility/benchmark/2.0/agent-trajectories.jsonl"
+                ),
+            ),
+            (
+                BUILD_PROVENANCE_FILE,
+                include_bytes!(
+                    "../../../tests/fixtures/compatibility/benchmark/2.0/build-provenance.json"
+                ),
+            ),
+            (
+                COMMAND_FILE,
+                include_bytes!("../../../tests/fixtures/compatibility/benchmark/2.0/command.json"),
+            ),
+            (
+                COVERAGE_FILE,
+                include_bytes!("../../../tests/fixtures/compatibility/benchmark/2.0/coverage.json"),
+            ),
+            (
+                DATASET_MANIFEST_FILE,
+                include_bytes!(
+                    "../../../tests/fixtures/compatibility/benchmark/2.0/dataset-manifest.json"
+                ),
+            ),
+            (
+                ENVIRONMENT_FILE,
+                include_bytes!(
+                    "../../../tests/fixtures/compatibility/benchmark/2.0/environment.json"
+                ),
+            ),
+            (
+                QUALITY_FILE,
+                include_bytes!("../../../tests/fixtures/compatibility/benchmark/2.0/quality.json"),
+            ),
+            (
+                RAW_SAMPLES_FILE,
+                include_bytes!(
+                    "../../../tests/fixtures/compatibility/benchmark/2.0/raw-samples.jsonl"
+                ),
+            ),
+            (
+                SUMMARY_FILE,
+                include_bytes!("../../../tests/fixtures/compatibility/benchmark/2.0/summary.json"),
+            ),
+            (
+                CHECKSUMS_FILE,
+                include_bytes!("../../../tests/fixtures/compatibility/benchmark/2.0/checksums.txt"),
+            ),
+        ];
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        publish_bundle(&fixture(), &destination).expect("compatibility bundle publishes");
+        verify_bundle(&destination).expect("compatibility bundle verifies");
+
+        for (artifact, expected) in frozen_artifacts {
+            assert_eq!(
+                fs::read(destination.join(artifact)).expect("published artifact is readable"),
+                expected,
+                "{artifact} changed without a schema-version bump"
+            );
+        }
     }
 
     #[test]
@@ -2745,10 +2772,8 @@ mod tests {
         let destination = temporary.path().join("result");
         let barrier = Arc::new(Barrier::new(PUBLISHER_COUNT));
         let mut publishers = Vec::new();
-        for index in 0..PUBLISHER_COUNT {
-            let mut bundle = fixture();
-            bundle.environment.operating_system =
-                EvidenceValue::observed(format!("publisher-{index}"));
+        for _ in 0..PUBLISHER_COUNT {
+            let bundle = fixture();
             let destination = destination.clone();
             let barrier = Arc::clone(&barrier);
             publishers.push(thread::spawn(move || {
@@ -2986,6 +3011,7 @@ mod tests {
             },
             |_| {},
             || {},
+            |_| {},
         )
         .expect("verification stays bound to the original root handle");
 
@@ -3025,10 +3051,57 @@ mod tests {
                 #[cfg(not(windows))]
                 Err(error) => panic!("opened summary can be renamed: {error}"),
             },
+            |_| {},
         )
         .expect("verification stays bound to opened artifact handles");
 
         assert!(swapped.get() || blocked.get());
+    }
+
+    #[test]
+    fn verifier_rejects_size_changes_before_retaining_artifacts() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        let retained = Cell::new(0_usize);
+
+        let error = verify_bundle_with_control(
+            &destination,
+            BundleLimits::default(),
+            || {},
+            |_| {},
+            || {
+                for artifact in [AGENT_TRAJECTORIES_FILE, COMMAND_FILE] {
+                    let mut file = fs::OpenOptions::new()
+                        .append(true)
+                        .open(destination.join(artifact))
+                        .expect("opened artifact remains writable by the test owner");
+                    file.write_all(b"x")
+                        .expect("opened artifact size is increased");
+                }
+            },
+            |_| retained.set(retained.get() + 1),
+        )
+        .expect_err("a size change after collection is rejected");
+
+        assert!(matches!(error, BundleError::ArtifactSizeChanged));
+        assert_eq!(retained.get(), 0);
+    }
+
+    #[test]
+    fn verifier_rejects_multiply_linked_artifacts() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        fs::hard_link(
+            destination.join(SUMMARY_FILE),
+            temporary.path().join("summary-alias"),
+        )
+        .expect("hard-link fixture is created");
+
+        let error = verify_bundle(&destination).expect_err("hard-linked artifact is rejected");
+
+        assert!(matches!(error, BundleError::UnsupportedArtifactLinkCount));
     }
 
     #[cfg(unix)]
@@ -3057,6 +3130,7 @@ mod tests {
                 }
             },
             || {},
+            |_| {},
         )
         .expect_err("a swapped symlink is rejected");
 
@@ -3111,75 +3185,67 @@ mod tests {
     }
 
     #[test]
-    fn verifier_preflights_profile_and_log_class_limits() {
+    fn schema_two_requires_empty_profile_and_log_directories() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
-        let destination = temporary.path().join("result");
-        let mut bundle = fixture();
-        bundle.profiles.insert("first.pb".to_owned(), vec![0; 40]);
-        bundle.profiles.insert("second.pb".to_owned(), vec![0; 40]);
-        bundle
-            .logs
-            .insert("first.json".to_owned(), large_operational_log(0, 2));
-        bundle
-            .logs
-            .insert("second.json".to_owned(), large_operational_log(2, 2));
-        publish_bundle(&bundle, &destination).expect("bundle publishes");
+        let canonical = temporary.path().join("canonical");
+        publish_bundle(&fixture(), &canonical).expect("empty class directories publish");
+        verify_bundle(&canonical).expect("empty class directories verify");
+        assert!(
+            fs::read_dir(canonical.join("profiles"))
+                .expect("profiles directory is readable")
+                .next()
+                .is_none()
+        );
+        assert!(
+            fs::read_dir(canonical.join("logs"))
+                .expect("logs directory is readable")
+                .next()
+                .is_none()
+        );
 
-        let count_limits = BundleLimits {
-            max_artifacts_per_class: 1,
-            ..constrained_limits()
-        };
+        let mut profile_bundle = fixture();
+        profile_bundle
+            .profiles
+            .insert("capture.pb".to_owned(), vec![0]);
         assert!(matches!(
-            verify_bundle_with_limits(&destination, count_limits),
-            Err(BundleError::LimitExceeded {
-                resource: "artifact_count"
-            })
+            publish_bundle(&profile_bundle, &temporary.path().join("profile-publish")),
+            Err(BundleError::UnsupportedProfileSchema)
         ));
+        let profile_verify = temporary.path().join("profile-verify");
+        publish_bundle(&fixture(), &profile_verify).expect("profile verifier fixture publishes");
+        add_artifact_and_checksum(&profile_verify, "profiles/capture.pb", b"opaque");
+        let error = verify_bundle(&profile_verify).expect_err("profile artifact is rejected");
+        assert!(
+            matches!(error, BundleError::UnsupportedProfileSchema),
+            "unexpected profile error: {error:?}"
+        );
 
-        let profile_limits = BundleLimits {
-            max_profile_bytes: 79,
-            ..constrained_limits()
-        };
-        assert!(matches!(
-            verify_bundle_with_limits(&destination, profile_limits),
-            Err(BundleError::LimitExceeded {
-                resource: "profile_bytes"
-            })
-        ));
-
-        let log_limits = BundleLimits {
-            max_log_bytes: 1,
-            ..constrained_limits()
-        };
-        assert!(matches!(
-            verify_bundle_with_limits(&destination, log_limits),
-            Err(BundleError::LimitExceeded {
-                resource: "log_bytes"
-            })
-        ));
-    }
-
-    #[test]
-    fn verifier_strictly_decodes_operational_logs() {
-        let temporary = tempfile::tempdir().expect("temporary root is available");
-        let destination = temporary.path().join("result");
-        let mut bundle = fixture();
-        bundle
+        let mut log_bundle = fixture();
+        log_bundle
             .logs
             .insert("run.json".to_owned(), large_operational_log(0, 1));
-        publish_bundle(&bundle, &destination).expect("bundle publishes");
-        let bytes = fs::read(destination.join("logs").join("run.json"))
-            .expect("operational log is readable");
-        let mut text = String::from_utf8(bytes).expect("operational log is UTF-8");
-        text = text.replace(
-            "\"elapsed_ns\":1",
-            "\"elapsed_ns\":1,\"host_path\":\"C:/source\"",
-        );
-        rewrite_artifact_and_checksum(&destination, "logs/run.json", text.as_bytes());
-
-        let error = verify_bundle(&destination).expect_err("unknown log payload is rejected");
-
-        assert!(matches!(error, BundleError::InvalidLog));
+        assert!(matches!(
+            publish_bundle(&log_bundle, &temporary.path().join("log-publish")),
+            Err(BundleError::UnsupportedLogSchema)
+        ));
+        for (index, bytes) in [
+            b"{}\n".as_slice(),
+            br#"{"records":[]}
+"#,
+            br#"{"records":[{"sequence":0,"event":"sample_completed","status":"succeeded","sample_ordinal":0,"elapsed_ns":1}]}
+"#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let destination = temporary.path().join(format!("log-verify-{index}"));
+            publish_bundle(&fixture(), &destination).expect("log verifier fixture publishes");
+            add_artifact_and_checksum(&destination, "logs/run.json", bytes);
+            assert!(matches!(
+                verify_bundle(&destination),
+                Err(BundleError::UnsupportedLogSchema)
+            ));
+        }
     }
 
     #[test]
@@ -3435,6 +3501,82 @@ mod tests {
 
         assert!(matches!(error, BundleError::InvalidArtifactEncoding));
         assert!(!temporary.path().join("result").exists());
+    }
+
+    #[test]
+    fn schema_two_closes_command_and_environment_text_channels() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        for (index, value) in [
+            "src/lib.rs",
+            "C:/source/repo",
+            "https://example.invalid/source",
+            "fn_private_source",
+            "api_key_super_secret",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut command_bundle = fixture();
+            command_bundle.command.arguments = vec![value.to_owned()];
+            assert!(matches!(
+                publish_bundle(
+                    &command_bundle,
+                    &temporary.path().join(format!("command-publish-{index}"))
+                ),
+                Err(BundleError::InvalidArtifactEncoding)
+            ));
+
+            let command_destination = temporary.path().join(format!("command-verify-{index}"));
+            publish_bundle(&fixture(), &command_destination)
+                .expect("command verifier fixture publishes");
+            let command =
+                json_bytes(&command_bundle.command, 64 * 1024).expect("command fixture serializes");
+            rewrite_artifact_and_checksum(&command_destination, COMMAND_FILE, &command);
+            assert!(matches!(
+                verify_bundle(&command_destination),
+                Err(BundleError::InvalidArtifactEncoding)
+            ));
+
+            let mut environment_bundle = fixture();
+            environment_bundle.environment.operating_system =
+                EvidenceValue::observed(value.to_owned());
+            assert!(matches!(
+                publish_bundle(
+                    &environment_bundle,
+                    &temporary
+                        .path()
+                        .join(format!("environment-publish-{index}"))
+                ),
+                Err(BundleError::InvalidArtifactEncoding)
+            ));
+
+            let environment_destination =
+                temporary.path().join(format!("environment-verify-{index}"));
+            publish_bundle(&fixture(), &environment_destination)
+                .expect("environment verifier fixture publishes");
+            let environment = json_bytes(&environment_bundle.environment, 64 * 1024)
+                .expect("environment fixture serializes");
+            rewrite_artifact_and_checksum(&environment_destination, ENVIRONMENT_FILE, &environment);
+            assert!(matches!(
+                verify_bundle(&environment_destination),
+                Err(BundleError::InvalidArtifactEncoding)
+            ));
+        }
+
+        let mut compiler_bundle = fixture();
+        compiler_bundle.environment.compiler =
+            EvidenceValue::observed("rustc-1.90.0-secret".to_owned());
+        assert!(matches!(
+            publish_bundle(&compiler_bundle, &temporary.path().join("compiler-suffix")),
+            Err(BundleError::InvalidArtifactEncoding)
+        ));
+
+        let mut subcommand_bundle = fixture();
+        subcommand_bundle.command.subcommand = "m05-parser".to_owned();
+        assert!(matches!(
+            publish_bundle(&subcommand_bundle, &temporary.path().join("subcommand")),
+            Err(BundleError::InvalidArtifactEncoding)
+        ));
     }
 
     #[test]
@@ -3877,8 +4019,7 @@ mod tests {
         ));
         assert!(!temporary.path().join("total").exists());
 
-        let checksum_bytes =
-            checksum_manifest_size(&invalid_later).expect("checksum size is computable");
+        let checksum_bytes = checksum_manifest_size().expect("checksum size is computable");
         let mut limits = constrained_limits();
         limits.max_total_bytes = checksum_bytes + 32;
         let error = publish_bundle_with_limits(
@@ -3894,57 +4035,6 @@ mod tests {
             }
         ));
 
-        let mut bundle = fixture();
-        bundle.profiles.insert("first.pb".to_owned(), vec![0; 40]);
-        bundle.profiles.insert("second.pb".to_owned(), vec![0; 40]);
-        let mut limits = constrained_limits();
-        limits.max_profile_bytes = 64;
-        let error =
-            publish_bundle_with_limits(&bundle, &temporary.path().join("profile-bytes"), limits)
-                .expect_err("profile byte bound is enforced");
-        assert!(matches!(
-            error,
-            BundleError::LimitExceeded {
-                resource: "profile_bytes"
-            }
-        ));
-
-        let mut bundle = fixture();
-        bundle.profiles.insert("extra.pb".to_owned(), vec![0]);
-        let mut limits = constrained_limits();
-        limits.max_directory_entries = FIXED_ARTIFACT_COUNT + 3;
-        let error = publish_bundle_with_limits(
-            &bundle,
-            &temporary.path().join("directory-entries"),
-            limits,
-        )
-        .expect_err("checksum and class directories count toward directory entries");
-        assert!(matches!(
-            error,
-            BundleError::LimitExceeded {
-                resource: "directory_entry_count"
-            }
-        ));
-
-        let mut bundle = fixture();
-        bundle
-            .logs
-            .insert("first.log".to_owned(), large_operational_log(0, 8));
-        bundle
-            .logs
-            .insert("second.log".to_owned(), large_operational_log(100, 8));
-        let mut limits = constrained_limits();
-        limits.max_log_bytes = 512;
-        let error =
-            publish_bundle_with_limits(&bundle, &temporary.path().join("log-bytes"), limits)
-                .expect_err("log byte bound is enforced");
-        assert!(matches!(
-            error,
-            BundleError::LimitExceeded {
-                resource: "log_bytes"
-            }
-        ));
-
         let mut limits = constrained_limits();
         limits.max_checksum_bytes = 128;
         let error =
@@ -3956,6 +4046,32 @@ mod tests {
                 resource: "checksum_bytes"
             }
         ));
+
+        let checksum_bytes = checksum_manifest_size().expect("checksum size is computable");
+        let mut artifact_limits = constrained_limits();
+        artifact_limits.max_artifact_bytes = checksum_bytes - 1;
+        let error = publish_bundle_with_limits(
+            &fixture(),
+            &temporary.path().join("checksum-artifact-limit"),
+            artifact_limits,
+        )
+        .expect_err("checksum manifest obeys the per-artifact limit");
+        assert!(matches!(
+            error,
+            BundleError::LimitExceeded {
+                resource: "artifact_bytes"
+            }
+        ));
+
+        let exact_checksum_limits = BundleLimits {
+            max_checksum_bytes: checksum_bytes,
+            ..constrained_limits()
+        };
+        let exact_destination = temporary.path().join("checksum-exact");
+        publish_bundle_with_limits(&fixture(), &exact_destination, exact_checksum_limits)
+            .expect("exact checksum limit publishes");
+        verify_bundle_with_limits(&exact_destination, exact_checksum_limits)
+            .expect("exact checksum limit verifies");
     }
 
     #[test]

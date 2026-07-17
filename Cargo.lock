@@ -1497,6 +1497,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "winapi-util",
  "windows",
  "windows-permissions",
 ]

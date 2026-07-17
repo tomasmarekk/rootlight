@@ -33,6 +33,7 @@ nt-token.workspace = true
 renamore.workspace = true
 windows.workspace = true
 windows-permissions.workspace = true
+winapi-util.workspace = true
 
 [lints]
 workspace = true

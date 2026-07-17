@@ -203,11 +203,7 @@ fn benchmark_command() -> BenchmarkCommand {
     BenchmarkCommand {
         schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
         subcommand: "m05-parser-evidence".to_owned(),
-        arguments: vec![
-            format!("dataset_id={DATASET_ID}"),
-            format!("fixture_count={}", FIXTURES.len()),
-            format!("build_profile={}", build_profile()),
-        ],
+        arguments: Vec::new(),
         seed: BENCHMARK_SEED,
         warmup_rounds: WARMUP_ROUNDS,
         trial_rounds: TRIAL_ROUNDS,

@@ -3,9 +3,11 @@
 //! The same bounded wire checks protect publication and later verification so
 //! checksums cannot legitimize internally contradictory benchmark evidence.
 
-use std::collections::BTreeMap;
-
-use serde::de::DeserializeOwned;
+use serde::{
+    Deserialize, Serialize,
+    de::{DeserializeSeed as _, Error as _, MapAccess, SeqAccess, Visitor},
+    ser::{SerializeMap as _, SerializeSeq as _},
+};
 use sha2::{Digest as _, Sha256};
 
 use crate::bundle::{
@@ -19,23 +21,699 @@ use crate::parser::{
     semantic_quality_eligibility_from_values, summarize,
 };
 use crate::{
-    AgentTrajectory, Availability, BuildProvenance, BundleLimits, CoverageEvidence,
-    DatasetManifest, EnvironmentEvidence, EvidenceValue, MetricDistribution, QualityEvidence,
+    Availability, BundleLimits, DatasetManifest, EvidenceValue, MetricDistribution,
     RESULT_BUNDLE_SCHEMA_VERSION, RawSample, ResultSummary, SEMANTIC_QUALITY_RUBRIC_ID,
     SampleOutcome, decode_benchmark_command, decode_dataset_manifest,
 };
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum WireEvidence<'a, T> {
+    Observed {
+        value: T,
+    },
+    Target {
+        value: T,
+    },
+    Unavailable {
+        #[serde(borrow)]
+        reason_code: &'a str,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum WireAvailability<'a> {
+    Available,
+    Failed {
+        #[serde(borrow)]
+        reason_code: &'a str,
+    },
+    Unavailable {
+        #[serde(borrow)]
+        reason_code: &'a str,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum WireSampleOutcome<'a> {
+    Succeeded,
+    Failed {
+        #[serde(borrow)]
+        error_code: &'a str,
+    },
+    TimedOut,
+    Cancelled,
+}
+
 #[derive(Debug)]
-struct FixedArtifacts {
-    environment: EnvironmentEvidence,
+struct FallibleVec<T>(Vec<T>);
+
+impl<T> FallibleVec<T> {
+    fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<'de, T> Deserialize<'de> for FallibleVec<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(FallibleVecVisitor(std::marker::PhantomData))
+    }
+}
+
+struct FallibleVecVisitor<T>(std::marker::PhantomData<T>);
+
+impl<'de, T> Visitor<'de> for FallibleVecVisitor<T>
+where
+    T: Deserialize<'de>,
+{
+    type Value = FallibleVec<T>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a fallibly retained JSON array")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element()? {
+            if values.len() == values.capacity() {
+                try_reserve_decode(&mut values, 1).map_err(A::Error::custom)?;
+            }
+            values.push(value);
+        }
+        Ok(FallibleVec(values))
+    }
+}
+
+impl<T> Serialize for FallibleVec<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for value in &self.0 {
+            sequence.serialize_element(value)?;
+        }
+        sequence.end()
+    }
+}
+
+#[derive(Debug)]
+struct FallibleMap<'a, V>(Vec<(&'a str, V)>);
+
+impl<V> FallibleMap<'_, V> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&str, &V)> {
+        self.0.iter().map(|(key, value)| (*key, value))
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|(key, _)| *key)
+    }
+}
+
+impl<'de: 'a, 'a, V> Deserialize<'de> for FallibleMap<'a, V>
+where
+    V: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(FallibleMapVisitor(std::marker::PhantomData))
+    }
+}
+
+struct FallibleMapVisitor<'a, V>(std::marker::PhantomData<(&'a str, V)>);
+
+impl<'de: 'a, 'a, V> Visitor<'de> for FallibleMapVisitor<'a, V>
+where
+    V: Deserialize<'de>,
+{
+    type Value = FallibleMap<'a, V>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a sorted fallibly retained JSON object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(key) = map.next_key::<&'a str>()? {
+            if values
+                .last()
+                .is_some_and(|(previous, _): &(&str, V)| *previous >= key)
+            {
+                return Err(A::Error::custom("JSON object keys are not canonical"));
+            }
+            if values.len() == values.capacity() {
+                try_reserve_decode(&mut values, 1).map_err(A::Error::custom)?;
+            }
+            values.push((key, map.next_value()?));
+        }
+        Ok(FallibleMap(values))
+    }
+}
+
+impl<V> Serialize for FallibleMap<'_, V>
+where
+    V: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (key, value) in &self.0 {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+fn try_reserve_decode<T>(values: &mut Vec<T>, additional: usize) -> Result<(), &'static str> {
+    before_decode_reservation()?;
+    values
+        .try_reserve(additional)
+        .map_err(|_| "fixed-artifact reservation failed")
+}
+
+fn before_decode_reservation() -> Result<(), &'static str> {
+    #[cfg(test)]
+    DECODE_RESERVATION_FAIL_AFTER.with(|remaining| {
+        if let Some(value) = remaining.get() {
+            if value == 0 {
+                return Err("injected fixed-artifact reservation failure");
+            }
+            remaining.set(Some(value - 1));
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn own_wire_string(value: &str) -> Result<String, BundleError> {
+    before_decode_reservation().map_err(|_| BundleError::AllocationFailed)?;
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(value.len())
+        .map_err(|_| BundleError::AllocationFailed)?;
+    owned.push_str(value);
+    Ok(owned)
+}
+
+#[cfg(test)]
+thread_local! {
+    static DECODE_RESERVATION_FAIL_AFTER: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireEnvironment<'a> {
+    #[serde(borrow)]
+    schema_version: &'a str,
+    #[serde(borrow)]
+    cpu_model: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    cpu_topology: WireEvidence<'a, &'a str>,
+    ram_bytes: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    operating_system: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    kernel: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    filesystem: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    storage_device: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    power_mode: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    container_limits: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    compiler: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    binary_sha256: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    feature_profile: &'a str,
+    #[serde(borrow)]
+    sqlite: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    adapter_versions: WireEvidence<'a, FallibleMap<'a, &'a str>>,
+    #[serde(borrow)]
+    grammar_versions: WireEvidence<'a, FallibleMap<'a, &'a str>>,
+    #[serde(borrow)]
+    grammar_source_package_checksums: WireEvidence<'a, FallibleMap<'a, &'a str>>,
+    #[serde(borrow)]
+    grammar_hashes: WireEvidence<'a, FallibleMap<'a, &'a str>>,
+    #[serde(borrow)]
+    locale: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    background_process_policy: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    clock_source: WireEvidence<'a, &'a str>,
+    #[serde(borrow)]
+    process_tree_accounting: WireAvailability<'a>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireBuildProvenance<'a> {
+    #[serde(borrow)]
+    schema_version: &'a str,
+    #[serde(borrow)]
+    source_revision: &'a str,
+    #[serde(borrow)]
+    binary_revision: &'a str,
+    #[serde(borrow)]
+    build_profile: &'a str,
+    #[serde(borrow)]
+    features: FallibleVec<&'a str>,
+    #[serde(borrow)]
+    target: &'a str,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireMetricDistribution<'a> {
+    sample_count: u64,
+    #[serde(borrow)]
+    p50_ns: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    p95_ns: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    p99_ns: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    physical_lines_per_second: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    files_per_second: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    syntax_nodes_per_second: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    syntax_facts_per_source_byte_ppm: WireEvidence<'a, u64>,
+    outlier_count: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireSummary<'a> {
+    #[serde(borrow)]
+    schema_version: &'a str,
+    #[serde(borrow)]
+    benchmark_id: &'a str,
+    #[serde(borrow)]
+    semantic_eligibility: WireAvailability<'a>,
+    #[serde(borrow)]
+    families: FallibleMap<'a, WireMetricDistribution<'a>>,
+    failed_samples: u64,
+    timed_out_samples: u64,
+    cancelled_samples: u64,
+    #[serde(borrow)]
+    confidence_intervals: WireAvailability<'a>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireCoverage<'a> {
+    #[serde(borrow)]
+    schema_version: &'a str,
+    attempted_entries: u64,
+    committed_entries: u64,
+    #[serde(borrow)]
+    skipped: FallibleMap<'a, &'a str>,
+    #[serde(borrow)]
+    parser_status: FallibleMap<'a, &'a str>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireQuality<'a> {
+    #[serde(borrow)]
+    schema_version: &'a str,
+    #[serde(borrow)]
+    rubric_id: &'a str,
+    #[serde(borrow)]
+    semantic_eligibility: WireAvailability<'a>,
+    #[serde(borrow)]
+    precision_ppm: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    recall_ppm: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    expected_calibration_error_ppm: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    unsupported_cases: FallibleMap<'a, &'a str>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireRawSample<'a> {
+    #[serde(borrow)]
+    schema_version: &'a str,
+    ordinal: u64,
+    #[serde(borrow)]
+    phase: &'a str,
+    #[serde(borrow)]
+    dataset_entry_id: &'a str,
+    #[serde(borrow)]
+    grammar_family: &'a str,
+    elapsed_ns: u64,
+    source_bytes: u64,
+    physical_lines: u64,
+    syntax_nodes: u64,
+    syntax_facts: u64,
+    #[serde(borrow)]
+    semantic_facts: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    process_tree_cpu_ns: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    process_tree_peak_rss_bytes: WireEvidence<'a, u64>,
+    #[serde(borrow)]
+    outcome: WireSampleOutcome<'a>,
+    is_outlier: bool,
+}
+
+impl WireRawSample<'_> {
+    fn into_owned(self) -> Result<RawSample, BundleError> {
+        Ok(RawSample {
+            schema_version: own_wire_string(self.schema_version)?,
+            ordinal: self.ordinal,
+            phase: own_wire_string(self.phase)?,
+            dataset_entry_id: own_wire_string(self.dataset_entry_id)?,
+            grammar_family: own_wire_string(self.grammar_family)?,
+            elapsed_ns: self.elapsed_ns,
+            source_bytes: self.source_bytes,
+            physical_lines: self.physical_lines,
+            syntax_nodes: self.syntax_nodes,
+            syntax_facts: self.syntax_facts,
+            semantic_facts: self.semantic_facts.into_owned()?,
+            process_tree_cpu_ns: self.process_tree_cpu_ns.into_owned()?,
+            process_tree_peak_rss_bytes: self.process_tree_peak_rss_bytes.into_owned()?,
+            outcome: self.outcome.into_owned()?,
+            is_outlier: self.is_outlier,
+        })
+    }
+}
+
+impl WireEvidence<'_, u64> {
+    fn into_owned(self) -> Result<EvidenceValue<u64>, BundleError> {
+        match self {
+            Self::Observed { value } => Ok(EvidenceValue::Observed { value }),
+            Self::Target { value } => Ok(EvidenceValue::Target { value }),
+            Self::Unavailable { reason_code } => Ok(EvidenceValue::Unavailable {
+                reason_code: own_wire_string(reason_code)?,
+            }),
+        }
+    }
+
+    fn to_owned(&self) -> Result<EvidenceValue<u64>, BundleError> {
+        match self {
+            Self::Observed { value } => Ok(EvidenceValue::Observed { value: *value }),
+            Self::Target { value } => Ok(EvidenceValue::Target { value: *value }),
+            Self::Unavailable { reason_code } => Ok(EvidenceValue::Unavailable {
+                reason_code: own_wire_string(reason_code)?,
+            }),
+        }
+    }
+
+    fn matches(&self, expected: &EvidenceValue<u64>) -> bool {
+        match (self, expected) {
+            (Self::Observed { value: left }, EvidenceValue::Observed { value: right })
+            | (Self::Target { value: left }, EvidenceValue::Target { value: right }) => {
+                left == right
+            }
+            (
+                Self::Unavailable { reason_code: left },
+                EvidenceValue::Unavailable { reason_code: right },
+            ) => *left == right,
+            _ => false,
+        }
+    }
+}
+
+impl WireSampleOutcome<'_> {
+    fn into_owned(self) -> Result<SampleOutcome, BundleError> {
+        match self {
+            Self::Succeeded => Ok(SampleOutcome::Succeeded),
+            Self::Failed { error_code } => Ok(SampleOutcome::Failed {
+                error_code: own_wire_string(error_code)?,
+            }),
+            Self::TimedOut => Ok(SampleOutcome::TimedOut),
+            Self::Cancelled => Ok(SampleOutcome::Cancelled),
+        }
+    }
+}
+
+impl WireAvailability<'_> {
+    fn to_owned(&self) -> Result<Availability, BundleError> {
+        match self {
+            Self::Available => Ok(Availability::Available),
+            Self::Failed { reason_code } => Ok(Availability::Failed {
+                reason_code: own_wire_string(reason_code)?,
+            }),
+            Self::Unavailable { reason_code } => Ok(Availability::Unavailable {
+                reason_code: own_wire_string(reason_code)?,
+            }),
+        }
+    }
+
+    fn matches(&self, expected: &Availability) -> bool {
+        match (self, expected) {
+            (Self::Available, Availability::Available) => true,
+            (Self::Failed { reason_code: left }, Availability::Failed { reason_code: right })
+            | (
+                Self::Unavailable { reason_code: left },
+                Availability::Unavailable { reason_code: right },
+            ) => *left == right,
+            _ => false,
+        }
+    }
+}
+
+const DECODE_BYTES_EXCEEDED: &str = "fixed decoded byte retention exceeded";
+const DECODE_ITEMS_EXCEEDED: &str = "fixed decoded item retention exceeded";
+
+struct FixedDecodeBudget {
+    retained_bytes: u64,
+    retained_items: u64,
+    max_retained_bytes: u64,
+    max_retained_items: u64,
+}
+
+impl FixedDecodeBudget {
+    const fn new(limits: BundleLimits) -> Self {
+        Self {
+            retained_bytes: 0,
+            retained_items: 0,
+            max_retained_bytes: limits.max_total_bytes,
+            max_retained_items: limits.max_total_bytes,
+        }
+    }
+
+    fn inspect_artifact(&mut self, name: &str, bytes: &[u8]) -> Result<(), BundleError> {
+        if matches!(name, RAW_SAMPLES_FILE | AGENT_TRAJECTORIES_FILE) {
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            if !bytes.ends_with(b"\n") {
+                return Err(BundleError::InvalidArtifactEncoding);
+            }
+            for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+                self.inspect_json(line)?;
+            }
+            return Ok(());
+        }
+        if bytes.len() <= 1 || !bytes.ends_with(b"\n") {
+            return Err(BundleError::InvalidArtifactEncoding);
+        }
+        self.inspect_json(&bytes[..bytes.len() - 1])
+    }
+
+    fn inspect_json(&mut self, bytes: &[u8]) -> Result<(), BundleError> {
+        // Borrowed wire decoding deliberately rejects escapes so serde never
+        // needs an attacker-sized scratch string before our fallible budget.
+        if bytes.contains(&b'\\') {
+            return Err(BundleError::InvalidArtifactEncoding);
+        }
+        let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+        BudgetSeed { budget: self }
+            .deserialize(&mut deserializer)
+            .map_err(map_budget_error)?;
+        deserializer
+            .end()
+            .map_err(|_| BundleError::InvalidArtifactEncoding)
+    }
+
+    fn charge_bytes<E: serde::de::Error>(&mut self, bytes: usize) -> Result<(), E> {
+        let bytes = u64::try_from(bytes).map_err(|_| E::custom(DECODE_BYTES_EXCEEDED))?;
+        self.retained_bytes = self
+            .retained_bytes
+            .checked_add(bytes)
+            .filter(|retained| *retained <= self.max_retained_bytes)
+            .ok_or_else(|| E::custom(DECODE_BYTES_EXCEEDED))?;
+        Ok(())
+    }
+
+    fn charge_item<E: serde::de::Error>(&mut self) -> Result<(), E> {
+        self.retained_items = self
+            .retained_items
+            .checked_add(1)
+            .filter(|retained| *retained <= self.max_retained_items)
+            .ok_or_else(|| E::custom(DECODE_ITEMS_EXCEEDED))?;
+        Ok(())
+    }
+}
+
+fn map_budget_error(error: serde_json::Error) -> BundleError {
+    let message = error.to_string();
+    if message.starts_with(DECODE_BYTES_EXCEEDED) {
+        BundleError::LimitExceeded {
+            resource: "decoded_retained_bytes",
+        }
+    } else if message.starts_with(DECODE_ITEMS_EXCEEDED) {
+        BundleError::LimitExceeded {
+            resource: "decoded_retained_items",
+        }
+    } else {
+        BundleError::InvalidArtifactEncoding
+    }
+}
+
+struct BudgetSeed<'a> {
+    budget: &'a mut FixedDecodeBudget,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for BudgetSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(BudgetVisitor {
+            budget: self.budget,
+        })
+    }
+}
+
+struct BudgetVisitor<'a> {
+    budget: &'a mut FixedDecodeBudget,
+}
+
+impl<'de> Visitor<'de> for BudgetVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("strict JSON with borrowed strings")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        BudgetSeed {
+            budget: self.budget,
+        }
+        .deserialize(deserializer)
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.budget.charge_bytes::<E>(value.len())
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Err(E::custom("fixed artifact string was not borrowed"))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while let Some(()) = sequence.next_element_seed(BudgetSeed {
+            budget: &mut *self.budget,
+        })? {
+            self.budget.charge_item::<A::Error>()?;
+        }
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while let Some(()) = map.next_key_seed(BudgetSeed {
+            budget: &mut *self.budget,
+        })? {
+            map.next_value_seed(BudgetSeed {
+                budget: &mut *self.budget,
+            })?;
+            self.budget.charge_item::<A::Error>()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct FixedArtifacts<'a> {
+    environment: WireEnvironment<'a>,
     dataset_manifest: DatasetManifest,
-    build_provenance: BuildProvenance,
+    build_provenance: WireBuildProvenance<'a>,
     schedule: Vec<ScheduledSample>,
     raw_samples: Vec<RawSample>,
-    summary: ResultSummary,
-    coverage: CoverageEvidence,
-    quality: QualityEvidence,
-    agent_trajectories: Vec<AgentTrajectory>,
+    summary: WireSummary<'a>,
+    coverage: WireCoverage<'a>,
+    quality: WireQuality<'a>,
 }
 
 pub(crate) fn is_fixed_artifact(relative: &str) -> bool {
@@ -57,17 +735,17 @@ where
     validate_fixed_bundle(&fixed, limits)
 }
 
-fn decode_fixed_artifacts<S>(
-    artifacts: &S,
+fn decode_fixed_artifacts<'a, S>(
+    artifacts: &'a S,
     limits: BundleLimits,
-) -> Result<FixedArtifacts, BundleError>
+) -> Result<FixedArtifacts<'a>, BundleError>
 where
     S: FixedArtifactSource + ?Sized,
 {
+    let mut decode_budget = FixedDecodeBudget::new(limits);
     for name in FIXED_ARTIFACTS {
-        if artifacts.artifact_bytes(name).is_none() {
-            return Err(BundleError::ArtifactSetMismatch);
-        }
+        let bytes = fixed_bytes(artifacts, name)?;
+        decode_budget.inspect_artifact(name, bytes)?;
     }
     let manifest_bytes = fixed_bytes(artifacts, DATASET_MANIFEST_FILE)?;
     validate_json_bytes(manifest_bytes, limits)?;
@@ -145,11 +823,12 @@ where
         true,
         limits,
     )?;
+    decode_agent_trajectories(fixed_bytes(artifacts, AGENT_TRAJECTORIES_FILE)?, limits)?;
     Ok(FixedArtifacts {
         environment: decode_json(fixed_bytes(artifacts, ENVIRONMENT_FILE)?, limits)?,
         dataset_manifest,
         build_provenance: decode_json(fixed_bytes(artifacts, BUILD_PROVENANCE_FILE)?, limits)?,
-        raw_samples: decode_json_lines(
+        raw_samples: decode_raw_samples(
             fixed_bytes(artifacts, RAW_SAMPLES_FILE)?,
             schedule.len(),
             limits,
@@ -159,10 +838,6 @@ where
         summary: decode_json(fixed_bytes(artifacts, SUMMARY_FILE)?, limits)?,
         coverage: decode_json(fixed_bytes(artifacts, COVERAGE_FILE)?, limits)?,
         quality: decode_json(fixed_bytes(artifacts, QUALITY_FILE)?, limits)?,
-        agent_trajectories: decode_agent_trajectories(
-            fixed_bytes(artifacts, AGENT_TRAJECTORIES_FILE)?,
-            limits,
-        )?,
     })
 }
 
@@ -201,10 +876,10 @@ where
         .ok_or(BundleError::ArtifactSetMismatch)
 }
 
-fn decode_json<T: DeserializeOwned + serde::Serialize>(
-    bytes: &[u8],
-    limits: BundleLimits,
-) -> Result<T, BundleError> {
+fn decode_json<'a, T>(bytes: &'a [u8], limits: BundleLimits) -> Result<T, BundleError>
+where
+    T: Deserialize<'a> + Serialize,
+{
     validate_json_bytes(bytes, limits)?;
     let value = serde_json::from_slice(&bytes[..bytes.len() - 1])
         .map_err(|_| BundleError::InvalidArtifactEncoding)?;
@@ -212,12 +887,12 @@ fn decode_json<T: DeserializeOwned + serde::Serialize>(
     Ok(value)
 }
 
-fn decode_json_lines<T: DeserializeOwned + serde::Serialize>(
+fn decode_raw_samples(
     bytes: &[u8],
     maximum_count: usize,
     limits: BundleLimits,
     resource: &'static str,
-) -> Result<Vec<T>, BundleError> {
+) -> Result<Vec<RawSample>, BundleError> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
@@ -242,9 +917,9 @@ fn decode_json_lines<T: DeserializeOwned + serde::Serialize>(
         if values.len() >= maximum_count {
             return Err(BundleError::LimitExceeded { resource });
         }
-        let value =
+        let value: WireRawSample<'_> =
             serde_json::from_slice(line).map_err(|_| BundleError::InvalidArtifactEncoding)?;
-        values.push(value);
+        values.push(value.into_owned()?);
     }
     let canonical_limit =
         usize::try_from(limits.max_artifact_bytes).map_err(|_| BundleError::LimitExceeded {
@@ -256,12 +931,9 @@ fn decode_json_lines<T: DeserializeOwned + serde::Serialize>(
     Ok(values)
 }
 
-fn decode_agent_trajectories(
-    bytes: &[u8],
-    limits: BundleLimits,
-) -> Result<Vec<AgentTrajectory>, BundleError> {
+fn decode_agent_trajectories(bytes: &[u8], limits: BundleLimits) -> Result<(), BundleError> {
     if bytes.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     validate_artifact_size(bytes, limits)?;
     if !bytes.ends_with(b"\n") {
@@ -347,8 +1019,11 @@ fn map_parser_integrity_error(error: crate::ParserRunError) -> BundleError {
     }
 }
 
-fn validate_fixed_bundle(fixed: &FixedArtifacts, limits: BundleLimits) -> Result<(), BundleError> {
-    validate_environment(&fixed.environment, limits)?;
+fn validate_fixed_bundle(
+    fixed: &FixedArtifacts<'_>,
+    limits: BundleLimits,
+) -> Result<(), BundleError> {
+    validate_environment(&fixed.environment)?;
     validate_manifest_revision(&fixed.dataset_manifest)?;
     validate_build_provenance(&fixed.environment, &fixed.build_provenance, limits)?;
     validate_samples(
@@ -364,44 +1039,81 @@ fn validate_fixed_bundle(fixed: &FixedArtifacts, limits: BundleLimits) -> Result
         &fixed.coverage,
         limits,
     )?;
-    validate_quality(&fixed.raw_samples, &fixed.summary, &fixed.quality, limits)?;
-    validate_trajectories(&fixed.agent_trajectories, limits)
+    validate_quality(&fixed.raw_samples, &fixed.summary, &fixed.quality, limits)
 }
 
-fn validate_environment(
-    environment: &EnvironmentEvidence,
-    limits: BundleLimits,
-) -> Result<(), BundleError> {
-    validate_schema(&environment.schema_version)?;
-    validate_label(&environment.feature_profile, limits)?;
+fn validate_environment(environment: &WireEnvironment<'_>) -> Result<(), BundleError> {
+    validate_schema(environment.schema_version)?;
+    if !matches!(
+        environment.feature_profile,
+        "debug" | "release" | "test" | "bench"
+    ) {
+        return Err(BundleError::InvalidArtifactEncoding);
+    }
     for value in [
         &environment.cpu_model,
         &environment.cpu_topology,
-        &environment.operating_system,
         &environment.kernel,
         &environment.filesystem,
         &environment.storage_device,
         &environment.power_mode,
         &environment.container_limits,
-        &environment.compiler,
         &environment.sqlite,
         &environment.locale,
         &environment.background_process_policy,
-        &environment.clock_source,
     ] {
-        validate_string_evidence(value, limits, StringKind::Text)?;
+        validate_unavailable_environment(value)?;
     }
-    validate_evidence_reason(&environment.ram_bytes, limits)?;
-    validate_string_evidence(&environment.binary_sha256, limits, StringKind::Digest)?;
-    validate_map_evidence(&environment.adapter_versions, limits, StringKind::Text)?;
-    validate_map_evidence(&environment.grammar_versions, limits, StringKind::Text)?;
-    validate_map_evidence(
-        &environment.grammar_source_package_checksums,
-        limits,
-        StringKind::Digest,
+    validate_environment_value(&environment.operating_system, |value| {
+        if matches!(value, "linux" | "macos" | "windows") {
+            Ok(())
+        } else {
+            Err(BundleError::InvalidArtifactEncoding)
+        }
+    })?;
+    validate_environment_value(&environment.compiler, validate_compiler_token)?;
+    validate_environment_value(&environment.clock_source, |value| {
+        if value == "std_instant_monotonic" {
+            Ok(())
+        } else {
+            Err(BundleError::InvalidArtifactEncoding)
+        }
+    })?;
+    validate_environment_scalar(&environment.ram_bytes)?;
+    validate_environment_value(&environment.binary_sha256, validate_digest)?;
+    validate_environment_map(
+        &environment.adapter_versions,
+        &["rootlight-adapter-treesitter", "tree-sitter-runtime"],
+        validate_version_token,
     )?;
-    validate_map_evidence(&environment.grammar_hashes, limits, StringKind::Digest)?;
-    validate_availability(&environment.process_tree_accounting, limits)
+    validate_environment_map(
+        &environment.grammar_versions,
+        &["java", "javascript", "python", "rust"],
+        validate_version_token,
+    )?;
+    validate_environment_map(
+        &environment.grammar_source_package_checksums,
+        &["java", "javascript", "python", "rust"],
+        validate_digest,
+    )?;
+    validate_environment_map(
+        &environment.grammar_hashes,
+        &[
+            "java.parser",
+            "javascript.parser",
+            "javascript.scanner",
+            "python.parser",
+            "python.scanner",
+            "rust.parser",
+            "rust.scanner",
+        ],
+        validate_digest,
+    )?;
+    match &environment.process_tree_accounting {
+        WireAvailability::Available => Ok(()),
+        WireAvailability::Unavailable { reason_code } => validate_environment_reason(reason_code),
+        WireAvailability::Failed { .. } => Err(BundleError::InvalidArtifactEncoding),
+    }
 }
 
 fn validate_manifest_revision(manifest: &DatasetManifest) -> Result<(), BundleError> {
@@ -418,22 +1130,22 @@ fn validate_manifest_revision(manifest: &DatasetManifest) -> Result<(), BundleEr
 }
 
 fn validate_build_provenance(
-    environment: &EnvironmentEvidence,
-    provenance: &BuildProvenance,
+    environment: &WireEnvironment<'_>,
+    provenance: &WireBuildProvenance<'_>,
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
-    validate_schema(&provenance.schema_version)?;
-    validate_revision(&provenance.source_revision)?;
-    validate_label(&provenance.build_profile, limits)?;
-    validate_label(&provenance.target, limits)?;
-    validate_sorted_labels(&provenance.features, limits)?;
-    let EvidenceValue::Observed {
+    validate_schema(provenance.schema_version)?;
+    validate_revision(provenance.source_revision)?;
+    validate_label(provenance.build_profile, limits)?;
+    validate_label(provenance.target, limits)?;
+    validate_sorted_wire_labels(provenance.features.as_slice(), limits)?;
+    let WireEvidence::Observed {
         value: binary_sha256,
-    } = &environment.binary_sha256
+    } = environment.binary_sha256
     else {
         return Err(BundleError::ArtifactInvariantViolation);
     };
-    if provenance.binary_revision != format!("sha256:{binary_sha256}")
+    if provenance.binary_revision.strip_prefix("sha256:") != Some(binary_sha256)
         || provenance.build_profile != environment.feature_profile
     {
         return Err(BundleError::ArtifactInvariantViolation);
@@ -502,19 +1214,19 @@ fn validate_sample_outcome(sample: &RawSample, limits: BundleLimits) -> Result<(
 
 fn validate_summary(
     samples: &[RawSample],
-    summary: &ResultSummary,
+    summary: &WireSummary<'_>,
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
-    validate_schema(&summary.schema_version)?;
-    validate_label(&summary.benchmark_id, limits)?;
-    validate_availability(&summary.semantic_eligibility, limits)?;
-    validate_availability(&summary.confidence_intervals, limits)?;
+    validate_schema(summary.schema_version)?;
+    validate_label(summary.benchmark_id, limits)?;
+    validate_wire_availability(&summary.semantic_eligibility, limits)?;
+    validate_wire_availability(&summary.confidence_intervals, limits)?;
     if summary.families.len() > limits.max_manifest_entries {
         return Err(BundleError::LimitExceeded {
             resource: "summary_family_count",
         });
     }
-    for (family, distribution) in &summary.families {
+    for (family, distribution) in summary.families.iter() {
         validate_label(family, limits)?;
         validate_distribution(distribution, limits)?;
     }
@@ -535,16 +1247,16 @@ fn validate_summary(
             return Err(BundleError::ArtifactInvariantViolation);
         }
     }
-    let expected = summarize(samples, summary.semantic_eligibility.clone())
+    let expected = summarize(samples, summary.semantic_eligibility.to_owned()?)
         .map_err(map_parser_integrity_error)?;
-    if *summary != expected {
+    if !summary_matches(summary, &expected) {
         return Err(BundleError::ArtifactInvariantViolation);
     }
     Ok(())
 }
 
 fn validate_distribution(
-    distribution: &MetricDistribution,
+    distribution: &WireMetricDistribution<'_>,
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
     for value in [
@@ -556,7 +1268,7 @@ fn validate_distribution(
         &distribution.syntax_nodes_per_second,
         &distribution.syntax_facts_per_source_byte_ppm,
     ] {
-        validate_observation(value, limits)?;
+        validate_wire_observation(value, limits)?;
     }
     if distribution.outlier_count > distribution.sample_count {
         return Err(BundleError::ArtifactInvariantViolation);
@@ -564,13 +1276,53 @@ fn validate_distribution(
     Ok(())
 }
 
+fn summary_matches(summary: &WireSummary<'_>, expected: &ResultSummary) -> bool {
+    summary.schema_version == expected.schema_version
+        && summary.benchmark_id == expected.benchmark_id
+        && summary
+            .semantic_eligibility
+            .matches(&expected.semantic_eligibility)
+        && summary.failed_samples == expected.failed_samples
+        && summary.timed_out_samples == expected.timed_out_samples
+        && summary.cancelled_samples == expected.cancelled_samples
+        && summary
+            .confidence_intervals
+            .matches(&expected.confidence_intervals)
+        && summary.families.len() == expected.families.len()
+        && summary.families.iter().zip(&expected.families).all(
+            |((left_family, left), (right_family, right))| {
+                left_family == right_family && left == right
+            },
+        )
+}
+
+impl PartialEq<MetricDistribution> for WireMetricDistribution<'_> {
+    fn eq(&self, expected: &MetricDistribution) -> bool {
+        self.sample_count == expected.sample_count
+            && self.p50_ns.matches(&expected.p50_ns)
+            && self.p95_ns.matches(&expected.p95_ns)
+            && self.p99_ns.matches(&expected.p99_ns)
+            && self
+                .physical_lines_per_second
+                .matches(&expected.physical_lines_per_second)
+            && self.files_per_second.matches(&expected.files_per_second)
+            && self
+                .syntax_nodes_per_second
+                .matches(&expected.syntax_nodes_per_second)
+            && self
+                .syntax_facts_per_source_byte_ppm
+                .matches(&expected.syntax_facts_per_source_byte_ppm)
+            && self.outlier_count == expected.outlier_count
+    }
+}
+
 fn validate_coverage(
     manifest: &DatasetManifest,
     samples: &[RawSample],
-    coverage: &CoverageEvidence,
+    coverage: &WireCoverage<'_>,
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
-    validate_schema(&coverage.schema_version)?;
+    validate_schema(coverage.schema_version)?;
     if coverage.skipped.len() > limits.max_manifest_entries
         || coverage.parser_status.len() > limits.max_manifest_entries
     {
@@ -601,12 +1353,9 @@ fn validate_coverage(
             *status = observed;
         }
     }
-    for (entry, status) in &coverage.parser_status {
+    for (entry, status) in coverage.parser_status.iter() {
         validate_label(entry, limits)?;
-        if !matches!(
-            status.as_str(),
-            "succeeded" | "cancelled" | "timed_out" | "failed"
-        ) {
+        if !matches!(*status, "succeeded" | "cancelled" | "timed_out" | "failed") {
             return Err(BundleError::InvalidArtifactEncoding);
         }
     }
@@ -622,7 +1371,7 @@ fn validate_coverage(
     let statuses_match = coverage
         .parser_status
         .iter()
-        .map(|(entry, status)| (entry.as_str(), status.as_str()))
+        .map(|(entry, status)| (entry, *status))
         .eq(statuses.iter().copied());
     if !statuses_match
         || coverage.attempted_entries != attempted
@@ -654,18 +1403,18 @@ fn status_severity(status: &str) -> u8 {
 
 fn validate_quality(
     samples: &[RawSample],
-    summary: &ResultSummary,
-    quality: &QualityEvidence,
+    summary: &WireSummary<'_>,
+    quality: &WireQuality<'_>,
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
-    validate_schema(&quality.schema_version)?;
+    validate_schema(quality.schema_version)?;
     if quality.rubric_id != SEMANTIC_QUALITY_RUBRIC_ID {
         return Err(BundleError::UnsupportedRubricVersion);
     }
-    validate_availability(&quality.semantic_eligibility, limits)?;
-    validate_observation(&quality.precision_ppm, limits)?;
-    validate_observation(&quality.recall_ppm, limits)?;
-    validate_observation(&quality.expected_calibration_error_ppm, limits)?;
+    validate_wire_availability(&quality.semantic_eligibility, limits)?;
+    validate_wire_observation(&quality.precision_ppm, limits)?;
+    validate_wire_observation(&quality.recall_ppm, limits)?;
+    validate_wire_observation(&quality.expected_calibration_error_ppm, limits)?;
     if quality.unsupported_cases.len() > limits.max_manifest_entries {
         return Err(BundleError::LimitExceeded {
             resource: "unsupported_case_count",
@@ -675,71 +1424,115 @@ fn validate_quality(
         validate_label(category, limits)?;
     }
     let fact_eligibility = semantic_fact_eligibility(samples);
+    let precision = quality.precision_ppm.to_owned()?;
+    let recall = quality.recall_ppm.to_owned()?;
+    let calibration = quality.expected_calibration_error_ppm.to_owned()?;
     let expected = semantic_quality_eligibility_from_values(
         &fact_eligibility,
-        &quality.precision_ppm,
-        &quality.recall_ppm,
-        &quality.expected_calibration_error_ppm,
+        &precision,
+        &recall,
+        &calibration,
     );
-    if quality.semantic_eligibility != expected || summary.semantic_eligibility != expected {
+    if !quality.semantic_eligibility.matches(&expected)
+        || !summary.semantic_eligibility.matches(&expected)
+    {
         return Err(BundleError::ArtifactInvariantViolation);
     }
     Ok(())
 }
 
-fn validate_trajectories(
-    trajectories: &[AgentTrajectory],
-    _limits: BundleLimits,
-) -> Result<(), BundleError> {
-    if !trajectories.is_empty() {
-        return Err(BundleError::UnsupportedTrajectorySchema);
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy)]
-enum StringKind {
-    Text,
-    Digest,
-}
-
-fn validate_string_evidence(
-    value: &EvidenceValue<String>,
-    limits: BundleLimits,
-    kind: StringKind,
+fn validate_environment_value(
+    value: &WireEvidence<'_, &str>,
+    validate: impl FnOnce(&str) -> Result<(), BundleError>,
 ) -> Result<(), BundleError> {
     match value {
-        EvidenceValue::Observed { value } | EvidenceValue::Target { value } => match kind {
-            StringKind::Text => validate_text(value, limits),
-            StringKind::Digest => validate_digest(value),
-        },
-        EvidenceValue::Unavailable { reason_code } => validate_reason(reason_code, limits),
+        WireEvidence::Observed { value } => validate(value),
+        WireEvidence::Unavailable { reason_code } => validate_environment_reason(reason_code),
+        WireEvidence::Target { .. } => Err(BundleError::InvalidArtifactEncoding),
     }
 }
 
-fn validate_map_evidence(
-    value: &EvidenceValue<BTreeMap<String, String>>,
-    limits: BundleLimits,
-    value_kind: StringKind,
+fn validate_unavailable_environment<T>(value: &WireEvidence<'_, T>) -> Result<(), BundleError> {
+    match value {
+        WireEvidence::Unavailable { reason_code } => validate_environment_reason(reason_code),
+        WireEvidence::Observed { .. } | WireEvidence::Target { .. } => {
+            Err(BundleError::InvalidArtifactEncoding)
+        }
+    }
+}
+
+fn validate_environment_scalar<T>(value: &WireEvidence<'_, T>) -> Result<(), BundleError> {
+    match value {
+        WireEvidence::Observed { .. } => Ok(()),
+        WireEvidence::Unavailable { reason_code } => validate_environment_reason(reason_code),
+        WireEvidence::Target { .. } => Err(BundleError::InvalidArtifactEncoding),
+    }
+}
+
+fn validate_environment_map(
+    value: &WireEvidence<'_, FallibleMap<'_, &str>>,
+    expected_keys: &[&str],
+    validate_value: fn(&str) -> Result<(), BundleError>,
 ) -> Result<(), BundleError> {
     match value {
-        EvidenceValue::Observed { value } | EvidenceValue::Target { value } => {
-            if value.len() > limits.max_manifest_entries {
-                return Err(BundleError::LimitExceeded {
-                    resource: "evidence_map_entry_count",
-                });
+        WireEvidence::Observed { value } => {
+            if value.len() != expected_keys.len() || !value.keys().eq(expected_keys.iter().copied())
+            {
+                return Err(BundleError::InvalidArtifactEncoding);
             }
-            for (key, mapped) in value {
-                validate_label(key, limits)?;
-                match value_kind {
-                    StringKind::Text => validate_text(mapped, limits)?,
-                    StringKind::Digest => validate_digest(mapped)?,
-                }
+            for (_, mapped) in value.iter() {
+                validate_value(mapped)?;
             }
             Ok(())
         }
-        EvidenceValue::Unavailable { reason_code } => validate_reason(reason_code, limits),
+        WireEvidence::Unavailable { reason_code } => validate_environment_reason(reason_code),
+        WireEvidence::Target { .. } => Err(BundleError::InvalidArtifactEncoding),
     }
+}
+
+fn validate_environment_reason(value: &str) -> Result<(), BundleError> {
+    if matches!(
+        value,
+        "not_sampled"
+            | "not_in_scope"
+            | "host_inventory_not_collected"
+            | "sqlite_not_in_scope"
+            | "background_process_policy_not_recorded"
+            | "platform_process_tree_sampler_not_integrated"
+    ) {
+        Ok(())
+    } else {
+        Err(BundleError::InvalidArtifactEncoding)
+    }
+}
+
+fn validate_compiler_token(value: &str) -> Result<(), BundleError> {
+    let release = value
+        .strip_prefix("rustc-")
+        .ok_or(BundleError::InvalidArtifactEncoding)?;
+    validate_version_token(release)
+}
+
+fn validate_version_token(value: &str) -> Result<(), BundleError> {
+    let mut components = value.split('.');
+    if value.len() > 64 {
+        return Err(BundleError::InvalidArtifactEncoding);
+    }
+    for _ in 0..3 {
+        let component = components
+            .next()
+            .ok_or(BundleError::InvalidArtifactEncoding)?;
+        if component.is_empty()
+            || !component.bytes().all(|byte| byte.is_ascii_digit())
+            || (component.len() > 1 && component.starts_with('0'))
+        {
+            return Err(BundleError::InvalidArtifactEncoding);
+        }
+    }
+    if components.next().is_some() {
+        return Err(BundleError::InvalidArtifactEncoding);
+    }
+    Ok(())
 }
 
 fn validate_observation<T>(
@@ -753,25 +1546,25 @@ fn validate_observation<T>(
     }
 }
 
-fn validate_evidence_reason<T>(
-    value: &EvidenceValue<T>,
+fn validate_wire_observation<T>(
+    value: &WireEvidence<'_, T>,
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
-    if let EvidenceValue::Unavailable { reason_code } = value {
-        validate_reason(reason_code, limits)?;
+    match value {
+        WireEvidence::Observed { .. } => Ok(()),
+        WireEvidence::Unavailable { reason_code } => validate_reason(reason_code, limits),
+        WireEvidence::Target { .. } => Err(BundleError::ArtifactInvariantViolation),
     }
-    Ok(())
 }
 
-fn validate_availability(
-    availability: &Availability,
+fn validate_wire_availability(
+    availability: &WireAvailability<'_>,
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
     match availability {
-        Availability::Available => Ok(()),
-        Availability::Failed { reason_code } | Availability::Unavailable { reason_code } => {
-            validate_reason(reason_code, limits)
-        }
+        WireAvailability::Available => Ok(()),
+        WireAvailability::Failed { reason_code }
+        | WireAvailability::Unavailable { reason_code } => validate_reason(reason_code, limits),
     }
 }
 
@@ -782,19 +1575,19 @@ fn validate_schema(schema: &str) -> Result<(), BundleError> {
     Ok(())
 }
 
-fn validate_sorted_labels(values: &[String], limits: BundleLimits) -> Result<(), BundleError> {
+fn validate_sorted_wire_labels(values: &[&str], limits: BundleLimits) -> Result<(), BundleError> {
     if values.len() > limits.max_command_arguments {
         return Err(BundleError::LimitExceeded {
             resource: "feature_count",
         });
     }
-    let mut prior: Option<&str> = None;
+    let mut prior = None;
     for value in values {
         validate_label(value, limits)?;
-        if prior.is_some_and(|previous| value.as_str() <= previous) {
+        if prior.is_some_and(|previous| *value <= previous) {
             return Err(BundleError::ArtifactInvariantViolation);
         }
-        prior = Some(value);
+        prior = Some(*value);
     }
     Ok(())
 }
@@ -813,16 +1606,6 @@ fn validate_label(value: &str, limits: BundleLimits) -> Result<(), BundleError> 
 
 fn validate_reason(value: &str, limits: BundleLimits) -> Result<(), BundleError> {
     validate_label(value, limits)
-}
-
-fn validate_text(value: &str, limits: BundleLimits) -> Result<(), BundleError> {
-    if value.is_empty()
-        || value.len() > limits.max_string_bytes
-        || value.chars().any(char::is_control)
-    {
-        return Err(BundleError::InvalidArtifactEncoding);
-    }
-    Ok(())
 }
 
 fn validate_digest(value: &str) -> Result<(), BundleError> {
@@ -861,4 +1644,65 @@ fn hex_digest(digest: impl AsRef<[u8]>) -> String {
         let _ = write!(output, "{byte:02x}");
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decoded_retention_budget_is_shared_and_monotonic() {
+        let mut budget = FixedDecodeBudget {
+            retained_bytes: 0,
+            retained_items: 0,
+            max_retained_bytes: 3,
+            max_retained_items: 2,
+        };
+        budget
+            .inspect_json(br#""ab""#)
+            .expect("first borrowed string fits");
+        assert!(matches!(
+            budget.inspect_json(br#""cd""#),
+            Err(BundleError::LimitExceeded {
+                resource: "decoded_retained_bytes"
+            })
+        ));
+
+        let mut item_budget = FixedDecodeBudget {
+            retained_bytes: 0,
+            retained_items: 0,
+            max_retained_bytes: 64,
+            max_retained_items: 2,
+        };
+        assert!(matches!(
+            item_budget.inspect_json(br#"[0,1,2]"#),
+            Err(BundleError::LimitExceeded {
+                resource: "decoded_retained_items"
+            })
+        ));
+    }
+
+    #[test]
+    fn borrowed_fixed_decoding_rejects_escapes_and_reports_reservation_failure() {
+        let mut budget = FixedDecodeBudget {
+            retained_bytes: 0,
+            retained_items: 0,
+            max_retained_bytes: 64,
+            max_retained_items: 64,
+        };
+        assert!(matches!(
+            budget.inspect_json(br#""source\u002fsecret""#),
+            Err(BundleError::InvalidArtifactEncoding)
+        ));
+
+        DECODE_RESERVATION_FAIL_AFTER.with(|remaining| remaining.set(Some(0)));
+        let decoded = serde_json::from_slice::<FallibleMap<'_, u64>>(br#"{"entry":1}"#);
+        DECODE_RESERVATION_FAIL_AFTER.with(|remaining| remaining.set(None));
+        let error = decoded.expect_err("injected collection reservation is reported");
+        assert!(
+            error
+                .to_string()
+                .starts_with("injected fixed-artifact reservation failure")
+        );
+    }
 }
