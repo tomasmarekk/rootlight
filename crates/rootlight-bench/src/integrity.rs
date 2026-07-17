@@ -3,7 +3,7 @@
 //! The same bounded wire checks protect publication and later verification so
 //! checksums cannot legitimize internally contradictory benchmark evidence.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::de::DeserializeOwned;
 use sha2::{Digest as _, Sha256};
@@ -13,13 +13,15 @@ use crate::bundle::{
     DATASET_MANIFEST_FILE, ENVIRONMENT_FILE, QUALITY_FILE, RAW_SAMPLES_FILE, SUMMARY_FILE,
     json_bytes, json_lines,
 };
-use crate::parser::{semantic_fact_eligibility, semantic_quality_eligibility};
+use crate::parser::{
+    ScheduledSample, build_schedule, outlier_fences, semantic_fact_eligibility,
+    semantic_quality_eligibility, summarize,
+};
 use crate::{
-    AgentTrajectory, Availability, BenchmarkCommand, BuildProvenance, BundleLimits,
-    CoverageEvidence, DatasetManifest, EnvironmentEvidence, EvidenceValue, MetricDistribution,
-    QualityEvidence, RESULT_BUNDLE_SCHEMA_VERSION, RawSample, ResultSummary,
-    SEMANTIC_QUALITY_RUBRIC_ID, SampleOutcome, SemanticQualityMeasurement,
-    decode_benchmark_command, decode_dataset_manifest,
+    AgentTrajectory, Availability, BuildProvenance, BundleLimits, CoverageEvidence,
+    DatasetManifest, EnvironmentEvidence, EvidenceValue, MetricDistribution, QualityEvidence,
+    RESULT_BUNDLE_SCHEMA_VERSION, RawSample, ResultSummary, SEMANTIC_QUALITY_RUBRIC_ID,
+    SampleOutcome, SemanticQualityMeasurement, decode_benchmark_command, decode_dataset_manifest,
 };
 
 const FIXED_ARTIFACTS: [&str; 9] = [
@@ -39,7 +41,7 @@ struct FixedArtifacts {
     environment: EnvironmentEvidence,
     dataset_manifest: DatasetManifest,
     build_provenance: BuildProvenance,
-    command: BenchmarkCommand,
+    schedule: Vec<ScheduledSample>,
     raw_samples: Vec<RawSample>,
     summary: ResultSummary,
     coverage: CoverageEvidence,
@@ -83,17 +85,25 @@ where
     validate_json_bytes(command_bytes, limits)?;
     let command = decode_benchmark_command(command_bytes, limits).map_err(map_decode_error)?;
     validate_canonical_json(command_bytes, &command, limits)?;
+    let schedule = build_schedule(
+        dataset_manifest.entries.len(),
+        command.warmup_rounds,
+        command.trial_rounds,
+        command.seed,
+        limits.max_raw_samples,
+    )
+    .map_err(map_parser_integrity_error)?;
     Ok(FixedArtifacts {
         environment: decode_json(fixed_bytes(artifacts, ENVIRONMENT_FILE)?, limits)?,
         dataset_manifest,
         build_provenance: decode_json(fixed_bytes(artifacts, BUILD_PROVENANCE_FILE)?, limits)?,
-        command,
         raw_samples: decode_json_lines(
             fixed_bytes(artifacts, RAW_SAMPLES_FILE)?,
-            limits.max_raw_samples,
+            schedule.len(),
             limits,
             "raw_sample_count",
         )?,
+        schedule,
         summary: decode_json(fixed_bytes(artifacts, SUMMARY_FILE)?, limits)?,
         coverage: decode_json(fixed_bytes(artifacts, COVERAGE_FILE)?, limits)?,
         quality: decode_json(fixed_bytes(artifacts, QUALITY_FILE)?, limits)?,
@@ -223,13 +233,20 @@ fn map_decode_error(error: crate::DecodeError) -> BundleError {
     }
 }
 
+fn map_parser_integrity_error(error: crate::ParserRunError) -> BundleError {
+    match error {
+        crate::ParserRunError::AllocationFailed => BundleError::AllocationFailed,
+        _ => BundleError::ArtifactInvariantViolation,
+    }
+}
+
 fn validate_fixed_bundle(fixed: &FixedArtifacts, limits: BundleLimits) -> Result<(), BundleError> {
     validate_environment(&fixed.environment, limits)?;
     validate_manifest_revision(&fixed.dataset_manifest)?;
     validate_build_provenance(&fixed.environment, &fixed.build_provenance, limits)?;
     validate_samples(
         &fixed.dataset_manifest,
-        &fixed.command,
+        &fixed.schedule,
         &fixed.raw_samples,
         limits,
     )?;
@@ -319,32 +336,14 @@ fn validate_build_provenance(
 
 fn validate_samples(
     manifest: &DatasetManifest,
-    command: &BenchmarkCommand,
+    schedule: &[ScheduledSample],
     samples: &[RawSample],
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
-    let rounds = usize::try_from(
-        command
-            .warmup_rounds
-            .checked_add(command.trial_rounds)
-            .ok_or(BundleError::ArtifactInvariantViolation)?,
-    )
-    .map_err(|_| BundleError::ArtifactInvariantViolation)?;
-    let expected_count = manifest
-        .entries
-        .len()
-        .checked_mul(rounds)
-        .ok_or(BundleError::ArtifactInvariantViolation)?;
-    if samples.len() != expected_count {
+    if samples.len() != schedule.len() {
         return Err(BundleError::ArtifactInvariantViolation);
     }
-    let entries = manifest
-        .entries
-        .iter()
-        .map(|entry| (entry.id.as_str(), entry))
-        .collect::<BTreeMap<_, _>>();
-    let mut phase_counts = BTreeMap::<(&str, &str), usize>::new();
-    for (ordinal, sample) in samples.iter().enumerate() {
+    for (ordinal, (sample, scheduled)) in samples.iter().zip(schedule).enumerate() {
         validate_schema(&sample.schema_version)?;
         let expected_ordinal =
             u64::try_from(ordinal).map_err(|_| BundleError::ArtifactInvariantViolation)?;
@@ -356,10 +355,13 @@ fn validate_samples(
         if !matches!(sample.phase.as_str(), "warmup" | "trial") {
             return Err(BundleError::InvalidArtifactEncoding);
         }
-        let entry = entries
-            .get(sample.dataset_entry_id.as_str())
+        let entry = manifest
+            .entries
+            .get(scheduled.input_index)
             .ok_or(BundleError::ArtifactInvariantViolation)?;
-        if sample.grammar_family != entry.grammar_family
+        if sample.phase != scheduled.phase.as_str()
+            || sample.dataset_entry_id != entry.id
+            || sample.grammar_family != entry.grammar_family
             || sample.source_bytes != entry.source_bytes
             || sample.physical_lines != entry.physical_lines
         {
@@ -369,28 +371,6 @@ fn validate_samples(
         validate_observation(&sample.process_tree_cpu_ns, limits)?;
         validate_observation(&sample.process_tree_peak_rss_bytes, limits)?;
         validate_sample_outcome(sample, limits)?;
-        *phase_counts
-            .entry((sample.phase.as_str(), sample.dataset_entry_id.as_str()))
-            .or_default() += 1;
-    }
-    let warmup_rounds = usize::try_from(command.warmup_rounds)
-        .map_err(|_| BundleError::ArtifactInvariantViolation)?;
-    let trial_rounds = usize::try_from(command.trial_rounds)
-        .map_err(|_| BundleError::ArtifactInvariantViolation)?;
-    for entry in &manifest.entries {
-        if phase_counts
-            .get(&("warmup", entry.id.as_str()))
-            .copied()
-            .unwrap_or(0)
-            != warmup_rounds
-            || phase_counts
-                .get(&("trial", entry.id.as_str()))
-                .copied()
-                .unwrap_or(0)
-                != trial_rounds
-        {
-            return Err(BundleError::ArtifactInvariantViolation);
-        }
     }
     Ok(())
 }
@@ -427,64 +407,31 @@ fn validate_summary(
             resource: "summary_family_count",
         });
     }
-    let mut family_counts = BTreeMap::<&str, (u64, u64)>::new();
-    let mut failed = 0_u64;
-    let mut timed_out = 0_u64;
-    let mut cancelled = 0_u64;
-    for sample in samples.iter().filter(|sample| sample.phase == "trial") {
-        match sample.outcome {
-            SampleOutcome::Succeeded => {
-                let counts = family_counts
-                    .entry(sample.grammar_family.as_str())
-                    .or_default();
-                counts.0 = counts
-                    .0
-                    .checked_add(1)
-                    .ok_or(BundleError::ArtifactInvariantViolation)?;
-                counts.1 = counts
-                    .1
-                    .checked_add(u64::from(sample.is_outlier))
-                    .ok_or(BundleError::ArtifactInvariantViolation)?;
-            }
-            SampleOutcome::Failed { .. } => {
-                failed = failed
-                    .checked_add(1)
-                    .ok_or(BundleError::ArtifactInvariantViolation)?;
-            }
-            SampleOutcome::TimedOut => {
-                timed_out = timed_out
-                    .checked_add(1)
-                    .ok_or(BundleError::ArtifactInvariantViolation)?;
-            }
-            SampleOutcome::Cancelled => {
-                cancelled = cancelled
-                    .checked_add(1)
-                    .ok_or(BundleError::ArtifactInvariantViolation)?;
-            }
-        }
-    }
-    let expected_families = family_counts.keys().copied().collect::<BTreeSet<_>>();
-    let actual_families = summary
-        .families
-        .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    if expected_families != actual_families
-        || summary.failed_samples != failed
-        || summary.timed_out_samples != timed_out
-        || summary.cancelled_samples != cancelled
-    {
-        return Err(BundleError::ArtifactInvariantViolation);
-    }
     for (family, distribution) in &summary.families {
         validate_label(family, limits)?;
         validate_distribution(distribution, limits)?;
-        let expected = family_counts
-            .get(family.as_str())
-            .ok_or(BundleError::ArtifactInvariantViolation)?;
-        if distribution.sample_count != expected.0 || distribution.outlier_count != expected.1 {
+    }
+    let fences = outlier_fences(samples).map_err(map_parser_integrity_error)?;
+    for sample in samples {
+        let expected =
+            if sample.phase == "trial" && matches!(sample.outcome, SampleOutcome::Succeeded) {
+                fences
+                    .get(&sample.grammar_family)
+                    .is_some_and(|(lower, upper)| {
+                        let elapsed = u128::from(sample.elapsed_ns);
+                        elapsed < *lower || elapsed > *upper
+                    })
+            } else {
+                false
+            };
+        if sample.is_outlier != expected {
             return Err(BundleError::ArtifactInvariantViolation);
         }
+    }
+    let expected = summarize(samples, summary.semantic_eligibility.clone())
+        .map_err(map_parser_integrity_error)?;
+    if *summary != expected {
+        return Err(BundleError::ArtifactInvariantViolation);
     }
     Ok(())
 }

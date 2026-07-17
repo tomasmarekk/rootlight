@@ -128,7 +128,10 @@ where
         config.seed,
         limits.max_raw_samples,
     )?;
-    let mut raw_samples = Vec::with_capacity(schedule.len());
+    let mut raw_samples = Vec::new();
+    raw_samples
+        .try_reserve_exact(schedule.len())
+        .map_err(|_| ParserRunError::AllocationFailed)?;
     let mut entry_status = BTreeMap::new();
     for (ordinal, scheduled) in schedule.into_iter().enumerate() {
         let input = inputs
@@ -202,13 +205,13 @@ where
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SamplePhase {
+pub(crate) enum SamplePhase {
     Warmup,
     Trial,
 }
 
 impl SamplePhase {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Warmup => "warmup",
             Self::Trial => "trial",
@@ -217,9 +220,9 @@ impl SamplePhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ScheduledSample {
-    phase: SamplePhase,
-    input_index: usize,
+pub(crate) struct ScheduledSample {
+    pub(crate) phase: SamplePhase,
+    pub(crate) input_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -427,7 +430,7 @@ fn validate_source_digest(value: &str) -> Result<(), ParserRunError> {
     Ok(())
 }
 
-fn build_schedule(
+pub(crate) fn build_schedule(
     input_count: usize,
     warmup_rounds: u32,
     trial_rounds: u32,
@@ -445,7 +448,10 @@ fn build_schedule(
     if capacity > max_samples {
         return Err(ParserRunError::TooManySamples);
     }
-    let mut schedule = Vec::with_capacity(capacity);
+    let mut schedule = Vec::new();
+    schedule
+        .try_reserve_exact(capacity)
+        .map_err(|_| ParserRunError::AllocationFailed)?;
     let mut random = SplitMix64::new(seed);
     for round in 0..total_rounds {
         let phase = if round < warmup_rounds {
@@ -453,7 +459,11 @@ fn build_schedule(
         } else {
             SamplePhase::Trial
         };
-        let mut indices = (0..input_count).collect::<Vec<_>>();
+        let mut indices = Vec::new();
+        indices
+            .try_reserve_exact(input_count)
+            .map_err(|_| ParserRunError::AllocationFailed)?;
+        indices.extend(0..input_count);
         seeded_shuffle(&mut indices, &mut random)?;
         schedule.extend(
             indices
@@ -558,17 +568,34 @@ fn sample_from_result<E: SemanticFactProbe + ?Sized>(
     })
 }
 
-fn mark_outliers(samples: &mut [RawSample]) -> Result<(), ParserRunError> {
+pub(crate) fn mark_outliers(samples: &mut [RawSample]) -> Result<(), ParserRunError> {
+    let fences = outlier_fences(samples)?;
+    for sample in samples {
+        if sample.phase == "trial"
+            && matches!(sample.outcome, SampleOutcome::Succeeded)
+            && let Some((lower, upper)) = fences.get(&sample.grammar_family)
+        {
+            let elapsed = u128::from(sample.elapsed_ns);
+            sample.is_outlier = elapsed < *lower || elapsed > *upper;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn outlier_fences(
+    samples: &[RawSample],
+) -> Result<BTreeMap<String, (u128, u128)>, ParserRunError> {
     let mut families = BTreeMap::<String, Vec<u64>>::new();
     for sample in samples.iter().filter(|sample| {
         sample.phase == "trial" && matches!(sample.outcome, SampleOutcome::Succeeded)
     }) {
-        families
-            .entry(sample.grammar_family.clone())
-            .or_default()
-            .push(sample.elapsed_ns);
+        let durations = families.entry(sample.grammar_family.clone()).or_default();
+        durations
+            .try_reserve(1)
+            .map_err(|_| ParserRunError::AllocationFailed)?;
+        durations.push(sample.elapsed_ns);
     }
-    let fences = families
+    families
         .into_iter()
         .map(|(family, mut durations)| {
             durations.sort_unstable();
@@ -589,20 +616,10 @@ fn mark_outliers(samples: &mut [RawSample]) -> Result<(), ParserRunError> {
                 .ok_or(ParserRunError::MetricOverflow)?;
             Ok((family, (lower, upper)))
         })
-        .collect::<Result<BTreeMap<_, _>, ParserRunError>>()?;
-    for sample in samples {
-        if sample.phase == "trial"
-            && matches!(sample.outcome, SampleOutcome::Succeeded)
-            && let Some((lower, upper)) = fences.get(&sample.grammar_family)
-        {
-            let elapsed = u128::from(sample.elapsed_ns);
-            sample.is_outlier = elapsed < *lower || elapsed > *upper;
-        }
-    }
-    Ok(())
+        .collect::<Result<BTreeMap<_, _>, ParserRunError>>()
 }
 
-fn summarize(
+pub(crate) fn summarize(
     samples: &[RawSample],
     semantic_eligibility: Availability,
 ) -> Result<ResultSummary, ParserRunError> {
@@ -612,10 +629,13 @@ fn summarize(
     let mut cancelled_samples = 0_u64;
     for sample in samples.iter().filter(|sample| sample.phase == "trial") {
         match sample.outcome {
-            SampleOutcome::Succeeded => grouped
-                .entry(sample.grammar_family.clone())
-                .or_default()
-                .push(sample),
+            SampleOutcome::Succeeded => {
+                let family_samples = grouped.entry(sample.grammar_family.clone()).or_default();
+                family_samples
+                    .try_reserve(1)
+                    .map_err(|_| ParserRunError::AllocationFailed)?;
+                family_samples.push(sample);
+            }
             SampleOutcome::Failed { .. } => {
                 failed_samples = failed_samples
                     .checked_add(1)
@@ -652,24 +672,22 @@ fn summarize(
 }
 
 pub(crate) fn semantic_fact_eligibility(samples: &[RawSample]) -> Availability {
-    let trials = samples
-        .iter()
-        .filter(|sample| sample.phase == "trial")
-        .collect::<Vec<_>>();
-    if trials.is_empty() {
+    let mut trials = samples.iter().filter(|sample| sample.phase == "trial");
+    let Some(first_trial) = trials.next() else {
         return Availability::Failed {
             reason_code: "no_measured_samples".to_owned(),
         };
-    }
+    };
+    let mut trials = std::iter::once(first_trial).chain(trials);
     if trials
-        .iter()
+        .clone()
         .any(|sample| !matches!(sample.outcome, SampleOutcome::Succeeded))
     {
         return Availability::Failed {
             reason_code: "incomplete_measured_run".to_owned(),
         };
     }
-    if trials.iter().any(|sample| {
+    if trials.clone().any(|sample| {
         matches!(
             sample.semantic_facts,
             EvidenceValue::Unavailable { .. } | EvidenceValue::Target { .. }
@@ -679,10 +697,7 @@ pub(crate) fn semantic_fact_eligibility(samples: &[RawSample]) -> Availability {
             reason_code: "semantic_extraction_not_integrated".to_owned(),
         };
     }
-    if trials
-        .iter()
-        .any(|sample| matches!(sample.semantic_facts, EvidenceValue::Observed { value: 0 }))
-    {
+    if trials.any(|sample| matches!(sample.semantic_facts, EvidenceValue::Observed { value: 0 })) {
         return Availability::Failed {
             reason_code: "semantic_facts_empty".to_owned(),
         };
@@ -742,10 +757,11 @@ pub(crate) fn semantic_quality_eligibility(
 }
 
 fn distribution(samples: &[&RawSample]) -> Result<MetricDistribution, ParserRunError> {
-    let mut durations = samples
-        .iter()
-        .map(|sample| sample.elapsed_ns)
-        .collect::<Vec<_>>();
+    let mut durations = Vec::new();
+    durations
+        .try_reserve_exact(samples.len())
+        .map_err(|_| ParserRunError::AllocationFailed)?;
+    durations.extend(samples.iter().map(|sample| sample.elapsed_ns));
     durations.sort_unstable();
     let elapsed = checked_sum(samples, |sample| sample.elapsed_ns)?;
     let lines = checked_sum(samples, |sample| sample.physical_lines)?;
@@ -966,6 +982,9 @@ pub enum ParserRunError {
     /// A retained metric or counter is not representable.
     #[error("parser benchmark metric is not representable")]
     MetricOverflow,
+    /// A bounded in-memory reservation could not be satisfied.
+    #[error("parser benchmark allocation failed")]
+    AllocationFailed,
     /// An internal schedule referred outside the validated dataset.
     #[error("parser benchmark schedule invariant failed")]
     ScheduleInvariant,

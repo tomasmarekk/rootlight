@@ -1406,7 +1406,7 @@ mod tests {
                 timed_out_samples: 0,
                 cancelled_samples: 0,
                 confidence_intervals: Availability::Unavailable {
-                    reason_code: "insufficient_samples".to_owned(),
+                    reason_code: "bootstrap_confidence_interval_not_integrated".to_owned(),
                 },
             },
             coverage: CoverageEvidence {
@@ -1431,6 +1431,108 @@ mod tests {
             profiles: BTreeMap::new(),
             logs: BTreeMap::new(),
         }
+    }
+
+    fn scheduled_fixture() -> ResultBundle {
+        let mut bundle = fixture();
+        bundle.dataset_manifest.entries = vec![
+            crate::DatasetEntry {
+                id: "entry-a".to_owned(),
+                grammar_family: "rust".to_owned(),
+                language: "rust".to_owned(),
+                relative_path: "a.rs".to_owned(),
+                source_sha256: "11".repeat(32),
+                source_bytes: 10,
+                physical_lines: 1,
+                generated: false,
+            },
+            crate::DatasetEntry {
+                id: "entry-b".to_owned(),
+                grammar_family: "python".to_owned(),
+                language: "python".to_owned(),
+                relative_path: "b.py".to_owned(),
+                source_sha256: "22".repeat(32),
+                source_bytes: 20,
+                physical_lines: 2,
+                generated: false,
+            },
+        ];
+        let mut revision = Sha256::new();
+        for entry in &bundle.dataset_manifest.entries {
+            revision.update(
+                u64::try_from(entry.id.len())
+                    .expect("test ID length fits")
+                    .to_be_bytes(),
+            );
+            revision.update(entry.id.as_bytes());
+            revision.update(
+                u64::try_from(entry.source_sha256.len())
+                    .expect("test digest length fits")
+                    .to_be_bytes(),
+            );
+            revision.update(entry.source_sha256.as_bytes());
+        }
+        let mut revision_hex = String::from("sha256:");
+        for byte in revision.finalize() {
+            use std::fmt::Write as _;
+            write!(revision_hex, "{byte:02x}").expect("writing to a string succeeds");
+        }
+        bundle.dataset_manifest.revision = revision_hex;
+        bundle.command.seed = 17;
+        bundle.command.warmup_rounds = 1;
+        bundle.command.trial_rounds = 2;
+        let schedule = crate::parser::build_schedule(
+            bundle.dataset_manifest.entries.len(),
+            bundle.command.warmup_rounds,
+            bundle.command.trial_rounds,
+            bundle.command.seed,
+            BundleLimits::default().max_raw_samples,
+        )
+        .expect("test schedule is valid");
+        bundle.raw_samples = schedule
+            .iter()
+            .enumerate()
+            .map(|(ordinal, scheduled)| {
+                let entry = &bundle.dataset_manifest.entries[scheduled.input_index];
+                RawSample {
+                    schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
+                    ordinal: u64::try_from(ordinal).expect("test ordinal fits"),
+                    phase: scheduled.phase.as_str().to_owned(),
+                    dataset_entry_id: entry.id.clone(),
+                    grammar_family: entry.grammar_family.clone(),
+                    elapsed_ns: u64::try_from(ordinal + 1).expect("test elapsed time fits") * 100,
+                    source_bytes: entry.source_bytes,
+                    physical_lines: entry.physical_lines,
+                    syntax_nodes: 4,
+                    syntax_facts: 2,
+                    semantic_facts: EvidenceValue::unavailable(
+                        "semantic_extraction_not_integrated",
+                    ),
+                    process_tree_cpu_ns: EvidenceValue::unavailable("not_measured"),
+                    process_tree_peak_rss_bytes: EvidenceValue::unavailable("not_measured"),
+                    outcome: crate::SampleOutcome::Succeeded,
+                    is_outlier: false,
+                }
+            })
+            .collect();
+        crate::parser::mark_outliers(&mut bundle.raw_samples)
+            .expect("test outliers are representable");
+        let semantic_eligibility = crate::parser::semantic_fact_eligibility(&bundle.raw_samples);
+        bundle.summary =
+            crate::parser::summarize(&bundle.raw_samples, semantic_eligibility.clone())
+                .expect("test summary is representable");
+        bundle.coverage = CoverageEvidence {
+            schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
+            attempted_entries: 2,
+            committed_entries: 2,
+            skipped: BTreeMap::new(),
+            parser_status: BTreeMap::from([
+                ("entry-a".to_owned(), "succeeded".to_owned()),
+                ("entry-b".to_owned(), "succeeded".to_owned()),
+            ]),
+        };
+        bundle.quality.semantic_eligibility = semantic_eligibility;
+        bundle
     }
 
     fn constrained_limits() -> BundleLimits {
@@ -1632,10 +1734,22 @@ mod tests {
             let error =
                 verify_bundle(&destination).expect_err("invalid fixed artifact is rejected");
 
-            assert!(
-                matches!(error, BundleError::InvalidArtifactEncoding),
-                "{artifact} returned {error:?}"
-            );
+            if artifact == RAW_SAMPLES_FILE {
+                assert!(
+                    matches!(
+                        error,
+                        BundleError::LimitExceeded {
+                            resource: "raw_sample_count"
+                        }
+                    ),
+                    "{artifact} returned {error:?}"
+                );
+            } else {
+                assert!(
+                    matches!(error, BundleError::InvalidArtifactEncoding),
+                    "{artifact} returned {error:?}"
+                );
+            }
         }
     }
 
@@ -1826,6 +1940,74 @@ mod tests {
                 &invalid_availability,
                 &temporary.path().join("availability")
             ),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+    }
+
+    #[test]
+    fn publication_reconstructs_seeded_schedule_order() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let bundle = scheduled_fixture();
+        publish_bundle(&bundle, &temporary.path().join("valid"))
+            .expect("scheduled fixture publishes");
+        let mut reordered = bundle;
+        reordered.raw_samples.swap(0, 1);
+        reordered.raw_samples[0].ordinal = 0;
+        reordered.raw_samples[1].ordinal = 1;
+
+        let error = publish_bundle(&reordered, &temporary.path().join("reordered"))
+            .expect_err("reordered samples are rejected");
+
+        assert!(matches!(error, BundleError::ArtifactInvariantViolation));
+    }
+
+    #[test]
+    fn publication_recomputes_distributions_rates_outliers_and_confidence() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let bundle = scheduled_fixture();
+
+        let mut percentile = bundle.clone();
+        let distribution = percentile
+            .summary
+            .families
+            .values_mut()
+            .next()
+            .expect("fixture has a family");
+        distribution.p50_ns = EvidenceValue::observed(999_999);
+        assert!(matches!(
+            publish_bundle(&percentile, &temporary.path().join("percentile")),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+
+        let mut rate = bundle.clone();
+        let distribution = rate
+            .summary
+            .families
+            .values_mut()
+            .next()
+            .expect("fixture has a family");
+        distribution.files_per_second = EvidenceValue::observed(999_999);
+        assert!(matches!(
+            publish_bundle(&rate, &temporary.path().join("rate")),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+
+        let mut outlier = bundle.clone();
+        let trial = outlier
+            .raw_samples
+            .iter_mut()
+            .find(|sample| sample.phase == "trial")
+            .expect("fixture has a measured sample");
+        trial.is_outlier = !trial.is_outlier;
+        assert!(matches!(
+            publish_bundle(&outlier, &temporary.path().join("outlier")),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+
+        let mut confidence = bundle;
+        confidence.summary.confidence_intervals = Availability::Available;
+        assert!(matches!(
+            publish_bundle(&confidence, &temporary.path().join("confidence")),
             Err(BundleError::ArtifactInvariantViolation)
         ));
     }
