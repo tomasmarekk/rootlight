@@ -10,8 +10,9 @@ mod decode;
 mod model;
 
 pub use bundle::{
-    BundleError, BundleLimits, ResultBundle, SourceFreeLog, publish_bundle,
-    publish_bundle_with_limits, verify_bundle, verify_bundle_with_limits,
+    BundleError, BundleLimits, OperationalEvent, OperationalLog, OperationalLogRecord,
+    OperationalStatus, ResultBundle, publish_bundle, publish_bundle_with_limits, verify_bundle,
+    verify_bundle_with_limits,
 };
 pub use decode::{DecodeError, decode_benchmark_command, decode_dataset_manifest};
 pub use model::{
