@@ -239,7 +239,7 @@ impl RuntimePaths {
     ///
     /// Returns [`RuntimeError`] when handle metadata, ownership, permissions, reparse-point,
     /// or Windows DACL validation fails.
-    pub fn secure_private_output_file(file: &mut File) -> Result<(), RuntimeError> {
+    fn secure_private_output_file(file: &mut File) -> Result<(), RuntimeError> {
         let metadata = file.metadata().map_err(RuntimeError::Io)?;
         if !metadata.file_type().is_file() {
             return Err(RuntimeError::InsecureOutputFile);
@@ -411,6 +411,13 @@ impl RuntimePaths {
 ///
 /// On macOS, content is staged behind a sanitized descriptor-anchored directory boundary and
 /// published with an atomic no-replace rename. Other platforms retain direct exclusive creation.
+/// The outer macOS directory can briefly inherit an ACL, but it contains no archive bytes; content
+/// is created only inside an owner-private directory made after descriptor-bound ACL removal.
+///
+/// macOS publication fails closed when `/bin/chmod -N /dev/fd/0`, two-link empty-directory
+/// semantics, no-replace rename, or directory synchronization are unavailable. The guarantee does
+/// not cover a hostile process running as the same effective user, and abnormal termination can
+/// leave an owner-private staging tree behind.
 #[derive(Debug)]
 pub struct PrivateOutputFile {
     file: File,
@@ -493,11 +500,8 @@ impl PrivateOutputFile {
 
         const STAGED_NAME: &str = "archive";
 
+        let destination_name = macos_output_name(path)?;
         let parent_path = output_parent(path)?;
-        let destination_name = path
-            .file_name()
-            .ok_or(RuntimeError::PrivateOutputSecurityPolicy)?
-            .to_os_string();
         let parent = File::from(
             rustix::fs::open(
                 parent_path,
@@ -597,7 +601,9 @@ impl PrivateOutputFile {
     ///
     /// Returns [`RuntimeError`] when file synchronization, exclusive publication, or required
     /// directory synchronization fails. A macOS destination collision is reported as
-    /// [`RuntimeError::Io`] with [`io::ErrorKind::AlreadyExists`].
+    /// [`RuntimeError::Io`] with [`io::ErrorKind::AlreadyExists`]. Once the macOS no-replace
+    /// rename succeeds, a later durability-sync error can be returned while the destination is
+    /// already visible.
     pub fn commit(mut self) -> Result<(), RuntimeError> {
         self.file.flush().map_err(RuntimeError::Io)?;
         self.file.sync_all().map_err(RuntimeError::Io)?;
@@ -663,6 +669,24 @@ fn output_parent(path: &Path) -> Result<&Path, RuntimeError> {
 }
 
 #[cfg(target_os = "macos")]
+fn macos_output_name(path: &Path) -> Result<std::ffi::OsString, RuntimeError> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let final_component = path
+        .as_os_str()
+        .as_bytes()
+        .rsplit(|byte| *byte == b'/')
+        .next()
+        .unwrap_or_default();
+    if final_component.is_empty() || final_component == b"." || final_component == b".." {
+        return Err(RuntimeError::PrivateOutputSecurityPolicy);
+    }
+    path.file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .ok_or(RuntimeError::PrivateOutputSecurityPolicy)
+}
+
+#[cfg(target_os = "macos")]
 fn runtime_io(source: rustix::io::Errno) -> RuntimeError {
     RuntimeError::Io(source.into())
 }
@@ -672,7 +696,7 @@ fn create_random_directory(
     parent: &File,
     prefix: &str,
 ) -> Result<std::ffi::OsString, RuntimeError> {
-    use rustix::fs::Mode;
+    use rustix::fs::{AtFlags, Mode};
 
     const ATTEMPTS: usize = 16;
     const RANDOM_BYTES: usize = 16;
@@ -688,7 +712,20 @@ fn create_random_directory(
                 .unwrap_or_else(|_| unreachable!("formatting into String cannot fail"));
         }
         match rustix::fs::mkdirat(parent, name.as_str(), Mode::RWXU) {
-            Ok(()) => return Ok(name.into()),
+            Ok(()) => {
+                // mkdirat applies the process umask, which can remove the owner permissions
+                // required to reopen the new directory for descriptor-bound hardening.
+                if let Err(source) = rustix::fs::chmodat(
+                    parent,
+                    name.as_str(),
+                    Mode::RWXU,
+                    AtFlags::SYMLINK_NOFOLLOW,
+                ) {
+                    let _ = rustix::fs::unlinkat(parent, name.as_str(), AtFlags::REMOVEDIR);
+                    return Err(runtime_io(source));
+                }
+                return Ok(name.into());
+            }
             Err(source) if source == rustix::io::Errno::EXIST => {}
             Err(source) => return Err(RuntimeError::Io(source.into())),
         }
@@ -1473,13 +1510,84 @@ mod tests {
         let path = temporary.path().join("support.zip");
         fs::write(&path, b"existing").expect("existing output writes");
 
-        let error = PrivateOutputFile::create(&path).expect_err("overwrite is refused");
+        let result = match PrivateOutputFile::create(&path) {
+            Ok(output) => output.commit(),
+            Err(error) => Err(error),
+        };
+        let error = result.expect_err("overwrite is refused");
 
         assert!(matches!(
             error,
             RuntimeError::Io(source) if source.kind() == io::ErrorKind::AlreadyExists
         ));
         assert_eq!(fs::read(path).expect("existing output reads"), b"existing");
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            fs::read_dir(temporary.path())
+                .expect("temporary directory reads")
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn private_output_transaction_rejects_directory_path_syntax() {
+        let temporary = private_tempdir();
+        for (requested, normalized) in [("trailing/", "trailing"), ("dot/.", "dot")] {
+            let path = temporary.path().join(requested);
+
+            assert!(matches!(
+                PrivateOutputFile::create(&path),
+                Err(RuntimeError::PrivateOutputSecurityPolicy)
+            ));
+            assert!(!temporary.path().join(normalized).exists());
+        }
+        assert_eq!(
+            fs::read_dir(temporary.path())
+                .expect("temporary directory reads")
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn private_output_transaction_tolerates_restrictive_umask() {
+        const CHILD_MARKER: &str = "ROOTLIGHT_TEST_RESTRICTIVE_OUTPUT_UMASK";
+        const TEST_NAME: &str = "tests::private_output_transaction_tolerates_restrictive_umask";
+
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let temporary = private_tempdir();
+            nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o777));
+            let path = temporary.path().join("support.zip");
+            let mut output = PrivateOutputFile::create(&path).expect("private output creates");
+            output.write_all(b"bundle").expect("private output writes");
+            output.commit().expect("private output publishes");
+
+            assert_eq!(fs::read(&path).expect("published output reads"), b"bundle");
+            assert_eq!(
+                fs::read_dir(temporary.path())
+                    .expect("temporary directory reads")
+                    .count(),
+                1
+            );
+            return;
+        }
+
+        let child = std::process::Command::new(
+            std::env::current_exe().expect("current test executable resolves"),
+        )
+        .args(["--exact", TEST_NAME, "--nocapture"])
+        .env(CHILD_MARKER, "1")
+        .output()
+        .expect("restrictive-umask child runs");
+        assert!(
+            child.status.success(),
+            "restrictive-umask child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
     }
 
     #[cfg(target_os = "macos")]
