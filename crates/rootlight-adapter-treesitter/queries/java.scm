@@ -4,6 +4,13 @@
 (program) @root
 [(package_declaration) (module_declaration)] @module
 
+(package_declaration
+  [(identifier) (scoped_identifier)] @definition
+  .)
+
+(module_declaration
+  name: [(identifier) (scoped_identifier)] @definition)
+
 [
   (class_declaration)
   (interface_declaration)
@@ -14,6 +21,7 @@
   (method_declaration)
   (constructor_declaration)
   (field_declaration)
+  (local_variable_declaration)
 ] @declaration
 
 [
