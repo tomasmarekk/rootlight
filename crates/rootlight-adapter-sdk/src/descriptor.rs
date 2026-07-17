@@ -12,6 +12,7 @@ use crate::error::{DescriptorError, LabelError, LabelField, LabelViolation};
 const MAX_CAPABILITY_ITEMS: usize = 128;
 const MAX_LANGUAGE_BYTES: usize = 64;
 const MAX_ENCODING_BYTES: usize = 32;
+const UTF8_ENCODING: &str = "utf-8";
 
 /// How an adapter enforces its advertised memory ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +88,12 @@ impl fmt::Display for LanguageId {
 pub struct EncodingId(String);
 
 impl EncodingId {
+    /// Creates the canonical UTF-8 encoding identity.
+    #[must_use]
+    pub fn utf8() -> Self {
+        Self(UTF8_ENCODING.to_owned())
+    }
+
     /// Creates a source-free encoding label.
     ///
     /// # Errors
