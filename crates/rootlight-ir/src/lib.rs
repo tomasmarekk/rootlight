@@ -3,6 +3,10 @@
 //! The frozen version 1.0 envelope remains available for compatibility. Version
 //! 1.1 adds language-neutral files, entities, occurrences, relations, provenance,
 //! source mappings, coverage, diagnostics, and extension envelopes.
+//! Untrusted exact-dispatch documents must enter through [`decode_ir_document`].
+//! The frozen [`IrDocumentSchema`] and record-level `Deserialize`
+//! implementations support schema and fixture composition but do not apply
+//! document-wide [`IrLimits`].
 
 #![forbid(unsafe_code)]
 
@@ -20,10 +24,11 @@ pub use lexical::{
 pub use normalized::{
     ContainerRef, CoverageRecord, CoverageScope, DiagnosticRecord, DiagnosticSeverity, EntityFlag,
     EntityKind, EntityRecord, EntityVisibility, ExtensionCriticality, ExtensionEnvelope,
-    FactDomain, FactEvidence, FactRef, FileRecord, IrDocument, NORMALIZED_IR_VERSION,
-    NormalizedIrDocument, NormalizedIrVersion, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
-    ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord,
-    SkippedRegion, SkippedRegionReason, SourceMappingKind, SourceMappingRecord,
+    FactDomain, FactEvidence, FactRef, FileRecord, IrDocument, IrDocumentDecodeError,
+    NORMALIZED_IR_VERSION, NormalizedIrDocument, NormalizedIrVersion, OccurrenceRecord,
+    OccurrenceRole, OccurrenceTarget, ProducerKind, ProvenanceRecord, RelationEndpoint,
+    RelationPredicate, RelationRecord, SkippedRegion, SkippedRegionReason, SourceMappingKind,
+    SourceMappingRecord, decode_ir_document,
 };
 pub use validation::{
     ExtensionIdentifier, ExtensionSupport, IrDocumentValidationError, IrLimits,
