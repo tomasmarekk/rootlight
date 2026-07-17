@@ -19,8 +19,10 @@ pub use bundle::{
 pub use decode::{DecodeError, decode_benchmark_command, decode_dataset_manifest};
 pub use model::{
     AgentTrajectory, Availability, BenchmarkCommand, BuildProvenance, CoverageEvidence,
-    DatasetEntry, DatasetManifest, EnvironmentEvidence, EvidenceValue, MetricDistribution,
-    QualityEvidence, RawSample, ResultSummary, SampleOutcome,
+    DatasetEntry, DatasetManifest, EnvironmentEvidence, EvidenceValue,
+    MAX_SEMANTIC_CALIBRATION_ERROR_PPM, MIN_SEMANTIC_PRECISION_PPM, MIN_SEMANTIC_RECALL_PPM,
+    MetricDistribution, QualityEvidence, RawSample, ResultSummary, SEMANTIC_QUALITY_RUBRIC_ID,
+    SampleOutcome, SemanticQualityMeasurement,
 };
 pub use parser::{
     ParserBenchmarkConfig, ParserBenchmarkEvidence, ParserDatasetInput, ParserRunError,

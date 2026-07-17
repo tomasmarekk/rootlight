@@ -7,6 +7,16 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+/// Versioned semantic-quality rubric used by the M05 parser evidence slice.
+pub const SEMANTIC_QUALITY_RUBRIC_ID: &str = "m05-parser-semantic-eligibility-2.0";
+/// Minimum accepted semantic precision, in millionths.
+pub const MIN_SEMANTIC_PRECISION_PPM: u64 = 980_000;
+/// Minimum accepted semantic recall, in millionths.
+pub const MIN_SEMANTIC_RECALL_PPM: u64 = 920_000;
+/// Maximum accepted expected calibration error, in millionths.
+pub const MAX_SEMANTIC_CALIBRATION_ERROR_PPM: u64 = 50_000;
+pub(crate) const MILLION_PPM: u64 = 1_000_000;
+
 /// A measurement's evidence classification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
@@ -329,6 +339,37 @@ pub struct QualityEvidence {
     pub expected_calibration_error_ppm: EvidenceValue<u64>,
     /// Unsupported cases by stable category.
     pub unsupported_cases: BTreeMap<String, u64>,
+}
+
+/// Corpus-backed semantic quality measurements supplied by an extraction probe.
+///
+/// Counts alone do not establish correctness. A run can become semantically
+/// eligible only when all three quality metrics are observed and satisfy the
+/// versioned M05 rubric.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticQualityMeasurement {
+    /// Measured semantic precision in millionths.
+    pub precision_ppm: EvidenceValue<u64>,
+    /// Measured semantic recall in millionths.
+    pub recall_ppm: EvidenceValue<u64>,
+    /// Measured expected calibration error in millionths.
+    pub expected_calibration_error_ppm: EvidenceValue<u64>,
+    /// Unsupported cases by stable category.
+    pub unsupported_cases: BTreeMap<String, u64>,
+}
+
+impl SemanticQualityMeasurement {
+    /// Creates a measurement whose corpus-backed metrics are unavailable.
+    #[must_use]
+    pub fn unavailable(reason_code: impl Into<String>) -> Self {
+        let reason_code = reason_code.into();
+        Self {
+            precision_ppm: EvidenceValue::unavailable(reason_code.clone()),
+            recall_ppm: EvidenceValue::unavailable(reason_code.clone()),
+            expected_calibration_error_ppm: EvidenceValue::unavailable(reason_code),
+            unsupported_cases: BTreeMap::new(),
+        }
+    }
 }
 
 /// One retained agent trajectory; parser-only runs normally publish none.

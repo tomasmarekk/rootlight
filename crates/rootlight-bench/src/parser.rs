@@ -16,10 +16,12 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ir::SourceRef;
 use rootlight_vfs::SourceSnapshot;
 
+use crate::model::MILLION_PPM;
 use crate::{
     Availability, BundleError, BundleLimits, CoverageEvidence, DatasetEntry, EvidenceValue,
+    MAX_SEMANTIC_CALIBRATION_ERROR_PPM, MIN_SEMANTIC_PRECISION_PPM, MIN_SEMANTIC_RECALL_PPM,
     MetricDistribution, ProcessTreeSample, ProcessTreeSampler, QualityEvidence, RawSample,
-    ResultSummary, SampleOutcome,
+    ResultSummary, SEMANTIC_QUALITY_RUBRIC_ID, SampleOutcome, SemanticQualityMeasurement,
 };
 
 const MAX_SAMPLE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -57,10 +59,19 @@ pub struct ParserBenchmarkConfig {
     pub evidence_limits: BundleLimits,
 }
 
-/// Supplies later normalized semantic fact counts for eligibility checks.
+/// Supplies normalized semantic facts and corpus-backed quality measurements.
 pub trait SemanticFactProbe: Send + Sync {
     /// Returns a normalized fact count, or `None` when extraction is unavailable.
     fn semantic_fact_count(&self, output: &ParseOutput) -> Option<u64>;
+
+    /// Returns corpus-backed quality metrics used by the semantic rubric.
+    ///
+    /// The default keeps count-only probes ineligible. Implementations must
+    /// return observed precision, recall, and calibration error before the
+    /// harness can report semantic availability.
+    fn semantic_quality(&self) -> SemanticQualityMeasurement {
+        SemanticQualityMeasurement::unavailable("semantic_quality_not_measured")
+    }
 }
 
 /// Syntax-only probe that keeps M05 performance evidence ineligible.
@@ -151,7 +162,10 @@ where
     }
 
     mark_outliers(&mut raw_samples)?;
-    let summary = summarize(&raw_samples)?;
+    let fact_eligibility = semantic_fact_eligibility(&raw_samples);
+    let semantic_quality = semantic_probe.semantic_quality();
+    let semantic_eligibility = semantic_quality_eligibility(&fact_eligibility, &semantic_quality);
+    let summary = summarize(&raw_samples, semantic_eligibility.clone())?;
     let committed_entries = entry_status
         .values()
         .filter(|status| **status == EntryStatus::Succeeded)
@@ -171,12 +185,12 @@ where
     };
     let quality = QualityEvidence {
         schema_version: "1.0".to_owned(),
-        rubric_id: "m05-parser-semantic-eligibility-1.0".to_owned(),
-        semantic_eligibility: summary.semantic_eligibility.clone(),
-        precision_ppm: EvidenceValue::unavailable("quality_corpus_not_integrated"),
-        recall_ppm: EvidenceValue::unavailable("quality_corpus_not_integrated"),
-        expected_calibration_error_ppm: EvidenceValue::unavailable("quality_corpus_not_integrated"),
-        unsupported_cases: BTreeMap::new(),
+        rubric_id: SEMANTIC_QUALITY_RUBRIC_ID.to_owned(),
+        semantic_eligibility,
+        precision_ppm: semantic_quality.precision_ppm,
+        recall_ppm: semantic_quality.recall_ppm,
+        expected_calibration_error_ppm: semantic_quality.expected_calibration_error_ppm,
+        unsupported_cases: semantic_quality.unsupported_cases,
     };
     Ok(ParserBenchmarkEvidence {
         raw_samples,
@@ -587,8 +601,10 @@ fn mark_outliers(samples: &mut [RawSample]) -> Result<(), ParserRunError> {
     Ok(())
 }
 
-fn summarize(samples: &[RawSample]) -> Result<ResultSummary, ParserRunError> {
-    let semantic_eligibility = semantic_eligibility(samples);
+fn summarize(
+    samples: &[RawSample],
+    semantic_eligibility: Availability,
+) -> Result<ResultSummary, ParserRunError> {
     let mut grouped = BTreeMap::<String, Vec<&RawSample>>::new();
     let mut failed_samples = 0_u64;
     let mut timed_out_samples = 0_u64;
@@ -634,7 +650,7 @@ fn summarize(samples: &[RawSample]) -> Result<ResultSummary, ParserRunError> {
     })
 }
 
-fn semantic_eligibility(samples: &[RawSample]) -> Availability {
+fn semantic_fact_eligibility(samples: &[RawSample]) -> Availability {
     let trials = samples
         .iter()
         .filter(|sample| sample.phase == "trial")
@@ -668,6 +684,57 @@ fn semantic_eligibility(samples: &[RawSample]) -> Availability {
     {
         return Availability::Failed {
             reason_code: "semantic_facts_empty".to_owned(),
+        };
+    }
+    Availability::Available
+}
+
+pub(crate) fn semantic_quality_eligibility(
+    fact_eligibility: &Availability,
+    quality: &SemanticQualityMeasurement,
+) -> Availability {
+    if !matches!(fact_eligibility, Availability::Available) {
+        return fact_eligibility.clone();
+    }
+    let (
+        EvidenceValue::Observed {
+            value: precision_ppm,
+        },
+        EvidenceValue::Observed { value: recall_ppm },
+        EvidenceValue::Observed {
+            value: calibration_error_ppm,
+        },
+    ) = (
+        &quality.precision_ppm,
+        &quality.recall_ppm,
+        &quality.expected_calibration_error_ppm,
+    )
+    else {
+        return Availability::Unavailable {
+            reason_code: "semantic_quality_not_measured".to_owned(),
+        };
+    };
+    if *precision_ppm > MILLION_PPM
+        || *recall_ppm > MILLION_PPM
+        || *calibration_error_ppm > MILLION_PPM
+    {
+        return Availability::Failed {
+            reason_code: "semantic_quality_metric_out_of_range".to_owned(),
+        };
+    }
+    if *precision_ppm < MIN_SEMANTIC_PRECISION_PPM {
+        return Availability::Failed {
+            reason_code: "semantic_precision_below_threshold".to_owned(),
+        };
+    }
+    if *recall_ppm < MIN_SEMANTIC_RECALL_PPM {
+        return Availability::Failed {
+            reason_code: "semantic_recall_below_threshold".to_owned(),
+        };
+    }
+    if *calibration_error_ppm > MAX_SEMANTIC_CALIBRATION_ERROR_PPM {
+        return Availability::Failed {
+            reason_code: "semantic_calibration_above_threshold".to_owned(),
         };
     }
     Availability::Available
@@ -934,6 +1001,28 @@ mod tests {
         }
     }
 
+    struct MeasuredSemanticFacts {
+        count: u64,
+        precision_ppm: u64,
+        recall_ppm: u64,
+        calibration_error_ppm: u64,
+    }
+
+    impl SemanticFactProbe for MeasuredSemanticFacts {
+        fn semantic_fact_count(&self, _output: &ParseOutput) -> Option<u64> {
+            Some(self.count)
+        }
+
+        fn semantic_quality(&self) -> SemanticQualityMeasurement {
+            SemanticQualityMeasurement {
+                precision_ppm: EvidenceValue::observed(self.precision_ppm),
+                recall_ppm: EvidenceValue::observed(self.recall_ppm),
+                expected_calibration_error_ppm: EvidenceValue::observed(self.calibration_error_ppm),
+                unsupported_cases: BTreeMap::new(),
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct FakeSampler;
 
@@ -1076,10 +1165,16 @@ mod tests {
         assert_eq!(first.raw_samples.len(), 5);
         assert_eq!(first.coverage.attempted_entries, 1);
         assert_eq!(first.coverage.committed_entries, 1);
-        assert!(matches!(
+        assert_eq!(
             first.summary.semantic_eligibility,
-            Availability::Available
-        ));
+            Availability::Unavailable {
+                reason_code: "semantic_quality_not_measured".to_owned()
+            }
+        );
+        assert_eq!(
+            first.summary.semantic_eligibility,
+            first.quality.semantic_eligibility
+        );
         assert!(first.raw_samples.iter().all(|sample| {
             matches!(sample.process_tree_cpu_ns, EvidenceValue::Observed { .. })
         }));
@@ -1103,6 +1198,99 @@ mod tests {
             evidence.summary.semantic_eligibility,
             Availability::Unavailable { .. }
         ));
+    }
+
+    #[test]
+    fn measured_quality_at_the_rubric_boundary_is_semantically_eligible() {
+        let fixture = fixture();
+        let provider = provider(&fixture.source);
+        let probe = MeasuredSemanticFacts {
+            count: 1,
+            precision_ppm: MIN_SEMANTIC_PRECISION_PPM,
+            recall_ppm: MIN_SEMANTIC_RECALL_PPM,
+            calibration_error_ppm: MAX_SEMANTIC_CALIBRATION_ERROR_PPM,
+        };
+
+        let evidence = run_parser_benchmark(
+            &provider,
+            std::slice::from_ref(&fixture.input),
+            &config(0, 1),
+            &UnavailableProcessTreeSampler,
+            &probe,
+        )
+        .expect("quality-backed benchmark succeeds");
+
+        assert_eq!(
+            evidence.summary.semantic_eligibility,
+            Availability::Available
+        );
+        assert_eq!(
+            evidence.summary.semantic_eligibility,
+            evidence.quality.semantic_eligibility
+        );
+        assert_eq!(
+            evidence.quality.precision_ppm,
+            EvidenceValue::observed(MIN_SEMANTIC_PRECISION_PPM)
+        );
+    }
+
+    #[test]
+    fn semantic_quality_rubric_rejects_each_failed_or_unmeasured_metric() {
+        let facts_available = Availability::Available;
+        let cases = [
+            (
+                SemanticQualityMeasurement {
+                    precision_ppm: EvidenceValue::observed(MIN_SEMANTIC_PRECISION_PPM - 1),
+                    recall_ppm: EvidenceValue::observed(MIN_SEMANTIC_RECALL_PPM),
+                    expected_calibration_error_ppm: EvidenceValue::observed(
+                        MAX_SEMANTIC_CALIBRATION_ERROR_PPM,
+                    ),
+                    unsupported_cases: BTreeMap::new(),
+                },
+                Availability::Failed {
+                    reason_code: "semantic_precision_below_threshold".to_owned(),
+                },
+            ),
+            (
+                SemanticQualityMeasurement {
+                    precision_ppm: EvidenceValue::observed(MIN_SEMANTIC_PRECISION_PPM),
+                    recall_ppm: EvidenceValue::observed(MIN_SEMANTIC_RECALL_PPM - 1),
+                    expected_calibration_error_ppm: EvidenceValue::observed(
+                        MAX_SEMANTIC_CALIBRATION_ERROR_PPM,
+                    ),
+                    unsupported_cases: BTreeMap::new(),
+                },
+                Availability::Failed {
+                    reason_code: "semantic_recall_below_threshold".to_owned(),
+                },
+            ),
+            (
+                SemanticQualityMeasurement {
+                    precision_ppm: EvidenceValue::observed(MIN_SEMANTIC_PRECISION_PPM),
+                    recall_ppm: EvidenceValue::observed(MIN_SEMANTIC_RECALL_PPM),
+                    expected_calibration_error_ppm: EvidenceValue::observed(
+                        MAX_SEMANTIC_CALIBRATION_ERROR_PPM + 1,
+                    ),
+                    unsupported_cases: BTreeMap::new(),
+                },
+                Availability::Failed {
+                    reason_code: "semantic_calibration_above_threshold".to_owned(),
+                },
+            ),
+            (
+                SemanticQualityMeasurement::unavailable("quality_corpus_not_integrated"),
+                Availability::Unavailable {
+                    reason_code: "semantic_quality_not_measured".to_owned(),
+                },
+            ),
+        ];
+
+        for (quality, expected) in cases {
+            assert_eq!(
+                semantic_quality_eligibility(&facts_available, &quality),
+                expected
+            );
+        }
     }
 
     #[test]
