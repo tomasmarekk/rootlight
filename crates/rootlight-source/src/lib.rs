@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     time::{Duration, Instant},
 };
 
@@ -332,54 +332,54 @@ impl<'a> SourceService<'a> {
             budget,
             &control,
         )?;
-        let mut snapshots = BTreeMap::<FileId, SourceSnapshot>::new();
-        let mut snapshotted_bytes = 0u64;
-        let mut chunks = Vec::new();
-        chunks
-            .try_reserve_exact(references.len())
-            .map_err(|_| SourceError::MemoryUnavailable)?;
-        let mut total_source_bytes = 0usize;
-        let total_metadata_bytes = prepared.metadata_bytes;
-        let mut total_response_memory_bytes = total_metadata_bytes;
-
-        for (reference, file_index) in references.iter().zip(prepared.file_indices) {
-            control.check()?;
+        let mut snapshots = Vec::<SourceSnapshot>::new();
+        try_reserve_vec(&mut snapshots, prepared.files.len(), &control)?;
+        for prepared_file in &prepared.files {
             let file = self
                 .generation
                 .document()
                 .files
-                .get(file_index)
+                .get(prepared_file.file_index)
                 .ok_or(SourceError::FileNotFound)?;
-            let path = validated_path(self.root, file)?;
-
-            if let std::collections::btree_map::Entry::Vacant(entry) = snapshots.entry(file.id) {
-                snapshotted_bytes = snapshotted_bytes
-                    .checked_add(file.byte_length)
-                    .ok_or(SourceError::SnapshotBudgetExceeded)?;
-                if snapshotted_bytes > budget.max_snapshot_bytes {
-                    return Err(SourceError::SnapshotBudgetExceeded);
-                }
-                let snapshot = self
-                    .root
+            let snapshot = control.controlled(|| {
+                self.root
                     .snapshot_cancellable(
-                        &path,
+                        &prepared_file.path,
                         file.byte_length.max(1),
                         cancellation,
                         control.deadline,
                     )
-                    .map_err(map_snapshot_error)?;
-                control.check()?;
-                if snapshot.file() != file.id
-                    || snapshot.metadata().length != file.byte_length
-                    || snapshot.content_hash() != file.content_hash
-                {
-                    return Err(SourceError::StaleSource);
-                }
-                entry.insert(snapshot);
+                    .map_err(map_snapshot_error)
+            })?;
+            if snapshot.file() != file.id
+                || snapshot.metadata().length != file.byte_length
+                || snapshot.content_hash() != file.content_hash
+            {
+                return Err(SourceError::StaleSource);
             }
-
-            let snapshot = snapshots.get(&file.id).ok_or(SourceError::ReadFailed)?;
             ensure_utf8(file, snapshot.content(), &control)?;
+            push_preallocated(&mut snapshots, snapshot, &control)?;
+        }
+
+        let mut chunks = Vec::new();
+        try_reserve_vec(&mut chunks, references.len(), &control)?;
+        let mut total_source_bytes = 0usize;
+        let total_metadata_bytes = prepared.metadata_bytes;
+        let mut total_response_memory_bytes = total_metadata_bytes;
+
+        for (reference, file_slot) in references.iter().zip(prepared.file_slots) {
+            control.check()?;
+            let prepared_file = prepared
+                .files
+                .get(file_slot)
+                .ok_or(SourceError::FileNotFound)?;
+            let file = self
+                .generation
+                .document()
+                .files
+                .get(prepared_file.file_index)
+                .ok_or(SourceError::FileNotFound)?;
+            let snapshot = snapshots.get(file_slot).ok_or(SourceError::ReadFailed)?;
             let range = expand_context(snapshot.content(), reference, options, &control)?;
             let selected = snapshot
                 .content()
@@ -397,29 +397,29 @@ impl<'a> SourceService<'a> {
             if next_response_memory_bytes > budget.max_response_memory_bytes {
                 return Err(SourceError::ResponseMemoryBudgetExceeded);
             }
-            let path = try_clone_string(&file.path)?;
-            let language = try_clone_string(&file.language)?;
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(selected.len())
-                .map_err(|_| SourceError::MemoryUnavailable)?;
-            bytes.extend_from_slice(selected);
+            let path = try_clone_string(&file.path, &control)?;
+            let language = try_clone_string(&file.language, &control)?;
+            let bytes = try_clone_bytes(selected, &control)?;
             total_source_bytes = next_source_bytes;
             total_response_memory_bytes = next_response_memory_bytes;
-            chunks.push(SourceChunk {
-                reference: reference.clone(),
-                path,
-                start_byte: usize_to_u64(range.start)?,
-                end_byte: usize_to_u64(range.end)?,
-                start_line: range.start_line,
-                end_line: range.end_line,
-                bytes,
-                content_hash: file.content_hash,
-                language,
-                generated: file.generated,
-                encoding: SourceEncoding::Utf8,
-                trust: SourceTrust::UntrustedRepositoryData,
-            });
+            push_preallocated(
+                &mut chunks,
+                SourceChunk {
+                    reference: reference.clone(),
+                    path,
+                    start_byte: usize_to_u64(range.start)?,
+                    end_byte: usize_to_u64(range.end)?,
+                    start_line: range.start_line,
+                    end_line: range.end_line,
+                    bytes,
+                    content_hash: file.content_hash,
+                    language,
+                    generated: file.generated,
+                    encoding: SourceEncoding::Utf8,
+                    trust: SourceTrust::UntrustedRepositoryData,
+                },
+                &control,
+            )?;
         }
         control.check()?;
 
@@ -440,11 +440,13 @@ impl<'a> SourceService<'a> {
         budget: SourceBudget,
         control: &SourceControl<'_>,
     ) -> Result<PreparedRequest, SourceError> {
-        let mut file_indices = Vec::new();
-        file_indices
-            .try_reserve_exact(references.len())
-            .map_err(|_| SourceError::MemoryUnavailable)?;
+        let mut file_slots = Vec::new();
+        try_reserve_vec(&mut file_slots, references.len(), control)?;
+        let mut files = Vec::<PreparedFile>::new();
+        try_reserve_vec(&mut files, references.len(), control)?;
         let mut metadata_bytes = 0usize;
+        let mut minimum_source_bytes = 0usize;
+        let mut snapshot_bytes = 0u64;
 
         for reference in references {
             control.check()?;
@@ -462,21 +464,63 @@ impl<'a> SourceService<'a> {
                 .get(file_index)
                 .ok_or(SourceError::FileNotFound)?;
             validate_file(file, reference)?;
-            let _ = validated_path(self.root, file)?;
+            validate_encoding(file)?;
             metadata_bytes = metadata_bytes
                 .checked_add(chunk_metadata_bytes(file)?)
                 .ok_or(SourceError::MetadataBudgetExceeded)?;
             if metadata_bytes > budget.max_metadata_bytes {
                 return Err(SourceError::MetadataBudgetExceeded);
             }
-            if metadata_bytes > budget.max_response_memory_bytes {
+            let selected_bytes = reference
+                .span()
+                .end_byte()
+                .checked_sub(reference.span().start_byte())
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .ok_or(SourceError::SourceBudgetExceeded)?;
+            minimum_source_bytes = minimum_source_bytes
+                .checked_add(selected_bytes)
+                .ok_or(SourceError::SourceBudgetExceeded)?;
+            if minimum_source_bytes > budget.max_source_bytes {
+                return Err(SourceError::SourceBudgetExceeded);
+            }
+            let minimum_response_bytes = metadata_bytes
+                .checked_add(minimum_source_bytes)
+                .ok_or(SourceError::ResponseMemoryBudgetExceeded)?;
+            if minimum_response_bytes > budget.max_response_memory_bytes {
                 return Err(SourceError::ResponseMemoryBudgetExceeded);
             }
-            file_indices.push(file_index);
+
+            let file_slot = if let Some(file_slot) = files
+                .iter()
+                .position(|prepared_file| prepared_file.file == file.id)
+            {
+                file_slot
+            } else {
+                snapshot_bytes = snapshot_bytes
+                    .checked_add(file.byte_length)
+                    .ok_or(SourceError::SnapshotBudgetExceeded)?;
+                if snapshot_bytes > budget.max_snapshot_bytes {
+                    return Err(SourceError::SnapshotBudgetExceeded);
+                }
+                let path = control.controlled(|| validated_path(self.root, file))?;
+                let file_slot = files.len();
+                push_preallocated(
+                    &mut files,
+                    PreparedFile {
+                        file: file.id,
+                        file_index,
+                        path,
+                    },
+                    control,
+                )?;
+                file_slot
+            };
+            push_preallocated(&mut file_slots, file_slot, control)?;
         }
 
         Ok(PreparedRequest {
-            file_indices,
+            file_slots,
+            files,
             metadata_bytes,
         })
     }
@@ -493,8 +537,15 @@ impl std::fmt::Debug for SourceService<'_> {
 }
 
 struct PreparedRequest {
-    file_indices: Vec<usize>,
+    file_slots: Vec<usize>,
+    files: Vec<PreparedFile>,
     metadata_bytes: usize,
+}
+
+struct PreparedFile {
+    file: FileId,
+    file_index: usize,
+    path: RelativePath,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -508,6 +559,8 @@ struct ExpandedRange {
 struct SourceControl<'a> {
     cancellation: &'a Cancellation,
     deadline: Instant,
+    #[cfg(test)]
+    after_operation: Option<&'a dyn Fn()>,
 }
 
 impl<'a> SourceControl<'a> {
@@ -516,6 +569,8 @@ impl<'a> SourceControl<'a> {
         Self {
             cancellation,
             deadline: started.checked_add(max_duration).unwrap_or(started),
+            #[cfg(test)]
+            after_operation: None,
         }
     }
 
@@ -527,6 +582,26 @@ impl<'a> SourceControl<'a> {
             return Err(SourceError::Cancelled(CancellationReason::DeadlineExceeded));
         }
         Ok(())
+    }
+
+    fn controlled<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, SourceError>,
+    ) -> Result<T, SourceError> {
+        self.check()?;
+        let result = operation();
+        #[cfg(test)]
+        if let Some(after_operation) = self.after_operation {
+            after_operation();
+        }
+        self.check()?;
+        result
+    }
+
+    #[cfg(test)]
+    fn with_after_operation(mut self, after_operation: &'a dyn Fn()) -> Self {
+        self.after_operation = Some(after_operation);
+        self
     }
 }
 
@@ -615,9 +690,7 @@ fn ensure_utf8(
     content: &[u8],
     control: &SourceControl<'_>,
 ) -> Result<(), SourceError> {
-    if !matches!(file.encoding.as_str(), "utf-8" | "utf8") {
-        return Err(SourceError::EncodingUnsupported);
-    }
+    validate_encoding(file)?;
 
     let mut offset = 0usize;
     while offset < content.len() {
@@ -673,15 +746,21 @@ fn expand_context(
         return Err(SourceError::InvalidSourceSpan);
     }
 
-    let mut starts = VecDeque::with_capacity(usize::from(options.context_lines_before) + 1);
-    starts.push_back(0usize);
+    let starts_capacity = usize::from(options.context_lines_before) + 1;
+    let mut starts = VecDeque::new();
+    control.controlled(|| {
+        starts
+            .try_reserve_exact(starts_capacity)
+            .map_err(|_| SourceError::MemoryUnavailable)
+    })?;
+    push_back_preallocated(&mut starts, 0usize, control)?;
     for (index, byte) in content[..selection_start].iter().copied().enumerate() {
         check_iteration(index, control)?;
         if byte == b'\n' {
-            starts.push_back(index + 1);
-            if starts.len() > usize::from(options.context_lines_before) + 1 {
+            if starts.len() == starts_capacity {
                 starts.pop_front();
             }
+            push_back_preallocated(&mut starts, index + 1, control)?;
         }
     }
     let start = starts.front().copied().unwrap_or(0);
@@ -775,12 +854,81 @@ fn usize_to_u64(value: usize) -> Result<u64, SourceError> {
     u64::try_from(value).map_err(|_| SourceError::InvalidSourceSpan)
 }
 
-fn try_clone_string(value: &str) -> Result<String, SourceError> {
+fn validate_encoding(file: &FileRecord) -> Result<(), SourceError> {
+    if matches!(file.encoding.as_str(), "utf-8" | "utf8") {
+        Ok(())
+    } else {
+        Err(SourceError::EncodingUnsupported)
+    }
+}
+
+fn try_reserve_vec<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    control: &SourceControl<'_>,
+) -> Result<(), SourceError> {
+    control.controlled(|| {
+        values
+            .try_reserve_exact(additional)
+            .map_err(|_| SourceError::MemoryUnavailable)
+    })
+}
+
+fn push_preallocated<T>(
+    values: &mut Vec<T>,
+    value: T,
+    control: &SourceControl<'_>,
+) -> Result<(), SourceError> {
+    control.controlled(|| {
+        if values.len() == values.capacity() {
+            return Err(SourceError::MemoryUnavailable);
+        }
+        values.push(value);
+        Ok(())
+    })
+}
+
+fn push_back_preallocated<T>(
+    values: &mut VecDeque<T>,
+    value: T,
+    control: &SourceControl<'_>,
+) -> Result<(), SourceError> {
+    control.controlled(|| {
+        if values.len() == values.capacity() {
+            return Err(SourceError::MemoryUnavailable);
+        }
+        values.push_back(value);
+        Ok(())
+    })
+}
+
+fn try_clone_string(value: &str, control: &SourceControl<'_>) -> Result<String, SourceError> {
     let mut cloned = String::new();
-    cloned
-        .try_reserve_exact(value.len())
-        .map_err(|_| SourceError::MemoryUnavailable)?;
-    cloned.push_str(value);
+    control.controlled(|| {
+        cloned
+            .try_reserve_exact(value.len())
+            .map_err(|_| SourceError::MemoryUnavailable)
+    })?;
+    control.controlled(|| {
+        if cloned.capacity() < value.len() {
+            return Err(SourceError::MemoryUnavailable);
+        }
+        cloned.push_str(value);
+        Ok(())
+    })?;
+    Ok(cloned)
+}
+
+fn try_clone_bytes(value: &[u8], control: &SourceControl<'_>) -> Result<Vec<u8>, SourceError> {
+    let mut cloned = Vec::new();
+    try_reserve_vec(&mut cloned, value.len(), control)?;
+    control.controlled(|| {
+        if cloned.capacity() < value.len() {
+            return Err(SourceError::MemoryUnavailable);
+        }
+        cloned.extend_from_slice(value);
+        Ok(())
+    })?;
     Ok(cloned)
 }
 
@@ -855,7 +1003,7 @@ mod tests {
         NormalizedIrDocument, ProducerIdentity, ProducerKind, ProvenanceRecord, SourceSpan,
     };
     use rootlight_storage::GenerationMetadata;
-    use std::{fs, path::Path};
+    use std::{cell::Cell, fs, path::Path};
     use tempfile::tempdir_in;
 
     struct Fixture {
@@ -1203,6 +1351,94 @@ mod tests {
                 &Cancellation::new()
             ),
             Err(SourceError::GenerationMismatch)
+        );
+    }
+
+    #[test]
+    fn preflights_later_encoding_before_reading_the_first_file() {
+        let mut fixture = fixture(b"first\n", "utf-8", (0, 5));
+        let second = add_fixture_file(&mut fixture, "src/second.rs", b"second\n", (0, 6));
+        fs::remove_file(fixture._temporary.path().join("src/sample.rs"))
+            .expect("first fixture source is removed");
+        let metadata = fixture.generation.metadata();
+        let mut document = fixture.generation.clone().into_document();
+        document
+            .files
+            .iter_mut()
+            .find(|file| file.id == second.span().file())
+            .expect("second fixture file exists")
+            .encoding = "utf-16".to_owned();
+        fixture.generation = GenerationSnapshot::new(
+            metadata,
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("fixture generation permits an unsupported source encoding");
+
+        assert_eq!(
+            read(
+                &fixture,
+                &[fixture.reference.clone(), second],
+                SourceReadOptions::default(),
+                SourceBudget::default(),
+                &Cancellation::new()
+            ),
+            Err(SourceError::EncodingUnsupported)
+        );
+    }
+
+    #[test]
+    fn preflights_snapshot_and_duplicate_minimums_before_vfs_access() {
+        let mut snapshot_fixture = fixture(b"aaaa", "utf-8", (0, 4));
+        let second = add_fixture_file(&mut snapshot_fixture, "src/second.rs", b"bbbb", (0, 4));
+        fs::remove_file(snapshot_fixture._temporary.path().join("src/sample.rs"))
+            .expect("first snapshot fixture source is removed");
+        assert_eq!(
+            read(
+                &snapshot_fixture,
+                &[snapshot_fixture.reference.clone(), second],
+                SourceReadOptions::default(),
+                SourceBudget::new().with_max_snapshot_bytes(7),
+                &Cancellation::new()
+            ),
+            Err(SourceError::SnapshotBudgetExceeded)
+        );
+
+        let duplicate_fixture = fixture(b"aaaa", "utf-8", (0, 4));
+        fs::remove_file(duplicate_fixture._temporary.path().join("src/sample.rs"))
+            .expect("duplicate fixture source is removed");
+        let duplicate = [
+            duplicate_fixture.reference.clone(),
+            duplicate_fixture.reference.clone(),
+        ];
+        let options = SourceReadOptions::new()
+            .with_context_lines_before(0)
+            .with_context_lines_after(0);
+        assert_eq!(
+            read(
+                &duplicate_fixture,
+                &duplicate,
+                options,
+                SourceBudget::new().with_max_source_bytes(7),
+                &Cancellation::new()
+            ),
+            Err(SourceError::SourceBudgetExceeded)
+        );
+
+        let metadata_bytes =
+            chunk_metadata_bytes(&duplicate_fixture.generation.document().files[0])
+                .expect("fixture metadata is bounded")
+                * duplicate.len();
+        assert_eq!(
+            read(
+                &duplicate_fixture,
+                &duplicate,
+                options,
+                SourceBudget::new().with_max_response_memory_bytes(metadata_bytes + 7),
+                &Cancellation::new()
+            ),
+            Err(SourceError::ResponseMemoryBudgetExceeded)
         );
     }
 
@@ -1661,6 +1897,100 @@ mod tests {
                 SourceBudget::new().with_max_duration(Duration::from_nanos(1)),
                 &Cancellation::new()
             ),
+            Err(SourceError::Cancelled(CancellationReason::DeadlineExceeded))
+        );
+    }
+
+    #[test]
+    fn cancellation_after_reservations_and_copies_precedes_success() {
+        let reserve_cancellation = Cancellation::new();
+        let reserve_hook = || {
+            let _ = reserve_cancellation.cancel(CancellationReason::ParentCancelled);
+        };
+        let reserve_control = SourceControl::new(&reserve_cancellation, Duration::from_secs(1))
+            .with_after_operation(&reserve_hook);
+        let mut reserved = Vec::<u8>::new();
+        assert_eq!(
+            try_reserve_vec(&mut reserved, 1, &reserve_control),
+            Err(SourceError::Cancelled(CancellationReason::ParentCancelled))
+        );
+        assert!(reserved.capacity() >= 1);
+
+        let metadata_cancellation = Cancellation::new();
+        let metadata_operations = Cell::new(0usize);
+        let metadata_hook = || {
+            let operation = metadata_operations.get() + 1;
+            metadata_operations.set(operation);
+            if operation == 2 {
+                let _ = metadata_cancellation.cancel(CancellationReason::ParentCancelled);
+            }
+        };
+        let metadata_control = SourceControl::new(&metadata_cancellation, Duration::from_secs(1))
+            .with_after_operation(&metadata_hook);
+        assert_eq!(
+            try_clone_string("repository-controlled", &metadata_control),
+            Err(SourceError::Cancelled(CancellationReason::ParentCancelled))
+        );
+        assert_eq!(metadata_operations.get(), 2);
+
+        let bytes_cancellation = Cancellation::new();
+        let byte_operations = Cell::new(0usize);
+        let bytes_hook = || {
+            let operation = byte_operations.get() + 1;
+            byte_operations.set(operation);
+            if operation == 2 {
+                let _ = bytes_cancellation.cancel(CancellationReason::ParentCancelled);
+            }
+        };
+        let bytes_control = SourceControl::new(&bytes_cancellation, Duration::from_secs(1))
+            .with_after_operation(&bytes_hook);
+        assert_eq!(
+            try_clone_bytes(b"repository-controlled", &bytes_control),
+            Err(SourceError::Cancelled(CancellationReason::ParentCancelled))
+        );
+        assert_eq!(byte_operations.get(), 2);
+    }
+
+    #[test]
+    fn cancellation_after_snapshot_insertion_precedes_success() {
+        let fixture = fixture(b"source\n", "utf-8", (0, 6));
+        let path = RelativePath::parse(Path::new("src/sample.rs"))
+            .expect("fixture source path is canonical");
+        let snapshot = fixture
+            .root
+            .snapshot(&path, 7)
+            .expect("fixture source snapshot succeeds");
+        let cancellation = Cancellation::new();
+        let setup_control = SourceControl::new(&cancellation, Duration::from_secs(1));
+        let mut snapshots = Vec::new();
+        try_reserve_vec(&mut snapshots, 1, &setup_control).expect("snapshot slot is preallocated");
+
+        let insertion_hook = || {
+            let _ = cancellation.cancel(CancellationReason::ParentCancelled);
+        };
+        let insertion_control = SourceControl::new(&cancellation, Duration::from_secs(1))
+            .with_after_operation(&insertion_hook);
+        assert_eq!(
+            push_preallocated(&mut snapshots, snapshot, &insertion_control),
+            Err(SourceError::Cancelled(CancellationReason::ParentCancelled))
+        );
+        assert_eq!(snapshots.len(), 1);
+    }
+
+    #[test]
+    fn deadline_after_an_operation_precedes_its_local_error() {
+        let cancellation = Cancellation::new();
+        let control = SourceControl::new(&cancellation, Duration::from_millis(10));
+        let deadline = control.deadline;
+        let result: Result<(), SourceError> = control.controlled(|| {
+            while Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
+            Err(SourceError::MemoryUnavailable)
+        });
+
+        assert_eq!(
+            result,
             Err(SourceError::Cancelled(CancellationReason::DeadlineExceeded))
         );
     }
