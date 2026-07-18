@@ -99,7 +99,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
 #[non_exhaustive]
 pub enum ClientPortError {
     /// The daemon returned an expected checked domain failure.
-    Public(PublicError),
+    Public(Box<PublicError>),
     /// The local daemon transport failed.
     Transport,
     /// The daemon response violated the typed client-port contract.
@@ -1378,7 +1378,7 @@ where
 
 fn map_port_error(error: ClientPortError) -> ToolExecutionError {
     match error {
-        ClientPortError::Public(error) => ToolExecutionError::new(error),
+        ClientPortError::Public(error) => ToolExecutionError::new(*error),
         ClientPortError::Transport => internal(ToolExecutionFailure::Transport),
         ClientPortError::InvalidResponse => internal(ToolExecutionFailure::InvalidResponse),
         ClientPortError::Executor => internal(ToolExecutionFailure::Executor),

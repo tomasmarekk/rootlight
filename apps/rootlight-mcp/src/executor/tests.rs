@@ -1005,7 +1005,7 @@ async fn router_keeps_public_failures_typed_and_internal_failures_static() {
         .expect("test public error is valid");
     let public_router = ToolRouter::new(
         Harness::new(FakeOutcome::RepositoryIndex(Err(ClientPortError::Public(
-            not_found,
+            Box::new(not_found),
         ))))
         .executor,
     )

@@ -1,12 +1,12 @@
-//! Bounded MCP 2025-11-25 standard-stream transport.
+//! Bounded MCP 2025-11-25 standard-stream transport and first-slice bridge.
 //!
-//! This crate owns JSON-RPC framing, lifecycle state, cancellation routing, and
-//! bounded transport orchestration. Domain tools remain unavailable until a
-//! later service integration supplies a [`RequestHandler`], so the default
-//! bridge does not advertise capabilities it cannot serve.
+//! This crate owns JSON-RPC framing, lifecycle state, cancellation routing,
+//! bounded transport orchestration, and the source-redacted adapter between
+//! the five public tools and Rootlight's asynchronous daemon client.
 
 #![forbid(unsafe_code)]
 
+mod client_port;
 mod executor;
 mod json;
 mod tools;
@@ -24,6 +24,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
+pub use client_port::{NativeFirstSliceClientPort, UnavailableFirstSliceClientPort};
 pub use executor::{
     ClientPortError, ClientPortFuture, CodeLocatePortRequest, CodeLocatePortResponse,
     FirstSliceClientPort, FirstSliceToolExecutor, OperationStatusPortRequest, ReadResponseMetadata,
