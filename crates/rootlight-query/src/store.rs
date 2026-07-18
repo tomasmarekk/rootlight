@@ -17,6 +17,7 @@ pub struct GenerationSet<Search> {
     maximum: usize,
     active: Option<GenerationId>,
     generations: BTreeMap<GenerationId, RetainedGeneration<Search>>,
+    staged: BTreeMap<GenerationId, RetainedGeneration<Search>>,
 }
 
 impl<Search> GenerationSet<Search>
@@ -37,6 +38,7 @@ where
             maximum,
             active: None,
             generations: BTreeMap::new(),
+            staged: BTreeMap::new(),
         })
     }
 
@@ -61,10 +63,10 @@ where
         if search.generation() != id {
             return Err(QueryError::GenerationMismatch);
         }
-        if self.generations.contains_key(&id) {
+        if self.generations.contains_key(&id) || self.staged.contains_key(&id) {
             return Err(QueryError::DuplicateGeneration);
         }
-        if self.generations.len() >= self.maximum {
+        if self.generations.len() + self.staged.len() >= self.maximum {
             return Err(QueryError::RetentionLimit);
         }
         self.generations
@@ -73,6 +75,73 @@ where
             self.active = Some(id);
         }
         Ok(id)
+    }
+
+    /// Reserves and retains one verified generation without making it queryable.
+    ///
+    /// Staging is the pre-terminal half of daemon publication. It performs all
+    /// validation and retention admission before durable operation success,
+    /// while [`Self::query`] and [`Self::generation`] continue to expose only
+    /// committed generations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for generation mismatch, duplicate identity, or
+    /// exhausted combined committed-and-staged capacity.
+    pub fn stage(
+        &mut self,
+        generation: IdentityVerifiedGeneration,
+        search: Search,
+    ) -> Result<GenerationId, QueryError> {
+        let snapshot = generation.into_snapshot();
+        let id = snapshot.metadata().generation();
+        if search.generation() != id {
+            return Err(QueryError::GenerationMismatch);
+        }
+        if self.generations.contains_key(&id) || self.staged.contains_key(&id) {
+            return Err(QueryError::DuplicateGeneration);
+        }
+        if self.generations.len() + self.staged.len() >= self.maximum {
+            return Err(QueryError::RetentionLimit);
+        }
+        self.staged
+            .insert(id, RetainedGeneration { snapshot, search });
+        Ok(id)
+    }
+
+    /// Commits one staged generation and optionally selects it as active.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError::GenerationNotFound`] when the staging token no
+    /// longer names a reserved generation.
+    pub fn commit_staged(
+        &mut self,
+        generation: GenerationId,
+        make_active: bool,
+    ) -> Result<(), QueryError> {
+        let retained = self
+            .staged
+            .remove(&generation)
+            .ok_or(QueryError::GenerationNotFound)?;
+        self.generations.insert(generation, retained);
+        if make_active {
+            self.active = Some(generation);
+        }
+        Ok(())
+    }
+
+    /// Discards one staged, still-hidden generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError::GenerationNotFound`] when no matching reservation
+    /// exists.
+    pub fn discard_staged(&mut self, generation: GenerationId) -> Result<(), QueryError> {
+        self.staged
+            .remove(&generation)
+            .map(|_| ())
+            .ok_or(QueryError::GenerationNotFound)
     }
 
     /// Returns a typed query service for one retained immutable generation.
@@ -145,6 +214,7 @@ where
             .field("maximum", &self.maximum)
             .field("active", &self.active)
             .field("retained", &self.generations.len())
+            .field("staged", &self.staged.len())
             .finish()
     }
 }

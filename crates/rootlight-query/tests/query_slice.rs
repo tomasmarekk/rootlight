@@ -815,6 +815,60 @@ fn retained_old_generation_remains_addressable_after_activation() {
 }
 
 #[test]
+fn staged_generation_is_hidden_until_commit_and_can_be_discarded() {
+    let staged = verified_empty_generation(21);
+    let staged_id = staged.metadata().generation();
+    let mut generations = GenerationSet::new(2).expect("retention bound is valid");
+    generations
+        .stage(
+            staged,
+            FakeSearch {
+                generation: staged_id,
+                hits: Vec::new(),
+            },
+        )
+        .expect("generation stages");
+
+    assert_eq!(generations.active_generation(), None);
+    assert_eq!(generations.len(), 0);
+    assert!(matches!(
+        generations.query(staged_id),
+        Err(QueryError::GenerationNotFound)
+    ));
+    assert!(matches!(
+        generations.generation(staged_id),
+        Err(QueryError::GenerationNotFound)
+    ));
+
+    generations
+        .commit_staged(staged_id, true)
+        .expect("staged generation commits");
+    assert_eq!(generations.active_generation(), Some(staged_id));
+    assert_eq!(generations.len(), 1);
+    assert!(generations.query(staged_id).is_ok());
+
+    let discarded = verified_empty_generation(22);
+    let discarded_id = discarded.metadata().generation();
+    generations
+        .stage(
+            discarded,
+            FakeSearch {
+                generation: discarded_id,
+                hits: Vec::new(),
+            },
+        )
+        .expect("second generation stages");
+    generations
+        .discard_staged(discarded_id)
+        .expect("staged generation discards");
+    assert!(matches!(
+        generations.commit_staged(discarded_id, false),
+        Err(QueryError::GenerationNotFound)
+    ));
+    assert_eq!(generations.len(), 1);
+}
+
+#[test]
 fn generation_set_rejects_invalid_mismatched_duplicate_and_excess_state() {
     assert!(matches!(
         GenerationSet::<FakeSearch>::new(0),
