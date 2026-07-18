@@ -46,6 +46,7 @@ const MAX_SUPPORT_ARCHIVE_BYTES: usize = 768 * 1024;
 const MAX_SUPPORT_ENTRY_BYTES: usize = 128 * 1024;
 const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(10);
 const START_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const START_CHILD_RETAIN_ATTEMPTS: usize = 3;
 const START_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 
@@ -304,7 +305,9 @@ pub struct Client {
 /// The daemon is a process-tree leaf: it starts threads but no descendant
 /// processes. Retaining and reaping this handle therefore owns the complete
 /// lifecycle. That invariant must move to a process group or job object before
-/// the daemon is allowed to spawn descendants.
+/// the daemon is allowed to spawn descendants. If bounded cleanup cannot prove
+/// that the child was reaped, the exact handle is deliberately retained rather
+/// than risking PID-based cleanup of an unrelated process.
 #[derive(Debug)]
 pub struct OwnedDaemon {
     paths: RuntimePaths,
@@ -324,7 +327,7 @@ impl OwnedDaemon {
         let discovery = self.paths.discover().map_err(ClientError::Runtime)?;
         let observed = ReadyDaemonIdentity::from_discovery(&discovery);
         if observed != self.identity || child.id() != self.identity.pid {
-            self.terminate_fail_closed();
+            self.terminate_or_retain();
             return Err(ClientError::DaemonLaunchFailed);
         }
         let stdin = child
@@ -348,23 +351,23 @@ impl OwnedDaemon {
                 };
             }
             if Instant::now() >= deadline {
-                self.terminate_fail_closed();
+                self.terminate_or_retain();
                 return Err(ClientError::DaemonLaunchCleanupTimedOut);
             }
             std::thread::sleep(START_POLL_INTERVAL);
         }
     }
 
-    fn terminate_fail_closed(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            terminate_startup_child_fail_closed(&mut child);
+    fn terminate_or_retain(&mut self) {
+        if let Some(child) = self.child.take() {
+            terminate_or_retain_startup_process(child, || {});
         }
     }
 }
 
 impl Drop for OwnedDaemon {
     fn drop(&mut self) {
-        self.terminate_fail_closed();
+        self.terminate_or_retain();
     }
 }
 
@@ -811,7 +814,7 @@ fn wait_for_ready_daemon(
 
 #[derive(Debug)]
 struct CoordinatedStartup {
-    _authority: LaunchLock,
+    authority: Option<LaunchLock>,
     ownership: StartupOwnership,
     child: Option<Child>,
 }
@@ -824,7 +827,7 @@ impl CoordinatedStartup {
     ) -> Result<Self, ClientError> {
         let child = spawn_coordinated_daemon(ownership, paths)?;
         Ok(Self {
-            _authority: authority,
+            authority: Some(authority),
             ownership,
             child: Some(child),
         })
@@ -888,12 +891,59 @@ impl CoordinatedStartup {
 
 impl Drop for CoordinatedStartup {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take()
-            && terminate_startup_child(&mut child).is_err()
-        {
-            terminate_startup_child_fail_closed(&mut child);
+        let Some(child) = self.child.take() else {
+            return;
+        };
+        let authority = self.authority.take();
+        terminate_or_retain_startup_process(child, move || {
+            if let Some(authority) = authority {
+                std::mem::forget(authority);
+            }
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupCleanup {
+    Reaped,
+    Retained,
+}
+
+fn terminate_or_retain_startup_process(
+    process: impl StartupProcess,
+    retain_authority: impl FnOnce(),
+) -> StartupCleanup {
+    terminate_or_retain_startup_process_with(
+        process,
+        START_CHILD_RETAIN_ATTEMPTS,
+        || std::thread::sleep(START_POLL_INTERVAL),
+        retain_authority,
+    )
+}
+
+fn terminate_or_retain_startup_process_with(
+    mut process: impl StartupProcess,
+    max_attempts: usize,
+    mut pause: impl FnMut(),
+    retain_authority: impl FnOnce(),
+) -> StartupCleanup {
+    for attempt in 0..max_attempts {
+        if matches!(process.try_exited(), Ok(true)) {
+            return StartupCleanup::Reaped;
+        }
+        let _ = process.terminate();
+        if matches!(process.try_exited(), Ok(true)) {
+            return StartupCleanup::Reaped;
+        }
+        if attempt.saturating_add(1) < max_attempts {
+            pause();
         }
     }
+    // INTENTIONAL: losing the handles would release startup authority without
+    // proof that the exact child exited. Bounded retention is safer than PID reuse.
+    std::mem::forget(process);
+    retain_authority();
+    StartupCleanup::Retained
 }
 
 fn terminate_startup_child(child: &mut Child) -> Result<(), ClientError> {
@@ -906,7 +956,6 @@ fn terminate_startup_child(child: &mut Child) -> Result<(), ClientError> {
 trait StartupProcess {
     fn try_exited(&mut self) -> io::Result<bool>;
     fn terminate(&mut self) -> io::Result<()>;
-    fn reap(&mut self) -> io::Result<()>;
 }
 
 impl StartupProcess for Child {
@@ -916,10 +965,6 @@ impl StartupProcess for Child {
 
     fn terminate(&mut self) -> io::Result<()> {
         self.kill()
-    }
-
-    fn reap(&mut self) -> io::Result<()> {
-        self.wait().map(|_| ())
     }
 }
 
@@ -942,18 +987,6 @@ fn terminate_startup_process_until(
         }
         if deadline_expired() {
             return Err(ClientError::DaemonLaunchCleanupTimedOut);
-        }
-        std::thread::sleep(START_POLL_INTERVAL);
-    }
-}
-
-fn terminate_startup_child_fail_closed(process: &mut impl StartupProcess) {
-    loop {
-        if matches!(process.try_exited(), Ok(true)) {
-            return;
-        }
-        if process.terminate().is_ok() && process.reap().is_ok() {
-            return;
         }
         std::thread::sleep(START_POLL_INTERVAL);
     }
@@ -1867,6 +1900,10 @@ impl ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
+    };
 
     const STARTUP_CHILD_ROOT_ENV: &str = "ROOTLIGHT_TEST_STARTUP_CHILD_ROOT";
 
@@ -1985,7 +2022,7 @@ mod tests {
         }
 
         let startup = CoordinatedStartup {
-            _authority: authority,
+            authority: Some(authority),
             ownership: StartupOwnership::Detached,
             child: Some(child),
         };
@@ -2042,7 +2079,7 @@ mod tests {
         let (child, child_paths) = spawn_cleanup_child(&temporary.path().join("child-unwind"));
         let child_id = child.id();
         let mut startup = CoordinatedStartup {
-            _authority: authority,
+            authority: Some(authority),
             ownership: StartupOwnership::Detached,
             child: Some(child),
         };
@@ -2093,7 +2130,7 @@ mod tests {
         child.kill().expect("cleanup child can be terminated");
         child.wait().expect("cleanup child can be reaped");
         let mut startup = CoordinatedStartup {
-            _authority: authority,
+            authority: Some(authority),
             ownership: StartupOwnership::Detached,
             child: Some(child),
         };
@@ -2116,15 +2153,29 @@ mod tests {
     struct FakeStartupProcess {
         exited: bool,
         terminate_failures: usize,
+        status_failures: usize,
         exit_after_terminate: bool,
+        terminate_calls: Arc<AtomicUsize>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for FakeStartupProcess {
+        fn drop(&mut self) {
+            self.dropped.store(true, AtomicOrdering::SeqCst);
+        }
     }
 
     impl StartupProcess for FakeStartupProcess {
         fn try_exited(&mut self) -> io::Result<bool> {
+            if self.status_failures > 0 {
+                self.status_failures = self.status_failures.saturating_sub(1);
+                return Err(io::Error::other("injected status failure"));
+            }
             Ok(self.exited)
         }
 
         fn terminate(&mut self) -> io::Result<()> {
+            self.terminate_calls.fetch_add(1, AtomicOrdering::SeqCst);
             if self.terminate_failures > 0 {
                 self.terminate_failures = self.terminate_failures.saturating_sub(1);
                 return Err(io::Error::new(
@@ -2137,11 +2188,6 @@ mod tests {
             }
             Ok(())
         }
-
-        fn reap(&mut self) -> io::Result<()> {
-            self.exited = true;
-            Ok(())
-        }
     }
 
     #[test]
@@ -2149,7 +2195,10 @@ mod tests {
         let mut kill_failure = FakeStartupProcess {
             exited: false,
             terminate_failures: 1,
+            status_failures: 0,
             exit_after_terminate: false,
+            terminate_calls: Arc::new(AtomicUsize::new(0)),
+            dropped: Arc::new(AtomicBool::new(false)),
         };
         assert!(matches!(
             terminate_startup_process_until(&mut kill_failure, || false),
@@ -2160,7 +2209,10 @@ mod tests {
         let mut timeout = FakeStartupProcess {
             exited: false,
             terminate_failures: 0,
+            status_failures: 0,
             exit_after_terminate: false,
+            terminate_calls: Arc::new(AtomicUsize::new(0)),
+            dropped: Arc::new(AtomicBool::new(false)),
         };
         assert!(matches!(
             terminate_startup_process_until(&mut timeout, || true),
@@ -2169,17 +2221,84 @@ mod tests {
     }
 
     #[test]
-    fn fail_closed_startup_cleanup_retries_until_reaped() {
-        let mut process = FakeStartupProcess {
+    fn bounded_startup_cleanup_retries_transient_failures() {
+        let terminate_calls = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let process = FakeStartupProcess {
             exited: false,
             terminate_failures: 2,
+            status_failures: 0,
             exit_after_terminate: true,
+            terminate_calls: Arc::clone(&terminate_calls),
+            dropped: Arc::clone(&dropped),
         };
+        let mut pauses = 0_usize;
 
-        terminate_startup_child_fail_closed(&mut process);
+        let outcome = terminate_or_retain_startup_process_with(
+            process,
+            START_CHILD_RETAIN_ATTEMPTS,
+            || pauses = pauses.saturating_add(1),
+            || panic!("successful cleanup must not retain startup authority"),
+        );
 
-        assert!(process.exited);
-        assert_eq!(process.terminate_failures, 0);
+        assert_eq!(outcome, StartupCleanup::Reaped);
+        assert_eq!(
+            terminate_calls.load(AtomicOrdering::SeqCst),
+            START_CHILD_RETAIN_ATTEMPTS
+        );
+        assert_eq!(pauses, START_CHILD_RETAIN_ATTEMPTS.saturating_sub(1));
+        assert!(dropped.load(AtomicOrdering::SeqCst));
+    }
+
+    #[test]
+    fn permanent_cleanup_failure_retains_process_and_startup_authority() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths.prepare_owner().expect("runtime paths are private");
+        let authority = paths
+            .acquire_launch_lock()
+            .expect("startup authority is acquired");
+        let retained_authority = std::cell::RefCell::new(None);
+        let terminate_calls = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let process = FakeStartupProcess {
+            exited: false,
+            terminate_failures: usize::MAX,
+            status_failures: usize::MAX,
+            exit_after_terminate: false,
+            terminate_calls: Arc::clone(&terminate_calls),
+            dropped: Arc::clone(&dropped),
+        };
+        let mut pauses = 0_usize;
+
+        let outcome = terminate_or_retain_startup_process_with(
+            process,
+            START_CHILD_RETAIN_ATTEMPTS,
+            || pauses = pauses.saturating_add(1),
+            || {
+                retained_authority.replace(Some(authority));
+            },
+        );
+
+        assert_eq!(outcome, StartupCleanup::Retained);
+        assert_eq!(
+            terminate_calls.load(AtomicOrdering::SeqCst),
+            START_CHILD_RETAIN_ATTEMPTS
+        );
+        assert_eq!(pauses, START_CHILD_RETAIN_ATTEMPTS.saturating_sub(1));
+        assert!(!dropped.load(AtomicOrdering::SeqCst));
+        assert!(matches!(
+            paths.acquire_launch_lock(),
+            Err(rootlight_runtime::RuntimeError::LaunchBusy)
+        ));
+        drop(retained_authority.take());
+        paths
+            .acquire_launch_lock()
+            .expect("test releases retained startup authority explicitly");
     }
 
     #[test]
