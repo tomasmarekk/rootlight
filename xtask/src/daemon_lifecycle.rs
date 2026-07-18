@@ -632,12 +632,9 @@ fn exercise_concurrent_clients(paths: &RuntimePaths) -> Result<(), LifecycleErro
 }
 
 fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), LifecycleError> {
-    let noisy = Arc::new(
-        Client::connect_or_start(paths, [70; 16], ConnectPolicy::ExistingOnly)
-            .map_err(LifecycleError::Client)?,
-    );
-    let peer = Client::connect_or_start(paths, [71; 16], ConnectPolicy::ExistingOnly)
-        .map_err(LifecycleError::Client)?;
+    let setup_deadline = quota_deadline(COMMAND_TIMEOUT)?;
+    let noisy = Arc::new(connect_existing_until(paths, [70; 16], setup_deadline)?);
+    let peer = connect_existing_until(paths, [71; 16], setup_deadline)?;
     let worker_count = usize::try_from(EXPECTED_CLIENT_CONNECTION_LIMIT)
         .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?;
 
@@ -645,10 +642,11 @@ fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), Lifecy
     // permits while their submission burst is still crossing a slower IPC host.
     let mut guards = Vec::with_capacity(QUOTA_GUARD_IDENTITIES.len());
     for identity in QUOTA_GUARD_IDENTITIES {
-        let guard = Arc::new(
-            Client::connect_or_start(paths, [identity; 16], ConnectPolicy::ExistingOnly)
-                .map_err(LifecycleError::Client)?,
-        );
+        let guard = Arc::new(connect_existing_until(
+            paths,
+            [identity; 16],
+            setup_deadline,
+        )?);
         let operations = (0..EXPECTED_CLIENT_CONNECTION_LIMIT)
             .map(|ordinal| quota_operation(identity, ordinal))
             .collect::<Result<Vec<_>, _>>()?;
@@ -695,13 +693,7 @@ fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), Lifecy
     )?;
 
     let rejected = quota_operation(70, EXPECTED_CLIENT_OPERATION_LIMIT)?;
-    let rejection = noisy.operation_submit(rejected);
-    require_quota_window(quota_window)?;
-    match rejection {
-        Err(error) if is_client_operation_quota(&error) => {}
-        Err(error) => return Err(LifecycleError::Client(error)),
-        Ok(_) => return Err(LifecycleError::ClientOperationQuotaNotEnforced),
-    }
+    require_quota_rejection_until(&noisy, rejected, quota_window)?;
 
     let saturated = wait_for_health_until(
         &peer,
@@ -724,9 +716,7 @@ fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), Lifecy
     })?;
     require_expected_default_limits(&saturated)?;
     let peer_operation = quota_operation(71, 0)?;
-    let peer_submission = peer.operation_submit(peer_operation);
-    require_quota_window(quota_window)?;
-    let peer_status = peer_submission.map_err(LifecycleError::Client)?;
+    let peer_status = submit_quota_operation_until(&peer, peer_operation, quota_window)?;
     if !matches!(
         peer_status.state,
         OperationState::Running | OperationState::Queued
@@ -831,6 +821,27 @@ fn wait_for_health(
     wait_for_health_until(client, predicate, quota_deadline(COMMAND_TIMEOUT)?)
 }
 
+fn connect_existing_until(
+    paths: &RuntimePaths,
+    identity: [u8; 16],
+    deadline: Instant,
+) -> Result<Client, LifecycleError> {
+    loop {
+        require_quota_setup_window(deadline)?;
+        match Client::connect_or_start(paths, identity, ConnectPolicy::ExistingOnly) {
+            Ok(client) => {
+                require_quota_setup_window(deadline)?;
+                return Ok(client);
+            }
+            Err(error) if is_retryable_control_transport(&error) => {
+                require_quota_setup_window(deadline)?;
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(error) => return Err(LifecycleError::Client(error)),
+        }
+    }
+}
+
 fn wait_for_health_until(
     client: &Client,
     predicate: impl Fn(&Health) -> bool,
@@ -840,11 +851,22 @@ fn wait_for_health_until(
         if Instant::now() >= deadline {
             return Err(LifecycleError::HealthStateTimedOut);
         }
-        let health = client.health();
+        let health = match client.health() {
+            Ok(health) => health,
+            Err(error) if is_retryable_control_transport(&error) => {
+                if Instant::now() >= deadline {
+                    return Err(LifecycleError::HealthStateTimedOut);
+                }
+                thread::sleep(
+                    POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+                );
+                continue;
+            }
+            Err(error) => return Err(LifecycleError::Client(error)),
+        };
         if Instant::now() >= deadline {
             return Err(LifecycleError::HealthStateTimedOut);
         }
-        let health = health.map_err(LifecycleError::Client)?;
         if predicate(&health) {
             return Ok(health);
         }
@@ -949,26 +971,53 @@ fn submit_quota_operation_until(
     operation: OperationId,
     deadline: Instant,
 ) -> Result<rootlight_client::OperationStatus, LifecycleError> {
+    // A stable operation ID makes timeout retries replay one durable journal
+    // admission instead of creating duplicate work.
     loop {
         require_quota_window(deadline)?;
         match client.operation_submit(operation) {
             Ok(status) => {
+                if !matches!(
+                    status.state,
+                    OperationState::Running | OperationState::Queued
+                ) {
+                    return Err(LifecycleError::UnexpectedQuotaOperationState(status.state));
+                }
                 require_quota_window(deadline)?;
                 return Ok(status);
             }
-            Err(error) if is_retryable_quota_transport(&error) => {
+            Err(error) if is_retryable_control_transport(&error) => {
                 require_quota_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
-            Err(error) => {
-                require_quota_window(deadline)?;
-                return Err(LifecycleError::Client(error));
-            }
+            Err(error) => return Err(LifecycleError::Client(error)),
         }
     }
 }
 
-fn is_retryable_quota_transport(error: &ClientError) -> bool {
+fn require_quota_rejection_until(
+    client: &Client,
+    operation: OperationId,
+    deadline: Instant,
+) -> Result<(), LifecycleError> {
+    loop {
+        require_quota_window(deadline)?;
+        match client.operation_submit(operation) {
+            Err(error) if is_client_operation_quota(&error) => {
+                require_quota_window(deadline)?;
+                return Ok(());
+            }
+            Err(error) if is_retryable_control_transport(&error) => {
+                require_quota_window(deadline)?;
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(error) => return Err(LifecycleError::Client(error)),
+            Ok(_) => return Err(LifecycleError::ClientOperationQuotaNotEnforced),
+        }
+    }
+}
+
+fn is_retryable_control_transport(error: &ClientError) -> bool {
     match error {
         ClientError::Ipc(IpcError::TimedOut | IpcError::ConnectTimedOut) => true,
         ClientError::Ipc(IpcError::Transport(error)) => error.kind() == io::ErrorKind::TimedOut,
@@ -980,6 +1029,13 @@ fn quota_deadline(timeout: Duration) -> Result<Instant, LifecycleError> {
     Instant::now()
         .checked_add(timeout)
         .ok_or(LifecycleError::Clock)
+}
+
+fn require_quota_setup_window(deadline: Instant) -> Result<(), LifecycleError> {
+    if Instant::now() >= deadline {
+        return Err(LifecycleError::QuotaClientSetupTimedOut);
+    }
+    Ok(())
 }
 
 fn require_quota_window(deadline: Instant) -> Result<(), LifecycleError> {
@@ -1003,15 +1059,38 @@ fn is_client_operation_quota(error: &ClientError) -> bool {
 }
 
 fn cancel_and_wait(client: &Client, operation: OperationId) -> Result<(), LifecycleError> {
-    let (accepted, status) = client
-        .operation_cancel(operation)
-        .map_err(LifecycleError::Client)?;
-    match status.state {
-        OperationState::Cancelling | OperationState::Cancelled if accepted => {
-            wait_for_client_terminal(client, operation, OperationState::Cancelled)
+    let deadline = quota_deadline(COMMAND_TIMEOUT)?;
+    loop {
+        require_operation_window(deadline)?;
+        let response = client.operation_cancel(operation);
+        match response {
+            // A timed-out cancellation may already be durable, so an idempotent
+            // replay can report accepted=false while retaining this state.
+            Ok((_, status))
+                if matches!(
+                    status.state,
+                    OperationState::Cancelling | OperationState::Cancelled
+                ) =>
+            {
+                require_operation_window(deadline)?;
+                return wait_for_client_terminal_until(
+                    client,
+                    operation,
+                    OperationState::Cancelled,
+                    deadline,
+                );
+            }
+            Ok((false, status)) if status.state == OperationState::Succeeded => {
+                require_operation_window(deadline)?;
+                return Ok(());
+            }
+            Ok(_) => return Err(LifecycleError::UnexpectedCancellationState),
+            Err(error) if is_retryable_control_transport(&error) => {
+                require_operation_window(deadline)?;
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(error) => return Err(LifecycleError::Client(error)),
         }
-        OperationState::Succeeded if !accepted => Ok(()),
-        _ => Err(LifecycleError::UnexpectedCancellationState),
     }
 }
 
@@ -1131,11 +1210,28 @@ fn wait_for_client_terminal(
     let deadline = Instant::now()
         .checked_add(COMMAND_TIMEOUT)
         .ok_or(LifecycleError::Clock)?;
+    wait_for_client_terminal_until(client, operation, expected, deadline)
+}
+
+fn wait_for_client_terminal_until(
+    client: &Client,
+    operation: OperationId,
+    expected: OperationState,
+    deadline: Instant,
+) -> Result<(), LifecycleError> {
     loop {
-        let status = client
-            .operation_status(operation)
-            .map_err(LifecycleError::Client)?;
+        require_operation_window(deadline)?;
+        let status = match client.operation_status(operation) {
+            Ok(status) => status,
+            Err(error) if is_retryable_control_transport(&error) => {
+                require_operation_window(deadline)?;
+                thread::sleep(POLL_INTERVAL);
+                continue;
+            }
+            Err(error) => return Err(LifecycleError::Client(error)),
+        };
         if status.state == expected {
+            require_operation_window(deadline)?;
             return Ok(());
         }
         if matches!(
@@ -1144,11 +1240,16 @@ fn wait_for_client_terminal(
         ) {
             return Err(LifecycleError::UnexpectedCancellationState);
         }
-        if Instant::now() >= deadline {
-            return Err(LifecycleError::OperationTimedOut);
-        }
+        require_operation_window(deadline)?;
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn require_operation_window(deadline: Instant) -> Result<(), LifecycleError> {
+    if Instant::now() >= deadline {
+        return Err(LifecycleError::OperationTimedOut);
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1892,6 +1993,8 @@ pub(crate) enum LifecycleError {
     },
     #[error("daemon did not enforce the per-client operation quota")]
     ClientOperationQuotaNotEnforced,
+    #[error("daemon quota clients did not connect within their shared deadline")]
+    QuotaClientSetupTimedOut,
     #[error("daemon quota guard did not establish the required bounded backlog")]
     QuotaGuardBacklogUnavailable,
     #[error("daemon quota isolation evidence exceeded its bounded window")]
@@ -1953,7 +2056,7 @@ mod tests {
     use rootlight_ipc::IpcError;
 
     use super::{
-        QuotaDaemonStderr, is_retryable_quota_transport, privacy_checked_quota_stderr,
+        QuotaDaemonStderr, is_retryable_control_transport, privacy_checked_quota_stderr,
         sequences_are_strictly_increasing,
     };
 
@@ -1967,20 +2070,20 @@ mod tests {
     }
 
     #[test]
-    fn quota_retry_accepts_only_bounded_transport_timeouts() {
-        assert!(is_retryable_quota_transport(&ClientError::Ipc(
+    fn control_retry_accepts_only_bounded_transport_timeouts() {
+        assert!(is_retryable_control_transport(&ClientError::Ipc(
             IpcError::TimedOut
         )));
-        assert!(is_retryable_quota_transport(&ClientError::Ipc(
+        assert!(is_retryable_control_transport(&ClientError::Ipc(
             IpcError::ConnectTimedOut
         )));
-        assert!(is_retryable_quota_transport(&ClientError::Ipc(
+        assert!(is_retryable_control_transport(&ClientError::Ipc(
             IpcError::Transport(io::Error::new(io::ErrorKind::TimedOut, "fixture"))
         )));
-        assert!(!is_retryable_quota_transport(&ClientError::Ipc(
+        assert!(!is_retryable_control_transport(&ClientError::Ipc(
             IpcError::Transport(io::Error::new(io::ErrorKind::ConnectionReset, "fixture"))
         )));
-        assert!(!is_retryable_quota_transport(
+        assert!(!is_retryable_control_transport(
             &ClientError::UnexpectedResponse
         ));
     }
