@@ -448,6 +448,10 @@ fn client_errors_map_to_source_free_port_classes() {
         crate::ClientPortError::Transport
     );
     assert_eq!(
+        map_client_error(ClientError::DaemonLaunchCleanupTimedOut),
+        crate::ClientPortError::Transport
+    );
+    assert_eq!(
         map_client_error(ClientError::InvalidFirstSliceRequest),
         crate::ClientPortError::Executor
     );

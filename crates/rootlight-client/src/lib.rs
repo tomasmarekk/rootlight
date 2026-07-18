@@ -958,10 +958,8 @@ impl Client {
     pub fn new(endpoint: Endpoint, instance_nonce: [u8; 16], client_instance_id: [u8; 16]) -> Self {
         // Keep this infallible constructor bounded even if its static tuning ever
         // drifts outside `FrameCodec`'s validated limits.
-        let codec = match FrameCodec::new(rootlight_ipc::MAX_FRAME_BYTES, REQUEST_IO_TIMEOUT) {
-            Ok(codec) => codec,
-            Err(_) => FrameCodec::default(),
-        };
+        let codec =
+            FrameCodec::new(rootlight_ipc::MAX_FRAME_BYTES, REQUEST_IO_TIMEOUT).unwrap_or_default();
         Self {
             endpoint,
             instance_nonce,

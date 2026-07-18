@@ -1173,14 +1173,18 @@ fn wait_output(mut child: Child, timeout: Duration) -> Result<Output, LifecycleE
 }
 
 fn read_completed_output(child: &mut Child, status: ExitStatus) -> Result<Output, LifecycleError> {
-    let stdout = match child.stdout.take().map(read_stream).transpose()? {
-        Some(stdout) => stdout,
-        None => Vec::new(),
-    };
-    let stderr = match child.stderr.take().map(read_stream).transpose()? {
-        Some(stderr) => stderr,
-        None => Vec::new(),
-    };
+    let stdout = child
+        .stdout
+        .take()
+        .map(read_stream)
+        .transpose()?
+        .unwrap_or_default();
+    let stderr = child
+        .stderr
+        .take()
+        .map(read_stream)
+        .transpose()?
+        .unwrap_or_default();
     Ok(Output {
         status,
         stdout,

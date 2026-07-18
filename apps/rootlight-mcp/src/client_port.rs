@@ -556,6 +556,7 @@ fn map_client_error(error: ClientError) -> ClientPortError {
         | ClientError::LaunchIo(_)
         | ClientError::DaemonExecutableMissing
         | ClientError::DaemonLaunchFailed
+        | ClientError::DaemonLaunchCleanupTimedOut
         | ClientError::DaemonStartTimedOut => ClientPortError::Transport,
     }
 }

@@ -834,10 +834,7 @@ fn parse_timestamp_ms(value: &std::ffi::OsString) -> Result<u64, CliError> {
 }
 
 fn elapsed_micros(started: Instant) -> u64 {
-    match u64::try_from(started.elapsed().as_micros()) {
-        Ok(elapsed) => elapsed,
-        Err(_) => u64::MAX,
-    }
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 fn runtime_paths() -> Result<RuntimePaths, CliError> {
