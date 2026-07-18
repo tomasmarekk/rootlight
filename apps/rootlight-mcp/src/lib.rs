@@ -754,7 +754,7 @@ pub enum BlockingTaskError {
 /// task, backpressure, or repeated-invalid-input limits. Peer parse and method
 /// errors are returned as JSON-RPC responses where the protocol permits.
 pub async fn serve<R, W>(
-    mut input: R,
+    input: R,
     output: W,
     session: &mut Session,
     handler: Arc<dyn RequestHandler>,
@@ -765,6 +765,7 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let limits = limits.validate()?;
+    let mut frames = FrameReader::new(input, limits.max_frame_bytes);
     let (response_tx, response_rx) = mpsc::channel(limits.response_channel_capacity);
     let mut writer = tokio::spawn(write_responses(output, response_rx));
     let mut writer_finished = false;
@@ -790,7 +791,7 @@ where
                         enqueue_response(&response_tx, encoded)?;
                     }
                 }
-                frame = read_frame(&mut input, limits.max_frame_bytes) => {
+                frame = frames.read_next() => {
                     let frame = frame?;
                     let unterminated = matches!(frame, ReadFrame::Unterminated);
                     let dispatch = match frame {
@@ -1063,6 +1064,86 @@ enum ReadFrame {
     Complete(Vec<u8>),
     Oversized,
     Unterminated,
+}
+
+// Framing state lives outside the future returned by `read_next`. The serve
+// loop may drop that future whenever another `select!` branch wins; retaining
+// partial bytes and drain mode here prevents the next poll from losing sync.
+struct FrameReader<R> {
+    input: R,
+    frame: Vec<u8>,
+    maximum: usize,
+    draining_oversized: bool,
+}
+
+impl<R> FrameReader<R>
+where
+    R: AsyncBufRead + Unpin,
+{
+    const fn new(input: R, maximum: usize) -> Self {
+        Self {
+            input,
+            frame: Vec::new(),
+            maximum,
+            draining_oversized: false,
+        }
+    }
+
+    async fn read_next(&mut self) -> Result<ReadFrame, SessionError> {
+        loop {
+            let buffer = self.input.fill_buf().await.map_err(SessionError::Io)?;
+            if buffer.is_empty() {
+                if self.draining_oversized {
+                    self.draining_oversized = false;
+                    return Ok(ReadFrame::Oversized);
+                }
+                return if self.frame.is_empty() {
+                    Ok(ReadFrame::Eof)
+                } else {
+                    self.frame.clear();
+                    Ok(ReadFrame::Unterminated)
+                };
+            }
+
+            let newline = buffer.iter().position(|byte| *byte == b'\n');
+            if self.draining_oversized {
+                let consumed = newline.map_or(buffer.len(), |index| index.saturating_add(1));
+                self.input.consume(consumed);
+                if newline.is_some() {
+                    self.draining_oversized = false;
+                    return Ok(ReadFrame::Oversized);
+                }
+                continue;
+            }
+
+            let payload_len = newline.unwrap_or(buffer.len());
+            let next_len = self
+                .frame
+                .len()
+                .checked_add(payload_len)
+                .ok_or(SessionError::MemoryUnavailable)?;
+            if next_len > self.maximum {
+                self.frame.clear();
+                let consumed = newline.map_or(buffer.len(), |index| index.saturating_add(1));
+                self.input.consume(consumed);
+                if newline.is_some() {
+                    return Ok(ReadFrame::Oversized);
+                }
+                self.draining_oversized = true;
+                continue;
+            }
+
+            self.frame
+                .try_reserve_exact(payload_len)
+                .map_err(|_| SessionError::MemoryUnavailable)?;
+            self.frame.extend_from_slice(&buffer[..payload_len]);
+            let consumed = newline.map_or(payload_len, |index| index.saturating_add(1));
+            self.input.consume(consumed);
+            if newline.is_some() {
+                return Ok(ReadFrame::Complete(std::mem::take(&mut self.frame)));
+            }
+        }
+    }
 }
 
 fn readable_id(value: &Value) -> Option<RequestId> {
@@ -1475,63 +1556,6 @@ fn flatten_writer_result(
     result: Result<Result<(), SessionError>, tokio::task::JoinError>,
 ) -> Result<(), SessionError> {
     result.map_err(|_| SessionError::WriterTaskFailed)?
-}
-
-async fn read_frame(
-    input: &mut (impl AsyncBufRead + Unpin),
-    maximum: usize,
-) -> Result<ReadFrame, SessionError> {
-    let mut frame = Vec::new();
-    loop {
-        let buffer = input.fill_buf().await.map_err(SessionError::Io)?;
-        if buffer.is_empty() {
-            return if frame.is_empty() {
-                Ok(ReadFrame::Eof)
-            } else {
-                Ok(ReadFrame::Unterminated)
-            };
-        }
-
-        let newline = buffer.iter().position(|byte| *byte == b'\n');
-        let payload_len = newline.unwrap_or(buffer.len());
-        let next_len = frame
-            .len()
-            .checked_add(payload_len)
-            .ok_or(SessionError::MemoryUnavailable)?;
-        if next_len > maximum {
-            let consumed = newline.map_or(buffer.len(), |index| index.saturating_add(1));
-            input.consume(consumed);
-            if newline.is_none() {
-                drain_to_newline(input).await?;
-            }
-            return Ok(ReadFrame::Oversized);
-        }
-
-        frame
-            .try_reserve_exact(payload_len)
-            .map_err(|_| SessionError::MemoryUnavailable)?;
-        frame.extend_from_slice(&buffer[..payload_len]);
-        let consumed = newline.map_or(payload_len, |index| index.saturating_add(1));
-        input.consume(consumed);
-        if newline.is_some() {
-            return Ok(ReadFrame::Complete(frame));
-        }
-    }
-}
-
-async fn drain_to_newline(input: &mut (impl AsyncBufRead + Unpin)) -> Result<(), SessionError> {
-    loop {
-        let buffer = input.fill_buf().await.map_err(SessionError::Io)?;
-        if buffer.is_empty() {
-            return Ok(());
-        }
-        if let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
-            input.consume(newline.saturating_add(1));
-            return Ok(());
-        }
-        let consumed = buffer.len();
-        input.consume(consumed);
-    }
 }
 
 #[cfg(test)]

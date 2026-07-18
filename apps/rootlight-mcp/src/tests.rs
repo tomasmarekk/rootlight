@@ -333,17 +333,19 @@ fn response_limit_is_inclusive_and_bounds_serialization() {
 
 #[tokio::test]
 async fn frame_limit_is_inclusive_and_oversized_input_is_drained() {
-    let payload = "x".repeat(64);
+    let payload = "x".repeat(PING_TWO.len() + 1);
     let bytes = format!("{payload}\n{PING_TWO}\n").into_bytes();
-    let mut input = BufReader::new(bytes.as_slice());
+    let mut frames = FrameReader::new(BufReader::new(bytes.as_slice()), PING_TWO.len());
     assert!(matches!(
-        read_frame(&mut input, 63)
+        frames
+            .read_next()
             .await
             .expect("oversized frame is drained"),
         ReadFrame::Oversized
     ));
     assert!(matches!(
-        read_frame(&mut input, PING_TWO.len())
+        frames
+            .read_next()
             .await
             .expect("next exact frame is read"),
         ReadFrame::Complete(frame) if frame == PING_TWO.as_bytes()
@@ -353,18 +355,89 @@ async fn frame_limit_is_inclusive_and_oversized_input_is_drained() {
 #[tokio::test]
 async fn raw_embedded_newline_is_not_accepted_as_one_frame() {
     let bytes = b"{\"jsonrpc\":\"2.0\",\n\"id\":1,\"method\":\"initialize\"}\n";
-    let mut input = BufReader::new(bytes.as_slice());
+    let mut frames = FrameReader::new(BufReader::new(bytes.as_slice()), DEFAULT_MAX_FRAME_BYTES);
     assert!(matches!(
-        read_frame(&mut input, DEFAULT_MAX_FRAME_BYTES)
+        frames
+            .read_next()
             .await
             .expect("first raw line is read"),
         ReadFrame::Complete(frame) if frame == b"{\"jsonrpc\":\"2.0\","
     ));
     assert!(matches!(
-        read_frame(&mut input, DEFAULT_MAX_FRAME_BYTES)
+        frames
+            .read_next()
             .await
             .expect("second raw line is read"),
         ReadFrame::Complete(frame) if frame == b"\"id\":1,\"method\":\"initialize\"}"
+    ));
+}
+
+#[tokio::test]
+async fn partial_frame_survives_a_cancelled_read_future() {
+    let (client, server) = tokio::io::duplex(1024);
+    let (_client_read, mut client_write) = tokio::io::split(client);
+    let (server_read, _server_write) = tokio::io::split(server);
+    let mut frames = FrameReader::new(BufReader::new(server_read), DEFAULT_MAX_FRAME_BYTES);
+    let split = PING_TWO.len() / 2;
+
+    client_write
+        .write_all(&PING_TWO.as_bytes()[..split])
+        .await
+        .expect("partial fixture writes");
+    assert!(
+        timeout(Duration::from_millis(20), frames.read_next())
+            .await
+            .is_err(),
+        "partial frame remains pending"
+    );
+
+    client_write
+        .write_all(&PING_TWO.as_bytes()[split..])
+        .await
+        .expect("remaining fixture writes");
+    client_write
+        .write_all(b"\n")
+        .await
+        .expect("fixture newline writes");
+    assert!(matches!(
+        frames.read_next().await.expect("complete frame is retained"),
+        ReadFrame::Complete(frame) if frame == PING_TWO.as_bytes()
+    ));
+}
+
+#[tokio::test]
+async fn oversized_drain_survives_a_cancelled_read_future() {
+    let (client, server) = tokio::io::duplex(1024);
+    let (_client_read, mut client_write) = tokio::io::split(client);
+    let (server_read, _server_write) = tokio::io::split(server);
+    let mut frames = FrameReader::new(BufReader::new(server_read), PING_TWO.len());
+    let oversized = vec![b'x'; PING_TWO.len() + 1];
+
+    client_write
+        .write_all(&oversized)
+        .await
+        .expect("oversized prefix writes");
+    assert!(
+        timeout(Duration::from_millis(20), frames.read_next())
+            .await
+            .is_err(),
+        "oversized frame remains pending until its delimiter"
+    );
+
+    client_write
+        .write_all(format!("\n{PING_TWO}\n").as_bytes())
+        .await
+        .expect("delimiter and next frame write");
+    assert!(matches!(
+        frames
+            .read_next()
+            .await
+            .expect("oversized frame finishes draining"),
+        ReadFrame::Oversized
+    ));
+    assert!(matches!(
+        frames.read_next().await.expect("next frame is retained"),
+        ReadFrame::Complete(frame) if frame == PING_TWO.as_bytes()
     ));
 }
 
