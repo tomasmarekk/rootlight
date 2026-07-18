@@ -64,19 +64,22 @@ enum WorkerCommand {
 
 struct PublicationBoundaryHook {
     boundary: PublicationBoundary,
+    armed: AtomicBool,
     reached: SyncSender<()>,
     release: Receiver<()>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PublicationBoundary {
+    AfterAdmission,
+    AfterActivation,
     BeforeCompletion,
     AfterSuccess,
 }
 
 impl PublicationBoundaryHook {
     fn pause(&self, boundary: PublicationBoundary) -> Result<(), PublicError> {
-        if self.boundary != boundary {
+        if self.boundary != boundary || !self.armed.swap(false, Ordering::AcqRel) {
             return Ok(());
         }
         self.reached.try_send(()).map_err(|_| internal_error())?;
@@ -571,6 +574,11 @@ fn repository_index(
     if let Some(admission) = context.index_admission.as_ref() {
         admission.mark_inserted();
     }
+    if let Some(hook) = publication_hook
+        && let Err(error) = hook.pause(PublicationBoundary::AfterAdmission)
+    {
+        return Err(error);
+    }
     if propagate_peer_cancellation(runtime, journal, operation, context, lifecycle_deadline)? {
         return Err(cancelled_error());
     }
@@ -578,6 +586,19 @@ fn repository_index(
         runtime,
         journal.activate_operation_until(operation, lifecycle_deadline),
     )?;
+    if let Some(hook) = publication_hook
+        && let Err(error) = hook.pause(PublicationBoundary::AfterActivation)
+    {
+        finish_failed_index(
+            runtime,
+            lifecycle_deadline,
+            journal,
+            operation,
+            &cancellation,
+            &error,
+        )?;
+        return Err(error);
+    }
     match service.prepare_rust_fixture(&PathBuf::from(request.root), &cancellation) {
         Ok(prepared) => {
             if propagate_peer_cancellation(
@@ -1657,6 +1678,8 @@ mod tests {
     fn index_across_client_disconnect(
         detached: bool,
         protocol_error: bool,
+        boundary: PublicationBoundary,
+        prove_lane_reusable: bool,
         operation_byte: u8,
     ) -> (
         Result<FirstSliceIpcResponse, PublicError>,
@@ -1669,7 +1692,8 @@ mod tests {
         let (reached_sender, reached_receiver) = mpsc::sync_channel(1);
         let (release_sender, release_receiver) = mpsc::sync_channel(1);
         let hook = PublicationBoundaryHook {
-            boundary: PublicationBoundary::BeforeCompletion,
+            boundary,
+            armed: AtomicBool::new(true),
             reached: reached_sender,
             release: release_receiver,
         };
@@ -1689,6 +1713,8 @@ mod tests {
         let connection_admission = admission.clone();
         let index_daemon = daemon.clone();
         let root = fixture.path().to_string_lossy().into_owned();
+        let follow_up_root = root.clone();
+        let (response_sender, response_receiver) = mpsc::sync_channel(1);
         let index = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(30);
             let context = FirstSliceIpcContext {
@@ -1702,7 +1728,7 @@ mod tests {
                 .enable_time()
                 .build()
                 .expect("runtime builds");
-            runtime.block_on(index_daemon.dispatch(
+            let response = runtime.block_on(index_daemon.dispatch(
                 FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
                     schema_version: Some(schema_version()),
                     root,
@@ -1710,11 +1736,14 @@ mod tests {
                     detached,
                 }),
                 context,
-            ))
+            ));
+            response_sender
+                .send(response)
+                .expect("index response is observed");
         });
         reached_receiver
             .recv_timeout(Duration::from_secs(5))
-            .expect("index reaches publication boundary");
+            .expect("index reaches selected lifecycle boundary");
         if !detached || protocol_error {
             connection_admission.cancel_publication();
             assert!(
@@ -1722,8 +1751,29 @@ mod tests {
                     .cancel(rootlight_operations::CancellationReason::ClientRequest)
             );
         }
+        if prove_lane_reusable {
+            let cancellation = execute(
+                &daemon,
+                FirstSliceIpcRequest::RepositoryOperationStatus(
+                    daemon::RepositoryOperationStatusRequest {
+                        schema_version: Some(schema_version()),
+                        operation: Some(operation_to_wire(operation)),
+                        action: daemon::RepositoryOperationAction::RepositoryOperationCancel as i32,
+                        wait_ms: None,
+                        after_revision: None,
+                    },
+                ),
+            );
+            assert!(matches!(
+                cancellation,
+                FirstSliceIpcResponse::RepositoryOperationStatus(_)
+            ));
+        }
         release_sender.send(()).expect("index resumes");
-        let response = index.join().expect("index thread joins");
+        let response = response_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("cancelled index releases the work lane");
+        index.join().expect("index thread joins");
         let status = execute(
             &daemon,
             FirstSliceIpcRequest::RepositoryOperationStatus(
@@ -1741,6 +1791,28 @@ mod tests {
         };
         let published = status.published_generation.is_some();
         let terminal = journal.status(operation).expect("terminal status persists");
+        if prove_lane_reusable {
+            let follow_up = execute_with_timeout(
+                &daemon,
+                FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                    schema_version: Some(schema_version()),
+                    root: follow_up_root,
+                    operation: Some(operation_to_wire(OperationId::from_bytes(
+                        [operation_byte.wrapping_add(64); 16],
+                    ))),
+                    detached: true,
+                }),
+            );
+            let FirstSliceIpcResponse::RepositoryIndex(follow_up) =
+                follow_up.expect("fresh index completes on the released work lane")
+            else {
+                panic!("fresh repository index response expected");
+            };
+            assert!(
+                follow_up.parent_generation.is_none(),
+                "cancelled work must not publish a parent generation"
+            );
+        }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -1755,7 +1827,13 @@ mod tests {
 
     #[test]
     fn attached_disconnect_cancels_before_publication() {
-        let (response, terminal, published) = index_across_client_disconnect(false, false, 61);
+        let (response, terminal, published) = index_across_client_disconnect(
+            false,
+            false,
+            PublicationBoundary::BeforeCompletion,
+            false,
+            61,
+        );
 
         assert_eq!(
             response.expect_err("attached request is cancelled").code(),
@@ -1768,7 +1846,13 @@ mod tests {
 
     #[test]
     fn detached_disconnect_does_not_cancel_publication() {
-        let (response, terminal, published) = index_across_client_disconnect(true, false, 62);
+        let (response, terminal, published) = index_across_client_disconnect(
+            true,
+            false,
+            PublicationBoundary::BeforeCompletion,
+            false,
+            62,
+        );
 
         assert!(matches!(
             response.expect("detached request completes"),
@@ -1780,7 +1864,13 @@ mod tests {
 
     #[test]
     fn detached_protocol_error_cancels_before_publication() {
-        let (response, terminal, published) = index_across_client_disconnect(true, true, 63);
+        let (response, terminal, published) = index_across_client_disconnect(
+            true,
+            true,
+            PublicationBoundary::BeforeCompletion,
+            false,
+            63,
+        );
 
         assert_eq!(
             response
@@ -1791,6 +1881,33 @@ mod tests {
         assert_eq!(terminal.state, OperationState::Cancelled);
         assert_eq!(terminal.stage, OperationStage::Cleanup);
         assert!(!published);
+    }
+
+    #[test]
+    fn peer_cancellation_leaves_work_lane_reusable_before_publication() {
+        for (boundary, operation_byte) in [
+            (PublicationBoundary::AfterAdmission, 64),
+            (PublicationBoundary::AfterActivation, 65),
+            (PublicationBoundary::BeforeCompletion, 66),
+        ] {
+            let (response, terminal, published) =
+                index_across_client_disconnect(false, false, boundary, true, operation_byte);
+
+            assert_eq!(
+                response.expect_err("attached request is cancelled").code(),
+                ErrorCode::Cancelled
+            );
+            assert_eq!(terminal.state, OperationState::Cancelled);
+            assert_eq!(
+                terminal.stage,
+                if boundary == PublicationBoundary::AfterAdmission {
+                    OperationStage::Accepted
+                } else {
+                    OperationStage::Cleanup
+                }
+            );
+            assert!(!published);
+        }
     }
 
     #[test]
@@ -1884,6 +2001,7 @@ mod tests {
         let (release_sender, release_receiver) = mpsc::sync_channel(1);
         let hook = PublicationBoundaryHook {
             boundary: PublicationBoundary::AfterSuccess,
+            armed: AtomicBool::new(true),
             reached: reached_sender,
             release: release_receiver,
         };
@@ -1966,6 +2084,7 @@ mod tests {
         let (release_sender, release_receiver) = mpsc::sync_channel(1);
         let hook = PublicationBoundaryHook {
             boundary: PublicationBoundary::BeforeCompletion,
+            armed: AtomicBool::new(true),
             reached: reached_sender,
             release: release_receiver,
         };
@@ -2227,5 +2346,29 @@ mod tests {
         runtime
             .block_on(daemon.dispatch(request, context))
             .expect("request succeeds")
+    }
+
+    fn execute_with_timeout(
+        daemon: &FirstSliceDaemon,
+        request: FirstSliceIpcRequest,
+    ) -> Result<FirstSliceIpcResponse, PublicError> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let context = FirstSliceIpcContext {
+            client_instance_id: rootlight_operations::ClientInstanceId::from_bytes([7; 16]),
+            selected_protocol_minor: 5,
+            cancellation: rootlight_operations::Cancellation::with_deadline(deadline),
+            deadline,
+            index_admission: None,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        runtime
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), daemon.dispatch(request, context))
+                    .await
+            })
+            .expect("work-lane request completes within its deadline")
     }
 }
