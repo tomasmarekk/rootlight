@@ -7828,6 +7828,22 @@ mod tests {
         )
         .await
         .expect("index request writes");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if handler
+                    .requests
+                    .lock()
+                    .expect("request capture lock is healthy")
+                    .len()
+                    == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("index admission is observed before disconnect");
         drop(client);
 
         tokio::time::timeout(Duration::from_secs(2), server)

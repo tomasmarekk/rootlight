@@ -33,6 +33,11 @@ use tokio::{
     time::timeout,
 };
 
+// `interprocess` applies the Unix listener mode through process-global `umask`
+// during creation. Serialize that short section so parallel binds cannot race.
+#[cfg(unix)]
+static UNIX_LISTENER_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Maximum encoded protobuf payload accepted by the local daemon.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// Default time allowed for one frame read or write.
@@ -296,6 +301,8 @@ impl LocalListener {
             .name(name)
             .nonblocking(ListenerNonblockingMode::Both);
         let options = platform_listener_options(options)?;
+        #[cfg(unix)]
+        let _creation_guard = unix_listener_creation_guard()?;
         let listener = options.create_sync().map_err(IpcError::Transport)?;
         if let Err(error) = verify_bound_endpoint(&endpoint) {
             drop(listener);
@@ -349,6 +356,8 @@ impl AsyncLocalListener {
         let name = endpoint.name()?;
         let options = ListenerOptions::new().name(name);
         let options = platform_listener_options(options)?;
+        #[cfg(unix)]
+        let _creation_guard = unix_listener_creation_guard()?;
         let listener = options.create_tokio().map_err(IpcError::Transport)?;
         if let Err(error) = verify_bound_endpoint(&endpoint) {
             drop(listener);
@@ -856,6 +865,13 @@ fn platform_listener_options(
 ) -> Result<ListenerOptions<'_>, IpcError> {
     use interprocess::os::unix::local_socket::ListenerOptionsExt as _;
     Ok(options.mode(0o600))
+}
+
+#[cfg(unix)]
+fn unix_listener_creation_guard() -> Result<std::sync::MutexGuard<'static, ()>, IpcError> {
+    UNIX_LISTENER_CREATION
+        .lock()
+        .map_err(|_| IpcError::SecurityPolicy)
 }
 
 #[cfg(windows)]
