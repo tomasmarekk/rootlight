@@ -103,20 +103,20 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let shutdown = shutdown_signal(mode);
     tokio::pin!(shutdown);
 
-    loop {
+    let run_failure = loop {
         tokio::select! {
-            _ = &mut shutdown => break,
+            _ = &mut shutdown => break None,
             event = orchestrator.next_event(), if !orchestrator.is_idle() => {
                 let event = match event {
                     Ok(event) => event,
                     Err(error) => {
                         state.set_journal_healthy(false);
-                        return Err(error.into());
+                        break Some(error.into());
                     }
                 };
                 if let Err(error) = orchestrator.process_event(event).await {
                     state.set_journal_healthy(false);
-                    return Err(error.into());
+                    break Some(error.into());
                 }
             }
             submission = submission_rx.recv() => {
@@ -125,7 +125,7 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                     && error.is_fatal_submission_failure()
                 {
                     state.set_journal_healthy(false);
-                    return Err(error.into());
+                    break Some(error.into());
                 }
             }
             // Reap before accepting: completed handlers release connection permits
@@ -136,7 +136,10 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                 }
             }
             accepted = listener.accept() => {
-                let stream = accepted?;
+                let stream = match accepted {
+                    Ok(stream) => stream,
+                    Err(error) => break Some(error.into()),
+                };
                 let permit = match Arc::clone(&connection_slots).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => continue,
@@ -164,7 +167,7 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                 });
             }
         }
-    }
+    };
 
     state.set_lifecycle(DaemonLifecycle::Draining);
     diagnostic_actor.stop();
@@ -200,11 +203,16 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
         }
         orchestrator.shutdown().await
     };
-    tokio::time::timeout(limits.shutdown_grace, drain)
+    let drain_result = tokio::time::timeout(limits.shutdown_grace, drain)
         .await
-        .map_err(|_| DaemonError::ShutdownTimedOut)??;
-    actor.join()?;
-    Ok(())
+        .map_err(|_| DaemonError::ShutdownTimedOut)
+        .and_then(|result| result.map_err(DaemonError::from));
+    let actor_result = actor.join().map_err(DaemonError::from);
+    actor_result?;
+    if let Some(error) = run_failure {
+        return Err(error);
+    }
+    drain_result
 }
 
 async fn shutdown_signal(mode: DaemonMode) {

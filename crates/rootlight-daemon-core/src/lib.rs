@@ -526,6 +526,11 @@ enum JournalCommand {
     Checkpoint {
         reply: tokio::sync::oneshot::Sender<Result<(), OperationError>>,
     },
+    #[cfg(test)]
+    Barrier {
+        entered: SyncSender<()>,
+        release: Receiver<()>,
+    },
 }
 
 #[derive(Debug)]
@@ -534,11 +539,16 @@ struct JournalSenders {
     normal: SyncSender<JournalCommand>,
 }
 
+#[derive(Debug)]
+enum JournalActorState {
+    Accepting(JournalSenders),
+    Draining,
+}
+
 /// Bounded two-lane handle to one journal-owning thread.
 #[derive(Debug, Clone)]
 pub struct JournalActorHandle {
-    senders: Arc<Mutex<Option<JournalSenders>>>,
-    stopping: Arc<AtomicBool>,
+    state: Arc<Mutex<JournalActorState>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -752,13 +762,12 @@ impl JournalActorHandle {
             .map_err(ServiceError::Operations)
     }
 
-    fn stop(&self) {
-        let Ok(mut senders) = self.senders.lock() else {
-            self.stopping.store(true, Ordering::Release);
-            return;
+    fn begin_drain(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
         };
-        self.stopping.store(true, Ordering::Release);
-        senders.take();
+        *state = JournalActorState::Draining;
     }
 
     fn try_send(&self, lane: JournalLane, command: JournalCommand) -> Result<(), ServiceError> {
@@ -771,14 +780,11 @@ impl JournalActorHandle {
         lane: JournalLane,
         command: JournalCommand,
     ) -> Result<(), (ServiceError, Box<JournalCommand>)> {
-        let senders = match self.senders.lock() {
-            Ok(senders) => senders,
+        let state = match self.state.lock() {
+            Ok(state) => state,
             Err(_) => return Err((ServiceError::ChannelClosed, Box::new(command))),
         };
-        if self.stopping.load(Ordering::Acquire) {
-            return Err((ServiceError::ChannelClosed, Box::new(command)));
-        }
-        let Some(senders) = senders.as_ref() else {
+        let JournalActorState::Accepting(senders) = &*state else {
             return Err((ServiceError::ChannelClosed, Box::new(command)));
         };
         let sender = match lane {
@@ -837,19 +843,16 @@ impl JournalActor {
         }
         let (control_tx, control_rx) = mpsc::sync_channel(control_capacity);
         let (normal_tx, normal_rx) = mpsc::sync_channel(normal_capacity);
-        let stopping = Arc::new(AtomicBool::new(false));
-        let actor_stopping = Arc::clone(&stopping);
         let thread = thread::Builder::new()
             .name("rootlight-journal".to_owned())
-            .spawn(move || journal_actor_loop(journal, control_rx, normal_rx, actor_stopping))
+            .spawn(move || journal_actor_loop(journal, control_rx, normal_rx))
             .map_err(ServiceError::ThreadSpawn)?;
         Ok(Self {
             handle: JournalActorHandle {
-                senders: Arc::new(Mutex::new(Some(JournalSenders {
+                state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
                     control: control_tx,
                     normal: normal_tx,
                 }))),
-                stopping,
             },
             join: Some(thread),
         })
@@ -861,13 +864,13 @@ impl JournalActor {
         self.handle.clone()
     }
 
-    /// Stops and joins the journal thread.
+    /// Closes admission, drains both bounded lanes, and joins the journal thread.
     ///
     /// # Errors
     ///
     /// Returns [`ServiceError::ThreadPanicked`] when the actor panicked.
     pub fn join(mut self) -> Result<(), ServiceError> {
-        self.handle.stop();
+        self.handle.begin_drain();
         let Some(join) = self.join.take() else {
             return Ok(());
         };
@@ -877,7 +880,7 @@ impl JournalActor {
 
 impl Drop for JournalActor {
     fn drop(&mut self) {
-        self.handle.stop();
+        self.handle.begin_drain();
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -888,17 +891,15 @@ fn journal_actor_loop(
     journal: Arc<OperationJournal>,
     control: Receiver<JournalCommand>,
     normal: Receiver<JournalCommand>,
-    stopping: Arc<AtomicBool>,
 ) {
     const CONTROL_BURST: usize = 16;
+    let mut control_open = true;
+    let mut normal_open = true;
     loop {
-        if stopping.load(Ordering::Acquire) {
-            return;
-        }
         let mut handled = false;
         for _ in 0..CONTROL_BURST {
-            if stopping.load(Ordering::Acquire) {
-                return;
+            if !control_open {
+                break;
             }
             match control.try_recv() {
                 Ok(command) => {
@@ -906,44 +907,40 @@ fn journal_actor_loop(
                     execute_journal_command(&journal, command);
                 }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return,
+                Err(TryRecvError::Disconnected) => {
+                    control_open = false;
+                    break;
+                }
             }
         }
-        if stopping.load(Ordering::Acquire) {
-            return;
-        }
-        match normal.try_recv() {
-            Ok(command) => {
-                handled = true;
-                execute_journal_command(&journal, command);
+        if normal_open {
+            match normal.try_recv() {
+                Ok(command) => {
+                    handled = true;
+                    execute_journal_command(&journal, command);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => normal_open = false,
             }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) if !handled => return,
-            Err(TryRecvError::Disconnected) => {}
         }
         if handled {
             continue;
         }
-        match control.recv_timeout(Duration::from_millis(10)) {
-            Ok(command) => {
-                if stopping.load(Ordering::Acquire) {
-                    return;
-                }
-                execute_journal_command(&journal, command);
+        if !control_open && !normal_open {
+            return;
+        }
+        if control_open {
+            match control.recv_timeout(Duration::from_millis(10)) {
+                Ok(command) => execute_journal_command(&journal, command),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => control_open = false,
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if stopping.load(Ordering::Acquire) {
-                    return;
-                }
-                match normal.try_recv() {
-                    Ok(command) => {
-                        execute_journal_command(&journal, command);
-                    }
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => return,
-                }
+        } else if normal_open {
+            match normal.recv_timeout(Duration::from_millis(10)) {
+                Ok(command) => execute_journal_command(&journal, command),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => normal_open = false,
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
     }
 }
@@ -977,6 +974,12 @@ fn start_operation(
 
 fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) {
     match command {
+        #[cfg(test)]
+        JournalCommand::Barrier { entered, release } => {
+            if entered.send(()).is_ok() {
+                let _ = release.recv();
+            }
+        }
         JournalCommand::Execute { request, reply } => {
             let _ = reply.send(execute_journal_request(journal, request));
         }
@@ -2734,8 +2737,6 @@ impl DaemonOrchestrator {
         while let Ok(completion) = self.workers.completions.try_recv() {
             completion.permit.finish();
         }
-        self.timers = TimerSchedule::default();
-        self.active_operations.clear();
         match tokio::time::timeout(self.limits.request_timeout, self.journal.checkpoint()).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -2745,10 +2746,12 @@ impl DaemonOrchestrator {
                 failure.get_or_insert(ServiceError::RequestTimedOut);
             }
         }
-        self.state.set_operation_counts(0, 0, 0);
         match failure {
             Some(error) => Err(self.fail_timer_delivery(error)),
             None => {
+                self.timers = TimerSchedule::default();
+                self.active_operations.clear();
+                self.state.set_operation_counts(0, 0, 0);
                 self.state.set_lifecycle(DaemonLifecycle::Stopped);
                 Ok(())
             }
@@ -4740,8 +4743,10 @@ mod tests {
         let (control, control_rx) = mpsc::sync_channel(control_capacity);
         let (normal, normal_rx) = mpsc::sync_channel(4);
         let journal = JournalActorHandle {
-            senders: Arc::new(Mutex::new(Some(JournalSenders { control, normal }))),
-            stopping: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
+                control,
+                normal,
+            }))),
         };
         let state = Arc::new(DaemonState::starting());
         state.set_lifecycle(DaemonLifecycle::Ready);
@@ -5165,52 +5170,81 @@ mod tests {
     }
 
     #[test]
-    fn journal_actor_stop_preempts_buffered_commands() {
+    fn journal_actor_drop_drains_buffered_durable_commands() {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-        let (control_tx, control_rx) = mpsc::sync_channel(2);
-        let (_normal_tx, normal_rx) = mpsc::sync_channel(1);
-        let stopping = Arc::new(AtomicBool::new(true));
         let operation = OperationId::from_bytes([10; 16]);
-        let (reply, _receiver) = tokio::sync::oneshot::channel();
-        control_tx
-            .try_send(JournalCommand::Submit {
-                submission: OperationSubmission::control_probe(operation),
-                deadline_retry: DeadlineRetry::Exact,
-                reply,
-            })
-            .expect("command buffers");
-
-        journal_actor_loop(Arc::clone(&journal), control_rx, normal_rx, stopping);
-
-        assert!(matches!(
-            journal.status(operation),
-            Err(OperationError::NotFound)
-        ));
-    }
-
-    #[test]
-    fn journal_actor_stop_rejects_new_commands_and_joins_with_full_lane() {
-        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-        let actor = JournalActor::start(Arc::clone(&journal), 1, 1).expect("actor starts");
+        journal.enqueue(operation).expect("operation enqueues");
+        let actor = JournalActor::start(Arc::clone(&journal), 2, 1).expect("actor starts");
         let handle = actor.handle();
-        let (reply, _receiver) = tokio::sync::oneshot::channel();
-        let command = JournalCommand::Submit {
-            submission: OperationSubmission::control_probe(OperationId::from_bytes([11; 16])),
-            deadline_retry: DeadlineRetry::Exact,
-            reply,
-        };
-        let senders = handle.senders.lock().expect("sender lock is available");
-        let sender = &senders.as_ref().expect("actor is accepting").control;
-        let _ = sender.try_send(command);
-        drop(senders);
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+            )
+            .expect("barrier queues");
+        entered_rx.recv().expect("actor enters barrier");
+        let response = handle
+            .interrupt_deadline_receiver(operation)
+            .expect("durable interrupt queues");
 
-        actor.join().expect("actor joins without an in-band stop");
-
+        handle.begin_drain();
         let (reply, _receiver) = tokio::sync::oneshot::channel();
         assert!(matches!(
             handle.try_send(JournalLane::Control, JournalCommand::Checkpoint { reply }),
             Err(ServiceError::ChannelClosed)
         ));
+        let dropped = thread::spawn(move || drop(actor));
+        release_tx.send(()).expect("actor barrier releases");
+        dropped.join().expect("actor owner drops");
+
+        let observed = response
+            .blocking_recv()
+            .expect("accepted command returns")
+            .expect("durable interrupt succeeds");
+        assert_eq!(observed.state, OperationState::Interrupted);
+        assert_eq!(
+            journal
+                .status(operation)
+                .expect("durable state remains readable")
+                .state,
+            OperationState::Interrupted
+        );
+    }
+
+    #[test]
+    fn journal_actor_drain_rejects_new_commands_and_joins_with_full_lane() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 1, 1).expect("actor starts");
+        let handle = actor.handle();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+            )
+            .expect("barrier queues");
+        entered_rx.recv().expect("actor enters barrier");
+        let (reply, _receiver) = tokio::sync::oneshot::channel();
+        handle
+            .try_send(JournalLane::Control, JournalCommand::Checkpoint { reply })
+            .expect("control lane fills");
+        handle.begin_drain();
+        let (reply, _receiver) = tokio::sync::oneshot::channel();
+        assert!(matches!(
+            handle.try_send(JournalLane::Control, JournalCommand::Checkpoint { reply }),
+            Err(ServiceError::ChannelClosed)
+        ));
+        release_tx.send(()).expect("actor barrier releases");
+        actor.join().expect("actor drains and joins");
     }
 
     #[test]
@@ -5218,8 +5252,10 @@ mod tests {
         let (control, _control_rx) = mpsc::sync_channel(1);
         let (normal, normal_rx) = mpsc::sync_channel(1);
         let handle = JournalActorHandle {
-            senders: Arc::new(Mutex::new(Some(JournalSenders { control, normal }))),
-            stopping: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
+                control,
+                normal,
+            }))),
         };
         let (checkpoint_reply, _checkpoint_response) = tokio::sync::oneshot::channel();
         handle
@@ -6037,8 +6073,10 @@ mod tests {
         let (control, control_rx) = mpsc::sync_channel(1);
         let (normal, _normal_rx) = mpsc::sync_channel(1);
         let journal = JournalActorHandle {
-            senders: Arc::new(Mutex::new(Some(JournalSenders { control, normal }))),
-            stopping: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
+                control,
+                normal,
+            }))),
         };
         let (submissions, _submission_rx) = tokio::sync::mpsc::channel(1);
         let commands = OrchestratorSenders::new(submissions);
@@ -6241,6 +6279,12 @@ mod tests {
         let journal = OperationJournal::open_in_memory().expect("journal opens");
         let operation = OperationId::from_bytes([53; 16]);
         journal.enqueue(operation).expect("operation enqueues");
+        orchestrator.active_operations.insert(
+            operation,
+            journal.status(operation).expect("operation is durable"),
+        );
+        state.set_operation_counts(1, 1, 0);
+        let deadline = tokio::time::Instant::now();
         orchestrator
             .timers
             .register(
@@ -6248,7 +6292,7 @@ mod tests {
                     operation,
                     reason: TimerReason::Deadline,
                 },
-                tokio::time::Instant::now(),
+                deadline,
             )
             .expect("timer registers");
         orchestrator
@@ -6270,7 +6314,10 @@ mod tests {
             Duration::from_millis(10)
         );
         assert_eq!(state.lifecycle(), DaemonLifecycle::Faulted);
-        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
+        assert_eq!(orchestrator.timers.next_deadline(), Some(deadline));
+        assert!(orchestrator.active_operations.contains_key(&operation));
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 1);
+        assert_eq!(state.queued_operations.load(Ordering::Acquire), 1);
         let command = control_rx
             .try_recv()
             .expect("accepted durable interruption remains in the actor lane");
