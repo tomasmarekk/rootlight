@@ -127,6 +127,12 @@ const FILES_SQL: &str = "CREATE TABLE files (
     repository_id BLOB NOT NULL CHECK(length(repository_id) = 16),
     generation_id BLOB NOT NULL CHECK(length(generation_id) = 20),
     path TEXT NOT NULL CHECK(length(path) BETWEEN 1 AND 32768),
+    path_locator_encoding TEXT CHECK(path_locator_encoding IS NULL OR path_locator_encoding IN (
+        'unix_bytes_v1', 'windows_wide_v1'
+    )),
+    path_locator_components TEXT CHECK(
+        path_locator_components IS NULL OR length(path_locator_components) BETWEEN 2 AND 131072
+    ),
     content_hash BLOB NOT NULL CHECK(length(content_hash) = 32),
     byte_length INTEGER NOT NULL CHECK(byte_length >= 0),
     language TEXT NOT NULL CHECK(length(language) BETWEEN 1 AND 32768),
@@ -134,7 +140,7 @@ const FILES_SQL: &str = "CREATE TABLE files (
     generated INTEGER NOT NULL CHECK(generated IN (0, 1)),
     provenance_id BLOB NOT NULL CHECK(length(provenance_id) = 20),
     evidence_source_ordinal INTEGER,
-    UNIQUE(repository_id, generation_id, path),
+    CHECK((path_locator_encoding IS NULL) = (path_locator_components IS NULL)),
     FOREIGN KEY(repository_id, generation_id)
         REFERENCES generation_meta(repository_id, generation_id)
         DEFERRABLE INITIALLY DEFERRED,

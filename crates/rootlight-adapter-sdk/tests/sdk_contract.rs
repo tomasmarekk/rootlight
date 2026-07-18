@@ -1114,6 +1114,11 @@ fn minimal_ir_records_for_tier(
         repository: source.repository(),
         generation: source.generation(),
         path: "src/lib.rs".to_owned(),
+        path_locator: Some(
+            RelativePath::parse(Path::new("src/lib.rs"))
+                .expect("fixture file path is valid")
+                .to_locator(),
+        ),
         content_hash: source.content_hash(),
         byte_length: source.span().end_byte(),
         language: "rust".to_owned(),

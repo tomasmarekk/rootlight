@@ -165,7 +165,7 @@ impl GenerationMetadata {
         })
     }
 
-    /// Returns the logical storage contract version.
+    /// Returns the additive logical storage contract version.
     #[must_use]
     pub const fn contract_version(&self) -> GenerationContractVersion {
         self.contract_version

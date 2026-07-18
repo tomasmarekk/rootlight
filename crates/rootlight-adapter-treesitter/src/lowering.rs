@@ -843,6 +843,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             repository: self.full_source.repository(),
             generation: self.full_source.generation(),
             path: self.request.source().path().as_str().to_owned(),
+            path_locator: Some(self.request.source().path().to_locator()),
             content_hash: self.full_source.content_hash(),
             byte_length: self.full_source.span().end_byte(),
             language: self.request.language().as_str().to_owned(),

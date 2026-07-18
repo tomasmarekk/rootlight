@@ -142,6 +142,12 @@ pub(crate) fn measure(
         insert_measured_identity(&mut identities, RegistryIdentity::File(file.id), context)?;
         collect_evidence(&file.evidence, &mut sources, &mut child_rows, context)?;
         add_text(&mut text_bytes, &file.path, context)?;
+        if let Some(locator) = &file.path_locator {
+            add_text(&mut text_bytes, locator.encoding().as_str(), context)?;
+            for component in locator.components() {
+                add_text(&mut text_bytes, component, context)?;
+            }
+        }
         add_text(&mut text_bytes, &file.language, context)?;
         add_text(&mut text_bytes, &file.encoding, context)?;
     }
@@ -647,21 +653,33 @@ fn insert_files(
     let mut statement = transaction
         .prepare(
             "INSERT INTO files (
-                file_id, repository_id, generation_id, path, content_hash,
-                byte_length, language, encoding, generated, provenance_id,
-                evidence_source_ordinal
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                file_id, repository_id, generation_id, path, path_locator_encoding,
+                path_locator_components, content_hash, byte_length, language, encoding,
+                generated, provenance_id, evidence_source_ordinal
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .map_err(CatalogError::sqlite)?;
     let mut evidence_statement = evidence_statement(transaction)?;
     for record in &document.files {
         context.check().map_err(CatalogError::control)?;
+        let locator_encoding = record
+            .path_locator
+            .as_ref()
+            .map(|locator| locator.encoding().as_str());
+        let locator_components = record
+            .path_locator
+            .as_ref()
+            .map(|locator| serde_json::to_string(locator.components()))
+            .transpose()
+            .map_err(CatalogError::json)?;
         statement
             .execute(params![
                 record.id.as_bytes().as_slice(),
                 record.repository.as_bytes().as_slice(),
                 record.generation.as_bytes().as_slice(),
                 record.path,
+                locator_encoding,
+                locator_components,
                 record.content_hash.as_bytes().as_slice(),
                 codec::sqlite_i64(record.byte_length)?,
                 record.language,

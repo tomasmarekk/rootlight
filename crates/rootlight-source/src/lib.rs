@@ -9,7 +9,6 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
-    path::Path,
     time::{Duration, Instant},
 };
 
@@ -562,9 +561,12 @@ fn validate_budget(budget: SourceBudget) -> Result<(), SourceError> {
 }
 
 fn validated_path(root: &RepositoryRoot, file: &FileRecord) -> Result<RelativePath, SourceError> {
-    let path =
-        RelativePath::parse(Path::new(&file.path)).map_err(|_| SourceError::InvalidIndexedPath)?;
-    if root.file_id(&path) != file.id {
+    let locator = file
+        .path_locator
+        .as_ref()
+        .ok_or(SourceError::InvalidIndexedPath)?;
+    let path = RelativePath::from_locator(locator).map_err(|_| SourceError::InvalidIndexedPath)?;
+    if path.as_str() != file.path || root.file_id(&path) != file.id {
         return Err(SourceError::InvalidIndexedPath);
     }
     Ok(path)
@@ -864,16 +866,26 @@ mod tests {
     }
 
     fn fixture(content: &[u8], encoding: &str, selection: (u64, u64)) -> Fixture {
+        fixture_at_path(content, encoding, selection, Path::new("src/sample.rs"))
+    }
+
+    fn fixture_at_path(
+        content: &[u8],
+        encoding: &str,
+        selection: (u64, u64),
+        relative_path: &Path,
+    ) -> Fixture {
         let current = std::env::current_dir().expect("current directory is available");
         let temporary = tempdir_in(current).expect("local temporary directory is available");
         let repository = derive_repository(b"rootlight-source-test").id();
         let root = RepositoryRoot::open(repository, temporary.path())
             .expect("temporary directory is a valid repository root");
-        let path =
-            RelativePath::parse(Path::new("src/sample.rs")).expect("fixture path is canonical");
-        fs::create_dir(temporary.path().join("src")).expect("fixture directory is created");
-        fs::write(temporary.path().join("src/sample.rs"), content)
-            .expect("fixture source is written");
+        let path = RelativePath::parse(relative_path).expect("fixture path is canonical");
+        let absolute_path = temporary.path().join(relative_path);
+        if let Some(parent) = absolute_path.parent() {
+            fs::create_dir_all(parent).expect("fixture directory is created");
+        }
+        fs::write(&absolute_path, content).expect("fixture source is written");
 
         let manifest_hash = content_hash(b"source-test-manifest");
         let configuration_hash = content_hash(b"source-test-configuration");
@@ -926,6 +938,7 @@ mod tests {
             repository,
             generation,
             path: path.as_str().to_owned(),
+            path_locator: Some(path.to_locator()),
             content_hash: hash,
             byte_length: u64::try_from(content.len()).expect("fixture length fits u64"),
             language: "rust".to_owned(),
@@ -1013,6 +1026,7 @@ mod tests {
             repository: metadata.repository(),
             generation: metadata.generation(),
             path: path.as_str().to_owned(),
+            path_locator: Some(path.to_locator()),
             content_hash: hash,
             byte_length: u64::try_from(content.len()).expect("fixture length fits u64"),
             language: "rust".to_owned(),
@@ -1084,6 +1098,64 @@ mod tests {
         assert_eq!(chunk.trust, SourceTrust::UntrustedRepositoryData);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unix_lossless_locators_disambiguate_raw_and_literal_paths() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let mut fixture = fixture_at_path(
+            b"raw\n",
+            "utf-8",
+            (0, 4),
+            Path::new(OsStr::from_bytes(b"\xff")),
+        );
+        let literal = add_fixture_file(&mut fixture, "@raw-ff", b"literal\n", (0, 8));
+        let result = read(
+            &fixture,
+            &[fixture.reference.clone(), literal],
+            SourceReadOptions::default(),
+            SourceBudget::default(),
+            &Cancellation::new(),
+        )
+        .expect("both colliding presentation paths resolve");
+
+        assert_ne!(
+            result.chunks[0].reference.span().file(),
+            result.chunks[1].reference.span().file()
+        );
+        assert_eq!(result.chunks[0].path, result.chunks[1].path);
+        assert_eq!(result.chunks[0].bytes, b"raw\n");
+        assert_eq!(result.chunks[1].bytes, b"literal\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lossless_locators_disambiguate_wide_and_literal_paths() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let raw_name = OsString::from_wide(&[0xd800]);
+        let mut fixture = fixture_at_path(b"raw\n", "utf-8", (0, 4), Path::new(&raw_name));
+        let literal = add_fixture_file(&mut fixture, "@raw-00d8", b"literal\n", (0, 8));
+        let result = read(
+            &fixture,
+            &[fixture.reference.clone(), literal],
+            SourceReadOptions::default(),
+            SourceBudget::default(),
+            &Cancellation::new(),
+        )
+        .expect("both colliding presentation paths resolve");
+
+        assert_ne!(
+            result.chunks[0].reference.span().file(),
+            result.chunks[1].reference.span().file()
+        );
+        assert_eq!(result.chunks[0].path, result.chunks[1].path);
+        assert_eq!(result.chunks[0].bytes, b"raw\n");
+        assert_eq!(result.chunks[1].bytes, b"literal\n");
+    }
+
     #[test]
     fn rejects_foreign_generations_before_reading_repository_data() {
         let fixture = fixture(b"source\n", "utf-8", (0, 6));
@@ -1149,6 +1221,34 @@ mod tests {
             &ExtensionSupport::default(),
         )
         .expect("generation validation does not replace the VFS path boundary");
+
+        assert_eq!(
+            read(
+                &fixture,
+                std::slice::from_ref(&fixture.reference),
+                SourceReadOptions::default(),
+                SourceBudget::default(),
+                &Cancellation::new()
+            ),
+            Err(SourceError::InvalidIndexedPath)
+        );
+    }
+
+    #[test]
+    fn older_records_without_locators_never_fall_back_to_display_paths() {
+        let mut fixture = fixture(b"source\n", "utf-8", (0, 6));
+        fs::remove_file(fixture._temporary.path().join("src/sample.rs"))
+            .expect("fixture source is removed");
+        let metadata = fixture.generation.metadata();
+        let mut document = fixture.generation.clone().into_document();
+        document.files[0].path_locator = None;
+        fixture.generation = GenerationSnapshot::new(
+            metadata,
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("older compatible records remain valid IR");
 
         assert_eq!(
             read(

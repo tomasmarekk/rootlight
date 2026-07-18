@@ -9,12 +9,13 @@ use rootlight_ids::{FactId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageRecord, CoverageStatus, EntityFlag, EntityKind,
     EntityRecord, EntityVisibility, EvidenceKind, ExtensionEnvelope, ExtensionEnvelopeDecodeError,
-    ExtensionSupport, FactDomain, FactEvidence, FactRef, FileRecord, IrLimits,
-    NORMALIZED_IR_VERSION, NormalizedIrDocument, NormalizedRecordDecodeError, OccurrenceRecord,
-    OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord,
-    RelationPredicate, RelationRecord, SkippedRegion, SourceMappingRecord, SourceRef,
-    decode_diagnostic_record_with_checkpoint, decode_extension_envelope_with_checkpoint,
-    decode_skipped_region_with_checkpoint, decode_source_mapping_record_with_checkpoint,
+    ExtensionSupport, FactDomain, FactEvidence, FactRef, FilePathLocator, FilePathLocatorEncoding,
+    FileRecord, IrLimits, NORMALIZED_IR_VERSION, NormalizedIrDocument,
+    NormalizedRecordDecodeError, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
+    ProducerIdentity, ProducerKind, ProvenanceRecord, RelationPredicate, RelationRecord,
+    SkippedRegion, SourceMappingRecord, SourceRef, decode_diagnostic_record_with_checkpoint,
+    decode_extension_envelope_with_checkpoint, decode_skipped_region_with_checkpoint,
+    decode_source_mapping_record_with_checkpoint,
 };
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationContext, GenerationContractVersion, GenerationMetadata,
@@ -921,9 +922,9 @@ fn read_files(
     let mut statement = connection
         .prepare(
             "SELECT
-                file_id, repository_id, generation_id, path, content_hash,
-                byte_length, language, encoding, generated, provenance_id,
-                evidence_source_ordinal
+                file_id, repository_id, generation_id, path, path_locator_encoding,
+                path_locator_components, content_hash, byte_length, language, encoding,
+                generated, provenance_id, evidence_source_ordinal
              FROM files
              ORDER BY file_id",
         )
@@ -938,16 +939,35 @@ fn read_files(
             repository: codec::repository_id(get(row, 1)?)?,
             generation: codec::generation_id(get(row, 2)?)?,
             path: get(row, 3)?,
-            content_hash: codec::content_hash(get(row, 4)?)?,
-            byte_length: codec::nonnegative_u64(get(row, 5)?)?,
-            language: get(row, 6)?,
-            encoding: get(row, 7)?,
-            generated: codec::bool_value(get(row, 8)?)?,
-            provenance: codec::fact_id(get(row, 9)?)?,
-            evidence: take_evidence("file", raw_id, get(row, 10)?, sources, evidence)?,
+            path_locator: decode_path_locator(get(row, 4)?, get(row, 5)?)?,
+            content_hash: codec::content_hash(get(row, 6)?)?,
+            byte_length: codec::nonnegative_u64(get(row, 7)?)?,
+            language: get(row, 8)?,
+            encoding: get(row, 9)?,
+            generated: codec::bool_value(get(row, 10)?)?,
+            provenance: codec::fact_id(get(row, 11)?)?,
+            evidence: take_evidence("file", raw_id, get(row, 12)?, sources, evidence)?,
         });
     }
     Ok(records)
+}
+
+fn decode_path_locator(
+    encoding: Option<String>,
+    components: Option<String>,
+) -> Result<Option<FilePathLocator>, CatalogError> {
+    match (encoding, components) {
+        (None, None) => Ok(None),
+        (Some(encoding), Some(components)) => {
+            let encoding = FilePathLocatorEncoding::parse(&encoding)
+                .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?;
+            let components = serde_json::from_str(&components).map_err(CatalogError::json)?;
+            FilePathLocator::new(encoding, components)
+                .map(Some)
+                .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
+        }
+        _ => Err(CatalogError::new(CatalogErrorKind::Corrupt)),
+    }
 }
 
 fn read_entities(

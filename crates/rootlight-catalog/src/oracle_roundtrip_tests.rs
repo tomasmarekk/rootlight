@@ -29,10 +29,11 @@ use rootlight_ids::{
 };
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageStatus, ExtensionCriticality, ExtensionIdentifier,
-    ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim, FileRecord,
-    IrDocument, IrLimits, ProducerIdentity, ProducerKind, ProvenanceRecord,
-    SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, SourceSpan, decode_file_identity_claim_envelope,
-    decode_ir_document, decode_symbol_identity_claim_envelope, derive_provenance_record_id,
+    ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim,
+    FilePathLocator, FilePathLocatorEncoding, FileRecord, IrDocument, IrLimits, ProducerIdentity,
+    ProducerKind, ProvenanceRecord, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, SourceSpan,
+    decode_file_identity_claim_envelope, decode_ir_document,
+    decode_symbol_identity_claim_envelope, derive_provenance_record_id,
     new_file_identity_claim_envelope, new_symbol_identity_claim_envelope,
 };
 use rootlight_storage::{
@@ -79,9 +80,21 @@ fn fixture_documents() -> (
         panic!("fixture must use normalized IR 1.1");
     };
 
+    document.files[0].path = "@raw-ff".to_owned();
+    document.files[0].path_locator = Some(
+        FilePathLocator::new(FilePathLocatorEncoding::UnixBytesV1, vec!["ff".to_owned()])
+            .expect("fixture path locator is canonical"),
+    );
+
     let mut second_file = document.files[0].clone();
     second_file.id = FileId::from_bytes([0xf0; 20]);
-    second_file.path = "src/second.rs".to_owned();
+    second_file.path_locator = Some(
+        FilePathLocator::new(
+            FilePathLocatorEncoding::UnixBytesV1,
+            vec!["407261772d6666".to_owned()],
+        )
+        .expect("second fixture path locator is canonical"),
+    );
     second_file.content_hash = content_hash(b"let second = true;\n");
     second_file.byte_length = 19;
     second_file.evidence.source = Some(SourceRef::new(

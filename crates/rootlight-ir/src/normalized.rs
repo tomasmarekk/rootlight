@@ -19,6 +19,10 @@ use crate::{
 
 /// The exact normalized fact-document version.
 pub const NORMALIZED_IR_VERSION: IrVersion = IrVersion::new(1, 1);
+/// Maximum components in one lossless file-path locator.
+pub const MAX_FILE_PATH_LOCATOR_COMPONENTS: usize = 256;
+/// Maximum aggregate hexadecimal bytes in one lossless file-path locator.
+pub const MAX_FILE_PATH_LOCATOR_ENCODED_BYTES: usize = 64 * 1024;
 
 /// The singleton wire marker for normalized fact-document version 1.1.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -429,6 +433,148 @@ pub struct FactEvidence {
     pub derivation: Vec<FactRef>,
 }
 
+/// Platform representation used by a lossless file-path locator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FilePathLocatorEncoding {
+    /// Lowercase hexadecimal Unix path-component bytes.
+    UnixBytesV1,
+    /// Lowercase hexadecimal little-endian Windows UTF-16 code units.
+    WindowsWideV1,
+}
+
+impl FilePathLocatorEncoding {
+    /// Returns the stable wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnixBytesV1 => "unix_bytes_v1",
+            Self::WindowsWideV1 => "windows_wide_v1",
+        }
+    }
+
+    /// Parses one stable wire spelling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilePathLocatorError::UnsupportedEncoding`] for unknown
+    /// representations.
+    pub fn parse(value: &str) -> Result<Self, FilePathLocatorError> {
+        match value {
+            "unix_bytes_v1" => Ok(Self::UnixBytesV1),
+            "windows_wide_v1" => Ok(Self::WindowsWideV1),
+            _ => Err(FilePathLocatorError::UnsupportedEncoding),
+        }
+    }
+}
+
+/// A lossless, component-preserving locator for one repository-relative file.
+///
+/// `FileRecord::path` remains untrusted presentation text. Capability-bearing
+/// readers must instead decode this locator and verify the resulting file ID.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct FilePathLocator {
+    encoding: FilePathLocatorEncoding,
+    components: Vec<String>,
+}
+
+impl FilePathLocator {
+    /// Creates a locator from canonical lowercase hexadecimal components.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilePathLocatorError`] when the component count is invalid or
+    /// a component is empty, non-canonical, or incompatible with `encoding`.
+    pub fn new(
+        encoding: FilePathLocatorEncoding,
+        components: Vec<String>,
+    ) -> Result<Self, FilePathLocatorError> {
+        if components.is_empty() {
+            return Err(FilePathLocatorError::Empty);
+        }
+        if components.len() > MAX_FILE_PATH_LOCATOR_COMPONENTS {
+            return Err(FilePathLocatorError::TooManyComponents);
+        }
+        let encoded_bytes = components.iter().try_fold(0usize, |total, component| {
+            total.checked_add(component.len())
+        });
+        if !matches!(encoded_bytes, Some(total) if total <= MAX_FILE_PATH_LOCATOR_ENCODED_BYTES) {
+            return Err(FilePathLocatorError::TooLong);
+        }
+        if components
+            .iter()
+            .any(|component| !is_canonical_locator_component(encoding, component))
+        {
+            return Err(FilePathLocatorError::InvalidComponent);
+        }
+        Ok(Self {
+            encoding,
+            components,
+        })
+    }
+
+    /// Returns the platform representation.
+    #[must_use]
+    pub const fn encoding(&self) -> FilePathLocatorEncoding {
+        self.encoding
+    }
+
+    /// Returns the canonical encoded path components.
+    #[must_use]
+    pub fn components(&self) -> &[String] {
+        &self.components
+    }
+}
+
+impl std::fmt::Debug for FilePathLocator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FilePathLocator")
+            .field("encoding", &self.encoding)
+            .field("component_count", &self.components.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Invalid lossless file-path locator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FilePathLocatorError {
+    /// A locator contained no path components.
+    #[error("file path locator is empty")]
+    Empty,
+    /// A locator exceeded the component-count ceiling.
+    #[error("file path locator has too many components")]
+    TooManyComponents,
+    /// A locator exceeded the aggregate encoded-byte ceiling.
+    #[error("file path locator is too long")]
+    TooLong,
+    /// A locator component was not canonical lowercase hexadecimal data.
+    #[error("file path locator component is invalid")]
+    InvalidComponent,
+    /// A locator declared an unknown platform representation.
+    #[error("file path locator encoding is unsupported")]
+    UnsupportedEncoding,
+}
+
+fn is_canonical_locator_component(encoding: FilePathLocatorEncoding, component: &str) -> bool {
+    if component.is_empty() || !component.len().is_multiple_of(2) {
+        return false;
+    }
+    if matches!(encoding, FilePathLocatorEncoding::WindowsWideV1)
+        && !component.len().is_multiple_of(4)
+    {
+        return false;
+    }
+    component
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 /// One immutable file owned by the document repository and generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -440,8 +586,11 @@ pub struct FileRecord {
     pub repository: RepositoryId,
     /// Owning immutable generation.
     pub generation: GenerationId,
-    /// Canonical repository-relative path.
+    /// Canonical repository-relative presentation path.
     pub path: String,
+    /// Lossless capability locator, absent only in older compatible documents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_locator: Option<FilePathLocator>,
     /// Immutable content hash used by every source reference.
     pub content_hash: ContentHash,
     /// Authoritative file length in bytes.
@@ -1689,6 +1838,7 @@ struct WireFileRecord {
     repository: RepositoryId,
     generation: GenerationId,
     path: String,
+    path_locator: Option<WireFilePathLocator>,
     content_hash: ContentHash,
     byte_length: u64,
     language: String,
@@ -1705,6 +1855,10 @@ impl WireFileRecord {
             repository: self.repository,
             generation: self.generation,
             path: self.path,
+            path_locator: self
+                .path_locator
+                .map(WireFilePathLocator::into_domain)
+                .transpose()?,
             content_hash: self.content_hash,
             byte_length: self.byte_length,
             language: self.language,
@@ -1713,6 +1867,35 @@ impl WireFileRecord {
             provenance: self.provenance,
             evidence: self.evidence.into_domain()?,
         })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireFilePathLocator {
+    encoding: WireFilePathLocatorEncoding,
+    components: Vec<String>,
+}
+
+impl WireFilePathLocator {
+    fn into_domain(self) -> Result<FilePathLocator, ()> {
+        FilePathLocator::new(self.encoding.into(), self.components).map_err(|_| ())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireFilePathLocatorEncoding {
+    UnixBytesV1,
+    WindowsWideV1,
+}
+
+impl From<WireFilePathLocatorEncoding> for FilePathLocatorEncoding {
+    fn from(value: WireFilePathLocatorEncoding) -> Self {
+        match value {
+            WireFilePathLocatorEncoding::UnixBytesV1 => Self::UnixBytesV1,
+            WireFilePathLocatorEncoding::WindowsWideV1 => Self::WindowsWideV1,
+        }
     }
 }
 
@@ -2147,6 +2330,64 @@ mod tests {
             decode(NORMALIZED_FIXTURE, &IrLimits::default()),
             Ok(IrDocument::NormalizedV1_1(_))
         ));
+        let IrDocument::NormalizedV1_1(document) = decode(NORMALIZED_FIXTURE, &IrLimits::default())
+            .expect("frozen normalized fixture decodes")
+        else {
+            panic!("normalized fixture dispatches to version 1.1");
+        };
+        assert!(
+            document
+                .files
+                .first()
+                .expect("fixture file exists")
+                .path_locator
+                .is_none(),
+            "older 1.1 documents remain readable without an unsafe locator fallback"
+        );
+    }
+
+    #[test]
+    fn normalized_files_round_trip_optional_lossless_path_locators() {
+        let mut value = normalized_value();
+        value["files"][0]["path_locator"] = serde_json::json!({
+            "encoding": "unix_bytes_v1",
+            "components": ["737263", "6c69622e7273"]
+        });
+        let encoded = encode_test_value(&value);
+        let IrDocument::NormalizedV1_1(document) =
+            decode(&encoded, &IrLimits::default()).expect("locator document decodes")
+        else {
+            panic!("locator document dispatches to version 1.1");
+        };
+        let locator = document
+            .files
+            .first()
+            .and_then(|file| file.path_locator.as_ref())
+            .expect("locator is retained");
+        assert_eq!(locator.encoding(), FilePathLocatorEncoding::UnixBytesV1);
+        assert_eq!(locator.components(), &["737263", "6c69622e7273"]);
+        let rendered = format!("{locator:?}");
+        assert!(!rendered.contains("737263"));
+
+        let serialized = serde_json::to_value(&document).expect("document serializes");
+        assert_eq!(
+            serialized["files"][0]["path_locator"],
+            value["files"][0]["path_locator"]
+        );
+    }
+
+    #[test]
+    fn normalized_files_reject_noncanonical_path_locators() {
+        let mut value = normalized_value();
+        value["files"][0]["path_locator"] = serde_json::json!({
+            "encoding": "unix_bytes_v1",
+            "components": ["737263", "6C69622e7273"]
+        });
+
+        assert_eq!(
+            decode(&encode_test_value(&value), &IrLimits::default()),
+            Err(IrDocumentDecodeError::InvalidDocumentShape)
+        );
     }
 
     #[test]

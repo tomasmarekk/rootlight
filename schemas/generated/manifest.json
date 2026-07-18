@@ -124,7 +124,7 @@
     },
     {
       "path": "schemas/generated/json/ir-1.1.schema.json",
-      "blake3": "9815111822daab89e54ce1083937e52f2d288af6286819355ac0e62cca0873aa"
+      "blake3": "de4a8fcf88a78b8cb5ea41e2bb8eda6e31b74e91f55581c42d173fdc1910315c"
     },
     {
       "path": "schemas/generated/json/ir-extension-rootlight-lexical-1.schema.json",
@@ -141,6 +141,10 @@
     {
       "path": "schemas/generated/protobuf/rootlight.desc",
       "blake3": "d611cb9904e1087d06b18b9c62441e912609274ae8f9bac5f647c2cab4b454d0"
+    },
+    {
+      "path": "tests/fixtures/compatibility/storage/1.0/schema-fingerprints.json",
+      "blake3": "7088172e5b315b5e005e2d61463337feeb1187c95a65d090bed3ee0b9afd217c"
     }
   ]
 }
