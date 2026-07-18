@@ -105,7 +105,6 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
 
     loop {
         tokio::select! {
-            biased;
             _ = &mut shutdown => break,
             event = orchestrator.next_event(), if !orchestrator.is_idle() => {
                 let event = match event {
@@ -180,7 +179,6 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                 break;
             }
             tokio::select! {
-                biased;
                 submission = submission_rx.recv(), if !submissions_closed => {
                     match submission {
                         Some(admission) => {

@@ -2052,8 +2052,6 @@ fn synthetic_worker_loop(
     }
 }
 
-const TIMER_BATCH_LIMIT: usize = 16;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum TimerKind {
     Deadline,
@@ -2133,13 +2131,16 @@ impl TimerSchedule {
         self.by_deadline.first().map(|(deadline, _)| *deadline)
     }
 
-    fn due(&self, now: tokio::time::Instant, maximum: usize) -> Vec<ScheduledTimer> {
-        self.by_deadline
-            .iter()
-            .take_while(|(deadline, _)| *deadline <= now)
-            .take(maximum)
-            .map(|(_, timer)| *timer)
-            .collect()
+    fn take_next_due(
+        &mut self,
+        now: tokio::time::Instant,
+    ) -> Option<(tokio::time::Instant, ScheduledTimer)> {
+        let (deadline, timer) = self.by_deadline.first().copied()?;
+        if deadline > now {
+            return None;
+        }
+        self.remove(timer.id());
+        Some((deadline, timer))
     }
 
     fn due_for_operation(
@@ -2165,7 +2166,17 @@ pub struct OrchestratorEvent {
 #[derive(Debug)]
 enum OrchestratorEventKind {
     Timer,
+    TimerDelivery,
     Completion,
+}
+
+#[derive(Debug)]
+struct PendingTimerInterrupt {
+    scheduled_at: tokio::time::Instant,
+    timer: ScheduledTimer,
+    delivery_deadline: tokio::time::Instant,
+    reply: tokio::sync::oneshot::Receiver<Result<OperationRecord, OperationError>>,
+    result: Option<Result<OperationRecord, ServiceError>>,
 }
 
 /// Bounded daemon scheduling and monotonic-timer coordinator.
@@ -2174,6 +2185,7 @@ pub struct DaemonOrchestrator {
     journal: JournalActorHandle,
     workers: SyntheticWorkerPool,
     pending_completion: Option<PendingWorkerCompletion>,
+    pending_timer: Option<PendingTimerInterrupt>,
     timers: TimerSchedule,
     state: Arc<DaemonState>,
     client_admissions: Arc<Mutex<ClientOperationAdmissions>>,
@@ -2198,6 +2210,7 @@ impl DaemonOrchestrator {
             journal,
             workers: SyntheticWorkerPool::start(limits.operation_workers, queue_limit)?,
             pending_completion: None,
+            pending_timer: None,
             timers: TimerSchedule::default(),
             state,
             client_admissions: Arc::new(Mutex::new(ClientOperationAdmissions::default())),
@@ -2371,7 +2384,8 @@ impl DaemonOrchestrator {
         let now = tokio::time::Instant::now();
         let due = self.timers.due_for_operation(operation, now);
         for timer in due {
-            let observed = self.interrupt_timer_with_retry(timer).await?;
+            let observed = self.interrupt_timer_bounded(timer).await?;
+            self.timers.remove(timer.id());
             if observed.state.is_terminal() || observed.cancellation_requested {
                 self.timers.remove_operation(operation);
                 self.active_operations.remove(&operation);
@@ -2381,49 +2395,122 @@ impl DaemonOrchestrator {
         Ok(None)
     }
 
-    async fn interrupt_timer_with_retry(
+    fn interrupt_timer_receiver(
+        &self,
+        timer: ScheduledTimer,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<OperationRecord, OperationError>>, ServiceError>
+    {
+        match timer.reason {
+            TimerReason::Deadline => self.journal.interrupt_deadline_receiver(timer.operation),
+            TimerReason::Lease {
+                expected_expiry_unix_ms,
+            } => self
+                .journal
+                .interrupt_lease_receiver(timer.operation, expected_expiry_unix_ms),
+        }
+    }
+
+    fn fail_timer_delivery(&self, error: ServiceError) -> ServiceError {
+        self.state.set_journal_healthy(false);
+        error
+    }
+
+    async fn interrupt_timer_bounded(
         &self,
         timer: ScheduledTimer,
     ) -> Result<OperationRecord, ServiceError> {
-        loop {
-            let receiver = match timer.reason {
-                TimerReason::Deadline => self.journal.interrupt_deadline_receiver(timer.operation),
-                TimerReason::Lease {
-                    expected_expiry_unix_ms,
-                } => self
-                    .journal
-                    .interrupt_lease_receiver(timer.operation, expected_expiry_unix_ms),
-            };
-            match receiver {
-                Ok(receiver) => {
-                    return receiver
-                        .await
-                        .map_err(|_| ServiceError::ChannelClosed)?
-                        .map_err(ServiceError::Operations);
-                }
-                Err(ServiceError::QueueFull) => tokio::task::yield_now().await,
-                Err(error) => return Err(error),
-            }
+        let receiver = self
+            .interrupt_timer_receiver(timer)
+            .map_err(|error| self.fail_timer_delivery(error))?;
+        match tokio::time::timeout(self.limits.request_timeout, receiver).await {
+            Ok(Ok(Ok(operation))) => Ok(operation),
+            Ok(Ok(Err(error))) => Err(self.fail_timer_delivery(ServiceError::Operations(error))),
+            Ok(Err(_)) => Err(self.fail_timer_delivery(ServiceError::ChannelClosed)),
+            Err(_) => Err(self.fail_timer_delivery(ServiceError::TimerDeliveryTimedOut)),
         }
     }
 
-    async fn expire_timers_at(&mut self, now: tokio::time::Instant) -> Result<(), ServiceError> {
-        let due = self.timers.due(now, TIMER_BATCH_LIMIT);
-        for timer in due {
-            let observed = self.interrupt_timer_with_retry(timer).await?;
-            self.timers.remove(timer.id());
-            if observed.state.is_terminal() || observed.cancellation_requested {
-                self.timers.remove_operation(timer.operation);
-                self.active_operations.remove(&timer.operation);
-            }
+    fn start_due_timer_delivery(&mut self, now: tokio::time::Instant) -> Result<(), ServiceError> {
+        if self.pending_timer.is_some() {
+            return Err(ServiceError::UnexpectedResponse);
         }
+        let Some((scheduled_at, timer)) = self.timers.take_next_due(now) else {
+            return Ok(());
+        };
+        let reply = match self.interrupt_timer_receiver(timer) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.timers
+                    .register(timer, scheduled_at)
+                    .map_err(|_| self.fail_timer_delivery(ServiceError::UnexpectedResponse))?;
+                return Err(self.fail_timer_delivery(error));
+            }
+        };
+        self.pending_timer = Some(PendingTimerInterrupt {
+            scheduled_at,
+            timer,
+            delivery_deadline: now + self.limits.request_timeout,
+            reply,
+            result: None,
+        });
         Ok(())
     }
 
-    /// Reports whether no synthetic worker result is currently pending.
+    async fn await_pending_timer_delivery(&mut self) -> Result<(), ServiceError> {
+        let pending = self
+            .pending_timer
+            .as_mut()
+            .ok_or(ServiceError::UnexpectedResponse)?;
+        if pending.result.is_some() {
+            return Ok(());
+        }
+        let result = tokio::select! {
+            biased;
+            result = &mut pending.reply => match result {
+                Ok(Ok(operation)) => Ok(operation),
+                Ok(Err(error)) => Err(ServiceError::Operations(error)),
+                Err(_) => Err(ServiceError::ChannelClosed),
+            },
+            () = tokio::time::sleep_until(pending.delivery_deadline) => {
+                Err(ServiceError::TimerDeliveryTimedOut)
+            }
+        };
+        pending.result = Some(result);
+        Ok(())
+    }
+
+    fn process_pending_timer_delivery(&mut self) -> Result<Option<OperationRecord>, ServiceError> {
+        let pending = self
+            .pending_timer
+            .take()
+            .ok_or(ServiceError::UnexpectedResponse)?;
+        let result = pending.result.ok_or(ServiceError::UnexpectedResponse);
+        match result {
+            Ok(Ok(operation)) => {
+                if operation.state.is_terminal() || operation.cancellation_requested {
+                    self.timers.remove_operation(pending.timer.operation);
+                    self.active_operations.remove(&pending.timer.operation);
+                }
+                Ok(Some(operation))
+            }
+            Ok(Err(error)) | Err(error) => {
+                if self
+                    .timers
+                    .register(pending.timer, pending.scheduled_at)
+                    .is_err()
+                {
+                    return Err(self.fail_timer_delivery(ServiceError::UnexpectedResponse));
+                }
+                Err(self.fail_timer_delivery(error))
+            }
+        }
+    }
+
+    /// Reports whether no synthetic worker result or durable timer delivery is pending.
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.pending_completion.is_none()
+            && self.pending_timer.is_none()
             && self.state.admitted_operations.load(Ordering::Acquire) == 0
     }
 
@@ -2436,6 +2523,12 @@ impl DaemonOrchestrator {
     ///
     /// Returns [`ServiceError::ChannelClosed`] when no completion can arrive.
     pub async fn next_event(&mut self) -> Result<OrchestratorEvent, ServiceError> {
+        if self.pending_timer.is_some() {
+            self.await_pending_timer_delivery().await?;
+            return Ok(OrchestratorEvent {
+                kind: OrchestratorEventKind::TimerDelivery,
+            });
+        }
         if self.pending_completion.is_some() {
             return Ok(OrchestratorEvent {
                 kind: OrchestratorEventKind::Completion,
@@ -2485,9 +2578,10 @@ impl DaemonOrchestrator {
     ) -> Result<Option<OperationRecord>, ServiceError> {
         match event.kind {
             OrchestratorEventKind::Timer => {
-                self.expire_timers_at(tokio::time::Instant::now()).await?;
+                self.start_due_timer_delivery(tokio::time::Instant::now())?;
                 Ok(None)
             }
+            OrchestratorEventKind::TimerDelivery => self.process_pending_timer_delivery(),
             OrchestratorEventKind::Completion => {
                 let pending = self
                     .pending_completion
@@ -2593,13 +2687,42 @@ impl DaemonOrchestrator {
     pub async fn shutdown(&mut self) -> Result<(), ServiceError> {
         self.state.set_lifecycle(DaemonLifecycle::Draining);
         self.workers.close();
-        loop {
-            let changed = self.journal.interrupt(256).await?;
-            if changed == 0 {
-                break;
+        let mut failure = None;
+        if self.pending_timer.is_some() {
+            if let Err(error) = self.await_pending_timer_delivery().await {
+                failure = Some(error);
+            } else if let Err(error) = self.process_pending_timer_delivery() {
+                failure = Some(error);
             }
         }
-        self.workers.join()?;
+        let maximum_rounds = rootlight_operations::MAX_OPERATION_HISTORY.div_ceil(256) + 1;
+        let mut interruption_complete = false;
+        for _ in 0..maximum_rounds {
+            let interrupt =
+                tokio::time::timeout(self.limits.request_timeout, self.journal.interrupt(256))
+                    .await;
+            match interrupt {
+                Ok(Ok(0)) => {
+                    interruption_complete = true;
+                    break;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    failure.get_or_insert(error);
+                    break;
+                }
+                Err(_) => {
+                    failure.get_or_insert(ServiceError::RequestTimedOut);
+                    break;
+                }
+            }
+        }
+        if !interruption_complete && failure.is_none() {
+            failure = Some(ServiceError::UnexpectedResponse);
+        }
+        if let Err(error) = self.workers.join() {
+            failure.get_or_insert(error);
+        }
         if let Some(completion) = self.pending_completion.take() {
             completion.completion.permit.finish();
         }
@@ -2608,10 +2731,23 @@ impl DaemonOrchestrator {
         }
         self.timers = TimerSchedule::default();
         self.active_operations.clear();
-        self.journal.checkpoint().await?;
+        match tokio::time::timeout(self.limits.request_timeout, self.journal.checkpoint()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                failure.get_or_insert(error);
+            }
+            Err(_) => {
+                failure.get_or_insert(ServiceError::RequestTimedOut);
+            }
+        }
         self.state.set_operation_counts(0, 0, 0);
-        self.state.set_lifecycle(DaemonLifecycle::Stopped);
-        Ok(())
+        match failure {
+            Some(error) => Err(self.fail_timer_delivery(error)),
+            None => {
+                self.state.set_lifecycle(DaemonLifecycle::Stopped);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -4224,7 +4360,8 @@ impl ServiceError {
             )
             | Self::UnexpectedResponse
             | Self::Clock
-            | Self::TimerAlreadyRegistered => true,
+            | Self::TimerAlreadyRegistered
+            | Self::TimerDeliveryTimedOut => true,
         }
     }
 
@@ -4531,6 +4668,9 @@ pub enum ServiceError {
     /// A process-local timer was registered twice.
     #[error("operation timer is already registered")]
     TimerAlreadyRegistered,
+    /// A due interruption was not durably acknowledged within the fixed delivery budget.
+    #[error("operation timer delivery timed out")]
+    TimerDeliveryTimedOut,
     /// A stable public error was returned by bounded orchestration.
     #[error("daemon request failed")]
     Public(Box<PublicError>),
@@ -4581,6 +4721,38 @@ mod tests {
         tokio::sync::oneshot::Receiver<Result<OperationRecord, PublicError>>,
     ) {
         OperationAdmission::new(prepared(submission), Arc::new(AtomicBool::new(false)))
+    }
+
+    fn manual_orchestrator(
+        control_capacity: usize,
+        request_timeout: Duration,
+    ) -> (
+        DaemonOrchestrator,
+        Arc<DaemonState>,
+        Receiver<JournalCommand>,
+        Receiver<JournalCommand>,
+    ) {
+        let (control, control_rx) = mpsc::sync_channel(control_capacity);
+        let (normal, normal_rx) = mpsc::sync_channel(4);
+        let journal = JournalActorHandle {
+            senders: Arc::new(Mutex::new(Some(JournalSenders { control, normal }))),
+            stopping: Arc::new(AtomicBool::new(false)),
+        };
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let limits = DaemonLimits::new(
+            4,
+            control_capacity,
+            32,
+            1,
+            request_timeout,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .expect("test limits are valid");
+        let orchestrator = DaemonOrchestrator::new(journal, Arc::clone(&state), limits)
+            .expect("orchestrator starts");
+        (orchestrator, state, control_rx, normal_rx)
     }
 
     fn supported_hello(nonce: Vec<u8>) -> daemon::ClientHello {
@@ -5840,7 +6012,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn deadline_schedule_is_inclusive_and_bounded() {
+    async fn deadline_schedule_is_inclusive_and_serializes_every_due_timer() {
         let now = tokio::time::Instant::now();
         let mut timers = TimerSchedule::default();
         for seed in 1..=20 {
@@ -5857,14 +6029,305 @@ mod tests {
 
         assert!(
             timers
-                .due(now + Duration::from_millis(99), TIMER_BATCH_LIMIT)
-                .is_empty()
+                .take_next_due(now + Duration::from_millis(99))
+                .is_none()
         );
-        let due = timers.due(now + Duration::from_millis(100), TIMER_BATCH_LIMIT);
-        assert_eq!(due.len(), TIMER_BATCH_LIMIT);
+        let mut due = 0;
+        while timers
+            .take_next_due(now + Duration::from_millis(100))
+            .is_some()
+        {
+            due += 1;
+        }
+        assert_eq!(due, 20);
+        assert!(timers.by_timer.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
+    async fn due_timer_queue_saturation_faults_without_dropping_the_timer() {
+        let (mut orchestrator, state, control_rx, _normal_rx) =
+            manual_orchestrator(1, Duration::from_millis(10));
+        let now = tokio::time::Instant::now();
+        let operation = OperationId::from_bytes([50; 16]);
+        orchestrator
+            .timers
+            .register(
+                ScheduledTimer {
+                    operation,
+                    reason: TimerReason::Deadline,
+                },
+                now,
+            )
+            .expect("timer registers");
+        let (reply, _receiver) = tokio::sync::oneshot::channel();
+        orchestrator
+            .journal
+            .try_send(JournalLane::Control, JournalCommand::Checkpoint { reply })
+            .expect("control lane fills");
+
+        let error = orchestrator
+            .process_event(OrchestratorEvent {
+                kind: OrchestratorEventKind::Timer,
+            })
+            .await
+            .expect_err("saturation faults instead of retrying forever");
+
+        assert!(matches!(error, ServiceError::QueueFull));
+        assert_eq!(orchestrator.timers.next_deadline(), Some(now));
+        assert!(orchestrator.pending_timer.is_none());
+        assert_eq!(state.lifecycle(), DaemonLifecycle::Faulted);
+        assert!(matches!(
+            control_rx.try_recv(),
+            Ok(JournalCommand::Checkpoint { .. })
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn due_timer_channel_failure_faults_without_dropping_the_timer() {
+        let (mut orchestrator, state, control_rx, _normal_rx) =
+            manual_orchestrator(1, Duration::from_millis(10));
+        drop(control_rx);
+        let now = tokio::time::Instant::now();
+        let operation = OperationId::from_bytes([51; 16]);
+        orchestrator
+            .timers
+            .register(
+                ScheduledTimer {
+                    operation,
+                    reason: TimerReason::Deadline,
+                },
+                now,
+            )
+            .expect("timer registers");
+
+        let error = orchestrator
+            .process_event(OrchestratorEvent {
+                kind: OrchestratorEventKind::Timer,
+            })
+            .await
+            .expect_err("closed actor lane faults immediately");
+
+        assert!(matches!(error, ServiceError::ChannelClosed));
+        assert_eq!(orchestrator.timers.next_deadline(), Some(now));
+        assert!(orchestrator.pending_timer.is_none());
+        assert_eq!(state.lifecycle(), DaemonLifecycle::Faulted);
+    }
+
+    #[tokio::test]
+    async fn timer_actor_failure_restores_the_due_timer_and_faults() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let actor = JournalActor::start(Arc::clone(&journal), 1, 1).expect("actor starts");
+        let mut orchestrator =
+            DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), DaemonLimits::default())
+                .expect("orchestrator starts");
+        let now = tokio::time::Instant::now();
+        orchestrator
+            .timers
+            .register(
+                ScheduledTimer {
+                    operation: OperationId::from_bytes([52; 16]),
+                    reason: TimerReason::Deadline,
+                },
+                now,
+            )
+            .expect("timer registers");
+
+        orchestrator
+            .process_event(OrchestratorEvent {
+                kind: OrchestratorEventKind::Timer,
+            })
+            .await
+            .expect("delivery enters the actor lane");
+        let event = orchestrator
+            .next_event()
+            .await
+            .expect("actor failure becomes ready");
+        let error = orchestrator
+            .process_event(event)
+            .await
+            .expect_err("missing durable operation faults delivery");
+
+        assert!(
+            matches!(&error, ServiceError::Operations(OperationError::NotFound)),
+            "unexpected timer actor failure: {error:?}"
+        );
+        assert_eq!(orchestrator.timers.next_deadline(), Some(now));
+        assert_eq!(state.lifecycle(), DaemonLifecycle::Faulted);
+        orchestrator
+            .shutdown()
+            .await
+            .expect("healthy actor still permits bounded shutdown");
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_bounds_an_unacknowledged_timer_without_losing_its_command() {
+        let (mut orchestrator, state, control_rx, _normal_rx) =
+            manual_orchestrator(1, Duration::from_millis(10));
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = OperationId::from_bytes([53; 16]);
+        journal.enqueue(operation).expect("operation enqueues");
+        orchestrator
+            .timers
+            .register(
+                ScheduledTimer {
+                    operation,
+                    reason: TimerReason::Deadline,
+                },
+                tokio::time::Instant::now(),
+            )
+            .expect("timer registers");
+        orchestrator
+            .process_event(OrchestratorEvent {
+                kind: OrchestratorEventKind::Timer,
+            })
+            .await
+            .expect("timer command enters the actor lane");
+
+        let started = tokio::time::Instant::now();
+        let error = orchestrator
+            .shutdown()
+            .await
+            .expect_err("unresponsive actor faults bounded shutdown");
+
+        assert!(matches!(error, ServiceError::TimerDeliveryTimedOut));
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(started),
+            Duration::from_millis(10)
+        );
+        assert_eq!(state.lifecycle(), DaemonLifecycle::Faulted);
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
+        let command = control_rx
+            .try_recv()
+            .expect("accepted durable interruption remains in the actor lane");
+        assert!(matches!(
+            &command,
+            JournalCommand::InterruptDeadline {
+                operation: observed,
+                ..
+            } if *observed == operation
+        ));
+        execute_journal_command(&journal, command);
+        assert_eq!(
+            journal.status(operation).expect("operation persists").state,
+            OperationState::Interrupted
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timer_storm_keeps_status_and_cancel_reachable_ahead_of_timer_two() {
+        let (mut orchestrator, state, control_rx, _normal_rx) =
+            manual_orchestrator(3, Duration::from_millis(10));
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let now = tokio::time::Instant::now();
+        for seed in 1..=20 {
+            let operation = OperationId::from_bytes([seed; 16]);
+            journal.enqueue(operation).expect("operation enqueues");
+            orchestrator
+                .timers
+                .register(
+                    ScheduledTimer {
+                        operation,
+                        reason: TimerReason::Deadline,
+                    },
+                    now,
+                )
+                .expect("timer registers");
+        }
+        let control_operation = OperationId::from_bytes([54; 16]);
+        journal
+            .enqueue(control_operation)
+            .expect("control operation enqueues");
+
+        orchestrator
+            .process_event(OrchestratorEvent {
+                kind: OrchestratorEventKind::Timer,
+            })
+            .await
+            .expect("only the first timer enters the control lane");
+        let (status_reply, status_receiver) = tokio::sync::oneshot::channel();
+        orchestrator
+            .journal
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Execute {
+                    request: ControlRequest::OperationStatus(control_operation),
+                    reply: status_reply,
+                },
+            )
+            .expect("status remains admissible");
+        let (cancel_reply, cancel_receiver) = tokio::sync::oneshot::channel();
+        orchestrator
+            .journal
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Execute {
+                    request: ControlRequest::OperationCancel(control_operation),
+                    reply: cancel_reply,
+                },
+            )
+            .expect("cancel remains admissible");
+
+        for expected in ["timer", "status", "cancel"] {
+            let command = control_rx.try_recv().expect("queued command is present");
+            match (expected, &command) {
+                ("timer", JournalCommand::InterruptDeadline { .. })
+                | (
+                    "status",
+                    JournalCommand::Execute {
+                        request: ControlRequest::OperationStatus(_),
+                        ..
+                    },
+                )
+                | (
+                    "cancel",
+                    JournalCommand::Execute {
+                        request: ControlRequest::OperationCancel(_),
+                        ..
+                    },
+                ) => {}
+                _ => panic!("unexpected control-lane ordering"),
+            }
+            execute_journal_command(&journal, command);
+        }
+        assert!(matches!(
+            status_receiver
+                .await
+                .expect("status reply channel remains open")
+                .expect("status succeeds"),
+            ControlResponse::OperationStatus(operation)
+                if operation.operation == control_operation
+                    && !operation.cancellation_requested
+        ));
+        assert!(matches!(
+            cancel_receiver
+                .await
+                .expect("cancel reply channel remains open")
+                .expect("cancel succeeds"),
+            ControlResponse::OperationCancel {
+                accepted: true,
+                operation,
+            } if operation.operation == control_operation
+        ));
+
+        let event = orchestrator
+            .next_event()
+            .await
+            .expect("first timer acknowledgement becomes ready");
+        let interrupted = orchestrator
+            .process_event(event)
+            .await
+            .expect("first timer acknowledgement persists")
+            .expect("timer delivery returns durable state");
+        assert_eq!(interrupted.state, OperationState::Interrupted);
+        assert_eq!(orchestrator.timers.by_timer.len(), 19);
+        assert!(orchestrator.pending_timer.is_none());
+        assert_eq!(state.lifecycle(), DaemonLifecycle::Ready);
+    }
+
+    #[tokio::test]
     async fn admission_delay_expires_before_worker_start() {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
         let state = Arc::new(DaemonState::starting());
@@ -5889,11 +6352,12 @@ mod tests {
             submission,
             AdmissionClockSample {
                 wall_unix_ms: 1_000,
-                monotonic: now,
+                monotonic: now
+                    .checked_sub(Duration::from_millis(100))
+                    .expect("test monotonic instant can represent admission delay"),
             },
         );
 
-        tokio::time::advance(Duration::from_millis(100)).await;
         let observed = orchestrator
             .schedule(prepared)
             .await
