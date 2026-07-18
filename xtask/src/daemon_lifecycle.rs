@@ -13,7 +13,7 @@ use std::{
 };
 
 use rootlight_client::{
-    Client, ClientError, ConnectPolicy, DaemonLifecycle, Health, OperationState,
+    Client, ClientError, ConnectPolicy, DaemonLifecycle, Health, OperationState, OwnedDaemon,
 };
 use rootlight_error::{ErrorCode, PublicValue};
 use rootlight_ids::OperationId;
@@ -25,7 +25,6 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 const CLIENT_COUNT: usize = 100;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
-const AUTOSTART_QUIESCENCE: Duration = Duration::from_secs(1);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const EXPECTED_CLIENT_CONNECTION_LIMIT: u32 = 8;
 const EXPECTED_CLIENT_OPERATION_LIMIT: u32 = 32;
@@ -42,7 +41,7 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     )
     .map_err(LifecycleError::Runtime)?;
     let environment = Environment::new(&paths);
-    exercise_simultaneous_autostart(&paths, &rootlight, &environment)?;
+    exercise_simultaneous_autostart(&paths)?;
     let mut process = SupervisedDaemon::spawn(&daemon, &environment)?;
 
     wait_until_ready(&paths, &rootlight, &environment)?;
@@ -352,86 +351,38 @@ fn wait_until_ready(
     }
 }
 
-fn exercise_simultaneous_autostart(
-    paths: &RuntimePaths,
-    rootlight: &Path,
-    environment: &Environment,
-) -> Result<(), LifecycleError> {
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(CLIENT_COUNT));
+fn exercise_simultaneous_autostart(paths: &RuntimePaths) -> Result<(), LifecycleError> {
+    let barrier = Arc::new(Barrier::new(CLIENT_COUNT));
     let mut clients = Vec::with_capacity(CLIENT_COUNT);
     for index in 0..CLIENT_COUNT {
-        let rootlight = rootlight.to_path_buf();
-        let environment = environment.clone();
-        let barrier = std::sync::Arc::clone(&barrier);
+        let paths = paths.clone();
+        let barrier = Arc::clone(&barrier);
         clients.push(thread::spawn(move || {
             barrier.wait();
-            let mut command = Command::new(rootlight);
-            environment.apply(&mut command);
-            command
-                .arg("health")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            command
-                .spawn()
-                .map_err(LifecycleError::SpawnCommand)
-                .map(|child| (index, child))
+            let identity = deterministic_client_identity(index)?;
+            Client::connect_or_start_owned(&paths, identity, ConnectPolicy::StartIfMissing)
+                .map_err(LifecycleError::Client)
         }));
     }
-    let mut children = Vec::with_capacity(CLIENT_COUNT);
+    let mut connected = Vec::with_capacity(CLIENT_COUNT);
+    let mut owner: Option<OwnedDaemon> = None;
     for client in clients {
-        children.push(
-            client
-                .join()
-                .map_err(|_| LifecycleError::ClientThreadPanicked)??,
-        );
+        let (client, owned) = client
+            .join()
+            .map_err(|_| LifecycleError::ClientThreadPanicked)??;
+        if !client.health().map_err(LifecycleError::Client)?.ready {
+            return Err(LifecycleError::UnexpectedClientHealth);
+        }
+        if let Some(owned) = owned
+            && owner.replace(owned).is_some()
+        {
+            return Err(LifecycleError::MultipleAutostartOwners);
+        }
+        connected.push(client);
     }
-    let deadline = Instant::now()
-        .checked_add(START_TIMEOUT)
-        .ok_or(LifecycleError::Clock)?;
-    while !children.is_empty() {
-        let mut index = 0_usize;
-        while index < children.len() {
-            let status = children[index]
-                .1
-                .try_wait()
-                .map_err(LifecycleError::WaitChild)?;
-            if let Some(status) = status {
-                let (client_index, child) = children.swap_remove(index);
-                drop(child);
-                if !status.success() {
-                    return Err(LifecycleError::AutostartClient {
-                        index: client_index,
-                        source: Box::new(LifecycleError::CommandFailed {
-                            status,
-                            stderr: String::new(),
-                        }),
-                    });
-                }
-            } else {
-                index = index.saturating_add(1);
-            }
-        }
-        if !children.is_empty() && Instant::now() >= deadline {
-            for (_, mut child) in children {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            return Err(LifecycleError::CommandTimedOut);
-        }
-        if !children.is_empty() {
-            thread::sleep(POLL_INTERVAL);
-        }
-    }
-    let discovery = paths.discover().map_err(LifecycleError::Runtime)?;
-    terminate_process(discovery.pid())?;
-    wait_until_process_exit(discovery.pid())?;
-    paths
-        .remove_stale_endpoint(discovery.instance_nonce())
-        .map_err(LifecycleError::Runtime)?;
-    paths
-        .remove_discovery_if_matches(discovery.instance_nonce())
-        .map_err(LifecycleError::Runtime)?;
+    let owner = owner.ok_or(LifecycleError::MissingAutostartOwner)?;
+    owner.shutdown().map_err(LifecycleError::Client)?;
+    drop(connected);
     wait_until_autostart_quiescent(paths)
 }
 
@@ -1051,35 +1002,17 @@ fn wait_until_absent(paths: &RuntimePaths) -> Result<(), LifecycleError> {
 }
 
 fn wait_until_autostart_quiescent(paths: &RuntimePaths) -> Result<(), LifecycleError> {
-    let deadline = Instant::now()
-        .checked_add(STOP_TIMEOUT)
-        .ok_or(LifecycleError::Clock)?;
     let mut absent_since = None;
     loop {
         match paths.discover() {
             Err(error) if runtime_absence(&error) => {
                 let observed = *absent_since.get_or_insert_with(Instant::now);
-                if Instant::now().saturating_duration_since(observed) >= AUTOSTART_QUIESCENCE {
+                if Instant::now().saturating_duration_since(observed) >= START_TIMEOUT {
                     return Ok(());
                 }
             }
             Err(error) => return Err(LifecycleError::Runtime(error)),
-            Ok(survivor) => {
-                if process_is_running(survivor.pid())? {
-                    terminate_process(survivor.pid())?;
-                    wait_until_process_exit(survivor.pid())?;
-                }
-                paths
-                    .remove_stale_endpoint(survivor.instance_nonce())
-                    .map_err(LifecycleError::Runtime)?;
-                paths
-                    .remove_discovery_if_matches(survivor.instance_nonce())
-                    .map_err(LifecycleError::Runtime)?;
-                return Err(LifecycleError::AutostartSurvivor(survivor.pid()));
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(LifecycleError::CleanupTimedOut);
+            Ok(survivor) => return Err(LifecycleError::AutostartSurvivor(survivor.pid())),
         }
         thread::sleep(POLL_INTERVAL);
     }
@@ -1134,81 +1067,6 @@ fn run_command(
         .stderr(Stdio::piped());
     let child = command.spawn().map_err(LifecycleError::SpawnCommand)?;
     wait_output(child, timeout)
-}
-
-#[cfg(windows)]
-fn terminate_process(pid: u32) -> Result<(), LifecycleError> {
-    let status = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
-        .map_err(LifecycleError::TerminateProcess)?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(LifecycleError::TerminateProcessFailed(status))
-    }
-}
-
-#[cfg(unix)]
-fn terminate_process(pid: u32) -> Result<(), LifecycleError> {
-    let status = Command::new("kill")
-        .args(["-KILL", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
-        .map_err(LifecycleError::TerminateProcess)?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(LifecycleError::TerminateProcessFailed(status))
-    }
-}
-
-fn wait_until_process_exit(pid: u32) -> Result<(), LifecycleError> {
-    let deadline = Instant::now()
-        .checked_add(STOP_TIMEOUT)
-        .ok_or(LifecycleError::Clock)?;
-    loop {
-        if !process_is_running(pid)? {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(LifecycleError::ProcessExitTimedOut);
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
-}
-
-#[cfg(windows)]
-fn process_is_running(pid: u32) -> Result<bool, LifecycleError> {
-    let output = Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(LifecycleError::ProcessProbe)?;
-    if !output.status.success() {
-        return Err(LifecycleError::ProcessProbeFailed(output.status));
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    Ok(!text.contains("No tasks are running") && text.contains(&pid.to_string()))
-}
-
-#[cfg(unix)]
-fn process_is_running(pid: u32) -> Result<bool, LifecycleError> {
-    let status = Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(LifecycleError::ProcessProbe)?;
-    Ok(status.success())
 }
 
 fn wait_output(mut child: Child, timeout: Duration) -> Result<Output, LifecycleError> {
@@ -1460,16 +1318,6 @@ pub(crate) enum LifecycleError {
     TerminateChild(#[source] io::Error),
     #[error("forced daemon termination unexpectedly returned success")]
     CrashExitSucceeded,
-    #[error("failed to terminate autostarted daemon")]
-    TerminateProcess(#[source] io::Error),
-    #[error("autostarted daemon termination failed with {0}")]
-    TerminateProcessFailed(ExitStatus),
-    #[error("failed to probe autostarted daemon liveness")]
-    ProcessProbe(#[source] io::Error),
-    #[error("autostarted daemon liveness probe failed with {0}")]
-    ProcessProbeFailed(ExitStatus),
-    #[error("autostarted daemon did not exit within the cleanup deadline")]
-    ProcessExitTimedOut,
     #[error("failed to read lifecycle command output")]
     ReadOutput(#[source] io::Error),
     #[error("daemon lifecycle command timed out")]
@@ -1531,12 +1379,10 @@ pub(crate) enum LifecycleError {
     },
     #[error("daemon lifecycle client thread panicked")]
     ClientThreadPanicked,
-    #[error("simultaneous autostart client {index} failed: {source}")]
-    AutostartClient {
-        index: usize,
-        #[source]
-        source: Box<LifecycleError>,
-    },
+    #[error("simultaneous autostart did not return the exact daemon owner")]
+    MissingAutostartOwner,
+    #[error("simultaneous autostart returned more than one daemon owner")]
+    MultipleAutostartOwners,
     #[error("daemon discovery cleanup timed out")]
     CleanupTimedOut,
     #[error("simultaneous autostart left daemon process {0} after cleanup")]
