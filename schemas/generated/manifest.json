@@ -14,7 +14,7 @@
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
-      "blake3": "2097dd3d42380a42d0c17b7b4cf0eb0114c1dafbfd5cdddc1adf2343efe9d4d3"
+      "blake3": "39587eabfc46094c86e98032f6ba72c0790a75ce5fb1ae18d0edc8578dcb6997"
     },
     {
       "path": "proto/adapter_v1.proto",

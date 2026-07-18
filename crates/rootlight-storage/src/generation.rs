@@ -481,12 +481,20 @@ fn observe_source<'document>(
     context: &GenerationContext<'_>,
 ) -> Result<(), GenerationControlError> {
     context.check()?;
-    if sources.insert(source) {
+    if !sources.contains(source) {
+        let source_count = sources
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| budget_exceeded(GenerationResource::SourceReferences, context))?;
         context.require(
             GenerationResource::SourceReferences,
-            usize_to_budget_u64(sources.len(), GenerationResource::SourceReferences, context)?,
+            usize_to_budget_u64(source_count, GenerationResource::SourceReferences, context)?,
         )?;
-        *rows = checked_add_resource(*rows, 1, GenerationResource::Rows, context)?;
+        let next_rows = checked_add_resource(*rows, 1, GenerationResource::Rows, context)?;
+        context.check()?;
+        let inserted = sources.insert(source);
+        debug_assert!(inserted, "source membership changed without mutation");
+        *rows = next_rows;
     }
     context.check()
 }
@@ -1519,8 +1527,9 @@ mod tests {
     use super::*;
     use rootlight_cancel::CancellationReason;
     use rootlight_ids::{
-        GenerationId, GenerationIdentity, RepositoryId, content_hash, derive_generation,
+        FileId, GenerationId, GenerationIdentity, RepositoryId, content_hash, derive_generation,
     };
+    use rootlight_ir::SourceSpan;
     use serde::ser::SerializeSeq;
 
     fn metadata(repository: RepositoryId) -> GenerationMetadata {
@@ -1746,5 +1755,47 @@ mod tests {
                 reason: CancellationReason::ClientRequest,
             })
         );
+    }
+
+    #[test]
+    fn source_budget_is_checked_before_registry_growth() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let first_file = FileId::from_bytes([3; 20]);
+        let second_file = FileId::from_bytes([4; 20]);
+        let hash = content_hash(b"x");
+        let first = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(first_file, 0, 1).expect("fixture span is valid"),
+            hash,
+            None,
+        );
+        let second = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(second_file, 0, 1).expect("fixture span is valid"),
+            hash,
+            None,
+        );
+        let cancellation = Cancellation::new();
+        let budget = GenerationBudget::new(100, 1, 1).expect("fixture budget is valid");
+        let context = GenerationContext::new(&cancellation, budget);
+        let mut sources = BTreeSet::new();
+        let mut rows = 0;
+        observe_source(&first, &mut sources, &mut rows, &context)
+            .expect("first source fits the registry");
+
+        let result = observe_source(&second, &mut sources, &mut rows, &context);
+
+        assert_eq!(
+            result,
+            Err(GenerationControlError::BudgetExceeded {
+                resource: GenerationResource::SourceReferences,
+                limit: 1,
+            })
+        );
+        assert_eq!(sources.len(), 1);
+        assert_eq!(rows, 1);
     }
 }
