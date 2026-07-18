@@ -17,8 +17,10 @@ rootlight-observability = { path = "../../crates/rootlight-observability" }
 rootlight-operations = { path = "../../crates/rootlight-operations" }
 rootlight-protocol = { path = "../../crates/rootlight-protocol" }
 rootlight-runtime = { path = "../../crates/rootlight-runtime" }
+rootlight-service = { path = "../../crates/rootlight-service" }
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
@@ -26,7 +28,6 @@ tokio.workspace = true
 windows.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

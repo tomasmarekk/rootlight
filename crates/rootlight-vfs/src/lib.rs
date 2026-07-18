@@ -7,8 +7,10 @@
 
 use std::{
     ffi::{OsStr, OsString},
+    fmt,
     io::{self, Read},
     path::{Component, Path, PathBuf},
+    time::Instant,
 };
 
 #[cfg(windows)]
@@ -18,18 +20,22 @@ use cap_std::{
     ambient_authority,
     fs::{Dir, File, Metadata, OpenOptions},
 };
-use rootlight_ids::{ContentHash, FileId, FileIdentity, RepositoryId, content_hash, derive_file};
-use rootlight_ir::SourceRef;
+use rootlight_cancel::{Cancellation, CancellationReason};
+use rootlight_ids::{ContentHash, FileId, FileIdentity, RepositoryId, derive_file};
+use rootlight_ir::{
+    FilePathLocator, FilePathLocatorEncoding, MAX_FILE_PATH_LOCATOR_COMPONENTS, SourceRef,
+};
 
 /// Hard ceiling for one VFS source capture, independent of caller configuration.
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
+const SNAPSHOT_READ_CHUNK_BYTES: usize = 64 * 1024;
 /// Maximum number of relative path components accepted by the VFS.
 pub const MAX_PATH_COMPONENTS: usize = 256;
 /// Maximum platform path bytes accepted by the VFS.
 pub const MAX_PATH_BYTES: usize = 32 * 1024;
 
 /// A validated repository-relative path with platform-stable identity bytes.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RelativePath {
     components: Vec<OsString>,
     display: String,
@@ -54,8 +60,10 @@ impl RelativePath {
             return Err(VfsError::InvalidRelativePath);
         }
 
-        let path_bytes = platform_path_bytes(path.as_os_str());
-        if path_bytes.len() > MAX_PATH_BYTES {
+        let path_bytes = platform_path_byte_len(path.as_os_str()).ok_or(VfsError::PathTooLong {
+            maximum: MAX_PATH_BYTES,
+        })?;
+        if path_bytes > MAX_PATH_BYTES {
             return Err(VfsError::PathTooLong {
                 maximum: MAX_PATH_BYTES,
             });
@@ -68,8 +76,7 @@ impl RelativePath {
             let Component::Normal(component) = component else {
                 return Err(VfsError::InvalidRelativePath);
             };
-            let raw_bytes = platform_path_bytes(component);
-            if raw_bytes.is_empty() || contains_separator_alias(component) {
+            if component.is_empty() || contains_separator_alias(component) {
                 return Err(VfsError::InvalidRelativePath);
             }
             if components.len() >= MAX_PATH_COMPONENTS {
@@ -91,6 +98,88 @@ impl RelativePath {
             display: display_parts.join("/"),
             identity,
         })
+    }
+
+    /// Reconstructs a validated relative path from a lossless IR locator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError`] when the locator belongs to another platform,
+    /// contains a non-canonical component, or exceeds VFS path bounds.
+    pub fn from_locator(locator: &FilePathLocator) -> Result<Self, VfsError> {
+        if locator.encoding() != platform_locator_encoding()
+            || locator.components().len() > MAX_PATH_COMPONENTS
+            || locator.components().len() > MAX_FILE_PATH_LOCATOR_COMPONENTS
+        {
+            return Err(VfsError::InvalidRelativePath);
+        }
+
+        let component_count = locator.components().len();
+        let mut components = Vec::new();
+        components
+            .try_reserve_exact(component_count)
+            .map_err(|_| VfsError::MemoryUnavailable)?;
+        let mut display_parts = Vec::new();
+        display_parts
+            .try_reserve_exact(component_count)
+            .map_err(|_| VfsError::MemoryUnavailable)?;
+        let mut identity = Vec::new();
+        let mut path_bytes = 0usize;
+        for (index, encoded) in locator.components().iter().enumerate() {
+            let raw = decode_lower_hex(encoded)?;
+            let component = platform_os_string(raw)?;
+            if !is_single_normal_component(&component) {
+                return Err(VfsError::InvalidRelativePath);
+            }
+            let component_bytes =
+                platform_path_byte_len(&component).ok_or(VfsError::PathTooLong {
+                    maximum: MAX_PATH_BYTES,
+                })?;
+            if index > 0 {
+                path_bytes = path_bytes
+                    .checked_add(platform_separator_byte_len())
+                    .ok_or(VfsError::PathTooLong {
+                        maximum: MAX_PATH_BYTES,
+                    })?;
+            }
+            path_bytes = path_bytes
+                .checked_add(component_bytes)
+                .ok_or(VfsError::PathTooLong {
+                    maximum: MAX_PATH_BYTES,
+                })?;
+            if path_bytes > MAX_PATH_BYTES {
+                return Err(VfsError::PathTooLong {
+                    maximum: MAX_PATH_BYTES,
+                });
+            }
+            let (display, identity_bytes) = canonical_component(&component);
+            append_identity_component(&mut identity, &identity_bytes)?;
+            display_parts.push(display);
+            components.push(component);
+        }
+
+        Ok(Self {
+            components,
+            display: display_parts.join("/"),
+            identity,
+        })
+    }
+
+    /// Encodes this path as a lossless producer-neutral IR locator.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if this crate's validated path invariants diverge from the
+    /// normalized IR locator contract.
+    #[must_use]
+    pub fn to_locator(&self) -> FilePathLocator {
+        let components = self
+            .components
+            .iter()
+            .map(|component| encode_lower_hex(&platform_path_bytes(component)))
+            .collect();
+        FilePathLocator::new(platform_locator_encoding(), components)
+            .expect("validated relative paths produce canonical path locators")
     }
 
     /// Returns the canonical forward-slash presentation path.
@@ -120,14 +209,18 @@ impl RelativePath {
     ///
     /// Returns [`VfsError`] when the child would violate path bounds.
     pub fn join_name(&self, name: &OsStr) -> Result<Self, VfsError> {
+        if self.components.len() >= MAX_PATH_COMPONENTS || !is_single_normal_component(name) {
+            return Err(VfsError::InvalidRelativePath);
+        }
+        let name_bytes = platform_path_byte_len(name).ok_or(VfsError::PathTooLong {
+            maximum: MAX_PATH_BYTES,
+        })?;
+        if name_bytes > MAX_PATH_BYTES {
+            return Err(VfsError::PathTooLong {
+                maximum: MAX_PATH_BYTES,
+            });
+        }
         let mut components = self.components.clone();
-        if components.len() >= MAX_PATH_COMPONENTS || contains_separator_alias(name) {
-            return Err(VfsError::InvalidRelativePath);
-        }
-        let raw_bytes = platform_path_bytes(name);
-        if raw_bytes.is_empty() {
-            return Err(VfsError::InvalidRelativePath);
-        }
         let mut identity = self.identity.clone();
         let (display_name, identity_bytes) = canonical_component(name);
         append_identity_component(&mut identity, &identity_bytes)?;
@@ -149,8 +242,18 @@ impl RelativePath {
     }
 }
 
+impl fmt::Debug for RelativePath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelativePath")
+            .field("component_count", &self.components.len())
+            .field("identity_byte_length", &self.identity.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Immutable bytes captured from one stable regular file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SourceSnapshot {
     file: FileId,
     path: RelativePath,
@@ -191,6 +294,18 @@ impl SourceSnapshot {
     }
 }
 
+impl fmt::Debug for SourceSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SourceSnapshot")
+            .field("file", &self.file)
+            .field("byte_length", &self.content.len())
+            .field("content_hash", &self.content_hash)
+            .field("metadata", &self.metadata)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Source-free metadata retained with a source snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotMetadata {
@@ -205,11 +320,19 @@ pub struct SnapshotMetadata {
 }
 
 /// A capability handle confining all repository content access.
-#[derive(Debug)]
 pub struct RepositoryRoot {
     repository: RepositoryId,
     canonical_path: PathBuf,
     directory: Dir,
+}
+
+impl fmt::Debug for RepositoryRoot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RepositoryRoot")
+            .field("repository", &self.repository)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RepositoryRoot {
@@ -322,13 +445,93 @@ impl RepositoryRoot {
         path: &RelativePath,
         maximum_bytes: u64,
     ) -> Result<SourceSnapshot, VfsError> {
+        self.snapshot_with_check(path, maximum_bytes, || Ok(()))
+    }
+
+    /// Captures one stable regular file under an inherited cancellation token.
+    ///
+    /// Any monotonic deadline carried by the token is checked before and after
+    /// each fallible handle operation, allocation checkpoint, and read chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::Cancelled`] when the token's cancellation or
+    /// deadline wins, plus the ordinary bounded snapshot errors.
+    pub fn snapshot_with_cancellation(
+        &self,
+        path: &RelativePath,
+        maximum_bytes: u64,
+        cancellation: &Cancellation,
+    ) -> Result<SourceSnapshot, VfsError> {
+        self.snapshot_with_check(path, maximum_bytes, || {
+            cancellation
+                .check()
+                .map_err(|cancelled| VfsError::Cancelled(cancelled.reason()))
+        })
+    }
+
+    /// Captures one stable regular file with cooperative cancellation.
+    ///
+    /// The absolute monotonic deadline is checked before and after every
+    /// fallible handle operation, allocation checkpoint, and read chunk in
+    /// both captures. An in-flight operating-system operation cannot be
+    /// preempted. A stop observed immediately after an operation takes
+    /// precedence over that operation's result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::Cancelled`] when cancellation or the supplied
+    /// deadline wins, plus the ordinary bounded snapshot errors.
+    pub fn snapshot_cancellable(
+        &self,
+        path: &RelativePath,
+        maximum_bytes: u64,
+        cancellation: &Cancellation,
+        deadline: Instant,
+    ) -> Result<SourceSnapshot, VfsError> {
+        self.snapshot_with_check(path, maximum_bytes, || {
+            cancellation
+                .check()
+                .map_err(|cancelled| VfsError::Cancelled(cancelled.reason()))?;
+            if Instant::now() >= deadline {
+                return Err(VfsError::Cancelled(CancellationReason::DeadlineExceeded));
+            }
+            Ok(())
+        })
+    }
+
+    fn snapshot_with_check(
+        &self,
+        path: &RelativePath,
+        maximum_bytes: u64,
+        mut check: impl FnMut() -> Result<(), VfsError>,
+    ) -> Result<SourceSnapshot, VfsError> {
         let maximum_bytes = maximum_bytes.min(MAX_SNAPSHOT_BYTES);
         if maximum_bytes == 0 {
             return Err(VfsError::InvalidByteLimit);
         }
-        let first = self.capture(path, maximum_bytes)?;
-        let second = self.capture(path, maximum_bytes)?;
-        if first.metadata != second.metadata || first.hash != second.hash {
+        check()?;
+        let Capture {
+            content: _,
+            hash: first_hash,
+            metadata: first_metadata,
+        } = self.capture(path, maximum_bytes, &mut check)?;
+        check()?;
+        let second = self.capture(path, maximum_bytes, &mut check)?;
+        check()?;
+        let result = self.finish_snapshot(path, first_hash, first_metadata, second);
+        check()?;
+        result
+    }
+
+    fn finish_snapshot(
+        &self,
+        path: &RelativePath,
+        first_hash: ContentHash,
+        first_metadata: SnapshotMetadata,
+        second: Capture,
+    ) -> Result<SourceSnapshot, VfsError> {
+        if first_metadata != second.metadata || first_hash != second.hash {
             return Err(VfsError::UnstableFile);
         }
         Ok(SourceSnapshot {
@@ -389,18 +592,27 @@ impl RepositoryRoot {
         Ok(directory)
     }
 
-    fn open_parent(&self, path: &RelativePath) -> Result<Dir, VfsError> {
-        let mut directory = self
-            .directory
-            .try_clone()
-            .map_err(|source| VfsError::OpenDirectory { source })?;
+    fn open_parent(
+        &self,
+        path: &RelativePath,
+        check: &mut impl FnMut() -> Result<(), VfsError>,
+    ) -> Result<Dir, VfsError> {
+        let mut directory = controlled(check, || {
+            self.directory
+                .try_clone()
+                .map_err(|source| VfsError::OpenDirectory { source })
+        })?;
         for component in path.parent_components() {
-            directory = directory
-                .open_dir_nofollow(component)
-                .map_err(|source| VfsError::OpenDirectory { source })?;
-            let metadata = directory
-                .dir_metadata()
-                .map_err(|source| VfsError::OpenDirectory { source })?;
+            directory = controlled(check, || {
+                directory
+                    .open_dir_nofollow(component)
+                    .map_err(|source| VfsError::OpenDirectory { source })
+            })?;
+            let metadata = controlled(check, || {
+                directory
+                    .dir_metadata()
+                    .map_err(|source| VfsError::OpenDirectory { source })
+            })?;
             if !metadata.is_dir() || is_reparse_point(&metadata) {
                 return Err(VfsError::LinkedPath);
             }
@@ -408,33 +620,70 @@ impl RepositoryRoot {
         Ok(directory)
     }
 
-    fn capture(&self, path: &RelativePath, maximum_bytes: u64) -> Result<Capture, VfsError> {
-        let parent = self.open_parent(path)?;
+    fn capture(
+        &self,
+        path: &RelativePath,
+        maximum_bytes: u64,
+        check: &mut impl FnMut() -> Result<(), VfsError>,
+    ) -> Result<Capture, VfsError> {
+        let parent = self.open_parent(path, check)?;
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
-        let mut file = parent
-            .open_with(path.file_name(), &options)
-            .map_err(|source| VfsError::OpenFile { source })?;
-        let before = checked_metadata(&file, maximum_bytes)?;
+        let mut file = controlled(check, || {
+            parent
+                .open_with(path.file_name(), &options)
+                .map_err(|source| VfsError::OpenFile { source })
+        })?;
+        let before = controlled(check, || checked_metadata(&file, maximum_bytes))?;
         let capacity = usize::try_from(before.length).map_err(|_| VfsError::FileTooLarge {
             maximum: maximum_bytes,
         })?;
-        let mut content = Vec::with_capacity(capacity);
-        file.by_ref()
-            .take(maximum_bytes.saturating_add(1))
-            .read_to_end(&mut content)
-            .map_err(|source| VfsError::ReadFile { source })?;
+        let mut content = Vec::new();
+        controlled(check, || {
+            content
+                .try_reserve_exact(capacity)
+                .map_err(|_| VfsError::MemoryUnavailable)
+        })?;
+        let mut hasher = blake3::Hasher::new();
+        let read_ceiling = maximum_bytes.saturating_add(1);
+        let mut buffer = [0u8; SNAPSHOT_READ_CHUNK_BYTES];
+        loop {
+            check()?;
+            let consumed = u64::try_from(content.len()).unwrap_or(u64::MAX);
+            let remaining = read_ceiling.saturating_sub(consumed);
+            if remaining == 0 {
+                break;
+            }
+            let admitted = usize::try_from(remaining)
+                .unwrap_or(usize::MAX)
+                .min(buffer.len());
+            let read = controlled(check, || {
+                file.read(&mut buffer[..admitted])
+                    .map_err(|source| VfsError::ReadFile { source })
+            })?;
+            if read == 0 {
+                break;
+            }
+            controlled(check, || {
+                content
+                    .try_reserve(read)
+                    .map_err(|_| VfsError::MemoryUnavailable)
+            })?;
+            content.extend_from_slice(&buffer[..read]);
+            hasher.update(&buffer[..read]);
+            check()?;
+        }
         if u64::try_from(content.len()).unwrap_or(u64::MAX) > maximum_bytes {
             return Err(VfsError::FileTooLarge {
                 maximum: maximum_bytes,
             });
         }
-        let after = checked_metadata(&file, maximum_bytes)?;
+        let after = controlled(check, || checked_metadata(&file, maximum_bytes))?;
         if before != after || after.length != u64::try_from(content.len()).unwrap_or(u64::MAX) {
             return Err(VfsError::UnstableFile);
         }
         Ok(Capture {
-            hash: content_hash(&content),
+            hash: ContentHash::from_bytes(*hasher.finalize().as_bytes()),
             content,
             metadata: after,
         })
@@ -470,6 +719,16 @@ struct Capture {
     content: Vec<u8>,
     hash: ContentHash,
     metadata: SnapshotMetadata,
+}
+
+fn controlled<T>(
+    check: &mut impl FnMut() -> Result<(), VfsError>,
+    operation: impl FnOnce() -> Result<T, VfsError>,
+) -> Result<T, VfsError> {
+    check()?;
+    let result = operation();
+    check()?;
+    result
 }
 
 fn checked_metadata(file: &File, maximum_bytes: u64) -> Result<SnapshotMetadata, VfsError> {
@@ -581,10 +840,126 @@ fn append_identity_component(identity: &mut Vec<u8>, bytes: &[u8]) -> Result<(),
     Ok(())
 }
 
+fn encode_lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn decode_lower_hex(encoded: &str) -> Result<Vec<u8>, VfsError> {
+    let mut decoded = Vec::new();
+    decoded
+        .try_reserve_exact(encoded.len() / 2)
+        .map_err(|_| VfsError::MemoryUnavailable)?;
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let [high, low] = pair else {
+            return Err(VfsError::InvalidRelativePath);
+        };
+        let high = decode_lower_hex_nibble(*high).ok_or(VfsError::InvalidRelativePath)?;
+        let low = decode_lower_hex_nibble(*low).ok_or(VfsError::InvalidRelativePath)?;
+        decoded.push((high << 4) | low);
+    }
+    Ok(decoded)
+}
+
+const fn decode_lower_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn is_single_normal_component(name: &OsStr) -> bool {
+    if name.is_empty() || contains_separator_alias(name) {
+        return false;
+    }
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(component)), None) if component == name
+    )
+}
+
+#[cfg(unix)]
 fn contains_separator_alias(component: &OsStr) -> bool {
-    component
-        .to_str()
-        .is_some_and(|component| component.contains('\\'))
+    use std::os::unix::ffi::OsStrExt as _;
+
+    component.as_bytes().contains(&b'\\')
+}
+
+#[cfg(windows)]
+fn contains_separator_alias(component: &OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    component.encode_wide().any(|unit| unit == u16::from(b'\\'))
+}
+
+#[cfg(unix)]
+fn platform_path_byte_len(value: &OsStr) -> Option<usize> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    Some(value.as_bytes().len())
+}
+
+#[cfg(unix)]
+const fn platform_separator_byte_len() -> usize {
+    1
+}
+
+#[cfg(unix)]
+const fn platform_locator_encoding() -> FilePathLocatorEncoding {
+    FilePathLocatorEncoding::UnixBytesV1
+}
+
+#[cfg(unix)]
+fn platform_os_string(raw: Vec<u8>) -> Result<OsString, VfsError> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    Ok(OsString::from_vec(raw))
+}
+
+#[cfg(windows)]
+fn platform_path_byte_len(value: &OsStr) -> Option<usize> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    value.encode_wide().try_fold(0usize, |length, _| {
+        length.checked_add(std::mem::size_of::<u16>())
+    })
+}
+
+#[cfg(windows)]
+const fn platform_separator_byte_len() -> usize {
+    std::mem::size_of::<u16>()
+}
+
+#[cfg(windows)]
+const fn platform_locator_encoding() -> FilePathLocatorEncoding {
+    FilePathLocatorEncoding::WindowsWideV1
+}
+
+#[cfg(windows)]
+fn platform_os_string(raw: Vec<u8>) -> Result<OsString, VfsError> {
+    use std::os::windows::ffi::OsStringExt as _;
+
+    if !raw.len().is_multiple_of(2) {
+        return Err(VfsError::InvalidRelativePath);
+    }
+    let mut wide = Vec::new();
+    wide.try_reserve_exact(raw.len() / 2)
+        .map_err(|_| VfsError::MemoryUnavailable)?;
+    for pair in raw.chunks_exact(2) {
+        let [low, high] = pair else {
+            return Err(VfsError::InvalidRelativePath);
+        };
+        wide.push(u16::from_le_bytes([*low, *high]));
+    }
+    Ok(OsString::from_wide(&wide))
 }
 
 #[cfg(unix)]
@@ -681,6 +1056,12 @@ pub enum VfsError {
     /// Repeated bounded captures observed different file state.
     #[error("repository file changed during snapshot capture")]
     UnstableFile,
+    /// A bounded source capture could not reserve its admitted memory.
+    #[error("repository snapshot memory is unavailable")]
+    MemoryUnavailable,
+    /// Cooperative cancellation or a monotonic deadline stopped the capture.
+    #[error("repository snapshot was cancelled: {0:?}")]
+    Cancelled(CancellationReason),
     /// The source reference does not identify this repository or file.
     #[error("source reference does not match repository path")]
     SourceReferenceMismatch,
@@ -695,9 +1076,10 @@ pub enum VfsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rootlight_cancel::CancellationReason;
     use rootlight_ids::{GenerationId, derive_repository};
     use rootlight_ir::SourceSpan;
-    use std::fs;
+    use std::{cell::Cell, fs, time::Duration};
     use tempfile::tempdir_in;
 
     fn local_tempdir() -> tempfile::TempDir {
@@ -711,6 +1093,12 @@ mod tests {
         let root = RepositoryRoot::open(repository, temporary.path())
             .expect("temporary directory is a valid repository root");
         (temporary, root)
+    }
+
+    fn capture(root: &RepositoryRoot, path: &RelativePath) -> Capture {
+        let mut check = || Ok(());
+        root.capture(path, MAX_SNAPSHOT_BYTES, &mut check)
+            .expect("fixture capture succeeds")
     }
 
     #[test]
@@ -727,6 +1115,98 @@ mod tests {
     }
 
     #[test]
+    fn joined_names_accept_exactly_one_normal_component() {
+        let parent = RelativePath::parse(Path::new("src")).expect("fixture parent is valid");
+        for name in ["", ".", "..", "/", "nested/file.rs", "nested\\file.rs"] {
+            assert!(parent.join_name(OsStr::new(name)).is_err(), "{name}");
+        }
+        #[cfg(windows)]
+        for name in ["C:", "C:/absolute", "//server/share"] {
+            assert!(parent.join_name(OsStr::new(name)).is_err(), "{name}");
+        }
+
+        let joined = parent
+            .join_name(OsStr::new("lib.rs"))
+            .expect("one normal component is accepted");
+        let parsed =
+            RelativePath::parse(Path::new("src/lib.rs")).expect("equivalent path is valid");
+        assert_eq!(joined, parsed);
+
+        let (_, root) = fixture();
+        assert_eq!(root.file_id(&joined), root.file_id(&parsed));
+    }
+
+    #[test]
+    fn lossless_locators_preserve_canonical_path_identity() {
+        let path = RelativePath::parse(Path::new("src/lib.rs")).expect("fixture path is canonical");
+        let reconstructed =
+            RelativePath::from_locator(&path.to_locator()).expect("locator reconstructs");
+
+        assert_eq!(reconstructed, path);
+        let (_, root) = fixture();
+        assert_eq!(root.file_id(&reconstructed), root.file_id(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_locators_distinguish_invalid_bytes_from_literal_raw_labels() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let raw = RelativePath::parse(Path::new(OsStr::from_bytes(b"\xff")))
+            .expect("raw Unix component is valid");
+        let literal = RelativePath::parse(Path::new("@raw-ff")).expect("literal path is valid");
+        assert_eq!(raw.as_str(), literal.as_str());
+        assert_ne!(raw.identity_bytes(), literal.identity_bytes());
+        assert_eq!(
+            RelativePath::from_locator(&raw.to_locator()).expect("raw locator reconstructs"),
+            raw
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_locators_distinguish_unpaired_wide_names_from_literal_raw_labels() {
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let raw_name = OsString::from_wide(&[0xd800]);
+        let raw =
+            RelativePath::parse(Path::new(&raw_name)).expect("unpaired wide component is valid");
+        let literal = RelativePath::parse(Path::new("@raw-00d8")).expect("literal path is valid");
+        assert_eq!(raw.as_str(), literal.as_str());
+        assert_ne!(raw.identity_bytes(), literal.identity_bytes());
+        assert_eq!(
+            RelativePath::from_locator(&raw.to_locator()).expect("wide locator reconstructs"),
+            raw
+        );
+    }
+
+    #[test]
+    fn relative_paths_reject_oversized_input_before_canonical_allocation() {
+        let oversized = "a".repeat(MAX_PATH_BYTES + 1);
+
+        assert!(matches!(
+            RelativePath::parse(Path::new(&oversized)),
+            Err(VfsError::PathTooLong {
+                maximum: MAX_PATH_BYTES
+            })
+        ));
+    }
+
+    #[test]
+    fn debug_output_redacts_repository_paths_and_source() {
+        let (temporary, root) = fixture();
+        let source = b"do not log repository source";
+        fs::write(temporary.path().join("sample.rs"), source).expect("fixture write succeeds");
+        let path = RelativePath::parse(Path::new("sample.rs")).expect("fixture path is valid");
+        let snapshot = root.snapshot(&path, 1_024).expect("snapshot succeeds");
+
+        let rendered = format!("{root:?} {path:?} {snapshot:?}");
+        assert!(!rendered.contains("sample.rs"));
+        assert!(!rendered.contains("do not log"));
+        assert!(!rendered.contains(&temporary.path().to_string_lossy().into_owned()));
+    }
+
+    #[test]
     fn snapshots_hash_actual_bytes_and_detect_same_size_rewrites() {
         let (temporary, root) = fixture();
         fs::write(temporary.path().join("sample.rs"), b"alpha").expect("fixture write succeeds");
@@ -737,6 +1217,51 @@ mod tests {
 
         assert_ne!(first.content_hash(), second.content_hash());
         assert_eq!(first.metadata().length, second.metadata().length);
+    }
+
+    #[test]
+    fn repeated_captures_reject_between_capture_in_place_rewrites() {
+        let (temporary, root) = fixture();
+        let target = temporary.path().join("sample.rs");
+        fs::write(&target, b"alpha").expect("fixture write succeeds");
+        let path = RelativePath::parse(Path::new("sample.rs")).expect("fixture path is valid");
+        let Capture {
+            content: _,
+            hash: first_hash,
+            metadata: first_metadata,
+        } = capture(&root, &path);
+
+        fs::write(&target, b"bravo").expect("same-size rewrite succeeds");
+        let second = capture(&root, &path);
+
+        assert!(matches!(
+            root.finish_snapshot(&path, first_hash, first_metadata, second),
+            Err(VfsError::UnstableFile)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_captures_reject_between_capture_atomic_replacements() {
+        let (temporary, root) = fixture();
+        let target = temporary.path().join("sample.rs");
+        let replacement = temporary.path().join("replacement.rs");
+        fs::write(&target, b"alpha").expect("fixture write succeeds");
+        let path = RelativePath::parse(Path::new("sample.rs")).expect("fixture path is valid");
+        let Capture {
+            content: _,
+            hash: first_hash,
+            metadata: first_metadata,
+        } = capture(&root, &path);
+
+        fs::write(&replacement, b"alpha").expect("replacement fixture is written");
+        fs::rename(replacement, target).expect("atomic replacement succeeds");
+        let second = capture(&root, &path);
+
+        assert!(matches!(
+            root.finish_snapshot(&path, first_hash, first_metadata, second),
+            Err(VfsError::UnstableFile)
+        ));
     }
 
     #[test]
@@ -752,6 +1277,113 @@ mod tests {
         assert!(matches!(
             root.snapshot(&path, u64::MAX),
             Err(VfsError::FileTooLarge { maximum }) if maximum == MAX_SNAPSHOT_BYTES
+        ));
+    }
+
+    #[test]
+    fn cancellable_snapshots_stop_before_opening_repository_data() {
+        let (_temporary, root) = fixture();
+        let path = RelativePath::parse(Path::new("missing.rs")).expect("fixture path is valid");
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+
+        assert!(matches!(
+            root.snapshot_cancellable(
+                &path,
+                1_024,
+                &cancellation,
+                Instant::now() + Duration::from_secs(1)
+            ),
+            Err(VfsError::Cancelled(CancellationReason::ClientRequest))
+        ));
+    }
+
+    #[test]
+    fn cancellable_snapshots_enforce_the_local_deadline() {
+        let (_temporary, root) = fixture();
+        let path = RelativePath::parse(Path::new("missing.rs")).expect("fixture path is valid");
+        let now = Instant::now();
+        let deadline = now.checked_sub(Duration::from_nanos(1)).unwrap_or(now);
+
+        assert!(matches!(
+            root.snapshot_cancellable(&path, 1_024, &Cancellation::new(), deadline),
+            Err(VfsError::Cancelled(CancellationReason::DeadlineExceeded))
+        ));
+    }
+
+    #[test]
+    fn snapshot_capture_checks_control_between_read_chunks() {
+        let (temporary, root) = fixture();
+        fs::write(
+            temporary.path().join("large.rs"),
+            vec![b'x'; SNAPSHOT_READ_CHUNK_BYTES * 2],
+        )
+        .expect("large fixture is written");
+        let path = RelativePath::parse(Path::new("large.rs")).expect("fixture path is valid");
+        let checks = Cell::new(0usize);
+
+        let result = root.snapshot_with_check(&path, MAX_SNAPSHOT_BYTES, || {
+            let next = checks.get() + 1;
+            checks.set(next);
+            if next == 17 {
+                Err(VfsError::Cancelled(CancellationReason::ClientRequest))
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(matches!(
+            result,
+            Err(VfsError::Cancelled(CancellationReason::ClientRequest))
+        ));
+        assert_eq!(checks.get(), 17);
+    }
+
+    #[test]
+    fn parent_traversal_checks_control_between_components() {
+        let (temporary, root) = fixture();
+        fs::create_dir_all(temporary.path().join("a/b"))
+            .expect("nested fixture directories are created");
+        let path = RelativePath::parse(Path::new("a/b/sample.rs")).expect("fixture path is valid");
+        let checks = Cell::new(0usize);
+        let mut check = || {
+            let next = checks.get() + 1;
+            checks.set(next);
+            if next == 7 {
+                Err(VfsError::Cancelled(CancellationReason::ClientRequest))
+            } else {
+                Ok(())
+            }
+        };
+
+        assert!(matches!(
+            root.open_parent(&path, &mut check),
+            Err(VfsError::Cancelled(CancellationReason::ClientRequest))
+        ));
+        assert_eq!(checks.get(), 7);
+    }
+
+    #[test]
+    fn post_operation_cancellation_precedes_capability_errors() {
+        let checks = Cell::new(0usize);
+        let mut check = || {
+            let next = checks.get() + 1;
+            checks.set(next);
+            if next == 2 {
+                Err(VfsError::Cancelled(CancellationReason::ClientRequest))
+            } else {
+                Ok(())
+            }
+        };
+        let result: Result<(), VfsError> = controlled(&mut check, || {
+            Err(VfsError::ReadFile {
+                source: std::io::Error::other("fixture read failure"),
+            })
+        });
+
+        assert!(matches!(
+            result,
+            Err(VfsError::Cancelled(CancellationReason::ClientRequest))
         ));
     }
 
@@ -808,5 +1440,24 @@ mod tests {
         let path = RelativePath::parse(Path::new("link")).expect("link path is valid");
 
         assert!(root.snapshot(&path, 1024).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn joined_paths_preserve_embedded_link_validation() {
+        use std::os::unix::fs::symlink;
+
+        let (temporary, root) = fixture();
+        let real = temporary.path().join("real");
+        fs::create_dir(&real).expect("real directory is created");
+        fs::write(real.join("sample.rs"), b"source").expect("fixture source is written");
+        symlink(&real, temporary.path().join("link")).expect("directory link is created");
+        let linked_parent =
+            RelativePath::parse(Path::new("link")).expect("link path identity is valid");
+        let path = linked_parent
+            .join_name(OsStr::new("sample.rs"))
+            .expect("leaf name is valid");
+
+        assert!(root.snapshot(&path, 1_024).is_err());
     }
 }

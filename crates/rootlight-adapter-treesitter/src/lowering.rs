@@ -17,18 +17,20 @@ use rootlight_adapter_sdk::{
     SyntaxFactKind, execute_parse,
 };
 use rootlight_cancel::Cancellation;
-use rootlight_ids::{
-    ContentHash, FactId, SymbolId, SymbolIdentity, content_hash, derive_fact, derive_symbol,
-};
+use rootlight_ids::{ContentHash, FactId, SymbolId, SymbolIdentity, content_hash, derive_symbol};
 use rootlight_ir::{
     AnalysisTier, Confidence, ContainerRef, CoverageRecord, CoverageScope, CoverageStatus,
-    DiagnosticRecord, DiagnosticSeverity, EntityFlag, EntityKind, EntityRecord, EntityVisibility,
-    EvidenceKind, ExtensionEnvelope, FactDomain, FactEvidence, FactRef, FileRecord, IrLimits,
+    DiagnosticRecord, EntityFlag, EntityKind, EntityRecord, EntityVisibility, EvidenceKind,
+    ExtensionEnvelope, FactDomain, FactEvidence, FactRef, FileIdentityClaim, FileRecord, IrLimits,
     LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION, LexicalEvidenceFormat,
     LexicalEvidenceKind, LexicalEvidenceV1, MAX_LEXICAL_SIGNATURE_BYTES, OccurrenceRecord,
     OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord,
     RelationEndpoint, RelationPredicate, RelationRecord, SkippedRegion, SkippedRegionReason,
-    SourceRef, SourceSpan, new_lexical_evidence_envelope,
+    SourceRef, SourceSpan, SymbolIdentityClaim, derive_coverage_record_id,
+    derive_diagnostic_record_id, derive_occurrence_record_id, derive_provenance_record_id,
+    derive_relation_record_id, derive_skipped_region_id, entity_kind_identity_label,
+    new_file_identity_claim_envelope, new_lexical_evidence_envelope,
+    new_symbol_identity_claim_envelope,
 };
 
 const ANALYZER_TIER: AnalysisTier = AnalysisTier::TierD;
@@ -37,12 +39,6 @@ const CONTAINMENT_CONFIDENCE: u16 = 1_000;
 const CANCELLATION_CHECK_INTERVAL: usize = 64;
 const MAX_FRONTEND_VERSION_BYTES: usize = 128;
 
-const PROVENANCE_DOMAIN: &str = "rootlight.provenance/v1";
-const OCCURRENCE_DOMAIN: &str = "rootlight.occurrence/v1";
-const RELATION_DOMAIN: &str = "rootlight.relation/v1";
-const COVERAGE_DOMAIN: &str = "rootlight.coverage/v1";
-const SKIPPED_REGION_DOMAIN: &str = "rootlight.skipped-region/v1";
-const DIAGNOSTIC_DOMAIN: &str = "rootlight.diagnostic/v1";
 const SCOPE_IDENTITY_CONTEXT: &str = "rootlight/scope-container/v1";
 const SCOPE_HEADER_CONTEXT: &str = "rootlight/treesitter-scope-header/v1";
 const SCOPE_COLLISION_GUARD_CONTEXT: &str = "rootlight/treesitter-scope-collision-guard/v1";
@@ -463,6 +459,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         }
 
         let mut entities = BTreeMap::<SymbolId, EntityRecord>::new();
+        let mut symbol_claims = BTreeMap::<SymbolId, SymbolIdentityClaim>::new();
         let mut identity_guards = BTreeMap::<SymbolId, [u8; 32]>::new();
         for entity in materialized.values() {
             ensure_symbol_identity_collision_free(
@@ -477,10 +474,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     }
                     if entity_source_span(existing) > entity_source_span(&entity.record) {
                         entities.insert(entity.record.id, entity.record.clone());
+                        symbol_claims.insert(entity.record.id, entity.identity_claim.clone());
                     }
                 }
                 _ => {
                     entities.insert(entity.record.id, entity.record.clone());
+                    symbol_claims.insert(entity.record.id, entity.identity_claim.clone());
                 }
             }
         }
@@ -499,6 +498,47 @@ impl<'context, 'source> Lowering<'context, 'source> {
             .iter()
             .map(|fact| (fact.local_id(), fact))
             .collect();
+
+        let file_claim = FileIdentityClaim {
+            file: file.id,
+            repository: file.repository,
+            path: file.path.clone(),
+            path_identity: self.request.source().path().identity_bytes().to_vec(),
+            content_hash: file.content_hash,
+            byte_length: file.byte_length,
+        };
+        let file_claim_envelope = new_file_identity_claim_envelope(
+            &file_claim,
+            self.full_source.generation(),
+            provenance_id,
+            self.full_source.clone(),
+        )
+        .map_err(|_| provider_failure("treesitter-file-identity-claim"))?;
+        ensure_extension_budget(
+            &file_claim_envelope,
+            &mut extension_bytes,
+            self.request.limits().ir(),
+        )?;
+        extensions.insert(file_claim_envelope.id, file_claim_envelope);
+        for claim in symbol_claims.values() {
+            let entity = entities
+                .get(&claim.symbol)
+                .ok_or_else(|| provider_failure("treesitter-symbol-identity-claim"))?;
+            let source = entity
+                .evidence
+                .source
+                .clone()
+                .ok_or_else(|| provider_failure("treesitter-symbol-identity-claim"))?;
+            let envelope = new_symbol_identity_claim_envelope(
+                claim,
+                self.full_source.generation(),
+                provenance_id,
+                source,
+            )
+            .map_err(|_| provider_failure("treesitter-symbol-identity-claim"))?;
+            ensure_extension_budget(&envelope, &mut extension_bytes, self.request.limits().ir())?;
+            extensions.insert(envelope.id, envelope);
+        }
 
         for (index, fact) in self.parse_output.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
@@ -772,21 +812,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
     fn provenance(&self) -> Result<ProvenanceRecord, AdapterError> {
         let producer = self.analyzer.descriptor.identity();
-        let mut identity = Vec::new();
-        push_source_identity(&mut identity, self.full_source)?;
-        push_text(&mut identity, producer.name())?;
-        push_text(&mut identity, producer.version())?;
-        push_bytes(&mut identity, producer.configuration_hash().as_bytes())?;
-        push_bytes(&mut identity, self.analyzer.binary_digest.as_bytes())?;
-        push_text(&mut identity, &self.analyzer.frontend_version)?;
-        push_text(&mut identity, self.request.language().as_str())?;
-        push_bytes(
-            &mut identity,
-            self.request.build_context().digest().as_bytes(),
-        )?;
-        let id = derive_fact(PROVENANCE_DOMAIN, &identity).id();
-        Ok(ProvenanceRecord {
-            id,
+        let mut record = ProvenanceRecord {
+            id: FactId::from_bytes([0; 20]),
             repository: self.full_source.repository(),
             generation: self.full_source.generation(),
             producer_kind: ProducerKind::Parser,
@@ -800,7 +827,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
             evidence_sources: vec![self.full_source.clone()],
             derivation_parents: Vec::new(),
             rule: None,
-        })
+        };
+        record.id = derive_provenance_record_id(&record)
+            .map_err(|_| provider_failure("treesitter-provenance-identity"))?;
+        Ok(record)
     }
 
     fn file(&self, provenance: FactId) -> Result<FileRecord, AdapterError> {
@@ -813,6 +843,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             repository: self.full_source.repository(),
             generation: self.full_source.generation(),
             path: self.request.source().path().as_str().to_owned(),
+            path_locator: Some(self.request.source().path().to_locator()),
             content_hash: self.full_source.content_hash(),
             byte_length: self.full_source.span().end_byte(),
             language: self.request.language().as_str().to_owned(),
@@ -1059,7 +1090,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 left.depth,
                 left.span.start_byte(),
                 left.span.end_byte(),
-                entity_kind_label(left.kind),
+                entity_kind_identity_label(left.kind),
                 left.name.as_str(),
                 left.signature.as_str(),
             )
@@ -1067,7 +1098,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     right.depth,
                     right.span.start_byte(),
                     right.span.end_byte(),
-                    entity_kind_label(right.kind),
+                    entity_kind_identity_label(right.kind),
                     right.name.as_str(),
                     right.signature.as_str(),
                 ))
@@ -1196,6 +1227,7 @@ struct EntityDraft {
 #[derive(Clone)]
 struct MaterializedEntity {
     record: EntityRecord,
+    identity_claim: SymbolIdentityClaim,
     direct_parent: ContainerRef,
     identity_guard: [u8; 32],
     definition_local_id: Option<u64>,
@@ -1305,7 +1337,7 @@ fn materialize_entity(
         container_identity.extend_from_slice(&scope_identity);
     }
     debug_assert_eq!(qualified_name.len(), draft.qualified_length);
-    let semantic_kind = entity_kind_label(draft.kind);
+    let semantic_kind = entity_kind_identity_label(draft.kind);
     let identity_guard = entity_identity_guard(
         full_source.repository(),
         &draft.language,
@@ -1347,8 +1379,20 @@ fn materialize_entity(
         provenance,
         evidence: direct_evidence(source),
     };
+    let identity_claim = SymbolIdentityClaim {
+        symbol: record.id,
+        repository: record.repository,
+        language: draft.language.clone(),
+        kind: draft.kind,
+        container: record.container,
+        container_identity,
+        declared_identity: draft.name.clone(),
+        signature_discriminator: draft.signature.as_bytes().to_vec(),
+        build_context_discriminator: build_context.digest().as_bytes().to_vec(),
+    };
     let entity = MaterializedEntity {
         direct_parent: container,
+        identity_claim,
         identity_guard,
         definition_local_id: draft.definition_local_id,
         signature_evidence: draft.signature_evidence.clone(),
@@ -1487,13 +1531,8 @@ fn declaration_occurrence(
     confidence: Confidence,
     source: &SourceRef,
 ) -> Result<OccurrenceRecord, AdapterError> {
-    let mut identity = Vec::new();
-    push_source_identity(&mut identity, source)?;
-    push_bytes(&mut identity, entity.record.id.as_bytes())?;
-    push_text(&mut identity, fact.syntax_kind().as_str())?;
-    let id = derive_fact(OCCURRENCE_DOMAIN, &identity).id();
-    Ok(OccurrenceRecord {
-        id,
+    let mut record = OccurrenceRecord {
+        id: FactId::from_bytes([0; 20]),
         repository: source.repository(),
         generation: source.generation(),
         file: source.span().file(),
@@ -1511,7 +1550,10 @@ fn declaration_occurrence(
         provenance,
         confidence,
         evidence: direct_evidence(source.clone()),
-    })
+    };
+    record.id = derive_occurrence_record_id(&record)
+        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+    Ok(record)
 }
 
 fn unresolved_occurrence(
@@ -1524,20 +1566,8 @@ fn unresolved_occurrence(
     text: &str,
 ) -> Result<OccurrenceRecord, AdapterError> {
     let text_hash = content_hash(text.as_bytes());
-    let mut identity = Vec::new();
-    push_source_identity(&mut identity, &source)?;
-    identity.push(occurrence_role_tag(role));
-    push_bytes(&mut identity, text_hash.as_bytes())?;
-    push_text(&mut identity, fact.syntax_kind().as_str())?;
-    if let Some(enclosing) = enclosing {
-        identity.push(1);
-        push_bytes(&mut identity, enclosing.as_bytes())?;
-    } else {
-        identity.push(0);
-    }
-    let id = derive_fact(OCCURRENCE_DOMAIN, &identity).id();
-    Ok(OccurrenceRecord {
-        id,
+    let mut record = OccurrenceRecord {
+        id: FactId::from_bytes([0; 20]),
         repository: source.repository(),
         generation: source.generation(),
         file: source.span().file(),
@@ -1550,7 +1580,10 @@ fn unresolved_occurrence(
         provenance,
         confidence,
         evidence: direct_evidence(source),
-    })
+    };
+    record.id = derive_occurrence_record_id(&record)
+        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+    Ok(record)
 }
 
 fn containment_relation(
@@ -1565,14 +1598,8 @@ fn containment_relation(
         ContainerRef::Entity(parent) => RelationEndpoint::Entity(parent),
     };
     let object = RelationEndpoint::Entity(entity.record.id);
-    let mut identity = Vec::new();
-    push_source_identity(&mut identity, source)?;
-    push_endpoint(&mut identity, subject)?;
-    identity.push(relation_predicate_tag(RelationPredicate::Contains));
-    push_endpoint(&mut identity, object)?;
-    let id = derive_fact(RELATION_DOMAIN, &identity).id();
-    Ok(RelationRecord {
-        id,
+    let mut record = RelationRecord {
+        id: FactId::from_bytes([0; 20]),
         repository: source.repository(),
         generation: source.generation(),
         subject,
@@ -1582,7 +1609,10 @@ fn containment_relation(
         evidence_kind: EvidenceKind::Syntax,
         provenance,
         evidence: direct_evidence(source.clone()),
-    })
+    };
+    record.id = derive_relation_record_id(&record)
+        .map_err(|_| provider_failure("treesitter-relation-identity"))?;
+    Ok(record)
 }
 
 fn diagnostic_record(
@@ -1591,14 +1621,8 @@ fn diagnostic_record(
     provenance: FactId,
 ) -> Result<DiagnosticRecord, AdapterError> {
     let source = diagnostic.source().cloned();
-    let mut identity = Vec::new();
-    push_source_identity(&mut identity, source.as_ref().unwrap_or(full_source))?;
-    push_text(&mut identity, diagnostic.code().as_str())?;
-    identity.push(diagnostic_severity_tag(diagnostic.severity()));
-    identity.push(coverage_status_tag(diagnostic.coverage_effect()));
-    let id = derive_fact(DIAGNOSTIC_DOMAIN, &identity).id();
-    Ok(DiagnosticRecord {
-        id,
+    let mut record = DiagnosticRecord {
+        id: FactId::from_bytes([0; 20]),
         repository: full_source.repository(),
         generation: full_source.generation(),
         code: diagnostic.code().as_str().to_owned(),
@@ -1614,7 +1638,10 @@ fn diagnostic_record(
             },
             direct_evidence,
         ),
-    })
+    };
+    record.id = derive_diagnostic_record_id(&record)
+        .map_err(|_| provider_failure("treesitter-diagnostic-identity"))?;
+    Ok(record)
 }
 
 fn skipped_region(
@@ -1626,14 +1653,8 @@ fn skipped_region(
     provenance: FactId,
 ) -> Result<SkippedRegion, AdapterError> {
     let source = source_for_span(full_source, span);
-    let mut identity = Vec::new();
-    push_source_identity(&mut identity, &source)?;
-    identity.push(fact_domain_tag(domain));
-    identity.push(skipped_reason_tag(reason));
-    push_text(&mut identity, detail)?;
-    let id = derive_fact(SKIPPED_REGION_DOMAIN, &identity).id();
-    Ok(SkippedRegion {
-        id,
+    let mut record = SkippedRegion {
+        id: FactId::from_bytes([0; 20]),
         repository: full_source.repository(),
         generation: full_source.generation(),
         source: source.clone(),
@@ -1642,7 +1663,10 @@ fn skipped_region(
         detail: detail.to_owned(),
         provenance,
         evidence: direct_evidence(source),
-    })
+    };
+    record.id = derive_skipped_region_id(&record)
+        .map_err(|_| provider_failure("treesitter-skipped-region-identity"))?;
+    Ok(record)
 }
 
 fn coverage_records(
@@ -1659,16 +1683,8 @@ fn coverage_records(
                 .map_err(|_| provider_failure("treesitter-lowering-accounting"))?;
             let skipped = u64::try_from(domain.skipped())
                 .map_err(|_| provider_failure("treesitter-lowering-accounting"))?;
-            let mut identity = Vec::new();
-            push_source_identity(&mut identity, source)?;
-            identity.push(fact_domain_tag(domain.domain()));
-            identity.push(coverage_status_tag(domain.status()));
-            identity.extend_from_slice(&discovered.to_be_bytes());
-            identity.extend_from_slice(&indexed.to_be_bytes());
-            identity.extend_from_slice(&skipped.to_be_bytes());
-            let id = derive_fact(COVERAGE_DOMAIN, &identity).id();
-            Ok(CoverageRecord {
-                id,
+            let mut record = CoverageRecord {
+                id: FactId::from_bytes([0; 20]),
                 repository: source.repository(),
                 generation: source.generation(),
                 scope: CoverageScope::File(source.span().file()),
@@ -1680,7 +1696,10 @@ fn coverage_records(
                 skipped,
                 provenance,
                 evidence: direct_evidence(source.clone()),
-            })
+            };
+            record.id = derive_coverage_record_id(&record)
+                .map_err(|_| provider_failure("treesitter-coverage-identity"))?;
+            Ok(record)
         })
         .collect()
 }
@@ -2543,69 +2562,6 @@ fn usage_fits(usage: StreamUsage, budget: rootlight_adapter_sdk::RemainingBudget
         && usage.string_bytes() <= remaining.string_bytes()
 }
 
-fn push_source_identity(identity: &mut Vec<u8>, source: &SourceRef) -> Result<(), AdapterError> {
-    push_bytes(identity, source.repository().as_bytes())?;
-    push_bytes(identity, source.generation().as_bytes())?;
-    push_bytes(identity, source.span().file().as_bytes())?;
-    identity.extend_from_slice(&source.span().start_byte().to_be_bytes());
-    identity.extend_from_slice(&source.span().end_byte().to_be_bytes());
-    push_bytes(identity, source.content_hash().as_bytes())
-}
-
-fn push_endpoint(identity: &mut Vec<u8>, endpoint: RelationEndpoint) -> Result<(), AdapterError> {
-    match endpoint {
-        RelationEndpoint::Repository(id) => {
-            identity.push(1);
-            push_bytes(identity, id.as_bytes())
-        }
-        RelationEndpoint::File(id) => {
-            identity.push(2);
-            push_bytes(identity, id.as_bytes())
-        }
-        RelationEndpoint::Entity(id) => {
-            identity.push(3);
-            push_bytes(identity, id.as_bytes())
-        }
-        RelationEndpoint::Occurrence(id) => {
-            identity.push(4);
-            push_bytes(identity, id.as_bytes())
-        }
-    }
-}
-
-fn push_text(identity: &mut Vec<u8>, text: &str) -> Result<(), AdapterError> {
-    push_bytes(identity, text.as_bytes())
-}
-
-fn push_bytes(identity: &mut Vec<u8>, bytes: &[u8]) -> Result<(), AdapterError> {
-    let length = u64::try_from(bytes.len())
-        .map_err(|_| provider_failure("treesitter-lowering-accounting"))?;
-    identity.extend_from_slice(&length.to_be_bytes());
-    identity.extend_from_slice(bytes);
-    Ok(())
-}
-
-const fn entity_kind_label(kind: EntityKind) -> &'static str {
-    match kind {
-        EntityKind::Module => "module",
-        EntityKind::Namespace => "namespace",
-        EntityKind::Class => "class",
-        EntityKind::Struct => "struct",
-        EntityKind::Enum => "enum",
-        EntityKind::Trait => "trait",
-        EntityKind::Interface => "interface",
-        EntityKind::TypeAlias => "type-alias",
-        EntityKind::Function => "function",
-        EntityKind::Method => "method",
-        EntityKind::Constructor => "constructor",
-        EntityKind::Field => "field",
-        EntityKind::Constant => "constant",
-        EntityKind::Variable => "variable",
-        EntityKind::Parameter => "parameter",
-        _ => "entity",
-    }
-}
-
 const fn syntax_fact_kind_tag(kind: SyntaxFactKind) -> u8 {
     match kind {
         SyntaxFactKind::Root => 1,
@@ -2623,76 +2579,6 @@ const fn syntax_fact_kind_tag(kind: SyntaxFactKind) -> u8 {
     }
 }
 
-const fn occurrence_role_tag(role: OccurrenceRole) -> u8 {
-    match role {
-        OccurrenceRole::Definition => 1,
-        OccurrenceRole::Declaration => 2,
-        OccurrenceRole::Reference => 3,
-        OccurrenceRole::CallSite => 4,
-        OccurrenceRole::TypeUse => 5,
-        OccurrenceRole::ImportUse => 6,
-        OccurrenceRole::Write => 7,
-        OccurrenceRole::Read => 8,
-        OccurrenceRole::InheritanceUse => 9,
-        OccurrenceRole::ImplementationUse => 10,
-        OccurrenceRole::DecoratorUse => 11,
-        OccurrenceRole::MacroUse => 12,
-        OccurrenceRole::RouteUse => 13,
-        OccurrenceRole::TestUse => 14,
-        OccurrenceRole::Documentation => 15,
-        OccurrenceRole::StringEvidence => 16,
-    }
-}
-
-const fn relation_predicate_tag(predicate: RelationPredicate) -> u8 {
-    match predicate {
-        RelationPredicate::Contains => 1,
-        _ => 255,
-    }
-}
-
-const fn fact_domain_tag(domain: FactDomain) -> u8 {
-    match domain {
-        FactDomain::Files => 1,
-        FactDomain::Entities => 2,
-        FactDomain::Occurrences => 3,
-        FactDomain::Relations => 4,
-        FactDomain::Provenance => 5,
-        FactDomain::SourceMappings => 6,
-        FactDomain::Diagnostics => 7,
-        FactDomain::Extensions => 8,
-    }
-}
-
-const fn coverage_status_tag(status: CoverageStatus) -> u8 {
-    match status {
-        CoverageStatus::Complete => 1,
-        CoverageStatus::Bounded => 2,
-        CoverageStatus::Sampled => 3,
-        CoverageStatus::Unknown => 4,
-        _ => 255,
-    }
-}
-
-const fn diagnostic_severity_tag(severity: DiagnosticSeverity) -> u8 {
-    match severity {
-        DiagnosticSeverity::Info => 1,
-        DiagnosticSeverity::Warning => 2,
-        DiagnosticSeverity::Error => 3,
-    }
-}
-
-const fn skipped_reason_tag(reason: SkippedRegionReason) -> u8 {
-    match reason {
-        SkippedRegionReason::ResourceLimit => 1,
-        SkippedRegionReason::ParseError => 2,
-        SkippedRegionReason::MissingBuildContext => 3,
-        SkippedRegionReason::AdapterFailure => 4,
-        SkippedRegionReason::UnsupportedEncoding => 5,
-        SkippedRegionReason::UnsupportedConstruct => 6,
-    }
-}
-
 fn provider_failure(code: &'static str) -> AdapterError {
     AdapterError::ProviderFailed {
         code: DiagnosticCode::new(code).expect("hard-coded lowering diagnostic code is valid"),
@@ -2703,7 +2589,7 @@ fn provider_failure(code: &'static str) -> AdapterError {
 mod tests {
     use proptest::prelude::*;
     use rootlight_adapter_sdk::{SyntaxFact, SyntaxFactKind, SyntaxKindLabel};
-    use rootlight_ids::{FileId, GenerationId, RepositoryId};
+    use rootlight_ids::{FileId, GenerationId, RepositoryId, derive_fact};
     use rootlight_ir::{Confidence, SourceRef, SourceSpan};
 
     use super::*;

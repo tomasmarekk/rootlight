@@ -9,10 +9,26 @@
 
 #![forbid(unsafe_code)]
 
+mod identity;
 mod lexical;
 mod normalized;
 mod validation;
 
+pub use identity::{
+    FILE_IDENTITY_CLAIM_NAMESPACE, FactIdentityRecipeError, FileIdentityClaim,
+    IDENTITY_CLAIM_VERSION, IdentityClaimError, SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+    SymbolIdentityClaim, decode_file_identity_claim_envelope,
+    decode_file_identity_claim_envelope_with_checkpoint, decode_symbol_identity_claim_envelope,
+    decode_symbol_identity_claim_envelope_with_checkpoint, derive_coverage_record_id,
+    derive_coverage_record_id_with_checkpoint, derive_diagnostic_record_id,
+    derive_diagnostic_record_id_with_checkpoint, derive_occurrence_record_id,
+    derive_occurrence_record_id_with_checkpoint, derive_provenance_record_id,
+    derive_provenance_record_id_with_checkpoint, derive_relation_record_id,
+    derive_relation_record_id_with_checkpoint, derive_skipped_region_id,
+    derive_skipped_region_id_with_checkpoint, derive_source_mapping_record_id,
+    derive_source_mapping_record_id_with_checkpoint, entity_kind_identity_label,
+    new_file_identity_claim_envelope, new_symbol_identity_claim_envelope,
+};
 pub use lexical::{
     LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION, LexicalEvidenceFormat,
     LexicalEvidenceKind, LexicalEvidenceV1, LexicalExtensionError, MAX_LEXICAL_PAYLOAD_BYTES,
@@ -23,12 +39,16 @@ pub use lexical::{
 pub use normalized::{
     ContainerRef, CoverageRecord, CoverageScope, DiagnosticRecord, DiagnosticSeverity, EntityFlag,
     EntityKind, EntityRecord, EntityVisibility, ExtensionCriticality, ExtensionEnvelope,
-    ExtensionEnvelopeDecodeError, FactDomain, FactEvidence, FactRef, FileRecord, IrDocument,
-    IrDocumentDecodeError, LegacyIrDocumentDecodeError, NORMALIZED_IR_VERSION,
-    NormalizedIrDocument, NormalizedIrVersion, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
-    ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord,
-    SkippedRegion, SkippedRegionReason, SourceMappingKind, SourceMappingRecord,
-    decode_extension_envelope, decode_ir_document, decode_legacy_ir_document,
+    ExtensionEnvelopeDecodeError, FactDomain, FactEvidence, FactRef, FilePathLocator,
+    FilePathLocatorEncoding, FilePathLocatorError, FileRecord, IrDocument, IrDocumentDecodeError,
+    LegacyIrDocumentDecodeError, MAX_FILE_PATH_LOCATOR_COMPONENTS,
+    MAX_FILE_PATH_LOCATOR_ENCODED_BYTES, NORMALIZED_IR_VERSION, NormalizedIrDocument,
+    NormalizedIrVersion, NormalizedRecordDecodeError, OccurrenceRecord, OccurrenceRole,
+    OccurrenceTarget, ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate,
+    RelationRecord, SkippedRegion, SkippedRegionReason, SourceMappingKind, SourceMappingRecord,
+    decode_diagnostic_record_with_checkpoint, decode_extension_envelope,
+    decode_extension_envelope_with_checkpoint, decode_ir_document, decode_legacy_ir_document,
+    decode_skipped_region_with_checkpoint, decode_source_mapping_record_with_checkpoint,
 };
 pub use validation::{
     ExtensionIdentifier, ExtensionSupport, IrDocumentValidationError, IrLimits,

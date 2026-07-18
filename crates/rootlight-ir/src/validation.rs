@@ -340,6 +340,16 @@ fn validate_limits(
     for file in &document.files {
         budget.evidence("file.evidence.derivation", &file.evidence, limits)?;
         budget.string("file.path", &file.path, limits)?;
+        if let Some(locator) = &file.path_locator {
+            budget.nested(
+                "file.path_locator.components",
+                locator.components().len(),
+                limits,
+            )?;
+            for component in locator.components() {
+                budget.string("file.path_locator.component", component, limits)?;
+            }
+        }
         budget.string("file.language", &file.language, limits)?;
         budget.string("file.encoding", &file.encoding, limits)?;
     }

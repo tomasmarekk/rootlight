@@ -12,6 +12,7 @@ use std::{
 use cargo_metadata::MetadataCommand;
 use prost::Message;
 use prost_types::FileDescriptorSet;
+use rootlight_catalog::{catalog_schema_compatibility, oracle_schema_compatibility};
 use rootlight_config::{ConfigDocumentSchema, ConfigDocumentSchemaV1_1};
 use rootlight_ir::{
     ExtensionSupport, IrDocument, IrDocumentSchema, IrLimits, LexicalEvidenceV1,
@@ -24,6 +25,7 @@ use rootlight_mcp_contract::{
     SymbolExplainInput, SymbolExplainOutput,
 };
 use rootlight_protocol::generated::common::v1::ContractVersion as ProtocolContractVersion;
+use rootlight_storage::GENERATION_CONTRACT_VERSION;
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +39,15 @@ const GENERATED_RUST_FILES: [&str; 3] = [
 const SCHEMA_ROOT: &str = "schemas/generated";
 const PROTOCOL_GENERATED_ROOT: &str = "crates/rootlight-protocol/src/generated";
 const COMPATIBILITY_ROOT: &str = "tests/fixtures/compatibility";
+const STORAGE_COMPATIBILITY_BASELINES: [&str; 3] = [
+    "storage/1.0/schema-fingerprints.json",
+    "storage/1.1/schema-fingerprints.json",
+    "storage/1.2/schema-fingerprints.json",
+];
+const STORAGE_GENERATOR_INPUTS: [&str; 2] = [
+    "crates/rootlight-catalog/src/schema.rs",
+    "crates/rootlight-storage/src/generation.rs",
+];
 const COMPATIBILITY_FILES: [&str; 4] = [
     "contract-0.1.json",
     "contract-0.2.json",
@@ -44,13 +55,16 @@ const COMPATIBILITY_FILES: [&str; 4] = [
     "contract-2.0-rejected.json",
 ];
 const LEXICAL_EXTENSION_BASELINE: &str = "extensions/rootlight.lexical/1/envelope.json";
-const COMPATIBILITY_BASELINES: [&str; 6] = [
+const COMPATIBILITY_BASELINES: [&str; 9] = [
     LEXICAL_EXTENSION_BASELINE,
     "ir/1.0/document.json",
     "ir/1.1/document.json",
     "protobuf/1.0/contract-version.bin",
     "protobuf/1.0/contract-version.json",
     "protobuf/1.0/rootlight.desc",
+    STORAGE_COMPATIBILITY_BASELINES[0],
+    STORAGE_COMPATIBILITY_BASELINES[1],
+    STORAGE_COMPATIBILITY_BASELINES[2],
 ];
 const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 3] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
@@ -209,6 +223,7 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
 
     validate_daemon_protocol_baselines(&workspace_root)?;
     validate_protobuf_unknown_field_skip()?;
+    validate_storage_compatibility(&workspace_root)?;
     println!("compatibility: frozen configuration 1.0 and current 1.1 fixtures verified");
     println!("compatibility: frozen protobuf descriptor is a compatible subset");
     println!("compatibility: daemon protocol 1.1, 1.2, and 1.3 descriptors verified");
@@ -216,7 +231,76 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
     println!("compatibility: frozen IR 1.0 and normalized IR 1.1 documents verified");
     println!("compatibility: frozen rootlight.lexical extension version 1 verified");
     println!("compatibility: unsupported IR major and minor versions rejected");
+    println!("compatibility: generation and SQLite schema fingerprints verified");
     Ok(())
+}
+
+fn validate_storage_compatibility(workspace_root: &Path) -> Result<(), SchemaError> {
+    let fixtures = STORAGE_COMPATIBILITY_BASELINES
+        .iter()
+        .map(|relative| {
+            let path = workspace_root.join(COMPATIBILITY_ROOT).join(relative);
+            serde_json::from_slice::<StorageCompatibilityFixture>(&read_bytes(&path)?)
+                .map_err(|source| SchemaError::ParseCompatibilityFixture { path, source })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if fixtures
+        .iter()
+        .any(|fixture| fixture.fixture_version != MANIFEST_VERSION)
+        || fixtures
+            .iter()
+            .map(|fixture| {
+                (
+                    fixture.generation_contract.major,
+                    fixture.generation_contract.minor,
+                )
+            })
+            .collect::<Vec<_>>()
+            != [(1, 0), (1, 1), (1, 2)]
+        || !schema_history_is_valid(&fixtures, |fixture| &fixture.catalog)
+        || !schema_history_is_valid(&fixtures, |fixture| &fixture.oracle)
+    {
+        return Err(SchemaError::StorageCompatibilityMismatch);
+    }
+    let catalog = catalog_schema_compatibility();
+    let oracle = oracle_schema_compatibility();
+    let expected = StorageCompatibilityFixture {
+        fixture_version: MANIFEST_VERSION.to_owned(),
+        generation_contract: VersionFixture {
+            major: GENERATION_CONTRACT_VERSION.major(),
+            minor: GENERATION_CONTRACT_VERSION.minor(),
+        },
+        catalog: SqliteSchemaFixture {
+            application_id: catalog.application_id(),
+            schema_version: catalog.schema_version(),
+            checksum: catalog.checksum().to_string(),
+        },
+        oracle: SqliteSchemaFixture {
+            application_id: oracle.application_id(),
+            schema_version: oracle.schema_version(),
+            checksum: oracle.checksum().to_string(),
+        },
+    };
+    if fixtures.last() != Some(&expected) {
+        return Err(SchemaError::StorageCompatibilityMismatch);
+    }
+    Ok(())
+}
+
+fn schema_history_is_valid<'fixture>(
+    fixtures: &'fixture [StorageCompatibilityFixture],
+    select: impl Fn(&'fixture StorageCompatibilityFixture) -> &'fixture SqliteSchemaFixture,
+) -> bool {
+    fixtures.windows(2).all(|pair| {
+        let previous = select(&pair[0]);
+        let current = select(&pair[1]);
+        previous.application_id == current.application_id
+            && if previous.checksum == current.checksum {
+                previous.schema_version == current.schema_version
+            } else {
+                previous.schema_version < current.schema_version
+            }
+    })
 }
 
 fn validate_configuration_schema(
@@ -1655,6 +1739,7 @@ fn generation_inputs(workspace_root: &Path) -> Result<Vec<ArtifactRecord>, Schem
             .iter()
             .map(|(_, name)| format!("{COMPATIBILITY_ROOT}/{name}")),
     );
+    paths.extend(STORAGE_GENERATOR_INPUTS.map(str::to_owned));
     paths.sort();
     paths
         .into_iter()
@@ -1863,6 +1948,30 @@ struct ProtocolVersionFixture {
     minor: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StorageCompatibilityFixture {
+    fixture_version: String,
+    generation_contract: VersionFixture,
+    catalog: SqliteSchemaFixture,
+    oracle: SqliteSchemaFixture,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionFixture {
+    major: u16,
+    minor: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SqliteSchemaFixture {
+    application_id: u32,
+    schema_version: u32,
+    checksum: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum FixtureDisposition {
@@ -1983,6 +2092,8 @@ pub(crate) enum SchemaError {
     CompatibilityProtobufDecode(#[source] prost::DecodeError),
     #[error("COMPAT_PROTOBUF_SEMANTICS: additive protobuf field changed known values")]
     CompatibilityProtobufSemantics,
+    #[error("COMPAT_STORAGE: generation or SQLite schema fingerprint changed")]
+    StorageCompatibilityMismatch,
     #[error("COMPAT_MAJOR_ACCEPTED: unsupported major fixture was accepted")]
     CompatibilityExpectedMajorRejection,
     #[error("failed to read generated artifact at {path}")]
@@ -2041,10 +2152,13 @@ mod tests {
         assert_eq!(outputs.len(), artifacts.len() + 1);
         assert!(outputs.contains(&format!("{SCHEMA_ROOT}/manifest.json")));
         assert!(!artifacts.contains(&format!("{SCHEMA_ROOT}/manifest.json")));
+        for baseline in STORAGE_COMPATIBILITY_BASELINES {
+            assert!(!outputs.contains(&format!("{COMPATIBILITY_ROOT}/{baseline}")));
+        }
     }
 
     #[test]
-    fn manifest_inputs_are_declarative_contracts_and_frozen_baselines() {
+    fn manifest_inputs_cover_contracts_baselines_and_storage_ledgers() {
         let root = workspace_root().expect("workspace metadata is available");
         let observed: Vec<String> = generation_inputs(&root)
             .expect("manifest inputs digest")
@@ -2074,9 +2188,33 @@ mod tests {
                     .iter()
                     .map(|(_, name)| format!("{COMPATIBILITY_ROOT}/{name}")),
             )
+            .chain(STORAGE_GENERATOR_INPUTS.map(str::to_owned))
             .collect();
         expected.sort();
 
         assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn schema_history_requires_a_version_bump_for_checksum_changes() {
+        let fixture = |minor, schema_version, checksum: &str| StorageCompatibilityFixture {
+            fixture_version: MANIFEST_VERSION.to_owned(),
+            generation_contract: VersionFixture { major: 1, minor },
+            catalog: SqliteSchemaFixture {
+                application_id: 1,
+                schema_version,
+                checksum: checksum.to_owned(),
+            },
+            oracle: SqliteSchemaFixture {
+                application_id: 2,
+                schema_version,
+                checksum: checksum.to_owned(),
+            },
+        };
+        let valid = [fixture(0, 1, "old"), fixture(1, 2, "new")];
+        let invalid = [fixture(0, 1, "old"), fixture(1, 1, "new")];
+
+        assert!(schema_history_is_valid(&valid, |entry| &entry.oracle));
+        assert!(!schema_history_is_valid(&invalid, |entry| &entry.oracle));
     }
 }
