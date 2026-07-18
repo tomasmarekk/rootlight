@@ -767,8 +767,10 @@ impl JournalActorHandle {
         operation: OperationId,
         deadline: &WorkerDeadline,
     ) -> WorkerStart {
-        let (started, receiver) = mpsc::sync_channel(0);
-        let (acknowledged, acknowledgement) = mpsc::sync_channel(0);
+        // Capacity one lets each peer install its deadline wait after sending,
+        // without making scheduler progress on the other thread a prerequisite.
+        let (started, receiver) = mpsc::sync_channel(1);
+        let (acknowledged, acknowledgement) = mpsc::sync_channel(1);
         let mut command = JournalCommand::StartOperation {
             operation,
             deadline: deadline.clone(),
@@ -794,6 +796,7 @@ impl JournalActorHandle {
                 Err((error, _)) => return Err(error),
             }
         }
+        deadline.pause_before_start_receive();
         loop {
             let Some(remaining) = deadline.remaining() else {
                 return Err(ServiceError::RequestTimedOut);
@@ -809,23 +812,22 @@ impl JournalActorHandle {
                     deadline.pause_after_start_receipt();
                     let accepted = deadline.remaining().is_some();
                     deadline.pause_before_start_acknowledgement();
-                    let acknowledgement = if accepted {
-                        WorkerStartAcknowledgement::Accepted
-                    } else {
-                        WorkerStartAcknowledgement::Expired
-                    };
-                    if acknowledged.send(acknowledgement).is_err() {
-                        return Err(if !accepted || deadline.remaining().is_none() {
+                    if !accepted {
+                        let _ = acknowledged.try_send(WorkerStartAcknowledgement::Expired);
+                        return Err(ServiceError::RequestTimedOut);
+                    }
+                    let (authorized, authorization) = mpsc::sync_channel(1);
+                    if acknowledged
+                        .try_send(WorkerStartAcknowledgement::Accepted(authorized))
+                        .is_err()
+                    {
+                        return Err(if deadline.remaining().is_none() {
                             ServiceError::RequestTimedOut
                         } else {
                             ServiceError::ChannelClosed
                         });
                     }
-                    return if accepted {
-                        start
-                    } else {
-                        Err(ServiceError::RequestTimedOut)
-                    };
+                    return wait_for_worker_start_authorization(start, authorization, deadline);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -1319,6 +1321,84 @@ fn execute_journal_command(
     Ok(())
 }
 
+fn wait_for_worker_start_authorization(
+    start: WorkerStart,
+    authorization: Receiver<WorkerStartAuthorization>,
+    deadline: &WorkerDeadline,
+) -> WorkerStart {
+    loop {
+        match authorization.try_recv() {
+            Ok(WorkerStartAuthorization::Authorized) => return start,
+            Ok(WorkerStartAuthorization::Expired) => {
+                return Err(ServiceError::RequestTimedOut);
+            }
+            Err(TryRecvError::Disconnected) => {
+                return Err(if deadline.remaining().is_none() {
+                    ServiceError::RequestTimedOut
+                } else {
+                    ServiceError::ChannelClosed
+                });
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+        let Some(remaining) = deadline.remaining() else {
+            return Err(ServiceError::RequestTimedOut);
+        };
+        match authorization.recv_timeout(remaining.min(WORKER_HANDSHAKE_POLL_INTERVAL)) {
+            Ok(WorkerStartAuthorization::Authorized) => return start,
+            Ok(WorkerStartAuthorization::Expired) => {
+                return Err(ServiceError::RequestTimedOut);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(if deadline.remaining().is_none() {
+                    ServiceError::RequestTimedOut
+                } else {
+                    ServiceError::ChannelClosed
+                });
+            }
+        }
+    }
+}
+
+fn receive_worker_start_acknowledgement(
+    acknowledged: &Receiver<WorkerStartAcknowledgement>,
+    deadline: &WorkerDeadline,
+) -> Result<WorkerStartAcknowledgement, mpsc::RecvTimeoutError> {
+    loop {
+        match acknowledged.try_recv() {
+            Ok(acknowledgement) => return Ok(acknowledgement),
+            Err(TryRecvError::Disconnected) => {
+                return Err(mpsc::RecvTimeoutError::Disconnected);
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+        let Some(remaining) = deadline.remaining() else {
+            return Err(mpsc::RecvTimeoutError::Timeout);
+        };
+        match acknowledged.recv_timeout(remaining.min(WORKER_HANDSHAKE_POLL_INTERVAL)) {
+            Ok(acknowledgement) => return Ok(acknowledgement),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(mpsc::RecvTimeoutError::Disconnected);
+            }
+        }
+    }
+}
+
+fn compensate_unacknowledged_worker_start(
+    journal: &OperationJournal,
+    operation: OperationId,
+    deadline: &WorkerDeadline,
+) -> Result<(), OperationError> {
+    if deadline.remaining().is_none() {
+        journal.interrupt_deadline(operation)?;
+    } else {
+        journal.interrupt_unacknowledged_start(operation)?;
+    }
+    Ok(())
+}
+
 fn deliver_worker_start(
     journal: &OperationJournal,
     operation: OperationId,
@@ -1339,30 +1419,34 @@ fn deliver_worker_start(
         &result,
         Ok((record, Some(_))) if record.state == OperationState::Running
     );
-    if let Err(send_error) = started.send(result) {
-        if matches!(
-            &send_error.0,
-            Ok((record, Some(_))) if record.state == OperationState::Running
-        ) {
-            journal.interrupt_unacknowledged_start(operation)?;
+    if started.try_send(result).is_err() {
+        if durable_start {
+            compensate_unacknowledged_worker_start(journal, operation, deadline)?;
         }
         return Ok(());
     }
     if !durable_start {
         return Ok(());
     }
-    let acknowledgement = deadline
-        .remaining()
-        .map_or(Err(mpsc::RecvTimeoutError::Timeout), |remaining| {
-            acknowledged.recv_timeout(remaining)
-        });
-    match acknowledgement {
-        Ok(WorkerStartAcknowledgement::Accepted) => {}
+    match receive_worker_start_acknowledgement(&acknowledged, deadline) {
+        Ok(WorkerStartAcknowledgement::Accepted(authorized)) => {
+            // This actor-owned check is the authorization linearization point:
+            // durable deadline compensation must precede any worker execution.
+            if deadline.remaining().is_none() {
+                journal.interrupt_deadline(operation)?;
+                let _ = authorized.try_send(WorkerStartAuthorization::Expired);
+            } else if authorized
+                .try_send(WorkerStartAuthorization::Authorized)
+                .is_err()
+            {
+                compensate_unacknowledged_worker_start(journal, operation, deadline)?;
+            }
+        }
         Ok(WorkerStartAcknowledgement::Expired) | Err(mpsc::RecvTimeoutError::Timeout) => {
             journal.interrupt_deadline(operation)?;
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            journal.interrupt_unacknowledged_start(operation)?;
+            compensate_unacknowledged_worker_start(journal, operation, deadline)?;
         }
     }
     Ok(())
@@ -2177,15 +2261,29 @@ impl Drop for ClientConnectionPermit {
 type WorkerStart =
     Result<(OperationRecord, Option<rootlight_operations::Cancellation>), ServiceError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum WorkerStartAcknowledgement {
-    Accepted,
+    Accepted(SyncSender<WorkerStartAuthorization>),
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerStartAuthorization {
+    Authorized,
     Expired,
 }
 
 #[cfg(test)]
 #[derive(Debug)]
 struct WorkerStartReceiptHook {
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+struct ControlledStartReceive {
+    deadline: WorkerDeadline,
+    force_expired: Arc<AtomicBool>,
     entered: Arc<std::sync::Barrier>,
     release: Arc<std::sync::Barrier>,
 }
@@ -2218,6 +2316,8 @@ struct WorkerDeadline {
     #[cfg(test)]
     remaining_checks: Option<Arc<AtomicU32>>,
     #[cfg(test)]
+    start_receive_hook: Option<Arc<WorkerStartReceiptHook>>,
+    #[cfg(test)]
     start_receipt_hook: Option<Arc<WorkerStartReceiptHook>>,
     #[cfg(test)]
     start_acknowledgement_hook: Option<Arc<WorkerStartReceiptHook>>,
@@ -2234,6 +2334,8 @@ impl WorkerDeadline {
             forced_expired: None,
             #[cfg(test)]
             remaining_checks: None,
+            #[cfg(test)]
+            start_receive_hook: None,
             #[cfg(test)]
             start_receipt_hook: None,
             #[cfg(test)]
@@ -2268,6 +2370,14 @@ impl WorkerDeadline {
         self.expires_at
     }
 
+    fn pause_before_start_receive(&self) {
+        #[cfg(test)]
+        if let Some(hook) = self.start_receive_hook.as_ref() {
+            hook.entered.wait();
+            hook.release.wait();
+        }
+    }
+
     fn pause_after_start_receipt(&self) {
         #[cfg(test)]
         if let Some(hook) = self.start_receipt_hook.as_ref() {
@@ -2297,6 +2407,25 @@ impl WorkerDeadline {
         let mut deadline = Self::from_timeout(timeout)?;
         deadline.remaining_checks = Some(Arc::new(AtomicU32::new(checks)));
         Ok(deadline)
+    }
+
+    #[cfg(test)]
+    fn controlled_before_start_receive(
+        timeout: Duration,
+    ) -> Result<ControlledStartReceive, ServiceError> {
+        let (mut deadline, forced_expired) = Self::controlled(timeout)?;
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        deadline.start_receive_hook = Some(Arc::new(WorkerStartReceiptHook {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }));
+        Ok(ControlledStartReceive {
+            deadline,
+            force_expired: forced_expired,
+            entered,
+            release,
+        })
     }
 
     #[cfg(test)]
@@ -5951,6 +6080,75 @@ mod tests {
     }
 
     #[test]
+    fn worker_start_delivery_does_not_wait_for_worker_receive() {
+        let operation = OperationId::from_bytes([67; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let cancellation = journal.enqueue(operation).expect("operation enqueues");
+        let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
+        let handle = actor.handle();
+        let ControlledStartReceive {
+            deadline,
+            force_expired,
+            entered,
+            release,
+        } = WorkerDeadline::controlled_before_start_receive(DEFAULT_REQUEST_TIMEOUT)
+            .expect("deadline is valid");
+        let worker_handle = handle.clone();
+        let worker =
+            thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
+
+        entered.wait();
+        let durable_start_observed = (0..100).any(|_| {
+            if journal
+                .status(operation)
+                .is_ok_and(|record| record.state == OperationState::Running)
+            {
+                true
+            } else {
+                thread::sleep(Duration::from_millis(1));
+                false
+            }
+        });
+        assert!(
+            durable_start_observed,
+            "actor must deliver the buffered start before worker receive"
+        );
+        force_expired.store(true, Ordering::Release);
+
+        let (sentinel_entered, sentinel_receiver) = mpsc::sync_channel(0);
+        let (sentinel_release, sentinel_release_receiver) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered: sentinel_entered,
+                    release: sentinel_release_receiver,
+                },
+            )
+            .expect("control sentinel queues");
+        sentinel_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("actor remains responsive after worker deadline");
+        sentinel_release
+            .send(())
+            .expect("control sentinel releases");
+        release.wait();
+
+        assert!(matches!(
+            worker.join().expect("worker joins"),
+            Err(ServiceError::RequestTimedOut)
+        ));
+        let operation = journal.status(operation).expect("status loads");
+        assert_eq!(operation.state, OperationState::Interrupted);
+        assert_eq!(operation.recovery_class, RecoveryClass::DeadlineElapsed);
+        assert_eq!(
+            cancellation.reason(),
+            Some(rootlight_operations::CancellationReason::DeadlineExceeded)
+        );
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
     fn worker_start_expiry_after_rendezvous_receipt_prevents_execution() {
         let operation = OperationId::from_bytes([63; 16]);
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
@@ -6001,21 +6199,12 @@ mod tests {
     }
 
     #[test]
-    fn failed_start_acknowledgement_prefers_the_elapsed_deadline() {
+    fn stale_start_acknowledgement_cannot_authorize_after_deadline() {
         let operation = OperationId::from_bytes([65; 16]);
-        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
         let cancellation = journal.enqueue(operation).expect("operation enqueues");
-        let running = journal
-            .start_execution(operation)
-            .expect("operation starts");
-        let (control, _control_rx) = mpsc::sync_channel(1);
-        let (normal, normal_rx) = mpsc::sync_channel(1);
-        let handle = JournalActorHandle {
-            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
-                control,
-                normal,
-            }))),
-        };
+        let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
+        let handle = actor.handle();
         let ControlledStartAcknowledgement {
             deadline,
             force_expired,
@@ -6026,37 +6215,98 @@ mod tests {
         let worker_handle = handle.clone();
         let worker =
             thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
-        let JournalCommand::StartOperation {
-            started,
-            acknowledged,
-            ..
-        } = normal_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("worker start command arrives")
-        else {
-            panic!("worker start command is preserved");
-        };
-        started
-            .send(Ok((running, Some(cancellation.clone()))))
-            .expect("durable start reaches the worker");
 
         entered.wait();
         force_expired.store(true, Ordering::Release);
-        drop(acknowledged);
         release.wait();
 
         assert!(matches!(
             worker.join().expect("worker joins"),
             Err(ServiceError::RequestTimedOut)
         ));
-        let interrupted = journal
-            .interrupt_deadline(operation)
-            .expect("test cleanup records the elapsed deadline");
+        let (sentinel_entered, sentinel_receiver) = mpsc::sync_channel(0);
+        let (sentinel_release, sentinel_release_receiver) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered: sentinel_entered,
+                    release: sentinel_release_receiver,
+                },
+            )
+            .expect("control sentinel queues");
+        sentinel_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("actor processes the stale acknowledgement");
+        sentinel_release
+            .send(())
+            .expect("control sentinel releases");
+
+        let interrupted = journal.status(operation).expect("status loads");
+        assert_eq!(interrupted.state, OperationState::Interrupted);
         assert_eq!(interrupted.recovery_class, RecoveryClass::DeadlineElapsed);
         assert_eq!(
             cancellation.reason(),
             Some(rootlight_operations::CancellationReason::DeadlineExceeded)
         );
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn real_deadline_at_start_acknowledgement_never_authorizes_work() {
+        for byte in 80..100 {
+            let operation = OperationId::from_bytes([byte; 16]);
+            let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+            let cancellation = journal.enqueue(operation).expect("operation enqueues");
+            let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
+            let handle = actor.handle();
+            let ControlledStartAcknowledgement {
+                deadline,
+                force_expired: _,
+                entered,
+                release,
+            } = WorkerDeadline::controlled_before_start_acknowledgement(Duration::from_millis(100))
+                .expect("deadline is valid");
+            let expires_at = deadline.expires_at();
+            let worker_handle = handle.clone();
+            let worker =
+                thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
+
+            entered.wait();
+            thread::sleep(expires_at.saturating_duration_since(Instant::now()));
+            release.wait();
+
+            assert!(matches!(
+                worker.join().expect("worker joins"),
+                Err(ServiceError::RequestTimedOut)
+            ));
+            let (sentinel_entered, sentinel_receiver) = mpsc::sync_channel(0);
+            let (sentinel_release, sentinel_release_receiver) = mpsc::sync_channel(0);
+            handle
+                .try_send(
+                    JournalLane::Control,
+                    JournalCommand::Barrier {
+                        entered: sentinel_entered,
+                        release: sentinel_release_receiver,
+                    },
+                )
+                .expect("control sentinel queues");
+            sentinel_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("actor settles the real deadline");
+            sentinel_release
+                .send(())
+                .expect("control sentinel releases");
+
+            let interrupted = journal.status(operation).expect("status loads");
+            assert_eq!(interrupted.state, OperationState::Interrupted);
+            assert_eq!(interrupted.recovery_class, RecoveryClass::DeadlineElapsed);
+            assert_eq!(
+                cancellation.reason(),
+                Some(rootlight_operations::CancellationReason::DeadlineExceeded)
+            );
+            actor.join().expect("actor joins");
+        }
     }
 
     #[test]
