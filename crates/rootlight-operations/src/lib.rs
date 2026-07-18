@@ -1475,22 +1475,52 @@ impl OperationJournal {
     /// Returns a typed SQLite or integer-conversion failure.
     pub fn counts(&self) -> Result<OperationCounts, OperationError> {
         let connection = self.lock_connection()?;
-        let (queued, running, cancelling): (i64, i64, i64) = connection
-            .query_row(
-                "SELECT
-                    COALESCE(SUM(CASE WHEN state = 'queued' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN state = 'cancelling' THEN 1 ELSE 0 END), 0)
-                 FROM operations",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(map_sqlite_error)?;
-        Ok(OperationCounts {
-            queued: nonnegative_i64_to_u32(queued)?,
-            running: nonnegative_i64_to_u32(running)?,
-            cancelling: nonnegative_i64_to_u32(cancelling)?,
-        })
+        query_operation_counts(&connection)
+    }
+
+    /// Reads source-free counts from a persistent catalog under a monotonic timeout.
+    ///
+    /// The probe uses an independent read-only connection and validates the
+    /// Rootlight catalog identity and schema before reading aggregate state. It
+    /// neither runs recovery nor mutates the catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::DiagnosticTimedOut`] when `timeout` is zero or
+    /// elapses, or another [`OperationError`] for open, policy, identity, schema,
+    /// integrity, or integer-conversion failures.
+    pub fn counts_path_with_timeout(
+        path: &Path,
+        timeout: Duration,
+    ) -> Result<OperationCounts, OperationError> {
+        if timeout.is_zero() {
+            return Err(OperationError::DiagnosticTimedOut);
+        }
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(OperationError::DiagnosticTimedOut)?;
+        Self::counts_path_until(path, deadline)
+    }
+
+    /// Reads source-free counts from a persistent catalog before a monotonic deadline.
+    ///
+    /// The probe uses an independent read-only connection and validates the
+    /// Rootlight catalog identity and schema before reading aggregate state. It
+    /// neither runs recovery nor mutates the catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::DiagnosticTimedOut`] when `deadline` has elapsed,
+    /// or another [`OperationError`] for open, policy, identity, schema, integrity,
+    /// or integer-conversion failures.
+    pub fn counts_path_until(
+        path: &Path,
+        deadline: Instant,
+    ) -> Result<OperationCounts, OperationError> {
+        let connection = open_validated_read_only_catalog(path, deadline)?;
+        let counts = map_diagnostic_timeout(query_operation_counts(&connection))?;
+        check_diagnostic_deadline(deadline)?;
+        Ok(counts)
     }
 
     /// Returns the number of durable nonterminal operations.
@@ -1553,21 +1583,7 @@ impl OperationJournal {
     /// Returns [`OperationError`] for an expired deadline, open, policy, identity,
     /// schema, or integrity failure.
     pub fn quick_check_path_until(path: &Path, deadline: Instant) -> Result<(), OperationError> {
-        check_diagnostic_deadline(deadline)?;
-        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_URI;
-        let connection = Connection::open_with_flags(path, flags).map_err(map_sqlite_error)?;
-        connection.busy_handler(None).map_err(map_sqlite_error)?;
-        connection
-            .progress_handler(1_000, Some(move || Instant::now() >= deadline))
-            .map_err(map_sqlite_error)?;
-        configure_read_only_diagnostic_connection(&connection)?;
-        check_diagnostic_deadline(deadline)?;
-        map_diagnostic_timeout(validate_catalog_identity(&connection))?;
-        check_diagnostic_deadline(deadline)?;
-        map_diagnostic_timeout(validate_schema(&connection, CatalogStorage::Persistent))?;
-        check_diagnostic_deadline(deadline)
+        open_validated_read_only_catalog(path, deadline).map(|_| ())
     }
 
     fn recover_nonterminal(&self, now_unix_ms: u64) -> Result<(), OperationError> {
@@ -1757,6 +1773,28 @@ fn remaining_diagnostic_time(deadline: Instant) -> Result<Duration, OperationErr
         .ok_or(OperationError::DiagnosticTimedOut)
 }
 
+fn open_validated_read_only_catalog(
+    path: &Path,
+    deadline: Instant,
+) -> Result<Connection, OperationError> {
+    check_diagnostic_deadline(deadline)?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_URI;
+    let connection = Connection::open_with_flags(path, flags).map_err(map_sqlite_error)?;
+    connection.busy_handler(None).map_err(map_sqlite_error)?;
+    connection
+        .progress_handler(1_000, Some(move || Instant::now() >= deadline))
+        .map_err(map_sqlite_error)?;
+    configure_read_only_diagnostic_connection(&connection)?;
+    check_diagnostic_deadline(deadline)?;
+    map_diagnostic_timeout(validate_catalog_identity(&connection))?;
+    check_diagnostic_deadline(deadline)?;
+    map_diagnostic_timeout(validate_schema(&connection, CatalogStorage::Persistent))?;
+    check_diagnostic_deadline(deadline)?;
+    Ok(connection)
+}
+
 fn check_diagnostic_deadline(deadline: Instant) -> Result<(), OperationError> {
     remaining_diagnostic_time(deadline).map(|_| ())
 }
@@ -1796,6 +1834,25 @@ fn configure_read_only_diagnostic_connection(
         .map_err(map_sqlite_error)?;
     install_catalog_authorizer(connection)?;
     Ok(())
+}
+
+fn query_operation_counts(connection: &Connection) -> Result<OperationCounts, OperationError> {
+    let (queued, running, cancelling): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN state = 'queued' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN state = 'cancelling' THEN 1 ELSE 0 END), 0)
+             FROM operations",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(map_sqlite_error)?;
+    Ok(OperationCounts {
+        queued: nonnegative_i64_to_u32(queued)?,
+        running: nonnegative_i64_to_u32(running)?,
+        cancelling: nonnegative_i64_to_u32(cancelling)?,
+    })
 }
 
 fn catalog_storage(connection: &Connection) -> Result<CatalogStorage, OperationError> {
@@ -4653,6 +4710,146 @@ mod tests {
                 OperationError::Busy
             ));
         }
+    }
+
+    #[test]
+    fn read_only_counts_report_active_persistent_operations() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let journal = OperationJournal::open(&path).expect("catalog opens");
+        let queued = operation(61);
+        let running = operation(62);
+        let cancelling = operation(63);
+        for operation in [queued, running, cancelling] {
+            journal.enqueue(operation).expect("operation enqueues");
+        }
+        journal
+            .start_execution(running)
+            .expect("running operation starts");
+        journal
+            .start_execution(cancelling)
+            .expect("cancelling operation starts");
+        journal
+            .request_cancellation(cancelling, CancellationReason::ClientRequest)
+            .expect("cancellation commits");
+
+        let counts = OperationJournal::counts_path_with_timeout(&path, Duration::from_secs(1))
+            .expect("read-only counts load");
+
+        assert_eq!(
+            counts,
+            OperationCounts {
+                queued: 1,
+                running: 1,
+                cancelling: 1,
+            }
+        );
+        assert_eq!(counts, journal.counts().expect("writer counts load"));
+    }
+
+    #[test]
+    fn read_only_counts_reject_zero_and_expired_budgets_before_opening() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("missing.sqlite");
+
+        assert!(matches!(
+            OperationJournal::counts_path_with_timeout(&path, Duration::ZERO),
+            Err(OperationError::DiagnosticTimedOut)
+        ));
+        assert!(matches!(
+            OperationJournal::counts_path_until(
+                &path,
+                Instant::now()
+                    .checked_sub(Duration::from_millis(1))
+                    .expect("test instant subtracts"),
+            ),
+            Err(OperationError::DiagnosticTimedOut)
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn read_only_counts_reject_foreign_and_tampered_catalogs() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let foreign_path = temporary.path().join("foreign.sqlite");
+        {
+            let connection = Connection::open(&foreign_path).expect("foreign database opens");
+            connection
+                .execute_batch("CREATE TABLE unrelated(value TEXT NOT NULL);")
+                .expect("foreign schema creates");
+        }
+        assert!(matches!(
+            OperationJournal::counts_path_with_timeout(&foreign_path, Duration::from_secs(1)),
+            Err(OperationError::ForeignCatalog)
+        ));
+
+        let tampered_path = temporary.path().join("tampered.sqlite");
+        drop(OperationJournal::open(&tampered_path).expect("catalog creates"));
+        {
+            let connection = Connection::open(&tampered_path).expect("catalog reopens");
+            connection
+                .execute_batch(
+                    "ALTER TABLE operations RENAME TO operations_original;
+                     CREATE TABLE operations(value TEXT);",
+                )
+                .expect("schema is tampered");
+        }
+        assert!(matches!(
+            OperationJournal::counts_path_with_timeout(&tampered_path, Duration::from_secs(1)),
+            Err(OperationError::CorruptSchema)
+        ));
+    }
+
+    #[test]
+    fn read_only_counts_do_not_interrupt_a_live_writer() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let journal = Arc::new(OperationJournal::open(&path).expect("catalog opens"));
+        let operation = operation(64);
+        journal.enqueue(operation).expect("operation enqueues");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let (committed_tx, committed_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        journal
+            .install_cancellation_signal_hook(committed_tx, release_rx)
+            .expect("cancellation hook installs");
+        let cancellation_journal = Arc::clone(&journal);
+        let cancellation = thread::spawn(move || {
+            cancellation_journal.request_cancellation(operation, CancellationReason::ClientRequest)
+        });
+        committed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer commits before signalling");
+        assert!(matches!(
+            journal.connection.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+
+        let counts = OperationJournal::counts_path_until(
+            &path,
+            Instant::now()
+                .checked_add(Duration::from_secs(1))
+                .expect("test deadline is representable"),
+        )
+        .expect("read-only counts load while writer is live");
+
+        assert_eq!(
+            counts,
+            OperationCounts {
+                queued: 0,
+                running: 0,
+                cancelling: 1,
+            }
+        );
+        release_tx.send(()).expect("writer signalling resumes");
+        let outcome = cancellation
+            .join()
+            .expect("writer thread joins")
+            .expect("writer completes after the read");
+        assert!(outcome.accepted);
+        assert_eq!(outcome.operation.state, OperationState::Cancelling);
     }
 
     #[test]
