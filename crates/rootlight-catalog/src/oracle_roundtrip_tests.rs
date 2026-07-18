@@ -45,6 +45,22 @@ use rootlight_vfs::{RelativePath, RepositoryRoot};
 use rusqlite::Connection;
 use tempfile::TempDir;
 
+fn create_private_test_file(path: &Path) {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        options.mode(0o600);
+    }
+    drop(
+        options
+            .open(path)
+            .expect("private test database is created"),
+    );
+}
+
 fn fixture_documents() -> (
     rootlight_ir::NormalizedIrDocument,
     rootlight_ir::NormalizedIrDocument,
@@ -218,6 +234,7 @@ fn control_catalog_owns_only_the_exact_private_filename() {
 fn foreign_control_database_is_rejected_before_journal_mutation() {
     let directory = TempDir::new().expect("temporary state root is created");
     let path = directory.path().join(CATALOG_FILENAME);
+    create_private_test_file(&path);
     let connection = Connection::open(&path).expect("foreign database is created");
     connection
         .pragma_update(None, "application_id", 7_u32)
@@ -234,6 +251,26 @@ fn foreign_control_database_is_rejected_before_journal_mutation() {
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
         .expect("foreign journal mode is readable");
     assert_eq!(journal_after, journal_before);
+}
+
+#[cfg(unix)]
+#[test]
+fn insecure_file_precedes_database_content_classification() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = TempDir::new().expect("temporary state root is created");
+    let path = directory.path().join(CATALOG_FILENAME);
+    create_private_test_file(&path);
+    let connection = Connection::open(&path).expect("foreign database is created");
+    connection
+        .pragma_update(None, "application_id", 7_u32)
+        .expect("foreign application marker is written");
+    drop(connection);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+        .expect("fixture permissions become insecure");
+
+    let error = Catalog::open_in(directory.path()).expect_err("insecure catalog is rejected");
+    assert_eq!(error.kind(), CatalogErrorKind::InsecureFile);
 }
 
 #[test]
@@ -798,11 +835,10 @@ fn oversized_application_metadata_is_rejected_without_returning_the_blob() {
 #[test]
 fn arbitrary_non_database_bytes_are_typed_as_corruption() {
     let directory = TempDir::new().expect("temporary generation directory is created");
-    fs::write(
-        directory.path().join(ORACLE_FILENAME),
-        b"hostile bytes, not a sqlite database",
-    )
-    .expect("hostile database fixture is written");
+    let path = directory.path().join(ORACLE_FILENAME);
+    create_private_test_file(&path);
+    fs::write(&path, b"hostile bytes, not a sqlite database")
+        .expect("hostile database fixture is written");
     let cancellation = Cancellation::new();
     let context = default_context(&cancellation);
 

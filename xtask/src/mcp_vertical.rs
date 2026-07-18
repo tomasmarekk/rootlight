@@ -131,7 +131,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     let fixture = FrozenFixture::load()?;
     fixture.verify()?;
 
-    let temporary = tempfile::tempdir().map_err(|source| VerticalError::Io {
+    let temporary = vertical_tempdir().map_err(|source| VerticalError::Io {
         action: "create MCP vertical temporary directory",
         source,
     })?;
@@ -589,6 +589,21 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
             summary_path: "summary.json",
         },
     })
+}
+
+fn vertical_tempdir() -> Result<tempfile::TempDir, io::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        // Keep the authenticated Unix endpoint below macOS `sun_path` while
+        // avoiding the default TMPDIR's `/var` alias at the VFS boundary.
+        tempfile::Builder::new()
+            .prefix("rl-g1-")
+            .tempdir_in("/private/tmp")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        tempfile::tempdir()
+    }
 }
 
 fn open_session(

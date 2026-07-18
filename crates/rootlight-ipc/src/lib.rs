@@ -54,8 +54,9 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// Returns [`IpcError::InvalidEndpoint`] when the path is empty, relative, or
-    /// outside the local named-pipe namespace on Windows.
+    /// Returns [`IpcError::InvalidEndpoint`] when the path is empty, relative,
+    /// unrepresentable as a platform Unix socket address, or outside the local
+    /// named-pipe namespace on Windows.
     pub fn new(path: PathBuf) -> Result<Self, IpcError> {
         validate_endpoint(&path)?;
         Ok(Self { path })
@@ -768,6 +769,7 @@ fn validate_endpoint(path: &Path) -> Result<(), IpcError> {
     if path.as_os_str().is_empty() || !path.is_absolute() {
         return Err(IpcError::InvalidEndpoint);
     }
+    std::os::unix::net::SocketAddr::from_pathname(path).map_err(|_| IpcError::InvalidEndpoint)?;
     Ok(())
 }
 
@@ -1066,6 +1068,16 @@ mod tests {
     fn endpoint_rejects_relative_paths() {
         assert!(matches!(
             Endpoint::new(PathBuf::from("rootlight.sock")),
+            Err(IpcError::InvalidEndpoint)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn endpoint_rejects_unrepresentable_unix_paths() {
+        let path = Path::new("/").join("x".repeat(4096));
+        assert!(matches!(
+            Endpoint::new(path),
             Err(IpcError::InvalidEndpoint)
         ));
     }

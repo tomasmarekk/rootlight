@@ -7365,7 +7365,7 @@ mod tests {
         write_client_hello_async, write_request_async,
     };
     use rootlight_operations::Progress;
-    use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
+    use std::{sync::mpsc, thread, time::Duration};
     use tempfile::{TempDir, tempdir};
     use tokio::io::AsyncWriteExt as _;
 
@@ -7479,7 +7479,7 @@ mod tests {
         #[cfg(unix)]
         let path = temporary.path().join(format!("{label}.sock"));
         #[cfg(windows)]
-        let path = PathBuf::from(format!(
+        let path = std::path::PathBuf::from(format!(
             r"\\.\pipe\rootlight-daemon-core-{}-{}-{label}",
             std::process::id(),
             temporary.path().display().to_string().len()

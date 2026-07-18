@@ -1547,11 +1547,13 @@ mod tests {
 
     fn fixture() -> Fixture {
         let temporary = tempfile::tempdir().expect("temporary root is available");
-        fs::write(temporary.path().join("lib.rs"), b"fn main() {}\n")
-            .expect("fixture source is written");
+        // macOS exposes its default temporary directory through the `/var`
+        // alias. Resolve it before exercising VFS, whose no-follow boundary
+        // intentionally rejects aliased repository roots.
+        let root = fs::canonicalize(temporary.path()).expect("temporary root canonicalizes");
+        fs::write(root.join("lib.rs"), b"fn main() {}\n").expect("fixture source is written");
         let repository_id = RepositoryId::from_bytes([7; 16]);
-        let repository =
-            RepositoryRoot::open(repository_id, temporary.path()).expect("fixture root opens");
+        let repository = RepositoryRoot::open(repository_id, &root).expect("fixture root opens");
         let relative = RelativePath::parse(Path::new("lib.rs")).expect("relative path is valid");
         let snapshot = repository
             .snapshot(&relative, 4096)

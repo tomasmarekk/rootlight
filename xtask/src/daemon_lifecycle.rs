@@ -40,7 +40,7 @@ const MAX_DAEMON_STDERR_BYTES: usize = 1024 * 1024;
 pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     let rootlight = binary_path(bin_dir, "rootlight")?;
     let daemon = binary_path(bin_dir, "rootlight-daemon")?;
-    let temporary = tempfile::tempdir().map_err(LifecycleError::TemporaryDirectory)?;
+    let temporary = lifecycle_tempdir().map_err(LifecycleError::TemporaryDirectory)?;
     let paths = RuntimePaths::new(
         temporary.path().join("state"),
         temporary.path().join("runtime"),
@@ -262,6 +262,21 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     );
     control_latency.report();
     Ok(())
+}
+
+fn lifecycle_tempdir() -> Result<tempfile::TempDir, std::io::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        // The default macOS TMPDIR is long enough to overflow `sun_path` once
+        // Rootlight appends its authenticated endpoint name.
+        tempfile::Builder::new()
+            .prefix("rl-life-")
+            .tempdir_in("/private/tmp")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        tempfile::tempdir()
+    }
 }
 
 #[derive(Debug, Clone)]
