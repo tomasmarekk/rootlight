@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
@@ -56,6 +57,7 @@ const HARD_MAX_EXAMINED_TERMS: usize = 100_000;
 const HARD_MAX_QUERY_POSTINGS: u64 = 1_000_000;
 const HARD_MAX_RETURNED_TEXT_BYTES: usize = 64 * 1024 * 1024;
 const HARD_MAX_QUERY_DURATION: Duration = Duration::from_secs(10);
+const SORT_CHECKPOINT_STRIDE: usize = 1_024;
 
 type QueryClause = (Occur, Box<dyn Query>);
 
@@ -106,6 +108,7 @@ impl LexicalIndexBuilder {
             cancellation,
         )?;
         drop(index);
+        cancellation.check()?;
         let stats = BuildStats {
             generation,
             documents: document_count,
@@ -116,7 +119,7 @@ impl LexicalIndexBuilder {
 }
 
 /// Backend-neutral domain contract for generation-pinned lexical reads.
-pub trait LexicalSearch {
+pub trait LexicalSearch: Send + Sync {
     /// Returns the immutable generation served by this reader.
     fn generation(&self) -> GenerationId;
 
@@ -256,7 +259,9 @@ impl LexicalIndex {
             cancellation,
         )?;
         let (actual_generation, reader) =
-            open_reader(&index, &fields, generation, Some(document_count))?;
+            open_reader_checked(&index, &fields, generation, Some(document_count), || {
+                cancellation.check().map_err(SearchError::from)
+            })?;
         Ok(Self {
             generation: actual_generation,
             fields,
@@ -345,17 +350,22 @@ impl LexicalIndex {
             }
         }
         control.check()?;
-        hits.sort_unstable_by(|left, right| {
-            left.rank
-                .cmp(&right.rank)
-                .then_with(|| {
-                    right
-                        .hit
-                        .relevance_score
-                        .total_cmp(&left.hit.relevance_score)
-                })
-                .then_with(|| left.hit.symbol_id.cmp(&right.hit.symbol_id))
-        });
+        sort_with_checkpoints(
+            &mut hits,
+            |left, right| {
+                left.rank
+                    .cmp(&right.rank)
+                    .then_with(|| {
+                        right
+                            .hit
+                            .relevance_score
+                            .total_cmp(&left.hit.relevance_score)
+                    })
+                    .then_with(|| left.hit.symbol_id.cmp(&right.hit.symbol_id))
+            },
+            || control.check(),
+        )?;
+        control.check()?;
         let matched_candidates =
             u64::try_from(hits.len()).map_err(|_| SearchError::CandidateBudgetExceeded)?;
         let materialized_text_bytes = u64::try_from(materialized_text_bytes)
@@ -394,6 +404,58 @@ impl LexicalSearch for LexicalIndex {
     }
 }
 
+fn sort_with_checkpoints<T>(
+    values: &mut [T],
+    compare: impl Fn(&T, &T) -> Ordering,
+    mut check: impl FnMut() -> Result<(), SearchError>,
+) -> Result<(), SearchError> {
+    check()?;
+    if values.len() < 2 {
+        return Ok(());
+    }
+
+    for root in (0..values.len() / 2).rev() {
+        if root % SORT_CHECKPOINT_STRIDE == 0 {
+            check()?;
+        }
+        sift_down(values, root, values.len(), &compare);
+    }
+    for end in (1..values.len()).rev() {
+        if end % SORT_CHECKPOINT_STRIDE == 0 {
+            check()?;
+        }
+        values.swap(0, end);
+        sift_down(values, 0, end, &compare);
+    }
+    check()
+}
+
+fn sift_down<T>(
+    values: &mut [T],
+    mut root: usize,
+    end: usize,
+    compare: &impl Fn(&T, &T) -> Ordering,
+) {
+    loop {
+        let Some(left) = root.checked_mul(2).and_then(|value| value.checked_add(1)) else {
+            return;
+        };
+        if left >= end {
+            return;
+        }
+        let mut greater = left;
+        let right = left + 1;
+        if right < end && compare(&values[left], &values[right]) == Ordering::Less {
+            greater = right;
+        }
+        if compare(&values[root], &values[greater]) != Ordering::Less {
+            return;
+        }
+        values.swap(root, greater);
+        root = greater;
+    }
+}
+
 fn prepare_documents(
     documents: &mut [LexicalDocument],
     budget: BuildBudget,
@@ -404,7 +466,11 @@ fn prepare_documents(
             resource: "documents",
         });
     }
-    documents.sort_unstable_by_key(|document| document.symbol_id);
+    sort_with_checkpoints(
+        documents,
+        |left, right| left.symbol_id.cmp(&right.symbol_id),
+        || cancellation.check().map_err(SearchError::from),
+    )?;
     let mut prior = None;
     let mut text_bytes = 0usize;
     for document in documents.iter() {
@@ -434,6 +500,14 @@ fn prepare_documents(
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildCheckpoint {
+    BeforeWriter,
+    BeforeDocument,
+    BeforeCommit,
+    AfterCommit,
+}
+
 fn populate_index(
     index: &Index,
     fields: &Fields,
@@ -443,22 +517,44 @@ fn populate_index(
     budget: BuildBudget,
     cancellation: &Cancellation,
 ) -> Result<(), SearchError> {
+    populate_index_with_checkpoints(
+        index,
+        fields,
+        generation,
+        documents,
+        document_count,
+        budget,
+        |_| cancellation.check().map_err(SearchError::from),
+    )
+}
+
+fn populate_index_with_checkpoints(
+    index: &Index,
+    fields: &Fields,
+    generation: GenerationId,
+    documents: &[LexicalDocument],
+    document_count: u64,
+    budget: BuildBudget,
+    mut check: impl FnMut(BuildCheckpoint) -> Result<(), SearchError>,
+) -> Result<(), SearchError> {
+    check(BuildCheckpoint::BeforeWriter)?;
     let mut writer = index
         .writer_with_num_threads(1, budget.indexer_memory_bytes)
         .map_err(|_| operation("writer"))?;
     writer.set_merge_policy(Box::new(NoMergePolicy));
     for document in documents {
-        cancellation.check()?;
+        check(BuildCheckpoint::BeforeDocument)?;
         writer
             .add_document(fields.encode(document)?)
             .map_err(|_| operation("add_document"))?;
     }
-    cancellation.check()?;
+    check(BuildCheckpoint::BeforeCommit)?;
     let mut prepared = writer
         .prepare_commit()
         .map_err(|_| operation("prepare_commit"))?;
     prepared.set_payload(&format_payload(generation, document_count));
     prepared.commit().map_err(|_| operation("commit"))?;
+    check(BuildCheckpoint::AfterCommit)?;
     drop(writer);
     Ok(())
 }
@@ -505,6 +601,18 @@ fn open_reader(
         return Err(SearchError::IncompatibleIndex);
     }
     Ok((actual_generation, reader))
+}
+
+fn open_reader_checked(
+    index: &Index,
+    fields: &Fields,
+    expected_generation: GenerationId,
+    expected_documents: Option<u64>,
+    check: impl FnOnce() -> Result<(), SearchError>,
+) -> Result<(GenerationId, IndexReader), SearchError> {
+    let opened = open_reader(index, fields, expected_generation, expected_documents)?;
+    check()?;
+    Ok(opened)
 }
 
 #[derive(Clone)]
@@ -1725,7 +1833,11 @@ fn operation(operation: &'static str) -> SearchError {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        cell::Cell,
+        fs,
+        sync::{Arc, Barrier},
+    };
 
     use rootlight_cancel::{Cancellation, CancellationReason};
     use rootlight_ids::{FileId, GenerationId, SymbolId};
@@ -1964,6 +2076,9 @@ mod tests {
 
     #[test]
     fn ordering_is_stable_across_permutations_and_parallel_callers() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<LexicalIndex>();
         let documents = [
             document(1, "same_name", "src/a.rs"),
             document(2, "same_name", "src/b.rs"),
@@ -2002,22 +2117,23 @@ mod tests {
             assert_eq!(actual, expected);
         }
 
+        let shared = Arc::new(
+            LexicalIndex::build_ephemeral(
+                generation(29),
+                documents.to_vec(),
+                BuildBudget::default(),
+                &Cancellation::new(),
+            )
+            .expect("shared ephemeral index builds"),
+        );
         for caller_count in [1_usize, 2, 4] {
+            let barrier = Arc::new(Barrier::new(caller_count));
             let handles = (0..caller_count)
-                .map(|caller| {
-                    let permutation = permutations[caller % permutations.len()];
-                    let ordered = permutation
-                        .map(|index| documents[index].clone())
-                        .into_iter()
-                        .collect::<Vec<_>>();
+                .map(|_| {
+                    let index = Arc::clone(&shared);
+                    let barrier = Arc::clone(&barrier);
                     std::thread::spawn(move || {
-                        let index = LexicalIndex::build_ephemeral(
-                            generation(29),
-                            ordered,
-                            BuildBudget::default(),
-                            &Cancellation::new(),
-                        )
-                        .expect("parallel ephemeral index builds");
+                        barrier.wait();
                         search(&index, "same name", SearchMode::Text)
                             .into_iter()
                             .map(|hit| hit.symbol_id)
@@ -2033,6 +2149,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ordering_checks_cancellation_during_bounded_sort_work() {
+        let mut interrupted = (0_u32..4_096).rev().collect::<Vec<_>>();
+        let checks = Cell::new(0_usize);
+        let error = sort_with_checkpoints(&mut interrupted, Ord::cmp, || {
+            let current = checks.get() + 1;
+            checks.set(current);
+            if current == 3 {
+                Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("an internal ordering checkpoint cancels the sort");
+        assert_eq!(
+            error,
+            SearchError::Cancelled(CancellationReason::ClientRequest)
+        );
+        assert_eq!(checks.get(), 3);
+
+        let mut completed = (0_u32..4_096).rev().collect::<Vec<_>>();
+        sort_with_checkpoints(&mut completed, Ord::cmp, || Ok(()))
+            .expect("bounded ordering completes");
+        assert!(completed.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn build_checks_cancellation_after_commit() {
+        let fields = Fields::new();
+        let index = Index::create_in_ram(fields.schema.clone());
+        register_tokenizer(&index);
+        let documents = vec![document(1, "item", "src/lib.rs")];
+        let checkpoints = std::cell::RefCell::new(Vec::new());
+
+        let error = populate_index_with_checkpoints(
+            &index,
+            &fields,
+            generation(31),
+            &documents,
+            1,
+            BuildBudget::default(),
+            |checkpoint| {
+                checkpoints.borrow_mut().push(checkpoint);
+                if checkpoint == BuildCheckpoint::AfterCommit {
+                    Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("post-commit cancellation is surfaced");
+
+        assert_eq!(
+            error,
+            SearchError::Cancelled(CancellationReason::ClientRequest)
+        );
+        assert_eq!(
+            checkpoints.into_inner(),
+            [
+                BuildCheckpoint::BeforeWriter,
+                BuildCheckpoint::BeforeDocument,
+                BuildCheckpoint::BeforeCommit,
+                BuildCheckpoint::AfterCommit,
+            ]
+        );
+    }
+
+    #[test]
+    fn ephemeral_reader_checks_cancellation_after_open() {
+        let fields = Fields::new();
+        let index = Index::create_in_ram(fields.schema.clone());
+        register_tokenizer(&index);
+        let documents = vec![document(1, "item", "src/lib.rs")];
+        populate_index(
+            &index,
+            &fields,
+            generation(32),
+            &documents,
+            1,
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .expect("fixture index commits");
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        let checked_after_open = Cell::new(false);
+
+        let error = match open_reader_checked(&index, &fields, generation(32), Some(1), || {
+            checked_after_open.set(true);
+            cancellation.check().map_err(SearchError::from)
+        }) {
+            Ok(_) => panic!("post-open cancellation must be surfaced"),
+            Err(error) => error,
+        };
+
+        assert!(checked_after_open.get());
+        assert_eq!(
+            error,
+            SearchError::Cancelled(CancellationReason::ClientRequest)
+        );
     }
 
     #[test]
