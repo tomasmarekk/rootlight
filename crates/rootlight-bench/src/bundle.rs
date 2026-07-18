@@ -1,18 +1,18 @@
-//! Immutable result-bundle publication and bounded checksum verification.
+//! Fail-closed result-bundle publication and bounded checksum verification.
 //!
-//! Publication performs all serialization and size accounting before it
-//! creates the staging directory. Verification bounds directory traversal and
-//! every read before allocating artifact contents.
+//! Production publication stops at the unsupported VFS private-tree preflight.
+//! Read-only verification bounds directory traversal and every read before
+//! allocating artifact contents.
 
 use std::{
-    borrow::Cow,
     collections::BTreeMap,
-    ffi::OsStr,
     fmt,
     io::{self, Read as _, Write as _},
     path::Path,
 };
 
+#[cfg(test)]
+use std::borrow::Cow;
 #[cfg(test)]
 use std::fs;
 
@@ -23,6 +23,7 @@ use serde::{
 use sha2::{Digest as _, Sha256};
 
 use cap_fs_ext::DirExt as _;
+use rootlight_vfs::platform::PrivateDirectory;
 
 use crate::integrity::{FixedArtifactSource, is_fixed_artifact, validate_fixed_artifacts};
 use crate::{
@@ -406,45 +407,33 @@ pub struct ResultBundle {
 ///
 /// # Errors
 ///
-/// Returns [`BundleError`] for invalid input, exceeded limits, serialization,
-/// existing destinations, or filesystem publication failures. A
-/// [`BundleError::PublicationDurabilityUnknown`] result means the verified
-/// destination was installed and must not be retried as though it were absent.
+/// Returns [`BundleError::PublicationUnavailable`] before inspecting the
+/// destination or performing serialization or filesystem work while the VFS
+/// account-private tree boundary remains unavailable.
 pub fn publish_bundle(bundle: &ResultBundle, destination: &Path) -> Result<(), BundleError> {
     publish_bundle_with_limits(bundle, destination, BundleLimits::default())
 }
 
 /// Publishes one immutable result bundle with checked caller-selected limits.
 ///
-/// All artifacts are serialized and byte-accounted before a staging directory
-/// is created. The destination parent must already exist. Publication writes
-/// and syncs a complete checksummed sibling directory, then atomically installs
-/// that directory without replacing an existing destination. After the rename,
-/// publication reopens the destination through the original parent handle and
-/// proves that its stable filesystem identity matches the still-open staging
-/// handle. Name substitution or Windows ambient-path redirection therefore
-/// fails closed and is never reported as successful. A process crash before
-/// installation can leave an inert staging sibling but never exposes this
-/// operation's partial content as a successful destination. The staging tree
-/// is restricted to the publishing account, and each directory and file has
-/// its ownership and policy verified before sensitive content is written. On
-/// Unix, staging and parent directories are synced around installation. Rust's
-/// standard library does not expose portable Windows directory-handle syncing,
-/// so Windows retains synced files plus the atomic no-replace directory rename
-/// as a best-effort durability fallback.
+/// Production publication is intentionally blocked until the proposed VFS
+/// account-private tree boundary is accepted. The availability check is the
+/// first operation: invalid paths, caller limits, and bundle contents cannot
+/// trigger path parsing, randomness, serialization, or filesystem effects.
 ///
 /// # Errors
 ///
-/// Returns [`BundleError`] for invalid input, exceeded limits, serialization,
-/// existing destinations, or filesystem publication failures. A
-/// [`BundleError::PublicationDurabilityUnknown`] result means the verified
-/// destination was installed and must not be retried as though it were absent.
+/// Returns [`BundleError::PublicationUnavailable`] while the VFS boundary is
+/// unsupported. If that boundary becomes available before this fallback is
+/// replaced, returns [`BundleError::PublicationDisabled`].
 pub fn publish_bundle_with_limits(
     bundle: &ResultBundle,
     destination: &Path,
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
-    publish_bundle_with_fault(bundle, destination, limits, None)
+    PrivateDirectory::require_supported().map_err(BundleError::PublicationUnavailable)?;
+    let _ = (bundle, destination, limits);
+    Err(BundleError::PublicationDisabled)
 }
 
 /// Verifies a result bundle using the crate's hard defaults.
@@ -586,564 +575,6 @@ fn preflight_artifact_classes(expected: &ParsedChecksums<'_>) -> Result<(), Bund
     Ok(())
 }
 
-fn publish_bundle_with_fault(
-    bundle: &ResultBundle,
-    destination: &Path,
-    limits: BundleLimits,
-    fail_after_writes: Option<usize>,
-) -> Result<(), BundleError> {
-    publish_bundle_with_control(
-        bundle,
-        destination,
-        limits,
-        fail_after_writes,
-        |_, _| Ok(()),
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PublicationControlPoint {
-    Install,
-    StagingCleanup,
-    RecoveryParentSync,
-    CommittedParentSync,
-}
-
-fn publish_bundle_with_control<F>(
-    bundle: &ResultBundle,
-    destination: &Path,
-    limits: BundleLimits,
-    fail_after_writes: Option<usize>,
-    mut control: F,
-) -> Result<(), BundleError>
-where
-    F: FnMut(PublicationControlPoint, &mut std::path::PathBuf) -> io::Result<()>,
-{
-    let limits = limits.validate()?;
-    let artifacts = build_artifacts(bundle, limits)?;
-    let mut parent_path = destination_parent(destination)?;
-    let destination_name = destination
-        .file_name()
-        .ok_or(BundleError::InvalidDestination)?;
-    let parent = cap_std::fs::Dir::open_ambient_dir(&parent_path, cap_std::ambient_authority())
-        .map_err(|source| BundleError::Io {
-            operation: "open result parent directory",
-            source,
-        })?;
-    let staging = create_staging_directory(&parent)?;
-    let preparation = write_bundle(&artifacts, &staging.directory, fail_after_writes)
-        .and_then(|()| {
-            sync_cap_directory(
-                &staging
-                    .directory
-                    .open_dir_nofollow("profiles")
-                    .map_err(|source| BundleError::Io {
-                        operation: "open profiles directory",
-                        source,
-                    })?,
-                "sync profiles directory",
-            )
-        })
-        .and_then(|()| {
-            sync_cap_directory(
-                &staging
-                    .directory
-                    .open_dir_nofollow("logs")
-                    .map_err(|source| BundleError::Io {
-                        operation: "open logs directory",
-                        source,
-                    })?,
-                "sync logs directory",
-            )
-        })
-        .and_then(|()| sync_cap_directory(&staging.directory, "sync staging directory"))
-        .and_then(|()| sync_cap_directory(&parent, "sync result parent directory"));
-    if let Err(error) = preparation {
-        return Err(recover_failed_publication(
-            staging,
-            &parent,
-            &mut parent_path,
-            error,
-            &mut control,
-        ));
-    }
-    if let Err(source) = control(PublicationControlPoint::Install, &mut parent_path) {
-        return Err(recover_failed_publication(
-            staging,
-            &parent,
-            &mut parent_path,
-            BundleError::Io {
-                operation: "prepare result installation",
-                source,
-            },
-            &mut control,
-        ));
-    }
-    if let Err(error) =
-        install_staged_bundle(&parent, &parent_path, &staging.name, destination_name)
-    {
-        return Err(recover_failed_publication(
-            staging,
-            &parent,
-            &mut parent_path,
-            error,
-            &mut control,
-        ));
-    }
-    if !installed_directory_matches(&staging.directory, &parent, destination_name) {
-        drop(staging);
-        let primary = BundleError::PublicationIdentityMismatch;
-        let sync = control(
-            PublicationControlPoint::RecoveryParentSync,
-            &mut parent_path,
-        )
-        .and_then(|()| sync_cap_directory_io(&parent));
-        return Err(match sync {
-            Ok(()) => primary,
-            Err(source) => publication_recovery_error(primary, None, Some(source)),
-        });
-    }
-    drop(staging);
-    control(
-        PublicationControlPoint::CommittedParentSync,
-        &mut parent_path,
-    )
-    .and_then(|()| sync_cap_directory_io(&parent))
-    .map_err(|source| BundleError::PublicationDurabilityUnknown { source })
-}
-
-fn recover_failed_publication<F>(
-    staging: StagingDirectory,
-    parent: &cap_std::fs::Dir,
-    parent_path: &mut std::path::PathBuf,
-    primary: BundleError,
-    control: &mut F,
-) -> BundleError
-where
-    F: FnMut(PublicationControlPoint, &mut std::path::PathBuf) -> io::Result<()>,
-{
-    let cleanup = match control(PublicationControlPoint::StagingCleanup, parent_path) {
-        Ok(()) => remove_staging_directory_io(staging),
-        Err(source) => {
-            drop(staging);
-            Err(source)
-        }
-    };
-    let sync = control(PublicationControlPoint::RecoveryParentSync, parent_path)
-        .and_then(|()| sync_cap_directory_io(parent));
-    if cleanup.is_ok() && sync.is_ok() {
-        primary
-    } else {
-        publication_recovery_error(primary, cleanup.err(), sync.err())
-    }
-}
-
-fn publication_recovery_error(
-    primary: BundleError,
-    cleanup_source: Option<io::Error>,
-    sync_source: Option<io::Error>,
-) -> BundleError {
-    let (primary_operation, primary_source) = match primary {
-        BundleError::Io { operation, source } => (operation, Some(source)),
-        BundleError::DestinationExists => ("result destination already exists", None),
-        BundleError::InjectedWriteFailure => ("injected result write failure", None),
-        BundleError::PublicationIdentityMismatch => (
-            "installed result directory identity does not match staging",
-            None,
-        ),
-        _ => ("result publication failed", None),
-    };
-    BundleError::PublicationRecoveryFailed {
-        primary_operation,
-        primary_source,
-        cleanup_source,
-        sync_source,
-    }
-}
-
-fn installed_directory_matches(
-    staging: &cap_std::fs::Dir,
-    parent: &cap_std::fs::Dir,
-    destination_name: &OsStr,
-) -> bool {
-    let Ok(installed) = parent.open_dir_nofollow(destination_name) else {
-        return false;
-    };
-    let (Ok(staging_metadata), Ok(installed_metadata)) =
-        (staging.dir_metadata(), installed.dir_metadata())
-    else {
-        return false;
-    };
-    if !staging_metadata.is_dir()
-        || staging_metadata.file_type().is_symlink()
-        || !installed_metadata.is_dir()
-        || installed_metadata.file_type().is_symlink()
-    {
-        return false;
-    }
-    same_directory_identity(&staging_metadata, &installed_metadata)
-}
-
-#[cfg(unix)]
-fn same_directory_identity(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
-    use cap_std::fs::MetadataExt as _;
-
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(windows)]
-fn same_directory_identity(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
-    use cap_fs_ext::MetadataExt as _;
-
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn same_directory_identity(_left: &cap_std::fs::Metadata, _right: &cap_std::fs::Metadata) -> bool {
-    false
-}
-
-struct StagingDirectory {
-    name: String,
-    directory: cap_std::fs::Dir,
-}
-
-fn create_staging_directory(parent: &cap_std::fs::Dir) -> Result<StagingDirectory, BundleError> {
-    const PREFIX: &str = ".rootlight-result-partial-";
-    for _ in 0..16 {
-        let mut random = [0_u8; 16];
-        getrandom::fill(&mut random).map_err(BundleError::Randomness)?;
-        let mut name = String::new();
-        name.try_reserve_exact(PREFIX.len() + random.len() * 2)
-            .map_err(|_| BundleError::AllocationFailed)?;
-        name.push_str(PREFIX);
-        for byte in random {
-            const HEX: &[u8; 16] = b"0123456789abcdef";
-            name.push(char::from(HEX[usize::from(byte >> 4)]));
-            name.push(char::from(HEX[usize::from(byte & 0x0f)]));
-        }
-        match create_private_directory(parent, &name) {
-            Ok(()) => {
-                let directory = open_staging_directory(parent, &name)?;
-                // The name can be replaced in a shared parent. Until the
-                // opened object passes ownership and policy checks, leaving a
-                // residue is safer than deleting an unverified object.
-                verify_and_restrict_staging_directory(&directory)?;
-                return Ok(StagingDirectory { name, directory });
-            }
-            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(source) => {
-                return Err(BundleError::Io {
-                    operation: "create staging directory",
-                    source,
-                });
-            }
-        }
-    }
-    Err(BundleError::StagingExists)
-}
-
-#[cfg(unix)]
-fn create_private_directory(parent: &cap_std::fs::Dir, name: &str) -> io::Result<()> {
-    use cap_std::fs::DirBuilderExt as _;
-
-    let mut builder = cap_std::fs::DirBuilder::new();
-    builder.mode(0o700);
-    parent.create_dir_with(name, &builder)
-}
-
-#[cfg(not(unix))]
-fn create_private_directory(parent: &cap_std::fs::Dir, name: &str) -> io::Result<()> {
-    parent.create_dir(name)
-}
-
-#[cfg(unix)]
-fn verify_and_restrict_staging_directory(directory: &cap_std::fs::Dir) -> Result<(), BundleError> {
-    use cap_std::fs::MetadataExt as _;
-
-    let metadata = directory.dir_metadata().map_err(|source| BundleError::Io {
-        operation: "inspect result staging object security",
-        source,
-    })?;
-    if !metadata.is_dir()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != nix::unistd::geteuid().as_raw()
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err(BundleError::ResultSecurityPolicy);
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn verify_and_restrict_staging_directory(directory: &cap_std::fs::Dir) -> Result<(), BundleError> {
-    let mut handle = directory
-        .try_clone()
-        .map_err(|source| BundleError::Io {
-            operation: "clone staging directory handle",
-            source,
-        })?
-        .into_std_file();
-    restrict_private_windows_object(&mut handle, true)
-}
-
-#[cfg(windows)]
-fn restrict_private_windows_object(
-    handle: &mut std::fs::File,
-    inherit_to_children: bool,
-) -> Result<(), BundleError> {
-    use windows_permissions::{
-        LocalBox, SecurityDescriptor,
-        constants::{SeObjectType, SecurityInformation},
-        wrappers::{GetSecurityInfo, SetSecurityInfo},
-    };
-
-    let (current_sid, token_owner_sid) = current_windows_account_sids()?;
-    let before = GetSecurityInfo(
-        &*handle,
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Owner,
-    )
-    .map_err(|source| BundleError::Io {
-        operation: "inspect result staging object owner",
-        source,
-    })?;
-    let owner = before
-        .owner()
-        .ok_or(BundleError::ResultSecurityPolicy)?
-        .to_string();
-    if owner != current_sid && owner != token_owner_sid {
-        return Err(BundleError::ResultSecurityPolicy);
-    }
-
-    let inheritance = if inherit_to_children { "OICI" } else { "" };
-    let sddl_length = current_sid
-        .len()
-        .checked_mul(2)
-        .and_then(|length| length.checked_add(16))
-        .and_then(|length| length.checked_add(inheritance.len()))
-        .ok_or(BundleError::AllocationFailed)?;
-    let mut sddl = String::new();
-    sddl.try_reserve_exact(sddl_length)
-        .map_err(|_| BundleError::AllocationFailed)?;
-    sddl.push_str("O:");
-    sddl.push_str(&current_sid);
-    sddl.push_str("D:P(A;");
-    sddl.push_str(inheritance);
-    sddl.push_str(";FA;;;");
-    sddl.push_str(&current_sid);
-    sddl.push(')');
-    let descriptor: LocalBox<SecurityDescriptor> = sddl
-        .parse()
-        .map_err(|_| BundleError::ResultSecurityPolicy)?;
-    let dacl = descriptor.dacl().ok_or(BundleError::ResultSecurityPolicy)?;
-    let secured_owner = descriptor
-        .owner()
-        .ok_or(BundleError::ResultSecurityPolicy)?;
-    SetSecurityInfo(
-        &mut *handle,
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Owner | SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-        Some(secured_owner),
-        None,
-        Some(dacl),
-        None,
-    )
-    .map_err(|source| BundleError::Io {
-        operation: "restrict result staging object",
-        source,
-    })?;
-    let secured = GetSecurityInfo(
-        &*handle,
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Owner | SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-    )
-    .map_err(|source| BundleError::Io {
-        operation: "verify result staging object security",
-        source,
-    })?;
-    let expected_flags = if inherit_to_children {
-        windows_permissions::constants::AceFlags::ContainerInherit
-            | windows_permissions::constants::AceFlags::ObjectInherit
-    } else {
-        windows_permissions::constants::AceFlags::empty()
-    };
-    verify_private_windows_descriptor(&secured, &current_sid, expected_flags)
-}
-
-#[cfg(windows)]
-fn current_windows_account_sids() -> Result<(String, String), BundleError> {
-    use nt_token::OwnedToken;
-    use windows::Win32::Security::TOKEN_QUERY;
-
-    let token = OwnedToken::from_current_process(TOKEN_QUERY)
-        .map_err(|_| BundleError::ResultSecurityPolicy)?;
-    let user = token
-        .user()
-        .and_then(|sid| sid.to_string())
-        .map_err(|_| BundleError::ResultSecurityPolicy)?;
-    let owner = token
-        .owner()
-        .and_then(|sid| sid.to_string())
-        .map_err(|_| BundleError::ResultSecurityPolicy)?;
-    Ok((user, owner))
-}
-
-#[cfg(windows)]
-fn verify_private_windows_descriptor(
-    descriptor: &windows_permissions::SecurityDescriptor,
-    current_sid: &str,
-    expected_flags: windows_permissions::constants::AceFlags,
-) -> Result<(), BundleError> {
-    use windows_permissions::constants::{AccessRights, AceType, SecurityInformation};
-    use windows_permissions::wrappers::ConvertSecurityDescriptorToStringSecurityDescriptor;
-
-    let owner = descriptor
-        .owner()
-        .ok_or(BundleError::ResultSecurityPolicy)?
-        .to_string();
-    let dacl = descriptor.dacl().ok_or(BundleError::ResultSecurityPolicy)?;
-    let sddl =
-        ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, SecurityInformation::Dacl)
-            .map_err(|source| BundleError::Io {
-                operation: "encode result staging object security",
-                source,
-            })?;
-    let ace = dacl.get_ace(0).ok_or(BundleError::ResultSecurityPolicy)?;
-    let ace_sid = ace
-        .sid()
-        .ok_or(BundleError::ResultSecurityPolicy)?
-        .to_string();
-    if owner != current_sid
-        || !sddl.to_string_lossy().starts_with("D:P")
-        || dacl.len() != 1
-        || ace.ace_type() != AceType::ACCESS_ALLOWED_ACE_TYPE
-        || ace.mask() != AccessRights::FileAllAccess
-        || ace.flags() != expected_flags
-        || ace_sid != current_sid
-    {
-        return Err(BundleError::ResultSecurityPolicy);
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn verify_and_restrict_staging_directory(_directory: &cap_std::fs::Dir) -> Result<(), BundleError> {
-    Err(BundleError::ResultSecurityPolicy)
-}
-
-#[cfg(not(windows))]
-fn open_staging_directory(
-    parent: &cap_std::fs::Dir,
-    name: &str,
-) -> Result<cap_std::fs::Dir, BundleError> {
-    parent
-        .open_dir_nofollow(name)
-        .map_err(|source| BundleError::Io {
-            operation: "open staging directory",
-            source,
-        })
-}
-
-#[cfg(windows)]
-fn open_staging_directory(
-    parent: &cap_std::fs::Dir,
-    name: &str,
-) -> Result<cap_std::fs::Dir, BundleError> {
-    use cap_std::fs::OpenOptionsExt as _;
-    use windows::Win32::{
-        Foundation::GENERIC_READ,
-        Storage::FileSystem::{WRITE_DAC, WRITE_OWNER},
-    };
-
-    // FILE_FLAG_BACKUP_SEMANTICS opens the directory while preserving the
-    // default delete-sharing mode needed for an atomic rename by another handle.
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    let mut options = cap_std::fs::OpenOptions::new();
-    options
-        .access_mode(GENERIC_READ.0 | WRITE_DAC.0 | WRITE_OWNER.0)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
-    cap_fs_ext::OpenOptionsFollowExt::follow(&mut options, cap_fs_ext::FollowSymlinks::No);
-    parent
-        .open_with(name, &options)
-        .map(|file| cap_std::fs::Dir::from_std_file(file.into_std()))
-        .map_err(|source| BundleError::Io {
-            operation: "open staging directory",
-            source,
-        })
-}
-
-fn create_private_subdirectory(
-    parent: &cap_std::fs::Dir,
-    name: &str,
-    operation: &'static str,
-) -> Result<cap_std::fs::Dir, BundleError> {
-    create_private_directory(parent, name)
-        .map_err(|source| BundleError::Io { operation, source })?;
-    let directory = open_staging_directory(parent, name)?;
-    verify_and_restrict_staging_directory(&directory)?;
-    Ok(directory)
-}
-
-fn remove_staging_directory_io(staging: StagingDirectory) -> io::Result<()> {
-    staging.directory.remove_open_dir_all()
-}
-
-fn install_staged_bundle(
-    parent: &cap_std::fs::Dir,
-    parent_path: &Path,
-    staging_name: &str,
-    destination_name: &OsStr,
-) -> Result<(), BundleError> {
-    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-    let result = rustix::fs::renameat_with(
-        parent,
-        staging_name,
-        parent,
-        Path::new(destination_name),
-        rustix::fs::RenameFlags::NOREPLACE,
-    )
-    .map_err(io::Error::from);
-
-    #[cfg(windows)]
-    // MoveFileExW has no directory-handle-relative form, so success remains
-    // provisional until the destination is reopened through the original
-    // parent handle and matched to the staging handle.
-    let result = renamore::rename_exclusive(
-        parent_path.join(staging_name),
-        parent_path.join(destination_name),
-    );
-
-    #[cfg(not(windows))]
-    let _ = parent_path;
-
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "android",
-        target_vendor = "apple",
-        windows
-    )))]
-    let result = Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "atomic no-replace directory installation is unsupported",
-    ));
-
-    match result {
-        Ok(()) => Ok(()),
-        Err(source) => match parent.symlink_metadata(Path::new(destination_name)) {
-            Ok(_) => Err(BundleError::DestinationExists),
-            Err(inspect) if inspect.kind() == io::ErrorKind::NotFound => Err(BundleError::Io {
-                operation: "install result bundle",
-                source,
-            }),
-            Err(source) => Err(BundleError::Io {
-                operation: "inspect result destination",
-                source,
-            }),
-        },
-    }
-}
-
 fn destination_parent(destination: &Path) -> Result<std::path::PathBuf, BundleError> {
     let parent = destination
         .parent()
@@ -1158,38 +589,12 @@ fn destination_parent(destination: &Path) -> Result<std::path::PathBuf, BundleEr
     }
 }
 
-#[cfg(unix)]
-fn sync_cap_directory(
-    directory: &cap_std::fs::Dir,
-    operation: &'static str,
-) -> Result<(), BundleError> {
-    sync_cap_directory_io(directory).map_err(|source| BundleError::Io { operation, source })
-}
-
-#[cfg(not(unix))]
-fn sync_cap_directory(
-    _directory: &cap_std::fs::Dir,
-    _operation: &'static str,
-) -> Result<(), BundleError> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_cap_directory_io(directory: &cap_std::fs::Dir) -> io::Result<()> {
-    directory
-        .try_clone()
-        .and_then(|directory| directory.into_std_file().sync_all())
-}
-
-#[cfg(not(unix))]
-fn sync_cap_directory_io(_directory: &cap_std::fs::Dir) -> io::Result<()> {
-    Ok(())
-}
-
+#[cfg(test)]
 struct ArtifactSet<'a> {
     entries: Vec<(String, Cow<'a, [u8]>)>,
 }
 
+#[cfg(test)]
 impl FixedArtifactSource for ArtifactSet<'_> {
     fn artifact_bytes(&self, name: &str) -> Option<&[u8]> {
         self.entries
@@ -1199,6 +604,7 @@ impl FixedArtifactSource for ArtifactSet<'_> {
     }
 }
 
+#[cfg(test)]
 impl<'a> ArtifactSet<'a> {
     fn with_capacity(capacity: usize) -> Result<Self, BundleError> {
         let mut entries = Vec::new();
@@ -1235,6 +641,7 @@ impl<'a> ArtifactSet<'a> {
     }
 }
 
+#[cfg(test)]
 fn build_artifacts<'a>(
     bundle: &'a ResultBundle,
     limits: BundleLimits,
@@ -1361,6 +768,7 @@ fn build_artifacts<'a>(
     Ok(artifacts)
 }
 
+#[cfg(test)]
 fn serialize_with_budget(
     retained_bytes: u64,
     limits: BundleLimits,
@@ -1406,6 +814,7 @@ fn serialize_with_budget(
     }
 }
 
+#[cfg(test)]
 fn checksum_manifest(
     artifacts: &ArtifactSet<'_>,
     limits: BundleLimits,
@@ -1436,6 +845,7 @@ fn checksum_manifest(
     Ok(checksums.into_inner())
 }
 
+#[cfg(test)]
 fn checksum_buffer_error(checksums: &BoundedBuffer) -> BundleError {
     if checksums.allocation_failed() {
         BundleError::AllocationFailed
@@ -1446,6 +856,7 @@ fn checksum_buffer_error(checksums: &BoundedBuffer) -> BundleError {
     }
 }
 
+#[cfg(test)]
 fn checksum_manifest_size() -> Result<u64, BundleError> {
     let mut size = 0_u64;
     for relative in [
@@ -1464,6 +875,7 @@ fn checksum_manifest_size() -> Result<u64, BundleError> {
     Ok(size)
 }
 
+#[cfg(test)]
 fn add_checksum_line_size(total: &mut u64, path_length: usize) -> Result<(), BundleError> {
     let line = path_length
         .checked_add(67)
@@ -1480,6 +892,7 @@ fn add_checksum_line_size(total: &mut u64, path_length: usize) -> Result<(), Bun
     Ok(())
 }
 
+#[cfg(test)]
 fn fallible_string(value: &str) -> Result<String, BundleError> {
     let mut owned = String::new();
     owned
@@ -1487,29 +900,6 @@ fn fallible_string(value: &str) -> Result<String, BundleError> {
         .map_err(|_| BundleError::AllocationFailed)?;
     owned.push_str(value);
     Ok(owned)
-}
-
-fn write_bundle(
-    artifacts: &ArtifactSet<'_>,
-    staging: &cap_std::fs::Dir,
-    fail_after_writes: Option<usize>,
-) -> Result<(), BundleError> {
-    let profiles = create_private_subdirectory(staging, "profiles", "create profiles directory")?;
-    let logs = create_private_subdirectory(staging, "logs", "create logs directory")?;
-
-    for (write_count, (relative, bytes)) in artifacts.entries.iter().enumerate() {
-        if fail_after_writes == Some(write_count) {
-            return Err(BundleError::InjectedWriteFailure);
-        }
-        if let Some(name) = relative.strip_prefix("profiles/") {
-            write_new(&profiles, name, bytes.as_ref())?;
-        } else if let Some(name) = relative.strip_prefix("logs/") {
-            write_new(&logs, name, bytes.as_ref())?;
-        } else {
-            write_new(staging, relative, bytes.as_ref())?;
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn json_bytes(value: &impl Serialize, limit: usize) -> Result<Vec<u8>, BundleError> {
@@ -1571,7 +961,7 @@ struct BoundedBuffer {
 }
 
 impl BoundedBuffer {
-    fn new(limit: usize) -> Self {
+    const fn new(limit: usize) -> Self {
         Self {
             bytes: Vec::new(),
             limit,
@@ -1580,11 +970,11 @@ impl BoundedBuffer {
         }
     }
 
-    fn exceeded(&self) -> bool {
+    const fn exceeded(&self) -> bool {
         self.exceeded
     }
 
-    fn allocation_failed(&self) -> bool {
+    const fn allocation_failed(&self) -> bool {
         self.allocation_failed
     }
 
@@ -1618,78 +1008,6 @@ impl io::Write for BoundedBuffer {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
-}
-
-fn write_new(directory: &cap_std::fs::Dir, path: &str, bytes: &[u8]) -> Result<(), BundleError> {
-    let mut options = cap_std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use cap_std::fs::OpenOptionsExt as _;
-
-        options.mode(0o600);
-    }
-    #[cfg(windows)]
-    {
-        use cap_std::fs::OpenOptionsExt as _;
-        use windows::Win32::{
-            Foundation::{GENERIC_READ, GENERIC_WRITE},
-            Storage::FileSystem::{WRITE_DAC, WRITE_OWNER},
-        };
-
-        options.access_mode(GENERIC_READ.0 | GENERIC_WRITE.0 | WRITE_DAC.0 | WRITE_OWNER.0);
-    }
-    cap_fs_ext::OpenOptionsFollowExt::follow(&mut options, cap_fs_ext::FollowSymlinks::No);
-    let mut file = directory
-        .open_with(path, &options)
-        .map_err(|source| BundleError::Io {
-            operation: "create result artifact",
-            source,
-        })?;
-    verify_and_restrict_artifact_file(&file)?;
-    file.write_all(bytes).map_err(|source| BundleError::Io {
-        operation: "write result artifact",
-        source,
-    })?;
-    file.sync_all().map_err(|source| BundleError::Io {
-        operation: "sync result artifact",
-        source,
-    })
-}
-
-#[cfg(unix)]
-fn verify_and_restrict_artifact_file(file: &cap_std::fs::File) -> Result<(), BundleError> {
-    use cap_std::fs::MetadataExt as _;
-
-    let metadata = file.metadata().map_err(|source| BundleError::Io {
-        operation: "inspect result artifact security",
-        source,
-    })?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != nix::unistd::geteuid().as_raw()
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err(BundleError::ResultSecurityPolicy);
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn verify_and_restrict_artifact_file(file: &cap_std::fs::File) -> Result<(), BundleError> {
-    let mut handle = file
-        .try_clone()
-        .map_err(|source| BundleError::Io {
-            operation: "clone result artifact handle",
-            source,
-        })?
-        .into_std();
-    restrict_private_windows_object(&mut handle, false)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn verify_and_restrict_artifact_file(_file: &cap_std::fs::File) -> Result<(), BundleError> {
-    Err(BundleError::ResultSecurityPolicy)
 }
 
 fn validate_artifact_name(name: &str) -> Result<(), BundleError> {
@@ -2178,6 +1496,7 @@ fn check_count(count: usize, limit: usize, resource: &'static str) -> Result<(),
     Ok(())
 }
 
+#[cfg(test)]
 fn add_bytes(
     total: &mut u64,
     length: usize,
@@ -2260,40 +1579,15 @@ pub enum BundleError {
     /// A bounded in-memory reservation could not be satisfied.
     #[error("result bundle allocation failed")]
     AllocationFailed,
-    /// Secure randomness for an operation-owned staging name was unavailable.
-    #[error("result staging randomness failed")]
-    Randomness(#[source] getrandom::Error),
+    /// The VFS account-private tree boundary is not available.
+    #[error("result publication private-tree boundary is unavailable")]
+    PublicationUnavailable(#[source] rootlight_vfs::platform::PlatformError),
+    /// The VFS boundary became available before production publication was implemented.
+    #[error("result publication remains disabled pending an accepted private-tree design")]
+    PublicationDisabled,
     /// The final destination already exists.
     #[error("result destination already exists")]
     DestinationExists,
-    /// The operation-owned staging directory already exists.
-    #[error("result staging directory already exists")]
-    StagingExists,
-    /// A staging-tree object is not account-owned and owner-only.
-    #[error("result staging object security policy is invalid")]
-    ResultSecurityPolicy,
-    /// The installed directory is not the opened, verified staging object.
-    #[error("installed result directory identity does not match staging")]
-    PublicationIdentityMismatch,
-    /// Publication failed and staging cleanup or recovery syncing also failed.
-    #[error("result publication failed during {primary_operation}; staging recovery also failed")]
-    PublicationRecoveryFailed {
-        /// Stable source-free description of the primary failure.
-        primary_operation: &'static str,
-        /// Primary I/O source, when the primary failure was an I/O operation.
-        primary_source: Option<io::Error>,
-        /// Staging cleanup source, when cleanup failed.
-        cleanup_source: Option<io::Error>,
-        /// Parent-directory sync source, when recovery syncing failed.
-        sync_source: Option<io::Error>,
-    },
-    /// The destination is installed but its parent-directory sync failed.
-    #[error("result bundle is installed but parent-directory durability is unknown")]
-    PublicationDurabilityUnknown {
-        /// Parent-directory sync failure.
-        #[source]
-        source: io::Error,
-    },
     /// The destination cannot be represented safely.
     #[error("result destination is invalid")]
     InvalidDestination,
@@ -2354,18 +1648,11 @@ pub enum BundleError {
     /// A regular artifact has more than one filesystem name.
     #[error("result bundle contains a multiply linked artifact")]
     UnsupportedArtifactLinkCount,
-    /// Test-only failure after a bounded number of writes.
-    #[error("injected result write failure")]
-    InjectedWriteFailure,
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        cell::Cell,
-        sync::{Arc, Barrier, Mutex},
-        thread,
-    };
+    use std::{cell::Cell, sync::Mutex};
 
     use super::*;
     use crate::{
@@ -2590,6 +1877,75 @@ mod tests {
         }
     }
 
+    fn materialize_bundle(bundle: &ResultBundle, destination: &Path) -> Result<(), BundleError> {
+        materialize_bundle_with_limits(bundle, destination, BundleLimits::default())
+    }
+
+    fn materialize_bundle_with_limits(
+        bundle: &ResultBundle,
+        destination: &Path,
+        limits: BundleLimits,
+    ) -> Result<(), BundleError> {
+        let limits = limits.validate()?;
+        let artifacts = build_artifacts(bundle, limits)?;
+        fs::create_dir(destination).map_err(|source| {
+            if source.kind() == io::ErrorKind::AlreadyExists {
+                BundleError::DestinationExists
+            } else {
+                BundleError::Io {
+                    operation: "create test bundle",
+                    source,
+                }
+            }
+        })?;
+        fs::create_dir(destination.join("profiles")).map_err(|source| BundleError::Io {
+            operation: "create test profile directory",
+            source,
+        })?;
+        fs::create_dir(destination.join("logs")).map_err(|source| BundleError::Io {
+            operation: "create test log directory",
+            source,
+        })?;
+        for (relative, bytes) in artifacts.entries {
+            fs::write(destination.join(relative), bytes.as_ref()).map_err(|source| {
+                BundleError::Io {
+                    operation: "write test bundle artifact",
+                    source,
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_publication_fails_at_vfs_preflight_without_filesystem_effects() {
+        let temporary = tempfile::tempdir().expect("temporary parent is available");
+        let destination = temporary.path().join("result");
+        let mut invalid = fixture();
+        invalid.profiles.insert("profile".to_owned(), vec![1]);
+        let invalid_limits = BundleLimits {
+            max_total_bytes: 0,
+            ..BundleLimits::default()
+        };
+
+        let error = publish_bundle_with_limits(&invalid, &destination, invalid_limits)
+            .expect_err("unaccepted private-tree publication is blocked first");
+
+        assert!(matches!(
+            error,
+            BundleError::PublicationUnavailable(
+                rootlight_vfs::platform::PlatformError::UnsupportedPlatform
+            )
+        ));
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::read_dir(temporary.path())
+                .expect("temporary parent remains readable")
+                .count(),
+            0
+        );
+    }
+
     fn rewrite_artifact_and_checksum(destination: &Path, artifact: &str, bytes: &[u8]) {
         fs::write(destination.join(artifact), bytes).expect("tampered artifact is written");
         let checksums = fs::read_to_string(destination.join(CHECKSUMS_FILE))
@@ -2636,30 +1992,15 @@ mod tests {
             .expect("extended checksum manifest is written");
     }
 
-    fn only_staging_path(parent: &Path) -> std::path::PathBuf {
-        let mut staging = fs::read_dir(parent)
-            .expect("publication parent is readable")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(OsStr::to_str)
-                    .is_some_and(|name| name.starts_with(".rootlight-result-partial-"))
-            });
-        let path = staging.next().expect("one staging directory exists");
-        assert!(staging.next().is_none());
-        path
-    }
-
     #[test]
-    fn equivalent_bundles_publish_identical_artifacts() {
+    fn equivalent_bundles_encode_identical_artifacts() {
         let first = tempfile::tempdir().expect("temporary root is available");
         let second = tempfile::tempdir().expect("temporary root is available");
         let first_result = first.path().join("result");
         let second_result = second.path().join("result");
 
-        publish_bundle(&fixture(), &first_result).expect("first bundle publishes");
-        publish_bundle(&fixture(), &second_result).expect("second bundle publishes");
+        materialize_bundle(&fixture(), &first_result).expect("first fixture materializes");
+        materialize_bundle(&fixture(), &second_result).expect("second fixture materializes");
 
         let first_checksums = fs::read(first_result.join(CHECKSUMS_FILE)).expect("checksums exist");
         let second_checksums =
@@ -2670,7 +2011,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_two_compatibility_fixture_matches_canonical_publication() {
+    fn schema_two_compatibility_fixture_matches_canonical_encoding() {
         let frozen_artifacts: [(&str, &[u8]); 10] = [
             (
                 AGENT_TRAJECTORIES_FILE,
@@ -2725,12 +2066,12 @@ mod tests {
         ];
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        publish_bundle(&fixture(), &destination).expect("compatibility bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("compatibility fixture materializes");
         verify_bundle(&destination).expect("compatibility bundle verifies");
 
         for (artifact, expected) in frozen_artifacts {
             assert_eq!(
-                fs::read(destination.join(artifact)).expect("published artifact is readable"),
+                fs::read(destination.join(artifact)).expect("materialized artifact is readable"),
                 expected,
                 "{artifact} changed without a schema-version bump"
             );
@@ -2738,7 +2079,7 @@ mod tests {
     }
 
     #[test]
-    fn relative_destination_publishes_and_verifies_from_current_directory() {
+    fn relative_test_fixture_materializes_and_verifies_from_current_directory() {
         static CURRENT_DIRECTORY: Mutex<()> = Mutex::new(());
         let _lock = CURRENT_DIRECTORY
             .lock()
@@ -2749,206 +2090,32 @@ mod tests {
         let _restore = CurrentDirectoryGuard(original);
 
         let destination = Path::new("result");
-        publish_bundle(&fixture(), destination).expect("relative bundle publishes");
+        materialize_bundle(&fixture(), destination).expect("relative fixture materializes");
         verify_bundle(destination).expect("relative bundle verifies");
     }
 
     #[test]
-    fn publication_never_overwrites_existing_evidence() {
+    fn test_materialization_never_overwrites_existing_evidence() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        publish_bundle(&fixture(), &destination).expect("initial bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("initial fixture materializes");
 
-        let error = publish_bundle(&fixture(), &destination).expect_err("overwrite is rejected");
+        let error =
+            materialize_bundle(&fixture(), &destination).expect_err("overwrite is rejected");
 
         assert!(matches!(error, BundleError::DestinationExists));
-    }
-
-    #[test]
-    fn concurrent_publishers_have_one_winner_and_leave_no_partial_results() {
-        const PUBLISHER_COUNT: usize = 8;
-
-        let temporary = tempfile::tempdir().expect("temporary root is available");
-        let destination = temporary.path().join("result");
-        let barrier = Arc::new(Barrier::new(PUBLISHER_COUNT));
-        let mut publishers = Vec::new();
-        for _ in 0..PUBLISHER_COUNT {
-            let bundle = fixture();
-            let destination = destination.clone();
-            let barrier = Arc::clone(&barrier);
-            publishers.push(thread::spawn(move || {
-                publish_bundle_with_control(
-                    &bundle,
-                    &destination,
-                    BundleLimits::default(),
-                    None,
-                    |point, _| {
-                        if point == PublicationControlPoint::Install {
-                            barrier.wait();
-                        }
-                        Ok(())
-                    },
-                )
-            }));
-        }
-
-        let mut successes = 0;
-        for publisher in publishers {
-            match publisher.join().expect("publisher thread does not panic") {
-                Ok(()) => successes += 1,
-                Err(BundleError::DestinationExists) => {}
-                Err(error) => panic!("unexpected publication error: {error:?}"),
-            }
-        }
-
-        assert_eq!(successes, 1);
-        verify_bundle(&destination).expect("winning bundle verifies");
-        let remaining = fs::read_dir(temporary.path())
-            .expect("temporary root is readable")
-            .count();
-        assert_eq!(remaining, 1);
-    }
-
-    #[test]
-    fn noncooperating_destination_created_before_atomic_claim_is_not_replaced() {
-        let temporary = tempfile::tempdir().expect("temporary root is available");
-        let destination = temporary.path().join("result");
-
-        let error = publish_bundle_with_control(
-            &fixture(),
-            &destination,
-            BundleLimits::default(),
-            None,
-            |point, _| {
-                if point == PublicationControlPoint::Install {
-                    fs::create_dir(&destination).expect("racing destination is created");
-                    fs::write(destination.join("sentinel"), b"not rootlight evidence")
-                        .expect("racing destination content is written");
-                }
-                Ok(())
-            },
-        )
-        .expect_err("racing destination is rejected");
-
-        assert!(matches!(error, BundleError::DestinationExists));
-        assert_eq!(
-            fs::read(destination.join("sentinel")).expect("racing content remains readable"),
-            b"not rootlight evidence"
-        );
-        assert_eq!(
-            fs::read_dir(temporary.path())
-                .expect("temporary root is readable")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn publication_rejects_a_substituted_staging_name_without_deleting_it() {
-        let temporary = tempfile::tempdir().expect("temporary root is available");
-        let destination = temporary.path().join("result");
-        let displaced = temporary.path().join("verified-staging");
-
-        let error = publish_bundle_with_control(
-            &fixture(),
-            &destination,
-            BundleLimits::default(),
-            None,
-            |point, _| {
-                if point == PublicationControlPoint::Install {
-                    let staging = only_staging_path(temporary.path());
-                    fs::rename(&staging, &displaced).expect("verified staging is displaced");
-                    fs::create_dir(&staging).expect("foreign staging replacement is created");
-                    fs::write(staging.join("sentinel"), b"foreign staging")
-                        .expect("foreign staging sentinel is written");
-                }
-                Ok(())
-            },
-        )
-        .expect_err("staging identity substitution fails closed");
-
-        assert!(matches!(error, BundleError::PublicationIdentityMismatch));
-        assert_eq!(
-            fs::read(destination.join("sentinel")).expect("foreign destination remains"),
-            b"foreign staging"
-        );
-        assert!(displaced.join(CHECKSUMS_FILE).is_file());
     }
 
     #[cfg(windows)]
     #[test]
-    fn publication_rejects_ambient_parent_redirection_without_cleanup() {
-        let temporary = tempfile::tempdir().expect("temporary root is available");
-        let destination = temporary.path().join("result");
-        let redirected_parent = temporary.path().join("redirected-parent");
-        fs::create_dir(&redirected_parent).expect("redirected parent is created");
-
-        let error = publish_bundle_with_control(
-            &fixture(),
-            &destination,
-            BundleLimits::default(),
-            None,
-            |point, install_parent| {
-                if point == PublicationControlPoint::Install {
-                    let staging = only_staging_path(temporary.path());
-                    let staging_name = staging.file_name().expect("staging name exists").to_owned();
-                    let redirected_staging = redirected_parent.join(staging_name);
-                    fs::create_dir(&redirected_staging).expect("redirected staging is created");
-                    fs::write(redirected_staging.join("sentinel"), b"redirected")
-                        .expect("redirected sentinel is written");
-                    *install_parent = redirected_parent.clone();
-                }
-                Ok(())
-            },
-        )
-        .expect_err("ambient parent redirection fails closed");
-
-        assert!(matches!(error, BundleError::PublicationIdentityMismatch));
-        assert!(!destination.exists());
-        assert!(
-            only_staging_path(temporary.path())
-                .join(CHECKSUMS_FILE)
-                .is_file()
-        );
-        assert_eq!(
-            fs::read(redirected_parent.join("result").join("sentinel"))
-                .expect("redirected foreign destination remains"),
-            b"redirected"
-        );
-    }
-
-    #[test]
-    fn preinstall_crash_orphan_does_not_block_publication() {
-        let temporary = tempfile::tempdir().expect("temporary root is available");
-        let destination = temporary.path().join("result");
-        let orphan = temporary.path().join(".rootlight-result-partial-abandoned");
-        fs::create_dir(&orphan).expect("orphan staging directory is created");
-        fs::write(orphan.join("partial"), b"incomplete").expect("orphan content is written");
-
-        publish_bundle(&fixture(), &destination).expect("new publication succeeds");
-
-        verify_bundle(&destination).expect("new publication verifies");
-        assert_eq!(
-            fs::read(orphan.join("partial")).expect("orphan is not deleted"),
-            b"incomplete"
-        );
-        assert_eq!(
-            fs::read_dir(temporary.path())
-                .expect("temporary root is readable")
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn partial_destination_is_never_recovered_or_deleted() {
+    fn partial_destination_is_rejected_without_deletion() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
         fs::create_dir(&destination).expect("partial destination is created");
         fs::write(destination.join("partial"), b"incomplete").expect("partial artifact is written");
 
-        let error =
-            publish_bundle(&fixture(), &destination).expect_err("partial destination is preserved");
+        let error = materialize_bundle(&fixture(), &destination)
+            .expect_err("partial destination is preserved");
 
         assert!(matches!(error, BundleError::DestinationExists));
         assert_eq!(
@@ -2961,7 +2128,7 @@ mod tests {
     fn obsolete_publication_marker_is_an_unexpected_artifact() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("fixture materializes");
         let marker = destination.join(".rootlight-publication");
         fs::write(&marker, []).expect("obsolete marker file is written");
 
@@ -2978,7 +2145,7 @@ mod tests {
     fn verification_detects_tampering_without_echoing_artifact_names() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("fixture materializes");
         fs::write(destination.join(SUMMARY_FILE), b"{}\n").expect("fixture is tampered");
 
         let error = verify_bundle(&destination).expect_err("tampering is rejected");
@@ -2992,7 +2159,7 @@ mod tests {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
         let displaced = temporary.path().join("displaced");
-        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("fixture materializes");
         let swapped = Cell::new(false);
         let blocked = Cell::new(false);
 
@@ -3032,7 +2199,7 @@ mod tests {
         let destination = temporary.path().join("result");
         let summary = destination.join(SUMMARY_FILE);
         let displaced = destination.join("summary.displaced");
-        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("fixture materializes");
         let swapped = Cell::new(false);
         let blocked = Cell::new(false);
 
@@ -3062,7 +2229,7 @@ mod tests {
     fn verifier_rejects_size_changes_before_retaining_artifacts() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("fixture materializes");
         let retained = Cell::new(0_usize);
 
         let error = verify_bundle_with_control(
@@ -3092,7 +2259,7 @@ mod tests {
     fn verifier_rejects_multiply_linked_artifacts() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("fixture materializes");
         fs::hard_link(
             destination.join(SUMMARY_FILE),
             temporary.path().join("summary-alias"),
@@ -3112,7 +2279,7 @@ mod tests {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
         let outside = temporary.path().join("outside");
-        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("fixture materializes");
         fs::write(&outside, b"outside").expect("outside content is written");
         let swapped = Cell::new(false);
 
@@ -3159,7 +2326,7 @@ mod tests {
         ] {
             let temporary = tempfile::tempdir().expect("temporary root is available");
             let destination = temporary.path().join("result");
-            publish_bundle(&fixture(), &destination).expect("bundle publishes");
+            materialize_bundle(&fixture(), &destination).expect("fixture materializes");
             rewrite_artifact_and_checksum(&destination, artifact, b"{}\n");
 
             let error =
@@ -3188,7 +2355,7 @@ mod tests {
     fn schema_two_requires_empty_profile_and_log_directories() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let canonical = temporary.path().join("canonical");
-        publish_bundle(&fixture(), &canonical).expect("empty class directories publish");
+        materialize_bundle(&fixture(), &canonical).expect("empty class fixture materializes");
         verify_bundle(&canonical).expect("empty class directories verify");
         assert!(
             fs::read_dir(canonical.join("profiles"))
@@ -3208,11 +2375,12 @@ mod tests {
             .profiles
             .insert("capture.pb".to_owned(), vec![0]);
         assert!(matches!(
-            publish_bundle(&profile_bundle, &temporary.path().join("profile-publish")),
+            materialize_bundle(&profile_bundle, &temporary.path().join("profile-publish")),
             Err(BundleError::UnsupportedProfileSchema)
         ));
         let profile_verify = temporary.path().join("profile-verify");
-        publish_bundle(&fixture(), &profile_verify).expect("profile verifier fixture publishes");
+        materialize_bundle(&fixture(), &profile_verify)
+            .expect("profile verifier fixture materializes");
         add_artifact_and_checksum(&profile_verify, "profiles/capture.pb", b"opaque");
         let error = verify_bundle(&profile_verify).expect_err("profile artifact is rejected");
         assert!(
@@ -3225,7 +2393,7 @@ mod tests {
             .logs
             .insert("run.json".to_owned(), large_operational_log(0, 1));
         assert!(matches!(
-            publish_bundle(&log_bundle, &temporary.path().join("log-publish")),
+            materialize_bundle(&log_bundle, &temporary.path().join("log-publish")),
             Err(BundleError::UnsupportedLogSchema)
         ));
         for (index, bytes) in [
@@ -3239,7 +2407,8 @@ mod tests {
         .enumerate()
         {
             let destination = temporary.path().join(format!("log-verify-{index}"));
-            publish_bundle(&fixture(), &destination).expect("log verifier fixture publishes");
+            materialize_bundle(&fixture(), &destination)
+                .expect("log verifier fixture materializes");
             add_artifact_and_checksum(&destination, "logs/run.json", bytes);
             assert!(matches!(
                 verify_bundle(&destination),
@@ -3252,7 +2421,7 @@ mod tests {
     fn verifier_requires_canonical_json_and_jsonl_bytes() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let json_destination = temporary.path().join("json-result");
-        publish_bundle(&fixture(), &json_destination).expect("bundle publishes");
+        materialize_bundle(&fixture(), &json_destination).expect("fixture materializes");
         let environment =
             fs::read(json_destination.join(ENVIRONMENT_FILE)).expect("environment is readable");
         let mut noncanonical = Vec::with_capacity(environment.len() + 1);
@@ -3265,7 +2434,8 @@ mod tests {
         ));
 
         let jsonl_destination = temporary.path().join("jsonl-result");
-        publish_bundle(&fixture(), &jsonl_destination).expect("empty trajectory bundle publishes");
+        materialize_bundle(&fixture(), &jsonl_destination)
+            .expect("empty trajectory fixture materializes");
         rewrite_artifact_and_checksum(&jsonl_destination, AGENT_TRAJECTORIES_FILE, b" {}\n");
         assert!(matches!(
             verify_bundle(&jsonl_destination),
@@ -3277,7 +2447,7 @@ mod tests {
     fn verifier_bounds_unknown_keys_before_wire_decoding() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("fixture materializes");
         let limits = constrained_limits();
         let unknown_key = "x".repeat(limits.max_string_bytes + 1);
         let mut environment = fs::read_to_string(destination.join(ENVIRONMENT_FILE))
@@ -3312,7 +2482,7 @@ mod tests {
             ),
             ("tree-sitter-runtime".to_owned(), "1.0.0".to_owned()),
         ]));
-        publish_bundle(&bundle, &destination).expect("bundle with retained map publishes");
+        materialize_bundle(&bundle, &destination).expect("retained-map fixture materializes");
 
         crate::integrity::set_decode_reservation_fail_after(Some(0));
         let error = verify_bundle(&destination)
@@ -3346,7 +2516,7 @@ mod tests {
                 total_tokens: EvidenceValue::unavailable("not_measured"),
             });
 
-            let error = publish_bundle(&bundle, &destination)
+            let error = materialize_bundle(&bundle, &destination)
                 .expect_err("schema 2.0 rejects every non-empty trajectory artifact");
 
             assert!(matches!(error, BundleError::UnsupportedTrajectorySchema));
@@ -3361,7 +2531,8 @@ mod tests {
     fn verifier_rejects_checksum_valid_schema_two_trajectories_after_limits() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        publish_bundle(&fixture(), &destination).expect("empty trajectory bundle publishes");
+        materialize_bundle(&fixture(), &destination)
+            .expect("empty trajectory fixture materializes");
         let trajectory = AgentTrajectory {
             schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
             task_id: "task".to_owned(),
@@ -3396,7 +2567,7 @@ mod tests {
     fn version_one_bundle_is_explicitly_unsupported() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("legacy-result");
-        publish_bundle(&fixture(), &destination).expect("current bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("current fixture materializes");
         let manifest =
             fs::read(destination.join(DATASET_MANIFEST_FILE)).expect("manifest is readable");
         let legacy = String::from_utf8(manifest)
@@ -3415,27 +2586,27 @@ mod tests {
         let mut bundle = fixture();
         bundle.quality.rubric_id = "m05-parser-semantic-eligibility-1.0".to_owned();
 
-        let error = publish_bundle(&bundle, &temporary.path().join("result"))
+        let error = materialize_bundle(&bundle, &temporary.path().join("result"))
             .expect_err("legacy rubric is incompatible with schema version two");
 
         assert!(matches!(error, BundleError::UnsupportedRubricVersion));
     }
 
     #[test]
-    fn publication_rejects_schema_revision_count_and_availability_contradictions() {
+    fn artifact_encoding_rejects_schema_revision_count_and_availability_contradictions() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
 
         let mut invalid_schema = fixture();
         invalid_schema.environment.schema_version = "3.0".to_owned();
         assert!(matches!(
-            publish_bundle(&invalid_schema, &temporary.path().join("schema")),
+            materialize_bundle(&invalid_schema, &temporary.path().join("schema")),
             Err(BundleError::UnsupportedSchemaVersion)
         ));
 
         let mut invalid_dataset_revision = fixture();
         invalid_dataset_revision.dataset_manifest.revision = format!("sha256:{}", "11".repeat(32));
         assert!(matches!(
-            publish_bundle(
+            materialize_bundle(
                 &invalid_dataset_revision,
                 &temporary.path().join("dataset-revision")
             ),
@@ -3446,7 +2617,7 @@ mod tests {
         invalid_binary_revision.build_provenance.binary_revision =
             format!("sha256:{}", "11".repeat(32));
         assert!(matches!(
-            publish_bundle(
+            materialize_bundle(
                 &invalid_binary_revision,
                 &temporary.path().join("binary-revision")
             ),
@@ -3456,14 +2627,14 @@ mod tests {
         let mut invalid_count = fixture();
         invalid_count.summary.failed_samples = 1;
         assert!(matches!(
-            publish_bundle(&invalid_count, &temporary.path().join("count")),
+            materialize_bundle(&invalid_count, &temporary.path().join("count")),
             Err(BundleError::ArtifactInvariantViolation)
         ));
 
         let mut invalid_availability = fixture();
         invalid_availability.summary.semantic_eligibility = Availability::Available;
         assert!(matches!(
-            publish_bundle(
+            materialize_bundle(
                 &invalid_availability,
                 &temporary.path().join("availability")
             ),
@@ -3472,24 +2643,24 @@ mod tests {
     }
 
     #[test]
-    fn publication_reconstructs_seeded_schedule_order() {
+    fn artifact_encoding_reconstructs_seeded_schedule_order() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let bundle = scheduled_fixture();
-        publish_bundle(&bundle, &temporary.path().join("valid"))
-            .expect("scheduled fixture publishes");
+        materialize_bundle(&bundle, &temporary.path().join("valid"))
+            .expect("scheduled fixture materializes");
         let mut reordered = bundle;
         reordered.raw_samples.swap(0, 1);
         reordered.raw_samples[0].ordinal = 0;
         reordered.raw_samples[1].ordinal = 1;
 
-        let error = publish_bundle(&reordered, &temporary.path().join("reordered"))
+        let error = materialize_bundle(&reordered, &temporary.path().join("reordered"))
             .expect_err("reordered samples are rejected");
 
         assert!(matches!(error, BundleError::ArtifactInvariantViolation));
     }
 
     #[test]
-    fn publication_recomputes_distributions_rates_outliers_and_confidence() {
+    fn artifact_encoding_recomputes_distributions_rates_outliers_and_confidence() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let bundle = scheduled_fixture();
 
@@ -3502,7 +2673,7 @@ mod tests {
             .expect("fixture has a family");
         distribution.p50_ns = EvidenceValue::observed(999_999);
         assert!(matches!(
-            publish_bundle(&percentile, &temporary.path().join("percentile")),
+            materialize_bundle(&percentile, &temporary.path().join("percentile")),
             Err(BundleError::ArtifactInvariantViolation)
         ));
 
@@ -3515,7 +2686,7 @@ mod tests {
             .expect("fixture has a family");
         distribution.files_per_second = EvidenceValue::observed(999_999);
         assert!(matches!(
-            publish_bundle(&rate, &temporary.path().join("rate")),
+            materialize_bundle(&rate, &temporary.path().join("rate")),
             Err(BundleError::ArtifactInvariantViolation)
         ));
 
@@ -3527,25 +2698,25 @@ mod tests {
             .expect("fixture has a measured sample");
         trial.is_outlier = !trial.is_outlier;
         assert!(matches!(
-            publish_bundle(&outlier, &temporary.path().join("outlier")),
+            materialize_bundle(&outlier, &temporary.path().join("outlier")),
             Err(BundleError::ArtifactInvariantViolation)
         ));
 
         let mut confidence = bundle;
         confidence.summary.confidence_intervals = Availability::Available;
         assert!(matches!(
-            publish_bundle(&confidence, &temporary.path().join("confidence")),
+            materialize_bundle(&confidence, &temporary.path().join("confidence")),
             Err(BundleError::ArtifactInvariantViolation)
         ));
     }
 
     #[test]
-    fn unsafe_reason_labels_are_rejected_before_publication() {
+    fn unsafe_reason_labels_are_rejected_before_artifact_encoding() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let mut bundle = fixture();
         bundle.quality.precision_ppm = EvidenceValue::unavailable("../../host-path");
 
-        let error = publish_bundle(&bundle, &temporary.path().join("result"))
+        let error = materialize_bundle(&bundle, &temporary.path().join("result"))
             .expect_err("unsafe reason is rejected");
 
         assert!(matches!(error, BundleError::InvalidArtifactEncoding));
@@ -3568,7 +2739,7 @@ mod tests {
             let mut command_bundle = fixture();
             command_bundle.command.arguments = vec![value.to_owned()];
             assert!(matches!(
-                publish_bundle(
+                materialize_bundle(
                     &command_bundle,
                     &temporary.path().join(format!("command-publish-{index}"))
                 ),
@@ -3576,8 +2747,8 @@ mod tests {
             ));
 
             let command_destination = temporary.path().join(format!("command-verify-{index}"));
-            publish_bundle(&fixture(), &command_destination)
-                .expect("command verifier fixture publishes");
+            materialize_bundle(&fixture(), &command_destination)
+                .expect("command verifier fixture materializes");
             let command =
                 json_bytes(&command_bundle.command, 64 * 1024).expect("command fixture serializes");
             rewrite_artifact_and_checksum(&command_destination, COMMAND_FILE, &command);
@@ -3590,7 +2761,7 @@ mod tests {
             environment_bundle.environment.operating_system =
                 EvidenceValue::observed(value.to_owned());
             assert!(matches!(
-                publish_bundle(
+                materialize_bundle(
                     &environment_bundle,
                     &temporary
                         .path()
@@ -3601,8 +2772,8 @@ mod tests {
 
             let environment_destination =
                 temporary.path().join(format!("environment-verify-{index}"));
-            publish_bundle(&fixture(), &environment_destination)
-                .expect("environment verifier fixture publishes");
+            materialize_bundle(&fixture(), &environment_destination)
+                .expect("environment verifier fixture materializes");
             let environment = json_bytes(&environment_bundle.environment, 64 * 1024)
                 .expect("environment fixture serializes");
             rewrite_artifact_and_checksum(&environment_destination, ENVIRONMENT_FILE, &environment);
@@ -3616,14 +2787,14 @@ mod tests {
         compiler_bundle.environment.compiler =
             EvidenceValue::observed("rustc-1.90.0-secret".to_owned());
         assert!(matches!(
-            publish_bundle(&compiler_bundle, &temporary.path().join("compiler-suffix")),
+            materialize_bundle(&compiler_bundle, &temporary.path().join("compiler-suffix")),
             Err(BundleError::InvalidArtifactEncoding)
         ));
 
         let mut subcommand_bundle = fixture();
         subcommand_bundle.command.subcommand = "m05-parser".to_owned();
         assert!(matches!(
-            publish_bundle(&subcommand_bundle, &temporary.path().join("subcommand")),
+            materialize_bundle(&subcommand_bundle, &temporary.path().join("subcommand")),
             Err(BundleError::InvalidArtifactEncoding)
         ));
     }
@@ -3633,7 +2804,7 @@ mod tests {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
         let mut bundle = fixture();
-        publish_bundle(&bundle, &destination).expect("bundle publishes");
+        materialize_bundle(&bundle, &destination).expect("fixture materializes");
         bundle.summary.semantic_eligibility = Availability::Available;
         let bytes = json_bytes(&bundle.summary, 64 * 1024).expect("summary serializes");
         rewrite_artifact_and_checksum(&destination, SUMMARY_FILE, &bytes);
@@ -3647,7 +2818,7 @@ mod tests {
     fn fixed_jsonl_decode_enforces_collection_limits_before_invariants() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("fixture materializes");
         let sample = RawSample {
             schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
             ordinal: 0,
@@ -3687,7 +2858,7 @@ mod tests {
     fn nested_collection_limits_precede_checksum_valid_decode_errors() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let summary_destination = temporary.path().join("summary");
-        publish_bundle(&fixture(), &summary_destination).expect("summary bundle publishes");
+        materialize_bundle(&fixture(), &summary_destination).expect("summary fixture materializes");
         let summary = fs::read_to_string(summary_destination.join(SUMMARY_FILE))
             .expect("summary is readable")
             .replace("\"families\":{}", "\"families\":{\"a\":0,\"b\":0}");
@@ -3712,7 +2883,8 @@ mod tests {
             ]));
         let environment =
             json_bytes(&environment_bundle.environment, 64 * 1024).expect("environment serializes");
-        publish_bundle(&fixture(), &environment_destination).expect("environment bundle publishes");
+        materialize_bundle(&fixture(), &environment_destination)
+            .expect("environment fixture materializes");
         let environment = String::from_utf8(environment)
             .expect("environment is UTF-8")
             .replace("\"b\":\"two\"", "\"b\":7");
@@ -3729,7 +2901,8 @@ mod tests {
         ));
 
         let trajectory_destination = temporary.path().join("trajectory");
-        publish_bundle(&fixture(), &trajectory_destination).expect("trajectory bundle publishes");
+        materialize_bundle(&fixture(), &trajectory_destination)
+            .expect("trajectory fixture materializes");
         let trajectory = AgentTrajectory {
             schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
             task_id: "task".to_owned(),
@@ -3759,221 +2932,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_publication_removes_partial_staging_tree() {
-        let temporary = tempfile::tempdir().expect("temporary root is available");
-        let destination = temporary.path().join("result");
-
-        let error =
-            publish_bundle_with_fault(&fixture(), &destination, BundleLimits::default(), Some(2))
-                .expect_err("fault interrupts publication");
-
-        assert!(matches!(error, BundleError::InjectedWriteFailure));
-        assert!(!destination.exists());
-        let remaining = fs::read_dir(temporary.path())
-            .expect("temporary root is readable")
-            .count();
-        assert_eq!(remaining, 0);
-    }
-
-    #[test]
-    fn publication_preserves_primary_failure_and_recovery_context() {
-        let temporary = tempfile::tempdir().expect("temporary root is available");
-        let destination = temporary.path().join("result");
-
-        let error = publish_bundle_with_control(
-            &fixture(),
-            &destination,
-            BundleLimits::default(),
-            Some(0),
-            |point, _| match point {
-                PublicationControlPoint::StagingCleanup => {
-                    Err(io::Error::other("injected cleanup failure"))
-                }
-                PublicationControlPoint::RecoveryParentSync => {
-                    Err(io::Error::other("injected recovery sync failure"))
-                }
-                _ => Ok(()),
-            },
-        )
-        .expect_err("write, cleanup, and recovery sync faults are reported");
-
-        assert!(matches!(
-            error,
-            BundleError::PublicationRecoveryFailed {
-                primary_operation: "injected result write failure",
-                primary_source: None,
-                cleanup_source: Some(_),
-                sync_source: Some(_),
-            }
-        ));
-        assert!(!destination.exists());
-        assert!(only_staging_path(temporary.path()).is_dir());
-    }
-
-    #[test]
-    fn failed_claim_never_deletes_the_foreign_destination() {
-        let temporary = tempfile::tempdir().expect("temporary root is available");
-        let destination = temporary.path().join("result");
-
-        let error = publish_bundle_with_control(
-            &fixture(),
-            &destination,
-            BundleLimits::default(),
-            None,
-            |point, _| match point {
-                PublicationControlPoint::Install => {
-                    fs::create_dir(&destination).expect("foreign destination is created");
-                    fs::write(destination.join("sentinel"), b"foreign")
-                        .expect("foreign sentinel is written");
-                    Ok(())
-                }
-                PublicationControlPoint::StagingCleanup => {
-                    Err(io::Error::other("injected cleanup failure"))
-                }
-                _ => Ok(()),
-            },
-        )
-        .expect_err("foreign destination and failed cleanup are reported");
-
-        assert!(matches!(
-            error,
-            BundleError::PublicationRecoveryFailed {
-                primary_operation: "result destination already exists",
-                primary_source: None,
-                cleanup_source: Some(_),
-                sync_source: None,
-            }
-        ));
-        assert_eq!(
-            fs::read(destination.join("sentinel")).expect("foreign destination remains"),
-            b"foreign"
-        );
-    }
-
-    #[test]
-    fn committed_parent_sync_failure_reports_unknown_durability() {
-        let temporary = tempfile::tempdir().expect("temporary root is available");
-        let destination = temporary.path().join("result");
-
-        let error = publish_bundle_with_control(
-            &fixture(),
-            &destination,
-            BundleLimits::default(),
-            None,
-            |point, _| {
-                if point == PublicationControlPoint::CommittedParentSync {
-                    Err(io::Error::other("injected committed sync failure"))
-                } else {
-                    Ok(())
-                }
-            },
-        )
-        .expect_err("post-install sync failure has a typed outcome");
-
-        assert!(matches!(
-            error,
-            BundleError::PublicationDurabilityUnknown { .. }
-        ));
-        verify_bundle(&destination).expect("the committed destination remains verifiable");
-        assert_eq!(
-            fs::read_dir(temporary.path())
-                .expect("publication parent is readable")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn staging_directory_is_private_before_artifact_writes() {
-        let temporary = tempfile::tempdir().expect("temporary root is available");
-        let parent =
-            cap_std::fs::Dir::open_ambient_dir(temporary.path(), cap_std::ambient_authority())
-                .expect("temporary parent opens");
-        let staging = create_staging_directory(&parent).expect("private staging is created");
-
-        #[cfg(unix)]
-        {
-            use cap_std::fs::MetadataExt as _;
-
-            let metadata = staging
-                .directory
-                .dir_metadata()
-                .expect("staging metadata is readable");
-            assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
-            assert_eq!(metadata.mode() & 0o077, 0);
-        }
-        #[cfg(windows)]
-        {
-            use windows_permissions::{
-                constants::{AceFlags, SeObjectType, SecurityInformation},
-                wrappers::GetSecurityInfo,
-            };
-
-            let handle = staging
-                .directory
-                .try_clone()
-                .expect("staging handle clones")
-                .into_std_file();
-            let descriptor = GetSecurityInfo(
-                &handle,
-                SeObjectType::SE_FILE_OBJECT,
-                SecurityInformation::Owner
-                    | SecurityInformation::Dacl
-                    | SecurityInformation::ProtectedDacl,
-            )
-            .expect("staging security is readable");
-            let (current_sid, _) =
-                current_windows_account_sids().expect("current account SID is available");
-            verify_private_windows_descriptor(
-                &descriptor,
-                &current_sid,
-                AceFlags::ContainerInherit | AceFlags::ObjectInherit,
-            )
-            .expect("staging is owner-only");
-
-            let child =
-                create_private_subdirectory(&staging.directory, "child", "create test child")
-                    .expect("child directory is created");
-            write_new(&child, "artifact", b"private").expect("child artifact is created");
-            let child_descriptor = GetSecurityInfo(
-                &child
-                    .try_clone()
-                    .expect("child handle clones")
-                    .into_std_file(),
-                SeObjectType::SE_FILE_OBJECT,
-                SecurityInformation::Owner
-                    | SecurityInformation::Dacl
-                    | SecurityInformation::ProtectedDacl,
-            )
-            .expect("child security is readable");
-            verify_private_windows_descriptor(
-                &child_descriptor,
-                &current_sid,
-                AceFlags::ContainerInherit | AceFlags::ObjectInherit,
-            )
-            .expect("child directory is account-owned and account-only");
-            let artifact = child.open("artifact").expect("child artifact opens");
-            let artifact_descriptor = GetSecurityInfo(
-                &artifact.into_std(),
-                SeObjectType::SE_FILE_OBJECT,
-                SecurityInformation::Owner
-                    | SecurityInformation::Dacl
-                    | SecurityInformation::ProtectedDacl,
-            )
-            .expect("artifact security is readable");
-            verify_private_windows_descriptor(
-                &artifact_descriptor,
-                &current_sid,
-                AceFlags::empty(),
-            )
-            .expect("child artifact is account-owned and account-only");
-        }
-
-        remove_staging_directory_io(staging).expect("staging cleanup succeeds");
-    }
-
-    #[test]
-    fn publication_rejects_each_bounded_collection() {
+    fn artifact_encoding_rejects_each_bounded_collection() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let limits = constrained_limits();
         let mut bundle = fixture();
@@ -3997,8 +2956,9 @@ mod tests {
             };
             limits.max_raw_samples + 1
         ];
-        let error = publish_bundle_with_limits(&bundle, &temporary.path().join("samples"), limits)
-            .expect_err("raw sample bound is enforced");
+        let error =
+            materialize_bundle_with_limits(&bundle, &temporary.path().join("samples"), limits)
+                .expect_err("raw sample bound is enforced");
         assert!(matches!(
             error,
             BundleError::LimitExceeded {
@@ -4010,8 +2970,9 @@ mod tests {
         for index in 0..=limits.max_artifacts_per_class {
             bundle.profiles.insert(format!("p{index}"), vec![0]);
         }
-        let error = publish_bundle_with_limits(&bundle, &temporary.path().join("profiles"), limits)
-            .expect_err("artifact count bound is enforced");
+        let error =
+            materialize_bundle_with_limits(&bundle, &temporary.path().join("profiles"), limits)
+                .expect_err("artifact count bound is enforced");
         assert!(matches!(
             error,
             BundleError::LimitExceeded {
@@ -4033,7 +2994,7 @@ mod tests {
             limits.max_agent_trajectories + 1
         ];
         let error =
-            publish_bundle_with_limits(&bundle, &temporary.path().join("trajectories"), limits)
+            materialize_bundle_with_limits(&bundle, &temporary.path().join("trajectories"), limits)
                 .expect_err("trajectory count bound is enforced");
         assert!(matches!(
             error,
@@ -4044,12 +3005,13 @@ mod tests {
     }
 
     #[test]
-    fn publication_preflights_class_file_checksum_and_total_bytes() {
+    fn artifact_encoding_preflights_file_checksum_and_total_bytes() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let mut limits = constrained_limits();
         limits.max_artifact_bytes = 8;
-        let error = publish_bundle_with_limits(&fixture(), &temporary.path().join("file"), limits)
-            .expect_err("serialized file bound is enforced");
+        let error =
+            materialize_bundle_with_limits(&fixture(), &temporary.path().join("file"), limits)
+                .expect_err("serialized file bound is enforced");
         assert!(matches!(error, BundleError::LimitExceeded { .. }));
         assert!(!temporary.path().join("file").exists());
 
@@ -4058,7 +3020,7 @@ mod tests {
         let mut limits = constrained_limits();
         limits.max_total_bytes = 256;
         let error =
-            publish_bundle_with_limits(&invalid_later, &temporary.path().join("total"), limits)
+            materialize_bundle_with_limits(&invalid_later, &temporary.path().join("total"), limits)
                 .expect_err("total bytes are preflighted before later artifact validation");
         assert!(matches!(
             error,
@@ -4071,7 +3033,7 @@ mod tests {
         let checksum_bytes = checksum_manifest_size().expect("checksum size is computable");
         let mut limits = constrained_limits();
         limits.max_total_bytes = checksum_bytes + 32;
-        let error = publish_bundle_with_limits(
+        let error = materialize_bundle_with_limits(
             &invalid_later,
             &temporary.path().join("rolling-total"),
             limits,
@@ -4086,9 +3048,12 @@ mod tests {
 
         let mut limits = constrained_limits();
         limits.max_checksum_bytes = 128;
-        let error =
-            publish_bundle_with_limits(&invalid_later, &temporary.path().join("checksums"), limits)
-                .expect_err("checksum bytes are preflighted before later artifact validation");
+        let error = materialize_bundle_with_limits(
+            &invalid_later,
+            &temporary.path().join("checksums"),
+            limits,
+        )
+        .expect_err("checksum bytes are preflighted before later artifact validation");
         assert!(matches!(
             error,
             BundleError::LimitExceeded {
@@ -4099,7 +3064,7 @@ mod tests {
         let checksum_bytes = checksum_manifest_size().expect("checksum size is computable");
         let mut artifact_limits = constrained_limits();
         artifact_limits.max_artifact_bytes = checksum_bytes - 1;
-        let error = publish_bundle_with_limits(
+        let error = materialize_bundle_with_limits(
             &fixture(),
             &temporary.path().join("checksum-artifact-limit"),
             artifact_limits,
@@ -4117,8 +3082,8 @@ mod tests {
             ..constrained_limits()
         };
         let exact_destination = temporary.path().join("checksum-exact");
-        publish_bundle_with_limits(&fixture(), &exact_destination, exact_checksum_limits)
-            .expect("exact checksum limit publishes");
+        materialize_bundle_with_limits(&fixture(), &exact_destination, exact_checksum_limits)
+            .expect("exact checksum limit materializes");
         verify_bundle_with_limits(&exact_destination, exact_checksum_limits)
             .expect("exact checksum limit verifies");
     }
@@ -4127,7 +3092,7 @@ mod tests {
     fn verification_bounds_file_count_depth_size_and_total_bytes() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("fixture materializes");
 
         let mut limits = constrained_limits();
         limits.max_file_count = 10;
@@ -4198,7 +3163,7 @@ mod tests {
     fn checksum_manifest_requires_lowercase_and_bounded_lines() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        publish_bundle(&fixture(), &destination).expect("bundle publishes");
+        materialize_bundle(&fixture(), &destination).expect("fixture materializes");
         let checksum_path = destination.join(CHECKSUMS_FILE);
         let mut bytes = fs::read(&checksum_path).expect("checksum fixture is readable");
         let hex_index = bytes[..64]
@@ -4210,8 +3175,8 @@ mod tests {
         let error = verify_bundle(&destination).expect_err("uppercase checksum is rejected");
         assert!(matches!(error, BundleError::InvalidChecksumManifest));
 
-        publish_bundle(&fixture(), &temporary.path().join("line-result"))
-            .expect("second bundle publishes");
+        materialize_bundle(&fixture(), &temporary.path().join("line-result"))
+            .expect("second fixture materializes");
         let mut limits = constrained_limits();
         limits.max_checksum_lines = 8;
         let error = verify_bundle_with_limits(&temporary.path().join("line-result"), limits)
@@ -4224,7 +3189,7 @@ mod tests {
         ));
 
         let crlf_destination = temporary.path().join("crlf-result");
-        publish_bundle(&fixture(), &crlf_destination).expect("CRLF fixture publishes");
+        materialize_bundle(&fixture(), &crlf_destination).expect("CRLF fixture materializes");
         let checksum_path = crlf_destination.join(CHECKSUMS_FILE);
         let checksums = fs::read_to_string(&checksum_path).expect("checksums are readable");
         fs::write(&checksum_path, checksums.replace('\n', "\r\n"))
@@ -4326,7 +3291,7 @@ mod tests {
         let mut limits = BundleLimits::default();
         limits.max_raw_samples += 1;
         let error =
-            publish_bundle_with_limits(&fixture(), &temporary.path().join("result"), limits)
+            materialize_bundle_with_limits(&fixture(), &temporary.path().join("result"), limits)
                 .expect_err("hard ceiling cannot be raised");
         assert!(matches!(error, BundleError::InvalidLimits));
     }

@@ -9,7 +9,6 @@ publish = false
 [dependencies]
 cap-fs-ext.workspace = true
 cap-std.workspace = true
-getrandom = { workspace = true, features = ["std"] }
 rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
 rootlight-cancel = { path = "../rootlight-cancel" }
@@ -22,17 +21,7 @@ sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 
-[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
-rustix = { workspace = true, features = ["fs"] }
-
-[target.'cfg(unix)'.dependencies]
-nix.workspace = true
-
 [target.'cfg(windows)'.dependencies]
-nt-token.workspace = true
-renamore.workspace = true
-windows.workspace = true
-windows-permissions.workspace = true
 winapi-util.workspace = true
 
 [lints]

@@ -23,6 +23,10 @@ pub(crate) struct PublishedDirectory {
     identity: PlatformFileIdentity,
 }
 
+pub(crate) fn require_support() -> Result<(), PlatformError> {
+    Err(PlatformError::UnsupportedPlatform)
+}
+
 pub(crate) fn create_directory(
     _parent: &Dir,
     _name: &PrivateName,

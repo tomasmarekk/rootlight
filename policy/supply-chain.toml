@@ -32,7 +32,6 @@ allowed_build_scripts = [
   "proc-macro2@1.0.106",
   "quote@1.0.46",
   "ref-cast@1.0.25",
-  "renamore@0.3.2",
   "rootlight-bench@0.1.0",
   "rustix@1.1.4",
   "rustversion@1.0.23",

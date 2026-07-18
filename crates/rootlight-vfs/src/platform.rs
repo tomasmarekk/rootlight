@@ -75,6 +75,20 @@ pub struct PrivateDirectory<'parent> {
 }
 
 impl PrivateDirectory<'static> {
+    /// Requires an accepted account-private tree implementation.
+    ///
+    /// This preflight does not inspect a path, acquire randomness, or perform
+    /// a filesystem operation. It lets callers fail closed before they touch
+    /// ambient state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::UnsupportedPlatform`] while ADR-026 remains
+    /// unaccepted.
+    pub fn require_supported() -> Result<(), PlatformError> {
+        os::require_support()
+    }
+
     /// Fails closed without inspecting or mutating the supplied parent.
     ///
     /// # Errors
@@ -484,5 +498,13 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn support_preflight_fails_without_filesystem_input() {
+        assert!(matches!(
+            PrivateDirectory::require_supported(),
+            Err(PlatformError::UnsupportedPlatform)
+        ));
     }
 }
