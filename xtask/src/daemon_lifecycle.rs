@@ -25,6 +25,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 const CLIENT_COUNT: usize = 100;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTOSTART_QUIESCENCE: Duration = Duration::from_secs(1);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const EXPECTED_CLIENT_CONNECTION_LIMIT: u32 = 8;
 const EXPECTED_CLIENT_OPERATION_LIMIT: u32 = 32;
@@ -431,7 +432,7 @@ fn exercise_simultaneous_autostart(
     paths
         .remove_discovery_if_matches(discovery.instance_nonce())
         .map_err(LifecycleError::Runtime)?;
-    wait_until_absent(paths)
+    wait_until_autostart_quiescent(paths)
 }
 
 fn exercise_crash_restart(
@@ -1049,6 +1050,41 @@ fn wait_until_absent(paths: &RuntimePaths) -> Result<(), LifecycleError> {
     }
 }
 
+fn wait_until_autostart_quiescent(paths: &RuntimePaths) -> Result<(), LifecycleError> {
+    let deadline = Instant::now()
+        .checked_add(STOP_TIMEOUT)
+        .ok_or(LifecycleError::Clock)?;
+    let mut absent_since = None;
+    loop {
+        match paths.discover() {
+            Err(error) if runtime_absence(&error) => {
+                let observed = *absent_since.get_or_insert_with(Instant::now);
+                if Instant::now().saturating_duration_since(observed) >= AUTOSTART_QUIESCENCE {
+                    return Ok(());
+                }
+            }
+            Err(error) => return Err(LifecycleError::Runtime(error)),
+            Ok(survivor) => {
+                if process_is_running(survivor.pid())? {
+                    terminate_process(survivor.pid())?;
+                    wait_until_process_exit(survivor.pid())?;
+                }
+                paths
+                    .remove_stale_endpoint(survivor.instance_nonce())
+                    .map_err(LifecycleError::Runtime)?;
+                paths
+                    .remove_discovery_if_matches(survivor.instance_nonce())
+                    .map_err(LifecycleError::Runtime)?;
+                return Err(LifecycleError::AutostartSurvivor(survivor.pid()));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(LifecycleError::CleanupTimedOut);
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
 fn run_json(
     binary: &Path,
     arguments: &[&str],
@@ -1503,6 +1539,8 @@ pub(crate) enum LifecycleError {
     },
     #[error("daemon discovery cleanup timed out")]
     CleanupTimedOut,
+    #[error("simultaneous autostart left daemon process {0} after cleanup")]
+    AutostartSurvivor(u32),
     #[error("monotonic lifecycle deadline overflowed")]
     Clock,
     #[error("lifecycle command failed with {status}: {stderr}")]

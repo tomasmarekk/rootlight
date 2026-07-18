@@ -27,7 +27,7 @@ use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR,
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
-use rootlight_runtime::RuntimePaths;
+use rootlight_runtime::{LaunchLock, RuntimePaths};
 use sha2::{Digest as _, Sha256};
 use zip::CompressionMethod;
 
@@ -45,6 +45,7 @@ const REQUEST_IO_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_SUPPORT_ARCHIVE_BYTES: usize = 768 * 1024;
 const MAX_SUPPORT_ENTRY_BYTES: usize = 128 * 1024;
 const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(10);
+const START_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const START_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 
@@ -627,9 +628,8 @@ fn coordinate_start(
                 {
                     return Err(error);
                 }
-                let child = spawn_sibling_daemon(true)?;
-                drop(launch);
-                return wait_for_ready_daemon(paths, client_instance_id, deadline, Some(child));
+                let startup = CoordinatedStartup::spawn(launch)?;
+                return wait_for_ready_daemon(paths, client_instance_id, deadline, startup);
             }
             Err(rootlight_runtime::RuntimeError::LaunchBusy) => {
                 if let ProbeOutcome::Ready(client) = probe_ready_client(paths, client_instance_id)?
@@ -647,33 +647,98 @@ fn wait_for_ready_daemon(
     paths: &RuntimePaths,
     client_instance_id: [u8; 16],
     deadline: Instant,
-    mut child: Option<Child>,
+    mut startup: CoordinatedStartup,
 ) -> Result<Client, ClientError> {
     loop {
         let probe = probe_ready_client(paths, client_instance_id);
         if let Ok(ProbeOutcome::Ready(client)) = probe {
+            startup.detach();
             return Ok(client);
         }
         if let Err(error) = probe
             && !startup_probe_retryable(&error)
         {
+            startup.terminate()?;
             return Err(error);
         }
-        let child_exited = child
-            .as_mut()
-            .map(|process| process.try_wait().map(|status| status.is_some()))
-            .transpose()
-            .map_err(ClientError::LaunchIo)?
-            .unwrap_or(false);
-        if child_exited {
-            child = None;
+        if startup.child_exited()? {
+            return Err(ClientError::DaemonLaunchFailed);
         }
         if Instant::now() >= deadline {
-            if let Some(mut child) = child {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+            startup.terminate()?;
             return Err(ClientError::DaemonStartTimedOut);
+        }
+        std::thread::sleep(START_POLL_INTERVAL);
+    }
+}
+
+#[derive(Debug)]
+struct CoordinatedStartup {
+    _authority: LaunchLock,
+    child: Option<Child>,
+}
+
+impl CoordinatedStartup {
+    fn spawn(authority: LaunchLock) -> Result<Self, ClientError> {
+        let child = spawn_coordinated_daemon()?;
+        Ok(Self {
+            _authority: authority,
+            child: Some(child),
+        })
+    }
+
+    fn child_exited(&mut self) -> Result<bool, ClientError> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(true);
+        };
+        if child.try_wait().map_err(ClientError::LaunchIo)?.is_none() {
+            return Ok(false);
+        }
+        self.child = None;
+        Ok(true)
+    }
+
+    fn terminate(&mut self) -> Result<(), ClientError> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(());
+        };
+        terminate_startup_child(child)?;
+        self.child = None;
+        Ok(())
+    }
+
+    fn detach(mut self) {
+        let _ = self.child.take();
+    }
+}
+
+impl Drop for CoordinatedStartup {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = terminate_startup_child(&mut child);
+        }
+    }
+}
+
+fn terminate_startup_child(child: &mut Child) -> Result<(), ClientError> {
+    if child.try_wait().map_err(ClientError::LaunchIo)?.is_some() {
+        return Ok(());
+    }
+    if let Err(source) = child.kill() {
+        if child.try_wait().map_err(ClientError::LaunchIo)?.is_some() {
+            return Ok(());
+        }
+        return Err(ClientError::LaunchIo(source));
+    }
+    let deadline = Instant::now()
+        .checked_add(START_CHILD_STOP_TIMEOUT)
+        .ok_or(ClientError::InvalidRequestTimeout)?;
+    loop {
+        if child.try_wait().map_err(ClientError::LaunchIo)?.is_some() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(ClientError::DaemonLaunchCleanupTimedOut);
         }
         std::thread::sleep(START_POLL_INTERVAL);
     }
@@ -783,7 +848,7 @@ fn ipc_unavailable(error: &IpcError) -> bool {
     )
 }
 
-fn spawn_sibling_daemon(coordinated: bool) -> Result<Child, ClientError> {
+fn spawn_coordinated_daemon() -> Result<Child, ClientError> {
     let executable = std::env::current_exe().map_err(ClientError::LaunchIo)?;
     let directory = executable
         .parent()
@@ -793,10 +858,8 @@ fn spawn_sibling_daemon(coordinated: bool) -> Result<Child, ClientError> {
         return Err(ClientError::DaemonExecutableMissing);
     }
     let mut command = Command::new(daemon);
-    if coordinated {
-        command.arg("--coordinated-start");
-    }
     command
+        .arg("--coordinated-start")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1532,6 +1595,9 @@ pub enum ClientError {
     /// The sibling daemon terminated before becoming ready.
     #[error("daemon startup failed")]
     DaemonLaunchFailed,
+    /// A failed sibling daemon did not exit within the bounded cleanup deadline.
+    #[error("daemon startup cleanup timed out")]
+    DaemonLaunchCleanupTimedOut,
     /// The sibling daemon did not become ready within the bounded deadline.
     #[error("daemon startup timed out")]
     DaemonStartTimedOut,
@@ -1551,6 +1617,8 @@ impl ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const STARTUP_CHILD_ROOT_ENV: &str = "ROOTLIGHT_TEST_STARTUP_CHILD_ROOT";
 
     fn test_endpoint(label: &str) -> Endpoint {
         #[cfg(unix)]
@@ -1581,6 +1649,113 @@ mod tests {
         paths
             .acquire_launch_lock()
             .expect("launch lock is released after startup authority ends");
+    }
+
+    #[test]
+    fn coordinated_startup_retains_authority_and_reaps_failed_child() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let paths = RuntimePaths::new(
+            temporary.path().join("owner-state"),
+            temporary.path().join("owner-runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths.prepare_owner().expect("runtime paths are private");
+        let authority = paths
+            .acquire_launch_lock()
+            .expect("startup authority is acquired");
+
+        let child_root = temporary.path().join("child");
+        let child_paths = RuntimePaths::new(child_root.join("state"), child_root.join("runtime"))
+            .expect("child runtime paths are valid");
+        let marker = child_root.join("ready");
+        let mut child = Command::new(std::env::current_exe().expect("test executable resolves"))
+            .args([
+                "--exact",
+                "tests::coordinated_startup_cleanup_child",
+                "--nocapture",
+            ])
+            .env(STARTUP_CHILD_ROOT_ENV, &child_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cleanup child starts");
+        let marker_deadline = Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .expect("marker deadline is representable");
+        while !marker.is_file() {
+            assert!(
+                child
+                    .try_wait()
+                    .expect("cleanup child status reads")
+                    .is_none(),
+                "cleanup child exited before acquiring its proof lock"
+            );
+            assert!(
+                Instant::now() < marker_deadline,
+                "cleanup child did not acquire its proof lock"
+            );
+            std::thread::sleep(START_POLL_INTERVAL);
+        }
+
+        let startup = CoordinatedStartup {
+            _authority: authority,
+            child: Some(child),
+        };
+        let contender_paths = paths.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let waiter = std::thread::spawn(move || {
+            started_tx
+                .send(())
+                .expect("startup wait observation begins");
+            wait_for_ready_daemon(
+                &contender_paths,
+                [91; 16],
+                Instant::now()
+                    .checked_add(Duration::from_millis(250))
+                    .expect("startup deadline is representable"),
+                startup,
+            )
+        });
+        started_rx
+            .recv()
+            .expect("startup wait observation is synchronized");
+        assert!(matches!(
+            paths.acquire_launch_lock(),
+            Err(rootlight_runtime::RuntimeError::LaunchBusy)
+        ));
+        assert!(matches!(
+            waiter
+                .join()
+                .expect("startup wait thread joins")
+                .expect_err("missing discovery must time out"),
+            ClientError::DaemonStartTimedOut
+        ));
+
+        paths
+            .acquire_launch_lock()
+            .expect("startup authority releases after bounded cleanup");
+        child_paths
+            .acquire_launch_lock()
+            .expect("terminated child releases its proof lock");
+    }
+
+    #[test]
+    fn coordinated_startup_cleanup_child() {
+        let Some(root) = std::env::var_os(STARTUP_CHILD_ROOT_ENV) else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let paths = RuntimePaths::new(root.join("state"), root.join("runtime"))
+            .expect("cleanup child runtime paths are valid");
+        paths
+            .prepare_owner()
+            .expect("cleanup child runtime paths are private");
+        let _proof = paths
+            .acquire_launch_lock()
+            .expect("cleanup child proof lock is acquired");
+        std::fs::write(root.join("ready"), b"ready").expect("cleanup child marker writes");
+        std::thread::sleep(Duration::from_secs(30));
     }
 
     #[test]
