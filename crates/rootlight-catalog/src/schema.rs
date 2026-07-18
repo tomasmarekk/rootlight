@@ -507,6 +507,7 @@ struct SchemaDefinition<'a> {
     application_id: u32,
     version: u32,
     kind: &'static [u8],
+    allows_document_hash: bool,
     objects: &'a [NamedSql],
 }
 
@@ -607,6 +608,7 @@ fn control_definition() -> SchemaDefinition<'static> {
         application_id: CONTROL_APPLICATION_ID,
         version: CONTROL_SCHEMA_VERSION,
         kind: b"rootlight-control",
+        allows_document_hash: false,
         objects: &CONTROL_TABLES,
     }
 }
@@ -625,6 +627,7 @@ fn oracle_definition() -> SchemaDefinition<'static> {
         application_id: ORACLE_APPLICATION_ID,
         version: ORACLE_SCHEMA_VERSION,
         kind: b"rootlight-oracle",
+        allows_document_hash: true,
         objects: &OBJECTS,
     }
 }
@@ -701,6 +704,7 @@ fn validate_schema(
     if version != definition.version {
         return Err(CatalogError::new(CatalogErrorKind::IncompatibleSchema));
     }
+    validate_application_metadata(connection, definition)?;
     let kind: Option<Vec<u8>> = connection
         .query_row(
             "SELECT value
@@ -714,19 +718,7 @@ fn validate_schema(
     if kind.as_deref() != Some(definition.kind) {
         return Err(CatalogError::new(CatalogErrorKind::ForeignDatabase));
     }
-    let checksum: Option<Vec<u8>> = connection
-        .query_row(
-            "SELECT checksum FROM migrations WHERE migration_id = ?1",
-            [definition.version],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(CatalogError::sqlite)?;
-    if checksum.as_deref() != Some(schema_checksum(definition).as_bytes().as_slice()) {
-        return Err(CatalogError::new(
-            CatalogErrorKind::MigrationChecksumMismatch,
-        ));
-    }
+    validate_migration_ledger(connection, definition)?;
     let mut expected = definition
         .objects
         .iter()
@@ -762,6 +754,67 @@ fn validate_schema(
     }
     if !expected.is_empty() {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    Ok(())
+}
+
+fn validate_application_metadata(
+    connection: &Connection,
+    definition: &SchemaDefinition<'_>,
+) -> Result<(), CatalogError> {
+    let (row_count, kind_count, document_hash_count, valid_document_hash_count): (
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = connection
+        .query_row(
+            "SELECT
+                count(*),
+                coalesce(sum(key = 'database_kind'), 0),
+                coalesce(sum(key = 'document_hash'), 0),
+                coalesce(sum(key = 'document_hash' AND length(value) = 32), 0)
+             FROM (SELECT key, value FROM application_meta LIMIT 3)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(CatalogError::sqlite)?;
+    let exact_control_ledger = row_count == 1 && kind_count == 1 && document_hash_count == 0;
+    let exact_unsealed_oracle = row_count == 1 && kind_count == 1 && document_hash_count == 0;
+    let exact_sealed_oracle = row_count == 2
+        && kind_count == 1
+        && document_hash_count == 1
+        && valid_document_hash_count == 1;
+    if (!definition.allows_document_hash && !exact_control_ledger)
+        || (definition.allows_document_hash && !exact_unsealed_oracle && !exact_sealed_oracle)
+    {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    Ok(())
+}
+
+fn validate_migration_ledger(
+    connection: &Connection,
+    definition: &SchemaDefinition<'_>,
+) -> Result<(), CatalogError> {
+    let checksum = schema_checksum(definition);
+    let (row_count, matching_count): (i64, i64) = connection
+        .query_row(
+            "SELECT
+                count(*),
+                coalesce(sum(migration_id = ?1 AND checksum = ?2), 0)
+             FROM (SELECT migration_id, checksum FROM migrations LIMIT 2)",
+            params![definition.version, checksum.as_bytes().as_slice(),],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(CatalogError::sqlite)?;
+    if row_count != 1 {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    if matching_count != 1 {
+        return Err(CatalogError::new(
+            CatalogErrorKind::MigrationChecksumMismatch,
+        ));
     }
     Ok(())
 }

@@ -626,6 +626,48 @@ fn undeclared_schema_objects_are_rejected() {
 }
 
 #[test]
+fn undeclared_application_metadata_is_rejected() {
+    let directory = TempDir::new().expect("temporary generation directory is created");
+    write_fixture(directory.path());
+    let connection =
+        Connection::open(directory.path().join(ORACLE_FILENAME)).expect("oracle opens");
+    connection
+        .execute(
+            "INSERT INTO application_meta(key, value) VALUES ('unexpected', x'01')",
+            [],
+        )
+        .expect("undeclared application metadata is installed");
+    drop(connection);
+
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let error = OracleReader::open_in(directory.path(), &context)
+        .expect_err("the exact application metadata ledger rejects extra rows");
+    assert_eq!(error.kind(), CatalogErrorKind::Corrupt);
+}
+
+#[test]
+fn undeclared_migration_is_rejected() {
+    let directory = TempDir::new().expect("temporary generation directory is created");
+    write_fixture(directory.path());
+    let connection =
+        Connection::open(directory.path().join(ORACLE_FILENAME)).expect("oracle opens");
+    connection
+        .execute(
+            "INSERT INTO migrations(migration_id, checksum) VALUES (3, zeroblob(32))",
+            [],
+        )
+        .expect("undeclared migration is installed");
+    drop(connection);
+
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let error = OracleReader::open_in(directory.path(), &context)
+        .expect_err("the exact migration ledger rejects extra rows");
+    assert_eq!(error.kind(), CatalogErrorKind::Corrupt);
+}
+
+#[test]
 fn reserved_sqlite_prefixed_schema_objects_are_not_hidden_from_the_ledger() {
     let directory = TempDir::new().expect("temporary generation directory is created");
     write_fixture(directory.path());
