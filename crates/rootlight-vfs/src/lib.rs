@@ -125,10 +125,7 @@ impl RelativePath {
     ///
     /// Returns [`VfsError`] when the child would violate path bounds.
     pub fn join_name(&self, name: &OsStr) -> Result<Self, VfsError> {
-        if self.components.len() >= MAX_PATH_COMPONENTS || contains_separator_alias(name) {
-            return Err(VfsError::InvalidRelativePath);
-        }
-        if name.is_empty() {
+        if self.components.len() >= MAX_PATH_COMPONENTS || !is_single_normal_component(name) {
             return Err(VfsError::InvalidRelativePath);
         }
         let name_bytes = platform_path_byte_len(name).ok_or(VfsError::PathTooLong {
@@ -737,10 +734,29 @@ fn append_identity_component(identity: &mut Vec<u8>, bytes: &[u8]) -> Result<(),
     Ok(())
 }
 
+fn is_single_normal_component(name: &OsStr) -> bool {
+    if name.is_empty() || contains_separator_alias(name) {
+        return false;
+    }
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(component)), None) if component == name
+    )
+}
+
+#[cfg(unix)]
 fn contains_separator_alias(component: &OsStr) -> bool {
-    component
-        .to_str()
-        .is_some_and(|component| component.contains('\\'))
+    use std::os::unix::ffi::OsStrExt as _;
+
+    component.as_bytes().contains(&b'\\')
+}
+
+#[cfg(windows)]
+fn contains_separator_alias(component: &OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    component.encode_wide().any(|unit| unit == u16::from(b'\\'))
 }
 
 #[cfg(unix)]
@@ -909,6 +925,28 @@ mod tests {
                 .as_str(),
             "src/lib.rs"
         );
+    }
+
+    #[test]
+    fn joined_names_accept_exactly_one_normal_component() {
+        let parent = RelativePath::parse(Path::new("src")).expect("fixture parent is valid");
+        for name in ["", ".", "..", "/", "nested/file.rs", "nested\\file.rs"] {
+            assert!(parent.join_name(OsStr::new(name)).is_err(), "{name}");
+        }
+        #[cfg(windows)]
+        for name in ["C:", "C:/absolute", "//server/share"] {
+            assert!(parent.join_name(OsStr::new(name)).is_err(), "{name}");
+        }
+
+        let joined = parent
+            .join_name(OsStr::new("lib.rs"))
+            .expect("one normal component is accepted");
+        let parsed =
+            RelativePath::parse(Path::new("src/lib.rs")).expect("equivalent path is valid");
+        assert_eq!(joined, parsed);
+
+        let (_, root) = fixture();
+        assert_eq!(root.file_id(&joined), root.file_id(&parsed));
     }
 
     #[test]
@@ -1171,5 +1209,24 @@ mod tests {
         let path = RelativePath::parse(Path::new("link")).expect("link path is valid");
 
         assert!(root.snapshot(&path, 1024).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn joined_paths_preserve_embedded_link_validation() {
+        use std::os::unix::fs::symlink;
+
+        let (temporary, root) = fixture();
+        let real = temporary.path().join("real");
+        fs::create_dir(&real).expect("real directory is created");
+        fs::write(real.join("sample.rs"), b"source").expect("fixture source is written");
+        symlink(&real, temporary.path().join("link")).expect("directory link is created");
+        let linked_parent =
+            RelativePath::parse(Path::new("link")).expect("link path identity is valid");
+        let path = linked_parent
+            .join_name(OsStr::new("sample.rs"))
+            .expect("leaf name is valid");
+
+        assert!(root.snapshot(&path, 1_024).is_err());
     }
 }
