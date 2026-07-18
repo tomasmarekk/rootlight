@@ -568,14 +568,10 @@ fn repository_index(
     if !submitted.inserted {
         return retry_index_response(metadata, submitted.operation);
     }
-    if propagate_attached_client_cancellation(
-        runtime,
-        journal,
-        operation,
-        detached,
-        context,
-        lifecycle_deadline,
-    )? {
+    if let Some(admission) = context.index_admission.as_ref() {
+        admission.mark_inserted();
+    }
+    if propagate_peer_cancellation(runtime, journal, operation, context, lifecycle_deadline)? {
         return Err(cancelled_error());
     }
     let (_, cancellation) = journal_lifecycle_call(
@@ -584,11 +580,10 @@ fn repository_index(
     )?;
     match service.prepare_rust_fixture(&PathBuf::from(request.root), &cancellation) {
         Ok(prepared) => {
-            if propagate_attached_client_cancellation(
+            if propagate_peer_cancellation(
                 runtime,
                 journal,
                 operation,
-                detached,
                 context,
                 lifecycle_deadline,
             )? {
@@ -626,18 +621,22 @@ fn repository_index(
                 lock_metadata(metadata)?.fail_closed(operation);
                 return Err(error);
             }
-            propagate_attached_client_cancellation(
-                runtime,
-                journal,
-                operation,
-                detached,
-                context,
-                lifecycle_deadline,
-            )?;
-            let operation_record = match journal_lifecycle_call(
-                runtime,
-                journal.complete_publication_until(operation, lifecycle_deadline),
-            ) {
+            propagate_peer_cancellation(runtime, journal, operation, context, lifecycle_deadline)?;
+            let completion = match context.index_admission.clone() {
+                Some(admission) => journal_lifecycle_call(
+                    runtime,
+                    journal.complete_publication_with_admission_until(
+                        operation,
+                        admission,
+                        lifecycle_deadline,
+                    ),
+                ),
+                None => journal_lifecycle_call(
+                    runtime,
+                    journal.complete_publication_until(operation, lifecycle_deadline),
+                ),
+            };
+            let operation_record = match completion {
                 Ok(record) => record,
                 Err(error) => {
                     if service.discard_staged(staged).is_err() {
@@ -688,17 +687,15 @@ fn repository_index(
     }
 }
 
-fn propagate_attached_client_cancellation(
+fn propagate_peer_cancellation(
     runtime: &tokio::runtime::Runtime,
     journal: &JournalActorHandle,
     operation: OperationId,
-    detached: bool,
     context: &FirstSliceIpcContext,
     lifecycle_deadline: Instant,
 ) -> Result<bool, PublicError> {
-    if detached
-        || context.cancellation.reason()
-            != Some(rootlight_operations::CancellationReason::ClientRequest)
+    if context.cancellation.reason()
+        != Some(rootlight_operations::CancellationReason::ClientRequest)
     {
         return Ok(false);
     }
@@ -1659,6 +1656,7 @@ mod tests {
 
     fn index_across_client_disconnect(
         detached: bool,
+        protocol_error: bool,
         operation_byte: u8,
     ) -> (
         Result<FirstSliceIpcResponse, PublicError>,
@@ -1687,6 +1685,8 @@ mod tests {
         let operation = OperationId::from_bytes([operation_byte; 16]);
         let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
         let connection_cancellation = cancellation.clone();
+        let admission = rootlight_daemon_core::FirstSliceAdmission::default();
+        let connection_admission = admission.clone();
         let index_daemon = daemon.clone();
         let root = fixture.path().to_string_lossy().into_owned();
         let index = thread::spawn(move || {
@@ -1696,6 +1696,7 @@ mod tests {
                 selected_protocol_minor: 5,
                 cancellation,
                 deadline,
+                index_admission: Some(admission),
             };
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_time()
@@ -1714,9 +1715,13 @@ mod tests {
         reached_receiver
             .recv_timeout(Duration::from_secs(5))
             .expect("index reaches publication boundary");
-        assert!(
-            connection_cancellation.cancel(rootlight_operations::CancellationReason::ClientRequest)
-        );
+        if !detached || protocol_error {
+            connection_admission.cancel_publication();
+            assert!(
+                connection_cancellation
+                    .cancel(rootlight_operations::CancellationReason::ClientRequest)
+            );
+        }
         release_sender.send(()).expect("index resumes");
         let response = index.join().expect("index thread joins");
         let status = execute(
@@ -1750,7 +1755,7 @@ mod tests {
 
     #[test]
     fn attached_disconnect_cancels_before_publication() {
-        let (response, terminal, published) = index_across_client_disconnect(false, 61);
+        let (response, terminal, published) = index_across_client_disconnect(false, false, 61);
 
         assert_eq!(
             response.expect_err("attached request is cancelled").code(),
@@ -1763,7 +1768,7 @@ mod tests {
 
     #[test]
     fn detached_disconnect_does_not_cancel_publication() {
-        let (response, terminal, published) = index_across_client_disconnect(true, 62);
+        let (response, terminal, published) = index_across_client_disconnect(true, false, 62);
 
         assert!(matches!(
             response.expect("detached request completes"),
@@ -1771,6 +1776,21 @@ mod tests {
         ));
         assert_eq!(terminal.state, OperationState::Succeeded);
         assert!(published);
+    }
+
+    #[test]
+    fn detached_protocol_error_cancels_before_publication() {
+        let (response, terminal, published) = index_across_client_disconnect(true, true, 63);
+
+        assert_eq!(
+            response
+                .expect_err("detached protocol error is cancelled")
+                .code(),
+            ErrorCode::Cancelled
+        );
+        assert_eq!(terminal.state, OperationState::Cancelled);
+        assert_eq!(terminal.stage, OperationStage::Cleanup);
+        assert!(!published);
     }
 
     #[test]
@@ -1968,6 +1988,7 @@ mod tests {
                 selected_protocol_minor: 5,
                 cancellation: rootlight_operations::Cancellation::with_deadline(deadline),
                 deadline,
+                index_admission: None,
             };
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_time()
@@ -2141,6 +2162,7 @@ mod tests {
                 selected_protocol_minor: 5,
                 cancellation: Cancellation::with_deadline(deadline),
                 deadline,
+                index_admission: None,
             },
         )
         .expect_err("missing receipt fails closed");
@@ -2196,6 +2218,7 @@ mod tests {
             selected_protocol_minor: 5,
             cancellation: rootlight_operations::Cancellation::with_deadline(deadline),
             deadline,
+            index_admission: None,
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
