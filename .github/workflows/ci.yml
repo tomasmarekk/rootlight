@@ -176,7 +176,7 @@ jobs:
             artifacts/gate-1/${{ matrix.os }}/summary.json
             artifacts/gate-1/${{ matrix.os }}/transcript.jsonl
             artifacts/gate-1/${{ matrix.os }}/failure.json
-          if-no-files-found: ignore
+          if-no-files-found: error
           include-hidden-files: false
           overwrite: false
 
