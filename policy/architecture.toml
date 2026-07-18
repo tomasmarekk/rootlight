@@ -286,6 +286,7 @@ allowed_internal_dependencies = [
   "rootlight-ir",
   "rootlight-mcp-contract",
   "rootlight-observability",
+  "rootlight-operations",
   "rootlight-protocol",
   "rootlight-runtime",
   "rootlight-storage",

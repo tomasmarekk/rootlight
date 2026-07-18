@@ -19,6 +19,7 @@ use rootlight_client::{Client, ConnectPolicy, OperationState as ClientOperationS
 use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
 use rootlight_ids::OperationId;
 use rootlight_mcp_contract::MCP_SPECIFICATION_DATE;
+use rootlight_operations::{OperationCounts, OperationJournal};
 use rootlight_runtime::{RuntimeError, RuntimePaths};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -41,6 +42,7 @@ const SYNTAX_RECOVERY_DIAGNOSTIC: &str = "syntax-error-recovery";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const CANCELLATION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(4);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const TRANSPORT_SAMPLES: usize = 20;
 const CANCELLATION_FIXTURE_FILES: usize = 256;
@@ -176,15 +178,17 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     exercise_protocol_errors(&mut mcp, &mut transcript)?;
     let transport_samples = exercise_transport_samples(&mut mcp, &mut transcript)?;
     let control_client = Client::connect_or_start(&paths, [0x63; 16], ConnectPolicy::ExistingOnly)?;
+    let operation_journal = paths.operation_journal_path();
     let cancellation = exercise_attached_cancellation(
         &mut mcp,
         &catalog,
         &mut transcript,
+        &operation_journal,
         &control_client,
         &cancellation_root,
     )?;
     let hostile_root = exercise_hostile_root(&mut mcp, &catalog, &mut transcript)?;
-    wait_until_idle(&control_client)?;
+    wait_until_connections_released(&control_client)?;
 
     let v1_index = index_repository("v1", &mut mcp, &catalog, &mut transcript, &repository_root)?;
     if v1_index.parent_generation.is_some() {
@@ -424,6 +428,8 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         "repo_index_discovered_indexed_and_entity_counts",
         "durable_index_size_ephemeral_fallback",
         "tantivy_index_bytes_not_present_in_first_slice",
+        "first_slice_health_operation_counters_are_scheduler_only",
+        "malformed_file_coverage_through_current_mcp_surface",
     ];
     if peak_rss_bytes.is_none() {
         unavailable_metrics.push("true_process_rss_operation_status_reported_zero");
@@ -474,21 +480,60 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
             prompt_injection_observed_only_in_untrusted_data_channel: true,
             ignored_sentinel_absent: true,
             outside_root_sentinel_absent: true,
-            malformed_file_coverage_status: "unknown",
+            expected_malformed_file_coverage_status: "unknown",
+            malformed_file_coverage_observed_through_mcp: false,
+            observed_valid_query_coverage_status: "complete",
+            observed_valid_query_rust_coverage_status: "complete",
+            observed_valid_query_rust_coverage_tier: "D",
+            observed_source_read_coverage_status: "bounded",
+            observed_source_read_rust_coverage_status: "bounded",
+            observed_source_read_rust_coverage_tier: "D",
             expected_syntax_diagnostic_code: SYNTAX_RECOVERY_DIAGNOSTIC,
             syntax_recovery_diagnostic_observed,
             syntax_diagnostic_acceptance_met: syntax_recovery_diagnostic_observed,
             nested_ignored_exact_match_count: discovery_policy.ignored_exact_match_count,
+            nested_ignored_policy_exclusion_test_passed: discovery_policy
+                .ignored_policy_exclusion_test_passed,
+            nested_ignored_exhaustive_repository_negative_claimed: discovery_policy
+                .ignored_exhaustive_repository_negative_claimed,
+            nested_ignored_response_coverage_status: discovery_policy
+                .ignored_response_coverage
+                .overall_status,
+            nested_ignored_response_rust_coverage_status: discovery_policy
+                .ignored_response_coverage
+                .language_status,
+            nested_ignored_response_rust_coverage_tier: discovery_policy
+                .ignored_response_coverage
+                .tier,
             nested_negation_kept_exact_match_count: discovery_policy.kept_exact_match_count,
             nested_negation_kept_source_read: discovery_policy.kept_source_read,
         },
         process_safety: ProcessSafetyEvidence {
+            live_daemon_port_verified_for_all_sessions: true,
+            cancellation_fixture_profile: "generated-cancellation-only-rust-v1",
+            cancellation_fixture_generated_rust_files: CANCELLATION_FIXTURE_FILES,
+            cancellation_fixture_functions_per_file: CANCELLATION_FIXTURE_FUNCTIONS_PER_FILE,
+            cancellation_follow_up_fixture_profile: "generated-cancellation-follow-up-rust-v1",
+            cancellation_follow_up_rust_files: 1,
+            cancellation_follow_up_functions_per_file: 1,
+            cancellation_admission_proof: "bounded_read_only_durable_operation_journal_counts_v1",
+            cancellation_durable_admission_observed: cancellation.durable_admission_observed,
+            cancellation_durable_admission_latency_us: cancellation.durable_admission_latency_us,
+            cancellation_durable_admission_queued: cancellation.durable_admission_counts.queued,
+            cancellation_durable_admission_running: cancellation.durable_admission_counts.running,
+            cancellation_durable_admission_cancelling: cancellation
+                .durable_admission_counts
+                .cancelling,
+            first_slice_health_operation_counters_scheduler_only: true,
+            first_slice_health_operation_counters_used_as_proof: false,
             attached_cancellation_notification_sent: cancellation.notification_sent,
             cancelled_request_response_observed: cancellation.response_observed,
             transport_responsive_after_cancellation: cancellation.transport_responsive,
             cancellation_follow_up_parent_generation_absent: cancellation
                 .follow_up_parent_generation_absent,
-            daemon_idle_after_cancellation: cancellation.daemon_idle,
+            durable_journal_idle_after_cancellation: cancellation.durable_journal_idle,
+            daemon_connection_slots_released_after_cancellation: cancellation
+                .daemon_connection_slots_released,
             hostile_root_error_code: hostile_root.error_code,
             hostile_root_error_message: hostile_root.error_message,
             hostile_root_identifiers_absent: hostile_root.identifiers_absent,
@@ -588,7 +633,39 @@ fn open_session(
         json!({}),
     )?;
     let catalog = ToolCatalog::parse(&tools.response)?;
+    probe_live_daemon_port(session, &mut process, &catalog, transcript)?;
     Ok((process, catalog, elapsed_micros(started.elapsed())))
+}
+
+fn probe_live_daemon_port(
+    session: &'static str,
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+) -> Result<(), VerticalError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| VerticalError::RandomUnavailable)?;
+    let arguments = json!({
+        "operation_id": OperationId::from_bytes(bytes).to_string(),
+        "action": "get"
+    });
+    catalog.validate_input("operation.status", &arguments)?;
+    let exchange = process.request(
+        transcript,
+        format!("{session}.live-daemon-port"),
+        "tools/call",
+        json!({"name": "operation.status", "arguments": arguments}),
+    )?;
+    if exchange.response.get("error").is_some() {
+        return Err(VerticalError::MissingLiveDaemonPort);
+    }
+    let outcome = catalog.validate_result("operation.status", &exchange.response)?;
+    assert_control_value_omits_sentinels(&outcome.structured)?;
+    if outcome.is_error && outcome.structured["error"]["code"] == "NOT_FOUND" {
+        Ok(())
+    } else {
+        Err(VerticalError::MissingLiveDaemonPort)
+    }
 }
 
 fn exercise_protocol_errors(
@@ -651,6 +728,7 @@ fn exercise_attached_cancellation(
     process: &mut McpProcess,
     catalog: &ToolCatalog,
     transcript: &mut TranscriptWriter,
+    operation_journal: &Path,
     control_client: &Client,
     repository_root: &Path,
 ) -> Result<CancellationEvidence, VerticalError> {
@@ -663,13 +741,28 @@ fn exercise_attached_cancellation(
         "detached": false
     });
     catalog.validate_input("repo.index", &arguments)?;
-    process.begin_cancelled_tool_request(
+    wait_until_journal_idle(operation_journal)?;
+    wait_until_connections_released(control_client)?;
+    let admission_started = Instant::now();
+    let request_id = process.begin_tool_request(
         transcript,
         "cancellation.attached-repo-index",
-        "cancellation.notification",
         "repo.index",
         arguments,
     )?;
+    let (durable_admission_latency_us, durable_admission_counts) =
+        wait_until_operation_admitted(operation_journal, admission_started)?;
+    process.notification(
+        transcript,
+        "cancellation.notification".to_owned(),
+        "notifications/cancelled",
+        json!({
+            "requestId": request_id,
+            "reason": "gate-1-attached-cleanup"
+        }),
+    )?;
+    wait_until_journal_idle(operation_journal)?;
+    wait_until_connections_released(control_client)?;
     let ping = process.request(
         transcript,
         "cancellation.transport-ping".to_owned(),
@@ -681,7 +774,7 @@ fn exercise_attached_cancellation(
             "MCP transport did not remain responsive after cancellation",
         ));
     }
-    wait_until_idle(control_client)?;
+    shrink_cancellation_repository(repository_root)?;
     let follow_up = index_repository(
         "cancellation-follow-up",
         process,
@@ -694,13 +787,18 @@ fn exercise_attached_cancellation(
             "attached cancellation published partial query state",
         ));
     }
-    wait_until_idle(control_client)?;
+    wait_until_journal_idle(operation_journal)?;
+    wait_until_connections_released(control_client)?;
     Ok(CancellationEvidence {
+        durable_admission_observed: true,
+        durable_admission_latency_us,
+        durable_admission_counts,
         notification_sent: true,
         response_observed: false,
         transport_responsive: true,
         follow_up_parent_generation_absent: true,
-        daemon_idle: true,
+        durable_journal_idle: true,
+        daemon_connection_slots_released: true,
         follow_up_status: follow_up.status_evidence,
     })
 }
@@ -936,7 +1034,7 @@ fn query_snapshot(
     require_trust_labels(&locate.structured)?;
     assert_control_value_omits_sentinels(&locate.structured)?;
     assert_read_correlation(&locate.structured, repository, expected_generation)?;
-    assert_unknown_rust_coverage(&locate.structured)?;
+    assert_complete_tier_d_rust_coverage(&locate.structured)?;
     let matches =
         locate.structured["data"]["matches"]
             .as_array()
@@ -977,7 +1075,7 @@ fn query_snapshot(
     require_trust_labels(&lexical.structured)?;
     assert_control_value_omits_sentinels(&lexical.structured)?;
     assert_read_correlation(&lexical.structured, repository, expected_generation)?;
-    assert_unknown_rust_coverage(&lexical.structured)?;
+    assert_complete_tier_d_rust_coverage(&lexical.structured)?;
     let lexical_matches =
         lexical.structured["data"]["matches"]
             .as_array()
@@ -1014,7 +1112,7 @@ fn query_snapshot(
     require_trust_labels(&explain.structured)?;
     assert_control_value_omits_sentinels(&explain.structured)?;
     assert_read_correlation(&explain.structured, repository, expected_generation)?;
-    assert_unknown_rust_coverage(&explain.structured)?;
+    assert_complete_tier_d_rust_coverage(&explain.structured)?;
     let symbols =
         explain.structured["data"]["symbols"]
             .as_array()
@@ -1051,7 +1149,7 @@ fn query_snapshot(
     require_tool_success(&source, "source.read")?;
     require_trust_labels(&source.structured)?;
     assert_read_correlation(&source.structured, repository, expected_generation)?;
-    assert_unknown_rust_coverage(&source.structured)?;
+    assert_bounded_tier_d_rust_coverage(&source.structured)?;
     assert_absent(&source.structured, IGNORED_SENTINEL)?;
     assert_absent(&source.structured, OUTSIDE_SENTINEL)?;
     let chunks = source.structured["data"]["chunks"]
@@ -1124,7 +1222,7 @@ fn exercise_nested_ignore_policy(
     require_trust_labels(&kept.structured)?;
     assert_control_value_omits_sentinels(&kept.structured)?;
     assert_read_correlation(&kept.structured, repository, generation)?;
-    assert_unknown_rust_coverage(&kept.structured)?;
+    assert_complete_tier_d_rust_coverage(&kept.structured)?;
     let kept_matches =
         kept.structured["data"]["matches"]
             .as_array()
@@ -1165,7 +1263,7 @@ fn exercise_nested_ignore_policy(
     require_tool_success(&kept_source, "source.read")?;
     require_trust_labels(&kept_source.structured)?;
     assert_read_correlation(&kept_source.structured, repository, generation)?;
-    assert_unknown_rust_coverage(&kept_source.structured)?;
+    assert_bounded_tier_d_rust_coverage(&kept_source.structured)?;
     assert_control_value_omits_sentinels(&kept_source.structured)?;
     let chunks =
         kept_source.structured["data"]["chunks"]
@@ -1203,7 +1301,6 @@ fn exercise_nested_ignore_policy(
     require_trust_labels(&ignored.structured)?;
     assert_control_value_omits_sentinels(&ignored.structured)?;
     assert_read_correlation(&ignored.structured, repository, generation)?;
-    assert_unknown_rust_coverage(&ignored.structured)?;
     if ignored.structured["data"]["matches"]
         .as_array()
         .is_none_or(|matches| !matches.is_empty())
@@ -1214,6 +1311,9 @@ fn exercise_nested_ignore_policy(
     }
     Ok(DiscoveryPolicyEvidence {
         ignored_exact_match_count: 0,
+        ignored_policy_exclusion_test_passed: true,
+        ignored_exhaustive_repository_negative_claimed: false,
+        ignored_response_coverage: observe_rust_coverage(&ignored.structured),
         kept_exact_match_count: 1,
         kept_source_read: true,
     })
@@ -1269,23 +1369,64 @@ fn assert_read_correlation(
     }
 }
 
-fn assert_unknown_rust_coverage(structured: &Value) -> Result<(), VerticalError> {
+fn assert_complete_tier_d_rust_coverage(structured: &Value) -> Result<(), VerticalError> {
+    assert_tier_d_rust_coverage(
+        structured,
+        "complete",
+        "valid first-slice query did not report complete Tier-D Rust coverage",
+    )
+}
+
+fn assert_bounded_tier_d_rust_coverage(structured: &Value) -> Result<(), VerticalError> {
+    assert_tier_d_rust_coverage(
+        structured,
+        "bounded",
+        "source.read did not report bounded Tier-D Rust coverage",
+    )
+}
+
+fn assert_tier_d_rust_coverage(
+    structured: &Value,
+    expected_status: &str,
+    failure: &'static str,
+) -> Result<(), VerticalError> {
     let languages =
         structured["coverage"]["languages"]
             .as_array()
             .ok_or(VerticalError::Invariant(
                 "read response omitted language coverage",
             ))?;
-    if structured["coverage"]["status"] == "unknown"
-        && languages
-            .iter()
-            .any(|language| language["language"] == "rust" && language["status"] == "unknown")
+    if structured["coverage"]["status"] == expected_status
+        && languages.len() == 1
+        && languages[0]["language"] == "rust"
+        && languages[0]["status"] == expected_status
+        && languages[0]["tier"] == "D"
     {
         Ok(())
     } else {
-        Err(VerticalError::Invariant(
-            "malformed fixture did not produce Unknown Rust coverage through MCP",
-        ))
+        Err(VerticalError::Invariant(failure))
+    }
+}
+
+fn observe_rust_coverage(structured: &Value) -> RustCoverageObservation {
+    let rust = structured["coverage"]["languages"]
+        .as_array()
+        .and_then(|languages| {
+            languages
+                .iter()
+                .find(|language| language["language"] == "rust")
+        });
+    RustCoverageObservation {
+        overall_status: structured["coverage"]["status"]
+            .as_str()
+            .unwrap_or("unreported")
+            .to_owned(),
+        language_status: rust
+            .and_then(|language| language["status"].as_str())
+            .map(str::to_owned),
+        tier: rust
+            .and_then(|language| language["tier"].as_str())
+            .map(str::to_owned),
     }
 }
 
@@ -1436,6 +1577,57 @@ fn prepare_cancellation_repository(root: &Path) -> Result<(), VerticalError> {
         })?;
     }
     Ok(())
+}
+
+fn shrink_cancellation_repository(root: &Path) -> Result<(), VerticalError> {
+    let source_root = root.join("src");
+    let expected = (0..CANCELLATION_FIXTURE_FILES)
+        .map(|index| format!("generated_{index:03}.rs"))
+        .collect::<BTreeSet<_>>();
+    let mut observed = BTreeSet::new();
+    for entry in fs::read_dir(&source_root).map_err(|source| VerticalError::Io {
+        action: "read cancellation fixture source directory",
+        source,
+    })? {
+        let entry = entry.map_err(|source| VerticalError::Io {
+            action: "enumerate cancellation fixture source directory",
+            source,
+        })?;
+        if !entry
+            .file_type()
+            .map_err(|source| VerticalError::Io {
+                action: "read cancellation fixture source type",
+                source,
+            })?
+            .is_file()
+        {
+            return Err(VerticalError::Invariant(
+                "cancellation fixture source directory contained a non-file entry",
+            ));
+        }
+        observed.insert(entry.file_name().into_string().map_err(|_| {
+            VerticalError::Invariant("cancellation fixture source name was not valid UTF-8")
+        })?);
+    }
+    if observed != expected {
+        return Err(VerticalError::Invariant(
+            "cancellation fixture source set changed before bounded reduction",
+        ));
+    }
+    for name in expected {
+        fs::remove_file(source_root.join(name)).map_err(|source| VerticalError::Io {
+            action: "remove generated cancellation fixture source",
+            source,
+        })?;
+    }
+    fs::write(
+        source_root.join("lib.rs"),
+        b"pub fn cancellation_follow_up() -> usize { 7 }\n",
+    )
+    .map_err(|source| VerticalError::Io {
+        action: "write cancellation follow-up source",
+        source,
+    })
 }
 
 fn modify_fixture_to_v2(repository_root: &Path) -> Result<(), VerticalError> {
@@ -1857,14 +2049,13 @@ impl McpProcess {
         transcript.record(self.session, label, &bytes, None, started.elapsed(), false)
     }
 
-    fn begin_cancelled_tool_request(
+    fn begin_tool_request(
         &mut self,
         transcript: &mut TranscriptWriter,
         request_label: &str,
-        cancellation_label: &str,
         tool: &str,
         arguments: Value,
-    ) -> Result<(), VerticalError> {
+    ) -> Result<u64, VerticalError> {
         let id = self.next_request_id;
         self.next_request_id = self
             .next_request_id
@@ -1876,34 +2067,14 @@ impl McpProcess {
             "method": "tools/call",
             "params": {"name": tool, "arguments": arguments}
         });
-        let cancellation = json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/cancelled",
-            "params": {
-                "requestId": id,
-                "reason": "gate-1-attached-cleanup"
-            }
-        });
         let mut request_bytes =
             serde_json::to_vec(&request).map_err(|source| VerticalError::Json {
                 action: "serialize cancellable MCP request",
                 source,
             })?;
         request_bytes.push(b'\n');
-        let mut cancellation_bytes =
-            serde_json::to_vec(&cancellation).map_err(|source| VerticalError::Json {
-                action: "serialize MCP cancellation notification",
-                source,
-            })?;
-        cancellation_bytes.push(b'\n');
-        let mut frames = Vec::new();
-        frames
-            .try_reserve_exact(request_bytes.len().saturating_add(cancellation_bytes.len()))
-            .map_err(|_| VerticalError::MemoryUnavailable)?;
-        frames.extend_from_slice(&request_bytes);
-        frames.extend_from_slice(&cancellation_bytes);
         let started = Instant::now();
-        self.write(&frames)?;
+        self.write(&request_bytes)?;
         let elapsed = started.elapsed();
         transcript.record(
             self.session,
@@ -1913,14 +2084,7 @@ impl McpProcess {
             elapsed,
             true,
         )?;
-        transcript.record(
-            self.session,
-            cancellation_label.to_owned(),
-            &cancellation_bytes,
-            None,
-            Duration::ZERO,
-            false,
-        )
+        Ok(id)
     }
 
     fn raw_exchange(
@@ -2144,21 +2308,64 @@ fn wait_until_ready(paths: &RuntimePaths) -> Result<(), VerticalError> {
     }
 }
 
-fn wait_until_idle(client: &Client) -> Result<(), VerticalError> {
+fn wait_until_connections_released(client: &Client) -> Result<(), VerticalError> {
     let deadline = Instant::now()
         .checked_add(STOP_TIMEOUT)
         .ok_or(VerticalError::Clock)?;
+    let mut consecutive_released_samples = 0_u8;
     loop {
         let health = client.health()?;
-        if health.active_operations == 0
-            && health.admitted_operations == 0
-            && health.queued_operations == 0
-            && health.running_operations == 0
-        {
-            return Ok(());
+        if health.active_connections <= 1 {
+            consecutive_released_samples = consecutive_released_samples.saturating_add(1);
+            if consecutive_released_samples == 3 {
+                return Ok(());
+            }
+        } else {
+            consecutive_released_samples = 0;
         }
         if Instant::now() >= deadline {
             return Err(VerticalError::DaemonCleanupTimedOut);
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn wait_until_operation_admitted(
+    operation_journal: &Path,
+    started: Instant,
+) -> Result<(u64, OperationCounts), VerticalError> {
+    let deadline = started
+        .checked_add(CANCELLATION_ADMISSION_TIMEOUT)
+        .ok_or(VerticalError::Clock)?;
+    loop {
+        let counts = OperationJournal::counts_path_until(operation_journal, deadline)?;
+        if counts.active() > 0 {
+            return Ok((elapsed_micros(started.elapsed()), counts));
+        }
+        if Instant::now() >= deadline {
+            return Err(VerticalError::DaemonAdmissionTimedOut);
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn wait_until_journal_idle(operation_journal: &Path) -> Result<(), VerticalError> {
+    let deadline = Instant::now()
+        .checked_add(STOP_TIMEOUT)
+        .ok_or(VerticalError::Clock)?;
+    let mut consecutive_idle_samples = 0_u8;
+    loop {
+        let counts = OperationJournal::counts_path_until(operation_journal, deadline)?;
+        if counts.active() == 0 {
+            consecutive_idle_samples = consecutive_idle_samples.saturating_add(1);
+            if consecutive_idle_samples == 3 {
+                return Ok(());
+            }
+        } else {
+            consecutive_idle_samples = 0;
+        }
+        if Instant::now() >= deadline {
+            return Err(VerticalError::DurableJournalIdleTimedOut);
         }
         thread::sleep(POLL_INTERVAL);
     }
@@ -2435,16 +2642,29 @@ fn canonicalize_known_identities(value: &Value, replacements: &[(&str, &str)]) -
 
 struct DiscoveryPolicyEvidence {
     ignored_exact_match_count: usize,
+    ignored_policy_exclusion_test_passed: bool,
+    ignored_exhaustive_repository_negative_claimed: bool,
+    ignored_response_coverage: RustCoverageObservation,
     kept_exact_match_count: usize,
     kept_source_read: bool,
 }
 
+struct RustCoverageObservation {
+    overall_status: String,
+    language_status: Option<String>,
+    tier: Option<String>,
+}
+
 struct CancellationEvidence {
+    durable_admission_observed: bool,
+    durable_admission_latency_us: u64,
+    durable_admission_counts: OperationCounts,
     notification_sent: bool,
     response_observed: bool,
     transport_responsive: bool,
     follow_up_parent_generation_absent: bool,
-    daemon_idle: bool,
+    durable_journal_idle: bool,
+    daemon_connection_slots_released: bool,
     follow_up_status: OperationStatusEvidence,
 }
 
@@ -2767,22 +2987,50 @@ struct FixtureEvidence {
     prompt_injection_observed_only_in_untrusted_data_channel: bool,
     ignored_sentinel_absent: bool,
     outside_root_sentinel_absent: bool,
-    malformed_file_coverage_status: &'static str,
+    expected_malformed_file_coverage_status: &'static str,
+    malformed_file_coverage_observed_through_mcp: bool,
+    observed_valid_query_coverage_status: &'static str,
+    observed_valid_query_rust_coverage_status: &'static str,
+    observed_valid_query_rust_coverage_tier: &'static str,
+    observed_source_read_coverage_status: &'static str,
+    observed_source_read_rust_coverage_status: &'static str,
+    observed_source_read_rust_coverage_tier: &'static str,
     expected_syntax_diagnostic_code: &'static str,
     syntax_recovery_diagnostic_observed: bool,
     syntax_diagnostic_acceptance_met: bool,
     nested_ignored_exact_match_count: usize,
+    nested_ignored_policy_exclusion_test_passed: bool,
+    nested_ignored_exhaustive_repository_negative_claimed: bool,
+    nested_ignored_response_coverage_status: String,
+    nested_ignored_response_rust_coverage_status: Option<String>,
+    nested_ignored_response_rust_coverage_tier: Option<String>,
     nested_negation_kept_exact_match_count: usize,
     nested_negation_kept_source_read: bool,
 }
 
 #[derive(Serialize)]
 struct ProcessSafetyEvidence {
+    live_daemon_port_verified_for_all_sessions: bool,
+    cancellation_fixture_profile: &'static str,
+    cancellation_fixture_generated_rust_files: usize,
+    cancellation_fixture_functions_per_file: usize,
+    cancellation_follow_up_fixture_profile: &'static str,
+    cancellation_follow_up_rust_files: usize,
+    cancellation_follow_up_functions_per_file: usize,
+    cancellation_admission_proof: &'static str,
+    cancellation_durable_admission_observed: bool,
+    cancellation_durable_admission_latency_us: u64,
+    cancellation_durable_admission_queued: u32,
+    cancellation_durable_admission_running: u32,
+    cancellation_durable_admission_cancelling: u32,
+    first_slice_health_operation_counters_scheduler_only: bool,
+    first_slice_health_operation_counters_used_as_proof: bool,
     attached_cancellation_notification_sent: bool,
     cancelled_request_response_observed: bool,
     transport_responsive_after_cancellation: bool,
     cancellation_follow_up_parent_generation_absent: bool,
-    daemon_idle_after_cancellation: bool,
+    durable_journal_idle_after_cancellation: bool,
+    daemon_connection_slots_released_after_cancellation: bool,
     hostile_root_error_code: &'static str,
     hostile_root_error_message: &'static str,
     hostile_root_identifiers_absent: bool,
@@ -3095,10 +3343,16 @@ pub(crate) enum VerticalError {
     MissingBinary(PathBuf),
     #[error("MCP production main does not advertise the exact first-slice tool catalog")]
     MissingProductionToolWiring,
+    #[error("MCP production main is not connected to the supervised daemon first-slice port")]
+    MissingLiveDaemonPort,
+    #[error("OS randomness was unavailable for the MCP live-port probe")]
+    RandomUnavailable,
     #[error("MCP vertical runtime setup failed")]
     Runtime(#[source] RuntimeError),
     #[error("MCP vertical client failed")]
     Client(#[from] rootlight_client::ClientError),
+    #[error("read-only durable operation journal probe failed")]
+    OperationJournal(#[from] rootlight_operations::OperationError),
     #[error("{action}")]
     Io {
         action: &'static str,
@@ -3131,6 +3385,10 @@ pub(crate) enum VerticalError {
     DaemonReadyTimedOut,
     #[error("daemon discovery cleanup timed out")]
     DaemonCleanupTimedOut,
+    #[error("durable journal did not expose an admitted operation before its request deadline")]
+    DaemonAdmissionTimedOut,
+    #[error("durable operation journal cleanup timed out")]
+    DurableJournalIdleTimedOut,
     #[error("child process cleanup timed out")]
     ChildStopTimedOut,
     #[error("MCP child closed stdout before a response")]
@@ -3161,14 +3419,21 @@ impl VerticalError {
             | Self::DuplicateOption(_)
             | Self::UnexpectedArgument(_) => "arguments",
             Self::MissingBinary(_) => "missing_binary",
-            Self::MissingProductionToolWiring => "production_tool_wiring",
+            Self::MissingProductionToolWiring | Self::MissingLiveDaemonPort => {
+                "production_tool_wiring"
+            }
+            Self::RandomUnavailable => "random_unavailable",
             Self::Runtime(_) | Self::Client(_) => "daemon_transport",
+            Self::OperationJournal(_) => "operation_journal_probe",
             Self::Io { .. } => "io",
             Self::Json { .. } | Self::Utf8 { .. } | Self::OwnedUtf8 { .. } => "encoding",
             Self::Invariant(_) => "invariant",
             Self::RequestTimedOut => "request_timeout",
             Self::DaemonReadyTimedOut => "daemon_ready_timeout",
-            Self::DaemonCleanupTimedOut | Self::ChildStopTimedOut => "cleanup_timeout",
+            Self::DaemonAdmissionTimedOut => "daemon_admission_timeout",
+            Self::DaemonCleanupTimedOut
+            | Self::DurableJournalIdleTimedOut
+            | Self::ChildStopTimedOut => "cleanup_timeout",
             Self::UnexpectedChildEof | Self::ChildFailed { .. } => "child_process",
             Self::McpOutputTooLarge => "protocol_limit",
             Self::ReaderThreadPanicked => "reader_thread",
@@ -3182,9 +3447,12 @@ impl VerticalError {
 #[cfg(test)]
 mod tests {
     use super::{
-        EXPECTED_TOOLS, Options, VerticalError, assert_unknown_rust_coverage,
+        CANCELLATION_FIXTURE_FILES, EXPECTED_TOOLS, Options, VerticalError,
+        assert_bounded_tier_d_rust_coverage, assert_complete_tier_d_rust_coverage,
         canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
-        modify_fixture_to_v2, nearest_rank, normalize_read_response, redact_request_for_evidence,
+        modify_fixture_to_v2, nearest_rank, normalize_read_response, observe_rust_coverage,
+        prepare_cancellation_repository, redact_request_for_evidence,
+        shrink_cancellation_repository,
     };
     use serde_json::json;
 
@@ -3299,17 +3567,28 @@ mod tests {
     }
 
     #[test]
-    fn malformed_coverage_and_diagnostic_checks_are_explicit() {
-        let coverage = json!({
+    fn valid_query_coverage_and_diagnostic_checks_are_explicit() {
+        let complete = json!({
             "coverage": {
-                "status": "unknown",
+                "status": "complete",
                 "languages": [
-                    {"language": "rust", "tier": "C", "status": "unknown"}
+                    {"language": "rust", "tier": "D", "status": "complete"}
                 ]
             }
         });
-        assert!(assert_unknown_rust_coverage(&coverage).is_ok());
-        let complete = json!({
+        assert!(assert_complete_tier_d_rust_coverage(&complete).is_ok());
+        assert!(assert_bounded_tier_d_rust_coverage(&complete).is_err());
+        let bounded = json!({
+            "coverage": {
+                "status": "bounded",
+                "languages": [
+                    {"language": "rust", "tier": "D", "status": "bounded"}
+                ]
+            }
+        });
+        assert!(assert_bounded_tier_d_rust_coverage(&bounded).is_ok());
+        assert!(assert_complete_tier_d_rust_coverage(&bounded).is_err());
+        let semantic = json!({
             "coverage": {
                 "status": "complete",
                 "languages": [
@@ -3317,7 +3596,18 @@ mod tests {
                 ]
             }
         });
-        assert!(assert_unknown_rust_coverage(&complete).is_err());
+        assert!(assert_complete_tier_d_rust_coverage(&semantic).is_err());
+        let observed = observe_rust_coverage(&json!({
+            "coverage": {
+                "status": "unknown",
+                "languages": [
+                    {"language": "rust", "tier": "D", "status": "partial"}
+                ]
+            }
+        }));
+        assert_eq!(observed.overall_status, "unknown");
+        assert_eq!(observed.language_status.as_deref(), Some("partial"));
+        assert_eq!(observed.tier.as_deref(), Some("D"));
         assert!(diagnostic_code_is_present(
             &json!([{"code": "syntax-error-recovery", "message": "source-free"}]),
             "syntax-error-recovery"
@@ -3389,5 +3679,36 @@ mod tests {
             std::fs::read_to_string(source_path).expect("v2 source"),
             "fn answer() {\n    43\n}\n"
         );
+    }
+
+    #[test]
+    fn cancellation_fixture_reduction_rejects_drift_before_bounded_removal() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("cancellation");
+        prepare_cancellation_repository(&root).expect("large cancellation fixture");
+        let unexpected = root.join("src").join("unexpected.rs");
+        std::fs::write(&unexpected, "pub fn unexpected() {}\n").expect("unexpected source");
+
+        assert!(matches!(
+            shrink_cancellation_repository(&root),
+            Err(VerticalError::Invariant(
+                "cancellation fixture source set changed before bounded reduction"
+            ))
+        ));
+        assert!(root.join("src").join("generated_000.rs").is_file());
+
+        std::fs::remove_file(unexpected).expect("remove test-only drift");
+        shrink_cancellation_repository(&root).expect("bounded reduction succeeds");
+        let sources = std::fs::read_dir(root.join("src"))
+            .expect("reduced source directory")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("reduced sources");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].file_name(), "lib.rs");
+        assert_eq!(
+            std::fs::read_to_string(sources[0].path()).expect("follow-up source"),
+            "pub fn cancellation_follow_up() -> usize { 7 }\n"
+        );
+        assert_eq!(CANCELLATION_FIXTURE_FILES, 256);
     }
 }
