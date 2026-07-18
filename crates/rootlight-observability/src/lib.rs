@@ -21,8 +21,10 @@ use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 /// Frozen support-bundle schema used by protocol 1.3 clients.
 pub const SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 1;
-/// Current support-bundle schema including bounded normalized telemetry.
-pub const CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 2;
+/// Frozen support-bundle schema used by protocol 1.4 clients.
+pub const PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 2;
+/// Current support-bundle schema including every protocol 1.5 control method.
+pub const CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 3;
 /// Schema version for normalized telemetry snapshots.
 pub const TELEMETRY_SCHEMA_VERSION: u32 = 1;
 /// Maximum encoded support archive returned through daemon IPC.
@@ -46,6 +48,8 @@ pub const SLOW_CONTROL_REQUEST_US: u64 = 50_000;
 
 const SUPPORT_ENTRY_COUNT_V1: usize = 5;
 const SUPPORT_ENTRY_COUNT_V2: usize = 6;
+const SUPPORT_ENTRY_COUNT_V3: usize = 6;
+const CONTROL_METHOD_COUNT_V2: usize = 8;
 const CONTROL_METHOD_COUNT: usize = 13;
 const TELEMETRY_OUTCOME_COUNT: usize = 6;
 /// Ordered allow-list for the frozen support archive schema.
@@ -65,6 +69,8 @@ pub const SUPPORT_ENTRY_NAMES_V2: [&str; SUPPORT_ENTRY_COUNT_V2] = [
     "redaction-report.json",
     "telemetry.json",
 ];
+/// Ordered allow-list for current support archives with normalized telemetry.
+pub const SUPPORT_ENTRY_NAMES_V3: [&str; SUPPORT_ENTRY_COUNT_V3] = SUPPORT_ENTRY_NAMES_V2;
 /// Data classes that the frozen support schema must explicitly omit.
 pub const OMITTED_DATA_CLASSES: [&str; 12] = [
     "absolute_roots",
@@ -95,6 +101,8 @@ pub const OMITTED_DATA_CLASSES_V2: [&str; 12] = [
     "raw_sqlite_errors",
     "source",
 ];
+/// Data classes omitted by current support archives.
+pub const OMITTED_DATA_CLASSES_V3: [&str; 12] = OMITTED_DATA_CLASSES_V2;
 
 /// Closed daemon protocol version emitted by this support schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +113,9 @@ pub enum ProtocolVersion {
     /// Rootlight daemon protocol 1.4.
     #[serde(rename = "1.4")]
     V1_4,
+    /// Rootlight daemon protocol 1.5.
+    #[serde(rename = "1.5")]
+    V1_5,
 }
 
 /// Closed target operating-system family emitted by support evidence.
@@ -637,6 +648,8 @@ pub enum SupportBundleSchema {
     V1,
     /// Six-entry schema with normalized bounded telemetry.
     V2,
+    /// Six-entry schema covering every protocol 1.5 control method.
+    V3,
 }
 
 /// Inputs accepted by the support-bundle privacy boundary.
@@ -1180,9 +1193,18 @@ pub fn build_support_bundle_for_schema(
     input: &SupportBundleInput,
     schema: SupportBundleSchema,
 ) -> Result<SupportBundle, SupportBundleError> {
+    let expected_protocol = match schema {
+        SupportBundleSchema::V1 => ProtocolVersion::V1_3,
+        SupportBundleSchema::V2 => ProtocolVersion::V1_4,
+        SupportBundleSchema::V3 => ProtocolVersion::V1_5,
+    };
+    if input.protocol_version != expected_protocol {
+        return Err(SupportBundleError::ProtocolVersionMismatch);
+    }
     match schema {
         SupportBundleSchema::V1 => build_support_bundle_v1(input),
         SupportBundleSchema::V2 => build_support_bundle_v2(input),
+        SupportBundleSchema::V3 => build_support_bundle_v3(input),
     }
 }
 
@@ -1208,12 +1230,43 @@ fn build_support_bundle_v2(
         .telemetry
         .as_ref()
         .ok_or(SupportBundleError::MissingTelemetry)?;
+    let telemetry = project_telemetry_v2(telemetry);
+    let diagnostics = json_entry("diagnostics/quick.json", &input.diagnostics)?;
+    let health = json_entry("health.json", &input.health)?;
+    let operations = json_entry("operations-summary.json", &input.operations)?;
+    let redaction = redaction_entry(
+        PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        &OMITTED_DATA_CLASSES_V2,
+    )?;
+    let telemetry = json_entry_with_limit("telemetry.json", &telemetry, MAX_TELEMETRY_ENTRY_BYTES)?;
+    let manifest = support_manifest_entry(
+        PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        input,
+        [&diagnostics, &health, &operations, &redaction, &telemetry],
+    )?;
+    finish_support_bundle(&[
+        diagnostics,
+        health,
+        manifest,
+        operations,
+        redaction,
+        telemetry,
+    ])
+}
+
+fn build_support_bundle_v3(
+    input: &SupportBundleInput,
+) -> Result<SupportBundle, SupportBundleError> {
+    let telemetry = input
+        .telemetry
+        .as_ref()
+        .ok_or(SupportBundleError::MissingTelemetry)?;
     let diagnostics = json_entry("diagnostics/quick.json", &input.diagnostics)?;
     let health = json_entry("health.json", &input.health)?;
     let operations = json_entry("operations-summary.json", &input.operations)?;
     let redaction = redaction_entry(
         CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
-        &OMITTED_DATA_CLASSES_V2,
+        &OMITTED_DATA_CLASSES_V3,
     )?;
     let telemetry = json_entry_with_limit("telemetry.json", telemetry, MAX_TELEMETRY_ENTRY_BYTES)?;
     let manifest = support_manifest_entry(
@@ -1229,6 +1282,47 @@ fn build_support_bundle_v2(
         redaction,
         telemetry,
     ])
+}
+
+fn project_telemetry_v2(telemetry: &TelemetrySnapshot) -> TelemetrySnapshot {
+    let mut projected = telemetry.clone();
+    projected
+        .logs
+        .retain(|record| log_event_supported_by_v2(record.event));
+    projected
+        .metrics
+        .ipc_requests
+        .truncate(CONTROL_METHOD_COUNT_V2);
+    projected
+        .traces
+        .retain(|span| span_kind_supported_by_v2(span.kind));
+    projected
+}
+
+const fn control_method_supported_by_v2(method: ControlMethod) -> bool {
+    method.index() < CONTROL_METHOD_COUNT_V2
+}
+
+const fn log_event_supported_by_v2(event: LogEvent) -> bool {
+    match event {
+        LogEvent::RequestCompleted { method, .. }
+        | LogEvent::DiagnosticCompleted { method, .. } => control_method_supported_by_v2(method),
+        LogEvent::LifecycleChanged { .. }
+        | LogEvent::ConnectionRejected { .. }
+        | LogEvent::ConnectionTaskFailed { .. }
+        | LogEvent::DaemonFailed { .. } => true,
+    }
+}
+
+const fn span_kind_supported_by_v2(kind: SpanKind) -> bool {
+    match kind {
+        SpanKind::IpcRequest { method } => control_method_supported_by_v2(method),
+        SpanKind::DaemonStartup
+        | SpanKind::DaemonShutdown
+        | SpanKind::IpcNegotiation
+        | SpanKind::DiagnosticsQuick
+        | SpanKind::SupportBundle => true,
+    }
 }
 
 fn redaction_entry(
@@ -1351,6 +1445,9 @@ pub enum SupportBundleError {
     /// Schema v2 was selected without a normalized telemetry snapshot.
     #[error("support bundle telemetry is required for this schema")]
     MissingTelemetry,
+    /// The selected support schema and daemon protocol version did not match.
+    #[error("support bundle protocol version does not match its schema")]
+    ProtocolVersionMismatch,
     /// Allow-listed JSON failed serialization.
     #[error("support bundle JSON serialization failed")]
     SerializeJson(#[source] serde_json::Error),
@@ -1546,8 +1643,19 @@ mod tests {
 
     #[test]
     fn schema_v2_support_archive_contains_bounded_normalized_telemetry() {
-        let telemetry = Telemetry::default();
+        let telemetry = Arc::new(Telemetry::default());
         telemetry.record_lifecycle(DaemonLifecycle::Ready);
+        telemetry.record_request(
+            ControlMethod::CodeLocate,
+            TelemetryOutcome::Rejected,
+            Duration::from_millis(1),
+            Some(ErrorCode::InvalidArgument),
+        );
+        telemetry
+            .start_span(SpanKind::IpcRequest {
+                method: ControlMethod::CodeLocate,
+            })
+            .finish(TelemetryOutcome::Rejected, Some(ErrorCode::InvalidArgument));
         let mut input = input();
         input.protocol_version = ProtocolVersion::V1_4;
         input.telemetry = Some(telemetry.snapshot());
@@ -1571,8 +1679,88 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(names, SUPPORT_ENTRY_NAMES_V2);
-        let telemetry_entry = archive.by_name("telemetry.json").expect("telemetry opens");
+        let mut telemetry_entry = archive.by_name("telemetry.json").expect("telemetry opens");
         assert!(telemetry_entry.size() <= u64::try_from(MAX_TELEMETRY_ENTRY_BYTES).unwrap());
+        let mut bytes = Vec::new();
+        telemetry_entry
+            .read_to_end(&mut bytes)
+            .expect("telemetry reads");
+        let telemetry: TelemetrySnapshot =
+            serde_json::from_slice(&bytes).expect("telemetry decodes");
+        assert_eq!(
+            telemetry.metrics.ipc_requests.len(),
+            CONTROL_METHOD_COUNT_V2
+        );
+        assert!(
+            telemetry
+                .logs
+                .iter()
+                .all(|record| log_event_supported_by_v2(record.event))
+        );
+        assert!(
+            telemetry
+                .traces
+                .iter()
+                .all(|span| span_kind_supported_by_v2(span.kind))
+        );
+    }
+
+    #[test]
+    fn schema_v3_support_archive_retains_current_control_methods() {
+        let telemetry = Arc::new(Telemetry::default());
+        telemetry.record_request(
+            ControlMethod::CodeLocate,
+            TelemetryOutcome::Rejected,
+            Duration::from_millis(1),
+            Some(ErrorCode::InvalidArgument),
+        );
+        telemetry
+            .start_span(SpanKind::IpcRequest {
+                method: ControlMethod::CodeLocate,
+            })
+            .finish(TelemetryOutcome::Rejected, Some(ErrorCode::InvalidArgument));
+        let mut input = input();
+        input.protocol_version = ProtocolVersion::V1_5;
+        input.telemetry = Some(telemetry.snapshot());
+
+        let bundle = build_support_bundle_for_schema(&input, SupportBundleSchema::V3)
+            .expect("schema v3 support bundle builds");
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(bundle.archive())).expect("support ZIP opens");
+        let mut telemetry_entry = archive.by_name("telemetry.json").expect("telemetry opens");
+        let mut bytes = Vec::new();
+        telemetry_entry
+            .read_to_end(&mut bytes)
+            .expect("telemetry reads");
+        let telemetry: TelemetrySnapshot =
+            serde_json::from_slice(&bytes).expect("telemetry decodes");
+        assert_eq!(telemetry.metrics.ipc_requests.len(), CONTROL_METHOD_COUNT);
+        assert!(telemetry.logs.iter().any(|record| {
+            matches!(
+                record.event,
+                LogEvent::RequestCompleted {
+                    method: ControlMethod::CodeLocate,
+                    ..
+                }
+            )
+        }));
+        assert!(telemetry.traces.iter().any(|span| {
+            span.kind
+                == SpanKind::IpcRequest {
+                    method: ControlMethod::CodeLocate,
+                }
+        }));
+    }
+
+    #[test]
+    fn support_schema_rejects_a_mismatched_protocol_version() {
+        let mut input = input();
+        input.telemetry = Some(Telemetry::default().snapshot());
+
+        assert!(matches!(
+            build_support_bundle_for_schema(&input, SupportBundleSchema::V2),
+            Err(SupportBundleError::ProtocolVersionMismatch)
+        ));
     }
 
     #[test]
