@@ -1068,7 +1068,7 @@ pub enum SourceError {
     /// A source reference named another immutable generation.
     #[error("source reference generation does not match")]
     GenerationMismatch,
-    /// No generation-owned file record matched a selector.
+    /// No generation-owned file record or retained snapshot matched a selector.
     #[error("source file was not found in the pinned generation")]
     FileNotFound,
     /// Persisted path identity was not canonical or did not match the file ID.
@@ -1077,7 +1077,7 @@ pub enum SourceError {
     /// Retained snapshots were not strictly ordered by file identity.
     #[error("retained source snapshot set is invalid")]
     InvalidSnapshotSet,
-    /// Indexed and live immutable source identity differed.
+    /// Indexed and resolved immutable source identities differed.
     #[error("source reference is stale")]
     StaleSource,
     /// A selected byte span was not representable in the verified file.

@@ -136,8 +136,9 @@ pub struct PreparedFirstSliceIndex {
 
 /// Retention-admitted generation awaiting durable lifecycle success.
 ///
-/// Newly built state is reserved inside the bounded generation set but remains
-/// invisible to every query path until this token is committed.
+/// Newly built state is reserved inside the bounded generation and source
+/// retention sets but remains invisible to every query path until this token
+/// is committed.
 pub struct FirstSliceStagedIndex {
     receipt: FirstSliceIndexReceipt,
     publication: FirstSlicePublication,
@@ -650,17 +651,12 @@ impl FirstSliceService {
             cancellation,
         )
         .map_err(|error| map_discovery_error(error, cancellation))?;
-        let rust_source_count = manifest
-            .inputs
-            .iter()
-            .filter(|input| is_rust_source(input))
-            .count();
-        if rust_source_count == 0 {
-            return Err(FirstSliceError::FixtureShape);
-        }
-        if rust_source_count > self.analysis_limits.ir().max_files {
-            return Err(FirstSliceError::Limits);
-        }
+        let rust_source_count = preflight_rust_source_inputs(
+            &manifest.inputs,
+            self.analysis_limits.ir().max_files,
+            self.source_snapshots.maximum_bytes,
+            cancellation,
+        )?;
         let mut file_claims = Vec::new();
         file_claims
             .try_reserve_exact(rust_source_count)
@@ -849,8 +845,8 @@ impl FirstSliceService {
     /// # Errors
     ///
     /// Returns [`FirstSliceError::Cancelled`] when cancellation was already
-    /// established, or [`FirstSliceError::Retention`] when the bounded
-    /// generation set cannot publish the prepared state.
+    /// established, or [`FirstSliceError::Retention`] when bounded generation
+    /// or process-local source retention cannot publish the prepared state.
     pub fn publish_prepared(
         &mut self,
         prepared: FirstSliceIndexPreparation,
@@ -1224,6 +1220,33 @@ fn is_rust_source(input: &ManifestInput) -> bool {
         .language_signals
         .iter()
         .any(|signal| signal.language == "rust" && signal.evidence == LanguageEvidence::Extension)
+}
+
+fn preflight_rust_source_inputs(
+    inputs: &[ManifestInput],
+    maximum_files: usize,
+    maximum_source_bytes: usize,
+    cancellation: &Cancellation,
+) -> Result<usize, FirstSliceError> {
+    check_cancellation(cancellation)?;
+    let mut rust_source_count = 0usize;
+    let mut source_bytes = 0usize;
+    for input in inputs.iter().filter(|input| is_rust_source(input)) {
+        check_cancellation(cancellation)?;
+        rust_source_count = checked_combined_length(rust_source_count, 1, maximum_files)?;
+        let input_bytes = usize::try_from(input.bytes).map_err(|_| FirstSliceError::Limits)?;
+        source_bytes = source_bytes
+            .checked_add(input_bytes)
+            .ok_or(FirstSliceError::Limits)?;
+        if source_bytes > maximum_source_bytes {
+            return Err(FirstSliceError::Retention);
+        }
+    }
+    check_cancellation(cancellation)?;
+    if rust_source_count == 0 {
+        return Err(FirstSliceError::FixtureShape);
+    }
+    Ok(rust_source_count)
 }
 
 fn append_normalized_document(
@@ -1706,6 +1729,33 @@ mod tests {
             checked_combined_length(usize::MAX, 1, usize::MAX),
             Err(FirstSliceError::Limits)
         );
+    }
+
+    #[test]
+    fn preparation_rejects_aggregate_source_content_before_retaining_state() {
+        const FIRST: &str = "pub fn first() {}\n";
+        const SECOND: &str = "pub fn second() {}\n";
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(fixture.path().join("src/first.rs"), FIRST).expect("first source writes");
+        fs::write(fixture.path().join("src/second.rs"), SECOND).expect("second source writes");
+        let per_file_limit = FIRST.len().max(SECOND.len());
+        let service = FirstSliceService::new_with_source_limit(2, per_file_limit)
+            .expect("bounded first-slice service initializes");
+
+        assert!(matches!(
+            service.prepare_rust_fixture(fixture.path(), &deadline()),
+            Err(FirstSliceError::Retention)
+        ));
+        assert!(service.generations.is_empty());
+        assert!(service.repositories.is_empty());
+        assert!(service.active_by_repository.is_empty());
+        assert!(service.receipts.is_empty());
+        assert!(service.source_snapshots.shared.is_empty());
+        assert!(service.source_snapshots.committed.is_empty());
+        assert_eq!(service.source_snapshots.retained_bytes(), 0);
+        assert_eq!(service.source_snapshots.staged_generations(), 0);
     }
 
     #[test]
