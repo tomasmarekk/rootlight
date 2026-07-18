@@ -1,14 +1,23 @@
-# ADR-026 macOS ACL boundary implementation plan
+# macOS ACL FFI companion implementation and evidence plan
 
-Status: planning only  
-Decision dependency: ADR-026 remains Proposed  
-Target module: `rootlight_vfs::platform::os`  
+Document type: non-decision companion plan
+
+Canonical decision record:
+[`ADR-026-private-handle-tree-boundary.md`](./ADR-026-private-handle-tree-boundary.md)
+
+Decision dependency: canonical ADR-026 remains Proposed
+
+Target module: `rootlight_vfs::platform::os`
+
 Authorized implementation in this change: none
 
-This plan does not accept ADR-026, authorize an unsafe-code policy exception, or
-enable private-tree operations on macOS. Rootlight must continue to fail closed
-before path inspection or filesystem mutation until the decision, policy
-inventory, implementation, and native evidence are all approved.
+This file is not an ADR, a second ADR-026 decision, or an entry for the policy
+decision index. It only supplies implementation steps and required evidence for
+the canonical ADR named above. It does not accept ADR-026, authorize an
+unsafe-code policy exception, or enable private-tree operations on macOS.
+Rootlight must continue to fail closed before path inspection or filesystem
+mutation until the decision, policy inventory, implementation, and native
+evidence are all approved.
 
 ## 1. Minimum boundary
 
@@ -241,8 +250,11 @@ Before the macOS implementation or any consumer can be enabled:
 ## 6. Remaining blocker
 
 The exact blocker is not `RENAME_EXCL`; that primitive exists. The blocker is
-approval and native proof of a minimal descriptor-bound ACL removal and
+explicit acceptance of the canonical
+[`ADR-026-private-handle-tree-boundary.md`](./ADR-026-private-handle-tree-boundary.md)
+decision and native proof of a minimal descriptor-bound ACL removal and
 verification mechanism that closes the inherited-ACL exposure window while
-preserving exact identity through no-replace publication. Until ADR-026 is
-explicitly Accepted and that proof passes on native APFS, macOS private output
-must remain unavailable with zero filesystem mutation.
+preserving exact identity through no-replace publication. This companion plan
+cannot supply or imply that acceptance. Until the canonical ADR is explicitly
+Accepted and that proof passes on native APFS, macOS private output must remain
+unavailable with zero filesystem mutation.
