@@ -58,7 +58,10 @@ const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-rust/1";
 /// Bounded receipt for one ephemeral first-slice generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct FirstSliceIndexReceipt {
-    /// Stable repository identity derived from the local root identity.
+    /// Random local-UUID identity stable for aliases in this service process.
+    ///
+    /// The canonical-root digest is only an internal lookup key, not this
+    /// public identity. The UUID is not durable across process restarts.
     pub repository: RepositoryId,
     /// Immutable generation published into this service instance.
     pub generation: GenerationId,
