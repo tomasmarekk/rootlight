@@ -78,6 +78,21 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 /// Default orderly shutdown grace period.
 pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// Hard maximum simultaneous negotiated connection count.
+pub const MAX_CONNECTION_LIMIT: u32 = 4_096;
+/// Hard maximum capacity of the high-priority control lane.
+pub const MAX_CONTROL_QUEUE_LIMIT: usize = 4_096;
+/// Hard maximum admitted nonterminal operation count.
+pub const MAX_OPERATION_QUEUE_LIMIT: u32 = 65_536;
+const MAX_OPERATION_QUEUE_CAPACITY: usize = 65_536;
+/// Hard maximum synthetic operation worker count.
+pub const MAX_OPERATION_WORKERS: usize = 64;
+/// Hard maximum server-side request response time.
+pub const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Hard maximum retained maintenance interval.
+pub const MAX_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
+/// Hard maximum graceful drain duration.
+pub const MAX_SHUTDOWN_GRACE: Duration = Duration::from_secs(60);
 
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const LIFECYCLE_STARTING: u8 = 1;
@@ -235,7 +250,8 @@ impl DaemonLimits {
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration is zero.
+    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration
+    /// falls outside the documented hard bounds.
     pub const fn new(
         connection_limit: u32,
         control_queue_limit: usize,
@@ -265,8 +281,9 @@ impl DaemonLimits {
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration is zero,
-    /// or when the client operation limit exceeds the global operation limit.
+    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration
+    /// falls outside the documented hard bounds, or when the client operation
+    /// limit exceeds the global operation limit.
     #[expect(
         clippy::too_many_arguments,
         reason = "each argument is one validated daemon resource dimension"
@@ -298,8 +315,9 @@ impl DaemonLimits {
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration is zero,
-    /// or when a client limit exceeds its corresponding global limit.
+    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration
+    /// falls outside the documented hard bounds, or when a client limit exceeds
+    /// its corresponding global limit.
     #[expect(
         clippy::too_many_arguments,
         reason = "each argument is one validated daemon resource dimension"
@@ -316,16 +334,23 @@ impl DaemonLimits {
         shutdown_grace: Duration,
     ) -> Result<Self, ServiceError> {
         if connection_limit == 0
+            || connection_limit > MAX_CONNECTION_LIMIT
             || client_connection_limit == 0
             || client_connection_limit > connection_limit
             || control_queue_limit == 0
+            || control_queue_limit > MAX_CONTROL_QUEUE_LIMIT
             || operation_queue_limit == 0
+            || operation_queue_limit > MAX_OPERATION_QUEUE_LIMIT
             || client_operation_limit == 0
             || client_operation_limit > operation_queue_limit
             || operation_workers == 0
+            || operation_workers > MAX_OPERATION_WORKERS
             || request_timeout.is_zero()
+            || duration_exceeds(request_timeout, MAX_REQUEST_TIMEOUT)
             || maintenance_interval.is_zero()
+            || duration_exceeds(maintenance_interval, MAX_MAINTENANCE_INTERVAL)
             || shutdown_grace.is_zero()
+            || duration_exceeds(shutdown_grace, MAX_SHUTDOWN_GRACE)
         {
             return Err(ServiceError::InvalidLimits);
         }
@@ -341,6 +366,11 @@ impl DaemonLimits {
             shutdown_grace,
         })
     }
+}
+
+const fn duration_exceeds(value: Duration, maximum: Duration) -> bool {
+    value.as_secs() > maximum.as_secs()
+        || value.as_secs() == maximum.as_secs() && value.subsec_nanos() > maximum.subsec_nanos()
 }
 
 impl Default for DaemonLimits {
@@ -831,14 +861,19 @@ impl JournalActor {
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError::InvalidLimits`] for a zero queue capacity or a
-    /// thread-spawn failure.
+    /// Returns [`ServiceError::InvalidLimits`] for a queue capacity outside the
+    /// daemon hard bounds, or [`ServiceError::ThreadSpawn`] when the journal
+    /// thread cannot start.
     pub fn start(
         journal: Arc<OperationJournal>,
         control_capacity: usize,
         normal_capacity: usize,
     ) -> Result<Self, ServiceError> {
-        if control_capacity == 0 || normal_capacity == 0 {
+        if control_capacity == 0
+            || control_capacity > MAX_CONTROL_QUEUE_LIMIT
+            || normal_capacity == 0
+            || normal_capacity > MAX_OPERATION_QUEUE_CAPACITY
+        {
             return Err(ServiceError::InvalidLimits);
         }
         let (control_tx, control_rx) = mpsc::sync_channel(control_capacity);
@@ -1933,24 +1968,41 @@ impl SyntheticWorkerPool {
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError::InvalidLimits`] for zero bounds or a thread error.
+    /// Returns [`ServiceError::InvalidLimits`] for bounds outside the daemon
+    /// hard caps or a join-handle allocation failure, and
+    /// [`ServiceError::ThreadSpawn`] when a worker cannot start.
     pub fn start(workers: usize, queue_limit: usize) -> Result<Self, ServiceError> {
-        if workers == 0 || queue_limit == 0 {
+        if workers == 0
+            || workers > MAX_OPERATION_WORKERS
+            || queue_limit == 0
+            || queue_limit > MAX_OPERATION_QUEUE_CAPACITY
+        {
             return Err(ServiceError::InvalidLimits);
         }
         let (sender, receiver) = mpsc::sync_channel(queue_limit);
         let receiver = Arc::new(std::sync::Mutex::new(receiver));
         let (completion_tx, completions) = tokio::sync::mpsc::channel(queue_limit);
-        let mut joins = Vec::with_capacity(workers);
+        let mut joins = Vec::new();
+        joins
+            .try_reserve_exact(workers)
+            .map_err(|_| ServiceError::InvalidLimits)?;
         for index in 0..workers {
             let receiver = Arc::clone(&receiver);
-            let completion_tx = completion_tx.clone();
-            joins.push(
-                thread::Builder::new()
-                    .name(format!("rootlight-worker-{index}"))
-                    .spawn(move || synthetic_worker_loop(receiver, completion_tx))
-                    .map_err(ServiceError::ThreadSpawn)?,
-            );
+            let worker_completion_tx = completion_tx.clone();
+            let worker = thread::Builder::new()
+                .name(format!("rootlight-worker-{index}"))
+                .spawn(move || synthetic_worker_loop(receiver, worker_completion_tx));
+            match worker {
+                Ok(worker) => joins.push(worker),
+                Err(source) => {
+                    drop(sender);
+                    drop(completion_tx);
+                    for worker in joins {
+                        let _ = worker.join();
+                    }
+                    return Err(ServiceError::ThreadSpawn(source));
+                }
+            }
         }
         drop(completion_tx);
         Ok(Self {
@@ -5749,6 +5801,113 @@ mod tests {
                 Duration::from_secs(1),
                 Duration::from_secs(1),
             ),
+            Err(ServiceError::InvalidLimits)
+        ));
+    }
+
+    #[test]
+    fn daemon_limits_enforce_hard_resource_caps() {
+        assert!(
+            DaemonLimits::new_with_client_limits(
+                MAX_CONNECTION_LIMIT,
+                MAX_CONNECTION_LIMIT,
+                MAX_CONTROL_QUEUE_LIMIT,
+                MAX_OPERATION_QUEUE_LIMIT,
+                MAX_OPERATION_QUEUE_LIMIT,
+                MAX_OPERATION_WORKERS,
+                MAX_REQUEST_TIMEOUT,
+                MAX_MAINTENANCE_INTERVAL,
+                MAX_SHUTDOWN_GRACE,
+            )
+            .is_ok()
+        );
+
+        for invalid in [
+            DaemonLimits::new(
+                u32::MAX,
+                1,
+                1,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            DaemonLimits::new(
+                1,
+                usize::MAX,
+                1,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            DaemonLimits::new(
+                1,
+                1,
+                u32::MAX,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            DaemonLimits::new(
+                1,
+                1,
+                1,
+                usize::MAX,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            DaemonLimits::new(
+                1,
+                1,
+                1,
+                1,
+                Duration::MAX,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            DaemonLimits::new(
+                1,
+                1,
+                1,
+                1,
+                Duration::from_secs(1),
+                Duration::MAX,
+                Duration::from_secs(1),
+            ),
+            DaemonLimits::new(
+                1,
+                1,
+                1,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::MAX,
+            ),
+        ] {
+            assert!(matches!(invalid, Err(ServiceError::InvalidLimits)));
+        }
+    }
+
+    #[test]
+    fn actors_reject_hostile_capacities_without_allocating() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        assert!(matches!(
+            JournalActor::start(Arc::clone(&journal), usize::MAX, 1),
+            Err(ServiceError::InvalidLimits)
+        ));
+        assert!(matches!(
+            JournalActor::start(Arc::clone(&journal), 1, usize::MAX),
+            Err(ServiceError::InvalidLimits)
+        ));
+        assert!(matches!(
+            SyntheticWorkerPool::start(usize::MAX, 1),
+            Err(ServiceError::InvalidLimits)
+        ));
+        assert!(matches!(
+            SyntheticWorkerPool::start(1, usize::MAX),
             Err(ServiceError::InvalidLimits)
         ));
     }
