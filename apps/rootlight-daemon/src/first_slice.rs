@@ -520,20 +520,18 @@ fn repository_index(
     context: &FirstSliceIpcContext,
     publication_hook: Option<&PublicationBoundaryHook>,
 ) -> Result<daemon::RepositoryIndexResponse, PublicError> {
-    if !request.detached {
-        return Err(unsupported_capability());
-    }
     let operation = parse_operation(request.operation.as_ref())?;
     let lifecycle_deadline = lifecycle_deadline(context.deadline)?;
     let deadline_unix_ms = deadline_unix_ms(context.deadline)?;
+    let detached = request.detached;
     let submission = OperationSubmission::new(
         operation,
         OperationKind::RepositoryIndex,
         PlanHash::from_bytes(*blake3::hash(request.root.as_bytes()).as_bytes()),
         context.client_instance_id,
-        true,
+        detached,
         Some(deadline_unix_ms),
-        None,
+        (!detached).then_some(deadline_unix_ms),
     )
     .map_err(|error| operation_error(&error, Some(operation)))?;
     match journal_call(
@@ -570,12 +568,40 @@ fn repository_index(
     if !submitted.inserted {
         return retry_index_response(metadata, submitted.operation);
     }
+    if propagate_attached_client_cancellation(
+        runtime,
+        journal,
+        operation,
+        detached,
+        context,
+        lifecycle_deadline,
+    )? {
+        return Err(cancelled_error());
+    }
     let (_, cancellation) = journal_lifecycle_call(
         runtime,
         journal.activate_operation_until(operation, lifecycle_deadline),
     )?;
     match service.prepare_rust_fixture(&PathBuf::from(request.root), &cancellation) {
         Ok(prepared) => {
+            if propagate_attached_client_cancellation(
+                runtime,
+                journal,
+                operation,
+                detached,
+                context,
+                lifecycle_deadline,
+            )? {
+                finish_failed_index(
+                    runtime,
+                    lifecycle_deadline,
+                    journal,
+                    operation,
+                    &cancellation,
+                    &cancelled_error(),
+                )?;
+                return Err(cancelled_error());
+            }
             let staged = match service.stage_prepared(prepared, &cancellation) {
                 Ok(staged) => staged,
                 Err(error) => {
@@ -600,6 +626,14 @@ fn repository_index(
                 lock_metadata(metadata)?.fail_closed(operation);
                 return Err(error);
             }
+            propagate_attached_client_cancellation(
+                runtime,
+                journal,
+                operation,
+                detached,
+                context,
+                lifecycle_deadline,
+            )?;
             let operation_record = match journal_lifecycle_call(
                 runtime,
                 journal.complete_publication_until(operation, lifecycle_deadline),
@@ -651,6 +685,34 @@ fn repository_index(
             )?;
             Err(public)
         }
+    }
+}
+
+fn propagate_attached_client_cancellation(
+    runtime: &tokio::runtime::Runtime,
+    journal: &JournalActorHandle,
+    operation: OperationId,
+    detached: bool,
+    context: &FirstSliceIpcContext,
+    lifecycle_deadline: Instant,
+) -> Result<bool, PublicError> {
+    if detached
+        || context.cancellation.reason()
+            != Some(rootlight_operations::CancellationReason::ClientRequest)
+    {
+        return Ok(false);
+    }
+    let response = journal_lifecycle_call(
+        runtime,
+        journal.control_until(
+            ControlRequest::OperationCancel(operation),
+            lifecycle_deadline,
+        ),
+    )?;
+    match response {
+        ControlResponse::OperationCancel { .. } => Ok(true),
+        ControlResponse::Error(error) => Err(error),
+        _ => Err(internal_error()),
     }
 }
 
@@ -1593,6 +1655,122 @@ mod tests {
             None,
         )
         .expect("submission is valid")
+    }
+
+    fn index_across_client_disconnect(
+        detached: bool,
+        operation_byte: u8,
+    ) -> (
+        Result<FirstSliceIpcResponse, PublicError>,
+        OperationRecord,
+        bool,
+    ) {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor =
+            JournalActor::start(Arc::clone(&journal), 16, 16).expect("journal actor starts");
+        let (reached_sender, reached_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let hook = PublicationBoundaryHook {
+            boundary: PublicationBoundary::BeforeCompletion,
+            reached: reached_sender,
+            release: release_receiver,
+        };
+        let (daemon, workers) = FirstSliceDaemon::start_with_publication_hook(actor.handle(), hook)
+            .expect("host starts");
+        let fixture = TempDir::new().expect("fixture exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn answer() -> u32 { 42 }\n",
+        )
+        .expect("source writes");
+        let operation = OperationId::from_bytes([operation_byte; 16]);
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let connection_cancellation = cancellation.clone();
+        let index_daemon = daemon.clone();
+        let root = fixture.path().to_string_lossy().into_owned();
+        let index = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let context = FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::from_bytes([7; 16]),
+                selected_protocol_minor: 5,
+                cancellation,
+                deadline,
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("runtime builds");
+            runtime.block_on(index_daemon.dispatch(
+                FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                    schema_version: Some(schema_version()),
+                    root,
+                    operation: Some(operation_to_wire(operation)),
+                    detached,
+                }),
+                context,
+            ))
+        });
+        reached_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("index reaches publication boundary");
+        assert!(
+            connection_cancellation.cancel(rootlight_operations::CancellationReason::ClientRequest)
+        );
+        release_sender.send(()).expect("index resumes");
+        let response = index.join().expect("index thread joins");
+        let status = execute(
+            &daemon,
+            FirstSliceIpcRequest::RepositoryOperationStatus(
+                daemon::RepositoryOperationStatusRequest {
+                    schema_version: Some(schema_version()),
+                    operation: Some(operation_to_wire(operation)),
+                    action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                    wait_ms: None,
+                    after_revision: None,
+                },
+            ),
+        );
+        let FirstSliceIpcResponse::RepositoryOperationStatus(status) = status else {
+            panic!("operation status response expected");
+        };
+        let published = status.published_generation.is_some();
+        let terminal = journal.status(operation).expect("terminal status persists");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        drop(daemon);
+        runtime
+            .block_on(workers.stop(tokio::time::Instant::now() + Duration::from_secs(5)))
+            .expect("workers stop");
+        actor.join().expect("journal actor joins");
+        (response, terminal, published)
+    }
+
+    #[test]
+    fn attached_disconnect_cancels_before_publication() {
+        let (response, terminal, published) = index_across_client_disconnect(false, 61);
+
+        assert_eq!(
+            response.expect_err("attached request is cancelled").code(),
+            ErrorCode::Cancelled
+        );
+        assert_eq!(terminal.state, OperationState::Cancelled);
+        assert_eq!(terminal.stage, OperationStage::Cleanup);
+        assert!(!published);
+    }
+
+    #[test]
+    fn detached_disconnect_does_not_cancel_publication() {
+        let (response, terminal, published) = index_across_client_disconnect(true, 62);
+
+        assert!(matches!(
+            response.expect("detached request completes"),
+            FirstSliceIpcResponse::RepositoryIndex(_)
+        ));
+        assert_eq!(terminal.state, OperationState::Succeeded);
+        assert!(published);
     }
 
     #[test]
