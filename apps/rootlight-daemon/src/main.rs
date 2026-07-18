@@ -5,11 +5,15 @@
 
 #![forbid(unsafe_code)]
 
+mod first_slice;
+
 use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
 
+use first_slice::FirstSliceDaemon;
 use rootlight_daemon_core::{
     ClientConnectionAdmissions, ControlService, DaemonLifecycle, DaemonLimits, DaemonOrchestrator,
-    DaemonState, DiagnosticActor, HealthStatus, JournalActor, handle_connection_async,
+    DaemonState, DiagnosticActor, FirstSliceIpcHandler, HealthStatus, JournalActor,
+    handle_connection_async_with_first_slice,
 };
 use rootlight_ipc::{AsyncLocalListener, FrameCodec};
 use rootlight_observability::{Telemetry, TelemetryOutput};
@@ -80,6 +84,8 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
         usize::try_from(limits.operation_queue_limit).map_err(|_| DaemonError::InvalidLimits)?,
     )?;
     let actor_handle = actor.handle();
+    let (first_slice, first_slice_workers) = FirstSliceDaemon::start(actor_handle.clone())?;
+    let first_slice: Arc<dyn FirstSliceIpcHandler> = Arc::new(first_slice);
     let mut orchestrator =
         DaemonOrchestrator::new(actor_handle.clone(), Arc::clone(&state), limits)?;
     let service = ControlService::with_state(journal, nonce, Arc::clone(&state), limits)
@@ -153,15 +159,17 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                 let actor = actor_handle.clone();
                 let submissions = submission_tx.clone();
                 let client_connections = Arc::clone(&client_connections);
+                let first_slice = Arc::clone(&first_slice);
                 let state = Arc::clone(&state);
                 connections.spawn(async move {
                     let _permit = permit;
                     let mut stream = stream;
-                    let result = handle_connection_async(
+                    let result = handle_connection_async_with_first_slice(
                         service,
                         actor,
                         submissions,
                         client_connections,
+                        first_slice,
                         FrameCodec::default(),
                         &mut stream,
                     )
@@ -178,11 +186,13 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
         }
     }
 
+    let shutdown_deadline = tokio::time::Instant::now() + limits.shutdown_grace;
     state.set_lifecycle(DaemonLifecycle::Draining);
     diagnostic_actor.stop();
     drop(discovery);
     drop(listener);
     drop(submission_tx);
+    drop(first_slice);
     let drain = async {
         let mut admissions_closed = false;
         loop {
@@ -209,13 +219,32 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                 }
             }
         }
-        orchestrator.shutdown().await
+        orchestrator.shutdown_until(shutdown_deadline).await
     };
-    tokio::time::timeout(limits.shutdown_grace, drain)
-        .await
-        .map_err(|_| DaemonError::ShutdownTimedOut)??;
-    actor.join()?;
-    Ok(())
+    let stop_workers = async {
+        first_slice_workers
+            .stop(shutdown_deadline)
+            .await
+            .map_err(DaemonError::from)
+    };
+    let drain_connections = async { drain.await.map_err(DaemonError::from) };
+    let drain_result = tokio::time::timeout_at(shutdown_deadline, async {
+        tokio::try_join!(stop_workers, drain_connections)?;
+        Ok::<(), DaemonError>(())
+    })
+    .await
+    .map_err(|_| DaemonError::ShutdownTimedOut)
+    .and_then(std::convert::identity);
+    let actor_result = match actor.join_until(shutdown_deadline).await {
+        Err(rootlight_daemon_core::ServiceError::RequestTimedOut) => {
+            Err(DaemonError::ShutdownTimedOut)
+        }
+        result => result.map_err(DaemonError::from),
+    };
+    match drain_result {
+        Err(error) => Err(error),
+        Ok(()) => actor_result,
+    }
 }
 
 async fn shutdown_signal(mode: DaemonMode) {
@@ -327,6 +356,8 @@ enum DaemonError {
     ShutdownTimedOut,
     #[error("daemon orchestration failed")]
     Service(#[from] rootlight_daemon_core::ServiceError),
+    #[error("daemon first-slice setup failed")]
+    FirstSlice(#[from] first_slice::FirstSliceHostError),
     #[error("daemon runtime setup failed")]
     Runtime(#[from] rootlight_runtime::RuntimeError),
     #[error("operation journal setup failed")]

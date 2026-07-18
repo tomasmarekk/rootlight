@@ -7,14 +7,26 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+blake3.workspace = true
 getrandom.workspace = true
 rootlight-daemon-core = { path = "../../crates/rootlight-daemon-core" }
+rootlight-error = { path = "../../crates/rootlight-error" }
+rootlight-ids = { path = "../../crates/rootlight-ids" }
 rootlight-ipc = { path = "../../crates/rootlight-ipc" }
+rootlight-ir = { path = "../../crates/rootlight-ir" }
 rootlight-observability = { path = "../../crates/rootlight-observability" }
 rootlight-operations = { path = "../../crates/rootlight-operations" }
+rootlight-protocol = { path = "../../crates/rootlight-protocol" }
+rootlight-query = { path = "../../crates/rootlight-query" }
 rootlight-runtime = { path = "../../crates/rootlight-runtime" }
+rootlight-service = { path = "../../crates/rootlight-service" }
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

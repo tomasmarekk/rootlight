@@ -119,10 +119,16 @@ allow_build_script = false
 name = "rootlight-daemon"
 allowed_internal_dependencies = [
   "rootlight-daemon-core",
+  "rootlight-error",
+  "rootlight-ids",
   "rootlight-ipc",
+  "rootlight-ir",
   "rootlight-observability",
   "rootlight-operations",
+  "rootlight-protocol",
+  "rootlight-query",
   "rootlight-runtime",
+  "rootlight-service",
 ]
 allow_build_script = false
 
