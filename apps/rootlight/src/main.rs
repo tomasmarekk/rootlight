@@ -182,8 +182,8 @@ fn execute_standalone(
     let state = Arc::new(DaemonState::starting());
     let actor = JournalActor::start(
         Arc::clone(&journal),
-        limits.control_queue_limit,
-        usize::try_from(limits.operation_queue_limit).map_err(|_| CliError::InvalidLimits)?,
+        limits.control_queue_limit(),
+        usize::try_from(limits.operation_queue_limit()).map_err(|_| CliError::InvalidLimits)?,
     )?;
     let actor_handle = actor.handle();
     let mut orchestrator =

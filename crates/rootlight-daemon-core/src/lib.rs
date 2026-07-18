@@ -230,23 +230,23 @@ impl ResourcePressure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DaemonLimits {
     /// Maximum simultaneous negotiated connections.
-    pub connection_limit: u32,
+    connection_limit: u32,
     /// Maximum simultaneous negotiated connections for one validated client-declared identity.
-    pub client_connection_limit: u32,
+    client_connection_limit: u32,
     /// Capacity of the high-priority control lane.
-    pub control_queue_limit: usize,
+    control_queue_limit: usize,
     /// Maximum admitted nonterminal operations.
-    pub operation_queue_limit: u32,
+    operation_queue_limit: u32,
     /// Maximum admitted nonterminal operations for one validated client-declared identity.
-    pub client_operation_limit: u32,
+    client_operation_limit: u32,
     /// Exact number of synthetic operation workers.
-    pub operation_workers: usize,
+    operation_workers: usize,
     /// Maximum response time accepted from a request envelope.
-    pub request_timeout: Duration,
+    request_timeout: Duration,
     /// Retained compatibility interval from the former polling scheduler.
-    pub maintenance_interval: Duration,
+    maintenance_interval: Duration,
     /// Maximum graceful drain duration.
-    pub shutdown_grace: Duration,
+    shutdown_grace: Duration,
 }
 
 impl DaemonLimits {
@@ -369,6 +369,60 @@ impl DaemonLimits {
             maintenance_interval,
             shutdown_grace,
         })
+    }
+
+    /// Returns the validated global connection limit.
+    #[must_use]
+    pub const fn connection_limit(&self) -> u32 {
+        self.connection_limit
+    }
+
+    /// Returns the validated per-client connection limit.
+    #[must_use]
+    pub const fn client_connection_limit(&self) -> u32 {
+        self.client_connection_limit
+    }
+
+    /// Returns the validated control-lane capacity.
+    #[must_use]
+    pub const fn control_queue_limit(&self) -> usize {
+        self.control_queue_limit
+    }
+
+    /// Returns the validated global nonterminal operation limit.
+    #[must_use]
+    pub const fn operation_queue_limit(&self) -> u32 {
+        self.operation_queue_limit
+    }
+
+    /// Returns the validated per-client nonterminal operation limit.
+    #[must_use]
+    pub const fn client_operation_limit(&self) -> u32 {
+        self.client_operation_limit
+    }
+
+    /// Returns the validated synthetic worker count.
+    #[must_use]
+    pub const fn operation_workers(&self) -> usize {
+        self.operation_workers
+    }
+
+    /// Returns the validated request timeout.
+    #[must_use]
+    pub const fn request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+
+    /// Returns the validated retained maintenance interval.
+    #[must_use]
+    pub const fn maintenance_interval(&self) -> Duration {
+        self.maintenance_interval
+    }
+
+    /// Returns the validated graceful shutdown duration.
+    #[must_use]
+    pub const fn shutdown_grace(&self) -> Duration {
+        self.shutdown_grace
     }
 }
 
@@ -1960,7 +2014,7 @@ impl ClientConnectionAdmissions {
     #[must_use]
     pub fn new(limits: DaemonLimits) -> Self {
         Self {
-            limit: limits.client_connection_limit,
+            limit: limits.client_connection_limit(),
             active: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -2457,11 +2511,11 @@ impl DaemonOrchestrator {
         state: Arc<DaemonState>,
         limits: DaemonLimits,
     ) -> Result<Self, ServiceError> {
-        let queue_limit = usize::try_from(limits.operation_queue_limit)
+        let queue_limit = usize::try_from(limits.operation_queue_limit())
             .map_err(|_| ServiceError::InvalidLimits)?;
         Ok(Self {
             journal,
-            workers: SyntheticWorkerPool::start(limits.operation_workers, queue_limit)?,
+            workers: SyntheticWorkerPool::start(limits.operation_workers(), queue_limit)?,
             pending_completion: None,
             pending_timer: None,
             timers: TimerSchedule::default(),
@@ -2529,8 +2583,8 @@ impl DaemonOrchestrator {
             Arc::clone(&self.state),
             Arc::clone(&self.client_admissions),
             submission.owner,
-            self.limits.operation_queue_limit,
-            self.limits.client_operation_limit,
+            self.limits.operation_queue_limit(),
+            self.limits.client_operation_limit(),
         ) {
             Ok(permit) => permit,
             Err(error @ (ServiceError::QueueFull | ServiceError::ClientOperationLimit { .. })) => {
@@ -2547,7 +2601,7 @@ impl DaemonOrchestrator {
             Err(error) => return Err(error),
         };
         let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
-        let handshake_deadline = WorkerDeadline::from_timeout(self.limits.request_timeout)?;
+        let handshake_deadline = WorkerDeadline::from_timeout(self.limits.request_timeout())?;
         if let Err(failure) = self.workers.submit(WorkerJob {
             operation: submission.operation,
             admitted: admitted_rx,
@@ -2677,7 +2731,7 @@ impl DaemonOrchestrator {
         let receiver = self
             .interrupt_timer_receiver(timer)
             .map_err(|error| self.fail_timer_delivery(error))?;
-        match tokio::time::timeout(self.limits.request_timeout, receiver).await {
+        match tokio::time::timeout(self.limits.request_timeout(), receiver).await {
             Ok(Ok(Ok(operation))) => Ok(operation),
             Ok(Ok(Err(error))) => Err(self.fail_timer_delivery(ServiceError::Operations(error))),
             Ok(Err(_)) => Err(self.fail_timer_delivery(ServiceError::ChannelClosed)),
@@ -2704,7 +2758,7 @@ impl DaemonOrchestrator {
         self.pending_timer = Some(PendingTimerInterrupt {
             scheduled_at,
             timer,
-            delivery_deadline: now + self.limits.request_timeout,
+            delivery_deadline: now + self.limits.request_timeout(),
             reply,
             result: None,
         });
@@ -2955,7 +3009,7 @@ impl DaemonOrchestrator {
         let mut interruption_complete = false;
         for _ in 0..maximum_rounds {
             let interrupt = tokio::time::timeout(
-                self.limits.request_timeout,
+                self.limits.request_timeout(),
                 self.journal.interrupt(SHUTDOWN_INTERRUPT_BATCH),
             )
             .await;
@@ -2987,7 +3041,7 @@ impl DaemonOrchestrator {
         while let Ok(completion) = self.workers.completions.try_recv() {
             completion.permit.finish();
         }
-        match tokio::time::timeout(self.limits.request_timeout, self.journal.checkpoint()).await {
+        match tokio::time::timeout(self.limits.request_timeout(), self.journal.checkpoint()).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 failure.get_or_insert(error);
@@ -3381,10 +3435,10 @@ impl ControlService {
             lifecycle,
             accepting_operations: self.state.accepting_operations.load(Ordering::Acquire),
             active_connections: self.state.active_connections.load(Ordering::Acquire),
-            connection_limit: self.limits.connection_limit,
+            connection_limit: self.limits.connection_limit(),
             queued_operations,
             running_operations,
-            operation_queue_limit: self.limits.operation_queue_limit,
+            operation_queue_limit: self.limits.operation_queue_limit(),
             journal_healthy,
             catalog_status,
             catalog_schema_version: rootlight_operations::OPERATION_SCHEMA_VERSION,
@@ -3537,7 +3591,7 @@ impl ControlService {
     /// Executes the quick check through a separate read-only catalog connection.
     #[must_use]
     pub fn execute_diagnostics_path(&self, path: &std::path::Path) -> ControlResponse {
-        self.diagnostics_quick_path(path, self.limits.request_timeout)
+        self.diagnostics_quick_path(path, self.limits.request_timeout())
     }
 
     /// Executes one typed control request.
@@ -3545,8 +3599,10 @@ impl ControlService {
     pub fn execute(&self, request: ControlRequest) -> ControlResponse {
         match request {
             ControlRequest::Health => ControlResponse::Health(self.health()),
-            ControlRequest::DiagnosticsQuick => self.diagnostics_quick(self.limits.request_timeout),
-            ControlRequest::SupportBundle => self.support_bundle(self.limits.request_timeout),
+            ControlRequest::DiagnosticsQuick => {
+                self.diagnostics_quick(self.limits.request_timeout())
+            }
+            ControlRequest::SupportBundle => self.support_bundle(self.limits.request_timeout()),
             ControlRequest::OperationSubmit(submission)
                 if !self.state.accepting_operations.load(Ordering::Acquire) =>
             {
@@ -3884,7 +3940,7 @@ async fn await_journal_response(
         )),
         Ok(Err(ServiceError::Public(error))) => response_to_wire(ControlResponse::Error(*error)),
         Ok(Err(ServiceError::QueueFull)) => response_to_wire(ControlResponse::Error(queue_full(
-            service.limits.operation_queue_limit,
+            service.limits.operation_queue_limit(),
         ))),
         Ok(Err(ServiceError::ClientOperationLimit { limit })) => {
             response_to_wire(ControlResponse::Error(client_operation_limit(limit)))
@@ -3898,8 +3954,8 @@ fn bounded_request_timeout(
     service: &ControlService,
     requested_timeout_ms: Option<u32>,
 ) -> Duration {
-    requested_timeout_ms.map_or(service.limits.request_timeout, |milliseconds| {
-        Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout)
+    requested_timeout_ms.map_or(service.limits.request_timeout(), |milliseconds| {
+        Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout())
     })
 }
 
@@ -4885,7 +4941,7 @@ pub enum ServiceError {
     /// A future public-error variant has no representation in this protocol minor.
     #[error("daemon public error variant is unsupported")]
     UnsupportedPublicErrorVariant,
-    /// Daemon capacities or deadlines were zero.
+    /// Daemon limits violated a hard bound, relationship, conversion, or allocation constraint.
     #[error("daemon resource limits are invalid")]
     InvalidLimits,
     /// A bounded daemon orchestration lane closed unexpectedly.
@@ -7289,17 +7345,17 @@ mod tests {
         let limits = DaemonLimits::default();
 
         assert_eq!(
-            limits.client_connection_limit,
+            limits.client_connection_limit(),
             DEFAULT_CLIENT_CONNECTION_LIMIT
         );
         assert_eq!(
-            limits.client_operation_limit,
+            limits.client_operation_limit(),
             DEFAULT_CLIENT_OPERATION_LIMIT
         );
-        assert_eq!(limits.operation_workers, DEFAULT_OPERATION_WORKERS);
-        assert_eq!(limits.operation_workers, 4);
-        assert!(limits.client_connection_limit <= limits.connection_limit);
-        assert!(limits.client_operation_limit <= limits.operation_queue_limit);
+        assert_eq!(limits.operation_workers(), DEFAULT_OPERATION_WORKERS);
+        assert_eq!(limits.operation_workers(), 4);
+        assert!(limits.client_connection_limit() <= limits.connection_limit());
+        assert!(limits.client_operation_limit() <= limits.operation_queue_limit());
     }
 
     #[test]

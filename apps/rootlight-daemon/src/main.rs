@@ -80,8 +80,8 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     state.set_catalog_status(HealthStatus::Healthy);
     let actor = JournalActor::start(
         Arc::clone(&journal),
-        limits.control_queue_limit,
-        usize::try_from(limits.operation_queue_limit).map_err(|_| DaemonError::InvalidLimits)?,
+        limits.control_queue_limit(),
+        usize::try_from(limits.operation_queue_limit()).map_err(|_| DaemonError::InvalidLimits)?,
     )?;
     let actor_handle = actor.handle();
     let mut orchestrator =
@@ -99,12 +99,12 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     state.set_lifecycle(DaemonLifecycle::Ready);
 
     let connection_slots = Arc::new(tokio::sync::Semaphore::new(
-        usize::try_from(limits.connection_limit).map_err(|_| DaemonError::InvalidLimits)?,
+        usize::try_from(limits.connection_limit()).map_err(|_| DaemonError::InvalidLimits)?,
     ));
     let client_connections = Arc::new(ClientConnectionAdmissions::new(limits));
     let mut connections = tokio::task::JoinSet::new();
     let command_capacity =
-        usize::try_from(limits.operation_queue_limit).map_err(|_| DaemonError::InvalidLimits)?;
+        usize::try_from(limits.operation_queue_limit()).map_err(|_| DaemonError::InvalidLimits)?;
     let (submission_tx, mut submission_rx) = tokio::sync::mpsc::channel(command_capacity);
     let command_senders = OrchestratorSenders::new(submission_tx);
     let shutdown = shutdown_signal(mode);
@@ -210,7 +210,7 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
         }
         orchestrator.shutdown().await
     };
-    let drain_result = tokio::time::timeout(limits.shutdown_grace, drain)
+    let drain_result = tokio::time::timeout(limits.shutdown_grace(), drain)
         .await
         .map_err(|_| DaemonError::ShutdownTimedOut)
         .and_then(|result| result.map_err(DaemonError::from));
