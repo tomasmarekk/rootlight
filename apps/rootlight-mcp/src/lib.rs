@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+mod executor;
 mod json;
 mod tools;
 
@@ -23,8 +24,16 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
+pub use executor::{
+    ClientPortError, ClientPortFuture, CodeLocatePortRequest, CodeLocatePortResponse,
+    FirstSliceClientPort, FirstSliceToolExecutor, OperationStatusPortRequest, ReadResponseMetadata,
+    RepositoryIndexPortRequest, RepositoryIndexPortResponse, SourceReadPortRequest,
+    SourceReadPortResponse, SymbolExplainPortRequest, SymbolExplainPortResponse,
+    ToolExecutorBuildError,
+};
 pub use tools::{
-    ToolExecutionError, ToolExecutionFuture, ToolExecutor, ToolRegistryError, ToolRouter,
+    ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture, ToolExecutor, ToolRegistryError,
+    ToolRouter,
 };
 
 const JSON_RPC_VERSION: &str = "2.0";
