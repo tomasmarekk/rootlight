@@ -39,6 +39,7 @@ fn run() -> Result<(), DaemonError> {
 enum DaemonMode {
     Normal,
     Coordinated,
+    CoordinatedSupervised,
     Supervised,
 }
 
@@ -47,6 +48,9 @@ fn validate_arguments() -> Result<DaemonMode, DaemonError> {
     match (arguments.next(), arguments.next()) {
         (None, None) => Ok(DaemonMode::Normal),
         (Some(argument), None) if argument == "--coordinated-start" => Ok(DaemonMode::Coordinated),
+        (Some(argument), None) if argument == "--coordinated-stdio" => {
+            Ok(DaemonMode::CoordinatedSupervised)
+        }
         (Some(argument), None) if argument == "--supervised-stdio" => Ok(DaemonMode::Supervised),
         _ => Err(DaemonError::InvalidArguments),
     }
@@ -55,7 +59,10 @@ fn validate_arguments() -> Result<DaemonMode, DaemonError> {
 async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let paths = runtime_paths()?;
     paths.prepare_owner()?;
-    let _launch = if mode == DaemonMode::Coordinated {
+    let _launch = if matches!(
+        mode,
+        DaemonMode::Coordinated | DaemonMode::CoordinatedSupervised
+    ) {
         None
     } else {
         Some(paths.acquire_launch_lock()?)
@@ -216,7 +223,10 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
 }
 
 async fn shutdown_signal(mode: DaemonMode) {
-    if mode == DaemonMode::Supervised {
+    if matches!(
+        mode,
+        DaemonMode::CoordinatedSupervised | DaemonMode::Supervised
+    ) {
         supervised_shutdown().await;
         return;
     }
@@ -340,5 +350,6 @@ mod tests {
     fn daemon_arguments_select_explicit_modes() {
         assert_ne!(DaemonMode::Normal, DaemonMode::Supervised);
         assert_ne!(DaemonMode::Coordinated, DaemonMode::Supervised);
+        assert_ne!(DaemonMode::Coordinated, DaemonMode::CoordinatedSupervised);
     }
 }

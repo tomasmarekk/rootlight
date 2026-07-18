@@ -6,7 +6,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    io::{self, Cursor, Read as _},
+    io::{self, Cursor, Read as _, Write as _},
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -299,6 +299,87 @@ pub struct Client {
     next_request_id: AtomicU64,
 }
 
+/// Exact child-process ownership retained by a lifecycle startup winner.
+///
+/// The daemon is a process-tree leaf: it starts threads but no descendant
+/// processes. Retaining and reaping this handle therefore owns the complete
+/// lifecycle. That invariant must move to a process group or job object before
+/// the daemon is allowed to spawn descendants.
+#[derive(Debug)]
+pub struct OwnedDaemon {
+    paths: RuntimePaths,
+    identity: ReadyDaemonIdentity,
+    child: Option<Child>,
+}
+
+impl OwnedDaemon {
+    /// Requests supervised shutdown and reaps the exact retained child.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when discovery no longer identifies the retained
+    /// child, shutdown IO fails, or bounded graceful exit requires forced cleanup.
+    pub fn shutdown(mut self) -> Result<(), ClientError> {
+        let child = self.child.as_mut().ok_or(ClientError::DaemonLaunchFailed)?;
+        let discovery = self.paths.discover().map_err(ClientError::Runtime)?;
+        let observed = ReadyDaemonIdentity::from_discovery(&discovery);
+        if observed != self.identity || child.id() != self.identity.pid {
+            self.terminate_fail_closed();
+            return Err(ClientError::DaemonLaunchFailed);
+        }
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or(ClientError::DaemonLaunchFailed)?;
+        stdin
+            .write_all(b"shutdown\n")
+            .map_err(ClientError::LaunchIo)?;
+        drop(child.stdin.take());
+        let deadline = Instant::now()
+            .checked_add(DEFAULT_START_TIMEOUT)
+            .ok_or(ClientError::InvalidRequestTimeout)?;
+        loop {
+            if let Some(status) = child.try_wait().map_err(ClientError::LaunchIo)? {
+                self.child = None;
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(ClientError::DaemonLaunchFailed)
+                };
+            }
+            if Instant::now() >= deadline {
+                self.terminate_fail_closed();
+                return Err(ClientError::DaemonLaunchCleanupTimedOut);
+            }
+            std::thread::sleep(START_POLL_INTERVAL);
+        }
+    }
+
+    fn terminate_fail_closed(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            terminate_startup_child_fail_closed(&mut child);
+        }
+    }
+}
+
+impl Drop for OwnedDaemon {
+    fn drop(&mut self) {
+        self.terminate_fail_closed();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupOwnership {
+    Detached,
+    Retained,
+}
+
+#[derive(Debug)]
+struct StartupConnection {
+    client: Client,
+    owned: Option<OwnedDaemon>,
+}
+
 impl Client {
     /// Resolves a validated daemon, optionally coordinating sibling startup.
     ///
@@ -311,13 +392,52 @@ impl Client {
         client_instance_id: [u8; 16],
         policy: ConnectPolicy,
     ) -> Result<Self, ClientError> {
+        Self::connect_or_start_with_ownership(
+            paths,
+            client_instance_id,
+            policy,
+            StartupOwnership::Detached,
+        )
+        .map(|connection| connection.client)
+    }
+
+    /// Resolves a daemon while retaining exact ownership when this call starts it.
+    ///
+    /// The optional [`OwnedDaemon`] is returned only to the winning startup caller.
+    /// It is intended for lifecycle harnesses that must stop and reap the exact
+    /// daemon they launched without signaling a discovery PID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for runtime validation, discovery, launch-lock,
+    /// sibling-spawn, timeout, negotiation, or readiness failures.
+    pub fn connect_or_start_owned(
+        paths: &RuntimePaths,
+        client_instance_id: [u8; 16],
+        policy: ConnectPolicy,
+    ) -> Result<(Self, Option<OwnedDaemon>), ClientError> {
+        Self::connect_or_start_with_ownership(
+            paths,
+            client_instance_id,
+            policy,
+            StartupOwnership::Retained,
+        )
+        .map(|connection| (connection.client, connection.owned))
+    }
+
+    fn connect_or_start_with_ownership(
+        paths: &RuntimePaths,
+        client_instance_id: [u8; 16],
+        policy: ConnectPolicy,
+        ownership: StartupOwnership,
+    ) -> Result<StartupConnection, ClientError> {
         match paths.client_directories_absent() {
             Ok(true) => {
                 return match policy {
                     ConnectPolicy::ExistingOnly => Err(ClientError::DaemonUnavailable),
                     ConnectPolicy::StartIfMissing => {
                         paths.prepare_owner().map_err(ClientError::Runtime)?;
-                        coordinate_start(paths, client_instance_id)
+                        coordinate_start(paths, client_instance_id, ownership)
                     }
                 };
             }
@@ -335,18 +455,23 @@ impl Client {
                 if policy == ConnectPolicy::StartIfMissing
                     && windows_policy_startup_retry(&error) =>
             {
-                return coordinate_start(paths, client_instance_id);
+                return coordinate_start(paths, client_instance_id, ownership);
             }
             Err(error) => return Err(error),
         };
         match probe {
-            ProbeOutcome::Ready(client) => return Ok(client),
+            ProbeOutcome::Ready(ready) => {
+                return Ok(StartupConnection {
+                    client: ready.client,
+                    owned: None,
+                });
+            }
             ProbeOutcome::Unavailable if policy == ConnectPolicy::ExistingOnly => {
                 return Err(ClientError::DaemonUnavailable);
             }
             ProbeOutcome::Unavailable => {}
         }
-        coordinate_start(paths, client_instance_id)
+        coordinate_start(paths, client_instance_id, ownership)
     }
 
     /// Creates a client bound to one discovered daemon and validated client-declared identity.
@@ -614,27 +739,33 @@ impl Client {
 fn coordinate_start(
     paths: &RuntimePaths,
     client_instance_id: [u8; 16],
-) -> Result<Client, ClientError> {
+    ownership: StartupOwnership,
+) -> Result<StartupConnection, ClientError> {
     let deadline = startup_deadline()?;
     loop {
         match paths.acquire_launch_lock() {
             Ok(launch) => {
                 let probe = probe_ready_client(paths, client_instance_id);
-                if let Ok(ProbeOutcome::Ready(client)) = probe {
-                    return Ok(client);
+                if let Ok(ProbeOutcome::Ready(ready)) = probe {
+                    return Ok(StartupConnection {
+                        client: ready.client,
+                        owned: None,
+                    });
                 }
                 if let Err(error) = probe
                     && !startup_probe_retryable(&error)
                 {
                     return Err(error);
                 }
-                let startup = CoordinatedStartup::spawn(launch)?;
+                let startup = CoordinatedStartup::spawn(launch, ownership, paths)?;
                 return wait_for_ready_daemon(paths, client_instance_id, deadline, startup);
             }
             Err(rootlight_runtime::RuntimeError::LaunchBusy) => {
-                if let ProbeOutcome::Ready(client) = probe_ready_client(paths, client_instance_id)?
-                {
-                    return Ok(client);
+                if let ProbeOutcome::Ready(ready) = probe_ready_client(paths, client_instance_id)? {
+                    return Ok(StartupConnection {
+                        client: ready.client,
+                        owned: None,
+                    });
                 }
                 wait_before_deadline(deadline)?;
             }
@@ -648,21 +779,27 @@ fn wait_for_ready_daemon(
     client_instance_id: [u8; 16],
     deadline: Instant,
     mut startup: CoordinatedStartup,
-) -> Result<Client, ClientError> {
+) -> Result<StartupConnection, ClientError> {
     loop {
+        if startup.child_exited()? {
+            return Err(ClientError::DaemonLaunchFailed);
+        }
         let probe = probe_ready_client(paths, client_instance_id);
-        if let Ok(ProbeOutcome::Ready(client)) = probe {
-            startup.detach();
-            return Ok(client);
+        if let Ok(ProbeOutcome::Ready(ready)) = probe {
+            if startup.matches(ready.identity) {
+                return startup.finish(paths.clone(), ready);
+            }
+            startup.terminate()?;
+            return Ok(StartupConnection {
+                client: ready.client,
+                owned: None,
+            });
         }
         if let Err(error) = probe
             && !startup_probe_retryable(&error)
         {
             startup.terminate()?;
             return Err(error);
-        }
-        if startup.child_exited()? {
-            return Err(ClientError::DaemonLaunchFailed);
         }
         if Instant::now() >= deadline {
             startup.terminate()?;
@@ -675,15 +812,52 @@ fn wait_for_ready_daemon(
 #[derive(Debug)]
 struct CoordinatedStartup {
     _authority: LaunchLock,
+    ownership: StartupOwnership,
     child: Option<Child>,
 }
 
 impl CoordinatedStartup {
-    fn spawn(authority: LaunchLock) -> Result<Self, ClientError> {
-        let child = spawn_coordinated_daemon()?;
+    fn spawn(
+        authority: LaunchLock,
+        ownership: StartupOwnership,
+        paths: &RuntimePaths,
+    ) -> Result<Self, ClientError> {
+        let child = spawn_coordinated_daemon(ownership, paths)?;
         Ok(Self {
             _authority: authority,
+            ownership,
             child: Some(child),
+        })
+    }
+
+    fn matches(&self, identity: ReadyDaemonIdentity) -> bool {
+        // An unreaped Child keeps its PID unavailable for reuse on every supported
+        // platform; the negotiated nonce then binds readiness to that exact process.
+        self.child
+            .as_ref()
+            .is_some_and(|child| child.id() == identity.pid)
+    }
+
+    fn finish(
+        mut self,
+        paths: RuntimePaths,
+        ready: ReadyDaemon,
+    ) -> Result<StartupConnection, ClientError> {
+        let child = self.child.take().ok_or(ClientError::DaemonLaunchFailed)?;
+        let owned = match self.ownership {
+            StartupOwnership::Detached => {
+                drop(child);
+                None
+            }
+            StartupOwnership::Retained => Some(OwnedDaemon {
+                paths,
+                identity: ready.identity,
+                child: Some(child),
+            }),
+        };
+        Ok(StartupConnection {
+            client: ready.client,
+            owned,
         })
     }
 
@@ -706,39 +880,76 @@ impl CoordinatedStartup {
         self.child = None;
         Ok(())
     }
-
-    fn detach(mut self) {
-        let _ = self.child.take();
-    }
 }
 
 impl Drop for CoordinatedStartup {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = terminate_startup_child(&mut child);
+        if let Some(mut child) = self.child.take()
+            && terminate_startup_child(&mut child).is_err()
+        {
+            terminate_startup_child_fail_closed(&mut child);
         }
     }
 }
 
 fn terminate_startup_child(child: &mut Child) -> Result<(), ClientError> {
-    if child.try_wait().map_err(ClientError::LaunchIo)?.is_some() {
+    let deadline = Instant::now()
+        .checked_add(START_CHILD_STOP_TIMEOUT)
+        .ok_or(ClientError::InvalidRequestTimeout)?;
+    terminate_startup_process_until(child, || Instant::now() >= deadline)
+}
+
+trait StartupProcess {
+    fn try_exited(&mut self) -> io::Result<bool>;
+    fn terminate(&mut self) -> io::Result<()>;
+    fn reap(&mut self) -> io::Result<()>;
+}
+
+impl StartupProcess for Child {
+    fn try_exited(&mut self) -> io::Result<bool> {
+        self.try_wait().map(|status| status.is_some())
+    }
+
+    fn terminate(&mut self) -> io::Result<()> {
+        self.kill()
+    }
+
+    fn reap(&mut self) -> io::Result<()> {
+        self.wait().map(|_| ())
+    }
+}
+
+fn terminate_startup_process_until(
+    process: &mut impl StartupProcess,
+    mut deadline_expired: impl FnMut() -> bool,
+) -> Result<(), ClientError> {
+    if process.try_exited().map_err(ClientError::LaunchIo)? {
         return Ok(());
     }
-    if let Err(source) = child.kill() {
-        if child.try_wait().map_err(ClientError::LaunchIo)?.is_some() {
+    if let Err(source) = process.terminate() {
+        if process.try_exited().map_err(ClientError::LaunchIo)? {
             return Ok(());
         }
         return Err(ClientError::LaunchIo(source));
     }
-    let deadline = Instant::now()
-        .checked_add(START_CHILD_STOP_TIMEOUT)
-        .ok_or(ClientError::InvalidRequestTimeout)?;
     loop {
-        if child.try_wait().map_err(ClientError::LaunchIo)?.is_some() {
+        if process.try_exited().map_err(ClientError::LaunchIo)? {
             return Ok(());
         }
-        if Instant::now() >= deadline {
+        if deadline_expired() {
             return Err(ClientError::DaemonLaunchCleanupTimedOut);
+        }
+        std::thread::sleep(START_POLL_INTERVAL);
+    }
+}
+
+fn terminate_startup_child_fail_closed(process: &mut impl StartupProcess) {
+    loop {
+        if matches!(process.try_exited(), Ok(true)) {
+            return;
+        }
+        if process.terminate().is_ok() && process.reap().is_ok() {
+            return;
         }
         std::thread::sleep(START_POLL_INTERVAL);
     }
@@ -746,8 +957,29 @@ fn terminate_startup_child(child: &mut Child) -> Result<(), ClientError> {
 
 #[derive(Debug)]
 enum ProbeOutcome {
-    Ready(Client),
+    Ready(ReadyDaemon),
     Unavailable,
+}
+
+#[derive(Debug)]
+struct ReadyDaemon {
+    client: Client,
+    identity: ReadyDaemonIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReadyDaemonIdentity {
+    pid: u32,
+    instance_nonce: [u8; 16],
+}
+
+impl ReadyDaemonIdentity {
+    fn from_discovery(discovery: &rootlight_runtime::DiscoveryRecord) -> Self {
+        Self {
+            pid: discovery.pid(),
+            instance_nonce: discovery.instance_nonce(),
+        }
+    }
 }
 
 fn probe_ready_client(
@@ -772,16 +1004,21 @@ fn probe_ready_client(
         client_instance_id,
     );
     let health = client.health();
-    classify_health_probe(client, health)
+    classify_health_probe(
+        client,
+        ReadyDaemonIdentity::from_discovery(&discovery),
+        health,
+    )
 }
 
 fn classify_health_probe(
     client: Client,
+    identity: ReadyDaemonIdentity,
     health: Result<Health, ClientError>,
 ) -> Result<ProbeOutcome, ClientError> {
     match health {
         Ok(health) if health.ready && health.lifecycle == DaemonLifecycle::Ready => {
-            Ok(ProbeOutcome::Ready(client))
+            Ok(ProbeOutcome::Ready(ReadyDaemon { client, identity }))
         }
         Ok(_) => Ok(ProbeOutcome::Unavailable),
         Err(ClientError::Ipc(error)) if ipc_unavailable(&error) => Ok(ProbeOutcome::Unavailable),
@@ -848,7 +1085,10 @@ fn ipc_unavailable(error: &IpcError) -> bool {
     )
 }
 
-fn spawn_coordinated_daemon() -> Result<Child, ClientError> {
+fn spawn_coordinated_daemon(
+    ownership: StartupOwnership,
+    paths: &RuntimePaths,
+) -> Result<Child, ClientError> {
     let executable = std::env::current_exe().map_err(ClientError::LaunchIo)?;
     let directory = executable
         .parent()
@@ -858,9 +1098,15 @@ fn spawn_coordinated_daemon() -> Result<Child, ClientError> {
         return Err(ClientError::DaemonExecutableMissing);
     }
     let mut command = Command::new(daemon);
+    let (argument, stdin) = match ownership {
+        StartupOwnership::Detached => ("--coordinated-start", Stdio::null()),
+        StartupOwnership::Retained => ("--coordinated-stdio", Stdio::piped()),
+    };
     command
-        .arg("--coordinated-start")
-        .stdin(Stdio::null())
+        .arg(argument)
+        .env("ROOTLIGHT_STATE_DIR", paths.state_dir())
+        .env("ROOTLIGHT_RUNTIME_DIR", paths.runtime_dir())
+        .stdin(stdin)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -1628,6 +1874,42 @@ mod tests {
         Endpoint::new(path).expect("test endpoint validates")
     }
 
+    fn spawn_cleanup_child(root: &std::path::Path) -> (Child, RuntimePaths) {
+        let child_paths = RuntimePaths::new(root.join("state"), root.join("runtime"))
+            .expect("child runtime paths are valid");
+        let marker = root.join("ready");
+        let mut child = Command::new(std::env::current_exe().expect("test executable resolves"))
+            .args([
+                "--exact",
+                "tests::coordinated_startup_cleanup_child",
+                "--nocapture",
+            ])
+            .env(STARTUP_CHILD_ROOT_ENV, root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cleanup child starts");
+        let marker_deadline = Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .expect("marker deadline is representable");
+        while !marker.is_file() {
+            assert!(
+                child
+                    .try_wait()
+                    .expect("cleanup child status reads")
+                    .is_none(),
+                "cleanup child exited before acquiring its proof lock"
+            );
+            assert!(
+                Instant::now() < marker_deadline,
+                "cleanup child did not acquire its proof lock"
+            );
+            std::thread::sleep(START_POLL_INTERVAL);
+        }
+        (child, child_paths)
+    }
+
     #[test]
     fn launch_lock_remains_exclusive_until_startup_authority_releases_it() {
         let temporary = tempfile::tempdir().expect("temporary directory is available");
@@ -1700,6 +1982,7 @@ mod tests {
 
         let startup = CoordinatedStartup {
             _authority: authority,
+            ownership: StartupOwnership::Detached,
             child: Some(child),
         };
         let contender_paths = paths.clone();
@@ -1738,6 +2021,117 @@ mod tests {
         child_paths
             .acquire_launch_lock()
             .expect("terminated child releases its proof lock");
+    }
+
+    #[test]
+    fn coordinated_startup_drop_reaps_exact_child_during_unwind() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let paths = RuntimePaths::new(
+            temporary.path().join("owner-state"),
+            temporary.path().join("owner-runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths.prepare_owner().expect("runtime paths are private");
+        let authority = paths
+            .acquire_launch_lock()
+            .expect("startup authority is acquired");
+        let (child, child_paths) = spawn_cleanup_child(&temporary.path().join("child-unwind"));
+        let child_id = child.id();
+        let startup = CoordinatedStartup {
+            _authority: authority,
+            ownership: StartupOwnership::Detached,
+            child: Some(child),
+        };
+        assert!(startup.matches(ReadyDaemonIdentity {
+            pid: child_id,
+            instance_nonce: [4; 16],
+        }));
+        assert!(!startup.matches(ReadyDaemonIdentity {
+            pid: child_id.saturating_add(1),
+            instance_nonce: [4; 16],
+        }));
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _startup = startup;
+            panic!("exercise startup unwind cleanup");
+        }));
+        assert!(unwind.is_err());
+        paths
+            .acquire_launch_lock()
+            .expect("startup authority releases after exact child cleanup");
+        child_paths
+            .acquire_launch_lock()
+            .expect("unwind cleanup reaps the exact child");
+    }
+
+    #[derive(Debug)]
+    struct FakeStartupProcess {
+        exited: bool,
+        terminate_failures: usize,
+        exit_after_terminate: bool,
+    }
+
+    impl StartupProcess for FakeStartupProcess {
+        fn try_exited(&mut self) -> io::Result<bool> {
+            Ok(self.exited)
+        }
+
+        fn terminate(&mut self) -> io::Result<()> {
+            if self.terminate_failures > 0 {
+                self.terminate_failures = self.terminate_failures.saturating_sub(1);
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected terminate failure",
+                ));
+            }
+            if self.exit_after_terminate {
+                self.exited = true;
+            }
+            Ok(())
+        }
+
+        fn reap(&mut self) -> io::Result<()> {
+            self.exited = true;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn startup_cleanup_surfaces_kill_failure_and_timeout() {
+        let mut kill_failure = FakeStartupProcess {
+            exited: false,
+            terminate_failures: 1,
+            exit_after_terminate: false,
+        };
+        assert!(matches!(
+            terminate_startup_process_until(&mut kill_failure, || false),
+            Err(ClientError::LaunchIo(error))
+                if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+
+        let mut timeout = FakeStartupProcess {
+            exited: false,
+            terminate_failures: 0,
+            exit_after_terminate: false,
+        };
+        assert!(matches!(
+            terminate_startup_process_until(&mut timeout, || true),
+            Err(ClientError::DaemonLaunchCleanupTimedOut)
+        ));
+    }
+
+    #[test]
+    fn fail_closed_startup_cleanup_retries_until_reaped() {
+        let mut process = FakeStartupProcess {
+            exited: false,
+            terminate_failures: 2,
+            exit_after_terminate: true,
+        };
+
+        terminate_startup_child_fail_closed(&mut process);
+
+        assert!(process.exited);
+        assert_eq!(process.terminate_failures, 0);
     }
 
     #[test]
@@ -2239,8 +2633,12 @@ mod tests {
     fn readiness_probe_preserves_protocol_and_security_failures() {
         let endpoint = test_endpoint("protocol");
         let client = Client::new(endpoint, [1; 16], [2; 16]);
+        let identity = ReadyDaemonIdentity {
+            pid: 1,
+            instance_nonce: [1; 16],
+        };
         assert!(matches!(
-            classify_health_probe(client, Err(ClientError::ProtocolMismatch)),
+            classify_health_probe(client, identity, Err(ClientError::ProtocolMismatch)),
             Err(ClientError::ProtocolMismatch)
         ));
     }
@@ -2249,8 +2647,13 @@ mod tests {
     fn readiness_probe_only_treats_connection_absence_as_unavailable() {
         let endpoint = test_endpoint("absent");
         let client = Client::new(endpoint, [1; 16], [2; 16]);
+        let identity = ReadyDaemonIdentity {
+            pid: 1,
+            instance_nonce: [1; 16],
+        };
         let unavailable = classify_health_probe(
             client,
+            identity,
             Err(ClientError::Ipc(IpcError::Transport(io::Error::new(
                 io::ErrorKind::NotFound,
                 "fixture is absent",
@@ -2262,7 +2665,7 @@ mod tests {
         let endpoint = test_endpoint("nonce");
         let client = Client::new(endpoint, [1; 16], [2; 16]);
         assert!(matches!(
-            classify_health_probe(client, Err(ClientError::NonceMismatch)),
+            classify_health_probe(client, identity, Err(ClientError::NonceMismatch)),
             Err(ClientError::NonceMismatch)
         ));
     }
