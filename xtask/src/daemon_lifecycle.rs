@@ -1339,7 +1339,7 @@ fn assert_support_telemetry(
     first: &rootlight_client::SupportBundle,
     second: &rootlight_client::SupportBundle,
 ) -> Result<(), LifecycleError> {
-    if health.protocol_version != "1.4"
+    if health.protocol_version != "1.5"
         || first.schema_version != 2
         || second.schema_version != 2
         || first.contains_source
