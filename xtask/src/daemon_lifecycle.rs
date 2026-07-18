@@ -34,6 +34,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const EXPECTED_CLIENT_CONNECTION_LIMIT: u32 = 8;
 const EXPECTED_CLIENT_OPERATION_LIMIT: u32 = 32;
 const EXPECTED_OPERATION_WORKERS: usize = 4;
+const QUOTA_GUARD_IDENTITIES: [u8; 8] = [72, 73, 74, 75, 76, 77, 78, 79];
+const QUOTA_GUARD_MIN_QUEUED: u32 = 48;
+const QUOTA_WINDOW_TIMEOUT: Duration = Duration::from_secs(15);
 const REFERENCE_CONTROL_P95_TARGET: Duration = Duration::from_millis(50);
 const MAX_DAEMON_STDERR_BYTES: usize = 1024 * 1024;
 
@@ -580,74 +583,95 @@ fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), Lifecy
     );
     let peer = Client::connect_or_start(paths, [71; 16], ConnectPolicy::ExistingOnly)
         .map_err(LifecycleError::Client)?;
-    let operation_count = usize::try_from(EXPECTED_CLIENT_OPERATION_LIMIT)
-        .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?;
-    let noisy_operations = Arc::new(
-        (0..EXPECTED_CLIENT_OPERATION_LIMIT)
-            .map(|ordinal| quota_operation(70, ordinal))
-            .collect::<Result<Vec<_>, _>>()?,
-    );
     let worker_count = usize::try_from(EXPECTED_CLIENT_CONNECTION_LIMIT)
         .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?;
-    let barrier = Arc::new(Barrier::new(worker_count));
-    let mut submissions = Vec::with_capacity(worker_count);
-    for worker in 0..worker_count {
-        let noisy = Arc::clone(&noisy);
-        let noisy_operations = Arc::clone(&noisy_operations);
-        let barrier = Arc::clone(&barrier);
-        submissions.push(thread::spawn(move || {
-            barrier.wait();
-            for index in (worker..operation_count).step_by(worker_count) {
-                let operation = noisy_operations[index];
-                let status = submit_with_transport_retry(&noisy, operation)?;
-                if !matches!(
-                    status.state,
-                    OperationState::Running | OperationState::Queued
-                ) {
-                    return Err(LifecycleError::UnexpectedQuotaOperationState(status.state));
-                }
-            }
-            Ok(())
-        }));
-    }
 
-    for submission in submissions {
-        submission
-            .join()
-            .map_err(|_| LifecycleError::ClientThreadPanicked)??;
+    // A bounded guard backlog prevents finite probes from releasing noisy-client
+    // permits while their submission burst is still crossing a slower IPC host.
+    let mut guards = Vec::with_capacity(QUOTA_GUARD_IDENTITIES.len());
+    for identity in QUOTA_GUARD_IDENTITIES {
+        let guard = Arc::new(
+            Client::connect_or_start(paths, [identity; 16], ConnectPolicy::ExistingOnly)
+                .map_err(LifecycleError::Client)?,
+        );
+        let operations = (0..EXPECTED_CLIENT_CONNECTION_LIMIT)
+            .map(|ordinal| quota_operation(identity, ordinal))
+            .collect::<Result<Vec<_>, _>>()?;
+        guards.push((guard, operations));
     }
-    let noisy_operations = Arc::try_unwrap(noisy_operations)
-        .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?;
+    let guard_deadline = quota_deadline(COMMAND_TIMEOUT)?;
+    submit_guard_operations(&guards, guard_deadline).map_err(|error| match error {
+        LifecycleError::QuotaGuardWindowExpired => LifecycleError::QuotaGuardBacklogUnavailable,
+        other => other,
+    })?;
+
+    let expected_running = default_worker_slots()?;
+    let guard_ready_deadline = quota_deadline(COMMAND_TIMEOUT)?;
+    let guard_health = wait_for_health_until(
+        &peer,
+        |health| {
+            health.ready
+                && health.lifecycle == DaemonLifecycle::Ready
+                && health.accepting_operations
+                && health.running_operations == expected_running
+                && health.queued_operations >= QUOTA_GUARD_MIN_QUEUED
+                && health
+                    .running_operations
+                    .checked_add(health.queued_operations)
+                    == Some(health.admitted_operations)
+        },
+        guard_ready_deadline,
+    )
+    .map_err(|error| match error {
+        LifecycleError::HealthStateTimedOut => LifecycleError::QuotaGuardBacklogUnavailable,
+        other => other,
+    })?;
+    require_expected_default_limits(&guard_health)?;
+
+    let quota_window = quota_deadline(QUOTA_WINDOW_TIMEOUT)?;
+    let noisy_operations = (0..EXPECTED_CLIENT_OPERATION_LIMIT)
+        .map(|ordinal| quota_operation(70, ordinal))
+        .collect::<Result<Vec<_>, _>>()?;
+    let noisy_operations = submit_operation_batch(
+        Arc::clone(&noisy),
+        noisy_operations,
+        worker_count,
+        quota_window,
+    )?;
 
     let rejected = quota_operation(70, EXPECTED_CLIENT_OPERATION_LIMIT)?;
-    match noisy.operation_submit(rejected) {
+    let rejection = noisy.operation_submit(rejected);
+    require_quota_window(quota_window)?;
+    match rejection {
         Err(error) if is_client_operation_quota(&error) => {}
         Err(error) => return Err(LifecycleError::Client(error)),
         Ok(_) => return Err(LifecycleError::ClientOperationQuotaNotEnforced),
     }
 
-    let health = peer.health().map_err(LifecycleError::Client)?;
-    let expected_running = default_worker_slots()?;
-    let expected_queued = EXPECTED_CLIENT_OPERATION_LIMIT
-        .checked_sub(expected_running)
-        .ok_or(LifecycleError::InvalidWorkerConfiguration)?;
-    if !health.ready
-        || health.lifecycle != DaemonLifecycle::Ready
-        || !health.accepting_operations
-        || health.admitted_operations != EXPECTED_CLIENT_OPERATION_LIMIT
-        || health.running_operations != expected_running
-        || health.queued_operations != expected_queued
-    {
-        return Err(LifecycleError::UnexpectedQuotaHealth {
-            admitted: health.admitted_operations,
-            running: health.running_operations,
-            queued: health.queued_operations,
-        });
-    }
+    let saturated = wait_for_health_until(
+        &peer,
+        |health| {
+            health.ready
+                && health.lifecycle == DaemonLifecycle::Ready
+                && health.accepting_operations
+                && health.admitted_operations >= EXPECTED_CLIENT_OPERATION_LIMIT
+                && health.running_operations == expected_running
+                && health
+                    .running_operations
+                    .checked_add(health.queued_operations)
+                    == Some(health.admitted_operations)
+        },
+        quota_window,
+    )
+    .map_err(|error| match error {
+        LifecycleError::HealthStateTimedOut => LifecycleError::QuotaGuardWindowExpired,
+        other => other,
+    })?;
+    require_expected_default_limits(&saturated)?;
     let peer_operation = quota_operation(71, 0)?;
-    let peer_status = peer
-        .operation_submit(peer_operation)
-        .map_err(LifecycleError::Client)?;
+    let peer_submission = peer.operation_submit(peer_operation);
+    require_quota_window(quota_window)?;
+    let peer_status = peer_submission.map_err(LifecycleError::Client)?;
     if !matches!(
         peer_status.state,
         OperationState::Running | OperationState::Queued
@@ -661,6 +685,11 @@ fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), Lifecy
         cancel_and_wait(&noisy, operation)?;
     }
     cancel_and_wait(&peer, peer_operation)?;
+    for (guard, operations) in guards {
+        for operation in operations {
+            cancel_and_wait(&guard, operation)?;
+        }
+    }
     wait_for_health(&peer, |health| {
         health.admitted_operations == 0
             && health.running_operations == 0
@@ -744,11 +773,23 @@ fn wait_for_health(
     client: &Client,
     predicate: impl Fn(&Health) -> bool,
 ) -> Result<Health, LifecycleError> {
-    let deadline = Instant::now()
-        .checked_add(COMMAND_TIMEOUT)
-        .ok_or(LifecycleError::Clock)?;
+    wait_for_health_until(client, predicate, quota_deadline(COMMAND_TIMEOUT)?)
+}
+
+fn wait_for_health_until(
+    client: &Client,
+    predicate: impl Fn(&Health) -> bool,
+    deadline: Instant,
+) -> Result<Health, LifecycleError> {
     loop {
-        let health = client.health().map_err(LifecycleError::Client)?;
+        if Instant::now() >= deadline {
+            return Err(LifecycleError::HealthStateTimedOut);
+        }
+        let health = client.health();
+        if Instant::now() >= deadline {
+            return Err(LifecycleError::HealthStateTimedOut);
+        }
+        let health = health.map_err(LifecycleError::Client)?;
         if predicate(&health) {
             return Ok(health);
         }
@@ -768,24 +809,126 @@ fn quota_operation(identity: u8, ordinal: u32) -> Result<OperationId, LifecycleE
     Ok(OperationId::from_bytes(bytes))
 }
 
-fn submit_with_transport_retry(
-    client: &Client,
-    operation: OperationId,
-) -> Result<rootlight_client::OperationStatus, LifecycleError> {
-    let deadline = Instant::now()
-        .checked_add(COMMAND_TIMEOUT)
-        .ok_or(LifecycleError::Clock)?;
-    loop {
-        match client.operation_submit(operation) {
-            Ok(status) => return Ok(status),
-            Err(ClientError::Ipc(rootlight_ipc::IpcError::Transport(error)))
-                if error.kind() == io::ErrorKind::TimedOut && Instant::now() < deadline =>
-            {
-                thread::sleep(POLL_INTERVAL);
-            }
-            Err(error) => return Err(LifecycleError::Client(error)),
+fn submit_guard_operations(
+    guards: &[(Arc<Client>, Vec<OperationId>)],
+    deadline: Instant,
+) -> Result<(), LifecycleError> {
+    let operation_count = guards
+        .iter()
+        .try_fold(0_usize, |count, (_, operations)| {
+            count.checked_add(operations.len())
+        })
+        .ok_or(LifecycleError::InvalidWorkerConfiguration)?;
+    if operation_count == 0 {
+        return Err(LifecycleError::InvalidWorkerConfiguration);
+    }
+
+    let barrier = Arc::new(Barrier::new(operation_count));
+    let mut submissions = Vec::with_capacity(operation_count);
+    for (client, operations) in guards {
+        for operation in operations {
+            let client = Arc::clone(client);
+            let barrier = Arc::clone(&barrier);
+            let operation = *operation;
+            submissions.push(thread::spawn(move || {
+                barrier.wait();
+                let status = submit_quota_operation_until(&client, operation, deadline)?;
+                if !matches!(
+                    status.state,
+                    OperationState::Running | OperationState::Queued
+                ) {
+                    return Err(LifecycleError::UnexpectedQuotaOperationState(status.state));
+                }
+                Ok(())
+            }));
         }
     }
+
+    for submission in submissions {
+        submission
+            .join()
+            .map_err(|_| LifecycleError::ClientThreadPanicked)??;
+    }
+    Ok(())
+}
+
+fn submit_operation_batch(
+    client: Arc<Client>,
+    operations: Vec<OperationId>,
+    worker_count: usize,
+    deadline: Instant,
+) -> Result<Vec<OperationId>, LifecycleError> {
+    if worker_count == 0 || operations.len() < worker_count {
+        return Err(LifecycleError::InvalidWorkerConfiguration);
+    }
+    let operation_count = operations.len();
+    let operations = Arc::new(operations);
+    let barrier = Arc::new(Barrier::new(worker_count));
+    let mut submissions = Vec::with_capacity(worker_count);
+    for worker in 0..worker_count {
+        let client = Arc::clone(&client);
+        let operations = Arc::clone(&operations);
+        let barrier = Arc::clone(&barrier);
+        submissions.push(thread::spawn(move || {
+            barrier.wait();
+            for index in (worker..operation_count).step_by(worker_count) {
+                let operation = operations[index];
+                let status = submit_quota_operation_until(&client, operation, deadline)?;
+                if !matches!(
+                    status.state,
+                    OperationState::Running | OperationState::Queued
+                ) {
+                    return Err(LifecycleError::UnexpectedQuotaOperationState(status.state));
+                }
+            }
+            Ok(())
+        }));
+    }
+    for submission in submissions {
+        submission
+            .join()
+            .map_err(|_| LifecycleError::ClientThreadPanicked)??;
+    }
+    Arc::try_unwrap(operations).map_err(|_| LifecycleError::InvalidWorkerConfiguration)
+}
+
+fn submit_quota_operation_until(
+    client: &Client,
+    operation: OperationId,
+    deadline: Instant,
+) -> Result<rootlight_client::OperationStatus, LifecycleError> {
+    loop {
+        require_quota_window(deadline)?;
+        match client.operation_submit(operation) {
+            Ok(status) => {
+                require_quota_window(deadline)?;
+                return Ok(status);
+            }
+            Err(ClientError::Ipc(rootlight_ipc::IpcError::Transport(error)))
+                if error.kind() == io::ErrorKind::TimedOut =>
+            {
+                require_quota_window(deadline)?;
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(error) => {
+                require_quota_window(deadline)?;
+                return Err(LifecycleError::Client(error));
+            }
+        }
+    }
+}
+
+fn quota_deadline(timeout: Duration) -> Result<Instant, LifecycleError> {
+    Instant::now()
+        .checked_add(timeout)
+        .ok_or(LifecycleError::Clock)
+}
+
+fn require_quota_window(deadline: Instant) -> Result<(), LifecycleError> {
+    if Instant::now() >= deadline {
+        return Err(LifecycleError::QuotaGuardWindowExpired);
+    }
+    Ok(())
 }
 
 fn is_client_operation_quota(error: &ClientError) -> bool {
@@ -1664,16 +1807,12 @@ pub(crate) enum LifecycleError {
     UnexpectedClientHealth,
     #[error("daemon did not enforce the per-client operation quota")]
     ClientOperationQuotaNotEnforced,
+    #[error("daemon quota guard did not establish the required bounded backlog")]
+    QuotaGuardBacklogUnavailable,
+    #[error("daemon quota isolation evidence exceeded its bounded window")]
+    QuotaGuardWindowExpired,
     #[error("daemon quota exercise returned an unexpected operation state: {0:?}")]
     UnexpectedQuotaOperationState(OperationState),
-    #[error(
-        "daemon quota isolation health is invalid: admitted={admitted}, running={running}, queued={queued}"
-    )]
-    UnexpectedQuotaHealth {
-        admitted: u32,
-        running: u32,
-        queued: u32,
-    },
     #[error("daemon lifecycle client thread panicked")]
     ClientThreadPanicked,
     #[error("simultaneous autostart did not return the exact daemon owner")]
