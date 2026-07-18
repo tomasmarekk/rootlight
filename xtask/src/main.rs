@@ -14,13 +14,20 @@ mod policy;
 mod protobuf_compatibility;
 mod schemas;
 
-use std::{env, process::ExitCode};
+use std::{env, error::Error as _, process::ExitCode};
 
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
+            if let XtaskError::DaemonLifecycle(lifecycle) = &error {
+                let mut source = lifecycle.source();
+                while let Some(cause) = source {
+                    eprintln!("caused by: {cause}");
+                    source = cause.source();
+                }
+            }
             ExitCode::FAILURE
         }
     }
