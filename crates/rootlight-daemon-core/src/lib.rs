@@ -808,16 +808,17 @@ impl JournalActorHandle {
                     }
                     deadline.pause_after_start_receipt();
                     let accepted = deadline.remaining().is_some();
+                    deadline.pause_before_start_acknowledgement();
                     let acknowledgement = if accepted {
                         WorkerStartAcknowledgement::Accepted
                     } else {
                         WorkerStartAcknowledgement::Expired
                     };
                     if acknowledged.send(acknowledgement).is_err() {
-                        return Err(if accepted {
-                            ServiceError::ChannelClosed
-                        } else {
+                        return Err(if !accepted || deadline.remaining().is_none() {
                             ServiceError::RequestTimedOut
+                        } else {
+                            ServiceError::ChannelClosed
                         });
                     }
                     return if accepted {
@@ -1355,8 +1356,14 @@ fn deliver_worker_start(
         .map_or(Err(mpsc::RecvTimeoutError::Timeout), |remaining| {
             acknowledged.recv_timeout(remaining)
         });
-    if !matches!(acknowledgement, Ok(WorkerStartAcknowledgement::Accepted)) {
-        journal.interrupt_unacknowledged_start(operation)?;
+    match acknowledgement {
+        Ok(WorkerStartAcknowledgement::Accepted) => {}
+        Ok(WorkerStartAcknowledgement::Expired) | Err(mpsc::RecvTimeoutError::Timeout) => {
+            journal.interrupt_deadline(operation)?;
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            journal.interrupt_unacknowledged_start(operation)?;
+        }
     }
     Ok(())
 }
@@ -2191,6 +2198,14 @@ struct ControlledStartReceipt {
     release: Arc<std::sync::Barrier>,
 }
 
+#[cfg(test)]
+struct ControlledStartAcknowledgement {
+    deadline: WorkerDeadline,
+    force_expired: Arc<AtomicBool>,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
 /// One monotonic budget shared by admission, actor enqueue, and actor execution.
 ///
 /// Keeping the deadline in the command prevents a start authorization that
@@ -2204,6 +2219,8 @@ struct WorkerDeadline {
     remaining_checks: Option<Arc<AtomicU32>>,
     #[cfg(test)]
     start_receipt_hook: Option<Arc<WorkerStartReceiptHook>>,
+    #[cfg(test)]
+    start_acknowledgement_hook: Option<Arc<WorkerStartReceiptHook>>,
 }
 
 impl WorkerDeadline {
@@ -2219,6 +2236,8 @@ impl WorkerDeadline {
             remaining_checks: None,
             #[cfg(test)]
             start_receipt_hook: None,
+            #[cfg(test)]
+            start_acknowledgement_hook: None,
         })
     }
 
@@ -2257,6 +2276,14 @@ impl WorkerDeadline {
         }
     }
 
+    fn pause_before_start_acknowledgement(&self) {
+        #[cfg(test)]
+        if let Some(hook) = self.start_acknowledgement_hook.as_ref() {
+            hook.entered.wait();
+            hook.release.wait();
+        }
+    }
+
     #[cfg(test)]
     fn controlled(timeout: Duration) -> Result<(Self, Arc<AtomicBool>), ServiceError> {
         let mut deadline = Self::from_timeout(timeout)?;
@@ -2284,6 +2311,25 @@ impl WorkerDeadline {
             release: Arc::clone(&release),
         }));
         Ok(ControlledStartReceipt {
+            deadline,
+            force_expired: forced_expired,
+            entered,
+            release,
+        })
+    }
+
+    #[cfg(test)]
+    fn controlled_before_start_acknowledgement(
+        timeout: Duration,
+    ) -> Result<ControlledStartAcknowledgement, ServiceError> {
+        let (mut deadline, forced_expired) = Self::controlled(timeout)?;
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        deadline.start_acknowledgement_hook = Some(Arc::new(WorkerStartReceiptHook {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }));
+        Ok(ControlledStartAcknowledgement {
             deadline,
             force_expired: forced_expired,
             entered,
@@ -5868,10 +5914,47 @@ mod tests {
     }
 
     #[test]
+    fn worker_acknowledgement_disconnect_preserves_restart_provenance() {
+        let operation = OperationId::from_bytes([66; 16]);
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let cancellation = journal.enqueue(operation).expect("operation enqueues");
+        let running = journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let deadline =
+            WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT).expect("deadline is valid");
+        let (started, start_receiver) = mpsc::sync_channel(1);
+        let (acknowledged, acknowledgement) = mpsc::sync_channel(0);
+        drop(acknowledged);
+
+        deliver_worker_start(
+            &journal,
+            operation,
+            &deadline,
+            started,
+            acknowledgement,
+            Ok((running, Some(cancellation.clone()))),
+        )
+        .expect("disconnected acknowledgement is compensated");
+
+        assert!(matches!(start_receiver.recv(), Ok(Ok(_))));
+        let operation = journal.status(operation).expect("status loads");
+        assert_eq!(operation.state, OperationState::Interrupted);
+        assert_eq!(
+            operation.recovery_class,
+            RecoveryClass::InterruptedByRestart
+        );
+        assert_eq!(
+            cancellation.reason(),
+            Some(rootlight_operations::CancellationReason::Shutdown)
+        );
+    }
+
+    #[test]
     fn worker_start_expiry_after_rendezvous_receipt_prevents_execution() {
         let operation = OperationId::from_bytes([63; 16]);
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-        journal.enqueue(operation).expect("operation enqueues");
+        let cancellation = journal.enqueue(operation).expect("operation enqueues");
         let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
         let handle = actor.handle();
         let ControlledStartReceipt {
@@ -5909,11 +5992,71 @@ mod tests {
 
         let operation = journal.status(operation).expect("status loads");
         assert_eq!(operation.state, OperationState::Interrupted);
+        assert_eq!(operation.recovery_class, RecoveryClass::DeadlineElapsed);
         assert_eq!(
-            operation.recovery_class,
-            RecoveryClass::InterruptedByRestart
+            cancellation.reason(),
+            Some(rootlight_operations::CancellationReason::DeadlineExceeded)
         );
         actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn failed_start_acknowledgement_prefers_the_elapsed_deadline() {
+        let operation = OperationId::from_bytes([65; 16]);
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let cancellation = journal.enqueue(operation).expect("operation enqueues");
+        let running = journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let (control, _control_rx) = mpsc::sync_channel(1);
+        let (normal, normal_rx) = mpsc::sync_channel(1);
+        let handle = JournalActorHandle {
+            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
+                control,
+                normal,
+            }))),
+        };
+        let ControlledStartAcknowledgement {
+            deadline,
+            force_expired,
+            entered,
+            release,
+        } = WorkerDeadline::controlled_before_start_acknowledgement(DEFAULT_REQUEST_TIMEOUT)
+            .expect("deadline is valid");
+        let worker_handle = handle.clone();
+        let worker =
+            thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
+        let JournalCommand::StartOperation {
+            started,
+            acknowledged,
+            ..
+        } = normal_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker start command arrives")
+        else {
+            panic!("worker start command is preserved");
+        };
+        started
+            .send(Ok((running, Some(cancellation.clone()))))
+            .expect("durable start reaches the worker");
+
+        entered.wait();
+        force_expired.store(true, Ordering::Release);
+        drop(acknowledged);
+        release.wait();
+
+        assert!(matches!(
+            worker.join().expect("worker joins"),
+            Err(ServiceError::RequestTimedOut)
+        ));
+        let interrupted = journal
+            .interrupt_deadline(operation)
+            .expect("test cleanup records the elapsed deadline");
+        assert_eq!(interrupted.recovery_class, RecoveryClass::DeadlineElapsed);
+        assert_eq!(
+            cancellation.reason(),
+            Some(rootlight_operations::CancellationReason::DeadlineExceeded)
+        );
     }
 
     #[test]
