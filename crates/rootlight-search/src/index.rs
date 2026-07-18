@@ -922,7 +922,6 @@ impl<'a> QueryWork<'a> {
                 .into_stream()
                 .map_err(|_| operation("term_dictionary"))?;
             loop {
-                self.require_examined_term_capacity()?;
                 self.control.check()?;
                 let advanced = stream.advance();
                 self.control.check()?;
@@ -972,19 +971,15 @@ impl<'a> QueryWork<'a> {
     }
 
     fn admit_examined_term(&mut self) -> Result<(), SearchError> {
-        self.examined_terms = self
+        let examined_terms = self
             .examined_terms
             .checked_add(1)
             .ok_or(SearchError::TermExaminationBudgetExceeded)?;
-        Ok(())
-    }
-
-    fn require_examined_term_capacity(&self) -> Result<(), SearchError> {
-        if self.examined_terms >= self.budget.max_examined_terms {
-            Err(SearchError::TermExaminationBudgetExceeded)
-        } else {
-            Ok(())
+        if examined_terms > self.budget.max_examined_terms {
+            return Err(SearchError::TermExaminationBudgetExceeded);
         }
+        self.examined_terms = examined_terms;
+        Ok(())
     }
 
     fn require_term_capacity(&self, additional: usize) -> Result<(), SearchError> {
@@ -2212,6 +2207,43 @@ mod tests {
                     mode: SearchMode::SafeRegex,
                     max_results: 1,
                 },
+                SearchBudget {
+                    max_examined_terms: 2,
+                    ..SearchBudget::default()
+                },
+                &Cancellation::new(),
+            ),
+            Err(SearchError::TermExaminationBudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn term_examination_budget_accepts_exact_cap_and_rejects_additional_term() {
+        let (_directory, _manifest, index) = build(vec![
+            document(11, "abaa", "src/aa.rs"),
+            document(12, "abab", "src/ab.rs"),
+            document(13, "abac", "src/ac.rs"),
+        ]);
+        let request = SearchRequest {
+            query: "ab.z".to_owned(),
+            mode: SearchMode::SafeRegex,
+            max_results: 1,
+        };
+
+        assert_eq!(
+            index.search(
+                &request,
+                SearchBudget {
+                    max_examined_terms: 3,
+                    ..SearchBudget::default()
+                },
+                &Cancellation::new(),
+            ),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            index.search(
+                &request,
                 SearchBudget {
                     max_examined_terms: 2,
                     ..SearchBudget::default()
