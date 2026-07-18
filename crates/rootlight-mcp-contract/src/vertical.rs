@@ -1,4 +1,7 @@
 //! Source definitions for the first MCP vertical-slice tool schemas.
+//!
+//! The schema generator derives checked public artifacts from these bounded
+//! types; transport routing consumes only those generated artifacts.
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -1,4 +1,7 @@
 //! Bounded MCP tool discovery and invocation routing.
+//!
+//! This module validates both sides of the generic daemon executor boundary
+//! and keeps MCP structured content identical to its JSON text mirror.
 
 use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
