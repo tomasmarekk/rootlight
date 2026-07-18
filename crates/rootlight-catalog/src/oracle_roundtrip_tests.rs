@@ -1190,6 +1190,7 @@ fn independent_sdk_producer_uses_the_same_identity_verifier() {
         repository,
         generation,
         path: relative.as_str().to_owned(),
+        path_locator: Some(relative.to_locator()),
         content_hash: source_snapshot.content_hash(),
         byte_length: u64::try_from(source_snapshot.content().len())
             .expect("fixture source length fits"),
