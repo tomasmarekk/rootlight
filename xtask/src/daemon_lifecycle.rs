@@ -37,6 +37,7 @@ const EXPECTED_OPERATION_WORKERS: usize = 4;
 const QUOTA_GUARD_IDENTITIES: [u8; 8] = [72, 73, 74, 75, 76, 77, 78, 79];
 const QUOTA_GUARD_MIN_QUEUED: u32 = 48;
 const QUOTA_WINDOW_TIMEOUT: Duration = Duration::from_secs(15);
+const QUOTA_EXIT_CONFIRM_TIMEOUT: Duration = Duration::from_millis(500);
 const REFERENCE_CONTROL_P95_TARGET: Duration = Duration::from_millis(50);
 const MAX_DAEMON_STDERR_BYTES: usize = 1024 * 1024;
 
@@ -57,7 +58,9 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     let health = run_json(&rootlight, &["health"], &environment, COMMAND_TIMEOUT)?;
     assert_success_type(&health, "health")?;
     exercise_concurrent_clients(&paths)?;
-    exercise_operation_quota_isolation(&paths)?;
+    if let Err(error) = exercise_operation_quota_isolation(&paths) {
+        return Err(process.contextualize_quota_failure(error, &environment.private_values()));
+    }
     let control_latency = exercise_saturated_control_responsiveness(&paths)?;
 
     let operation = OperationId::from_bytes([42; 16]).to_string();
@@ -384,6 +387,48 @@ impl SupervisedDaemon {
             });
         }
         Ok(stderr)
+    }
+
+    fn contextualize_quota_failure(
+        &mut self,
+        source: LifecycleError,
+        private_values: &[Vec<u8>],
+    ) -> LifecycleError {
+        let Some(deadline) = Instant::now().checked_add(QUOTA_EXIT_CONFIRM_TIMEOUT) else {
+            return LifecycleError::OperationQuotaProcessStateUnavailable {
+                source: Box::new(source),
+            };
+        };
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    let stderr = self
+                        .take_stderr()
+                        .map_or(QuotaDaemonStderr::Unavailable, |stderr| {
+                            privacy_checked_quota_stderr(&stderr, private_values)
+                        });
+                    return LifecycleError::DaemonExitedDuringQuota {
+                        status,
+                        stderr,
+                        source: Box::new(source),
+                    };
+                }
+                Ok(None) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return LifecycleError::OperationQuotaFailed {
+                            source: Box::new(source),
+                        };
+                    }
+                    thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+                }
+                Err(_) => {
+                    return LifecycleError::OperationQuotaProcessStateUnavailable {
+                        source: Box::new(source),
+                    };
+                }
+            }
+        }
     }
 
     fn take_stderr(&mut self) -> Result<Vec<u8>, LifecycleError> {
@@ -1575,6 +1620,14 @@ fn assert_privacy_sentinels_absent(
     Ok(())
 }
 
+fn privacy_checked_quota_stderr(bytes: &[u8], private_values: &[Vec<u8>]) -> QuotaDaemonStderr {
+    if assert_privacy_sentinels_absent("quota daemon stderr", bytes, private_values).is_err() {
+        QuotaDaemonStderr::Redacted
+    } else {
+        QuotaDaemonStderr::Captured(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
 fn parse_single_json(bytes: &[u8]) -> Result<Value, LifecycleError> {
     let text = std::str::from_utf8(bytes).map_err(LifecycleError::OutputUtf8)?;
     let mut values = serde_json::Deserializer::from_str(text).into_iter::<Value>();
@@ -1819,6 +1872,23 @@ pub(crate) enum LifecycleError {
     UnexpectedClientHealth,
     #[error("concurrent client connections did not drain before quota isolation")]
     ConcurrentClientDrainTimedOut,
+    #[error("daemon operation quota isolation failed")]
+    OperationQuotaFailed {
+        #[source]
+        source: Box<LifecycleError>,
+    },
+    #[error("daemon operation quota isolation failed while process state was unavailable")]
+    OperationQuotaProcessStateUnavailable {
+        #[source]
+        source: Box<LifecycleError>,
+    },
+    #[error("supervised daemon exited during quota isolation with {status}: {stderr}")]
+    DaemonExitedDuringQuota {
+        status: ExitStatus,
+        stderr: QuotaDaemonStderr,
+        #[source]
+        source: Box<LifecycleError>,
+    },
     #[error("daemon did not enforce the per-client operation quota")]
     ClientOperationQuotaNotEnforced,
     #[error("daemon quota guard did not establish the required bounded backlog")]
@@ -1857,6 +1927,23 @@ pub(crate) enum LifecycleError {
     OperationSubmitMismatch,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum QuotaDaemonStderr {
+    Captured(String),
+    Redacted,
+    Unavailable,
+}
+
+impl std::fmt::Display for QuotaDaemonStderr {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Captured(stderr) => formatter.write_str(stderr),
+            Self::Redacted => formatter.write_str("<redacted: private value detected>"),
+            Self::Unavailable => formatter.write_str("<unavailable: bounded capture failed>"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io;
@@ -1864,7 +1951,10 @@ mod tests {
     use rootlight_client::ClientError;
     use rootlight_ipc::IpcError;
 
-    use super::{is_retryable_quota_transport, sequences_are_strictly_increasing};
+    use super::{
+        QuotaDaemonStderr, is_retryable_quota_transport, privacy_checked_quota_stderr,
+        sequences_are_strictly_increasing,
+    };
 
     #[test]
     fn telemetry_sequence_order_rejects_reordering_and_duplicates() {
@@ -1889,5 +1979,22 @@ mod tests {
         assert!(!is_retryable_quota_transport(
             &ClientError::UnexpectedResponse
         ));
+    }
+
+    #[test]
+    fn quota_diagnostic_stderr_is_privacy_checked() {
+        let private_values = vec![b"/private/runtime".to_vec()];
+        assert_eq!(
+            privacy_checked_quota_stderr(b"safe structured diagnostic", &private_values),
+            QuotaDaemonStderr::Captured("safe structured diagnostic".to_owned())
+        );
+        assert_eq!(
+            privacy_checked_quota_stderr(b"path=/private/runtime", &private_values),
+            QuotaDaemonStderr::Redacted
+        );
+        assert_eq!(
+            privacy_checked_quota_stderr(b"token=sk-secret-token", &private_values),
+            QuotaDaemonStderr::Redacted
+        );
     }
 }
