@@ -146,6 +146,40 @@ jobs:
         shell: bash
         run: git diff --exit-code
 
+  gate-1:
+    name: gate-1 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup show active-toolchain
+      - name: Build Gate-1 binaries
+        shell: bash
+        run: cargo build --locked --package rootlight-daemon --package rootlight-mcp --package xtask
+      - name: Run Gate-1 vertical check
+        shell: bash
+        run: cargo run --locked --quiet --package xtask -- mcp-vertical-check --bin-dir target/debug --output-dir artifacts/gate-1/${{ matrix.os }}
+      - name: Upload Gate-1 evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate-1-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/gate-1/${{ matrix.os }}/summary.json
+            artifacts/gate-1/${{ matrix.os }}/transcript.jsonl
+            artifacts/gate-1/${{ matrix.os }}/failure.json
+          if-no-files-found: ignore
+          include-hidden-files: false
+          overwrite: false
+
   supply-chain:
     name: supply chain / linux
     runs-on: ubuntu-24.04
@@ -211,11 +245,11 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, supply-chain, offline]
+    needs: [fast, msrv, current-stable, platform, gate-1, supply-chain, offline]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require every foundation and daemon gate
+      - name: Require every foundation, daemon, and Gate-1 gate
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
@@ -233,5 +267,5 @@ jobs:
           if failures:
               print(f"required CI jobs did not succeed: {failures}", file=sys.stderr)
               raise SystemExit(1)
-          print("all required foundation and daemon CI jobs succeeded")
+          print("all required foundation, daemon, and Gate-1 CI jobs succeeded")
           PY
