@@ -1216,7 +1216,10 @@ mod tests {
     #[test]
     fn macos_support_output_error_is_stable_capability_specific_and_path_redacted() {
         let path_marker = "private/secret/support.zip";
-        let error = CliError::MacosSupportOutputUnavailable;
+        let error = map_support_output_error(RuntimeError::PrivateOutputSecurityPolicy(Some(
+            std::io::Error::new(std::io::ErrorKind::Unsupported, path_marker),
+        )));
+        assert!(matches!(error, CliError::MacosSupportOutputUnavailable));
         let envelope = CliEnvelope::failure(error.exit_family(), error.public_error());
         let json = serde_json::to_value(envelope).expect("CLI envelope serializes");
         let encoded = serde_json::to_string(&json).expect("CLI envelope renders");
