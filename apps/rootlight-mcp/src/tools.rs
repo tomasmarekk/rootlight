@@ -6,7 +6,11 @@
 use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
 use jsonschema::Validator;
-use rootlight_mcp_contract::VerticalTool;
+use rootlight_mcp_contract::{
+    CodeLocateInput, CodeLocateOutput, OperationStatusInput, OperationStatusOutput, RepoIndexInput,
+    RepoIndexOutput, SourceReadInput, SourceReadOutput, SymbolExplainInput, SymbolExplainOutput,
+    VerticalTool,
+};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -138,7 +142,9 @@ where
             return HandlerResponse::error(INVALID_PARAMS, "tool is not available");
         };
         let arguments_value = Value::Object(arguments);
-        if !contract.input_validator.is_valid(&arguments_value) {
+        if !contract.input_validator.is_valid(&arguments_value)
+            || !typed_input_is_valid(contract.tool, &arguments_value)
+        {
             return tool_error(INVALID_ARGUMENT_CODE, INVALID_ARGUMENT_MESSAGE);
         }
         let Value::Object(arguments) = arguments_value else {
@@ -159,7 +165,9 @@ where
             Err(error) => return tool_error(error.code(), error.message()),
         };
         let output_value = Value::Object(output);
-        if !contract.output_validator.is_valid(&output_value) {
+        if !contract.output_validator.is_valid(&output_value)
+            || !typed_output_is_valid(contract.tool, &output_value)
+        {
             return HandlerResponse::error(INTERNAL_ERROR, "tool output failed validation");
         }
         tool_success(output_value)
@@ -292,6 +300,48 @@ fn parse_object_schema(
     serde_json::from_str(schema)
 }
 
+fn typed_input_is_valid(tool: VerticalTool, input: &Value) -> bool {
+    // JSON Schema cannot express cross-field range invariants. Reapplying the
+    // Rust wire contract keeps malformed SourceRefs behind the MCP boundary.
+    match tool {
+        VerticalTool::RepoIndex => serde_json::from_value::<RepoIndexInput>(input.clone()).is_ok(),
+        VerticalTool::OperationStatus => {
+            serde_json::from_value::<OperationStatusInput>(input.clone()).is_ok()
+        }
+        VerticalTool::CodeLocate => {
+            serde_json::from_value::<CodeLocateInput>(input.clone()).is_ok()
+        }
+        VerticalTool::SymbolExplain => {
+            serde_json::from_value::<SymbolExplainInput>(input.clone()).is_ok()
+        }
+        VerticalTool::SourceRead => {
+            serde_json::from_value::<SourceReadInput>(input.clone()).is_ok()
+        }
+    }
+}
+
+fn typed_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
+    // The Rust output types also reapply source-free PublicError invariants
+    // that intentionally cannot be represented by generated JSON Schema.
+    match tool {
+        VerticalTool::RepoIndex => {
+            serde_json::from_value::<RepoIndexOutput>(output.clone()).is_ok()
+        }
+        VerticalTool::OperationStatus => {
+            serde_json::from_value::<OperationStatusOutput>(output.clone()).is_ok()
+        }
+        VerticalTool::CodeLocate => {
+            serde_json::from_value::<CodeLocateOutput>(output.clone()).is_ok()
+        }
+        VerticalTool::SymbolExplain => {
+            serde_json::from_value::<SymbolExplainOutput>(output.clone()).is_ok()
+        }
+        VerticalTool::SourceRead => {
+            serde_json::from_value::<SourceReadOutput>(output.clone()).is_ok()
+        }
+    }
+}
+
 fn list_params_are_valid(params: Option<&Value>) -> bool {
     let Some(params) = params else {
         return true;
@@ -422,7 +472,7 @@ mod tests {
                         "schema_version": "1.0",
                         "data": {
                             "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
-                            "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv",
                             "accepted_plan": {
                                 "scope": "repository",
                                 "mode": "auto",
@@ -548,6 +598,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn semantic_source_range_failure_does_not_reach_the_executor() {
+        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "source.read",
+                        "arguments": {
+                            "repository": {
+                                "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                            },
+                            "references": [{
+                                "source_ref": {
+                                    "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                                    "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                                    "span": {
+                                        "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                                        "start_byte": 9,
+                                        "end_byte": 4
+                                    },
+                                    "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu"
+                                }
+                            }]
+                        }
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+
+        let result = success(response);
+        assert_eq!(result["isError"], true);
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
     async fn unknown_tool_is_an_invalid_params_protocol_error_without_execution() {
         let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
         let response = router
@@ -570,6 +657,74 @@ mod tests {
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
     }
 
+    #[test]
+    fn typed_output_validation_rejects_source_shaped_public_errors() {
+        let contract =
+            ToolContract::compile(VerticalTool::OperationStatus).expect("contract compiles");
+        let output = json!({
+            "schema_version": "1.0",
+            "data": {
+                "operation": {
+                    "kind": "repository_index",
+                    "state": "failed",
+                    "stage": "failed",
+                    "progress": {
+                        "completed_units": 0,
+                        "total_units": null
+                    },
+                    "revision": 1,
+                    "started_at": "2026-07-18T00:00:00Z",
+                    "resources": {
+                        "peak_rss_bytes": 0,
+                        "written_bytes": 0,
+                        "files_examined": 0
+                    }
+                },
+                "published_generation": null,
+                "error": {
+                    "code": "INTERNAL",
+                    "message": "C:\\Users\\person\\secret.rs",
+                    "retryable": false,
+                    "retry_after_ms": null,
+                    "repository": null,
+                    "operation": null,
+                    "generation": null,
+                    "details": {},
+                    "next_actions": []
+                },
+                "retry_after_ms": null
+            }
+        });
+
+        assert!(contract.output_validator.is_valid(&output));
+        assert!(!typed_output_is_valid(
+            VerticalTool::OperationStatus,
+            &output
+        ));
+    }
+
+    #[test]
+    fn repo_index_fixture_decodes_as_the_typed_output() {
+        serde_json::from_value::<RepoIndexOutput>(json!({
+            "schema_version": "1.0",
+            "data": {
+                "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv",
+                "accepted_plan": {
+                    "scope": "repository",
+                    "mode": "auto",
+                    "providers": [],
+                    "parent_generation": null,
+                    "estimated_disk_bytes": 0
+                },
+                "state": "queued",
+                "published_generation": null,
+                "diagnostics": []
+            }
+        }))
+        .expect("fixture satisfies the typed repo.index output");
+    }
+
     #[tokio::test]
     async fn invalid_server_output_fails_as_a_protocol_internal_error() {
         let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
@@ -584,7 +739,7 @@ mod tests {
                                 "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
                             },
                             "references": [{
-                                "symbol_id": "sym1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                                "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
                             }]
                         }
                     }),
