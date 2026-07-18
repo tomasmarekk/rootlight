@@ -3,8 +3,10 @@
 //! This module owns the language-neutral wire model and strict version dispatch.
 //! Cross-record validation and deterministic canonicalization live separately.
 
+use std::io::{self, Cursor, Read};
+
 use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, RepositoryId, SymbolId};
-use serde::{Deserialize, Serialize, de};
+use serde::{Deserialize, Serialize, de, de::DeserializeOwned};
 
 use crate::validation::{
     StandaloneExtensionValidationError, validate_standalone_extension_envelope,
@@ -949,6 +951,32 @@ pub enum ExtensionEnvelopeDecodeError {
     /// The envelope namespace or version was not syntactically valid.
     #[error("encoded extension envelope has an invalid identity")]
     InvalidExtensionIdentity,
+    /// A caller-supplied cooperative checkpoint stopped decoding.
+    #[error("extension envelope decoding was interrupted")]
+    Interrupted,
+}
+
+/// Bounded standalone normalized-record decoding failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum NormalizedRecordDecodeError {
+    /// The encoded record exceeded the document byte ceiling.
+    #[error("encoded normalized record contains {observed} bytes, limit is {limit}")]
+    EncodedRecordTooLarge {
+        /// Observed encoded byte length.
+        observed: usize,
+        /// Configured encoded byte ceiling.
+        limit: usize,
+    },
+    /// The input was not syntactically valid JSON.
+    #[error("encoded normalized record is malformed")]
+    MalformedRecord,
+    /// The decoded JSON did not match the strict record shape.
+    #[error("encoded normalized record has an invalid shape")]
+    InvalidRecordShape,
+    /// A caller-supplied cooperative checkpoint stopped decoding.
+    #[error("normalized record decoding was interrupted")]
+    Interrupted,
 }
 
 /// Bounded IR document decoding failures.
@@ -1060,6 +1088,23 @@ pub fn decode_extension_envelope(
     encoded: &[u8],
     limits: &IrLimits,
 ) -> Result<ExtensionEnvelope, ExtensionEnvelopeDecodeError> {
+    decode_extension_envelope_with_checkpoint(encoded, limits, || true)
+}
+
+/// Decodes one bounded extension envelope with cooperative byte checkpoints.
+///
+/// The callback runs before decoding and after each 4 KiB of JSON input. It
+/// must return `false` to stop before additional input is parsed.
+///
+/// # Errors
+///
+/// Returns the same failures as [`decode_extension_envelope`], plus
+/// [`ExtensionEnvelopeDecodeError::Interrupted`] when `checkpoint` stops work.
+pub fn decode_extension_envelope_with_checkpoint(
+    encoded: &[u8],
+    limits: &IrLimits,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<ExtensionEnvelope, ExtensionEnvelopeDecodeError> {
     let observed = encoded.len();
     if observed > limits.max_extension_envelope_bytes {
         return Err(ExtensionEnvelopeDecodeError::EncodedEnvelopeTooLarge {
@@ -1068,8 +1113,16 @@ pub fn decode_extension_envelope(
         });
     }
 
-    let wire = serde_json::from_slice::<WireExtensionEnvelope>(encoded)
-        .map_err(classify_extension_wire_error)?;
+    let wire =
+        decode_checkpointed::<WireExtensionEnvelope>(encoded, checkpoint).map_err(|error| {
+            match error {
+                CheckpointDecodeError::Malformed => ExtensionEnvelopeDecodeError::MalformedEnvelope,
+                CheckpointDecodeError::InvalidShape => {
+                    ExtensionEnvelopeDecodeError::InvalidEnvelopeShape
+                }
+                CheckpointDecodeError::Interrupted => ExtensionEnvelopeDecodeError::Interrupted,
+            }
+        })?;
     let envelope = wire
         .into_domain()
         .map_err(|()| ExtensionEnvelopeDecodeError::InvalidEnvelopeShape)?;
@@ -1081,6 +1134,158 @@ pub fn decode_extension_envelope(
         Err(StandaloneExtensionValidationError::Identity) => {
             Err(ExtensionEnvelopeDecodeError::InvalidExtensionIdentity)
         }
+    }
+}
+
+/// Decodes one bounded source-mapping record with cooperative byte checkpoints.
+///
+/// Cross-record ownership and reference invariants remain the responsibility
+/// of [`canonicalize_ir_document`].
+///
+/// # Errors
+///
+/// Returns [`NormalizedRecordDecodeError`] for size, JSON, strict shape, or
+/// checkpoint failures.
+pub fn decode_source_mapping_record_with_checkpoint(
+    encoded: &[u8],
+    limits: &IrLimits,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<SourceMappingRecord, NormalizedRecordDecodeError> {
+    check_standalone_record_size(encoded, limits)?;
+    decode_checkpointed::<WireSourceMappingRecord>(encoded, checkpoint)
+        .map_err(NormalizedRecordDecodeError::from)?
+        .into_domain()
+        .map_err(|()| NormalizedRecordDecodeError::InvalidRecordShape)
+}
+
+/// Decodes one bounded skipped-region record with cooperative byte checkpoints.
+///
+/// Cross-record ownership and reference invariants remain the responsibility
+/// of [`canonicalize_ir_document`].
+///
+/// # Errors
+///
+/// Returns [`NormalizedRecordDecodeError`] for size, JSON, strict shape, or
+/// checkpoint failures.
+pub fn decode_skipped_region_with_checkpoint(
+    encoded: &[u8],
+    limits: &IrLimits,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<SkippedRegion, NormalizedRecordDecodeError> {
+    check_standalone_record_size(encoded, limits)?;
+    decode_checkpointed::<WireSkippedRegion>(encoded, checkpoint)
+        .map_err(NormalizedRecordDecodeError::from)?
+        .into_domain()
+        .map_err(|()| NormalizedRecordDecodeError::InvalidRecordShape)
+}
+
+/// Decodes one bounded diagnostic record with cooperative byte checkpoints.
+///
+/// Cross-record ownership and reference invariants remain the responsibility
+/// of [`canonicalize_ir_document`].
+///
+/// # Errors
+///
+/// Returns [`NormalizedRecordDecodeError`] for size, JSON, strict shape, or
+/// checkpoint failures.
+pub fn decode_diagnostic_record_with_checkpoint(
+    encoded: &[u8],
+    limits: &IrLimits,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<DiagnosticRecord, NormalizedRecordDecodeError> {
+    check_standalone_record_size(encoded, limits)?;
+    decode_checkpointed::<WireDiagnosticRecord>(encoded, checkpoint)
+        .map_err(NormalizedRecordDecodeError::from)?
+        .into_domain()
+        .map_err(|()| NormalizedRecordDecodeError::InvalidRecordShape)
+}
+
+fn check_standalone_record_size(
+    encoded: &[u8],
+    limits: &IrLimits,
+) -> Result<(), NormalizedRecordDecodeError> {
+    let observed = encoded.len();
+    if observed > limits.max_document_bytes {
+        Err(NormalizedRecordDecodeError::EncodedRecordTooLarge {
+            observed,
+            limit: limits.max_document_bytes,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+const JSON_CHECKPOINT_BYTES: usize = 4 * 1024;
+
+enum CheckpointDecodeError {
+    Malformed,
+    InvalidShape,
+    Interrupted,
+}
+
+impl From<CheckpointDecodeError> for NormalizedRecordDecodeError {
+    fn from(error: CheckpointDecodeError) -> Self {
+        match error {
+            CheckpointDecodeError::Malformed => Self::MalformedRecord,
+            CheckpointDecodeError::InvalidShape => Self::InvalidRecordShape,
+            CheckpointDecodeError::Interrupted => Self::Interrupted,
+        }
+    }
+}
+
+fn decode_checkpointed<T: DeserializeOwned>(
+    encoded: &[u8],
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<T, CheckpointDecodeError> {
+    if !checkpoint() {
+        return Err(CheckpointDecodeError::Interrupted);
+    }
+    let mut reader = CheckpointReader {
+        inner: Cursor::new(encoded),
+        checkpoint,
+        bytes_since_checkpoint: 0,
+        interrupted: false,
+    };
+    let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
+    let result = T::deserialize(&mut deserializer).and_then(|value| {
+        deserializer.end()?;
+        Ok(value)
+    });
+    drop(deserializer);
+    if reader.interrupted {
+        return Err(CheckpointDecodeError::Interrupted);
+    }
+    result.map_err(|error| {
+        if error.is_data() {
+            CheckpointDecodeError::InvalidShape
+        } else {
+            CheckpointDecodeError::Malformed
+        }
+    })
+}
+
+struct CheckpointReader<'a, F> {
+    inner: Cursor<&'a [u8]>,
+    checkpoint: F,
+    bytes_since_checkpoint: usize,
+    interrupted: bool,
+}
+
+impl<F: FnMut() -> bool> Read for CheckpointReader<'_, F> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.interrupted {
+            return Err(io::Error::other("controlled JSON decode stopped"));
+        }
+        if self.bytes_since_checkpoint >= JSON_CHECKPOINT_BYTES {
+            if !(self.checkpoint)() {
+                self.interrupted = true;
+                return Err(io::Error::other("controlled JSON decode stopped"));
+            }
+            self.bytes_since_checkpoint = 0;
+        }
+        let read = self.inner.read(buffer)?;
+        self.bytes_since_checkpoint = self.bytes_since_checkpoint.saturating_add(read);
+        Ok(read)
     }
 }
 
@@ -1871,14 +2076,6 @@ fn classify_legacy_wire_error(error: serde_json::Error) -> LegacyIrDocumentDecod
     }
 }
 
-fn classify_extension_wire_error(error: serde_json::Error) -> ExtensionEnvelopeDecodeError {
-    if error.is_data() {
-        ExtensionEnvelopeDecodeError::InvalidEnvelopeShape
-    } else {
-        ExtensionEnvelopeDecodeError::MalformedEnvelope
-    }
-}
-
 fn classify_wire_error(error: serde_json::Error) -> IrDocumentDecodeError {
     if error.is_data() {
         IrDocumentDecodeError::InvalidDocumentShape
@@ -1912,6 +2109,24 @@ mod tests {
     fn lexical_envelope_value() -> serde_json::Value {
         serde_json::from_slice(LEXICAL_ENVELOPE_FIXTURE)
             .expect("lexical envelope fixture JSON parses")
+    }
+
+    #[test]
+    fn standalone_decoder_stops_at_a_mid_payload_checkpoint() {
+        let mut value = lexical_envelope_value();
+        value["payload"] = serde_json::json!("x".repeat(16 * 1024));
+        let encoded = encode_test_value(&value);
+        let mut checkpoints = 0_u8;
+
+        let error =
+            decode_extension_envelope_with_checkpoint(&encoded, &IrLimits::default(), || {
+                checkpoints = checkpoints.saturating_add(1);
+                checkpoints < 2
+            })
+            .expect_err("the second checkpoint stops decoding");
+
+        assert_eq!(error, ExtensionEnvelopeDecodeError::Interrupted);
+        assert_eq!(checkpoints, 2);
     }
 
     fn encode_test_value(value: &serde_json::Value) -> Vec<u8> {

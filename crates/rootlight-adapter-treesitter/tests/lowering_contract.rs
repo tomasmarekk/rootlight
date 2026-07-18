@@ -22,9 +22,9 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, content_hash, derive_repository};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageStatus, DiagnosticSeverity, EntityFlag,
-    ExtensionSupport, FactEvidence, IrDocument, IrLimits, LexicalEvidenceKind, OccurrenceRole,
-    ProducerIdentity, RelationPredicate, SourceRef, SourceSpan, decode_ir_document,
-    decode_lexical_evidence_envelope,
+    ExtensionSupport, FactEvidence, IrDocument, IrLimits, LEXICAL_EXTENSION_NAMESPACE,
+    LexicalEvidenceKind, OccurrenceRole, ProducerIdentity, RelationPredicate, SourceRef,
+    SourceSpan, decode_ir_document, decode_lexical_evidence_envelope,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
@@ -426,6 +426,7 @@ fn lowering_emits_only_evidence_backed_conservative_relations() {
     let lexical_kinds: Vec<_> = document
         .extensions
         .iter()
+        .filter(|extension| extension.namespace == LEXICAL_EXTENSION_NAMESPACE)
         .map(|extension| {
             decode_lexical_evidence_envelope(extension)
                 .expect("first-party lexical envelope validates")
@@ -1089,7 +1090,13 @@ fn oversized_lexical_captures_truncate_or_become_explicit_gaps() {
         ],
     )
     .expect("oversized signature is omitted without failing analysis");
-    assert!(signature_output.document().extensions.is_empty());
+    assert!(
+        signature_output
+            .document()
+            .extensions
+            .iter()
+            .all(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE)
+    );
     assert!(
         signature_output
             .document()
