@@ -228,7 +228,7 @@ impl StdioLimits {
 }
 
 /// JSON-RPC request identity accepted by MCP.
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(untagged)]
 pub enum RequestId {
     /// Numeric identity preserved in serde_json's accepted representation.
@@ -259,12 +259,20 @@ impl RequestId {
     }
 }
 
+impl PartialEq for RequestId {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for RequestId {}
+
 impl Ord for RequestId {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
-            (Self::Number(left), Self::Number(right)) => {
-                number_order_key(left).cmp(&number_order_key(right))
-            }
+            // Comparing rendered numbers avoids collapsing distinct
+            // arbitrary-precision representations through a lossy f64 key.
+            (Self::Number(left), Self::Number(right)) => left.to_string().cmp(&right.to_string()),
             (Self::Number(_), Self::String(_)) => Ordering::Less,
             (Self::String(_), Self::Number(_)) => Ordering::Greater,
             (Self::String(left), Self::String(right)) => left.cmp(right),
@@ -275,29 +283,6 @@ impl Ord for RequestId {
 impl PartialOrd for RequestId {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
-    }
-}
-
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum NumberOrderKey {
-    Integer(i64),
-    Unsigned(u64),
-    Float(u64),
-    Arbitrary(String),
-}
-
-fn number_order_key(number: &Number) -> NumberOrderKey {
-    if let Some(value) = number.as_i64() {
-        NumberOrderKey::Integer(value)
-    } else if let Some(value) = number.as_u64() {
-        NumberOrderKey::Unsigned(value)
-    } else if let Some(value) = number.as_f64() {
-        // serde_json considers the two finite zero encodings equal, so their
-        // ordering keys must also compare equal for the BTreeMap contract.
-        let normalized = if value == 0.0 { 0.0 } else { value };
-        NumberOrderKey::Float(normalized.to_bits())
-    } else {
-        NumberOrderKey::Arbitrary(number.to_string())
     }
 }
 

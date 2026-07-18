@@ -284,6 +284,8 @@ fn numeric_identity_ordering_is_total_and_consistent_with_equality() {
             assert_eq!(*left == *right, left.cmp(right) == Ordering::Equal);
         }
     }
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[0].cmp(&ids[1]), Ordering::Equal);
     let mut sorted = ids;
     sorted.sort();
     assert!(sorted.windows(2).all(|pair| pair[0] <= pair[1]));
