@@ -7,15 +7,20 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
-use ignore::{Match, gitignore::GitignoreBuilder};
+use ignore::{
+    Match,
+    gitignore::{Gitignore, GitignoreBuilder},
+};
 use rootlight_cancel::{Cancellation, Cancelled};
 use rootlight_config::ConfigSnapshot;
 use rootlight_ids::{ContentHash, FileId, RepositoryId, content_hash};
-use rootlight_vfs::{DirectoryEntry, EntryKind, RelativePath, RepositoryRoot, VfsError};
+use rootlight_vfs::{
+    DirectoryEntry, EntryKind, RelativePath, RepositoryRoot, SourceSnapshot, VfsError,
+};
 use serde::{Deserialize, Serialize};
 
 /// Initial deterministic discovery-manifest version.
@@ -116,8 +121,16 @@ pub struct PolicyRule {
 #[derive(Debug)]
 pub struct DiscoveryPolicy {
     rules: Vec<PolicyRule>,
-    matcher: ignore::gitignore::Gitignore,
+    matchers: PolicyMatchers,
     audit: bool,
+}
+
+#[derive(Debug)]
+struct PolicyMatchers {
+    default: Gitignore,
+    vcs_ignore: Gitignore,
+    repository: Gitignore,
+    operation: Gitignore,
 }
 
 impl DiscoveryPolicy {
@@ -125,28 +138,28 @@ impl DiscoveryPolicy {
     ///
     /// # Errors
     ///
-    /// Returns [`DiscoveryError::InvalidPolicy`] for malformed patterns or unsafe
-    /// source labels.
+    /// Returns [`DiscoveryError::InvalidPolicy`] for unordered layers or unsafe
+    /// source labels, and [`DiscoveryError::InvalidPattern`] for malformed
+    /// configured patterns.
     pub fn build(mut rules: Vec<PolicyRule>, audit: bool) -> Result<Self, DiscoveryError> {
         rules.splice(0..0, default_rules());
         if rules.windows(2).any(|pair| pair[0].layer > pair[1].layer) {
             return Err(DiscoveryError::InvalidPolicy);
         }
-        let mut builder = GitignoreBuilder::new("");
         for rule in &rules {
             if !valid_source_label(&rule.source) {
                 return Err(DiscoveryError::InvalidPolicy);
             }
-            builder
-                .add_line(Some(PathBuf::from(&rule.source)), &rule.pattern)
-                .map_err(|source| DiscoveryError::InvalidPattern { source })?;
         }
-        let matcher = builder
-            .build()
-            .map_err(|source| DiscoveryError::InvalidPattern { source })?;
+        let matchers = PolicyMatchers {
+            default: build_policy_matcher(&rules, PolicyLayer::Default)?,
+            vcs_ignore: build_policy_matcher(&rules, PolicyLayer::VcsIgnore)?,
+            repository: build_policy_matcher(&rules, PolicyLayer::Repository)?,
+            operation: build_policy_matcher(&rules, PolicyLayer::Operation)?,
+        };
         Ok(Self {
             rules,
-            matcher,
+            matchers,
             audit,
         })
     }
@@ -157,47 +170,138 @@ impl DiscoveryPolicy {
         &self.rules
     }
 
+    #[cfg(test)]
     fn decision(&self, path: &RelativePath, is_directory: bool) -> PolicyDecision {
-        let matched = self.matcher.matched(Path::new(path.as_str()), is_directory);
-        let included = matched.is_whitelist();
-        let excluded = matched.is_ignore();
-        let decisive_rule = if self.audit {
-            match matched {
-                Match::Ignore(glob) | Match::Whitelist(glob) => Some(DecisiveRule {
-                    source: glob.from().map_or_else(
-                        || "default".to_owned(),
-                        |source| source.to_string_lossy().into_owned(),
-                    ),
-                    pattern: glob.original().to_owned(),
-                }),
-                Match::None => None,
-            }
-        } else {
-            None
-        };
-        PolicyDecision {
-            included,
-            excluded,
-            decisive_rule,
-        }
+        self.layered_decision(path, is_directory, None)
     }
+
+    fn decision_with_scoped_ignores(
+        &self,
+        path: &RelativePath,
+        is_directory: bool,
+        scoped_ignores: &ScopedIgnores,
+    ) -> PolicyDecision {
+        self.layered_decision(path, is_directory, Some(scoped_ignores))
+    }
+
+    fn layered_decision(
+        &self,
+        path: &RelativePath,
+        is_directory: bool,
+        scoped_ignores: Option<&ScopedIgnores>,
+    ) -> PolicyDecision {
+        let candidate = Path::new(path.as_str());
+        let mut decision = PolicyDecision::default();
+        for matcher in [&self.matchers.default, &self.matchers.vcs_ignore] {
+            if let Some(layer_decision) =
+                decision_from_match(matcher.matched(candidate, is_directory), self.audit)
+            {
+                decision = layer_decision;
+            }
+        }
+        if let Some(scoped_decision) =
+            scoped_ignores.and_then(|ignores| ignores.decision(path, is_directory, self.audit))
+        {
+            decision = scoped_decision;
+        }
+        for matcher in [&self.matchers.repository, &self.matchers.operation] {
+            if let Some(layer_decision) =
+                decision_from_match(matcher.matched(candidate, is_directory), self.audit)
+            {
+                decision = layer_decision;
+            }
+        }
+        decision
+    }
+}
+
+fn build_policy_matcher(
+    rules: &[PolicyRule],
+    layer: PolicyLayer,
+) -> Result<Gitignore, DiscoveryError> {
+    let mut builder = GitignoreBuilder::new("");
+    for rule in rules.iter().filter(|rule| rule.layer == layer) {
+        builder
+            .add_line(Some(PathBuf::from(&rule.source)), &rule.pattern)
+            .map_err(|source| DiscoveryError::InvalidPattern { source })?;
+    }
+    builder
+        .build()
+        .map_err(|source| DiscoveryError::InvalidPattern { source })
 }
 
 /// Why one path was included or excluded by layered policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisiveRule {
-    /// Source-free rule source label.
+    /// Repository-relative ignore file or source-free stable rule label.
     pub source: String,
     /// Original Gitignore-compatible pattern.
     pub pattern: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct PolicyDecision {
     included: bool,
     excluded: bool,
     decisive_rule: Option<DecisiveRule>,
+}
+
+fn decision_from_match(
+    matched: Match<&ignore::gitignore::Glob>,
+    audit: bool,
+) -> Option<PolicyDecision> {
+    match matched {
+        Match::Ignore(glob) | Match::Whitelist(glob) => Some(PolicyDecision {
+            included: glob.is_whitelist(),
+            excluded: !glob.is_whitelist(),
+            decisive_rule: audit.then(|| DecisiveRule {
+                source: glob.from().map_or_else(
+                    || "default".to_owned(),
+                    |source| source.to_string_lossy().into_owned(),
+                ),
+                pattern: glob.original().to_owned(),
+            }),
+        }),
+        Match::None => None,
+    }
+}
+
+#[derive(Debug, Default)]
+struct ScopedIgnores {
+    matchers: BTreeMap<String, Gitignore>,
+}
+
+impl ScopedIgnores {
+    fn insert(&mut self, scope: &str, matcher: Gitignore) {
+        self.matchers.insert(scope.to_owned(), matcher);
+    }
+
+    fn decision(
+        &self,
+        path: &RelativePath,
+        is_directory: bool,
+        audit: bool,
+    ) -> Option<PolicyDecision> {
+        let candidate = Path::new(path.as_str());
+        let mut scope = parent_scope(path.as_str());
+        loop {
+            if let Some(matcher) = self.matchers.get(scope)
+                && let Some(decision) =
+                    decision_from_match(matcher.matched(candidate, is_directory), audit)
+            {
+                return Some(decision);
+            }
+            if scope.is_empty() {
+                return None;
+            }
+            scope = parent_scope(scope);
+        }
+    }
+}
+
+fn parent_scope(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(parent, _)| parent)
 }
 
 /// Included-file classification.
@@ -380,6 +484,7 @@ struct DiscoveryState<'a> {
     exclusions: Vec<ManifestExclusion>,
     diagnostics: Vec<DiscoveryDiagnostic>,
     coverage: DiscoveryCoverage,
+    scoped_ignores: ScopedIgnores,
 }
 
 impl<'a> DiscoveryState<'a> {
@@ -403,6 +508,7 @@ impl<'a> DiscoveryState<'a> {
             exclusions: Vec::new(),
             diagnostics: Vec::new(),
             coverage: DiscoveryCoverage::default(),
+            scoped_ignores: ScopedIgnores::default(),
         }
     }
 
@@ -410,12 +516,68 @@ impl<'a> DiscoveryState<'a> {
         while let Some((directory, depth)) = self.queue.pop_front() {
             self.cancellation.check()?;
             let entries = self.root.read_directory(directory.as_ref())?;
+            self.cancellation.check()?;
+            self.ensure_entry_capacity(entries.len())?;
+            // Ignore files become readable only after ancestor policy admits this
+            // directory, so descendant negations cannot force traversal into it.
+            let mut ignore_snapshot = self.load_scoped_ignore(directory.as_ref(), &entries)?;
             for entry in entries {
                 self.cancellation.check()?;
-                self.visit_entry(directory.as_ref(), depth, entry)?;
+                let cached_snapshot = if entry.name == OsStr::new(".gitignore") {
+                    ignore_snapshot.take()
+                } else {
+                    None
+                };
+                self.visit_entry(directory.as_ref(), depth, entry, cached_snapshot)?;
             }
         }
         Ok(())
+    }
+
+    fn ensure_entry_capacity(&self, entry_count: usize) -> Result<(), DiscoveryError> {
+        let visited = usize::try_from(self.coverage.visited).unwrap_or(usize::MAX);
+        if entry_count > self.limits.max_entries.saturating_sub(visited) {
+            return Err(DiscoveryError::EntryLimit {
+                maximum: self.limits.max_entries,
+            });
+        }
+        Ok(())
+    }
+
+    fn load_scoped_ignore(
+        &mut self,
+        directory: Option<&RelativePath>,
+        entries: &[DirectoryEntry],
+    ) -> Result<Option<SourceSnapshot>, DiscoveryError> {
+        let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.name == OsStr::new(".gitignore") && entry.kind == EntryKind::File)
+        else {
+            return Ok(None);
+        };
+        let path = child_path(directory, &entry.name)?;
+        let snapshot = self.root.snapshot_with_cancellation(
+            &path,
+            self.limits.max_file_bytes,
+            self.cancellation,
+        )?;
+        let contents =
+            std::str::from_utf8(snapshot.content()).map_err(|_| DiscoveryError::InvalidPolicy)?;
+        let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
+        let scope = directory.map_or("", RelativePath::as_str);
+        let source = PathBuf::from(path.as_str());
+        let mut builder = GitignoreBuilder::new(Path::new(scope));
+        for line in contents.lines() {
+            self.cancellation.check()?;
+            builder
+                .add_line(Some(source.clone()), line)
+                .map_err(|_| DiscoveryError::InvalidPolicy)?;
+        }
+        self.cancellation.check()?;
+        let matcher = builder.build().map_err(|_| DiscoveryError::InvalidPolicy)?;
+        self.cancellation.check()?;
+        self.scoped_ignores.insert(scope, matcher);
+        Ok(Some(snapshot))
     }
 
     fn visit_entry(
@@ -423,6 +585,7 @@ impl<'a> DiscoveryState<'a> {
         directory: Option<&RelativePath>,
         depth: usize,
         entry: DirectoryEntry,
+        cached_snapshot: Option<SourceSnapshot>,
     ) -> Result<(), DiscoveryError> {
         if usize::try_from(self.coverage.visited).unwrap_or(usize::MAX) >= self.limits.max_entries {
             return Err(DiscoveryError::EntryLimit {
@@ -432,7 +595,9 @@ impl<'a> DiscoveryState<'a> {
         self.coverage.visited = self.coverage.visited.saturating_add(1);
         let path = child_path(directory, &entry.name)?;
         let is_directory = entry.kind == EntryKind::Directory;
-        let decision = self.policy.decision(&path, is_directory);
+        let decision =
+            self.policy
+                .decision_with_scoped_ignores(&path, is_directory, &self.scoped_ignores);
         if decision.excluded && !decision.included {
             self.exclude(&path, ExclusionReason::Policy, decision.decisive_rule);
             return Ok(());
@@ -450,7 +615,9 @@ impl<'a> DiscoveryState<'a> {
             EntryKind::Special => {
                 self.exclude(&path, ExclusionReason::Special, decision.decisive_rule);
             }
-            EntryKind::File => self.visit_file(path, entry.length, decision.decisive_rule)?,
+            EntryKind::File => {
+                self.visit_file(path, entry.length, decision.decisive_rule, cached_snapshot)?
+            }
         }
         Ok(())
     }
@@ -460,12 +627,21 @@ impl<'a> DiscoveryState<'a> {
         path: RelativePath,
         observed_length: u64,
         decisive_rule: Option<DecisiveRule>,
+        cached_snapshot: Option<SourceSnapshot>,
     ) -> Result<(), DiscoveryError> {
         if observed_length > self.limits.max_file_bytes {
             self.exclude(&path, ExclusionReason::Oversized, decisive_rule);
             return Ok(());
         }
-        let snapshot = match self.root.snapshot(&path, self.limits.max_file_bytes) {
+        let snapshot_result = match cached_snapshot {
+            Some(snapshot) => Ok(snapshot),
+            None => self.root.snapshot_with_cancellation(
+                &path,
+                self.limits.max_file_bytes,
+                self.cancellation,
+            ),
+        };
+        let snapshot = match snapshot_result {
             Ok(snapshot) => snapshot,
             Err(VfsError::FileTooLarge { .. }) => {
                 self.exclude(&path, ExclusionReason::Oversized, decisive_rule);
@@ -735,7 +911,7 @@ pub enum DiscoveryError {
     /// One or more configured limits were outside supported ceilings.
     #[error("invalid discovery limits")]
     InvalidLimits,
-    /// The configured layered policy was malformed.
+    /// A configured or repository-scoped layered policy was malformed.
     #[error("invalid discovery policy")]
     InvalidPolicy,
     /// A Gitignore-compatible rule failed to parse.
@@ -766,6 +942,7 @@ pub enum DiscoveryError {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use rootlight_cancel::CancellationReason;
     use rootlight_config::{ConfigLayer, ConfigSource};
     use rootlight_ids::derive_repository;
     use std::fs;
@@ -786,6 +963,19 @@ mod tests {
 
     fn limits() -> DiscoveryLimits {
         DiscoveryLimits::new(1_000, 16, 1024 * 1024, 100).expect("test limits are valid")
+    }
+
+    fn write_fixture(temporary: &TempDir, path: &str, content: &[u8]) {
+        let path = temporary.path().join(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("fixture parent directories are created");
+        }
+        fs::write(path, content).expect("fixture file is written");
+    }
+
+    fn fixture_root(temporary: &TempDir, identity: &[u8]) -> RepositoryRoot {
+        let repository = derive_repository(identity).id();
+        RepositoryRoot::open(repository, temporary.path()).expect("fixture root opens")
     }
 
     #[test]
@@ -888,6 +1078,316 @@ max_source_file_bytes = 2097152
 
         assert!(policy.decision(&included, false).included);
         assert!(policy.decision(&excluded, false).excluded);
+    }
+
+    #[test]
+    fn nested_gitignore_honors_gate_patterns_deterministically_with_audit_evidence() {
+        let temporary = local_tempdir();
+        write_fixture(
+            &temporary,
+            "nested/.gitignore",
+            b"ignored/*\n!ignored/kept.rs\n",
+        );
+        write_fixture(
+            &temporary,
+            "nested/ignored/ignored.rs",
+            b"fn ignored_by_nested_rule() {}\n",
+        );
+        write_fixture(
+            &temporary,
+            "nested/ignored/kept.rs",
+            b"fn kept_after_negation() {}\n",
+        );
+        let root = fixture_root(&temporary, b"nested-gate-patterns");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).expect("policy builds");
+
+        let first = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect("first discovery succeeds");
+        let second = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect("second discovery succeeds");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.canonical_bytes().expect("first manifest serializes"),
+            second
+                .canonical_bytes()
+                .expect("second manifest serializes")
+        );
+        assert_eq!(
+            first
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["nested/.gitignore", "nested/ignored/kept.rs"]
+        );
+        let ignored = first
+            .exclusions
+            .iter()
+            .find(|exclusion| exclusion.path == "nested/ignored/ignored.rs")
+            .expect("ignored Gate-1 input is audited");
+        assert_eq!(
+            ignored.decisive_rule,
+            Some(DecisiveRule {
+                source: "nested/.gitignore".to_owned(),
+                pattern: "ignored/*".to_owned(),
+            })
+        );
+        let kept = first
+            .inputs
+            .iter()
+            .find(|input| input.path == "nested/ignored/kept.rs")
+            .expect("negated Gate-1 input is included");
+        assert_eq!(
+            kept.decisive_rule,
+            Some(DecisiveRule {
+                source: "nested/.gitignore".to_owned(),
+                pattern: "!ignored/kept.rs".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn slashless_nested_rule_matches_descendants_without_leaking_to_siblings() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "scope/.gitignore", b"\xef\xbb\xbfcache.rs\n");
+        write_fixture(&temporary, "scope/cache.rs", b"fn direct() {}\n");
+        write_fixture(&temporary, "scope/deep/cache.rs", b"fn nested() {}\n");
+        write_fixture(&temporary, "scope/deep/kept.rs", b"fn kept() {}\n");
+        write_fixture(&temporary, "sibling/cache.rs", b"fn sibling() {}\n");
+        let root = fixture_root(&temporary, b"slashless-scope");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).expect("policy builds");
+
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect("discovery succeeds");
+
+        assert_eq!(
+            manifest
+                .inputs
+                .iter()
+                .map(|input| input.path.as_str())
+                .collect::<Vec<_>>(),
+            ["scope/.gitignore", "scope/deep/kept.rs", "sibling/cache.rs"]
+        );
+        assert_eq!(
+            manifest
+                .exclusions
+                .iter()
+                .map(|exclusion| exclusion.path.as_str())
+                .collect::<Vec<_>>(),
+            ["scope/cache.rs", "scope/deep/cache.rs"]
+        );
+    }
+
+    #[test]
+    fn child_gitignore_decision_overrides_matching_ancestor() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, ".gitignore", b"*.log\n");
+        write_fixture(&temporary, "child/.gitignore", b"!keep.log\n");
+        write_fixture(&temporary, "child/drop.log", b"drop\n");
+        write_fixture(&temporary, "child/keep.log", b"keep\n");
+        write_fixture(&temporary, "sibling/keep.log", b"ignored\n");
+        let root = fixture_root(&temporary, b"child-override");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).expect("policy builds");
+
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect("discovery succeeds");
+
+        let kept = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "child/keep.log")
+            .expect("child negation includes the matching file");
+        assert_eq!(
+            kept.decisive_rule,
+            Some(DecisiveRule {
+                source: "child/.gitignore".to_owned(),
+                pattern: "!keep.log".to_owned(),
+            })
+        );
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|exclusion| exclusion.path == "child/drop.log")
+        );
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|exclusion| exclusion.path == "sibling/keep.log")
+        );
+    }
+
+    #[test]
+    fn operation_negation_overrides_nested_vcs_exclusion() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, ".gitignore", b"*.rs\n");
+        write_fixture(&temporary, "drop.rs", b"fn drop() {}\n");
+        write_fixture(&temporary, "keep.rs", b"fn keep() {}\n");
+        let root = fixture_root(&temporary, b"operation-overrides-vcs");
+        let policy = DiscoveryPolicy::build(
+            vec![PolicyRule {
+                layer: PolicyLayer::Operation,
+                pattern: "!keep.rs".to_owned(),
+                source: "operation".to_owned(),
+            }],
+            true,
+        )
+        .expect("policy builds");
+
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect("discovery succeeds");
+
+        let kept = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "keep.rs")
+            .expect("operation negation includes the matching file");
+        assert_eq!(
+            kept.decisive_rule,
+            Some(DecisiveRule {
+                source: "operation".to_owned(),
+                pattern: "!keep.rs".to_owned(),
+            })
+        );
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|exclusion| exclusion.path == "drop.rs")
+        );
+    }
+
+    #[test]
+    fn descendant_negation_does_not_traverse_an_excluded_directory() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, ".gitignore", b"blocked/\n!blocked/kept.rs\n");
+        write_fixture(&temporary, "blocked/extra.rs", b"fn extra() {}\n");
+        write_fixture(&temporary, "blocked/kept.rs", b"fn kept() {}\n");
+        write_fixture(&temporary, "visible.rs", b"fn visible() {}\n");
+        let root = fixture_root(&temporary, b"excluded-directory");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).expect("policy builds");
+        let root_entry_limit =
+            DiscoveryLimits::new(3, 16, 1024 * 1024, 100).expect("test limits are valid");
+
+        let manifest = discover(
+            &root,
+            &config(),
+            &policy,
+            root_entry_limit,
+            &Cancellation::new(),
+        )
+        .expect("excluded subtree is not traversed");
+
+        assert_eq!(manifest.coverage.visited, 3);
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|exclusion| exclusion.path == "blocked")
+        );
+        assert!(
+            manifest
+                .inputs
+                .iter()
+                .all(|input| !input.path.starts_with("blocked/"))
+        );
+    }
+
+    #[test]
+    fn nested_ignore_discovery_honors_cancellation() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, ".gitignore", b"*.rs\n");
+        write_fixture(&temporary, "sample.rs", b"fn sample() {}\n");
+        let root = fixture_root(&temporary, b"nested-ignore-cancellation");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).expect("policy builds");
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+
+        assert!(matches!(
+            discover(&root, &config(), &policy, limits(), &cancellation),
+            Err(DiscoveryError::Cancelled(cancelled))
+                if cancelled.reason() == CancellationReason::ClientRequest
+        ));
+    }
+
+    #[test]
+    fn malformed_utf8_gitignore_fails_with_typed_policy_error() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, ".gitignore", &[0xff]);
+        let root = fixture_root(&temporary, b"malformed-ignore");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).expect("policy builds");
+
+        assert!(matches!(
+            discover(&root, &config(), &policy, limits(), &Cancellation::new()),
+            Err(DiscoveryError::InvalidPolicy)
+        ));
+    }
+
+    #[test]
+    fn malformed_gitignore_pattern_fails_without_exposing_repository_text() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, ".gitignore", b"[z-a]\n");
+        let root = fixture_root(&temporary, b"malformed-ignore-pattern");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).expect("policy builds");
+
+        let error = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect_err("malformed ignore pattern is rejected");
+
+        assert!(matches!(error, DiscoveryError::InvalidPolicy));
+        assert!(!format!("{error:?}").contains("[z-a]"));
+    }
+
+    #[test]
+    fn oversized_gitignore_fails_at_the_configured_snapshot_bound() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, ".gitignore", b"*.rs\n");
+        let root = fixture_root(&temporary, b"oversized-ignore");
+        let policy = DiscoveryPolicy::build(Vec::new(), false).expect("policy builds");
+        let four_byte_limit = DiscoveryLimits::new(10, 4, 4, 10).expect("test limits are valid");
+
+        assert!(matches!(
+            discover(
+                &root,
+                &config(),
+                &policy,
+                four_byte_limit,
+                &Cancellation::new()
+            ),
+            Err(DiscoveryError::Vfs(VfsError::FileTooLarge { maximum: 4 }))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_gitignore_is_not_read_or_allowed_to_escape_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = local_tempdir();
+        let outside = local_tempdir();
+        write_fixture(&outside, "outside-ignore", b"*.rs\n");
+        symlink(
+            outside.path().join("outside-ignore"),
+            temporary.path().join(".gitignore"),
+        )
+        .expect("ignore link is created");
+        write_fixture(&temporary, "visible.rs", b"fn visible() {}\n");
+        let root = fixture_root(&temporary, b"linked-ignore");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).expect("policy builds");
+
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new())
+            .expect("discovery does not follow ignore link");
+
+        assert!(
+            manifest
+                .inputs
+                .iter()
+                .any(|input| input.path == "visible.rs")
+        );
+        assert!(manifest.exclusions.iter().any(|exclusion| {
+            exclusion.path == ".gitignore" && exclusion.reason == ExclusionReason::Link
+        }));
     }
 
     proptest! {
