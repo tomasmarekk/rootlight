@@ -1,14 +1,16 @@
 //! Generation-pinned, capability-confined source retrieval.
 //!
 //! The service resolves indexed file identities through a validated generation
-//! before touching the VFS. Returned paths and bytes remain explicitly
-//! untrusted repository data. Callers resolve and retain the generation before
-//! construction; this crate does not select or reclaim catalog generations.
+//! before reading either a live VFS capability or caller-retained snapshots.
+//! Returned paths and bytes remain explicitly untrusted repository data.
+//! Callers resolve and retain the generation before construction; this crate
+//! does not select or reclaim catalog generations.
 
 #![forbid(unsafe_code)]
 
 use std::{
     collections::VecDeque,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -278,9 +280,12 @@ impl std::fmt::Debug for SourceReadResult {
     }
 }
 
-/// Source reader bound to one repository root and immutable generation.
+/// Source reader bound to an immutable generation and verified source backing.
+///
+/// The backing is either a live repository capability that revalidates current
+/// files or an ordered process-local snapshot set retained by its caller.
 pub struct SourceService<'a> {
-    root: &'a RepositoryRoot,
+    backing: SourceBacking<'a>,
     generation: &'a GenerationSnapshot,
 }
 
@@ -298,7 +303,36 @@ impl<'a> SourceService<'a> {
         if root.repository() != generation.metadata().repository() {
             return Err(SourceError::RepositoryMismatch);
         }
-        Ok(Self { root, generation })
+        Ok(Self {
+            backing: SourceBacking::Live(root),
+            generation,
+        })
+    }
+
+    /// Binds retained process-local snapshots to matching immutable generation data.
+    ///
+    /// Snapshots must be strictly ordered by [`SourceSnapshot::file`]. The
+    /// retained path preserves immutable first-slice reads without changing
+    /// [`Self::new`]'s live-VFS, fail-closed behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceError::InvalidSnapshotSet`] when snapshots are not
+    /// strictly ordered by file identity.
+    pub fn from_snapshots(
+        snapshots: &'a [Arc<SourceSnapshot>],
+        generation: &'a GenerationSnapshot,
+    ) -> Result<Self, SourceError> {
+        if snapshots
+            .windows(2)
+            .any(|pair| pair[0].file() >= pair[1].file())
+        {
+            return Err(SourceError::InvalidSnapshotSet);
+        }
+        Ok(Self {
+            backing: SourceBacking::Retained(snapshots),
+            generation,
+        })
     }
 
     /// Reads verified UTF-8 source selections with bounded line context.
@@ -342,7 +376,7 @@ impl<'a> SourceService<'a> {
             budget,
             &control,
         )?;
-        let mut snapshots = Vec::<SourceSnapshot>::new();
+        let mut snapshots = Vec::<ResolvedSnapshot<'_>>::new();
         try_reserve_vec(&mut snapshots, prepared.files.len(), &control)?;
         for prepared_file in &prepared.files {
             let file = self
@@ -351,23 +385,15 @@ impl<'a> SourceService<'a> {
                 .files
                 .get(prepared_file.file_index)
                 .ok_or(SourceError::FileNotFound)?;
-            let snapshot = control.controlled(|| {
-                self.root
-                    .snapshot_cancellable(
-                        &prepared_file.path,
-                        file.byte_length.max(1),
-                        cancellation,
-                        control.deadline,
-                    )
-                    .map_err(map_snapshot_error)
-            })?;
-            if snapshot.file() != file.id
-                || snapshot.metadata().length != file.byte_length
-                || snapshot.content_hash() != file.content_hash
+            let snapshot = self.resolve_snapshot(prepared_file, file, cancellation, &control)?;
+            let snapshot_ref = snapshot.as_ref();
+            if snapshot_ref.file() != file.id
+                || snapshot_ref.metadata().length != file.byte_length
+                || snapshot_ref.content_hash() != file.content_hash
             {
                 return Err(SourceError::StaleSource);
             }
-            ensure_utf8(file, snapshot.content(), &control)?;
+            ensure_utf8(file, snapshot_ref.content(), &control)?;
             push_preallocated(&mut snapshots, snapshot, &control)?;
         }
 
@@ -389,7 +415,10 @@ impl<'a> SourceService<'a> {
                 .files
                 .get(prepared_file.file_index)
                 .ok_or(SourceError::FileNotFound)?;
-            let snapshot = snapshots.get(file_slot).ok_or(SourceError::ReadFailed)?;
+            let snapshot = snapshots
+                .get(file_slot)
+                .map(ResolvedSnapshot::as_ref)
+                .ok_or(SourceError::ReadFailed)?;
             let range = expand_context(snapshot.content(), reference, options, &control)?;
             let selected = snapshot
                 .content()
@@ -512,7 +541,7 @@ impl<'a> SourceService<'a> {
                 if snapshot_bytes > budget.max_snapshot_bytes {
                     return Err(SourceError::SnapshotBudgetExceeded);
                 }
-                let path = control.controlled(|| validated_path(self.root, file))?;
+                let path = control.controlled(|| self.validated_path(file))?;
                 let file_slot = files.len();
                 push_preallocated(
                     &mut files,
@@ -533,6 +562,50 @@ impl<'a> SourceService<'a> {
             files,
             metadata_bytes,
         })
+    }
+
+    fn validated_path(&self, file: &FileRecord) -> Result<RelativePath, SourceError> {
+        let path = validated_path(file)?;
+        match self.backing {
+            SourceBacking::Live(root) if root.file_id(&path) == file.id => Ok(path),
+            SourceBacking::Retained(snapshots) => {
+                let snapshot = retained_snapshot(snapshots, file.id)?;
+                if snapshot.path() == &path {
+                    Ok(path)
+                } else {
+                    Err(SourceError::InvalidIndexedPath)
+                }
+            }
+            SourceBacking::Live(_) => Err(SourceError::InvalidIndexedPath),
+        }
+    }
+
+    fn resolve_snapshot<'service>(
+        &'service self,
+        prepared: &PreparedFile,
+        file: &FileRecord,
+        cancellation: &Cancellation,
+        control: &SourceControl<'_>,
+    ) -> Result<ResolvedSnapshot<'service>, SourceError> {
+        match self.backing {
+            SourceBacking::Live(root) => control
+                .controlled(|| {
+                    root.snapshot_cancellable(
+                        &prepared.path,
+                        file.byte_length.max(1),
+                        cancellation,
+                        control.deadline,
+                    )
+                    .map_err(map_snapshot_error)
+                })
+                .map(ResolvedSnapshot::Live),
+            SourceBacking::Retained(snapshots) => {
+                control.check()?;
+                let snapshot = retained_snapshot(snapshots, file.id)?;
+                control.check()?;
+                Ok(ResolvedSnapshot::Retained(snapshot))
+            }
+        }
     }
 }
 
@@ -556,6 +629,28 @@ struct PreparedFile {
     file: FileId,
     file_index: usize,
     path: RelativePath,
+}
+
+enum SourceBacking<'a> {
+    Live(&'a RepositoryRoot),
+    Retained(&'a [Arc<SourceSnapshot>]),
+}
+
+// Live snapshots stay inline because boxing would add one infallible
+// allocation per file after the service's fallible, hard-bounded reservations.
+#[allow(clippy::large_enum_variant)]
+enum ResolvedSnapshot<'a> {
+    Live(SourceSnapshot),
+    Retained(&'a SourceSnapshot),
+}
+
+impl ResolvedSnapshot<'_> {
+    fn as_ref(&self) -> &SourceSnapshot {
+        match self {
+            Self::Live(snapshot) => snapshot,
+            Self::Retained(snapshot) => snapshot,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -645,16 +740,28 @@ fn validate_budget(budget: SourceBudget) -> Result<(), SourceError> {
     Ok(())
 }
 
-fn validated_path(root: &RepositoryRoot, file: &FileRecord) -> Result<RelativePath, SourceError> {
+fn validated_path(file: &FileRecord) -> Result<RelativePath, SourceError> {
     let locator = file
         .path_locator
         .as_ref()
         .ok_or(SourceError::InvalidIndexedPath)?;
     let path = RelativePath::from_locator(locator).map_err(|_| SourceError::InvalidIndexedPath)?;
-    if path.as_str() != file.path || root.file_id(&path) != file.id {
+    if path.as_str() != file.path {
         return Err(SourceError::InvalidIndexedPath);
     }
     Ok(path)
+}
+
+fn retained_snapshot(
+    snapshots: &[Arc<SourceSnapshot>],
+    file: FileId,
+) -> Result<&SourceSnapshot, SourceError> {
+    snapshots
+        .binary_search_by_key(&file, |snapshot| snapshot.file())
+        .ok()
+        .and_then(|index| snapshots.get(index))
+        .map(Arc::as_ref)
+        .ok_or(SourceError::FileNotFound)
 }
 
 fn chunk_metadata_bytes(file: &FileRecord) -> Result<usize, SourceError> {
@@ -967,6 +1074,9 @@ pub enum SourceError {
     /// Persisted path identity was not canonical or did not match the file ID.
     #[error("indexed source path identity is invalid")]
     InvalidIndexedPath,
+    /// Retained snapshots were not strictly ordered by file identity.
+    #[error("retained source snapshot set is invalid")]
+    InvalidSnapshotSet,
     /// Indexed and live immutable source identity differed.
     #[error("source reference is stale")]
     StaleSource,
@@ -1255,6 +1365,75 @@ mod tests {
         assert_eq!(chunk.bytes, b"one\nTWO\nthree\n");
         assert_eq!(chunk.encoding, SourceEncoding::Utf8);
         assert_eq!(chunk.trust, SourceTrust::UntrustedRepositoryData);
+    }
+
+    #[test]
+    fn retained_snapshots_preserve_pinned_bytes_while_live_reads_fail_closed() {
+        let original = b"pub fn answer() -> u32 {\n    42\n}\n";
+        let changed = b"pub fn answer() -> u32 {\n    43\n}\n";
+        let end = u64::try_from(original.len()).expect("fixture length fits u64");
+        let fixture = fixture(original, "utf-8", (0, end));
+        let path =
+            RelativePath::parse(Path::new("src/sample.rs")).expect("fixture path is canonical");
+        let retained = vec![Arc::new(
+            fixture
+                .root
+                .snapshot(&path, end)
+                .expect("pinned source snapshot is stable"),
+        )];
+        fs::write(fixture._temporary.path().join("src/sample.rs"), changed)
+            .expect("live source changes");
+        let service = SourceService::from_snapshots(&retained, &fixture.generation)
+            .expect("retained snapshots are ordered");
+        let result = service
+            .read(
+                std::slice::from_ref(&fixture.reference),
+                SourceReadOptions::default(),
+                SourceBudget::default(),
+                &Cancellation::new(),
+            )
+            .expect("retained source remains readable");
+        assert_eq!(result.chunks[0].bytes, original);
+        assert_eq!(
+            result.chunks[0].content_hash,
+            fixture.reference.content_hash()
+        );
+
+        assert_eq!(
+            read(
+                &fixture,
+                std::slice::from_ref(&fixture.reference),
+                SourceReadOptions::default(),
+                SourceBudget::default(),
+                &Cancellation::new(),
+            ),
+            Err(SourceError::StaleSource)
+        );
+
+        let missing = Vec::<Arc<SourceSnapshot>>::new();
+        let missing_service = SourceService::from_snapshots(&missing, &fixture.generation)
+            .expect("an empty retained set is ordered");
+        assert_eq!(
+            missing_service.read(
+                std::slice::from_ref(&fixture.reference),
+                SourceReadOptions::default(),
+                SourceBudget::default(),
+                &Cancellation::new(),
+            ),
+            Err(SourceError::FileNotFound)
+        );
+
+        let cancellation = Cancellation::new();
+        assert!(cancellation.cancel(CancellationReason::ParentCancelled));
+        assert_eq!(
+            service.read(
+                std::slice::from_ref(&fixture.reference),
+                SourceReadOptions::default(),
+                SourceBudget::default(),
+                &cancellation,
+            ),
+            Err(SourceError::Cancelled(CancellationReason::ParentCancelled))
+        );
     }
 
     #[cfg(unix)]

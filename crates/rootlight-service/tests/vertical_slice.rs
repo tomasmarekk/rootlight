@@ -82,7 +82,7 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
     assert_eq!(explained.data.entity.id, symbol);
     assert!(!explained.data.coverage.is_empty());
     let source = service
-        .source_read(first.generation, vec![reference], &cancellation)
+        .source_read(first.generation, vec![reference.clone()], &cancellation)
         .expect("source query succeeds");
     assert_eq!(source.data.chunks.len(), 1);
     assert!(source.data.chunks[0].text.contains("answer"));
@@ -108,6 +108,50 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
         )
         .expect("old generation remains queryable");
     assert_eq!(pinned_first.data, located.data);
+
+    let active = service
+        .code_locate(
+            second.generation,
+            "answer".to_owned(),
+            LocateMode::Exact,
+            8,
+            &cancellation,
+        )
+        .expect("active generation remains queryable");
+    let active_reference = active.data.hits[0]
+        .source
+        .clone()
+        .expect("active symbol has exact source evidence");
+    let active_source = service
+        .source_read(
+            second.generation,
+            vec![active_reference.clone()],
+            &cancellation,
+        )
+        .expect("active source snapshot remains readable");
+    assert_eq!(active_source.data.chunks[0].text, AFTER);
+    assert_eq!(
+        active_source.data.chunks[0].content_hash,
+        active_reference.content_hash()
+    );
+
+    let pinned_source = service
+        .source_read(first.generation, vec![reference.clone()], &cancellation)
+        .expect("superseded source snapshot remains readable");
+    assert_eq!(pinned_source.data.chunks[0].text, BEFORE);
+    assert_eq!(
+        pinned_source.data.chunks[0].content_hash,
+        reference.content_hash()
+    );
+
+    assert!(matches!(
+        service.source_read(
+            GenerationId::from_bytes([0x55; 20]),
+            vec![reference],
+            &cancellation,
+        ),
+        Err(FirstSliceError::Query)
+    ));
 }
 
 #[test]
