@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -120,6 +121,21 @@ class GeigerValidationTests(unittest.TestCase):
 
     def test_exact_workspace_identity_passes(self) -> None:
         self.assertEqual(self.validate(), 1)
+
+    def test_accepted_boundary_requires_unimplemented_authoritative_evidence(
+        self,
+    ) -> None:
+        self.policy_path.write_text(
+            self.policy_path.read_text(encoding="utf-8")
+            .replace('status = "proposed"', 'status = "accepted"')
+            .replace("expected_geiger_count = 0", "expected_geiger_count = 1"),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "^" + re.escape(VALIDATOR.ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED) + "$",
+        ):
+            VALIDATOR.load_approved_counts(self.policy_path, self.inventory)
 
     def test_same_name_outside_workspace_is_rejected(self) -> None:
         outside = self.root / "outside"

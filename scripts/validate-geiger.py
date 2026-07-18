@@ -16,6 +16,10 @@ from typing import Any
 
 
 SUPPORTED_CARGO_GEIGER_VERSION = "cargo-geiger 0.13.0"
+ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED = (
+    "Accepted unsafe boundary evidence requires compiler-derived expanded input "
+    "inventory and the full cargo-geiger SafetyReport; this evidence is not implemented"
+)
 QUICK_REPORT_KEYS = {"packages", "packages_without_metrics"}
 QUICK_ENTRY_KEYS = {"package", "forbids_unsafe"}
 PACKAGE_INFO_KEYS = {
@@ -145,6 +149,10 @@ def load_approved_counts(
     boundaries = policy.get("boundaries")
     if not isinstance(boundaries, list):
         raise fail("unsafe inventory policy boundaries must be an array")
+    for boundary_value in boundaries:
+        boundary = require_object(boundary_value, "unsafe boundary")
+        if boundary.get("status") == "accepted":
+            raise fail(ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
 
     policy_root = canonical_file(policy_path, "unsafe inventory policy").parent.parent
     by_identity = {
@@ -181,16 +189,13 @@ def load_approved_counts(
         status = boundary.get("status")
         count = boundary.get("expected_geiger_count")
         if (
-            status not in {"proposed", "accepted"}
+            status != "proposed"
             or not isinstance(count, int)
             or isinstance(count, bool)
             or count < 0
-            or (status == "proposed" and count != 0)
-            or (status == "accepted" and count == 0)
+            or count != 0
         ):
             raise fail("unsafe inventory policy contains an invalid boundary")
-        if status == "accepted":
-            approved[cargo_id] = approved.get(cargo_id, 0) + count
     return approved
 
 
@@ -263,6 +268,8 @@ def validate_report(
     cargo_geiger_version: Any,
 ) -> int:
     validate_tool_version(cargo_geiger_version)
+    if approved_counts:
+        raise fail(ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
     require_exact_keys(report, QUICK_REPORT_KEYS, "cargo-geiger QuickSafetyReport")
     packages_without_metrics = require_array(
         report["packages_without_metrics"], "packages_without_metrics"
@@ -305,12 +312,6 @@ def validate_report(
             raise fail(f"cargo-geiger duplicated workspace package {cargo_id}")
         observed_ids.add(cargo_id)
 
-        approved_count = approved_counts.get(cargo_id)
-        if approved_count is not None:
-            raise fail(
-                f"accepted workspace package {cargo_id} requires the full "
-                "cargo-geiger SafetyReport schema"
-            )
         if not forbids_unsafe:
             raise fail(f"workspace package {cargo_id} permits or uses unsafe code")
 
