@@ -2011,6 +2011,9 @@ name = "rootlight-mcp"
 version = "0.1.0"
 dependencies = [
  "jsonschema",
+ "rootlight-client",
+ "rootlight-ids",
+ "rootlight-ir",
  "rootlight-mcp-contract",
  "serde",
  "serde_json",

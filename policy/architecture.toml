@@ -49,7 +49,12 @@ allow_build_script = false
 
 [[crates]]
 name = "rootlight-mcp"
-allowed_internal_dependencies = ["rootlight-mcp-contract"]
+allowed_internal_dependencies = [
+  "rootlight-client",
+  "rootlight-ids",
+  "rootlight-ir",
+  "rootlight-mcp-contract",
+]
 allow_build_script = false
 
 [[crates]]
