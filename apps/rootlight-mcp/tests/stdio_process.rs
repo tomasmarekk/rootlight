@@ -49,6 +49,10 @@ fn raw_lf_input_is_rejected_without_leaking_peer_content_and_processing_recovers
     let responses = response_lines(&output);
     assert_eq!(responses.len(), 4);
     assert_eq!(responses[0]["error"]["code"], -32_700);
+    assert_eq!(
+        responses[0].as_object().and_then(|value| value.get("id")),
+        Some(&Value::Null)
+    );
     assert_eq!(responses[1]["error"]["code"], -32_700);
     assert_eq!(responses[2]["id"], 2);
     assert_eq!(responses[3]["id"], "ping-after-malformed");

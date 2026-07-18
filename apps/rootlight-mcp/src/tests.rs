@@ -65,6 +65,13 @@ fn initialize(session: &mut Session) {
     response(session, INITIALIZED, StdioLimits::default()).expect("initialized is handled");
 }
 
+fn assert_explicit_null_id(response: &Value) {
+    let object = response
+        .as_object()
+        .expect("JSON-RPC response is an object");
+    assert_eq!(object.get("id"), Some(&Value::Null));
+}
+
 #[test]
 fn official_initialize_fixture_reaches_operation_with_truthful_capabilities() {
     let mut session = Session::rootlight();
@@ -146,7 +153,7 @@ fn initialize_rejects_unknown_critical_and_duplicate_fields() {
         if id_is_readable {
             assert_eq!(error["id"], "strict");
         } else {
-            assert!(error.get("id").is_none());
+            assert_explicit_null_id(&error);
         }
         assert!(matches!(
             error["error"]["code"].as_i64(),
@@ -227,13 +234,12 @@ fn readable_ids_survive_unknown_shape_and_string_length_errors() {
 }
 
 #[test]
-fn malformed_batch_and_invalid_identity_do_not_echo_input() {
+fn malformed_batch_and_null_identity_do_not_echo_input() {
     let mut session = Session::rootlight();
     for input in [
         r#"{"jsonrpc":"2.0","id":"private-token","method":"ping""#,
         r#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#,
         r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#,
-        r#"{"jsonrpc":"2.0","id":1.5,"method":"ping"}"#,
     ] {
         let encoded = session
             .handle_frame(input.as_bytes(), StdioLimits::default())
@@ -241,11 +247,46 @@ fn malformed_batch_and_invalid_identity_do_not_echo_input() {
             .expect("invalid input has an error");
         assert!(!String::from_utf8_lossy(&encoded).contains("private-token"));
         let error: Value = serde_json::from_slice(&encoded).expect("error response is valid JSON");
+        assert_explicit_null_id(&error);
         assert!(matches!(
             error["error"]["code"].as_i64(),
             Some(value) if value == i64::from(PARSE_ERROR) || value == i64::from(INVALID_REQUEST)
         ));
     }
+}
+
+#[test]
+fn every_accepted_json_number_round_trips_as_a_request_identity() {
+    let mut session = Session::rootlight();
+    initialize(&mut session);
+
+    for raw_id in ["1.5", "1e3", "18446744073709551616", "-9223372036854775809"] {
+        let request = format!(r#"{{"jsonrpc":"2.0","id":{raw_id},"method":"ping"}}"#);
+        let response = response(&mut session, &request, StdioLimits::default())
+            .expect("numeric identity is handled")
+            .expect("ping has a response");
+        let expected: Value =
+            serde_json::from_str(raw_id).expect("numeric identity fixture is valid JSON");
+        assert_eq!(response["id"], expected);
+    }
+}
+
+#[test]
+fn numeric_identity_ordering_is_total_and_consistent_with_equality() {
+    let ids = ["-0.0", "0.0", "1", "1.0", "1e3", "18446744073709551616"].map(|raw| {
+        let value: Value =
+            serde_json::from_str(raw).expect("numeric identity fixture is valid JSON");
+        RequestId::from_value(&value).expect("fixture is a request identity")
+    });
+
+    for left in &ids {
+        for right in &ids {
+            assert_eq!(*left == *right, left.cmp(right) == Ordering::Equal);
+        }
+    }
+    let mut sorted = ids;
+    sorted.sort();
+    assert!(sorted.windows(2).all(|pair| pair[0] <= pair[1]));
 }
 
 #[test]
@@ -255,7 +296,7 @@ fn duplicate_names_are_rejected_before_member_accounting_collapses_them() {
     let error = response(&mut session, duplicate, StdioLimits::default())
         .expect("duplicate input is handled")
         .expect("duplicate input has an error");
-    assert!(error.get("id").is_none());
+    assert_explicit_null_id(&error);
     assert_eq!(error["error"]["code"], INVALID_REQUEST);
 
     let nested =
@@ -263,7 +304,7 @@ fn duplicate_names_are_rejected_before_member_accounting_collapses_them() {
     let error = response(&mut session, nested, StdioLimits::default())
         .expect("nested duplicate input is handled")
         .expect("nested duplicate input has an error");
-    assert!(error.get("id").is_none());
+    assert_explicit_null_id(&error);
     assert_eq!(error["error"]["code"], INVALID_REQUEST);
 }
 
@@ -309,7 +350,7 @@ fn json_depth_string_object_array_and_node_limits_are_inclusive() {
     )
     .expect("long string is handled")
     .expect("long string has an error");
-    assert!(rejected.get("id").is_none());
+    assert_explicit_null_id(&rejected);
     assert_eq!(rejected["error"]["code"], INVALID_REQUEST);
 
     let array = r#"{"jsonrpc":"2.0","id":"array","method":"ping","params":{"_meta":{"x":[1,2]}}}"#;

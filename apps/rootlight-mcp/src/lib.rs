@@ -9,12 +9,12 @@
 
 mod json;
 
-use std::{collections::BTreeMap, fmt, future::Future, io, pin::Pin, sync::Arc};
+use std::{cmp::Ordering, collections::BTreeMap, fmt, future::Future, io, pin::Pin, sync::Arc};
 
 use json::{JsonIssue, JsonLimits, ParseFailure, parse_bounded};
 use rootlight_mcp_contract::MCP_SPECIFICATION_DATE;
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt},
@@ -228,13 +228,11 @@ impl StdioLimits {
 }
 
 /// JSON-RPC request identity accepted by MCP.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum RequestId {
-    /// Signed integral identity.
-    Integer(i64),
-    /// Unsigned integral identity outside the signed range.
-    Unsigned(u64),
+    /// Numeric identity preserved in serde_json's accepted representation.
+    Number(Number),
     /// String identity bounded by the configured JSON string limit.
     String(String),
 }
@@ -242,8 +240,7 @@ pub enum RequestId {
 impl fmt::Debug for RequestId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Integer(_) => formatter.write_str("RequestId::Integer(<redacted>)"),
-            Self::Unsigned(_) => formatter.write_str("RequestId::Unsigned(<redacted>)"),
+            Self::Number(_) => formatter.write_str("RequestId::Number(<redacted>)"),
             Self::String(value) => formatter
                 .debug_struct("RequestId::String")
                 .field("byte_length", &value.len())
@@ -255,13 +252,52 @@ impl fmt::Debug for RequestId {
 impl RequestId {
     fn from_value(value: &Value) -> Option<Self> {
         match value {
-            Value::Number(number) => number
-                .as_i64()
-                .map(Self::Integer)
-                .or_else(|| number.as_u64().map(Self::Unsigned)),
+            Value::Number(number) => Some(Self::Number(number.clone())),
             Value::String(value) => Some(Self::String(value.clone())),
             _ => None,
         }
+    }
+}
+
+impl Ord for RequestId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Number(left), Self::Number(right)) => {
+                number_order_key(left).cmp(&number_order_key(right))
+            }
+            (Self::Number(_), Self::String(_)) => Ordering::Less,
+            (Self::String(_), Self::Number(_)) => Ordering::Greater,
+            (Self::String(left), Self::String(right)) => left.cmp(right),
+        }
+    }
+}
+
+impl PartialOrd for RequestId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum NumberOrderKey {
+    Integer(i64),
+    Unsigned(u64),
+    Float(u64),
+    Arbitrary(String),
+}
+
+fn number_order_key(number: &Number) -> NumberOrderKey {
+    if let Some(value) = number.as_i64() {
+        NumberOrderKey::Integer(value)
+    } else if let Some(value) = number.as_u64() {
+        NumberOrderKey::Unsigned(value)
+    } else if let Some(value) = number.as_f64() {
+        // serde_json considers the two finite zero encodings equal, so their
+        // ordering keys must also compare equal for the BTreeMap contract.
+        let normalized = if value == 0.0 { 0.0 } else { value };
+        NumberOrderKey::Float(normalized.to_bits())
+    } else {
+        NumberOrderKey::Arbitrary(number.to_string())
     }
 }
 
@@ -1050,7 +1086,6 @@ struct ResultResponse<'a, T> {
 #[derive(Serialize)]
 struct ErrorResponse<'a> {
     jsonrpc: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<&'a RequestId>,
     error: ErrorObject,
 }
