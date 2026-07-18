@@ -786,7 +786,7 @@ fn wait_for_ready_daemon(
         }
         let probe = probe_ready_client(paths, client_instance_id);
         if let Ok(ProbeOutcome::Ready(ready)) = probe {
-            if startup.matches(ready.identity) {
+            if startup.matches_running(ready.identity)? {
                 return startup.finish(paths.clone(), ready);
             }
             startup.terminate()?;
@@ -830,12 +830,16 @@ impl CoordinatedStartup {
         })
     }
 
-    fn matches(&self, identity: ReadyDaemonIdentity) -> bool {
-        // An unreaped Child keeps its PID unavailable for reuse on every supported
-        // platform; the negotiated nonce then binds readiness to that exact process.
-        self.child
+    fn matches_running(&mut self, identity: ReadyDaemonIdentity) -> Result<bool, ClientError> {
+        // Recheck after the authenticated readiness probe: if the child exited
+        // during that probe, Windows may already be free to reuse its PID.
+        if self.child_exited()? {
+            return Ok(false);
+        }
+        Ok(self
+            .child
             .as_ref()
-            .is_some_and(|child| child.id() == identity.pid)
+            .is_some_and(|child| child.id() == identity.pid))
     }
 
     fn finish(
@@ -2037,19 +2041,27 @@ mod tests {
             .expect("startup authority is acquired");
         let (child, child_paths) = spawn_cleanup_child(&temporary.path().join("child-unwind"));
         let child_id = child.id();
-        let startup = CoordinatedStartup {
+        let mut startup = CoordinatedStartup {
             _authority: authority,
             ownership: StartupOwnership::Detached,
             child: Some(child),
         };
-        assert!(startup.matches(ReadyDaemonIdentity {
-            pid: child_id,
-            instance_nonce: [4; 16],
-        }));
-        assert!(!startup.matches(ReadyDaemonIdentity {
-            pid: child_id.saturating_add(1),
-            instance_nonce: [4; 16],
-        }));
+        assert!(
+            startup
+                .matches_running(ReadyDaemonIdentity {
+                    pid: child_id,
+                    instance_nonce: [4; 16],
+                })
+                .expect("exact child remains observable")
+        );
+        assert!(
+            !startup
+                .matches_running(ReadyDaemonIdentity {
+                    pid: child_id.saturating_add(1),
+                    instance_nonce: [4; 16],
+                })
+                .expect("foreign identity is rejected")
+        );
 
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let _startup = startup;
@@ -2062,6 +2074,42 @@ mod tests {
         child_paths
             .acquire_launch_lock()
             .expect("unwind cleanup reaps the exact child");
+    }
+
+    #[test]
+    fn coordinated_startup_never_matches_an_exited_child() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let paths = RuntimePaths::new(
+            temporary.path().join("owner-state"),
+            temporary.path().join("owner-runtime"),
+        )
+        .expect("runtime paths are valid");
+        paths.prepare_owner().expect("runtime paths are private");
+        let authority = paths
+            .acquire_launch_lock()
+            .expect("startup authority is acquired");
+        let (mut child, child_paths) = spawn_cleanup_child(&temporary.path().join("child-exited"));
+        let child_id = child.id();
+        child.kill().expect("cleanup child can be terminated");
+        child.wait().expect("cleanup child can be reaped");
+        let mut startup = CoordinatedStartup {
+            _authority: authority,
+            ownership: StartupOwnership::Detached,
+            child: Some(child),
+        };
+
+        assert!(
+            !startup
+                .matches_running(ReadyDaemonIdentity {
+                    pid: child_id,
+                    instance_nonce: [5; 16],
+                })
+                .expect("exited child status remains observable")
+        );
+        assert!(startup.child.is_none());
+        child_paths
+            .acquire_launch_lock()
+            .expect("exited child released its proof lock");
     }
 
     #[derive(Debug)]
