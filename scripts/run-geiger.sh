@@ -5,14 +5,22 @@
 set -euo pipefail
 
 export CARGO_BUILD_JOBS=1
-output_root="${1:-artifacts/geiger}"
-geiger_version="$(cargo geiger --version)"
-if [[ "$geiger_version" != "cargo-geiger 0.13.0" ]]; then
-    printf 'unsupported cargo-geiger version: %s\n' "$geiger_version" >&2
-    exit 1
+if (( $# < 1 || $# > 2 )); then
+    printf 'usage: %s ABSOLUTE_CARGO_GEIGER [OUTPUT_ROOT]\n' "$0" >&2
+    exit 2
 fi
+trusted_geiger="$1"
+output_root="${2:-artifacts/geiger}"
+
 rm -rf "$output_root"
 mkdir -p "$output_root"
+execution_identity="$output_root/cargo-geiger.execution.json"
+python scripts/validate-geiger.py preflight \
+    --trusted-cargo-geiger "$trusted_geiger" \
+    --cargo-config .cargo/config.toml \
+    --unsafe-policy policy/unsafe.toml \
+    --toolchain-policy policy/toolchain.toml \
+    --execution-identity "$execution_identity"
 
 cargo metadata --locked --no-deps --format-version 1 > "$output_root/metadata.json"
 python - \
@@ -79,19 +87,40 @@ rm "$output_root/metadata.json"
 python scripts/test-validate-geiger.py
 
 while IFS=$'\t' read -r cargo_id package version manifest; do
-    cargo geiger \
-        --manifest-path "$manifest" \
-        --all-features \
-        --all-targets \
-        --all-dependencies \
-        --forbid-only \
-        --locked \
-        --offline \
-        --output-format Json \
-        2> "$output_root/$package-$version.log" \
-        | python scripts/validate-geiger.py \
-            --cargo-geiger-version "$geiger_version" \
-            --required-workspace-package-id "$cargo_id" \
-            --workspace-inventory "$output_root/workspace-packages.json" \
-            --unsafe-policy policy/unsafe.toml
+    report="$output_root/$package-$version.report.json"
+    log="$output_root/$package-$version.log"
+    evidence="$output_root/$package-$version.evidence.json"
+    python scripts/validate-geiger.py scan \
+        --trusted-cargo-geiger "$trusted_geiger" \
+        --cargo-config .cargo/config.toml \
+        --unsafe-policy policy/unsafe.toml \
+        --toolchain-policy policy/toolchain.toml \
+        --execution-identity "$execution_identity" \
+        --manifest "$manifest" \
+        --report "$report" \
+        --log "$log"
+    python scripts/validate-geiger.py prepare \
+        --trusted-cargo-geiger "$trusted_geiger" \
+        --required-workspace-package-id "$cargo_id" \
+        --workspace-inventory "$output_root/workspace-packages.json" \
+        --unsafe-policy policy/unsafe.toml \
+        --toolchain-policy policy/toolchain.toml \
+        --cargo-lock Cargo.lock \
+        --cargo-config .cargo/config.toml \
+        --rust-toolchain rust-toolchain.toml \
+        --execution-identity "$execution_identity" \
+        --report "$report" \
+        --evidence-envelope "$evidence"
+    python scripts/validate-geiger.py validate \
+        --trusted-cargo-geiger "$trusted_geiger" \
+        --required-workspace-package-id "$cargo_id" \
+        --workspace-inventory "$output_root/workspace-packages.json" \
+        --unsafe-policy policy/unsafe.toml \
+        --toolchain-policy policy/toolchain.toml \
+        --cargo-lock Cargo.lock \
+        --cargo-config .cargo/config.toml \
+        --rust-toolchain rust-toolchain.toml \
+        --execution-identity "$execution_identity" \
+        --report "$report" \
+        --evidence-envelope "$evidence"
 done < "$output_root/workspace-packages.tsv"

@@ -177,7 +177,7 @@ jobs:
         run: bash scripts/policy-negative-controls.sh
       - name: Unsafe inventory
         shell: bash
-        run: bash scripts/run-geiger.sh artifacts/geiger
+        run: bash scripts/run-geiger.sh "$HOME/.local/bin/cargo-geiger" artifacts/geiger
       - name: Generate deterministic SBOM inputs
         run: |
           bash scripts/generate-sbom.sh artifacts/sbom-first
