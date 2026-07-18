@@ -46,7 +46,7 @@ pub const SLOW_CONTROL_REQUEST_US: u64 = 50_000;
 
 const SUPPORT_ENTRY_COUNT_V1: usize = 5;
 const SUPPORT_ENTRY_COUNT_V2: usize = 6;
-const CONTROL_METHOD_COUNT: usize = 8;
+const CONTROL_METHOD_COUNT: usize = 13;
 const TELEMETRY_OUTCOME_COUNT: usize = 6;
 /// Ordered allow-list for the frozen support archive schema.
 pub const SUPPORT_ENTRY_NAMES: [&str; SUPPORT_ENTRY_COUNT_V1] = [
@@ -365,6 +365,16 @@ pub enum ControlMethod {
     OperationCancel,
     /// Attached operation lease renewal.
     OperationLeaseRenew,
+    /// Whole-root first-slice repository indexing.
+    RepositoryIndex,
+    /// Repository index lifecycle status or cancellation.
+    RepositoryOperationStatus,
+    /// Generation-pinned lexical lookup.
+    CodeLocate,
+    /// Generation-pinned symbol explanation.
+    SymbolExplain,
+    /// Verified immutable source read.
+    SourceRead,
 }
 
 impl ControlMethod {
@@ -378,6 +388,11 @@ impl ControlMethod {
         Self::OperationStatus,
         Self::OperationCancel,
         Self::OperationLeaseRenew,
+        Self::RepositoryIndex,
+        Self::RepositoryOperationStatus,
+        Self::CodeLocate,
+        Self::SymbolExplain,
+        Self::SourceRead,
     ];
 
     const fn index(self) -> usize {
@@ -390,6 +405,11 @@ impl ControlMethod {
             Self::OperationStatus => 5,
             Self::OperationCancel => 6,
             Self::OperationLeaseRenew => 7,
+            Self::RepositoryIndex => 8,
+            Self::RepositoryOperationStatus => 9,
+            Self::CodeLocate => 10,
+            Self::SymbolExplain => 11,
+            Self::SourceRead => 12,
         }
     }
 }

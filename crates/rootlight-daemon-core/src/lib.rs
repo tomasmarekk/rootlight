@@ -8,6 +8,8 @@
 
 use std::{
     collections::BTreeMap,
+    future::Future,
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
@@ -52,6 +54,7 @@ pub const MAX_CAPABILITIES: usize = 32;
 pub const MAX_CAPABILITY_BYTES: usize = 64;
 
 const CAPABILITIES: &[&str] = &[
+    "code.locate.v1",
     "diagnostics.quick",
     "health",
     "operation.cancel",
@@ -59,6 +62,9 @@ const CAPABILITIES: &[&str] = &[
     "operation.lifecycle.v1",
     "operation.status",
     "operation.submit",
+    "repository.index.v1",
+    "source.read.v1",
+    "symbol.explain.v1",
     "support.bundle.v1",
     "support.bundle.v2",
 ];
@@ -99,6 +105,126 @@ const RESOURCE_ELEVATED: u8 = 2;
 const RESOURCE_HIGH: u8 = 3;
 const RESOURCE_CRITICAL: u8 = 4;
 const RESOURCE_UNKNOWN: u8 = 5;
+
+/// Boxed future returned by the daemon-owned first-slice IPC implementation.
+pub type FirstSliceIpcFuture =
+    Pin<Box<dyn Future<Output = Result<FirstSliceIpcResponse, PublicError>> + Send + 'static>>;
+
+/// Validated protocol request delegated to the daemon application.
+#[derive(Debug)]
+pub enum FirstSliceIpcRequest {
+    /// Admit and execute the supported bounded repository index plan.
+    RepositoryIndex(daemon::RepositoryIndexRequest),
+    /// Read or cancel one repository index operation.
+    RepositoryOperationStatus(daemon::RepositoryOperationStatusRequest),
+    /// Execute one generation-pinned lexical lookup.
+    CodeLocate(daemon::CodeLocateRequest),
+    /// Explain one or more stable symbols.
+    SymbolExplain(daemon::SymbolExplainRequest),
+    /// Read exact immutable source references.
+    SourceRead(daemon::SourceReadRequest),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstSliceIpcKind {
+    RepositoryIndex,
+    RepositoryOperationStatus,
+    CodeLocate,
+    SymbolExplain,
+    SourceRead,
+}
+
+impl FirstSliceIpcRequest {
+    const fn kind(&self) -> FirstSliceIpcKind {
+        match self {
+            Self::RepositoryIndex(_) => FirstSliceIpcKind::RepositoryIndex,
+            Self::RepositoryOperationStatus(_) => FirstSliceIpcKind::RepositoryOperationStatus,
+            Self::CodeLocate(_) => FirstSliceIpcKind::CodeLocate,
+            Self::SymbolExplain(_) => FirstSliceIpcKind::SymbolExplain,
+            Self::SourceRead(_) => FirstSliceIpcKind::SourceRead,
+        }
+    }
+}
+
+/// Typed first-slice response returned by the daemon application.
+#[derive(Debug)]
+pub enum FirstSliceIpcResponse {
+    /// Repository index admission and publication state.
+    RepositoryIndex(daemon::RepositoryIndexResponse),
+    /// Durable repository operation state.
+    RepositoryOperationStatus(daemon::RepositoryOperationStatusResponse),
+    /// Generation-pinned locate results.
+    CodeLocate(daemon::CodeLocateResponse),
+    /// Generation-pinned symbol explanations.
+    SymbolExplain(daemon::SymbolExplainResponse),
+    /// Verified immutable source chunks.
+    SourceRead(daemon::SourceReadResponse),
+}
+
+impl FirstSliceIpcResponse {
+    const fn kind(&self) -> FirstSliceIpcKind {
+        match self {
+            Self::RepositoryIndex(_) => FirstSliceIpcKind::RepositoryIndex,
+            Self::RepositoryOperationStatus(_) => FirstSliceIpcKind::RepositoryOperationStatus,
+            Self::CodeLocate(_) => FirstSliceIpcKind::CodeLocate,
+            Self::SymbolExplain(_) => FirstSliceIpcKind::SymbolExplain,
+            Self::SourceRead(_) => FirstSliceIpcKind::SourceRead,
+        }
+    }
+
+    fn into_wire(self) -> daemon::response_envelope::Response {
+        match self {
+            Self::RepositoryIndex(response) => {
+                daemon::response_envelope::Response::RepositoryIndex(response)
+            }
+            Self::RepositoryOperationStatus(response) => {
+                daemon::response_envelope::Response::RepositoryOperationStatus(response)
+            }
+            Self::CodeLocate(response) => daemon::response_envelope::Response::CodeLocate(response),
+            Self::SymbolExplain(response) => {
+                daemon::response_envelope::Response::SymbolExplain(response)
+            }
+            Self::SourceRead(response) => daemon::response_envelope::Response::SourceRead(response),
+        }
+    }
+}
+
+/// Authenticated, deadline-bound context for one delegated first-slice request.
+#[derive(Debug, Clone)]
+pub struct FirstSliceIpcContext {
+    /// Authenticated client identity from the negotiated local connection.
+    pub client_instance_id: ClientInstanceId,
+    /// Protocol minor selected for this local connection.
+    pub selected_protocol_minor: u32,
+    /// Cooperative cancellation token carrying the bounded request deadline.
+    pub cancellation: rootlight_operations::Cancellation,
+    /// Absolute monotonic deadline enforced by the daemon transport.
+    pub deadline: Instant,
+}
+
+/// Narrow application extension for first-slice protocol methods.
+pub trait FirstSliceIpcHandler: Send + Sync + 'static {
+    /// Executes one already validated first-slice request.
+    fn dispatch(
+        &self,
+        request: FirstSliceIpcRequest,
+        context: FirstSliceIpcContext,
+    ) -> FirstSliceIpcFuture;
+}
+
+/// Source-free default used by control-only embeddings.
+#[derive(Debug, Default)]
+pub struct UnavailableFirstSliceIpcHandler;
+
+impl FirstSliceIpcHandler for UnavailableFirstSliceIpcHandler {
+    fn dispatch(
+        &self,
+        _request: FirstSliceIpcRequest,
+        _context: FirstSliceIpcContext,
+    ) -> FirstSliceIpcFuture {
+        Box::pin(async { Err(first_slice_unavailable()) })
+    }
+}
 
 /// Source-free daemon lifecycle phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2217,6 +2343,10 @@ impl ControlService {
                     .filter(|value| match **value {
                         "diagnostics.quick" | "support.bundle.v1" => selected_minor >= 3,
                         "support.bundle.v2" => selected_minor >= 4,
+                        "code.locate.v1"
+                        | "repository.index.v1"
+                        | "source.read.v1"
+                        | "symbol.explain.v1" => selected_minor >= 5,
                         _ => true,
                     })
                     .map(|value| (*value).to_owned())
@@ -2570,6 +2700,32 @@ pub async fn handle_connection_async(
     codec: FrameCodec,
     stream: &mut AsyncLocalStream,
 ) -> Result<(), ServiceError> {
+    handle_connection_async_with_first_slice(
+        service,
+        journal,
+        submissions,
+        client_connections,
+        Arc::new(UnavailableFirstSliceIpcHandler),
+        codec,
+        stream,
+    )
+    .await
+}
+
+/// Serves one negotiated request with a daemon-application first-slice extension.
+///
+/// # Errors
+///
+/// Returns [`ServiceError`] for transport, queue, timeout, or actor failures.
+pub async fn handle_connection_async_with_first_slice(
+    service: Arc<ControlService>,
+    journal: JournalActorHandle,
+    submissions: tokio::sync::mpsc::Sender<OperationAdmission>,
+    client_connections: Arc<ClientConnectionAdmissions>,
+    first_slice: Arc<dyn FirstSliceIpcHandler>,
+    codec: FrameCodec,
+    stream: &mut AsyncLocalStream,
+) -> Result<(), ServiceError> {
     let negotiation = service.state.telemetry.start_span(SpanKind::IpcNegotiation);
     let hello = read_client_hello_async(codec, stream).await?;
     let selected_protocol = match validate_client_hello(&hello, service.instance_nonce) {
@@ -2605,6 +2761,7 @@ pub async fn handle_connection_async(
         &service,
         &journal,
         &submissions,
+        first_slice.as_ref(),
         envelope,
         client_instance_id,
         selected_protocol_minor,
@@ -2618,6 +2775,7 @@ async fn dispatch_async(
     service: &ControlService,
     journal: &JournalActorHandle,
     submissions: &tokio::sync::mpsc::Sender<OperationAdmission>,
+    first_slice: &dyn FirstSliceIpcHandler,
     envelope: daemon::RequestEnvelope,
     client_instance_id: ClientInstanceId,
     selected_protocol_minor: u32,
@@ -2638,85 +2796,113 @@ async fn dispatch_async(
             "daemon instance nonce does not match",
         )))
     } else {
-        match request_from_wire(
-            envelope.request,
-            client_instance_id,
-            selected_protocol_minor,
-        ) {
-            Ok(ControlRequest::Health) => {
-                response_to_wire(ControlResponse::Health(service.health()))
-            }
-            Ok(ControlRequest::DiagnosticsQuick) => {
-                run_diagnostic_request(service.clone(), DiagnosticKind::Quick, envelope.timeout_ms)
-                    .await
-            }
-            Ok(ControlRequest::SupportBundle(schema)) => {
-                run_diagnostic_request(
-                    service.clone(),
-                    DiagnosticKind::SupportBundle(schema),
-                    envelope.timeout_ms,
-                )
-                .await
-            }
-            Ok(request @ ControlRequest::OperationSubmit(_))
-                if !service.state.accepting_operations.load(Ordering::Acquire) =>
-            {
-                let ControlRequest::OperationSubmit(submission) = request else {
-                    unreachable!("guard restricts request kind");
-                };
-                response_to_wire(ControlResponse::Error(daemon_not_accepting(
-                    submission.operation,
-                )))
-            }
-            Ok(ControlRequest::OperationSubmit(submission)) => {
-                let timeout_ms = envelope.timeout_ms;
-                let response = async {
-                    let (admission, receiver) = OperationAdmission::new(submission);
-                    match submissions.try_send(admission) {
-                        Ok(()) => {}
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(admission)) => {
-                            let submission = admission.submission;
-                            return match journal.retry_status(submission).await {
-                                Ok(operation) => Ok(ControlResponse::OperationSubmit(operation)),
-                                Err(ServiceError::Operations(OperationError::NotFound)) => {
-                                    Err(ServiceError::QueueFull)
-                                }
-                                Err(error) => Err(error),
-                            };
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                            return Err(ServiceError::ChannelClosed);
-                        }
-                    }
-                    let operation = receiver
-                        .await
-                        .map_err(|_| ServiceError::ChannelClosed)?
-                        .map_err(|error| ServiceError::Public(Box::new(error)))?;
-                    Ok(ControlResponse::OperationSubmit(operation))
-                };
-                await_journal_response(service, response, timeout_ms).await
-            }
-            Ok(ControlRequest::OperationLeaseRenew {
-                operation,
-                owner,
-                expiry_unix_ms,
-            }) => {
-                await_journal_response(
+        match first_slice_request_from_wire(envelope.request) {
+            Ok(Some(request)) => {
+                dispatch_first_slice(
                     service,
-                    async {
-                        journal
-                            .renew_lease(operation, owner, expiry_unix_ms)
-                            .await
-                            .map(ControlResponse::OperationLeaseRenew)
-                    },
+                    first_slice,
+                    request,
+                    client_instance_id,
+                    selected_protocol_minor,
                     envelope.timeout_ms,
                 )
                 .await
             }
-            Ok(request) => {
-                await_journal_response(service, journal.control(request), envelope.timeout_ms).await
+            Ok(None) => daemon::response_envelope::Response::Error(public_error_to_wire(
+                &invalid_argument("daemon request is missing"),
+            )),
+            Err(request) => {
+                match request_from_wire(Some(request), client_instance_id, selected_protocol_minor)
+                {
+                    Ok(ControlRequest::Health) => {
+                        response_to_wire(ControlResponse::Health(service.health()))
+                    }
+                    Ok(ControlRequest::DiagnosticsQuick) => {
+                        run_diagnostic_request(
+                            service.clone(),
+                            DiagnosticKind::Quick,
+                            envelope.timeout_ms,
+                        )
+                        .await
+                    }
+                    Ok(ControlRequest::SupportBundle(schema)) => {
+                        run_diagnostic_request(
+                            service.clone(),
+                            DiagnosticKind::SupportBundle(schema),
+                            envelope.timeout_ms,
+                        )
+                        .await
+                    }
+                    Ok(request @ ControlRequest::OperationSubmit(_))
+                        if !service.state.accepting_operations.load(Ordering::Acquire) =>
+                    {
+                        let ControlRequest::OperationSubmit(submission) = request else {
+                            unreachable!("guard restricts request kind");
+                        };
+                        response_to_wire(ControlResponse::Error(daemon_not_accepting(
+                            submission.operation,
+                        )))
+                    }
+                    Ok(ControlRequest::OperationSubmit(submission)) => {
+                        let timeout_ms = envelope.timeout_ms;
+                        let response = async {
+                            let (admission, receiver) = OperationAdmission::new(submission);
+                            match submissions.try_send(admission) {
+                                Ok(()) => {}
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(admission)) => {
+                                    let submission = admission.submission;
+                                    return match journal.retry_status(submission).await {
+                                        Ok(operation) => {
+                                            Ok(ControlResponse::OperationSubmit(operation))
+                                        }
+                                        Err(ServiceError::Operations(OperationError::NotFound)) => {
+                                            Err(ServiceError::QueueFull)
+                                        }
+                                        Err(error) => Err(error),
+                                    };
+                                }
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                    return Err(ServiceError::ChannelClosed);
+                                }
+                            }
+                            let operation = receiver
+                                .await
+                                .map_err(|_| ServiceError::ChannelClosed)?
+                                .map_err(|error| ServiceError::Public(Box::new(error)))?;
+                            Ok(ControlResponse::OperationSubmit(operation))
+                        };
+                        await_journal_response(service, response, timeout_ms).await
+                    }
+                    Ok(ControlRequest::OperationLeaseRenew {
+                        operation,
+                        owner,
+                        expiry_unix_ms,
+                    }) => {
+                        await_journal_response(
+                            service,
+                            async {
+                                journal
+                                    .renew_lease(operation, owner, expiry_unix_ms)
+                                    .await
+                                    .map(ControlResponse::OperationLeaseRenew)
+                            },
+                            envelope.timeout_ms,
+                        )
+                        .await
+                    }
+                    Ok(request) => {
+                        await_journal_response(
+                            service,
+                            journal.control(request),
+                            envelope.timeout_ms,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        daemon::response_envelope::Response::Error(public_error_to_wire(&error))
+                    }
+                }
             }
-            Err(error) => daemon::response_envelope::Response::Error(public_error_to_wire(&error)),
         }
     };
     let (outcome, error_code) = telemetry_outcome_from_wire(&response);
@@ -2729,6 +2915,269 @@ async fn dispatch_async(
         request_id,
         response: Some(response),
     }
+}
+
+fn first_slice_request_from_wire(
+    request: Option<daemon::request_envelope::Request>,
+) -> Result<Option<FirstSliceIpcRequest>, daemon::request_envelope::Request> {
+    match request {
+        Some(daemon::request_envelope::Request::RepositoryIndex(request)) => {
+            Ok(Some(FirstSliceIpcRequest::RepositoryIndex(request)))
+        }
+        Some(daemon::request_envelope::Request::RepositoryOperationStatus(request)) => Ok(Some(
+            FirstSliceIpcRequest::RepositoryOperationStatus(request),
+        )),
+        Some(daemon::request_envelope::Request::CodeLocate(request)) => {
+            Ok(Some(FirstSliceIpcRequest::CodeLocate(request)))
+        }
+        Some(daemon::request_envelope::Request::SymbolExplain(request)) => {
+            Ok(Some(FirstSliceIpcRequest::SymbolExplain(request)))
+        }
+        Some(daemon::request_envelope::Request::SourceRead(request)) => {
+            Ok(Some(FirstSliceIpcRequest::SourceRead(request)))
+        }
+        Some(request) => Err(request),
+        None => Ok(None),
+    }
+}
+
+async fn dispatch_first_slice(
+    service: &ControlService,
+    handler: &dyn FirstSliceIpcHandler,
+    request: FirstSliceIpcRequest,
+    client_instance_id: ClientInstanceId,
+    selected_protocol_minor: u32,
+    requested_timeout_ms: Option<u32>,
+) -> daemon::response_envelope::Response {
+    if selected_protocol_minor < 5 {
+        return daemon::response_envelope::Response::Error(public_error_to_wire(
+            &protocol_mismatch("first-slice requests need protocol minor five"),
+        ));
+    }
+    if let Err(error) = validate_first_slice_request(&request) {
+        return daemon::response_envelope::Response::Error(public_error_to_wire(&error));
+    }
+    let timeout = requested_timeout_ms.map_or(service.limits.request_timeout, |milliseconds| {
+        Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout)
+    });
+    let Some(deadline) = Instant::now().checked_add(timeout) else {
+        return daemon::response_envelope::Response::Error(public_error_to_wire(
+            &request_timed_out(),
+        ));
+    };
+    let cancellation = rootlight_operations::Cancellation::with_deadline(deadline);
+    let context = FirstSliceIpcContext {
+        client_instance_id,
+        selected_protocol_minor,
+        cancellation,
+        deadline,
+    };
+    let request_kind = request.kind();
+    match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        handler.dispatch(request, context),
+    )
+    .await
+    {
+        Ok(Ok(response)) => correlated_first_slice_response(request_kind, response),
+        Ok(Err(error)) => daemon::response_envelope::Response::Error(public_error_to_wire(&error)),
+        Err(_) => {
+            daemon::response_envelope::Response::Error(public_error_to_wire(&request_timed_out()))
+        }
+    }
+}
+
+fn correlated_first_slice_response(
+    request_kind: FirstSliceIpcKind,
+    response: FirstSliceIpcResponse,
+) -> daemon::response_envelope::Response {
+    if response.kind() == request_kind {
+        response.into_wire()
+    } else {
+        daemon::response_envelope::Response::Error(public_error_to_wire(&internal_error()))
+    }
+}
+
+fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), PublicError> {
+    match request {
+        FirstSliceIpcRequest::RepositoryIndex(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(request.operation.as_ref().map(|id| id.value.as_slice()), 16)?;
+            if request.root.is_empty()
+                || request.root.len() > 4096
+                || request.root.as_bytes().contains(&0)
+            {
+                return Err(invalid_argument("repository root is invalid"));
+            }
+        }
+        FirstSliceIpcRequest::RepositoryOperationStatus(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(request.operation.as_ref().map(|id| id.value.as_slice()), 16)?;
+            if !matches!(
+                daemon::RepositoryOperationAction::try_from(request.action),
+                Ok(daemon::RepositoryOperationAction::RepositoryOperationGet
+                    | daemon::RepositoryOperationAction::RepositoryOperationCancel)
+            ) || request.wait_ms.is_some_and(|wait| wait > 30_000)
+            {
+                return Err(invalid_argument("repository operation request is invalid"));
+            }
+        }
+        FirstSliceIpcRequest::CodeLocate(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_generation_selector(request.generation.as_ref())?;
+            if request.query.is_empty()
+                || request.query.len() > 2048
+                || !(1..=200).contains(&request.maximum_results)
+                || !matches!(
+                    daemon::FirstSliceLocateMode::try_from(request.mode),
+                    Ok(daemon::FirstSliceLocateMode::FirstSliceLocateExact
+                        | daemon::FirstSliceLocateMode::FirstSliceLocatePrefix
+                        | daemon::FirstSliceLocateMode::FirstSliceLocateText
+                        | daemon::FirstSliceLocateMode::FirstSliceLocateSafeRegex
+                        | daemon::FirstSliceLocateMode::FirstSliceLocateGlob)
+                )
+            {
+                return Err(invalid_argument("code locate request is invalid"));
+            }
+        }
+        FirstSliceIpcRequest::SymbolExplain(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_generation_selector(request.generation.as_ref())?;
+            if request.symbols.is_empty() || request.symbols.len() > 16 {
+                return Err(invalid_argument("symbol explanation request is invalid"));
+            }
+            let mut observed = std::collections::BTreeSet::new();
+            for symbol in &request.symbols {
+                require_wire_id(Some(symbol.value.as_slice()), 20)?;
+                if !observed.insert(symbol.value.as_slice()) {
+                    return Err(invalid_argument("symbol identifiers must be distinct"));
+                }
+            }
+        }
+        FirstSliceIpcRequest::SourceRead(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            let repository = request
+                .repository
+                .as_ref()
+                .map(|id| id.value.as_slice())
+                .ok_or_else(|| invalid_argument("source repository is invalid"))?;
+            require_wire_id(Some(repository), 16)?;
+            validate_generation_selector(request.generation.as_ref())?;
+            if request.references.is_empty() || request.references.len() > 32 {
+                return Err(invalid_argument("source references are invalid"));
+            }
+            let explicit_generation = explicit_generation_bytes(request.generation.as_ref());
+            let mut observed_generation: Option<&[u8]> = None;
+            let mut observed = std::collections::BTreeSet::new();
+            for reference in &request.references {
+                validate_source_reference(reference)?;
+                let reference_repository = reference
+                    .repository
+                    .as_ref()
+                    .map(|id| id.value.as_slice())
+                    .ok_or_else(|| invalid_argument("source repository is invalid"))?;
+                let reference_generation = reference
+                    .generation
+                    .as_ref()
+                    .map(|id| id.value.as_slice())
+                    .ok_or_else(|| invalid_argument("source generation is invalid"))?;
+                if reference_repository != repository
+                    || explicit_generation.is_some_and(|value| value != reference_generation)
+                    || observed_generation.is_some_and(|value| value != reference_generation)
+                {
+                    return Err(invalid_argument("source reference correlation is invalid"));
+                }
+                observed_generation = Some(reference_generation);
+                let key = (
+                    reference_generation,
+                    reference.file.as_ref().map(|id| id.value.as_slice()),
+                    reference.start_byte,
+                    reference.end_byte,
+                );
+                if !observed.insert(key) {
+                    return Err(invalid_argument("source references must be distinct"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_first_slice_schema(
+    version: Option<&common::ContractVersion>,
+) -> Result<(), PublicError> {
+    if version.is_some_and(|version| version.major == 1 && version.minor == 0) {
+        Ok(())
+    } else {
+        Err(protocol_mismatch(
+            "first-slice schema version is unsupported",
+        ))
+    }
+}
+
+fn require_wire_id(value: Option<&[u8]>, expected: usize) -> Result<(), PublicError> {
+    if value.is_some_and(|value| value.len() == expected) {
+        Ok(())
+    } else {
+        Err(invalid_argument("first-slice identifier is invalid"))
+    }
+}
+
+fn validate_generation_selector(
+    selector: Option<&daemon::GenerationSelector>,
+) -> Result<(), PublicError> {
+    match selector.and_then(|selector| selector.selector.as_ref()) {
+        Some(daemon::generation_selector::Selector::Active(true)) => Ok(()),
+        Some(daemon::generation_selector::Selector::Generation(generation)) => {
+            require_wire_id(Some(generation.value.as_slice()), 20)
+        }
+        _ => Err(invalid_argument("generation selector is invalid")),
+    }
+}
+
+fn explicit_generation_bytes(selector: Option<&daemon::GenerationSelector>) -> Option<&[u8]> {
+    match selector.and_then(|selector| selector.selector.as_ref()) {
+        Some(daemon::generation_selector::Selector::Generation(generation)) => {
+            Some(generation.value.as_slice())
+        }
+        _ => None,
+    }
+}
+
+fn validate_source_reference(reference: &daemon::FirstSliceSourceRef) -> Result<(), PublicError> {
+    require_wire_id(
+        reference.repository.as_ref().map(|id| id.value.as_slice()),
+        16,
+    )?;
+    require_wire_id(
+        reference.generation.as_ref().map(|id| id.value.as_slice()),
+        20,
+    )?;
+    require_wire_id(reference.file.as_ref().map(|id| id.value.as_slice()), 20)?;
+    require_wire_id(
+        reference
+            .content_hash
+            .as_ref()
+            .map(|hash| hash.value.as_slice()),
+        32,
+    )?;
+    let lines_valid = match (reference.start_line, reference.end_line) {
+        (None, None) => true,
+        (Some(start), Some(end)) => start > 0 && start <= end,
+        _ => false,
+    };
+    if reference.start_byte > reference.end_byte || !lines_valid {
+        return Err(invalid_argument("source reference range is invalid"));
+    }
+    Ok(())
 }
 
 fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>) -> ControlMethod {
@@ -2750,6 +3199,15 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         Some(daemon::request_envelope::Request::OperationLeaseRenew(_)) => {
             ControlMethod::OperationLeaseRenew
         }
+        Some(daemon::request_envelope::Request::RepositoryIndex(_)) => {
+            ControlMethod::RepositoryIndex
+        }
+        Some(daemon::request_envelope::Request::RepositoryOperationStatus(_)) => {
+            ControlMethod::RepositoryOperationStatus
+        }
+        Some(daemon::request_envelope::Request::CodeLocate(_)) => ControlMethod::CodeLocate,
+        Some(daemon::request_envelope::Request::SymbolExplain(_)) => ControlMethod::SymbolExplain,
+        Some(daemon::request_envelope::Request::SourceRead(_)) => ControlMethod::SourceRead,
         None => ControlMethod::Unknown,
     }
 }
@@ -3151,6 +3609,13 @@ fn request_from_wire(
                 expiry_unix_ms: request.lease_expires_unix_ms,
             })
         }
+        Some(
+            daemon::request_envelope::Request::RepositoryIndex(_)
+            | daemon::request_envelope::Request::RepositoryOperationStatus(_)
+            | daemon::request_envelope::Request::CodeLocate(_)
+            | daemon::request_envelope::Request::SymbolExplain(_)
+            | daemon::request_envelope::Request::SourceRead(_),
+        ) => Err(Box::new(first_slice_unavailable())),
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
     }
 }
@@ -3567,6 +4032,15 @@ fn request_timed_out() -> PublicError {
         .next_action(NextAction::Retry)
         .build()
         .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
+}
+
+fn first_slice_unavailable() -> PublicError {
+    PublicError::builder(
+        ErrorCode::UnsupportedCapability,
+        "first-slice daemon service is unavailable",
+    )
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
 }
 
 fn internal_error() -> PublicError {
@@ -4074,6 +4548,7 @@ mod tests {
             &service,
             &actor.handle(),
             &submissions,
+            &UnavailableFirstSliceIpcHandler,
             daemon::RequestEnvelope {
                 request_id: 1,
                 instance_nonce: vec![7; 16],
@@ -5312,5 +5787,106 @@ mod tests {
             .transition(operation, OperationState::Cancelled, None)
             .expect("cleanup completes");
         assert_eq!(cancelled.state, OperationState::Cancelled);
+    }
+
+    #[test]
+    fn first_slice_source_references_validate_identity_range_and_correlation() {
+        let repository = common::RepositoryId { value: vec![1; 16] };
+        let generation = common::GenerationId { value: vec![2; 20] };
+        let reference = daemon::FirstSliceSourceRef {
+            repository: Some(repository.clone()),
+            generation: Some(generation.clone()),
+            file: Some(common::FileId { value: vec![3; 20] }),
+            start_byte: 4,
+            end_byte: 12,
+            content_hash: Some(common::ContentHash { value: vec![4; 32] }),
+            start_line: Some(1),
+            end_line: Some(2),
+        };
+        let request = |references: Vec<daemon::FirstSliceSourceRef>| {
+            FirstSliceIpcRequest::SourceRead(daemon::SourceReadRequest {
+                schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+                repository: Some(repository.clone()),
+                generation: Some(daemon::GenerationSelector {
+                    selector: Some(daemon::generation_selector::Selector::Generation(
+                        generation.clone(),
+                    )),
+                }),
+                references,
+            })
+        };
+        assert!(validate_first_slice_request(&request(vec![reference.clone()])).is_ok());
+
+        let mut invalid_file = reference.clone();
+        invalid_file.file = Some(common::FileId { value: vec![3; 19] });
+        assert!(validate_first_slice_request(&request(vec![invalid_file])).is_err());
+
+        let mut invalid_hash = reference.clone();
+        invalid_hash.content_hash = Some(common::ContentHash { value: vec![4; 31] });
+        assert!(validate_first_slice_request(&request(vec![invalid_hash])).is_err());
+
+        let mut inverted = reference.clone();
+        inverted.start_byte = 13;
+        assert!(validate_first_slice_request(&request(vec![inverted])).is_err());
+
+        let mut incomplete_lines = reference.clone();
+        incomplete_lines.end_line = None;
+        assert!(validate_first_slice_request(&request(vec![incomplete_lines])).is_err());
+
+        let mut foreign_repository = reference.clone();
+        foreign_repository.repository = Some(common::RepositoryId { value: vec![9; 16] });
+        assert!(validate_first_slice_request(&request(vec![foreign_repository])).is_err());
+
+        let mut foreign_generation = reference.clone();
+        foreign_generation.generation = Some(common::GenerationId { value: vec![8; 20] });
+        assert!(validate_first_slice_request(&request(vec![foreign_generation])).is_err());
+        assert!(
+            validate_first_slice_request(&request(vec![reference.clone(), reference])).is_err()
+        );
+    }
+
+    #[test]
+    fn first_slice_capabilities_are_only_advertised_on_minor_five() {
+        let service = service();
+        let hello = |maximum_minor| daemon::ClientHello {
+            supported_protocols: Some(common::VersionRange {
+                minimum: Some(common::ContractVersion { major: 1, minor: 1 }),
+                maximum: Some(common::ContractVersion {
+                    major: 1,
+                    minor: maximum_minor,
+                }),
+            }),
+            capabilities: Vec::new(),
+            expected_instance_nonce: vec![7; 16],
+            client_instance_id: vec![8; 16],
+        };
+        let previous = service.negotiate(&hello(4));
+        assert!(
+            !previous
+                .capabilities
+                .iter()
+                .any(|capability| capability == "repository.index.v1")
+        );
+        let current = service.negotiate(&hello(5));
+        assert!(
+            current
+                .capabilities
+                .iter()
+                .any(|capability| capability == "repository.index.v1")
+        );
+    }
+
+    #[test]
+    fn first_slice_response_variant_mismatch_is_a_bounded_internal_error() {
+        let wire = correlated_first_slice_response(
+            FirstSliceIpcKind::CodeLocate,
+            FirstSliceIpcResponse::SourceRead(daemon::SourceReadResponse::default()),
+        );
+        let daemon::response_envelope::Response::Error(error) = wire else {
+            panic!("mismatched first-slice response must fail closed");
+        };
+        assert_eq!(error.code, common::ErrorCode::Internal as i32);
+        assert_eq!(error.message, "internal operation failed");
+        assert!(error.details.is_empty());
     }
 }
