@@ -25,9 +25,10 @@ The versioned CLI error reports:
 The error never includes the requested path. Do not work around this boundary by
 weakening file permissions or redirecting sensitive output through an
 unprotected temporary path. macOS support-bundle file output remains unavailable
-until the Proposed ADR-026 private-tree boundary is accepted, implemented
-without weakening Rootlight's unsafe-code policy, and verified by native hostile
-APFS tests.
+unless the primary user explicitly accepts the Proposed ADR-026 decision and
+separately approves its tightly scoped `rootlight-vfs` unsafe boundary, with
+compiler-expanded inventory, cargo-geiger, and native hostile APFS evidence
+gates all passing before the capability is enabled.
 
 This limitation is specific to support-bundle file publication and is not a
 claim that the complete Rootlight product is supported on macOS.
