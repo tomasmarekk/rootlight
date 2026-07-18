@@ -292,6 +292,30 @@ fn numeric_identity_ordering_is_total_and_consistent_with_equality() {
 }
 
 #[test]
+fn arbitrary_precision_identity_texts_do_not_alias_through_f64() {
+    let ids = [
+        "1.0000000000000000000000000000001",
+        "1.0000000000000000000000000000002",
+    ]
+    .map(|raw| {
+        let value: Value =
+            serde_json::from_str(raw).expect("numeric identity fixture is valid JSON");
+        RequestId::from_value(&value).expect("fixture is a request identity")
+    });
+    let rendered = ids.each_ref().map(|id| match id {
+        RequestId::Number(number) => number.to_string(),
+        RequestId::String(_) => unreachable!("fixtures are numeric"),
+    });
+
+    // Default serde_json rounds both fixtures to one f64. When its
+    // arbitrary-precision feature is unified, their original texts survive.
+    if rendered[0] != rendered[1] {
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[0].cmp(&ids[1]), Ordering::Equal);
+    }
+}
+
+#[test]
 fn duplicate_names_are_rejected_before_member_accounting_collapses_them() {
     let mut session = Session::rootlight();
     let duplicate = r#"{"jsonrpc":"2.0","id":"first","id":"second","method":"ping"}"#;
