@@ -7,10 +7,15 @@
     "error": {
       "description": "Stable public error envelope.",
       "$ref": "#/$defs/PublicError"
+    },
+    "schema_version": {
+      "description": "Tool error schema version.",
+      "$ref": "#/$defs/SchemaVersion"
     }
   },
   "additionalProperties": false,
   "required": [
+    "schema_version",
     "error"
   ],
   "$defs": {
@@ -338,6 +343,7 @@
             "value": {
               "type": "integer",
               "format": "uint64",
+              "maximum": 18446744073709551615,
               "minimum": 0
             }
           },
@@ -431,6 +437,16 @@
       "maxLength": 128,
       "minLength": 1,
       "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "SchemaVersion": {
+      "description": "Version marker carried by every first-slice response.",
+      "oneOf": [
+        {
+          "description": "Tool contract version 1.0.",
+          "type": "string",
+          "const": "1.0"
+        }
+      ]
     }
   }
 }

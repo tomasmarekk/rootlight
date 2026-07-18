@@ -4,16 +4,17 @@
 
 pub mod vertical;
 
-use rootlight_error::PublicError;
 use rootlight_ids::{GenerationId, RepositoryId};
 use rootlight_ir::CoverageStatus;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicErrorBuildError};
 pub use vertical::{
-    CodeLocateInput, CodeLocateOutput, OperationStatusInput, OperationStatusOutput, RepoIndexInput,
-    RepoIndexOutput, SourceReadInput, SourceReadOutput, SymbolExplainInput, SymbolExplainOutput,
-    VerticalTool,
+    CodeLocateInput, CodeLocateOutput, ContinuationCursor, GenerationSelector,
+    OperationStatusInput, OperationStatusOutput, RepoIndexInput, RepoIndexOutput,
+    RepositorySelector, SchemaVersion, SourceFreeMessage, SourceReadInput, SourceReadOutput,
+    SymbolExplainInput, SymbolExplainOutput, ToolResponse, VerticalTool,
 };
 
 /// The MCP specification revision selected by ADR-015.
@@ -45,9 +46,11 @@ pub struct ResponseMetadata {
 }
 
 /// Strict common error response for MCP contract failures.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ErrorResponse {
+    /// Tool error schema version.
+    pub schema_version: vertical::SchemaVersion,
     /// Stable public error envelope.
     pub error: PublicError,
 }

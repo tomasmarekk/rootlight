@@ -62,6 +62,7 @@ pub const DEFAULT_RESPONSE_CHANNEL_CAPACITY: usize = 16;
 pub const DEFAULT_MAX_BLOCKING_WORKERS: usize = 4;
 
 const MAX_METHOD_BYTES: usize = 256;
+pub(crate) const MAX_REQUEST_ID_BYTES: usize = 4_096;
 const MAX_IMPLEMENTATION_NAME_BYTES: usize = 256;
 const MAX_IMPLEMENTATION_VERSION_BYTES: usize = 256;
 const MAX_IMPLEMENTATION_TITLE_BYTES: usize = 512;
@@ -257,8 +258,12 @@ impl fmt::Debug for RequestId {
 impl RequestId {
     fn from_value(value: &Value) -> Option<Self> {
         match value {
-            Value::Number(number) => Some(Self::Number(number.clone())),
-            Value::String(value) => Some(Self::String(value.clone())),
+            Value::Number(number) if number.to_string().len() <= MAX_REQUEST_ID_BYTES => {
+                Some(Self::Number(number.clone()))
+            }
+            Value::String(value) if value.len() <= MAX_REQUEST_ID_BYTES => {
+                Some(Self::String(value.clone()))
+            }
             _ => None,
         }
     }
@@ -1529,7 +1534,7 @@ fn initialized_params_are_valid(params: Option<&Value>) -> bool {
         && params.get("_meta").is_none_or(notification_meta_is_valid)
 }
 
-fn request_meta_is_valid(value: &Value) -> bool {
+pub(crate) fn request_meta_is_valid(value: &Value) -> bool {
     let Some(meta) = value.as_object() else {
         return false;
     };

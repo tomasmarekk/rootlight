@@ -5,14 +5,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rootlight_error::PublicError;
+use rootlight_error::{PublicError, SafeLabel};
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{CoverageStatus, SourceRef};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::TrustClassification;
+use crate::{ErrorResponse, TrustClassification};
+
+const MAX_SOURCE_FREE_MESSAGE_BYTES: usize = 1_024;
+const MAX_CONTINUATION_CURSOR_BYTES: usize = 4_096;
+const MAX_SOURCE_READ_BYTES: u64 = 524_288;
 
 /// One tool exposed by the first secure MCP vertical slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -157,10 +161,123 @@ pub enum SchemaVersion {
     V1_0,
 }
 
+/// A checked success-or-error result accepted by one tool output schema.
+///
+/// Successful variants preserve each tool's documented response shape.
+/// Expected domain failures use the same versioned [`ErrorResponse`] and
+/// checked [`PublicError`] contract for every tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ToolResponse<T> {
+    /// A tool-specific successful response.
+    Success(T),
+    /// A versioned source-redacted domain error.
+    Error(ErrorResponse),
+}
+
 /// A property that must be present and may contain JSON `null`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct RequiredNullable<T>(pub Option<T>);
+
+/// A bounded opaque continuation cursor.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, JsonSchema)]
+#[serde(transparent)]
+pub struct ContinuationCursor(#[schemars(length(min = 1, max = 4096))] String);
+
+impl ContinuationCursor {
+    /// Parses a nonempty cursor within the 4096-byte wire limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`McpContractError::InvalidContinuationCursor`] when the value
+    /// is empty or exceeds the byte limit.
+    pub fn parse(value: &str) -> Result<Self, McpContractError> {
+        if value.is_empty() || value.len() > MAX_CONTINUATION_CURSOR_BYTES {
+            return Err(McpContractError::InvalidContinuationCursor);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    /// Returns the opaque cursor text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ContinuationCursor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A checked Rootlight-generated message that cannot contain paths or source.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, JsonSchema)]
+#[serde(transparent)]
+pub struct SourceFreeMessage(
+    #[schemars(length(min = 1, max = 1024), regex(pattern = r"^[a-z0-9 -]+$"))] String,
+);
+
+impl SourceFreeMessage {
+    /// Parses a bounded lowercase source-free message template.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`McpContractError::InvalidSourceFreeMessage`] when the value
+    /// is empty, oversized, or outside the safe character allow-list.
+    pub fn parse(value: &str) -> Result<Self, McpContractError> {
+        let valid = !value.is_empty()
+            && value.len() <= MAX_SOURCE_FREE_MESSAGE_BYTES
+            && value.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b' ' | b'-')
+            });
+        if !valid {
+            return Err(McpContractError::InvalidSourceFreeMessage);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    /// Returns the checked source-free message.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for SourceFreeMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Semantic validation failures in the MCP wire contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum McpContractError {
+    /// A continuation cursor is empty or exceeds its byte ceiling.
+    #[error("invalid continuation cursor")]
+    InvalidContinuationCursor,
+    /// A source-free message violates its bounded template policy.
+    #[error("invalid source-free message")]
+    InvalidSourceFreeMessage,
+    /// A direct file range is inverted.
+    #[error("invalid source file range")]
+    InvalidFileRange,
+    /// A source chunk does not match its reference, encoding, or range.
+    #[error("invalid source chunk")]
+    InvalidSourceChunk,
+    /// Source chunk bytes do not match the declared aggregate.
+    #[error("invalid source byte total")]
+    InvalidSourceByteTotal,
+}
 
 /// Repository selector accepted by first-slice read tools.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -224,27 +341,35 @@ pub enum ResponseProfile {
 #[serde(deny_unknown_fields)]
 pub struct ResponseBudget {
     /// Maximum returned result objects.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 1000))]
     pub max_results: Option<u16>,
     /// Maximum estimated output tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 100, max = 3200))]
     pub max_tokens: Option<u16>,
     /// Maximum source bytes before JSON escaping.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 524_288))]
     pub max_source_bytes: Option<u32>,
     /// Maximum relationship or traversal facts examined.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 100_000))]
     pub max_traversal_facts: Option<u32>,
     /// Maximum plan depth.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 16))]
     pub max_depth: Option<u8>,
     /// Maximum independently returned paths.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 1000))]
     pub max_paths: Option<u16>,
     /// Cooperative request deadline in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 10, max = 30_000))]
     pub timeout_ms: Option<u32>,
     /// Requested evidence detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence_level: Option<ProvenanceLevel>,
 }
 
@@ -283,7 +408,7 @@ pub enum RepositoryScopeValue {
 #[serde(deny_unknown_fields)]
 pub struct PathScope {
     /// Distinct repository-relative paths.
-    #[schemars(length(min = 1, max = 256))]
+    #[schemars(length(min = 1, max = 256), inner(length(min = 1, max = 8192)))]
     pub paths: BTreeSet<String>,
 }
 
@@ -292,7 +417,7 @@ pub struct PathScope {
 #[serde(deny_unknown_fields)]
 pub struct PackageScope {
     /// Distinct package identities.
-    #[schemars(length(min = 1, max = 256))]
+    #[schemars(length(min = 1, max = 256), inner(length(min = 1, max = 512)))]
     pub packages: BTreeSet<String>,
 }
 
@@ -301,7 +426,7 @@ pub struct PackageScope {
 #[serde(deny_unknown_fields)]
 pub struct BuildTargetScope {
     /// Distinct build-target identities.
-    #[schemars(length(min = 1, max = 256))]
+    #[schemars(length(min = 1, max = 256), inner(length(min = 1, max = 512)))]
     pub build_targets: BTreeSet<String>,
 }
 
@@ -337,22 +462,32 @@ pub enum AnalysisTier {
 #[serde(deny_unknown_fields)]
 pub struct RepoIndexInput {
     /// Canonicalizable local root for first registration.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 4096))]
     pub root: Option<String>,
     /// Existing repository identity to update.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_id: Option<RepositoryId>,
     /// Optional indexing scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<IndexScope>,
     /// Requested indexing mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<IndexMode>,
     /// Per-language maximum requested tier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 64))]
     pub requested_tiers: Option<BTreeMap<String, AnalysisTier>>,
     /// Validated operation-scoped configuration override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 128))]
     pub configuration_patch: Option<BTreeMap<String, Value>>,
     /// Maximum time to wait for publication or a terminal state.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 30_000))]
     pub wait_ms: Option<u32>,
     /// Whether the operation may continue after client disconnect.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub detached: Option<bool>,
 }
 
@@ -365,7 +500,7 @@ pub struct IndexPlanSummary {
     /// Selected analysis mode.
     pub mode: IndexMode,
     /// Admitted providers in deterministic order.
-    #[schemars(length(max = 64))]
+    #[schemars(length(max = 64), inner(length(min = 1, max = 128)))]
     pub providers: Vec<String>,
     /// Parent generation, when an active generation existed.
     pub parent_generation: RequiredNullable<GenerationId>,
@@ -410,11 +545,9 @@ pub enum OperationState {
 #[serde(deny_unknown_fields)]
 pub struct Diagnostic {
     /// Stable diagnostic code.
-    #[schemars(length(min = 1, max = 128))]
-    pub code: String,
+    pub code: SafeLabel,
     /// Static or Rootlight-generated source-free message.
-    #[schemars(length(min = 1, max = 1024))]
-    pub message: String,
+    pub message: SourceFreeMessage,
 }
 
 /// `repo.index` result data.
@@ -439,12 +572,15 @@ pub struct RepoIndexData {
 /// Strict output for `repo.index`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct RepoIndexOutput {
+pub struct RepoIndexSuccess {
     /// Tool response schema version.
     pub schema_version: SchemaVersion,
     /// Operational result.
     pub data: RepoIndexData,
 }
+
+/// Checked success-or-error output for `repo.index`.
+pub type RepoIndexOutput = ToolResponse<RepoIndexSuccess>;
 
 /// Action accepted by `operation.status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -463,11 +599,14 @@ pub struct OperationStatusInput {
     /// Operation handle returned by the creating tool.
     pub operation_id: OperationId,
     /// Read or request cancellation.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<OperationAction>,
     /// Maximum long-poll duration.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 30_000))]
     pub wait_ms: Option<u32>,
     /// Return immediately only after this journal revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub after_revision: Option<u64>,
 }
 
@@ -533,12 +672,15 @@ pub struct OperationStatusData {
 /// Strict output for `operation.status`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct OperationStatusOutput {
+pub struct OperationStatusSuccess {
     /// Tool response schema version.
     pub schema_version: SchemaVersion,
     /// Operation result.
     pub data: OperationStatusData,
 }
+
+/// Checked success-or-error output for `operation.status`.
+pub type OperationStatusOutput = ToolResponse<OperationStatusSuccess>;
 
 /// Common scope selector for read tools.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -616,36 +758,46 @@ pub struct CodeLocateInput {
     /// Repository to query.
     pub repository: RepositorySelector,
     /// Immutable generation selector.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<GenerationSelector>,
     /// Identifier, path, text, or concept query.
     #[schemars(length(min = 1, max = 2048))]
     pub query: String,
     /// Entity kinds to retain.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 32))]
     pub kinds: Option<BTreeSet<EntityKind>>,
     /// Optional structural scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<ScopeSelector>,
     /// Language identity filters.
-    #[schemars(length(max = 32))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 32), inner(length(min = 1, max = 64)))]
     pub languages: Option<BTreeSet<String>>,
     /// Retrieval modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 6))]
     pub search_modes: Option<BTreeSet<SearchMode>>,
     /// Structural seed symbols.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 16))]
     pub related_to: Option<BTreeSet<SymbolId>>,
     /// Minimum relation confidence from 0 through 1000.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 1000))]
     pub min_confidence: Option<u16>,
     /// Maximum returned matches.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 200))]
     pub max_results: Option<u16>,
     /// Optional lower response limits.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub budget: Option<ResponseBudget>,
     /// Opaque generation-bound continuation cursor.
-    #[schemars(length(min = 1, max = 4096))]
-    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<ContinuationCursor>,
     /// Requested representation.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_profile: Option<ResponseProfile>,
 }
 
@@ -752,11 +904,9 @@ pub struct UsageSummary {
 #[serde(deny_unknown_fields)]
 pub struct ResponseWarning {
     /// Stable warning code.
-    #[schemars(length(min = 1, max = 128))]
-    pub code: String,
+    pub code: SafeLabel,
     /// Rootlight-generated source-free explanation.
-    #[schemars(length(min = 1, max = 1024))]
-    pub message: String,
+    pub message: SourceFreeMessage,
 }
 
 /// Common strict response envelope for generation-pinned reads.
@@ -776,13 +926,14 @@ pub struct ReadEnvelope<T> {
     /// Whether any hard or requested limit stopped completion.
     pub truncated: bool,
     /// Safe continuation cursor, when the result is pageable.
-    #[schemars(required)]
-    pub next_cursor: Option<String>,
+    pub next_cursor: RequiredNullable<ContinuationCursor>,
     /// Runtime resource accounting.
     pub usage: UsageSummary,
     /// Source-free warnings.
     #[schemars(length(max = 100))]
     pub warnings: Vec<ResponseWarning>,
+    /// Response-level classification for all repository-derived content.
+    pub trust: TrustClassification,
 }
 
 /// Why a locate item ranked in the result.
@@ -842,7 +993,7 @@ pub struct LocatedItem {
 #[serde(deny_unknown_fields)]
 pub struct QueryInterpretation {
     /// Normalized query tokens.
-    #[schemars(length(max = 128))]
+    #[schemars(length(max = 128), inner(length(min = 1, max = 256)))]
     pub tokens: Vec<String>,
     /// Applied search modes.
     #[schemars(length(max = 6))]
@@ -893,8 +1044,8 @@ pub struct CodeLocateData {
     pub suggested_next: Vec<ToolSuggestion>,
 }
 
-/// Strict output for `code.locate`.
-pub type CodeLocateOutput = ReadEnvelope<CodeLocateData>;
+/// Checked success-or-error output for `code.locate`.
+pub type CodeLocateOutput = ToolResponse<ReadEnvelope<CodeLocateData>>;
 
 /// Sections accepted by `symbol.explain`.
 #[derive(
@@ -943,24 +1094,31 @@ pub struct SymbolExplainInput {
     /// Owning repository.
     pub repository: RepositorySelector,
     /// Immutable generation selector.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<GenerationSelector>,
     /// Stable unambiguous symbols.
     #[schemars(length(min = 1, max = 16))]
     pub symbol_ids: BTreeSet<SymbolId>,
     /// Requested sections.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 10))]
     pub sections: Option<BTreeSet<ExplainSection>>,
     /// Per-relation evidence sample ceiling.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 25))]
     pub relation_sample_limit: Option<u8>,
     /// Source preview lines per symbol.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 40))]
     pub source_preview_lines: Option<u8>,
     /// Provenance detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub include_provenance: Option<ProvenanceLevel>,
     /// Optional lower response limits.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub budget: Option<ResponseBudget>,
     /// Requested representation.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_profile: Option<ResponseProfile>,
 }
 
@@ -1053,8 +1211,8 @@ pub struct SymbolExplainData {
     pub detail_handles: Vec<DetailHandle>,
 }
 
-/// Strict output for `symbol.explain`.
-pub type SymbolExplainOutput = ReadEnvelope<SymbolExplainData>;
+/// Checked success-or-error output for `symbol.explain`.
+pub type SymbolExplainOutput = ToolResponse<ReadEnvelope<SymbolExplainData>>;
 
 /// One source selector accepted by `source.read`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1085,7 +1243,7 @@ pub struct SymbolDefinitionSelector {
 }
 
 /// Explicit indexed-file range selector.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FileRangeSelector {
     /// Stable indexed file identity.
@@ -1094,6 +1252,31 @@ pub struct FileRangeSelector {
     pub start_byte: u64,
     /// Exclusive end byte.
     pub end_byte: u64,
+}
+
+impl<'de> Deserialize<'de> for FileRangeSelector {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireFileRangeSelector {
+            file_id: FileId,
+            start_byte: u64,
+            end_byte: u64,
+        }
+
+        let wire = WireFileRangeSelector::deserialize(deserializer)?;
+        if wire.start_byte > wire.end_byte {
+            return Err(serde::de::Error::custom(McpContractError::InvalidFileRange));
+        }
+        Ok(Self {
+            file_id: wire.file_id,
+            start_byte: wire.start_byte,
+            end_byte: wire.end_byte,
+        })
+    }
 }
 
 /// Requested source encoding.
@@ -1113,28 +1296,37 @@ pub struct SourceReadInput {
     /// Owning repository.
     pub repository: RepositorySelector,
     /// Immutable generation selector.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<GenerationSelector>,
     /// Exact source selectors.
     #[schemars(length(min = 1, max = 32))]
     pub references: Vec<SourceReadSelector>,
     /// Leading context lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 50))]
     pub context_lines_before: Option<u8>,
     /// Trailing context lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 50))]
     pub context_lines_after: Option<u8>,
     /// Merge overlapping verified ranges.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub merge_overlaps: Option<bool>,
     /// Aggregate raw source-byte ceiling.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 524_288))]
     pub max_source_bytes: Option<u32>,
     /// Include one-based line numbers.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub include_line_numbers: Option<bool>,
     /// Requested encoding.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<SourceEncodingRequest>,
     /// Optional lower response limits.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub budget: Option<ResponseBudget>,
     /// Requested representation.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_profile: Option<ResponseProfile>,
 }
 
@@ -1149,7 +1341,7 @@ pub enum SourceEncoding {
 }
 
 /// One exact verified source chunk.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SourceChunk {
     /// Selected generation-bound reference.
@@ -1181,6 +1373,137 @@ pub struct SourceChunk {
     pub trust: TrustClassification,
 }
 
+impl SourceChunk {
+    fn represented_source_bytes(&self) -> Result<u64, McpContractError> {
+        represented_source_bytes(&self.content, self.encoding)
+            .ok_or(McpContractError::InvalidSourceChunk)
+    }
+}
+
+impl<'de> Deserialize<'de> for SourceChunk {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireSourceChunk {
+            source_ref: SourceRef,
+            path: String,
+            start_byte: u64,
+            end_byte: u64,
+            start_line: u64,
+            end_line: u64,
+            content: String,
+            encoding: SourceEncoding,
+            content_hash: ContentHash,
+            language: String,
+            generated: bool,
+            trust: TrustClassification,
+        }
+
+        let wire = WireSourceChunk::deserialize(deserializer)?;
+        let span = wire.source_ref.span();
+        let represented_bytes = represented_source_bytes(&wire.content, wire.encoding)
+            .ok_or_else(|| serde::de::Error::custom(McpContractError::InvalidSourceChunk))?;
+        let span_bytes = wire
+            .end_byte
+            .checked_sub(wire.start_byte)
+            .ok_or_else(|| serde::de::Error::custom(McpContractError::InvalidSourceChunk))?;
+        let line_hint_matches = wire.source_ref.line_hint().is_none_or(|line_hint| {
+            line_hint.start_line() == wire.start_line && line_hint.end_line() == wire.end_line
+        });
+        if wire.start_line == 0
+            || wire.start_line > wire.end_line
+            || represented_bytes != span_bytes
+            || span.start_byte() != wire.start_byte
+            || span.end_byte() != wire.end_byte
+            || wire.source_ref.content_hash() != wire.content_hash
+            || !line_hint_matches
+        {
+            return Err(serde::de::Error::custom(
+                McpContractError::InvalidSourceChunk,
+            ));
+        }
+
+        Ok(Self {
+            source_ref: wire.source_ref,
+            path: wire.path,
+            start_byte: wire.start_byte,
+            end_byte: wire.end_byte,
+            start_line: wire.start_line,
+            end_line: wire.end_line,
+            content: wire.content,
+            encoding: wire.encoding,
+            content_hash: wire.content_hash,
+            language: wire.language,
+            generated: wire.generated,
+            trust: wire.trust,
+        })
+    }
+}
+
+fn represented_source_bytes(content: &str, encoding: SourceEncoding) -> Option<u64> {
+    match encoding {
+        SourceEncoding::Utf8 => u64::try_from(content.len()).ok(),
+        SourceEncoding::Base64 => canonical_base64_decoded_len(content),
+    }
+}
+
+fn canonical_base64_decoded_len(content: &str) -> Option<u64> {
+    let bytes = content.as_bytes();
+    if bytes.is_empty() {
+        return Some(0);
+    }
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+
+    let padding = if bytes.ends_with(b"==") {
+        2usize
+    } else if bytes.ends_with(b"=") {
+        1usize
+    } else {
+        0usize
+    };
+    let data_len = bytes.len().checked_sub(padding)?;
+    if bytes[..data_len]
+        .iter()
+        .any(|byte| base64_value(*byte).is_none())
+        || bytes[data_len..].iter().any(|byte| *byte != b'=')
+    {
+        return None;
+    }
+
+    if padding == 1 {
+        let last = *bytes.get(data_len.checked_sub(1)?)?;
+        if base64_value(last)? & 0b11 != 0 {
+            return None;
+        }
+    } else if padding == 2 {
+        let last = *bytes.get(data_len.checked_sub(1)?)?;
+        if base64_value(last)? & 0b1111 != 0 {
+            return None;
+        }
+    }
+
+    let quartets = u64::try_from(bytes.len() / 4).ok()?;
+    quartets
+        .checked_mul(3)?
+        .checked_sub(u64::try_from(padding).ok()?)
+}
+
+const fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
 /// A source selector that no longer resolves in the pinned snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1189,8 +1512,7 @@ pub struct StaleSourceReference {
     #[schemars(range(max = 31))]
     pub selector_index: u8,
     /// Source-free reason code.
-    #[schemars(length(min = 1, max = 128))]
-    pub reason: String,
+    pub reason: SafeLabel,
 }
 
 /// One source-read elision.
@@ -1201,14 +1523,13 @@ pub struct SourceElision {
     #[schemars(range(max = 31))]
     pub selector_index: u8,
     /// Source-free elision reason.
-    #[schemars(length(min = 1, max = 128))]
-    pub reason: String,
+    pub reason: SafeLabel,
     /// Raw bytes omitted.
     pub omitted_bytes: u64,
 }
 
 /// `source.read` result data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SourceReadData {
     /// Verified chunks in request order.
@@ -1225,16 +1546,65 @@ pub struct SourceReadData {
     pub total_source_bytes: u32,
 }
 
-/// Strict output for `source.read`.
-pub type SourceReadOutput = ReadEnvelope<SourceReadData>;
+impl<'de> Deserialize<'de> for SourceReadData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireSourceReadData {
+            chunks: Vec<SourceChunk>,
+            stale_references: Vec<StaleSourceReference>,
+            elisions: Vec<SourceElision>,
+            total_source_bytes: u32,
+        }
+
+        let wire = WireSourceReadData::deserialize(deserializer)?;
+        let mut observed = 0u64;
+        for chunk in &wire.chunks {
+            observed = observed
+                .checked_add(
+                    chunk
+                        .represented_source_bytes()
+                        .map_err(serde::de::Error::custom)?,
+                )
+                .ok_or_else(|| {
+                    serde::de::Error::custom(McpContractError::InvalidSourceByteTotal)
+                })?;
+        }
+        if observed != u64::from(wire.total_source_bytes) || observed > MAX_SOURCE_READ_BYTES {
+            return Err(serde::de::Error::custom(
+                McpContractError::InvalidSourceByteTotal,
+            ));
+        }
+
+        Ok(Self {
+            chunks: wire.chunks,
+            stale_references: wire.stale_references,
+            elisions: wire.elisions,
+            total_source_bytes: wire.total_source_bytes,
+        })
+    }
+}
+
+/// Checked success-or-error output for `source.read`.
+pub type SourceReadOutput = ToolResponse<ReadEnvelope<SourceReadData>>;
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::fmt::Debug;
 
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
     use serde_json::{Value, json};
 
-    use super::VerticalTool;
+    use super::{
+        CodeLocateInput, CodeLocateOutput, OperationStatusInput, OperationStatusOutput,
+        RepoIndexInput, RepoIndexOutput, SourceReadInput, SourceReadOutput, SymbolExplainInput,
+        SymbolExplainOutput, VerticalTool,
+    };
 
     #[test]
     fn embedded_vertical_schemas_are_unique_strict_draft_2020_12_objects() {
@@ -1253,7 +1623,10 @@ mod tests {
                     "https://json-schema.org/draft/2020-12/schema"
                 );
                 assert_eq!(schema["type"], "object");
-                assert_eq!(schema["additionalProperties"], false);
+                assert!(
+                    schema["additionalProperties"] == false
+                        || schema["unevaluatedProperties"] == false
+                );
                 assert_every_object_declares_additional_properties(&schema);
                 let identifier = schema["$id"]
                     .as_str()
@@ -1274,8 +1647,9 @@ mod tests {
             Value::Object(object) => {
                 if object.get("type").and_then(Value::as_str) == Some("object") {
                     assert!(
-                        object.contains_key("additionalProperties"),
-                        "object schema is missing an additionalProperties contract: {object:?}"
+                        object.contains_key("additionalProperties")
+                            || object.contains_key("unevaluatedProperties"),
+                        "object schema is missing a closed-properties contract: {object:?}"
                     );
                 }
                 for value in object.values() {
@@ -1323,5 +1697,251 @@ mod tests {
         let mut unknown = required;
         unknown["host_path"] = json!("must not be accepted");
         assert!(!validator.is_valid(&unknown));
+    }
+
+    #[test]
+    fn retained_tool_contracts_round_trip_through_rust_and_json_schema() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/mcp/1.0/tool-contracts.json"
+        ))
+        .expect("retained tool contracts are valid JSON");
+        let tools = fixture["tools"]
+            .as_array()
+            .expect("retained tool contracts contain a tool array");
+        assert_eq!(tools.len(), VerticalTool::ALL.len());
+
+        for fixture in tools {
+            let name = fixture["tool"].as_str().expect("tool name is a string");
+            let input = fixture["input"].clone();
+            let output = fixture["output"].clone();
+            match name {
+                "repo.index" => {
+                    assert_round_trip::<RepoIndexInput>(VerticalTool::RepoIndex, &input, true);
+                    assert_round_trip::<RepoIndexOutput>(VerticalTool::RepoIndex, &output, false);
+                }
+                "operation.status" => {
+                    assert_round_trip::<OperationStatusInput>(
+                        VerticalTool::OperationStatus,
+                        &input,
+                        true,
+                    );
+                    assert_round_trip::<OperationStatusOutput>(
+                        VerticalTool::OperationStatus,
+                        &output,
+                        false,
+                    );
+                }
+                "code.locate" => {
+                    assert_round_trip::<CodeLocateInput>(VerticalTool::CodeLocate, &input, true);
+                    assert_round_trip::<CodeLocateOutput>(VerticalTool::CodeLocate, &output, false);
+                }
+                "symbol.explain" => {
+                    assert_round_trip::<SymbolExplainInput>(
+                        VerticalTool::SymbolExplain,
+                        &input,
+                        true,
+                    );
+                    assert_round_trip::<SymbolExplainOutput>(
+                        VerticalTool::SymbolExplain,
+                        &output,
+                        false,
+                    );
+                }
+                "source.read" => {
+                    assert_round_trip::<SourceReadInput>(VerticalTool::SourceRead, &input, true);
+                    assert_round_trip::<SourceReadOutput>(VerticalTool::SourceRead, &output, false);
+                }
+                other => panic!("unexpected retained tool contract {other}"),
+            }
+        }
+    }
+
+    fn assert_round_trip<T>(tool: VerticalTool, fixture: &Value, input: bool)
+    where
+        T: DeserializeOwned + Serialize + PartialEq + Debug,
+    {
+        let decoded: T =
+            serde_json::from_value(fixture.clone()).expect("fixture decodes through Rust");
+        let encoded = serde_json::to_value(&decoded).expect("typed fixture serializes");
+        assert_eq!(
+            &encoded,
+            fixture,
+            "absent optional fields remain absent for {}",
+            tool.name()
+        );
+        let schema_text = if input {
+            tool.input_schema_json()
+        } else {
+            tool.output_schema_json()
+        };
+        let schema: Value = serde_json::from_str(schema_text).expect("tool schema is valid JSON");
+        let validator = jsonschema::draft202012::new(&schema).expect("tool schema compiles");
+        assert!(
+            validator.is_valid(&encoded),
+            "{} fixture passes its generated schema",
+            tool.name()
+        );
+        let round_tripped: T =
+            serde_json::from_value(encoded).expect("serialized fixture decodes through Rust");
+        assert_eq!(round_tripped, decoded);
+    }
+
+    #[test]
+    fn continuation_cursor_is_required_nullable_and_bounded() {
+        let fixture = retained_tool_output("code.locate");
+        let schema: Value = serde_json::from_str(VerticalTool::CodeLocate.output_schema_json())
+            .expect("valid JSON");
+        let validator = jsonschema::draft202012::new(&schema).expect("schema compiles");
+        assert!(validator.is_valid(&fixture));
+
+        let mut absent = fixture.clone();
+        absent
+            .as_object_mut()
+            .expect("output is an object")
+            .remove("next_cursor");
+        assert!(!validator.is_valid(&absent));
+
+        let mut maximum = fixture.clone();
+        maximum["next_cursor"] = json!("c".repeat(4_096));
+        assert!(validator.is_valid(&maximum));
+        serde_json::from_value::<CodeLocateOutput>(maximum).expect("maximum-sized cursor decodes");
+
+        let mut oversized = fixture;
+        oversized["next_cursor"] = json!("c".repeat(4_097));
+        assert!(!validator.is_valid(&oversized));
+        assert!(serde_json::from_value::<CodeLocateOutput>(oversized).is_err());
+    }
+
+    #[test]
+    fn every_tool_accepts_only_the_checked_versioned_error_envelope() {
+        let error = json!({
+            "schema_version": "1.0",
+            "error": {
+                "code": "NOT_FOUND",
+                "message": "requested entity was not found",
+                "retryable": false,
+                "retry_after_ms": null,
+                "repository": null,
+                "operation": null,
+                "generation": null,
+                "details": {},
+                "next_actions": []
+            }
+        });
+        for tool in VerticalTool::ALL {
+            let schema: Value =
+                serde_json::from_str(tool.output_schema_json()).expect("output schema is valid");
+            let validator = jsonschema::draft202012::new(&schema).expect("output schema compiles");
+            assert!(
+                validator.is_valid(&error),
+                "{} accepts the shared error envelope",
+                tool.name()
+            );
+        }
+        serde_json::from_value::<RepoIndexOutput>(error.clone()).expect("repo error decodes");
+        serde_json::from_value::<OperationStatusOutput>(error.clone())
+            .expect("operation error decodes");
+        serde_json::from_value::<CodeLocateOutput>(error.clone()).expect("locate error decodes");
+        serde_json::from_value::<SymbolExplainOutput>(error.clone())
+            .expect("explain error decodes");
+        serde_json::from_value::<SourceReadOutput>(error.clone()).expect("source error decodes");
+
+        let mut arbitrary_code = error.clone();
+        arbitrary_code["error"]["code"] = json!("EXECUTOR_PRIVATE_CODE");
+        assert!(serde_json::from_value::<RepoIndexOutput>(arbitrary_code).is_err());
+
+        let mut source_shaped_message = error;
+        source_shaped_message["error"]["message"] = json!("C:\\Users\\person\\secret.rs");
+        assert!(serde_json::from_value::<RepoIndexOutput>(source_shaped_message).is_err());
+    }
+
+    #[test]
+    fn diagnostics_and_warnings_reject_source_shaped_messages() {
+        let mut diagnostic = retained_tool_output("repo.index");
+        diagnostic["data"]["diagnostics"] = json!([{
+            "code": "fixture",
+            "message": "C:\\Users\\person\\secret.rs"
+        }]);
+        assert!(serde_json::from_value::<RepoIndexOutput>(diagnostic).is_err());
+
+        let mut warning = retained_tool_output("code.locate");
+        warning["warnings"] = json!([{
+            "code": "fixture",
+            "message": "src/lib.rs was skipped"
+        }]);
+        assert!(serde_json::from_value::<CodeLocateOutput>(warning).is_err());
+    }
+
+    #[test]
+    fn file_ranges_and_source_chunks_enforce_cross_field_invariants() {
+        let mut inverted_input = retained_tool_input("source.read");
+        inverted_input["references"][0]["start_byte"] = json!(11);
+        inverted_input["references"][0]["end_byte"] = json!(10);
+        assert!(serde_json::from_value::<SourceReadInput>(inverted_input).is_err());
+
+        let fixture = retained_tool_output("source.read");
+        let mut mismatched_span = fixture.clone();
+        mismatched_span["data"]["chunks"][0]["end_byte"] = json!(9);
+        assert!(serde_json::from_value::<SourceReadOutput>(mismatched_span).is_err());
+
+        let mut mismatched_reference = fixture.clone();
+        mismatched_reference["data"]["chunks"][0]["source_ref"]["span"]["end_byte"] = json!(9);
+        assert!(serde_json::from_value::<SourceReadOutput>(mismatched_reference).is_err());
+
+        let mut mismatched_hash = fixture.clone();
+        mismatched_hash["data"]["chunks"][0]["content_hash"] =
+            json!("b3_75bprqkwsgfv4kw74qjkj2xli5knc43nxoicyuklbc4qajuuj6gsxi36m4");
+        assert!(serde_json::from_value::<SourceReadOutput>(mismatched_hash).is_err());
+
+        let mut mismatched_line_hint = fixture.clone();
+        mismatched_line_hint["data"]["chunks"][0]["source_ref"]["line_hint"]["end_line"] = json!(2);
+        assert!(serde_json::from_value::<SourceReadOutput>(mismatched_line_hint).is_err());
+
+        let mut mismatched_total = fixture;
+        mismatched_total["data"]["total_source_bytes"] = json!(9);
+        assert!(serde_json::from_value::<SourceReadOutput>(mismatched_total).is_err());
+    }
+
+    #[test]
+    fn source_chunk_base64_length_is_checked_canonically() {
+        let fixture = retained_tool_output("source.read");
+        let mut valid = fixture.clone();
+        valid["data"]["chunks"][0]["content"] = json!("AQID");
+        valid["data"]["chunks"][0]["encoding"] = json!("base64");
+        valid["data"]["chunks"][0]["end_byte"] = json!(3);
+        valid["data"]["chunks"][0]["source_ref"]["span"]["end_byte"] = json!(3);
+        valid["data"]["total_source_bytes"] = json!(3);
+        serde_json::from_value::<SourceReadOutput>(valid).expect("canonical base64 decodes");
+
+        let mut noncanonical = fixture;
+        noncanonical["data"]["chunks"][0]["content"] = json!("AQI=");
+        noncanonical["data"]["chunks"][0]["encoding"] = json!("base64");
+        noncanonical["data"]["chunks"][0]["end_byte"] = json!(2);
+        noncanonical["data"]["chunks"][0]["source_ref"]["span"]["end_byte"] = json!(2);
+        noncanonical["data"]["total_source_bytes"] = json!(2);
+        noncanonical["data"]["chunks"][0]["content"] = json!("AQJ=");
+        assert!(serde_json::from_value::<SourceReadOutput>(noncanonical).is_err());
+    }
+
+    fn retained_tool_input(name: &str) -> Value {
+        retained_tool_fixture(name, "input")
+    }
+
+    fn retained_tool_output(name: &str) -> Value {
+        retained_tool_fixture(name, "output")
+    }
+
+    fn retained_tool_fixture(name: &str, field: &str) -> Value {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/mcp/1.0/tool-contracts.json"
+        ))
+        .expect("retained tool contracts are valid JSON");
+        fixture["tools"]
+            .as_array()
+            .expect("tool contracts contain an array")
+            .iter()
+            .find(|entry| entry["tool"] == name)
+            .unwrap_or_else(|| panic!("retained tool contract {name} exists"))[field]
+            .clone()
     }
 }

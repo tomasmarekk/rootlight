@@ -15,9 +15,11 @@
     },
     "cursor": {
       "description": "Opaque generation-bound continuation cursor.",
-      "type": "string",
-      "maxLength": 4096,
-      "minLength": 1
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContinuationCursor"
+        }
+      ]
     },
     "generation": {
       "description": "Immutable generation selector.",
@@ -40,7 +42,9 @@
       "description": "Language identity filters.",
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "maxLength": 64,
+        "minLength": 1
       },
       "maxItems": 32,
       "uniqueItems": true
@@ -128,7 +132,9 @@
           "description": "Distinct build-target identities.",
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1
           },
           "maxItems": 256,
           "minItems": 1,
@@ -139,6 +145,12 @@
       "required": [
         "build_targets"
       ]
+    },
+    "ContinuationCursor": {
+      "description": "A bounded opaque continuation cursor.",
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1
     },
     "EntityKind": {
       "description": "Entity classes supported by the first locate slice.",
@@ -215,7 +227,9 @@
           "description": "Distinct package identities.",
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1
           },
           "maxItems": 256,
           "minItems": 1,
@@ -235,7 +249,9 @@
           "description": "Distinct repository-relative paths.",
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 8192,
+            "minLength": 1
           },
           "maxItems": 256,
           "minItems": 1,

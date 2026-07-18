@@ -1,63 +1,20 @@
 {
   "$id": "https://rootlight.local/schema/mcp/source.read/output/1.0",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ReadEnvelope",
-  "description": "Common strict response envelope for generation-pinned reads.",
+  "title": "ToolResponse",
+  "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
   "type": "object",
-  "properties": {
-    "coverage": {
-      "description": "Relevant coverage.",
-      "$ref": "#/$defs/CoverageSummary"
+  "anyOf": [
+    {
+      "description": "A tool-specific successful response.",
+      "$ref": "#/$defs/ReadEnvelope"
     },
-    "data": {
-      "description": "Tool-specific result.",
-      "$ref": "#/$defs/SourceReadData"
-    },
-    "generation": {
-      "description": "Pinned generation and freshness.",
-      "$ref": "#/$defs/GenerationSummary"
-    },
-    "next_cursor": {
-      "description": "Safe continuation cursor, when the result is pageable.",
-      "type": "string"
-    },
-    "repository": {
-      "description": "Resolved repository.",
-      "$ref": "#/$defs/ResolvedRepository"
-    },
-    "schema_version": {
-      "description": "Tool response schema version.",
-      "$ref": "#/$defs/SchemaVersion"
-    },
-    "truncated": {
-      "description": "Whether any hard or requested limit stopped completion.",
-      "type": "boolean"
-    },
-    "usage": {
-      "description": "Runtime resource accounting.",
-      "$ref": "#/$defs/UsageSummary"
-    },
-    "warnings": {
-      "description": "Source-free warnings.",
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/ResponseWarning"
-      },
-      "maxItems": 100
+    {
+      "description": "A versioned source-redacted domain error.",
+      "$ref": "#/$defs/ErrorResponse"
     }
-  },
-  "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "repository",
-    "generation",
-    "coverage",
-    "data",
-    "truncated",
-    "next_cursor",
-    "usage",
-    "warnings"
   ],
+  "unevaluatedProperties": false,
   "$defs": {
     "AnalysisTier": {
       "description": "Requested or observed language support tier.",
@@ -108,6 +65,12 @@
       "type": "string",
       "pattern": "^b3_[a-z2-7]{58}$"
     },
+    "ContinuationCursor": {
+      "description": "A bounded opaque continuation cursor.",
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1
+    },
     "CoverageStatus": {
       "description": "Completeness of a bounded fact or result set.",
       "oneOf": [
@@ -149,6 +112,7 @@
           "description": "Inputs skipped by policy, limits, or capability.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "status": {
@@ -161,6 +125,117 @@
         "status",
         "languages",
         "skipped_inputs"
+      ]
+    },
+    "DetailKey": {
+      "description": "A validated key for a bounded public error detail.",
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z0-9_]+$"
+    },
+    "ErrorCode": {
+      "description": "Stable public error families shared by all Rootlight boundaries.",
+      "oneOf": [
+        {
+          "description": "The caller supplied an invalid value.",
+          "type": "string",
+          "const": "INVALID_ARGUMENT"
+        },
+        {
+          "description": "The requested entity does not exist.",
+          "type": "string",
+          "const": "NOT_FOUND"
+        },
+        {
+          "description": "The request conflicts with current state.",
+          "type": "string",
+          "const": "CONFLICT"
+        },
+        {
+          "description": "The selected generation is no longer valid for this operation.",
+          "type": "string",
+          "const": "STALE_GENERATION"
+        },
+        {
+          "description": "The requested capability is unavailable.",
+          "type": "string",
+          "const": "UNSUPPORTED_CAPABILITY"
+        },
+        {
+          "description": "The result is incomplete for the requested coverage.",
+          "type": "string",
+          "const": "INCOMPLETE_COVERAGE"
+        },
+        {
+          "description": "The operation exceeded an explicit work budget.",
+          "type": "string",
+          "const": "BUDGET_EXCEEDED"
+        },
+        {
+          "description": "A bounded resource is exhausted.",
+          "type": "string",
+          "const": "RESOURCE_EXHAUSTED"
+        },
+        {
+          "description": "The operation was cancelled before completion.",
+          "type": "string",
+          "const": "CANCELLED"
+        },
+        {
+          "description": "An isolated adapter failed.",
+          "type": "string",
+          "const": "ADAPTER_FAILED"
+        },
+        {
+          "description": "An index failed integrity checks.",
+          "type": "string",
+          "const": "INDEX_CORRUPT"
+        },
+        {
+          "description": "Stored data requires a supported migration.",
+          "type": "string",
+          "const": "MIGRATION_REQUIRED"
+        },
+        {
+          "description": "Policy denied the requested operation.",
+          "type": "string",
+          "const": "PERMISSION_DENIED"
+        },
+        {
+          "description": "A protocol or contract version is incompatible.",
+          "type": "string",
+          "const": "PROTOCOL_MISMATCH"
+        },
+        {
+          "description": "A conflicting operation temporarily owns the resource.",
+          "type": "string",
+          "const": "BUSY"
+        },
+        {
+          "description": "An internal failure cannot be safely disclosed.",
+          "type": "string",
+          "const": "INTERNAL"
+        }
+      ]
+    },
+    "ErrorResponse": {
+      "description": "Strict common error response for MCP contract failures.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "Stable public error envelope.",
+          "$ref": "#/$defs/PublicError"
+        },
+        "schema_version": {
+          "description": "Tool error schema version.",
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "error"
       ]
     },
     "FileId": {
@@ -253,11 +328,13 @@
         "end_line": {
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 1
         },
         "start_line": {
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 1
         }
       },
@@ -265,6 +342,381 @@
       "required": [
         "start_line",
         "end_line"
+      ]
+    },
+    "NextAction": {
+      "description": "Stable remediation hints generated from a closed set of templates.",
+      "oneOf": [
+        {
+          "description": "Correct one named input field.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "correct_field"
+            },
+            "field": {
+              "description": "Stable name of the invalid field.",
+              "$ref": "#/$defs/DetailKey"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "field"
+          ]
+        },
+        {
+          "description": "Retry after the bounded delay in the envelope.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "retry"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Select a compatible contract version.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "select_supported_version"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Inspect the associated operation status.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "inspect_operation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Rebuild the affected repository generation.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "rebuild_repository"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        },
+        {
+          "description": "Collect a protected source-free support bundle.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "collect_support_bundle"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
+        }
+      ]
+    },
+    "OperationId": {
+      "type": "string",
+      "pattern": "^op1_[a-z2-7]{32}$"
+    },
+    "PublicError": {
+      "description": "A stable source-redacted failure safe to serialize across public boundaries.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[a-z0-9_]+$": {
+              "$ref": "#/$defs/PublicValue"
+            }
+          }
+        },
+        "generation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GenerationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "next_actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NextAction"
+          },
+          "maxItems": 8
+        },
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repository": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepositoryId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retry_after_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 86400000,
+          "minimum": 0
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details",
+        "next_actions"
+      ]
+    },
+    "PublicValue": {
+      "description": "Bounded primitive values permitted in public error details.",
+      "oneOf": [
+        {
+          "description": "A boolean property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "boolean"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A signed integer property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "integer"
+            },
+            "value": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "An unsigned integer property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "unsigned"
+            },
+            "value": {
+              "type": "integer",
+              "format": "uint64",
+              "maximum": 18446744073709551615,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A repository identity.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "repository"
+            },
+            "value": {
+              "$ref": "#/$defs/RepositoryId"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A generation identity.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "generation"
+            },
+            "value": {
+              "$ref": "#/$defs/GenerationId"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "An operation identity.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "operation"
+            },
+            "value": {
+              "$ref": "#/$defs/OperationId"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "A validated source-free label.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "label"
+            },
+            "value": {
+              "$ref": "#/$defs/SafeLabel"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        }
+      ]
+    },
+    "ReadEnvelope": {
+      "description": "Common strict response envelope for generation-pinned reads.",
+      "type": "object",
+      "properties": {
+        "coverage": {
+          "description": "Relevant coverage.",
+          "$ref": "#/$defs/CoverageSummary"
+        },
+        "data": {
+          "description": "Tool-specific result.",
+          "$ref": "#/$defs/SourceReadData"
+        },
+        "generation": {
+          "description": "Pinned generation and freshness.",
+          "$ref": "#/$defs/GenerationSummary"
+        },
+        "next_cursor": {
+          "description": "Safe continuation cursor, when the result is pageable.",
+          "$ref": "#/$defs/RequiredNullable2"
+        },
+        "repository": {
+          "description": "Resolved repository.",
+          "$ref": "#/$defs/ResolvedRepository"
+        },
+        "schema_version": {
+          "description": "Tool response schema version.",
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "truncated": {
+          "description": "Whether any hard or requested limit stopped completion.",
+          "type": "boolean"
+        },
+        "trust": {
+          "description": "Response-level classification for all repository-derived content.",
+          "$ref": "#/$defs/TrustClassification"
+        },
+        "usage": {
+          "description": "Runtime resource accounting.",
+          "$ref": "#/$defs/UsageSummary"
+        },
+        "warnings": {
+          "description": "Source-free warnings.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResponseWarning"
+          },
+          "maxItems": 100
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "repository",
+        "generation",
+        "coverage",
+        "data",
+        "truncated",
+        "next_cursor",
+        "usage",
+        "warnings",
+        "trust"
       ]
     },
     "RepositoryId": {
@@ -276,6 +728,17 @@
       "anyOf": [
         {
           "$ref": "#/$defs/GenerationId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "RequiredNullable2": {
+      "description": "A property that must be present and may contain JSON `null`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContinuationCursor"
         },
         {
           "type": "null"
@@ -309,15 +772,11 @@
       "properties": {
         "code": {
           "description": "Stable warning code.",
-          "type": "string",
-          "maxLength": 128,
-          "minLength": 1
+          "$ref": "#/$defs/SafeLabel"
         },
         "message": {
           "description": "Rootlight-generated source-free explanation.",
-          "type": "string",
-          "maxLength": 1024,
-          "minLength": 1
+          "$ref": "#/$defs/SourceFreeMessage"
         }
       },
       "additionalProperties": false,
@@ -325,6 +784,13 @@
         "code",
         "message"
       ]
+    },
+    "SafeLabel": {
+      "description": "A short source-free label permitted in public diagnostics.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
     },
     "SchemaVersion": {
       "description": "Version marker carried by every first-slice response.",
@@ -357,12 +823,14 @@
           "description": "Exclusive byte end.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "end_line": {
           "description": "One-based last included line.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "generated": {
@@ -389,12 +857,14 @@
           "description": "Inclusive byte start.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "start_line": {
           "description": "One-based first included line.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "trust": {
@@ -426,13 +896,12 @@
           "description": "Raw bytes omitted.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "reason": {
           "description": "Source-free elision reason.",
-          "type": "string",
-          "maxLength": 128,
-          "minLength": 1
+          "$ref": "#/$defs/SafeLabel"
         },
         "selector_index": {
           "description": "Zero-based request selector index.",
@@ -463,6 +932,13 @@
           "const": "base64"
         }
       ]
+    },
+    "SourceFreeMessage": {
+      "description": "A checked Rootlight-generated message that cannot contain paths or source.",
+      "type": "string",
+      "maxLength": 1024,
+      "minLength": 1,
+      "pattern": "^[a-z0-9 -]+$"
     },
     "SourceReadData": {
       "description": "`source.read` result data.",
@@ -550,6 +1026,7 @@
         "end_byte": {
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "file": {
@@ -558,6 +1035,7 @@
         "start_byte": {
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         }
       },
@@ -574,9 +1052,7 @@
       "properties": {
         "reason": {
           "description": "Source-free reason code.",
-          "type": "string",
-          "maxLength": 128,
-          "minLength": 1
+          "$ref": "#/$defs/SafeLabel"
         },
         "selector_index": {
           "description": "Zero-based request selector index.",
@@ -614,30 +1090,35 @@
           "description": "Relationship edges examined.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "estimated_tokens": {
           "description": "Deterministic token estimate.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "json_bytes": {
           "description": "Encoded structured result bytes.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "rows": {
           "description": "Storage rows examined.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "source_bytes": {
           "description": "Raw source bytes returned.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "trace_id": {
@@ -650,6 +1131,7 @@
           "description": "Cooperative wall time in milliseconds.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         }
       },

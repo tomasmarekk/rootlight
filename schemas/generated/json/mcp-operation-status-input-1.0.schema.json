@@ -17,6 +17,7 @@
       "description": "Return immediately only after this journal revision.",
       "type": "integer",
       "format": "uint64",
+      "maximum": 18446744073709551615,
       "minimum": 0
     },
     "operation_id": {

@@ -1,24 +1,20 @@
 {
   "$id": "https://rootlight.local/schema/mcp/operation.status/output/1.0",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "OperationStatusOutput",
-  "description": "Strict output for `operation.status`.",
+  "title": "ToolResponse",
+  "description": "A checked success-or-error result accepted by one tool output schema.\n\nSuccessful variants preserve each tool's documented response shape.\nExpected domain failures use the same versioned [`ErrorResponse`] and\nchecked [`PublicError`] contract for every tool.",
   "type": "object",
-  "properties": {
-    "data": {
-      "description": "Operation result.",
-      "$ref": "#/$defs/OperationStatusData"
+  "anyOf": [
+    {
+      "description": "A tool-specific successful response.",
+      "$ref": "#/$defs/OperationStatusSuccess"
     },
-    "schema_version": {
-      "description": "Tool response schema version.",
-      "$ref": "#/$defs/SchemaVersion"
+    {
+      "description": "A versioned source-redacted domain error.",
+      "$ref": "#/$defs/ErrorResponse"
     }
-  },
-  "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "data"
   ],
+  "unevaluatedProperties": false,
   "$defs": {
     "DetailKey": {
       "description": "A validated key for a bounded public error detail.",
@@ -110,6 +106,25 @@
           "type": "string",
           "const": "INTERNAL"
         }
+      ]
+    },
+    "ErrorResponse": {
+      "description": "Strict common error response for MCP contract failures.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "Stable public error envelope.",
+          "$ref": "#/$defs/PublicError"
+        },
+        "schema_version": {
+          "description": "Tool error schema version.",
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "error"
       ]
     },
     "GenerationId": {
@@ -232,6 +247,7 @@
           "description": "Monotonic journal revision.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "stage": {
@@ -274,6 +290,7 @@
           "description": "Completed units.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "total_units": {
@@ -295,18 +312,21 @@
           "description": "Files examined so far.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "peak_rss_bytes": {
           "description": "Peak resident bytes observed so far.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "written_bytes": {
           "description": "Durable bytes written so far.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         }
       },
@@ -379,6 +399,25 @@
         "published_generation",
         "error",
         "retry_after_ms"
+      ]
+    },
+    "OperationStatusSuccess": {
+      "description": "Strict output for `operation.status`.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "description": "Operation result.",
+          "$ref": "#/$defs/OperationStatusData"
+        },
+        "schema_version": {
+          "description": "Tool response schema version.",
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "data"
       ]
     },
     "PublicError": {
@@ -511,6 +550,7 @@
             "value": {
               "type": "integer",
               "format": "uint64",
+              "maximum": 18446744073709551615,
               "minimum": 0
             }
           },
@@ -605,6 +645,7 @@
         "null"
       ],
       "format": "uint64",
+      "maximum": 18446744073709551615,
       "minimum": 0
     },
     "RequiredNullable2": {

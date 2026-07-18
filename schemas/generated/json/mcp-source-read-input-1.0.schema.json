@@ -112,6 +112,7 @@
           "description": "Exclusive end byte.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "file_id": {
@@ -122,6 +123,7 @@
           "description": "Inclusive start byte.",
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         }
       },
@@ -156,11 +158,13 @@
         "end_line": {
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 1
         },
         "start_line": {
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 1
         }
       },
@@ -406,6 +410,7 @@
         "end_byte": {
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         },
         "file": {
@@ -414,6 +419,7 @@
         "start_byte": {
           "type": "integer",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0
         }
       },

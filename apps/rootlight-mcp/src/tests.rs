@@ -441,6 +441,15 @@ fn arbitrary_precision_identity_texts_do_not_alias_through_f64() {
 }
 
 #[test]
+fn request_identity_budget_reserves_the_complete_response_envelope() {
+    let maximum = Value::String("i".repeat(MAX_REQUEST_ID_BYTES));
+    let oversized = Value::String("i".repeat(MAX_REQUEST_ID_BYTES + 1));
+
+    assert!(RequestId::from_value(&maximum).is_some());
+    assert!(RequestId::from_value(&oversized).is_none());
+}
+
+#[test]
 fn duplicate_names_are_rejected_before_member_accounting_collapses_them() {
     let mut session = Session::rootlight();
     let duplicate = r#"{"jsonrpc":"2.0","id":"first","id":"second","method":"ping"}"#;

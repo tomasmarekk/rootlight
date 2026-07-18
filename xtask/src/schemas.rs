@@ -57,6 +57,22 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 3] = [
     ("1.2", "protobuf/1.2/rootlight.desc"),
     ("1.3", "protobuf/1.3/rootlight.desc"),
 ];
+const SCHEMA_PROVENANCE_INPUTS: [&str; 14] = [
+    "Cargo.lock",
+    "crates/rootlight-config/src/lib.rs",
+    "crates/rootlight-error/src/lib.rs",
+    "crates/rootlight-ids/src/lib.rs",
+    "crates/rootlight-ir/src/lexical.rs",
+    "crates/rootlight-ir/src/lib.rs",
+    "crates/rootlight-ir/src/normalized.rs",
+    "crates/rootlight-ir/src/validation.rs",
+    "crates/rootlight-mcp-contract/src/lib.rs",
+    "crates/rootlight-mcp-contract/src/vertical.rs",
+    "tests/fixtures/mcp/1.0/tool-contracts.json",
+    "xtask/Cargo.toml",
+    "xtask/src/main.rs",
+    "xtask/src/schemas.rs",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GenerateMode {
@@ -674,9 +690,16 @@ fn write_mcp_tool_schema<T: JsonSchema>(
         && let Some(object) = schema.as_object_mut()
     {
         reject_explicit_null_for_optional_properties(object);
+        enforce_mcp_input_map_bounds(tool, object);
         if tool == "repo.index" {
             enforce_exact_repo_index_target(object);
         }
+    }
+    if direction == "output" {
+        schema.insert(
+            "type".to_owned(),
+            serde_json::Value::String("object".to_owned()),
+        );
     }
     close_mcp_object_schemas(&mut schema);
     schema.insert(
@@ -690,7 +713,14 @@ fn write_mcp_tool_schema<T: JsonSchema>(
     )
 }
 
-fn write_schema_value(path: &Path, schema: schemars::Schema) -> Result<(), SchemaError> {
+fn write_schema_value(path: &Path, mut schema: schemars::Schema) -> Result<(), SchemaError> {
+    if path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| name.starts_with("mcp-"))
+    {
+        bound_unsigned_64_bit_schemas(&mut schema);
+    }
     let mut bytes = serde_json::to_vec_pretty(&schema).map_err(SchemaError::SerializeJson)?;
     bytes.push(b'\n');
     write_bytes(path, &bytes)
@@ -710,6 +740,84 @@ fn enforce_exact_repo_index_target(object: &mut serde_json::Map<String, serde_js
             }
         ]),
     );
+}
+
+fn enforce_mcp_input_map_bounds(
+    tool: &str,
+    object: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    if tool != "repo.index" {
+        return;
+    }
+    let Some(properties) = object
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if let Some(requested_tiers) = properties
+        .get_mut("requested_tiers")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        requested_tiers.insert("maxProperties".to_owned(), serde_json::json!(64));
+        requested_tiers.insert(
+            "propertyNames".to_owned(),
+            serde_json::json!({
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+            }),
+        );
+    }
+    if let Some(configuration_patch) = properties
+        .get_mut("configuration_patch")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        configuration_patch.insert("maxProperties".to_owned(), serde_json::json!(128));
+        configuration_patch.insert(
+            "propertyNames".to_owned(),
+            serde_json::json!({
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+            }),
+        );
+    }
+}
+
+fn bound_unsigned_64_bit_schemas(schema: &mut schemars::Schema) {
+    if let Some(object) = schema.as_object_mut() {
+        bound_unsigned_64_bit_map(object);
+    }
+}
+
+fn bound_unsigned_64_bit_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                bound_unsigned_64_bit_value(value);
+            }
+        }
+        serde_json::Value::Object(object) => bound_unsigned_64_bit_map(object),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+fn bound_unsigned_64_bit_map(object: &mut serde_json::Map<String, serde_json::Value>) {
+    if object.get("format").and_then(serde_json::Value::as_str) == Some("uint64") {
+        object
+            .entry("minimum".to_owned())
+            .or_insert_with(|| serde_json::json!(0));
+        object
+            .entry("maximum".to_owned())
+            .or_insert_with(|| serde_json::Value::Number(u64::MAX.into()));
+    }
+    for value in object.values_mut() {
+        bound_unsigned_64_bit_value(value);
+    }
 }
 
 fn close_mcp_object_schemas(schema: &mut schemars::Schema) {
@@ -739,10 +847,20 @@ fn close_mcp_object_map(object: &mut serde_json::Map<String, serde_json::Value>)
     if object.get("type").and_then(serde_json::Value::as_str) == Some("object")
         && !object.contains_key("additionalProperties")
     {
-        object.insert(
-            "additionalProperties".to_owned(),
-            serde_json::Value::Bool(false),
-        );
+        if object.contains_key("oneOf")
+            || object.contains_key("anyOf")
+            || object.contains_key("allOf")
+        {
+            object.insert(
+                "unevaluatedProperties".to_owned(),
+                serde_json::Value::Bool(false),
+            );
+        } else {
+            object.insert(
+                "additionalProperties".to_owned(),
+                serde_json::Value::Bool(false),
+            );
+        }
     }
     for value in object.values_mut() {
         close_mcp_object_value(value);
@@ -1237,6 +1355,7 @@ fn validate_generated_json_schemas(
             )));
         }
     }
+    validate_retained_mcp_tool_contracts(workspace_root, &schema_root)?;
     let legacy = serde_json::to_vec(&ir_document(1, 0)).map_err(SchemaError::SerializeJson)?;
     let unsupported = serde_json::to_vec(&ir_document(1, 2)).map_err(SchemaError::SerializeJson)?;
     if !matches!(
@@ -1252,6 +1371,92 @@ fn validate_generated_json_schemas(
         return Err(SchemaError::GeneratedSchemaSemantics(
             "explicit IR dispatch accepted an unsupported minor".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_retained_mcp_tool_contracts(
+    workspace_root: &Path,
+    schema_root: &Path,
+) -> Result<(), SchemaError> {
+    let fixture =
+        read_json_value(&workspace_root.join("tests/fixtures/mcp/1.0/tool-contracts.json"))?;
+    let tools = fixture
+        .get("tools")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            SchemaError::GeneratedSchemaSemantics(
+                "retained MCP tool contracts have no tool array".to_owned(),
+            )
+        })?;
+    let schema_names = [
+        (
+            "repo.index",
+            "mcp-repo-index-input-1.0.schema.json",
+            "mcp-repo-index-output-1.0.schema.json",
+        ),
+        (
+            "operation.status",
+            "mcp-operation-status-input-1.0.schema.json",
+            "mcp-operation-status-output-1.0.schema.json",
+        ),
+        (
+            "code.locate",
+            "mcp-code-locate-input-1.0.schema.json",
+            "mcp-code-locate-output-1.0.schema.json",
+        ),
+        (
+            "symbol.explain",
+            "mcp-symbol-explain-input-1.0.schema.json",
+            "mcp-symbol-explain-output-1.0.schema.json",
+        ),
+        (
+            "source.read",
+            "mcp-source-read-input-1.0.schema.json",
+            "mcp-source-read-output-1.0.schema.json",
+        ),
+    ];
+
+    if tools.len() != schema_names.len() {
+        return Err(SchemaError::GeneratedSchemaSemantics(
+            "retained MCP tool contract set is incomplete".to_owned(),
+        ));
+    }
+    for (tool_name, input_schema, output_schema) in schema_names {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.get("tool").and_then(serde_json::Value::as_str) == Some(tool_name))
+            .ok_or_else(|| {
+                SchemaError::GeneratedSchemaSemantics(format!(
+                    "retained MCP tool contract is missing {tool_name}"
+                ))
+            })?;
+        for (field, schema_name) in [("input", input_schema), ("output", output_schema)] {
+            let instance = tool.get(field).ok_or_else(|| {
+                SchemaError::GeneratedSchemaSemantics(format!(
+                    "retained MCP {tool_name} contract has no {field}"
+                ))
+            })?;
+            let schema_path = schema_root.join(schema_name);
+            let schema: serde_json::Value = serde_json::from_slice(&read_bytes(&schema_path)?)
+                .map_err(|source| SchemaError::ParseGeneratedJson {
+                    path: schema_path,
+                    source,
+                })?;
+            let validator = jsonschema::draft202012::new(&schema).map_err(|source| {
+                SchemaError::CompileGeneratedSchema {
+                    name: schema_name.to_owned(),
+                    detail: source.to_string(),
+                }
+            })?;
+            if !validator.is_valid(instance)
+                || (field == "output" && !validator.is_valid(&public_error_fixture()))
+            {
+                return Err(SchemaError::GeneratedSchemaSemantics(format!(
+                    "retained MCP {tool_name} {field} contract is invalid"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -1356,6 +1561,7 @@ impl SchemaSemanticCase {
 
 fn public_error_fixture() -> serde_json::Value {
     serde_json::json!({
+        "schema_version": "1.0",
         "error": {
             "code": "INTERNAL",
             "message": "internal operation failed",
@@ -1428,6 +1634,11 @@ fn generation_inputs(workspace_root: &Path) -> Result<Vec<ArtifactRecord>, Schem
         .iter()
         .map(|name| format!("proto/{name}"))
         .collect();
+    paths.extend(
+        SCHEMA_PROVENANCE_INPUTS
+            .iter()
+            .map(|path| (*path).to_owned()),
+    );
     paths.extend(
         COMPATIBILITY_FILES
             .iter()
@@ -1842,6 +2053,11 @@ mod tests {
         let mut expected: Vec<String> = PROTO_FILES
             .iter()
             .map(|name| format!("proto/{name}"))
+            .chain(
+                SCHEMA_PROVENANCE_INPUTS
+                    .iter()
+                    .map(|path| (*path).to_owned()),
+            )
             .chain(
                 COMPATIBILITY_FILES
                     .iter()

@@ -8,7 +8,13 @@
     "configuration_patch": {
       "description": "Validated operation-scoped configuration override.",
       "type": "object",
-      "additionalProperties": true
+      "additionalProperties": true,
+      "maxProperties": 128,
+      "propertyNames": {
+        "type": "string",
+        "maxLength": 256,
+        "minLength": 1
+      }
     },
     "detached": {
       "description": "Whether the operation may continue after client disconnect.",
@@ -35,6 +41,12 @@
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/AnalysisTier"
+      },
+      "maxProperties": 64,
+      "propertyNames": {
+        "type": "string",
+        "maxLength": 64,
+        "minLength": 1
       }
     },
     "root": {
@@ -116,7 +128,9 @@
           "description": "Distinct build-target identities.",
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1
           },
           "maxItems": 256,
           "minItems": 1,
@@ -182,7 +196,9 @@
           "description": "Distinct package identities.",
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1
           },
           "maxItems": 256,
           "minItems": 1,
@@ -202,7 +218,9 @@
           "description": "Distinct repository-relative paths.",
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 8192,
+            "minLength": 1
           },
           "maxItems": 256,
           "minItems": 1,
