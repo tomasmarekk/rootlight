@@ -251,6 +251,7 @@ pub struct SourceRef {
     generation: GenerationId,
     span: SourceSpan,
     content_hash: ContentHash,
+    #[serde(skip_serializing_if = "Option::is_none")]
     line_hint: Option<LineRange>,
 }
 
@@ -616,6 +617,34 @@ mod tests {
             SourceRef::new(repository, generation, span, content_hash(b"fixture"), None);
         assert_eq!(reference.repository(), repository);
         assert_eq!(reference.generation(), generation);
+    }
+
+    #[test]
+    fn source_reference_line_hint_wire_shape_tracks_availability() {
+        let repository = derive_repository(b"repository").id();
+        let generation = GenerationId::from_bytes([2; 20]);
+        let span =
+            SourceSpan::new(FileId::from_bytes([3; 20]), 0, 12).expect("fixture span is valid");
+        let hash = content_hash(b"fixture");
+        let without_hint = SourceRef::new(repository, generation, span, hash, None);
+
+        let serialized = serde_json::to_value(&without_hint).expect("source reference serializes");
+        assert!(serialized.get("line_hint").is_none());
+
+        let mut legacy_null = serialized.clone();
+        legacy_null["line_hint"] = serde_json::Value::Null;
+        assert_eq!(
+            serde_json::from_value::<SourceRef>(legacy_null)
+                .expect("legacy explicit null remains readable"),
+            without_hint
+        );
+
+        let line_hint = LineRange::new(2, 3).expect("fixture lines are valid");
+        let with_hint = SourceRef::new(repository, generation, span, hash, Some(line_hint));
+        assert_eq!(
+            serde_json::to_value(with_hint).expect("source reference serializes")["line_hint"],
+            serde_json::json!({"start_line": 2, "end_line": 3})
+        );
     }
 
     #[test]
