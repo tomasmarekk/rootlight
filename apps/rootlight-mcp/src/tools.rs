@@ -59,23 +59,73 @@ pub trait ToolExecutor: Send + Sync + 'static {
     ) -> ToolExecutionFuture;
 }
 
-/// Source-free domain failure returned as an MCP tool execution error.
+/// Source-free failure returned by an MCP tool executor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecutionError {
-    error: PublicError,
+    kind: ToolExecutionErrorKind,
 }
 
 impl ToolExecutionError {
     /// Wraps one checked, source-redacted public error.
     #[must_use]
-    pub const fn new(error: PublicError) -> Self {
-        Self { error }
+    pub fn new(error: PublicError) -> Self {
+        Self {
+            kind: ToolExecutionErrorKind::Public(Box::new(error)),
+        }
     }
 
-    /// Returns the checked public error.
+    /// Creates one source-free internal executor failure.
     #[must_use]
-    pub const fn public_error(&self) -> &PublicError {
-        &self.error
+    pub const fn internal(failure: ToolExecutionFailure) -> Self {
+        Self {
+            kind: ToolExecutionErrorKind::Internal(failure),
+        }
+    }
+
+    /// Returns the checked public error for an expected domain failure.
+    #[must_use]
+    pub const fn public_error(&self) -> Option<&PublicError> {
+        match &self.kind {
+            ToolExecutionErrorKind::Public(error) => Some(error),
+            ToolExecutionErrorKind::Internal(_) => None,
+        }
+    }
+
+    /// Returns the static internal failure classification.
+    #[must_use]
+    pub const fn failure(&self) -> Option<ToolExecutionFailure> {
+        match self.kind {
+            ToolExecutionErrorKind::Public(_) => None,
+            ToolExecutionErrorKind::Internal(failure) => Some(failure),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolExecutionErrorKind {
+    Public(Box<PublicError>),
+    Internal(ToolExecutionFailure),
+}
+
+/// Static executor failure classes that must not expose causal text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ToolExecutionFailure {
+    /// The local daemon transport failed.
+    Transport,
+    /// A daemon response could not be mapped without inventing data.
+    InvalidResponse,
+    /// The executor itself failed before producing a checked response.
+    Executor,
+}
+
+impl ToolExecutionFailure {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::Transport => "tool transport failed",
+            Self::InvalidResponse => "tool response mapping failed",
+            Self::Executor => "tool executor failed",
+        }
     }
 }
 
@@ -225,12 +275,19 @@ where
         }
         let output = match execution {
             Ok(output) => output,
-            Err(error) => {
+            Err(ToolExecutionError {
+                kind: ToolExecutionErrorKind::Public(error),
+            }) => {
                 return cancel_or(
                     &cancellation,
-                    tool_error(contract, error.error)
+                    tool_error(contract, *error)
                         .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
                 );
+            }
+            Err(ToolExecutionError {
+                kind: ToolExecutionErrorKind::Internal(failure),
+            }) => {
+                return cancel_or(&cancellation, internal_tool_error(failure.message()));
             }
         };
         let output_value = Value::Object(output);
