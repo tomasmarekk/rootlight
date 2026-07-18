@@ -1955,6 +1955,7 @@ fn parse_operation_status(
     status: Option<daemon::OperationStatus>,
 ) -> Result<OperationStatus, ClientError> {
     let status = status.ok_or(ClientError::MissingOperation)?;
+    let operation = parse_operation(status.operation)?;
     let state = daemon::OperationState::try_from(status.state)
         .map_err(|_| ClientError::InvalidOperationState)?;
     let state = match state {
@@ -1991,17 +1992,32 @@ fn parse_operation_status(
         daemon::RecoveryClass::LeaseExpired => RecoveryClass::LeaseExpired,
         daemon::RecoveryClass::Unspecified => return Err(ClientError::InvalidRecoveryClass),
     };
+    let error = status.error.map(parse_public_error).transpose()?;
+    if (state == OperationState::Failed) != error.is_some()
+        || error
+            .as_ref()
+            .and_then(PublicError::operation)
+            .is_some_and(|error_operation| error_operation != operation)
+        || (state == OperationState::Interrupted)
+            == (recovery_class == RecoveryClass::NotApplicable)
+        || status.deadline_unix_ms == Some(0)
+        || status.lease_expires_unix_ms == Some(0)
+        || status.detached == status.lease_expires_unix_ms.is_some()
+        || (status.total_units != 0 && status.completed_units > status.total_units)
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
     let plan_hash: [u8; 32] = status
         .plan_hash
         .try_into()
         .map_err(|_| ClientError::InvalidPlanHash)?;
     Ok(OperationStatus {
-        operation: parse_operation(status.operation)?,
+        operation,
         state,
         revision: status.revision,
         completed_units: status.completed_units,
         total_units: status.total_units,
-        error: status.error.map(parse_public_error).transpose()?,
+        error,
         kind,
         stage,
         plan_hash,
@@ -2128,8 +2144,13 @@ fn parse_repository_index(
         .published_generation
         .map(parse_generation)
         .transpose()?;
+    let parent_generation = response
+        .parent_generation
+        .map(parse_generation)
+        .transpose()?;
     if operation != expected_operation
         || response.indexed_files > response.discovered_inputs
+        || parent_generation.is_some() && parent_generation == published_generation
         || match state {
             OperationState::Succeeded => published_generation.is_none(),
             OperationState::Queued
@@ -2151,10 +2172,7 @@ fn parse_repository_index(
         operation,
         state,
         revision: response.revision,
-        parent_generation: response
-            .parent_generation
-            .map(parse_generation)
-            .transpose()?,
+        parent_generation,
         published_generation,
         discovered_inputs: response.discovered_inputs,
         indexed_files: response.indexed_files,
@@ -2209,11 +2227,13 @@ fn parse_code_locate(
 ) -> Result<CodeLocate, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let context = parse_query_context(response.context, repository, selector)?;
+    let returned_results =
+        u64::try_from(response.hits.len()).map_err(|_| ClientError::InvalidResponseCorrelation)?;
     if response.hits.len()
         > usize::try_from(maximum_results).map_err(|_| ClientError::InvalidResponseCorrelation)?
-        || response.matched_candidates
-            < u64::try_from(response.hits.len())
-                .map_err(|_| ClientError::InvalidResponseCorrelation)?
+        || response.matched_candidates < returned_results
+        || !response.truncated && response.matched_candidates != returned_results
+        || context.usage.results < returned_results
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
@@ -2626,6 +2646,9 @@ fn unix_time_ms() -> Result<u64, ClientError> {
 }
 
 fn parse_public_error(error: common::PublicError) -> Result<PublicError, ClientError> {
+    if error.retry_after_ms.is_some() && !error.retryable {
+        return Err(ClientError::InvalidPublicError);
+    }
     let code = match common::ErrorCode::try_from(error.code)
         .map_err(|_| ClientError::InvalidPublicError)?
     {
@@ -2957,6 +2980,20 @@ mod tests {
         }
     }
 
+    fn wire_failure(message: &str) -> common::PublicError {
+        common::PublicError {
+            code: common::ErrorCode::Internal as i32,
+            message: message.to_owned(),
+            retryable: false,
+            retry_after_ms: None,
+            repository: None,
+            operation: None,
+            generation: None,
+            details: Default::default(),
+            next_actions: Vec::new(),
+        }
+    }
+
     #[test]
     fn launch_lock_remains_exclusive_until_startup_authority_releases_it() {
         let temporary = tempfile::tempdir().expect("temporary directory is available");
@@ -3141,6 +3178,50 @@ mod tests {
             parse_expected_operation_status(Some(wire_operation(foreign_operation)), operation),
             Err(ClientError::InvalidResponseCorrelation)
         ));
+        let mut failed_without_error = wire_operation(operation);
+        failed_without_error.state = daemon::OperationState::Failed as i32;
+        assert!(matches!(
+            parse_expected_operation_status(Some(failed_without_error), operation),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let mut queued_with_error = wire_operation(operation);
+        queued_with_error.state = daemon::OperationState::Queued as i32;
+        queued_with_error.error = Some(wire_failure("checked failure"));
+        assert!(matches!(
+            parse_expected_operation_status(Some(queued_with_error), operation),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let mut checked_failure = wire_operation(operation);
+        checked_failure.state = daemon::OperationState::Failed as i32;
+        checked_failure.error = Some(wire_failure("checked failure"));
+        assert!(parse_expected_operation_status(Some(checked_failure.clone()), operation).is_ok());
+        let mut foreign_nested_error = checked_failure.clone();
+        foreign_nested_error
+            .error
+            .as_mut()
+            .expect("error exists")
+            .operation = Some(operation_to_wire(foreign_operation));
+        assert!(matches!(
+            parse_expected_operation_status(Some(foreign_nested_error), operation),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let mut contradictory_retry = checked_failure;
+        contradictory_retry
+            .error
+            .as_mut()
+            .expect("error exists")
+            .retry_after_ms = Some(1);
+        assert!(matches!(
+            parse_expected_operation_status(Some(contradictory_retry), operation),
+            Err(ClientError::InvalidPublicError)
+        ));
+        let mut unsafe_failure = wire_operation(operation);
+        unsafe_failure.state = daemon::OperationState::Failed as i32;
+        unsafe_failure.error = Some(wire_failure(r"C:\secret\src\lib.rs"));
+        assert!(matches!(
+            parse_expected_operation_status(Some(unsafe_failure), operation),
+            Err(ClientError::InvalidPublicError)
+        ));
 
         let index = daemon::RepositoryIndexResponse {
             schema_version: Some(first_slice_schema()),
@@ -3161,6 +3242,12 @@ mod tests {
         assert!(matches!(
             parse_repository_index(wrong_schema, operation),
             Err(ClientError::InvalidResponseSchema)
+        ));
+        let mut self_parent = index.clone();
+        self_parent.parent_generation = self_parent.published_generation.clone();
+        assert!(matches!(
+            parse_repository_index(self_parent, operation),
+            Err(ClientError::InvalidResponseCorrelation)
         ));
         let mut wrong_operation = index;
         wrong_operation.operation = Some(operation_to_wire(foreign_operation));
@@ -3205,7 +3292,7 @@ mod tests {
         let symbol = SymbolId::from_bytes([5; 20]);
         let locate = daemon::CodeLocateResponse {
             schema_version: Some(first_slice_schema()),
-            context: Some(wire_query_context(1, 0)),
+            context: Some(wire_query_context(2, 0)),
             hits: vec![daemon::FirstSliceLocateHit {
                 symbol: Some(symbol_to_wire(symbol)),
                 file: Some(file_to_wire(source.file)),
@@ -3240,6 +3327,45 @@ mod tests {
             )
             .is_ok()
         );
+        let mut incomplete_without_truncation = locate.clone();
+        incomplete_without_truncation.matched_candidates = 2;
+        assert!(matches!(
+            parse_code_locate(
+                incomplete_without_truncation.clone(),
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        incomplete_without_truncation.truncated = true;
+        assert!(
+            parse_code_locate(
+                incomplete_without_truncation,
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+            )
+            .is_ok()
+        );
+        let mut wrong_result_usage = locate.clone();
+        wrong_result_usage
+            .context
+            .as_mut()
+            .expect("context exists")
+            .usage
+            .as_mut()
+            .expect("usage exists")
+            .results = 0;
+        assert!(matches!(
+            parse_code_locate(
+                wrong_result_usage,
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
         let mut foreign_context = locate.clone();
         foreign_context
             .context
