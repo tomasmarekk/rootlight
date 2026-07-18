@@ -11,8 +11,11 @@ mod model;
 mod tokenizer;
 
 pub use artifact::{ArtifactBudget, LexicalArtifactManifest, VerifiedLexicalArtifact};
-pub use index::{LexicalIndex, LexicalIndexBuilder, LexicalSearch};
+pub use index::{
+    LexicalIndex, LexicalIndexBuilder, LexicalSearch, validate_build_admission,
+    validate_search_request,
+};
 pub use model::{
     BuildBudget, BuildStats, DocumentField, LexicalDocument, QueryViolation, SearchBudget,
-    SearchError, SearchHit, SearchMode, SearchRequest,
+    SearchError, SearchHit, SearchMode, SearchOutcome, SearchRequest,
 };

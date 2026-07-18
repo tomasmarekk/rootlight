@@ -164,6 +164,17 @@ pub struct SearchHit {
     pub relevance_score: f32,
 }
 
+/// Bounded lexical result with exact backend work counters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchOutcome {
+    /// Deterministically ordered hits after the public result cap.
+    pub hits: Vec<SearchHit>,
+    /// Matching documents materialized before result truncation.
+    pub matched_candidates: u64,
+    /// Aggregate UTF-8 bytes decoded across all matching candidates.
+    pub materialized_text_bytes: u64,
+}
+
 /// Document field rejected at the indexing boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

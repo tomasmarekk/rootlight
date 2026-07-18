@@ -19,6 +19,7 @@ members = [
     "crates/rootlight-observability",
     "crates/rootlight-operations",
     "crates/rootlight-protocol",
+    "crates/rootlight-query",
     "crates/rootlight-runtime",
     "crates/rootlight-search",
     "crates/rootlight-source",

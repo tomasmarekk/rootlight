@@ -123,6 +123,16 @@ impl SourceBudget {
         self.max_duration = maximum;
         self
     }
+
+    /// Validates every source-budget field against its hard ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceError::InvalidBudget`] when a required field is zero or
+    /// any field exceeds the source-service contract.
+    pub fn validate(self) -> Result<(), SourceError> {
+        validate_budget(self)
+    }
 }
 
 impl Default for SourceBudget {
@@ -1002,7 +1012,7 @@ mod tests {
         AnalysisTier, BuildContextIdentity, ExtensionSupport, FactEvidence, FileRecord, IrLimits,
         NormalizedIrDocument, ProducerIdentity, ProducerKind, ProvenanceRecord, SourceSpan,
     };
-    use rootlight_storage::GenerationMetadata;
+    use rootlight_storage::{GENERATION_CONTRACT_VERSION, GenerationMetadata};
     use std::{cell::Cell, fs, path::Path};
     use tempfile::tempdir_in;
 
@@ -1044,7 +1054,8 @@ mod tests {
             manifest_hash,
             config_hash: configuration_hash,
             provider_set_hash,
-            format_version: 1,
+            format_version: (u32::from(GENERATION_CONTRACT_VERSION.major()) << 16)
+                | u32::from(GENERATION_CONTRACT_VERSION.minor()),
         })
         .id();
         let file = root.file_id(&path);

@@ -19,6 +19,7 @@ workspace_members = [
   "rootlight-observability",
   "rootlight-operations",
   "rootlight-protocol",
+  "rootlight-query",
   "rootlight-runtime",
   "rootlight-search",
   "rootlight-source",
@@ -181,6 +182,19 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-protocol"
 allowed_internal_dependencies = []
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-query"
+allowed_internal_dependencies = [
+  "rootlight-cancel",
+  "rootlight-ids",
+  "rootlight-ir",
+  "rootlight-search",
+  "rootlight-source",
+  "rootlight-storage",
+  "rootlight-vfs",
+]
 allow_build_script = false
 
 [[crates]]

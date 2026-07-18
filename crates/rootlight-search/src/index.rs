@@ -24,7 +24,7 @@ use crate::{
     artifact::{ArtifactBudget, LexicalArtifactManifest, VerifiedLexicalArtifact, create_manifest},
     model::{
         BuildBudget, BuildStats, CODE_TOKENIZER, DocumentField, LexicalDocument, QueryViolation,
-        SearchBudget, SearchError, SearchHit, SearchMode, SearchRequest,
+        SearchBudget, SearchError, SearchHit, SearchMode, SearchOutcome, SearchRequest,
     },
     tokenizer::{CodeTokenizer, has_oversized_term, normalize_text, token_texts},
 };
@@ -164,15 +164,54 @@ pub trait LexicalSearch {
     ///
     /// Returns [`SearchError`] when input, budgets, cancellation, durable data,
     /// or the backend prevents a truthful result.
+    fn search_with_stats(
+        &self,
+        request: &SearchRequest,
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError>;
+
+    /// Executes one bounded domain query and returns only its ordered hits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] under the same conditions as
+    /// [`LexicalSearch::search_with_stats`].
     fn search(
         &self,
         request: &SearchRequest,
         budget: SearchBudget,
         cancellation: &Cancellation,
-    ) -> Result<Vec<SearchHit>, SearchError>;
+    ) -> Result<Vec<SearchHit>, SearchError> {
+        self.search_with_stats(request, budget, cancellation)
+            .map(|outcome| outcome.hits)
+    }
 
     /// Returns the currently visible document count.
     fn document_count(&self) -> u64;
+}
+
+/// Validates a lexical construction budget without creating an artifact.
+///
+/// # Errors
+///
+/// Returns [`SearchError::BuildBudgetExceeded`] when a field is zero, below
+/// the backend minimum, or above a construction hard ceiling.
+pub fn validate_build_admission(budget: BuildBudget) -> Result<(), SearchError> {
+    validate_build_budget(budget)
+}
+
+/// Validates one query and its complete lexical budget without executing it.
+///
+/// # Errors
+///
+/// Returns [`SearchError`] for invalid syntax, result limits, or resource
+/// fields outside the backend hard ceilings.
+pub fn validate_search_request(
+    request: &SearchRequest,
+    budget: SearchBudget,
+) -> Result<(), SearchError> {
+    validate_request(request, budget)
 }
 
 /// A read-only lexical index pinned to one immutable generation.
@@ -265,6 +304,22 @@ impl LexicalIndex {
         budget: SearchBudget,
         cancellation: &Cancellation,
     ) -> Result<Vec<SearchHit>, SearchError> {
+        self.search_with_stats(request, budget, cancellation)
+            .map(|outcome| outcome.hits)
+    }
+
+    /// Executes a bounded query with exact candidate and text-byte counters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] for invalid input, cancellation, candidate
+    /// overflow, incompatible stored data, or redacted Tantivy failures.
+    pub fn search_with_stats(
+        &self,
+        request: &SearchRequest,
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
         let control = SearchControl::new(cancellation, budget.max_duration);
         control.check()?;
         validate_request(request, budget)?;
@@ -322,8 +377,16 @@ impl LexicalIndex {
                 })
                 .then_with(|| left.hit.symbol_id.cmp(&right.hit.symbol_id))
         });
+        let matched_candidates =
+            u64::try_from(hits.len()).map_err(|_| SearchError::CandidateBudgetExceeded)?;
+        let materialized_text_bytes = u64::try_from(materialized_text_bytes)
+            .map_err(|_| SearchError::ReturnedTextBudgetExceeded)?;
         hits.truncate(request.max_results);
-        Ok(hits.into_iter().map(|ranked| ranked.hit).collect())
+        Ok(SearchOutcome {
+            hits: hits.into_iter().map(|ranked| ranked.hit).collect(),
+            matched_candidates,
+            materialized_text_bytes,
+        })
     }
 
     /// Returns the currently visible document count.
@@ -338,13 +401,13 @@ impl LexicalSearch for LexicalIndex {
         self.generation()
     }
 
-    fn search(
+    fn search_with_stats(
         &self,
         request: &SearchRequest,
         budget: SearchBudget,
         cancellation: &Cancellation,
-    ) -> Result<Vec<SearchHit>, SearchError> {
-        self.search(request, budget, cancellation)
+    ) -> Result<SearchOutcome, SearchError> {
+        self.search_with_stats(request, budget, cancellation)
     }
 
     fn document_count(&self) -> u64 {
@@ -1685,6 +1748,30 @@ mod tests {
             search(&index, "žlutý kůň", SearchMode::Text)[0].symbol_id,
             SymbolId::from_bytes([3; 20])
         );
+    }
+
+    #[test]
+    fn search_outcome_counts_candidates_before_result_truncation() {
+        let (_directory, _manifest, index) = build(vec![
+            document(2, "HTTPServer", "src/net/server.rs"),
+            document(1, "QueryBudget", "src/search/budget.rs"),
+            document(3, "QueryPlan", "src/query/plan.rs"),
+        ]);
+        let outcome = index
+            .search_with_stats(
+                &SearchRequest {
+                    query: "query".to_owned(),
+                    mode: SearchMode::Prefix,
+                    max_results: 1,
+                },
+                SearchBudget::default(),
+                &Cancellation::new(),
+            )
+            .expect("bounded query succeeds");
+
+        assert_eq!(outcome.matched_candidates, 2);
+        assert_eq!(outcome.hits.len(), 1);
+        assert!(outcome.materialized_text_bytes > 0);
     }
 
     #[test]
