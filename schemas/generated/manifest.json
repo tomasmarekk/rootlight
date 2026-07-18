@@ -10,11 +10,11 @@
   "inputs": [
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
-      "blake3": "d67c6b71787728d9e35c0d9c83888e19a63c4bc395eae15aa53c55c3086ec48c"
+      "blake3": "2b2776abc6fb278fe688b09d4a4e6c459aa64e8c5010f754021c78773963c287"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
-      "blake3": "bfb622218a7a5eab54759130fd372c74e460793dd6f51896454a121558970e57"
+      "blake3": "2097dd3d42380a42d0c17b7b4cf0eb0114c1dafbfd5cdddc1adf2343efe9d4d3"
     },
     {
       "path": "proto/adapter_v1.proto",
