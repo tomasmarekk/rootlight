@@ -209,6 +209,60 @@ fn cancellation_stays_typed_across_index_and_query_boundaries() {
     ));
 }
 
+#[test]
+fn prepared_generation_is_not_queryable_before_publication() {
+    let fixture = fixture(BEFORE);
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let cancellation = deadline();
+    let prepared = service
+        .prepare_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture prepares");
+    let receipt = prepared.receipt();
+    let staged = service
+        .stage_prepared(prepared, &cancellation)
+        .expect("fixture enters hidden staging");
+    assert_eq!(service.active_generation_for(receipt.repository), None);
+    assert_eq!(
+        service.resolve_generation(receipt.repository, Some(receipt.generation)),
+        Err(FirstSliceError::RepositoryNotFound)
+    );
+    assert!(matches!(
+        service.code_locate(
+            receipt.generation,
+            "answer".to_owned(),
+            LocateMode::Exact,
+            1,
+            &cancellation,
+        ),
+        Err(FirstSliceError::Query)
+    ));
+
+    assert!(cancellation.cancel(CancellationReason::ClientRequest));
+    service
+        .discard_staged(staged)
+        .expect("cancelled staging reservation releases");
+    assert_eq!(service.active_generation_for(receipt.repository), None);
+
+    let publication = deadline();
+    let prepared = service
+        .prepare_rust_fixture(fixture.path(), &publication)
+        .expect("fixture prepares again");
+    let staged = service
+        .stage_prepared(prepared, &publication)
+        .expect("fixture stages again");
+    let published = service
+        .commit_staged(staged)
+        .expect("authorized publication succeeds");
+    assert_eq!(published.discovered_inputs, receipt.discovered_inputs);
+    assert_eq!(published.indexed_files, receipt.indexed_files);
+    assert_eq!(published.entities, receipt.entities);
+    assert_eq!(published.lexical_documents, receipt.lexical_documents);
+    assert_eq!(
+        service.active_generation_for(published.repository),
+        Some(published.generation)
+    );
+}
+
 fn fixture(source: &str) -> TempDir {
     let fixture = TempDir::new().expect("fixture root exists");
     fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");

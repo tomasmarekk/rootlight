@@ -96,6 +96,66 @@ pub struct FirstSliceGenerationContext {
     pub receipt: FirstSliceIndexReceipt,
 }
 
+/// Two-phase index result awaiting an explicit publication decision.
+///
+/// The prepared variant remains inline because adding a `Box` here would
+/// introduce an infallible allocation after the pipeline's fallible admission
+/// checks.
+#[allow(clippy::large_enum_variant)]
+pub enum FirstSliceIndexPreparation {
+    /// An identical retained generation only needs reactivation.
+    Retained(FirstSliceIndexReceipt),
+    /// Newly built immutable state that has not entered the queryable set.
+    Pending(PreparedFirstSliceIndex),
+}
+
+impl FirstSliceIndexPreparation {
+    /// Returns the receipt that publication would make active.
+    #[must_use]
+    pub const fn receipt(&self) -> FirstSliceIndexReceipt {
+        match self {
+            Self::Retained(receipt) => *receipt,
+            Self::Pending(prepared) => prepared.receipt,
+        }
+    }
+}
+
+/// Fully verified first-slice state that is not yet queryable.
+pub struct PreparedFirstSliceIndex {
+    verified: IdentityVerifiedGeneration,
+    search: LexicalIndex,
+    root: RepositoryRoot,
+    receipt: FirstSliceIndexReceipt,
+    root_identity: ContentHash,
+    register_repository: bool,
+}
+
+/// Retention-admitted generation awaiting durable lifecycle success.
+///
+/// Newly built state is reserved inside the bounded generation set but remains
+/// invisible to every query path until this token is committed.
+pub struct FirstSliceStagedIndex {
+    receipt: FirstSliceIndexReceipt,
+    publication: FirstSlicePublication,
+}
+
+impl FirstSliceStagedIndex {
+    /// Returns the still-hidden generation receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> FirstSliceIndexReceipt {
+        self.receipt
+    }
+}
+
+enum FirstSlicePublication {
+    Retained,
+    Pending {
+        root: RepositoryRoot,
+        root_identity: ContentHash,
+        register_repository: bool,
+    },
+}
+
 /// Transport-independent owner of bounded ephemeral fixture generations.
 ///
 /// The service intentionally retains at most the caller-selected hard-bounded
@@ -178,6 +238,26 @@ impl FirstSliceService {
         path: &Path,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceIndexReceipt, FirstSliceError> {
+        let prepared = self.prepare_rust_fixture(path, cancellation)?;
+        self.publish_prepared(prepared, cancellation)
+    }
+
+    /// Builds and verifies one fixture generation without making it queryable.
+    ///
+    /// This phase may perform all bounded discovery, parsing, normalization,
+    /// oracle, and lexical work. Publication remains an explicit second step so
+    /// the daemon can durably linearize lifecycle completion before activation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] under the same bounded validation,
+    /// cancellation, identity, storage, and retention conditions as
+    /// [`Self::index_rust_fixture`].
+    pub fn prepare_rust_fixture(
+        &self,
+        path: &Path,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceIndexPreparation, FirstSliceError> {
         let started = Instant::now();
         require_deadline(cancellation)?;
         cancellation
@@ -262,10 +342,7 @@ impl FirstSliceService {
                 && let Some(receipt) = self.receipts.get(&active).copied()
             {
                 check_cancellation(cancellation)?;
-                self.generations
-                    .activate(active)
-                    .map_err(|_| FirstSliceError::Retention)?;
-                return Ok(receipt);
+                return Ok(FirstSliceIndexPreparation::Retained(receipt));
             }
         }
         let parent = active;
@@ -280,11 +357,7 @@ impl FirstSliceService {
         .id();
         if let Some(receipt) = self.receipts.get(&generation).copied() {
             check_cancellation(cancellation)?;
-            self.generations
-                .activate(generation)
-                .map_err(|_| FirstSliceError::Retention)?;
-            self.active_by_repository.insert(repository, generation);
-            return Ok(receipt);
+            return Ok(FirstSliceIndexPreparation::Retained(receipt));
         }
         let source = SourceRef::new(
             repository,
@@ -359,10 +432,6 @@ impl FirstSliceService {
         let verified = oracle
             .read_verified(&context)
             .map_err(|error| map_catalog_error(&error, cancellation))?;
-        check_cancellation(cancellation)?;
-        self.generations
-            .publish(verified, search, true)
-            .map_err(|_| FirstSliceError::Retention)?;
         let receipt = FirstSliceIndexReceipt {
             repository,
             generation,
@@ -374,13 +443,136 @@ impl FirstSliceService {
             oracle_allocated_bytes,
             elapsed_micros: elapsed_micros(started),
         };
-        self.roots.insert(generation, root);
-        self.receipts.insert(generation, receipt);
-        self.active_by_repository.insert(repository, generation);
-        if existing_repository.is_none() {
-            self.repositories.insert(root_identity, repository);
+        check_cancellation(cancellation)?;
+        Ok(FirstSliceIndexPreparation::Pending(
+            PreparedFirstSliceIndex {
+                verified,
+                search,
+                root,
+                receipt,
+                root_identity,
+                register_repository: existing_repository.is_none(),
+            },
+        ))
+    }
+
+    /// Publishes or reactivates one prepared generation for standalone use.
+    ///
+    /// Its final token check is a process-local, nondurable cancellation
+    /// linearization point. The daemon instead stages first, atomically records
+    /// durable journal success, and then invokes [`Self::commit_staged`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Cancelled`] when cancellation was already
+    /// established, or [`FirstSliceError::Retention`] when the bounded
+    /// generation set cannot publish the prepared state.
+    pub fn publish_prepared(
+        &mut self,
+        prepared: FirstSliceIndexPreparation,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceIndexReceipt, FirstSliceError> {
+        let staged = self.stage_prepared(prepared, cancellation)?;
+        if let Err(error) = check_cancellation(cancellation) {
+            self.discard_staged(staged)?;
+            return Err(error);
         }
+        self.commit_staged(staged)
+    }
+
+    /// Retention-admits prepared state without exposing it to queries.
+    ///
+    /// The daemon invokes this before its serialized durable publication
+    /// completion. A cancellation that wins first can therefore discard the
+    /// reservation without publishing partial state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Cancelled`] when cancellation already won or
+    /// [`FirstSliceError::Retention`] when bounded admission fails.
+    pub fn stage_prepared(
+        &mut self,
+        prepared: FirstSliceIndexPreparation,
+        cancellation: &Cancellation,
+    ) -> Result<FirstSliceStagedIndex, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        match prepared {
+            FirstSliceIndexPreparation::Retained(receipt) => Ok(FirstSliceStagedIndex {
+                receipt,
+                publication: FirstSlicePublication::Retained,
+            }),
+            FirstSliceIndexPreparation::Pending(prepared) => {
+                let receipt = prepared.receipt;
+                self.generations
+                    .stage(prepared.verified, prepared.search)
+                    .map_err(|_| FirstSliceError::Retention)?;
+                Ok(FirstSliceStagedIndex {
+                    receipt,
+                    publication: FirstSlicePublication::Pending {
+                        root: prepared.root,
+                        root_identity: prepared.root_identity,
+                        register_repository: prepared.register_repository,
+                    },
+                })
+            }
+        }
+    }
+
+    /// Commits one correctly linearized staged generation.
+    ///
+    /// Daemon callers first durably terminalize the owning operation as
+    /// succeeded. Standalone [`Self::publish_prepared`] callers instead use its
+    /// final nondurable cancellation-token checkpoint. The staging token proves
+    /// that capacity and generation/search correlation were already admitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Retention`] only when the staging token no
+    /// longer matches this service instance.
+    pub fn commit_staged(
+        &mut self,
+        staged: FirstSliceStagedIndex,
+    ) -> Result<FirstSliceIndexReceipt, FirstSliceError> {
+        let receipt = staged.receipt;
+        match staged.publication {
+            FirstSlicePublication::Retained => {
+                self.generations
+                    .activate(receipt.generation)
+                    .map_err(|_| FirstSliceError::Retention)?;
+            }
+            FirstSlicePublication::Pending {
+                root,
+                root_identity,
+                register_repository,
+            } => {
+                self.generations
+                    .commit_staged(receipt.generation, true)
+                    .map_err(|_| FirstSliceError::Retention)?;
+                self.roots.insert(receipt.generation, root);
+                self.receipts.insert(receipt.generation, receipt);
+                if register_repository {
+                    self.repositories.insert(root_identity, receipt.repository);
+                }
+            }
+        }
+        self.active_by_repository
+            .insert(receipt.repository, receipt.generation);
         Ok(receipt)
+    }
+
+    /// Releases one pre-terminal staging reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::Retention`] when a newly built reservation
+    /// was already consumed or does not belong to this service.
+    pub fn discard_staged(&mut self, staged: FirstSliceStagedIndex) -> Result<(), FirstSliceError> {
+        if matches!(staged.publication, FirstSlicePublication::Pending { .. }) {
+            self.generations
+                .discard_staged(staged.receipt.generation)
+                .map_err(|_| FirstSliceError::Retention)?;
+        }
+        Ok(())
     }
 
     /// Returns the most recently activated generation across all repositories.
