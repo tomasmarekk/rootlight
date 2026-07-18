@@ -14,6 +14,8 @@ use tempfile::TempDir;
 const BEFORE: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 const AFTER: &str = "pub fn answer() -> u32 {\n    43\n}\n";
 const OTHER: &str = "pub fn other() -> u32 {\n    7\n}\n";
+const KEPT: &str = "pub fn kept_after_negation() -> bool {\n    true\n}\n";
+const MALFORMED: &str = "// malformed_source_sentinel\npub fn broken( {\n";
 
 #[test]
 fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
@@ -210,6 +212,36 @@ fn cancellation_stays_typed_across_index_and_query_boundaries() {
 }
 
 #[test]
+fn adapter_failure_preserves_the_prior_active_generation() {
+    let fixture = fixture(BEFORE);
+    let source_path = fixture.path().join("src/lib.rs");
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let first = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("valid generation indexes");
+    let mut invalid_utf8 = BEFORE.as_bytes().to_vec();
+    invalid_utf8.push(0xff);
+    fs::write(source_path, invalid_utf8).expect("invalid UTF-8 source writes");
+
+    assert_eq!(
+        service.index_rust_fixture(fixture.path(), &cancellation),
+        Err(FirstSliceError::Adapter)
+    );
+    assert_eq!(
+        service.active_generation_for(first.repository),
+        Some(first.generation)
+    );
+    assert_eq!(
+        service
+            .resolve_generation(first.repository, None)
+            .expect("prior active generation remains resolved")
+            .receipt,
+        first
+    );
+}
+
+#[test]
 fn prepared_generation_is_not_queryable_before_publication() {
     let fixture = fixture(BEFORE);
     let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
@@ -260,6 +292,132 @@ fn prepared_generation_is_not_queryable_before_publication() {
     assert_eq!(
         service.active_generation_for(published.repository),
         Some(published.generation)
+    );
+}
+
+#[test]
+fn rust_repository_indexes_only_extension_sources_and_preserves_lineage() {
+    let fixture = TempDir::new().expect("fixture root exists");
+    fs::create_dir_all(fixture.path().join("src/nested")).expect("fixture source directory exists");
+    fs::write(
+        fixture.path().join("Cargo.toml"),
+        "[package]\nname = \"cargo_manifest_sentinel\"\nversion = \"0.0.0\"\n",
+    )
+    .expect("fixture manifest writes");
+    fs::write(
+        fixture.path().join("src/nested/.gitignore"),
+        "nested_ignore_sentinel\n",
+    )
+    .expect("fixture ignore file writes");
+    fs::write(fixture.path().join("src/lib.rs"), BEFORE).expect("primary source writes");
+    fs::write(fixture.path().join("src/nested/kept.rs"), KEPT).expect("kept source writes");
+    fs::write(fixture.path().join("src/malformed.rs"), MALFORMED).expect("malformed source writes");
+
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let first = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("multi-file Rust repository indexes");
+    assert_eq!(first.discovered_inputs, 5);
+    assert_eq!(first.indexed_files, 3);
+
+    let answer = service
+        .code_locate(
+            first.generation,
+            "answer".to_owned(),
+            LocateMode::Exact,
+            8,
+            &cancellation,
+        )
+        .expect("answer locate succeeds");
+    assert_eq!(answer.data.hits.len(), 1);
+    assert_eq!(answer.data.hits[0].path, "src/lib.rs");
+    let first_answer = answer.data.hits[0]
+        .source
+        .clone()
+        .expect("answer retains exact source evidence");
+    let pinned_source = service
+        .source_read(first.generation, vec![first_answer], &cancellation)
+        .expect("first generation source is queryable");
+    assert!(pinned_source.data.chunks[0].text.contains("42"));
+    assert!(!pinned_source.data.chunks[0].text.contains("43"));
+
+    let kept = service
+        .code_locate(
+            first.generation,
+            "kept_after_negation".to_owned(),
+            LocateMode::Exact,
+            8,
+            &cancellation,
+        )
+        .expect("nested kept source locate succeeds");
+    assert_eq!(kept.data.hits.len(), 1);
+    assert_eq!(kept.data.hits[0].path, "src/nested/kept.rs");
+
+    for sentinel in [
+        "cargo_manifest_sentinel",
+        "nested_ignore_sentinel",
+        "malformed_source_sentinel",
+    ] {
+        let located = service
+            .code_locate(
+                first.generation,
+                sentinel.to_owned(),
+                LocateMode::Exact,
+                8,
+                &cancellation,
+            )
+            .expect("non-source sentinel locate succeeds");
+        assert!(
+            located.data.hits.is_empty(),
+            "{sentinel} must not be indexed"
+        );
+    }
+
+    let repeated = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("unchanged multi-file repository is idempotent");
+    assert_eq!(repeated, first);
+
+    fs::write(fixture.path().join("src/lib.rs"), AFTER).expect("changed source writes");
+    let second = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("changed multi-file repository indexes");
+    assert_eq!(second.parent, Some(first.generation));
+    assert_ne!(second.generation, first.generation);
+
+    let second_answer = service
+        .code_locate(
+            second.generation,
+            "answer".to_owned(),
+            LocateMode::Exact,
+            8,
+            &cancellation,
+        )
+        .expect("active answer locate succeeds");
+    assert_eq!(second_answer.data.hits.len(), 1);
+    assert_eq!(second_answer.data.hits[0].path, "src/lib.rs");
+    let second_answer = second_answer.data.hits[0]
+        .source
+        .clone()
+        .expect("active answer retains exact source evidence");
+
+    let active_source = service
+        .source_read(second.generation, vec![second_answer], &cancellation)
+        .expect("active generation source is queryable");
+    assert!(active_source.data.chunks[0].text.contains("43"));
+    assert!(!active_source.data.chunks[0].text.contains("42"));
+
+    let prior = service
+        .resolve_generation(first.repository, Some(first.generation))
+        .expect("prior generation remains retained");
+    assert!(!prior.active);
+    assert_eq!(
+        service
+            .resolve_generation(second.repository, None)
+            .expect("active generation resolves")
+            .generation,
+        second.generation
     );
 }
 
