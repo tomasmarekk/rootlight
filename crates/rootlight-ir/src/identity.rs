@@ -209,21 +209,28 @@ pub fn decode_file_identity_claim_envelope(
 /// noncanonical, mismatched, or unsupported claim envelope.
 pub fn decode_file_identity_claim_envelope_with_checkpoint(
     envelope: &ExtensionEnvelope,
-    checkpoint: impl FnMut() -> bool,
+    mut checkpoint: impl FnMut() -> bool,
 ) -> Result<FileIdentityClaim, IdentityClaimError> {
     require_claim_envelope(envelope, FILE_IDENTITY_CLAIM_NAMESPACE)?;
-    let claim: FileIdentityClaim = decode_canonical_payload(&envelope.payload, checkpoint)?;
+    let claim: FileIdentityClaim = decode_canonical_payload(&envelope.payload, &mut checkpoint)?;
     let source = require_claim_evidence(envelope, FactRef::File(claim.file))?;
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
+    let derived_file = claim.derived_file();
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
     if claim.repository != envelope.repository
         || claim.file != source.span().file()
         || claim.content_hash != source.content_hash()
         || claim.byte_length != source.span().end_byte()
         || source.span().start_byte() != 0
-        || claim.derived_file() != claim.file
+        || derived_file != claim.file
     {
         return Err(IdentityClaimError::EnvelopeMismatch);
     }
-    require_envelope_id(envelope)?;
+    require_envelope_id_with_checkpoint(envelope, &mut checkpoint)?;
     Ok(claim)
 }
 
@@ -247,15 +254,22 @@ pub fn decode_symbol_identity_claim_envelope(
 /// noncanonical, mismatched, or unsupported claim envelope.
 pub fn decode_symbol_identity_claim_envelope_with_checkpoint(
     envelope: &ExtensionEnvelope,
-    checkpoint: impl FnMut() -> bool,
+    mut checkpoint: impl FnMut() -> bool,
 ) -> Result<SymbolIdentityClaim, IdentityClaimError> {
     require_claim_envelope(envelope, SYMBOL_IDENTITY_CLAIM_NAMESPACE)?;
-    let claim: SymbolIdentityClaim = decode_canonical_payload(&envelope.payload, checkpoint)?;
+    let claim: SymbolIdentityClaim = decode_canonical_payload(&envelope.payload, &mut checkpoint)?;
     let _source = require_claim_evidence(envelope, FactRef::Entity(claim.symbol))?;
-    if claim.repository != envelope.repository || claim.derived_symbol() != claim.symbol {
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
+    let derived_symbol = claim.derived_symbol();
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
+    if claim.repository != envelope.repository || derived_symbol != claim.symbol {
         return Err(IdentityClaimError::EnvelopeMismatch);
     }
-    require_envelope_id(envelope)?;
+    require_envelope_id_with_checkpoint(envelope, &mut checkpoint)?;
     Ok(claim)
 }
 
@@ -267,7 +281,21 @@ pub fn decode_symbol_identity_claim_envelope_with_checkpoint(
 pub fn derive_provenance_record_id(
     record: &ProvenanceRecord,
 ) -> Result<FactId, FactIdentityRecipeError> {
-    derive_typed_fact_id(PROVENANCE_FACT_DOMAIN, record)
+    derive_provenance_record_id_with_checkpoint(record, || true)
+}
+
+/// Derives a provenance ID with checkpoints around recipe allocations.
+///
+/// # Errors
+///
+/// Returns [`FactIdentityRecipeError`] if a checkpoint stops work or canonical
+/// JSON encoding fails.
+pub fn derive_provenance_record_id_with_checkpoint(
+    record: &ProvenanceRecord,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<FactId, FactIdentityRecipeError> {
+    derive_typed_fact_id_with_checkpoint(PROVENANCE_FACT_DOMAIN, record, checkpoint)
+        .map_err(|_| FactIdentityRecipeError)
 }
 
 /// Derives an occurrence ID from every typed semantic field except `id`.
@@ -278,7 +306,21 @@ pub fn derive_provenance_record_id(
 pub fn derive_occurrence_record_id(
     record: &OccurrenceRecord,
 ) -> Result<FactId, FactIdentityRecipeError> {
-    derive_typed_fact_id(OCCURRENCE_FACT_DOMAIN, record)
+    derive_occurrence_record_id_with_checkpoint(record, || true)
+}
+
+/// Derives an occurrence ID with checkpoints around recipe allocations.
+///
+/// # Errors
+///
+/// Returns [`FactIdentityRecipeError`] if a checkpoint stops work or canonical
+/// JSON encoding fails.
+pub fn derive_occurrence_record_id_with_checkpoint(
+    record: &OccurrenceRecord,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<FactId, FactIdentityRecipeError> {
+    derive_typed_fact_id_with_checkpoint(OCCURRENCE_FACT_DOMAIN, record, checkpoint)
+        .map_err(|_| FactIdentityRecipeError)
 }
 
 /// Derives a relation ID from every typed semantic field except `id`.
@@ -289,7 +331,21 @@ pub fn derive_occurrence_record_id(
 pub fn derive_relation_record_id(
     record: &RelationRecord,
 ) -> Result<FactId, FactIdentityRecipeError> {
-    derive_typed_fact_id(RELATION_FACT_DOMAIN, record)
+    derive_relation_record_id_with_checkpoint(record, || true)
+}
+
+/// Derives a relation ID with checkpoints around recipe allocations.
+///
+/// # Errors
+///
+/// Returns [`FactIdentityRecipeError`] if a checkpoint stops work or canonical
+/// JSON encoding fails.
+pub fn derive_relation_record_id_with_checkpoint(
+    record: &RelationRecord,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<FactId, FactIdentityRecipeError> {
+    derive_typed_fact_id_with_checkpoint(RELATION_FACT_DOMAIN, record, checkpoint)
+        .map_err(|_| FactIdentityRecipeError)
 }
 
 /// Derives a source-mapping ID from every typed semantic field except `id`.
@@ -300,7 +356,21 @@ pub fn derive_relation_record_id(
 pub fn derive_source_mapping_record_id(
     record: &SourceMappingRecord,
 ) -> Result<FactId, FactIdentityRecipeError> {
-    derive_typed_fact_id(SOURCE_MAPPING_FACT_DOMAIN, record)
+    derive_source_mapping_record_id_with_checkpoint(record, || true)
+}
+
+/// Derives a source-mapping ID with checkpoints around recipe allocations.
+///
+/// # Errors
+///
+/// Returns [`FactIdentityRecipeError`] if a checkpoint stops work or canonical
+/// JSON encoding fails.
+pub fn derive_source_mapping_record_id_with_checkpoint(
+    record: &SourceMappingRecord,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<FactId, FactIdentityRecipeError> {
+    derive_typed_fact_id_with_checkpoint(SOURCE_MAPPING_FACT_DOMAIN, record, checkpoint)
+        .map_err(|_| FactIdentityRecipeError)
 }
 
 /// Derives a coverage ID from every typed semantic field except `id`.
@@ -311,7 +381,21 @@ pub fn derive_source_mapping_record_id(
 pub fn derive_coverage_record_id(
     record: &CoverageRecord,
 ) -> Result<FactId, FactIdentityRecipeError> {
-    derive_typed_fact_id(COVERAGE_FACT_DOMAIN, record)
+    derive_coverage_record_id_with_checkpoint(record, || true)
+}
+
+/// Derives a coverage ID with checkpoints around recipe allocations.
+///
+/// # Errors
+///
+/// Returns [`FactIdentityRecipeError`] if a checkpoint stops work or canonical
+/// JSON encoding fails.
+pub fn derive_coverage_record_id_with_checkpoint(
+    record: &CoverageRecord,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<FactId, FactIdentityRecipeError> {
+    derive_typed_fact_id_with_checkpoint(COVERAGE_FACT_DOMAIN, record, checkpoint)
+        .map_err(|_| FactIdentityRecipeError)
 }
 
 /// Derives a skipped-region ID from every typed semantic field except `id`.
@@ -320,7 +404,21 @@ pub fn derive_coverage_record_id(
 ///
 /// Returns [`FactIdentityRecipeError`] if canonical JSON encoding fails.
 pub fn derive_skipped_region_id(record: &SkippedRegion) -> Result<FactId, FactIdentityRecipeError> {
-    derive_typed_fact_id(SKIPPED_REGION_FACT_DOMAIN, record)
+    derive_skipped_region_id_with_checkpoint(record, || true)
+}
+
+/// Derives a skipped-region ID with checkpoints around recipe allocations.
+///
+/// # Errors
+///
+/// Returns [`FactIdentityRecipeError`] if a checkpoint stops work or canonical
+/// JSON encoding fails.
+pub fn derive_skipped_region_id_with_checkpoint(
+    record: &SkippedRegion,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<FactId, FactIdentityRecipeError> {
+    derive_typed_fact_id_with_checkpoint(SKIPPED_REGION_FACT_DOMAIN, record, checkpoint)
+        .map_err(|_| FactIdentityRecipeError)
 }
 
 /// Derives a diagnostic ID from every typed semantic field except `id`.
@@ -331,7 +429,21 @@ pub fn derive_skipped_region_id(record: &SkippedRegion) -> Result<FactId, FactId
 pub fn derive_diagnostic_record_id(
     record: &DiagnosticRecord,
 ) -> Result<FactId, FactIdentityRecipeError> {
-    derive_typed_fact_id(DIAGNOSTIC_FACT_DOMAIN, record)
+    derive_diagnostic_record_id_with_checkpoint(record, || true)
+}
+
+/// Derives a diagnostic ID with checkpoints around recipe allocations.
+///
+/// # Errors
+///
+/// Returns [`FactIdentityRecipeError`] if a checkpoint stops work or canonical
+/// JSON encoding fails.
+pub fn derive_diagnostic_record_id_with_checkpoint(
+    record: &DiagnosticRecord,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<FactId, FactIdentityRecipeError> {
+    derive_typed_fact_id_with_checkpoint(DIAGNOSTIC_FACT_DOMAIN, record, checkpoint)
+        .map_err(|_| FactIdentityRecipeError)
 }
 
 /// Stable identity label for one closed common entity kind.
@@ -437,8 +549,11 @@ fn require_claim_evidence(
     Ok(source)
 }
 
-fn require_envelope_id(envelope: &ExtensionEnvelope) -> Result<(), IdentityClaimError> {
-    if derive_claim_envelope_id(envelope)? == envelope.id {
+fn require_envelope_id_with_checkpoint(
+    envelope: &ExtensionEnvelope,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<(), IdentityClaimError> {
+    if derive_claim_envelope_id_with_checkpoint(envelope, checkpoint)? == envelope.id {
         Ok(())
     } else {
         Err(IdentityClaimError::EnvelopeMismatch)
@@ -446,8 +561,22 @@ fn require_envelope_id(envelope: &ExtensionEnvelope) -> Result<(), IdentityClaim
 }
 
 fn derive_claim_envelope_id(envelope: &ExtensionEnvelope) -> Result<FactId, IdentityClaimError> {
-    derive_typed_fact_id("rootlight.identity-claim-envelope/v1", envelope)
-        .map_err(|_| IdentityClaimError::MalformedPayload)
+    derive_claim_envelope_id_with_checkpoint(envelope, &mut || true)
+}
+
+fn derive_claim_envelope_id_with_checkpoint(
+    envelope: &ExtensionEnvelope,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<FactId, IdentityClaimError> {
+    derive_typed_fact_id_with_checkpoint(
+        "rootlight.identity-claim-envelope/v1",
+        envelope,
+        checkpoint,
+    )
+    .map_err(|error| match error {
+        FactRecipeFailure::Encoding => IdentityClaimError::MalformedPayload,
+        FactRecipeFailure::Interrupted => IdentityClaimError::Interrupted,
+    })
 }
 
 fn decode_canonical_payload<T>(
@@ -473,6 +602,9 @@ where
         return Err(IdentityClaimError::MalformedPayload);
     }
 
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
     let mut canonical = Vec::with_capacity(payload.len());
     {
         let mut writer = ClaimCheckpointWriter::new(&mut canonical, &mut checkpoint)?;
@@ -604,23 +736,70 @@ fn checkpoint_io_error() -> io::Error {
     io::Error::other("identity claim checkpoint")
 }
 
-fn derive_typed_fact_id<T>(domain: &str, record: &T) -> Result<FactId, FactIdentityRecipeError>
+enum FactRecipeFailure {
+    Encoding,
+    Interrupted,
+}
+
+fn derive_typed_fact_id_with_checkpoint<T>(
+    domain: &str,
+    record: &T,
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<FactId, FactRecipeFailure>
 where
     T: Serialize,
 {
-    let mut value = serde_json::to_value(record).map_err(|_| FactIdentityRecipeError)?;
-    let object = value.as_object_mut().ok_or(FactIdentityRecipeError)?;
+    require_recipe_checkpoint(&mut checkpoint)?;
+    let mut value = serde_json::to_value(record).map_err(|_| FactRecipeFailure::Encoding)?;
+    require_recipe_checkpoint(&mut checkpoint)?;
+    let object = value.as_object_mut().ok_or(FactRecipeFailure::Encoding)?;
     if object.remove("id").is_none() {
-        return Err(FactIdentityRecipeError);
+        return Err(FactRecipeFailure::Encoding);
     }
-    let bytes = serde_json::to_vec(&value).map_err(|_| FactIdentityRecipeError)?;
-    Ok(derive_fact(domain, &bytes).id())
+    require_recipe_checkpoint(&mut checkpoint)?;
+    let bytes = serde_json::to_vec(&value).map_err(|_| FactRecipeFailure::Encoding)?;
+    require_recipe_checkpoint(&mut checkpoint)?;
+    let id = derive_fact(domain, &bytes).id();
+    require_recipe_checkpoint(&mut checkpoint)?;
+    Ok(id)
+}
+
+fn require_recipe_checkpoint(
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<(), FactRecipeFailure> {
+    if checkpoint() {
+        Ok(())
+    } else {
+        Err(FactRecipeFailure::Interrupted)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::SourceSpan;
+
+    #[test]
+    fn fact_recipe_stops_between_canonical_allocations() {
+        #[derive(Serialize)]
+        struct RecipeFixture {
+            id: FactId,
+            payload: String,
+        }
+
+        let fixture = RecipeFixture {
+            id: FactId::from_bytes([1; 20]),
+            payload: "x".repeat(16 * 1024),
+        };
+        let mut checkpoints = 0;
+        let result = derive_typed_fact_id_with_checkpoint("test", &fixture, || {
+            checkpoints += 1;
+            checkpoints < 2
+        });
+
+        assert!(matches!(result, Err(FactRecipeFailure::Interrupted)));
+        assert_eq!(checkpoints, 2);
+    }
 
     #[test]
     fn claim_decoder_stops_inside_a_large_payload() {

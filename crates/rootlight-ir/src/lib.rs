@@ -20,10 +20,14 @@ pub use identity::{
     SymbolIdentityClaim, decode_file_identity_claim_envelope,
     decode_file_identity_claim_envelope_with_checkpoint, decode_symbol_identity_claim_envelope,
     decode_symbol_identity_claim_envelope_with_checkpoint, derive_coverage_record_id,
-    derive_diagnostic_record_id, derive_occurrence_record_id, derive_provenance_record_id,
-    derive_relation_record_id, derive_skipped_region_id, derive_source_mapping_record_id,
-    entity_kind_identity_label, new_file_identity_claim_envelope,
-    new_symbol_identity_claim_envelope,
+    derive_coverage_record_id_with_checkpoint, derive_diagnostic_record_id,
+    derive_diagnostic_record_id_with_checkpoint, derive_occurrence_record_id,
+    derive_occurrence_record_id_with_checkpoint, derive_provenance_record_id,
+    derive_provenance_record_id_with_checkpoint, derive_relation_record_id,
+    derive_relation_record_id_with_checkpoint, derive_skipped_region_id,
+    derive_skipped_region_id_with_checkpoint, derive_source_mapping_record_id,
+    derive_source_mapping_record_id_with_checkpoint, entity_kind_identity_label,
+    new_file_identity_claim_envelope, new_symbol_identity_claim_envelope,
 };
 pub use lexical::{
     LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION, LexicalEvidenceFormat,

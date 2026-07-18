@@ -19,10 +19,11 @@ use rootlight_ir::{
     LEXICAL_EXTENSION_NAMESPACE, NORMALIZED_IR_VERSION, NormalizedIrDocument, OccurrenceTarget,
     SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, canonicalize_ir_document,
     decode_file_identity_claim_envelope_with_checkpoint,
-    decode_symbol_identity_claim_envelope_with_checkpoint, derive_coverage_record_id,
-    derive_diagnostic_record_id, derive_occurrence_record_id, derive_provenance_record_id,
-    derive_relation_record_id, derive_skipped_region_id, derive_source_mapping_record_id,
-    validate_lexical_evidence_envelope,
+    decode_symbol_identity_claim_envelope_with_checkpoint,
+    derive_coverage_record_id_with_checkpoint, derive_diagnostic_record_id_with_checkpoint,
+    derive_occurrence_record_id_with_checkpoint, derive_provenance_record_id_with_checkpoint,
+    derive_relation_record_id_with_checkpoint, derive_skipped_region_id_with_checkpoint,
+    derive_source_mapping_record_id_with_checkpoint, validate_lexical_evidence_envelope,
 };
 use serde::Serialize;
 
@@ -582,18 +583,44 @@ impl GenerationManifestRecipe {
     pub fn new(
         repository: RepositoryId,
         configuration_hash: ContentHash,
-        mut files: Vec<FileIdentityClaim>,
+        files: Vec<FileIdentityClaim>,
     ) -> Result<Self, IdentityVerificationError> {
+        Self::new_with_checkpoint(repository, configuration_hash, files, || Ok(()))
+    }
+
+    fn new_with_context(
+        repository: RepositoryId,
+        configuration_hash: ContentHash,
+        files: Vec<FileIdentityClaim>,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, IdentityVerificationError> {
+        Self::new_with_checkpoint(repository, configuration_hash, files, || {
+            context.check().map_err(IdentityVerificationError::Control)
+        })
+    }
+
+    fn new_with_checkpoint(
+        repository: RepositoryId,
+        configuration_hash: ContentHash,
+        mut files: Vec<FileIdentityClaim>,
+        mut checkpoint: impl FnMut() -> Result<(), IdentityVerificationError>,
+    ) -> Result<Self, IdentityVerificationError> {
+        checkpoint()?;
         files.sort();
+        checkpoint()?;
         let mut previous = None;
         for claim in &files {
+            checkpoint()?;
+            let derived_file = claim.derived_file();
+            checkpoint()?;
             if claim.repository != repository
-                || claim.derived_file() != claim.file
+                || derived_file != claim.file
                 || previous == Some(claim.file)
             {
                 return Err(IdentityVerificationError::IdentityMismatch);
             }
             previous = Some(claim.file);
+            checkpoint()?;
         }
         Ok(Self {
             recipe_version: PROPOSED_IDENTITY_CLAIM_VERSION,
@@ -894,10 +921,11 @@ fn verify_snapshot_identities(
     context
         .check()
         .map_err(IdentityVerificationError::Control)?;
-    let manifest = GenerationManifestRecipe::new(
+    let manifest = GenerationManifestRecipe::new_with_context(
         document.repository,
         snapshot.metadata().configuration_hash(),
         manifest_claims,
+        context,
     )?;
     context
         .check()
@@ -963,6 +991,13 @@ fn map_claim_error(
     }
 }
 
+fn map_fact_recipe_error(context: &GenerationContext<'_>) -> IdentityVerificationError {
+    match context.check() {
+        Err(error) => IdentityVerificationError::Control(error),
+        Ok(()) => IdentityVerificationError::RecipeEncoding,
+    }
+}
+
 fn verify_fact_ids(
     document: &NormalizedIrDocument,
     context: &GenerationContext<'_>,
@@ -971,8 +1006,9 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        let derived = derive_provenance_record_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        let derived =
+            derive_provenance_record_id_with_checkpoint(record, || context.check().is_ok())
+                .map_err(|_| map_fact_recipe_error(context))?;
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
@@ -984,8 +1020,9 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        let derived = derive_occurrence_record_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        let derived =
+            derive_occurrence_record_id_with_checkpoint(record, || context.check().is_ok())
+                .map_err(|_| map_fact_recipe_error(context))?;
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
@@ -997,8 +1034,8 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        let derived = derive_relation_record_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        let derived = derive_relation_record_id_with_checkpoint(record, || context.check().is_ok())
+            .map_err(|_| map_fact_recipe_error(context))?;
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
@@ -1010,8 +1047,9 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        let derived = derive_source_mapping_record_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        let derived =
+            derive_source_mapping_record_id_with_checkpoint(record, || context.check().is_ok())
+                .map_err(|_| map_fact_recipe_error(context))?;
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
@@ -1023,8 +1061,8 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        let derived = derive_coverage_record_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        let derived = derive_coverage_record_id_with_checkpoint(record, || context.check().is_ok())
+            .map_err(|_| map_fact_recipe_error(context))?;
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
@@ -1036,8 +1074,8 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        let derived = derive_skipped_region_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        let derived = derive_skipped_region_id_with_checkpoint(record, || context.check().is_ok())
+            .map_err(|_| map_fact_recipe_error(context))?;
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
@@ -1049,8 +1087,9 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        let derived = derive_diagnostic_record_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        let derived =
+            derive_diagnostic_record_id_with_checkpoint(record, || context.check().is_ok())
+                .map_err(|_| map_fact_recipe_error(context))?;
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
