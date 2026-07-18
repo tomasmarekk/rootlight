@@ -135,7 +135,7 @@ where
             .iter()
             .find(|contract| contract.tool.name() == name)
         else {
-            return HandlerResponse::error(METHOD_NOT_FOUND, "tool is not available");
+            return HandlerResponse::error(INVALID_PARAMS, "tool is not available");
         };
         let arguments_value = Value::Object(arguments);
         if !contract.input_validator.is_valid(&arguments_value) {
@@ -544,6 +544,29 @@ mod tests {
             result["structuredContent"]["error"]["code"],
             INVALID_ARGUMENT_CODE
         );
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_is_an_invalid_params_protocol_error_without_execution() {
+        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({"name": "unknown.tool", "arguments": {}}),
+                ),
+                cancellation(),
+            )
+            .await;
+
+        assert!(matches!(
+            response,
+            HandlerResponse::Error {
+                code: INVALID_PARAMS,
+                ..
+            }
+        ));
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
     }
 
