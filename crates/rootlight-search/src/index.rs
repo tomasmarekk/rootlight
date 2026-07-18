@@ -84,32 +84,7 @@ impl LexicalIndexBuilder {
         cancellation.check()?;
         validate_build_budget(budget)?;
         ensure_empty_directory(directory)?;
-        if documents.len() > budget.max_documents {
-            return Err(SearchError::BuildBudgetExceeded {
-                resource: "documents",
-            });
-        }
-
-        documents.sort_unstable_by_key(|document| document.symbol_id);
-        let mut prior = None;
-        let mut text_bytes = 0usize;
-        for document in &documents {
-            cancellation.check()?;
-            if prior == Some(document.symbol_id) {
-                return Err(SearchError::DuplicateSymbol);
-            }
-            prior = Some(document.symbol_id);
-            text_bytes = text_bytes.checked_add(validate_document(document)?).ok_or(
-                SearchError::BuildBudgetExceeded {
-                    resource: "text_bytes",
-                },
-            )?;
-            if text_bytes > budget.max_text_bytes {
-                return Err(SearchError::BuildBudgetExceeded {
-                    resource: "text_bytes",
-                });
-            }
-        }
+        let (document_count, text_bytes) = prepare_documents(&mut documents, budget, cancellation)?;
 
         let fields = Fields::new();
         let index = Index::builder()
@@ -117,37 +92,20 @@ impl LexicalIndexBuilder {
             .create_in_dir(directory)
             .map_err(|_| operation("create"))?;
         register_tokenizer(&index);
-        let mut writer = index
-            .writer_with_num_threads(1, budget.indexer_memory_bytes)
-            .map_err(|_| operation("writer"))?;
-        writer.set_merge_policy(Box::new(NoMergePolicy));
-
-        for document in &documents {
-            cancellation.check()?;
-            writer
-                .add_document(fields.encode(document)?)
-                .map_err(|_| operation("add_document"))?;
-        }
-        cancellation.check()?;
-        let document_count =
-            u64::try_from(documents.len()).map_err(|_| SearchError::BuildBudgetExceeded {
-                resource: "documents",
-            })?;
-        let mut prepared = writer
-            .prepare_commit()
-            .map_err(|_| operation("prepare_commit"))?;
-        prepared.set_payload(&format_payload(generation, document_count));
-        prepared.commit().map_err(|_| operation("commit"))?;
-        drop(writer);
+        populate_index(
+            &index,
+            &fields,
+            generation,
+            &documents,
+            document_count,
+            budget,
+            cancellation,
+        )?;
         drop(index);
         let stats = BuildStats {
             generation,
             documents: document_count,
-            text_bytes: u64::try_from(text_bytes).map_err(|_| {
-                SearchError::BuildBudgetExceeded {
-                    resource: "text_bytes",
-                }
-            })?,
+            text_bytes,
         };
         create_manifest(directory, stats, artifact_budget, cancellation)
     }
@@ -219,7 +177,7 @@ pub struct LexicalIndex {
     generation: GenerationId,
     fields: Fields,
     reader: IndexReader,
-    _artifact: VerifiedLexicalArtifact,
+    _artifact: Option<VerifiedLexicalArtifact>,
 }
 
 impl LexicalIndex {
@@ -243,46 +201,59 @@ impl LexicalIndex {
         let fields = Fields::new();
         let index = Index::open_in_dir(artifact.directory()).map_err(|_| operation("open"))?;
         register_tokenizer(&index);
-        if index.schema() != fields.schema {
-            return Err(SearchError::IncompatibleIndex);
-        }
-        let metadata = index.load_metas().map_err(|_| operation("metadata"))?;
-        let payload = metadata
-            .payload
-            .as_deref()
-            .ok_or(SearchError::IncompatibleIndex)?;
-        let (actual_generation, expected_documents) = parse_payload(payload)?;
-        if expected_documents > HARD_MAX_DOCUMENTS as u64
-            || expected_documents != expected_stats.documents
-        {
-            return Err(SearchError::IncompatibleIndex);
-        }
-        if actual_generation != expected_generation {
-            return Err(SearchError::GenerationMismatch {
-                expected: expected_generation,
-                actual: actual_generation,
-            });
-        }
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .map_err(|_| operation("reader"))?;
-        reader.reload().map_err(|_| operation("reload"))?;
-        let searcher = reader.searcher();
-        if searcher
-            .segment_readers()
-            .iter()
-            .any(|segment| segment.max_doc() != segment.num_docs())
-            || searcher.num_docs() != expected_documents
-        {
-            return Err(SearchError::IncompatibleIndex);
-        }
+        let (actual_generation, reader) = open_reader(
+            &index,
+            &fields,
+            expected_generation,
+            Some(expected_stats.documents),
+        )?;
         Ok(Self {
             generation: actual_generation,
             fields,
             reader,
-            _artifact: artifact,
+            _artifact: Some(artifact),
+        })
+    }
+
+    /// Builds a nondurable in-memory index for a bounded first-slice session.
+    ///
+    /// The returned reader enforces the same document validation, generation
+    /// payload, query budgets, and deterministic ranking as a durable index,
+    /// but it cannot be reopened or shared across processes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] for invalid documents, exceeded budgets,
+    /// cancellation, incompatible committed metadata, or redacted Tantivy
+    /// failures.
+    pub fn build_ephemeral(
+        generation: GenerationId,
+        mut documents: Vec<LexicalDocument>,
+        budget: BuildBudget,
+        cancellation: &Cancellation,
+    ) -> Result<Self, SearchError> {
+        cancellation.check()?;
+        validate_build_budget(budget)?;
+        let (document_count, _) = prepare_documents(&mut documents, budget, cancellation)?;
+        let fields = Fields::new();
+        let index = Index::create_in_ram(fields.schema.clone());
+        register_tokenizer(&index);
+        populate_index(
+            &index,
+            &fields,
+            generation,
+            &documents,
+            document_count,
+            budget,
+            cancellation,
+        )?;
+        let (actual_generation, reader) =
+            open_reader(&index, &fields, generation, Some(document_count))?;
+        Ok(Self {
+            generation: actual_generation,
+            fields,
+            reader,
+            _artifact: None,
         })
     }
 
@@ -413,6 +384,119 @@ impl LexicalSearch for LexicalIndex {
     fn document_count(&self) -> u64 {
         self.document_count()
     }
+}
+
+fn prepare_documents(
+    documents: &mut [LexicalDocument],
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<(u64, u64), SearchError> {
+    if documents.len() > budget.max_documents {
+        return Err(SearchError::BuildBudgetExceeded {
+            resource: "documents",
+        });
+    }
+    documents.sort_unstable_by_key(|document| document.symbol_id);
+    let mut prior = None;
+    let mut text_bytes = 0usize;
+    for document in documents.iter() {
+        cancellation.check()?;
+        if prior == Some(document.symbol_id) {
+            return Err(SearchError::DuplicateSymbol);
+        }
+        prior = Some(document.symbol_id);
+        text_bytes = text_bytes.checked_add(validate_document(document)?).ok_or(
+            SearchError::BuildBudgetExceeded {
+                resource: "text_bytes",
+            },
+        )?;
+        if text_bytes > budget.max_text_bytes {
+            return Err(SearchError::BuildBudgetExceeded {
+                resource: "text_bytes",
+            });
+        }
+    }
+    Ok((
+        u64::try_from(documents.len()).map_err(|_| SearchError::BuildBudgetExceeded {
+            resource: "documents",
+        })?,
+        u64::try_from(text_bytes).map_err(|_| SearchError::BuildBudgetExceeded {
+            resource: "text_bytes",
+        })?,
+    ))
+}
+
+fn populate_index(
+    index: &Index,
+    fields: &Fields,
+    generation: GenerationId,
+    documents: &[LexicalDocument],
+    document_count: u64,
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<(), SearchError> {
+    let mut writer = index
+        .writer_with_num_threads(1, budget.indexer_memory_bytes)
+        .map_err(|_| operation("writer"))?;
+    writer.set_merge_policy(Box::new(NoMergePolicy));
+    for document in documents {
+        cancellation.check()?;
+        writer
+            .add_document(fields.encode(document)?)
+            .map_err(|_| operation("add_document"))?;
+    }
+    cancellation.check()?;
+    let mut prepared = writer
+        .prepare_commit()
+        .map_err(|_| operation("prepare_commit"))?;
+    prepared.set_payload(&format_payload(generation, document_count));
+    prepared.commit().map_err(|_| operation("commit"))?;
+    drop(writer);
+    Ok(())
+}
+
+fn open_reader(
+    index: &Index,
+    fields: &Fields,
+    expected_generation: GenerationId,
+    expected_documents: Option<u64>,
+) -> Result<(GenerationId, IndexReader), SearchError> {
+    if index.schema() != fields.schema {
+        return Err(SearchError::IncompatibleIndex);
+    }
+    let metadata = index.load_metas().map_err(|_| operation("metadata"))?;
+    let payload = metadata
+        .payload
+        .as_deref()
+        .ok_or(SearchError::IncompatibleIndex)?;
+    let (actual_generation, payload_documents) = parse_payload(payload)?;
+    if payload_documents > HARD_MAX_DOCUMENTS as u64
+        || expected_documents.is_some_and(|expected| payload_documents != expected)
+    {
+        return Err(SearchError::IncompatibleIndex);
+    }
+    if actual_generation != expected_generation {
+        return Err(SearchError::GenerationMismatch {
+            expected: expected_generation,
+            actual: actual_generation,
+        });
+    }
+    let reader = index
+        .reader_builder()
+        .reload_policy(ReloadPolicy::Manual)
+        .try_into()
+        .map_err(|_| operation("reader"))?;
+    reader.reload().map_err(|_| operation("reload"))?;
+    let searcher = reader.searcher();
+    if searcher
+        .segment_readers()
+        .iter()
+        .any(|segment| segment.max_doc() != segment.num_docs())
+        || searcher.num_docs() != payload_documents
+    {
+        return Err(SearchError::IncompatibleIndex);
+    }
+    Ok((actual_generation, reader))
 }
 
 #[derive(Clone)]
@@ -1692,6 +1776,28 @@ mod tests {
         .expect("index builds");
         let index = open_index(directory.path(), manifest.clone(), generation(7));
         (directory, manifest, index)
+    }
+
+    #[test]
+    fn ephemeral_index_uses_the_same_generation_and_query_contract() {
+        let expected_generation = generation(19);
+        let index = LexicalIndex::build_ephemeral(
+            expected_generation,
+            vec![
+                document(2, "HTTPServer", "src/net/server.rs"),
+                document(1, "query_budget", "src/search/budget.rs"),
+            ],
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .expect("ephemeral index builds");
+
+        assert_eq!(index.generation(), expected_generation);
+        assert_eq!(index.document_count(), 2);
+        assert_eq!(
+            search(&index, "query_budget", SearchMode::Exact)[0].symbol_id,
+            SymbolId::from_bytes([1; 20])
+        );
     }
 
     fn search(index: &LexicalIndex, query: &str, mode: SearchMode) -> Vec<SearchHit> {
