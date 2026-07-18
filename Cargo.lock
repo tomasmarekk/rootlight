@@ -2100,8 +2100,10 @@ dependencies = [
 name = "rootlight-vfs"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cap-fs-ext",
  "cap-std",
+ "rootlight-cancel",
  "rootlight-ids",
  "rootlight-ir",
  "tempfile",
