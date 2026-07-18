@@ -17,7 +17,7 @@ use rootlight_client::{
 };
 use rootlight_error::{ErrorCode, PublicValue};
 use rootlight_ids::OperationId;
-use rootlight_ipc::connect;
+use rootlight_ipc::{IpcError, connect};
 use rootlight_observability::{
     CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION, ControlMethod,
     DaemonLifecycle as TelemetryDaemonLifecycle, LogEvent, MAX_STRUCTURED_LOG_LINE_BYTES, SpanKind,
@@ -910,9 +910,7 @@ fn submit_quota_operation_until(
                 require_quota_window(deadline)?;
                 return Ok(status);
             }
-            Err(ClientError::Ipc(rootlight_ipc::IpcError::Transport(error)))
-                if error.kind() == io::ErrorKind::TimedOut =>
-            {
+            Err(error) if is_retryable_quota_transport(&error) => {
                 require_quota_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
@@ -921,6 +919,14 @@ fn submit_quota_operation_until(
                 return Err(LifecycleError::Client(error));
             }
         }
+    }
+}
+
+fn is_retryable_quota_transport(error: &ClientError) -> bool {
+    match error {
+        ClientError::Ipc(IpcError::TimedOut) => true,
+        ClientError::Ipc(IpcError::Transport(error)) => error.kind() == io::ErrorKind::TimedOut,
+        _ => false,
     }
 }
 
@@ -1853,7 +1859,12 @@ pub(crate) enum LifecycleError {
 
 #[cfg(test)]
 mod tests {
-    use super::sequences_are_strictly_increasing;
+    use std::io;
+
+    use rootlight_client::ClientError;
+    use rootlight_ipc::IpcError;
+
+    use super::{is_retryable_quota_transport, sequences_are_strictly_increasing};
 
     #[test]
     fn telemetry_sequence_order_rejects_reordering_and_duplicates() {
@@ -1862,5 +1873,21 @@ mod tests {
         assert!(sequences_are_strictly_increasing(&[1, 2, 3]));
         assert!(!sequences_are_strictly_increasing(&[2, 1]));
         assert!(!sequences_are_strictly_increasing(&[1, 1]));
+    }
+
+    #[test]
+    fn quota_retry_accepts_only_bounded_transport_timeouts() {
+        assert!(is_retryable_quota_transport(&ClientError::Ipc(
+            IpcError::TimedOut
+        )));
+        assert!(is_retryable_quota_transport(&ClientError::Ipc(
+            IpcError::Transport(io::Error::new(io::ErrorKind::TimedOut, "fixture"))
+        )));
+        assert!(!is_retryable_quota_transport(&ClientError::Ipc(
+            IpcError::Transport(io::Error::new(io::ErrorKind::ConnectionReset, "fixture"))
+        )));
+        assert!(!is_retryable_quota_transport(
+            &ClientError::UnexpectedResponse
+        ));
     }
 }
