@@ -352,6 +352,9 @@ fn wait_until_ready(
 }
 
 fn exercise_simultaneous_autostart(paths: &RuntimePaths) -> Result<(), LifecycleError> {
+    // Provision the shared security boundary once. The race under test starts
+    // without a daemon or discovery record and targets launch authority.
+    paths.prepare_owner().map_err(LifecycleError::Runtime)?;
     let barrier = Arc::new(Barrier::new(CLIENT_COUNT));
     let mut clients = Vec::with_capacity(CLIENT_COUNT);
     for index in 0..CLIENT_COUNT {
@@ -1300,7 +1303,7 @@ pub(crate) enum LifecycleError {
     MissingBinary(PathBuf),
     #[error("failed to create daemon lifecycle temporary directory")]
     TemporaryDirectory(#[source] io::Error),
-    #[error("daemon lifecycle runtime setup failed")]
+    #[error("daemon lifecycle runtime setup failed: {0}")]
     Runtime(#[source] RuntimeError),
     #[error("daemon lifecycle IPC setup failed")]
     Ipc(#[source] rootlight_ipc::IpcError),
