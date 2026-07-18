@@ -340,8 +340,8 @@ fn tool_success(structured: Value) -> HandlerResponse {
 }
 
 fn tool_error(code: &'static str, message: &'static str) -> HandlerResponse {
-    let error = json!({"error": {"code": code, "message": message}});
-    let text = match serde_json::to_string(&error) {
+    let structured = json!({"error": {"code": code, "message": message}});
+    let text = match serde_json::to_string(&structured) {
         Ok(text) => text,
         Err(_) => {
             return HandlerResponse::error(INTERNAL_ERROR, "tool error serialization failed");
@@ -349,6 +349,7 @@ fn tool_error(code: &'static str, message: &'static str) -> HandlerResponse {
     };
     HandlerResponse::Success(Map::from_iter([
         ("content".to_owned(), text_content(text)),
+        ("structuredContent".to_owned(), structured),
         ("isError".to_owned(), Value::Bool(true)),
     ]))
 }
@@ -531,7 +532,15 @@ mod tests {
             .await;
         let result = success(response);
         assert_eq!(result["isError"], true);
-        assert!(result.get("structuredContent").is_none());
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("error text mirror exists");
+        let mirror: Value = serde_json::from_str(text).expect("error text mirror is JSON");
+        assert_eq!(mirror, result["structuredContent"]);
+        assert_eq!(
+            result["structuredContent"]["error"]["code"],
+            INVALID_ARGUMENT_CODE
+        );
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
     }
 
