@@ -6,7 +6,7 @@
 **Decision date:** not accepted
 **Package:** rootlight-vfs@0.1.0
 **Manifest:** crates/rootlight-vfs/Cargo.toml
-**Module:** rootlight-vfs::platform::os
+**Module:** rootlight_vfs::platform::os
 **Source:** crates/rootlight-vfs/src/platform/os.rs
 **Related baseline:** ADR-010, REQ-N-004, REQ-N-008, CMP-VFS, M05, M12, R-009
 
@@ -39,7 +39,7 @@ them.
 
 Add a safe `rootlight_vfs::platform` API with opaque RAII types for private
 directories and files. Confine all native calls and raw representations to the
-private `rootlight-vfs::platform::os` module named in `policy/unsafe.toml`.
+private `rootlight_vfs::platform::os` module named in `policy/unsafe.toml`.
 
 While this decision remains `Proposed`, that API is type and ownership
 scaffolding only. Creation, publication, synchronization, and removal return an
@@ -69,9 +69,11 @@ The workspace-wide default remains `unsafe_code = "forbid"`. While this ADR is
 `Proposed`, `rootlight-vfs` must inherit that exact forbid and the inventory
 must remain zero. After acceptance, only `rootlight-vfs` may mirror the
 workspace lint table with `unsafe_code = "deny"`, and only the exact private
-native module may receive a scoped allow. The policy scanner and cargo-geiger
-validation reject an ADR-status or lint mismatch, any other native-code use,
-and any unexpected count change.
+native module may receive a scoped allow. Acceptance remains fail-closed until
+the policy gate inventories compiler-expanded inputs and the cargo-geiger gate
+validates a full `SafetyReport`; neither gate treats the current syntactic scan
+as authoritative Accepted coverage. While those evidence paths are absent,
+both gates reject every `Accepted` boundary explicitly.
 
 This proposal does not alter `RepositoryRoot`, `RelativePath`,
 `SourceSnapshot`, discovery semantics, or stable repository path identity.

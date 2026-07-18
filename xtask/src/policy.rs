@@ -13,8 +13,7 @@ use cargo_metadata::{Metadata, MetadataCommand, Package, TargetKind};
 use serde::Deserialize;
 use sha2::Digest as _;
 use syn::{
-    AttrStyle, Attribute, Expr, Item, Lit, LitStr, Meta, Path as SynPath, Token, UseTree,
-    punctuated::Punctuated,
+    AttrStyle, Attribute, Expr, Item, Lit, LitStr, Meta, Path as SynPath, UseTree,
     visit::{self, Visit},
 };
 use yaml_rust2::{Yaml, YamlLoader};
@@ -25,6 +24,7 @@ const TOOLCHAIN_POLICY_PATH: &str = "policy/toolchain.toml";
 const UNSAFE_POLICY_PATH: &str = "policy/unsafe.toml";
 const WORKFLOW_ROOT: &str = ".github/workflows";
 const CURRENT_SCHEMA_VERSION: &str = "1.0";
+const ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED: &str = "Accepted unsafe boundary evidence requires compiler-derived expanded input inventory and the full cargo-geiger SafetyReport; this evidence is not implemented";
 
 pub(crate) fn check() -> Result<(), PolicyError> {
     let metadata = MetadataCommand::new()
@@ -538,6 +538,7 @@ fn scan_workspace_unsafe(
     metadata: &Metadata,
     policy: &UnsafePolicy,
 ) -> Result<(), PolicyError> {
+    reject_accepted_boundaries_without_authoritative_evidence(policy)?;
     let root = fs::canonicalize(root).map_err(|source| PolicyError::Read {
         path: root.to_path_buf(),
         source,
@@ -619,6 +620,21 @@ fn scan_workspace_unsafe(
             }
             UnsafeBoundaryStatus::Accepted | UnsafeBoundaryStatus::Proposed => {}
         }
+    }
+    Ok(())
+}
+
+fn reject_accepted_boundaries_without_authoritative_evidence(
+    policy: &UnsafePolicy,
+) -> Result<(), PolicyError> {
+    if policy
+        .boundaries
+        .iter()
+        .any(|boundary| boundary.status == UnsafeBoundaryStatus::Accepted)
+    {
+        return Err(PolicyError::InvalidUnsafeBoundary {
+            detail: ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED.to_owned(),
+        });
     }
     Ok(())
 }
@@ -732,12 +748,17 @@ fn canonical_policy_file(
     Ok(canonical)
 }
 
+struct LibraryModuleGraph {
+    target_source: PathBuf,
+    modules: BTreeMap<String, PathBuf>,
+}
+
 fn package_target_defining_module(
     package: &Package,
     package_root: &Path,
     module: &str,
     source: &Path,
-) -> Result<Option<PathBuf>, PolicyError> {
+) -> Result<Option<LibraryModuleGraph>, PolicyError> {
     for target in package
         .targets
         .iter()
@@ -764,12 +785,15 @@ fn package_target_defining_module(
                 ),
             });
         }
-        let reachable = reachable_module_map(package_root, &target_source, package.name.as_str())?;
+        let reachable = reachable_module_map(package_root, &target_source, target.name.as_str())?;
         if reachable
             .get(module)
             .is_some_and(|declared| declared == source)
         {
-            return Ok(Some(target_source));
+            return Ok(Some(LibraryModuleGraph {
+                target_source,
+                modules: reachable,
+            }));
         }
     }
     Ok(None)
@@ -964,17 +988,13 @@ fn validate_unsafe_boundary_governance(
             path: manifest_path.to_path_buf(),
             source,
         })?;
-    let source_text = fs::read_to_string(source).map_err(|error| PolicyError::Read {
-        path: source.to_path_buf(),
-        source: error,
-    })?;
     let adr_text = fs::read_to_string(adr).map_err(|source| PolicyError::Read {
         path: adr.to_path_buf(),
         source,
     })?;
     validate_adr_header(adr, &adr_text, boundary)?;
 
-    let target_root =
+    let module_graph =
         package_target_defining_module(package, package_root, boundary.module.as_str(), source)?
             .ok_or_else(|| PolicyError::InvalidUnsafeBoundary {
                 detail: format!(
@@ -984,31 +1004,23 @@ fn validate_unsafe_boundary_governance(
                     package.name
                 ),
             })?;
-    if !target_root.starts_with(package_root) {
+    if !module_graph.target_source.starts_with(package_root) {
         return Err(PolicyError::InvalidUnsafeBoundary {
             detail: format!("package {} target source escapes its package", package.name),
         });
     }
-    let target_text = fs::read_to_string(&target_root).map_err(|source| PolicyError::Read {
-        path: target_root.clone(),
-        source,
-    })?;
+    let lint_inventory = module_graph_unsafe_lint_inventory(&module_graph)?;
     let lints = manifest.get("lints");
     if !boundary_lint_state_is_valid(
         boundary.status,
         lints,
-        &target_text,
-        &source_text,
+        lint_inventory.as_ref(),
         boundary.expected_source_tokens,
         boundary.expected_geiger_count,
     ) {
-        let requirement = match boundary.status {
-            UnsafeBoundaryStatus::Proposed => "retain workspace forbid and zero inventory",
-            UnsafeBoundaryStatus::Accepted => "declare the exact deny/allow inventory",
-        };
         return Err(PolicyError::InvalidUnsafeBoundary {
             detail: format!(
-                "{} boundary {} must {requirement}",
+                "{} boundary {} must retain workspace forbid, one target-root forbid declaration, no reachable override, and zero inventory",
                 match boundary.status {
                     UnsafeBoundaryStatus::Proposed => "proposed",
                     UnsafeBoundaryStatus::Accepted => "accepted",
@@ -1171,13 +1183,10 @@ fn parse_iso_date(value: &str) -> Option<(u16, u8, u8)> {
 fn boundary_lint_state_is_valid(
     status: UnsafeBoundaryStatus,
     lints: Option<&toml::Value>,
-    target_text: &str,
-    source_text: &str,
+    lint_inventory: Option<&UnsafeLintInventory>,
     expected_source_tokens: usize,
     expected_geiger_count: usize,
 ) -> bool {
-    let target_lints = unsafe_lint_declarations(target_text);
-    let source_lints = unsafe_lint_declarations(source_text);
     match status {
         UnsafeBoundaryStatus::Proposed => {
             let inherits_workspace = lints
@@ -1185,36 +1194,50 @@ fn boundary_lint_state_is_valid(
                 .and_then(toml::Value::as_bool)
                 == Some(true);
             inherits_workspace
-                && target_lints
-                    == Some(vec![UnsafeLintDeclaration {
-                        level: UnsafeLintLevel::Forbid,
-                        is_inner: true,
-                    }])
-                && source_lints == Some(Vec::new())
+                && lint_inventory.is_some_and(|inventory| {
+                    inventory.target
+                        == vec![UnsafeLintDeclaration {
+                            level: UnsafeLintLevel::Forbid,
+                            is_inner: true,
+                        }]
+                        && inventory.reachable_non_target.is_empty()
+                })
                 && expected_source_tokens == 0
                 && expected_geiger_count == 0
         }
-        UnsafeBoundaryStatus::Accepted => {
-            let crate_denies = lints
-                .and_then(|value| value.get("rust"))
-                .and_then(|value| value.get("unsafe_code"))
-                .and_then(toml::Value::as_str)
-                == Some("deny");
-            crate_denies
-                && target_lints
-                    == Some(vec![UnsafeLintDeclaration {
-                        level: UnsafeLintLevel::Deny,
-                        is_inner: true,
-                    }])
-                && source_lints
-                    == Some(vec![UnsafeLintDeclaration {
-                        level: UnsafeLintLevel::Allow,
-                        is_inner: true,
-                    }])
-                && expected_source_tokens > 0
-                && expected_geiger_count > 0
+        UnsafeBoundaryStatus::Accepted => false,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct UnsafeLintInventory {
+    target: Vec<UnsafeLintDeclaration>,
+    reachable_non_target: Vec<UnsafeLintDeclaration>,
+}
+
+fn module_graph_unsafe_lint_inventory(
+    graph: &LibraryModuleGraph,
+) -> Result<Option<UnsafeLintInventory>, PolicyError> {
+    let mut target = None;
+    let mut reachable_non_target = Vec::new();
+    for source in graph.modules.values() {
+        let text = fs::read_to_string(source).map_err(|error| PolicyError::Read {
+            path: source.clone(),
+            source: error,
+        })?;
+        let Some(mut declarations) = unsafe_lint_declarations(&text) else {
+            return Ok(None);
+        };
+        if source == &graph.target_source {
+            target = Some(declarations);
+        } else {
+            reachable_non_target.append(&mut declarations);
         }
     }
+    Ok(target.map(|target| UnsafeLintInventory {
+        target,
+        reachable_non_target,
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1236,6 +1259,7 @@ struct UnsafeLintDeclaration {
 struct UnsafeLintVisitor {
     declarations: Vec<UnsafeLintDeclaration>,
     has_conditional_declaration: bool,
+    has_invalid_declaration: bool,
 }
 
 impl<'ast> Visit<'ast> for UnsafeLintVisitor {
@@ -1252,11 +1276,15 @@ impl<'ast> Visit<'ast> for UnsafeLintVisitor {
             ("deny", UnsafeLintLevel::Deny),
             ("forbid", UnsafeLintLevel::Forbid),
         ] {
-            if attribute_has_unsafe_lint(attribute, name) {
-                self.declarations.push(UnsafeLintDeclaration {
-                    level,
-                    is_inner: matches!(attribute.style, AttrStyle::Inner(_)),
-                });
+            match attribute_has_unsafe_lint(attribute, name) {
+                Ok(true) => {
+                    self.declarations.push(UnsafeLintDeclaration {
+                        level,
+                        is_inner: matches!(attribute.style, AttrStyle::Inner(_)),
+                    });
+                }
+                Ok(false) => {}
+                Err(()) => self.has_invalid_declaration = true,
             }
         }
         visit::visit_attribute(self, attribute);
@@ -1267,19 +1295,35 @@ fn unsafe_lint_declarations(text: &str) -> Option<Vec<UnsafeLintDeclaration>> {
     let file = syn::parse_file(text).ok()?;
     let mut visitor = UnsafeLintVisitor::default();
     visitor.visit_file(&file);
-    (!visitor.has_conditional_declaration).then_some(visitor.declarations)
+    (!visitor.has_conditional_declaration && !visitor.has_invalid_declaration)
+        .then_some(visitor.declarations)
 }
 
-fn attribute_has_unsafe_lint(attribute: &Attribute, level: &str) -> bool {
+fn attribute_has_unsafe_lint(attribute: &Attribute, level: &str) -> Result<bool, ()> {
     if !attribute.path().is_ident(level) {
-        return false;
+        return Ok(false);
     }
-    let Meta::List(arguments) = &attribute.meta else {
-        return false;
+    let Meta::List(_) = &attribute.meta else {
+        return Ok(false);
     };
-    arguments
-        .parse_args_with(Punctuated::<SynPath, Token![,]>::parse_terminated)
-        .is_ok_and(|lints| lints.iter().any(|lint| lint.is_ident("unsafe_code")))
+    let mut has_unsafe_code = false;
+    let mut has_reason = false;
+    attribute
+        .parse_nested_meta(|meta| {
+            if meta.path.is_ident("reason") {
+                if has_reason {
+                    return Err(meta.error("lint attribute may contain only one reason"));
+                }
+                let value = meta.value()?;
+                value.parse::<LitStr>()?;
+                has_reason = true;
+            } else {
+                has_unsafe_code |= meta.path.is_ident("unsafe_code");
+            }
+            Ok(())
+        })
+        .map_err(|_| ())?;
+    Ok(has_unsafe_code)
 }
 
 fn attribute_tokens_contain_identifier(attribute: &Attribute, expected: &str) -> bool {
@@ -1484,8 +1528,8 @@ impl<'ast> Visit<'ast> for CompilerInputVisitor {
                 Err(_) => self.inputs.push(CompilerInput::Generated("include!")),
             }
         } else {
-            // Stable syn sees macro bodies as tokens, not expanded compiler inputs.
-            // Rejecting a nested `include` identifier prevents wrappers from hiding it.
+            // This catches only obvious Proposed-state wrappers. Stable syn cannot
+            // inventory expansion, so every Accepted boundary is rejected earlier.
             if rust_text_contains_identifier(&node.tokens.to_string(), "include") {
                 self.inputs
                     .push(CompilerInput::Generated("macro-expanded include!"));
@@ -1997,6 +2041,34 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn lint_inventory(target: &str, reachable_non_target: &[&str]) -> Option<UnsafeLintInventory> {
+        let target = unsafe_lint_declarations(target)?;
+        let mut reachable = Vec::new();
+        for source in reachable_non_target {
+            reachable.extend(unsafe_lint_declarations(source)?);
+        }
+        Some(UnsafeLintInventory {
+            target,
+            reachable_non_target: reachable,
+        })
+    }
+
+    fn fixture_boundary(status: UnsafeBoundaryStatus) -> UnsafeBoundary {
+        UnsafeBoundary {
+            package: "rootlight-vfs".to_owned(),
+            package_version: "0.1.0".to_owned(),
+            manifest: "crates/rootlight-vfs/Cargo.toml".into(),
+            module: "rootlight_vfs::platform::os".to_owned(),
+            source: "crates/rootlight-vfs/src/platform/os.rs".into(),
+            status,
+            adr: "policy/adr/ADR-026-fixture.md".into(),
+            owner: "@tomasmarekk".to_owned(),
+            reason: "fixture".to_owned(),
+            expected_source_tokens: usize::from(status == UnsafeBoundaryStatus::Accepted),
+            expected_geiger_count: usize::from(status == UnsafeBoundaryStatus::Accepted),
+        }
+    }
+
     #[test]
     fn unsafe_boundary_module_uses_the_declared_module_identity() {
         let directory = tempdir().expect("temporary directory is available");
@@ -2011,57 +2083,99 @@ mod tests {
         let package = fs::canonicalize(package).expect("package path canonicalizes");
         let target = fs::canonicalize(target).expect("target path canonicalizes");
         let source = fs::canonicalize(source).expect("source path canonicalizes");
-        let modules = reachable_module_map(&package, &target, "rootlight-vfs")
+        let modules = reachable_module_map(&package, &target, "rootlight_vfs")
             .expect("module graph resolves");
 
-        assert_eq!(modules.get("rootlight-vfs::logical"), Some(&source));
-        assert!(!modules.contains_key("rootlight-vfs::physical"));
+        assert_eq!(modules.get("rootlight_vfs::logical"), Some(&source));
+        assert!(!modules.contains_key("rootlight_vfs::physical"));
     }
 
     #[test]
-    fn proposed_and_accepted_boundaries_require_exact_lint_states() {
+    fn cargo_library_target_name_defines_the_crate_module_identity() {
+        let directory = tempdir().expect("temporary directory is available");
+        let package_root = directory.path().join("hyphenated-package");
+        let source_root = package_root.join("src");
+        fs::create_dir_all(&source_root).expect("source directory creates");
+        fs::write(
+            package_root.join("Cargo.toml"),
+            "[package]\nname = \"hyphenated-package\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\nname = \"custom_crate\"\n",
+        )
+        .expect("manifest writes");
+        fs::write(source_root.join("lib.rs"), "mod logical;\n").expect("target source writes");
+        fs::write(source_root.join("logical.rs"), "").expect("module source writes");
+        let metadata = MetadataCommand::new()
+            .manifest_path(package_root.join("Cargo.toml"))
+            .no_deps()
+            .exec()
+            .expect("Cargo metadata resolves");
+        let package = metadata.root_package().expect("root package exists");
+        let package_root = fs::canonicalize(package_root).expect("package root canonicalizes");
+        let source =
+            fs::canonicalize(source_root.join("logical.rs")).expect("source canonicalizes");
+
+        let graph = package_target_defining_module(
+            package,
+            &package_root,
+            "custom_crate::logical",
+            &source,
+        )
+        .expect("module identity resolves")
+        .expect("custom target declares module");
+
+        assert_eq!(graph.modules.get("custom_crate::logical"), Some(&source));
+        assert!(
+            package_target_defining_module(
+                package,
+                &package_root,
+                "hyphenated-package::logical",
+                &source
+            )
+            .expect("package-name mismatch is checked")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn proposed_boundaries_require_exact_reachable_lint_state() {
         let proposed_manifest: toml::Value =
             toml::from_str("[lints]\nworkspace = true\n").expect("fixture parses");
         let accepted_manifest: toml::Value =
             toml::from_str("[lints.rust]\nunsafe_code = \"deny\"\n").expect("fixture parses");
+        let exact = lint_inventory(
+            "#![forbid(unsafe_code, reason = \"workspace safety baseline\")]",
+            &["fn safe() {}"],
+        )
+        .expect("exact lint state parses");
 
         assert!(boundary_lint_state_is_valid(
             UnsafeBoundaryStatus::Proposed,
             proposed_manifest.get("lints"),
-            "#![forbid(unsafe_code)]",
-            "fn safe() {}",
+            Some(&exact),
             0,
             0,
         ));
         assert!(!boundary_lint_state_is_valid(
             UnsafeBoundaryStatus::Proposed,
             accepted_manifest.get("lints"),
-            "#![deny(unsafe_code)]",
-            "fn safe() {}",
+            Some(&exact),
             0,
             0,
         ));
-        assert!(boundary_lint_state_is_valid(
+        assert!(!boundary_lint_state_is_valid(
             UnsafeBoundaryStatus::Accepted,
             accepted_manifest.get("lints"),
-            "#![deny(unsafe_code)]",
-            "#![allow(unsafe_code)]\nunsafe fn native() {}",
+            Some(&exact),
             2,
             1,
         ));
         assert!(!boundary_lint_state_is_valid(
-            UnsafeBoundaryStatus::Accepted,
-            accepted_manifest.get("lints"),
-            "#![deny(unsafe_code)]",
-            "fn safe() {}",
-            0,
-            0,
-        ));
-        assert!(!boundary_lint_state_is_valid(
             UnsafeBoundaryStatus::Proposed,
             proposed_manifest.get("lints"),
-            "// #![forbid(unsafe_code)]\nconst CLAIM: &str = \"#![forbid(unsafe_code)]\";",
-            "fn safe() {}",
+            lint_inventory(
+                "// #![forbid(unsafe_code)]\nconst CLAIM: &str = \"#![forbid(unsafe_code)]\";",
+                &[]
+            )
+            .as_ref(),
             0,
             0,
         ));
@@ -2069,22 +2183,81 @@ mod tests {
             "#![forbid(unsafe_code)]\n#![allow(unsafe_code)]",
             "#![forbid(unsafe_code)]\n#![warn(unsafe_code)]",
             "#![forbid(unsafe_code)]\n#![expect(unsafe_code)]",
+            "#![forbid(unsafe_code)]\n#![allow(unsafe_code, reason = \"late override\")]",
             "#![cfg_attr(any(), forbid(unsafe_code))]",
         ] {
+            let inventory = lint_inventory(target, &[]);
             assert!(!boundary_lint_state_is_valid(
                 UnsafeBoundaryStatus::Proposed,
                 proposed_manifest.get("lints"),
-                target,
-                "fn safe() {}",
+                inventory.as_ref(),
                 0,
                 0,
             ));
         }
+        let reachable_override = lint_inventory(
+            "#![forbid(unsafe_code)]",
+            &[
+                "fn safe() {}",
+                "#![allow(unsafe_code, reason = \"reachable sibling override\")]\nfn hidden() {}",
+            ],
+        );
         assert!(!boundary_lint_state_is_valid(
             UnsafeBoundaryStatus::Proposed,
             proposed_manifest.get("lints"),
-            "#![forbid(unsafe_code)]",
-            "#[allow(unsafe_code)]\nfn hidden() {}",
+            reachable_override.as_ref(),
+            0,
+            0,
+        ));
+        assert!(
+            unsafe_lint_declarations("#![forbid(unsafe_code, reason = \"one\", reason = \"two\")]")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn reachable_module_lint_inventory_rejects_a_sibling_override() {
+        let directory = tempdir().expect("temporary directory is available");
+        let source_root = directory.path().join("src");
+        fs::create_dir(&source_root).expect("source directory creates");
+        fs::write(
+            source_root.join("lib.rs"),
+            "#![forbid(unsafe_code, reason = \"workspace safety baseline\")]\nmod boundary;\nmod sibling;\n",
+        )
+        .expect("target source writes");
+        fs::write(source_root.join("boundary.rs"), "fn safe() {}\n")
+            .expect("boundary source writes");
+        fs::write(
+            source_root.join("sibling.rs"),
+            "#![allow(unsafe_code, reason = \"late reachable override\")]\nfn hidden() {}\n",
+        )
+        .expect("sibling source writes");
+        let package_root = fs::canonicalize(directory.path()).expect("package root canonicalizes");
+        let target_source =
+            fs::canonicalize(source_root.join("lib.rs")).expect("target source canonicalizes");
+        let modules = reachable_module_map(&package_root, &target_source, "fixture_crate")
+            .expect("module graph resolves");
+        let graph = LibraryModuleGraph {
+            target_source,
+            modules,
+        };
+        let inventory = module_graph_unsafe_lint_inventory(&graph)
+            .expect("lint inventory reads")
+            .expect("lint declarations parse");
+        let manifest: toml::Value =
+            toml::from_str("[lints]\nworkspace = true\n").expect("fixture parses");
+
+        assert_eq!(
+            inventory.reachable_non_target,
+            vec![UnsafeLintDeclaration {
+                level: UnsafeLintLevel::Allow,
+                is_inner: true,
+            }]
+        );
+        assert!(!boundary_lint_state_is_valid(
+            UnsafeBoundaryStatus::Proposed,
+            manifest.get("lints"),
+            Some(&inventory),
             0,
             0,
         ));
@@ -2121,20 +2294,8 @@ mod tests {
 
     #[test]
     fn unsafe_boundary_adr_header_binds_identity_outside_fences() {
-        let boundary = UnsafeBoundary {
-            package: "rootlight-vfs".to_owned(),
-            package_version: "0.1.0".to_owned(),
-            manifest: "crates/rootlight-vfs/Cargo.toml".into(),
-            module: "rootlight-vfs::platform::os".to_owned(),
-            source: "crates/rootlight-vfs/src/platform/os.rs".into(),
-            status: UnsafeBoundaryStatus::Proposed,
-            adr: "policy/adr/ADR-026-fixture.md".into(),
-            owner: "@tomasmarekk".to_owned(),
-            reason: "fixture".to_owned(),
-            expected_source_tokens: 0,
-            expected_geiger_count: 0,
-        };
-        let header = "# ADR-026: Fixture\n\n**Status:** Proposed\n**Owner:** @tomasmarekk\n**Proposal date:** 2026-07-17\n**Decision date:** not accepted\n**Package:** rootlight-vfs@0.1.0\n**Manifest:** crates/rootlight-vfs/Cargo.toml\n**Module:** rootlight-vfs::platform::os\n**Source:** crates/rootlight-vfs/src/platform/os.rs\n**Related baseline:** ADR-010\n\n## Context\n";
+        let boundary = fixture_boundary(UnsafeBoundaryStatus::Proposed);
+        let header = "# ADR-026: Fixture\n\n**Status:** Proposed\n**Owner:** @tomasmarekk\n**Proposal date:** 2026-07-17\n**Decision date:** not accepted\n**Package:** rootlight-vfs@0.1.0\n**Manifest:** crates/rootlight-vfs/Cargo.toml\n**Module:** rootlight_vfs::platform::os\n**Source:** crates/rootlight-vfs/src/platform/os.rs\n**Related baseline:** ADR-010\n\n## Context\n";
         let path = Path::new("policy/adr/ADR-026-fixture.md");
 
         validate_adr_header(path, header, &boundary).expect("exact ADR header passes");
@@ -2174,6 +2335,37 @@ mod tests {
 
         let included = fs::canonicalize(included).expect("included input canonicalizes");
         assert_eq!(observed.get(&included).map(|item| item.count), Some(1));
+    }
+
+    #[test]
+    fn accepted_boundary_rejects_unexpanded_macro_generated_code() {
+        let directory = tempdir().expect("temporary directory is available");
+        let source = directory.path().join("lib.rs");
+        let text = "emit_generated!();\n";
+        fs::write(&source, text).expect("source fixture writes");
+
+        assert!(
+            rust_compiler_inputs(&source, text)
+                .expect("syntactic scan cannot see expansion")
+                .is_empty()
+        );
+        assert_eq!(
+            scan_rust_file(&source)
+                .expect("syntactic unsafe scan succeeds")
+                .count,
+            0
+        );
+        let policy = UnsafePolicy {
+            schema_version: CURRENT_SCHEMA_VERSION.to_owned(),
+            boundaries: vec![fixture_boundary(UnsafeBoundaryStatus::Accepted)],
+        };
+        let error = reject_accepted_boundaries_without_authoritative_evidence(&policy)
+            .expect_err("Accepted must fail without compiler-derived evidence");
+
+        assert_eq!(
+            error.to_string(),
+            format!("POLICY_UNSAFE_BOUNDARY: {ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED}")
+        );
     }
 
     #[test]
