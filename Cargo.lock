@@ -1782,6 +1782,7 @@ dependencies = [
  "rootlight-operations",
  "rootlight-protocol",
  "rootlight-runtime",
+ "rootlight-service",
  "serde",
  "serde_json",
  "tempfile",

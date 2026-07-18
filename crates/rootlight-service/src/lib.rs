@@ -14,7 +14,7 @@ use rootlight_adapter_sdk::{
 use rootlight_adapter_treesitter::{
     ParserSettings, RuntimeConfig, TreeSitterAnalyzer, TreeSitterProvider,
 };
-use rootlight_cancel::Cancellation;
+pub use rootlight_cancel::Cancellation;
 use rootlight_catalog::EphemeralOracleWriter;
 use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
 use rootlight_discovery::{DiscoveryLimits, DiscoveryPolicy, InputClass, discover};
@@ -26,10 +26,10 @@ use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, ExtensionSupport, FileIdentityClaim, IrLimits,
     ProducerIdentity, SourceRef, SourceSpan,
 };
-use rootlight_query::{
-    CodeLocateResult, GenerationSet, LocateMode, QueryBudget, QueryResponse, SourceReadQueryResult,
-    SymbolExplainResult, project_lexical_documents,
+pub use rootlight_query::{
+    CodeLocateResult, LocateMode, QueryResponse, SourceReadQueryResult, SymbolExplainResult,
 };
+use rootlight_query::{GenerationSet, QueryBudget, project_lexical_documents};
 use rootlight_search::{BuildBudget, LexicalIndex, SearchBudget};
 use rootlight_source::{SourceBudget, SourceReadOptions, SourceService};
 use rootlight_storage::{

@@ -6,12 +6,12 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    env,
+    env, fs,
     io::Write as _,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rootlight_client::{
@@ -34,10 +34,17 @@ use rootlight_operations::{
     RecoveryClass as JournalRecoveryClass,
 };
 use rootlight_runtime::RuntimePaths;
+use rootlight_service::{
+    Cancellation, CodeLocateResult, FirstSliceError, FirstSliceIndexReceipt, FirstSliceService,
+    LocateMode, QueryResponse, SourceReadQueryResult, SymbolExplainResult,
+};
 use serde::Serialize;
 
 const CLI_CONTRACT_VERSION: &str = "1.0";
+const FIRST_SLICE_DEMO_CONTRACT_VERSION: &str = "1.0";
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
+const FIRST_SLICE_SOURCE_BEFORE: &str = "pub fn answer() -> u32 {\n    42\n}\n";
+const FIRST_SLICE_SOURCE_AFTER: &str = "pub fn answer() -> u32 {\n    43\n}\n";
 
 fn main() -> ExitCode {
     match run() {
@@ -77,6 +84,9 @@ fn run() -> Result<CommandResult, CliError> {
     };
     let trailing = arguments.collect::<Vec<_>>();
 
+    if command == "first-slice-demo" {
+        return execute_first_slice_demo(&trailing);
+    }
     let paths = runtime_paths()?;
     if standalone {
         execute_standalone(&paths, command.to_string_lossy().as_ref(), &trailing)
@@ -87,6 +97,103 @@ fn run() -> Result<CommandResult, CliError> {
             Client::connect_or_start(&paths, client_instance_id, ConnectPolicy::StartIfMissing)?;
         execute_client(&client, command.to_string_lossy().as_ref(), &trailing)
     }
+}
+
+fn execute_first_slice_demo(arguments: &[std::ffi::OsString]) -> Result<CommandResult, CliError> {
+    if !arguments.is_empty() {
+        return Err(CliError::Usage);
+    }
+    let started = Instant::now();
+    let fixture = tempfile::Builder::new()
+        .prefix("rootlight-first-slice-")
+        .tempdir()
+        .map_err(CliError::DemoIo)?;
+    let source_directory = fixture.path().join("src");
+    fs::create_dir(&source_directory).map_err(CliError::DemoIo)?;
+    let source_path = source_directory.join("lib.rs");
+    fs::write(&source_path, FIRST_SLICE_SOURCE_BEFORE).map_err(CliError::DemoIo)?;
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(30))
+        .ok_or(CliError::Clock)?;
+    let cancellation = Cancellation::with_deadline(deadline);
+    let mut service = FirstSliceService::new(2)?;
+
+    let first = service.index_rust_fixture(fixture.path(), &cancellation)?;
+    let locate = service.code_locate(
+        first.generation,
+        "answer".to_owned(),
+        LocateMode::Exact,
+        8,
+        &cancellation,
+    )?;
+    let hit = locate.data.hits.first().ok_or(CliError::DemoInvariant)?;
+    let symbol = hit.symbol;
+    let reference = hit.source.clone().ok_or(CliError::DemoInvariant)?;
+    let explain = service.symbol_explain(first.generation, symbol, &cancellation)?;
+    let source = service.source_read(first.generation, vec![reference], &cancellation)?;
+
+    fs::write(&source_path, FIRST_SLICE_SOURCE_AFTER).map_err(CliError::DemoIo)?;
+    let second = service.index_rust_fixture(fixture.path(), &cancellation)?;
+    let second_locate = service.code_locate(
+        second.generation,
+        "answer".to_owned(),
+        LocateMode::Exact,
+        8,
+        &cancellation,
+    )?;
+    let pinned_first = service.code_locate(
+        first.generation,
+        "answer".to_owned(),
+        LocateMode::Exact,
+        8,
+        &cancellation,
+    )?;
+    let second_symbol = second_locate
+        .data
+        .hits
+        .first()
+        .map(|hit| hit.symbol)
+        .ok_or(CliError::DemoInvariant)?;
+    if second.parent != Some(first.generation)
+        || service.active_generation() != Some(second.generation)
+        || second_symbol != symbol
+        || pinned_first.data != locate.data
+    {
+        return Err(CliError::DemoInvariant);
+    }
+    let measurements = FirstSliceMeasurements {
+        total_wall_micros: elapsed_micros(started),
+        first_index_wall_micros: first.elapsed_micros,
+        second_index_wall_micros: second.elapsed_micros,
+        first_oracle_allocated_bytes: first.oracle_allocated_bytes,
+        second_oracle_allocated_bytes: second.oracle_allocated_bytes,
+        lexical_index_bytes: None,
+        lexical_index_size_status: "unavailable_in_memory_backend",
+        peak_rss_bytes: None,
+        peak_rss_status: "unavailable_portable_sampler",
+        locate: QueryMeasurement::from_response(&locate),
+        explain: QueryMeasurement::from_response(&explain),
+        source: QueryMeasurement::from_response(&source),
+        second_locate: QueryMeasurement::from_response(&second_locate),
+        pinned_first: QueryMeasurement::from_response(&pinned_first),
+    };
+    Ok(CommandResult::FirstSliceDemo(Box::new(
+        FirstSliceDemoResult {
+            contract_version: FIRST_SLICE_DEMO_CONTRACT_VERSION,
+            storage_mode: "ephemeral_sqlite_and_lexical",
+            first_freshness: "active_at_query_time",
+            retained_first_freshness: "retained_after_update",
+            second_freshness: "active",
+            first,
+            locate,
+            explain,
+            source,
+            second,
+            second_locate,
+            pinned_first,
+            measurements,
+        },
+    )))
 }
 
 fn execute_client(
@@ -597,6 +704,10 @@ fn unix_time_ms() -> Result<u64, CliError> {
     u64::try_from(elapsed.as_millis()).map_err(|_| CliError::Clock)
 }
 
+fn elapsed_micros(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
 fn runtime_paths() -> Result<RuntimePaths, CliError> {
     match (
         env::var_os("ROOTLIGHT_STATE_DIR"),
@@ -644,7 +755,7 @@ impl CliEnvelope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 enum CommandResult {
     Health(Health),
@@ -656,6 +767,59 @@ enum CommandResult {
         accepted: bool,
         operation: OperationStatus,
     },
+    FirstSliceDemo(Box<FirstSliceDemoResult>),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct FirstSliceDemoResult {
+    contract_version: &'static str,
+    storage_mode: &'static str,
+    first_freshness: &'static str,
+    retained_first_freshness: &'static str,
+    second_freshness: &'static str,
+    first: FirstSliceIndexReceipt,
+    locate: QueryResponse<CodeLocateResult>,
+    explain: QueryResponse<SymbolExplainResult>,
+    source: QueryResponse<SourceReadQueryResult>,
+    second: FirstSliceIndexReceipt,
+    second_locate: QueryResponse<CodeLocateResult>,
+    pinned_first: QueryResponse<CodeLocateResult>,
+    measurements: FirstSliceMeasurements,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct FirstSliceMeasurements {
+    total_wall_micros: u64,
+    first_index_wall_micros: u64,
+    second_index_wall_micros: u64,
+    first_oracle_allocated_bytes: u64,
+    second_oracle_allocated_bytes: u64,
+    lexical_index_bytes: Option<u64>,
+    lexical_index_size_status: &'static str,
+    peak_rss_bytes: Option<u64>,
+    peak_rss_status: &'static str,
+    locate: QueryMeasurement,
+    explain: QueryMeasurement,
+    source: QueryMeasurement,
+    second_locate: QueryMeasurement,
+    pinned_first: QueryMeasurement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct QueryMeasurement {
+    elapsed_micros: u64,
+    response_json_bytes: u64,
+    estimated_tokens: u64,
+}
+
+impl QueryMeasurement {
+    fn from_response<T>(response: &QueryResponse<T>) -> Self {
+        Self {
+            elapsed_micros: response.usage.elapsed_micros,
+            response_json_bytes: response.usage.json_bytes,
+            estimated_tokens: response.usage.estimated_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -695,7 +859,7 @@ impl ExitFamily {
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error(
-        "usage: rootlight [--standalone] health [--json]|diagnostics quick|support-bundle --output <file>|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
+        "usage: rootlight [--standalone] first-slice-demo|health [--json]|diagnostics quick|support-bundle --output <file>|operation-submit <id> [--timeout-ms <ms>|--deadline-unix-ms <ms> [--lease-expires-unix-ms <ms>]|--lease-expires-unix-ms <ms>]|operation-status <id>|operation-cancel <id>"
     )]
     Usage,
     #[error("daemon path overrides must provide both state and runtime directories")]
@@ -735,6 +899,12 @@ enum CliError {
     Service(#[from] ServiceError),
     #[error("operation journal failed")]
     Operations(#[from] rootlight_operations::OperationError),
+    #[error("first-slice demo failed")]
+    FirstSlice(#[from] FirstSliceError),
+    #[error("first-slice demo filesystem setup failed")]
+    DemoIo(#[source] std::io::Error),
+    #[error("first-slice demo invariant failed")]
+    DemoInvariant,
 }
 
 impl CliError {
