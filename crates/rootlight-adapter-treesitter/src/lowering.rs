@@ -2119,8 +2119,8 @@ fn canonical_rust_scope_component(
                     .get(index..)
                     .and_then(|remaining| remaining.chars().next())
                     .ok_or_else(|| provider_failure("treesitter-lowering-scope"))?;
-                if !is_rust_scope_word_character(next)
-                    && !(next == '#' && index == start + 1 && bytes.get(start) == Some(&b'r'))
+                if !(is_rust_scope_word_character(next)
+                    || next == '#' && index == start + 1 && bytes.get(start) == Some(&b'r'))
                 {
                     break;
                 }
