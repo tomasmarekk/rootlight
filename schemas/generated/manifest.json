@@ -111,12 +111,52 @@
       "blake3": "b513422d0bb11c80fda6eaac11f20c6af74b41a4b0c1dc637b5636852f2706ff"
     },
     {
+      "path": "schemas/generated/json/mcp-code-locate-input-1.0.schema.json",
+      "blake3": "cf600bb592444af8f4eb694f079094ac1ef11ae2fb8c80bdf4ce43a61ccc3a56"
+    },
+    {
+      "path": "schemas/generated/json/mcp-code-locate-output-1.0.schema.json",
+      "blake3": "0e809277555a31e2356a3b9cb30034ef74ab247b58dcb9cfae58ae5db6a9c05e"
+    },
+    {
       "path": "schemas/generated/json/mcp-error-response-1.0.schema.json",
       "blake3": "f1d0a2bb2ff60c02aaea031312e1b904b2cd1e1031bc4f684b36414e60ef8826"
     },
     {
+      "path": "schemas/generated/json/mcp-operation-status-input-1.0.schema.json",
+      "blake3": "3f617965cb7c402109531476c5216668892a5b59899769a16649bb8ce19e0ee1"
+    },
+    {
+      "path": "schemas/generated/json/mcp-operation-status-output-1.0.schema.json",
+      "blake3": "0e6f7b5599073d98774cff7510c4f786bd52463deff805cff7d2220de2d21380"
+    },
+    {
+      "path": "schemas/generated/json/mcp-repo-index-input-1.0.schema.json",
+      "blake3": "06c1d028e77d05c6b3dcc1a055046a0ebed1a3ad88aa6ada09b9d6ecc578290c"
+    },
+    {
+      "path": "schemas/generated/json/mcp-repo-index-output-1.0.schema.json",
+      "blake3": "2267595da2366de5575585806264df44702f6bef209a3a04e6dd4b6db1908d74"
+    },
+    {
       "path": "schemas/generated/json/mcp-response-metadata-1.0.schema.json",
       "blake3": "748bcb2bf594df78827224321e9d03e351fa9f5dfb16d1bae28086ce715d759d"
+    },
+    {
+      "path": "schemas/generated/json/mcp-source-read-input-1.0.schema.json",
+      "blake3": "4bfe83976fc071e3983ffa070dfeed4c908d61a06c114cb5f2b5d546d6db81ca"
+    },
+    {
+      "path": "schemas/generated/json/mcp-source-read-output-1.0.schema.json",
+      "blake3": "d5fcc384b32d4f643441f5968967b8cd054344704235b31b6f890c1bd52f3cc2"
+    },
+    {
+      "path": "schemas/generated/json/mcp-symbol-explain-input-1.0.schema.json",
+      "blake3": "7e3f2905fbc2238f1218fbc0b1c4725119995a0930adf3a84f833c0431dd5127"
+    },
+    {
+      "path": "schemas/generated/json/mcp-symbol-explain-output-1.0.schema.json",
+      "blake3": "e14b4d7a75096de53b05377adda06bc91a8717335f9ae02f904da6b7fbc5bbb9"
     },
     {
       "path": "schemas/generated/protobuf/rootlight.desc",

@@ -18,7 +18,11 @@ use rootlight_ir::{
     NormalizedIrDocument, decode_extension_envelope, decode_ir_document, decode_legacy_ir_document,
     decode_lexical_evidence, decode_lexical_evidence_envelope,
 };
-use rootlight_mcp_contract::{ErrorResponse, ResponseMetadata};
+use rootlight_mcp_contract::{
+    CodeLocateInput, CodeLocateOutput, ErrorResponse, OperationStatusInput, OperationStatusOutput,
+    RepoIndexInput, RepoIndexOutput, ResponseMetadata, SourceReadInput, SourceReadOutput,
+    SymbolExplainInput, SymbolExplainOutput,
+};
 use rootlight_protocol::generated::common::v1::ContractVersion as ProtocolContractVersion;
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
@@ -636,6 +640,16 @@ fn generate_json_schemas(staged_root: &Path) -> Result<(), SchemaError> {
     )?;
     write_schema::<ResponseMetadata>(&schema_root.join("mcp-response-metadata-1.0.schema.json"))?;
     write_schema::<ErrorResponse>(&schema_root.join("mcp-error-response-1.0.schema.json"))?;
+    write_mcp_tool_schema::<RepoIndexInput>(&schema_root, "repo.index", "input")?;
+    write_mcp_tool_schema::<RepoIndexOutput>(&schema_root, "repo.index", "output")?;
+    write_mcp_tool_schema::<OperationStatusInput>(&schema_root, "operation.status", "input")?;
+    write_mcp_tool_schema::<OperationStatusOutput>(&schema_root, "operation.status", "output")?;
+    write_mcp_tool_schema::<CodeLocateInput>(&schema_root, "code.locate", "input")?;
+    write_mcp_tool_schema::<CodeLocateOutput>(&schema_root, "code.locate", "output")?;
+    write_mcp_tool_schema::<SymbolExplainInput>(&schema_root, "symbol.explain", "input")?;
+    write_mcp_tool_schema::<SymbolExplainOutput>(&schema_root, "symbol.explain", "output")?;
+    write_mcp_tool_schema::<SourceReadInput>(&schema_root, "source.read", "input")?;
+    write_mcp_tool_schema::<SourceReadOutput>(&schema_root, "source.read", "output")?;
     Ok(())
 }
 
@@ -644,9 +658,142 @@ fn write_schema<T: JsonSchema>(path: &Path) -> Result<(), SchemaError> {
         .for_deserialize()
         .into_generator()
         .into_root_schema_for::<T>();
+    write_schema_value(path, schema)
+}
+
+fn write_mcp_tool_schema<T: JsonSchema>(
+    schema_root: &Path,
+    tool: &str,
+    direction: &str,
+) -> Result<(), SchemaError> {
+    let mut schema = SchemaSettings::draft2020_12()
+        .for_deserialize()
+        .into_generator()
+        .into_root_schema_for::<T>();
+    if direction == "input"
+        && let Some(object) = schema.as_object_mut()
+    {
+        reject_explicit_null_for_optional_properties(object);
+        if tool == "repo.index" {
+            enforce_exact_repo_index_target(object);
+        }
+    }
+    schema.insert(
+        "$id".to_owned(),
+        format!("https://rootlight.local/schema/mcp/{tool}/{direction}/1.0").into(),
+    );
+    let file_tool = tool.replace('.', "-");
+    write_schema_value(
+        &schema_root.join(format!("mcp-{file_tool}-{direction}-1.0.schema.json")),
+        schema,
+    )
+}
+
+fn write_schema_value(path: &Path, schema: schemars::Schema) -> Result<(), SchemaError> {
     let mut bytes = serde_json::to_vec_pretty(&schema).map_err(SchemaError::SerializeJson)?;
     bytes.push(b'\n');
     write_bytes(path, &bytes)
+}
+
+fn enforce_exact_repo_index_target(object: &mut serde_json::Map<String, serde_json::Value>) {
+    object.insert(
+        "oneOf".to_owned(),
+        serde_json::json!([
+            {
+                "required": ["root"],
+                "not": {"required": ["repository_id"]}
+            },
+            {
+                "required": ["repository_id"],
+                "not": {"required": ["root"]}
+            }
+        ]),
+    );
+}
+
+fn reject_explicit_null_for_optional_properties(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let required: BTreeSet<String> = object
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect();
+    if let Some(properties) = object
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for (name, property) in properties {
+            if !required.contains(name) {
+                remove_null_alternative(property);
+            }
+            recurse_schema_value(property);
+        }
+    }
+
+    for keyword in ["$defs", "definitions"] {
+        if let Some(definitions) = object
+            .get_mut(keyword)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for definition in definitions.values_mut() {
+                recurse_schema_value(definition);
+            }
+        }
+    }
+    if let Some(items) = object.get_mut("items") {
+        recurse_schema_value(items);
+    }
+    for keyword in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+        if let Some(alternatives) = object
+            .get_mut(keyword)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for alternative in alternatives {
+                recurse_schema_value(alternative);
+            }
+        }
+    }
+}
+
+fn recurse_schema_value(schema: &mut serde_json::Value) {
+    if let Some(object) = schema.as_object_mut() {
+        reject_explicit_null_for_optional_properties(object);
+    }
+}
+
+fn remove_null_alternative(schema: &mut serde_json::Value) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    let single_type = if let Some(types) = object.get_mut("type") {
+        if let Some(types) = types.as_array_mut() {
+            types.retain(|kind| kind.as_str() != Some("null"));
+            (types.len() == 1).then(|| types[0].clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(single_type) = single_type {
+        object.insert("type".to_owned(), single_type);
+    }
+    if let Some(alternatives) = object
+        .get_mut("anyOf")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        alternatives.retain(|alternative| {
+            alternative
+                .as_object()
+                .and_then(|object| object.get("type"))
+                .and_then(serde_json::Value::as_str)
+                != Some("null")
+        });
+    }
 }
 
 fn validate_generated_json_schemas(
@@ -654,6 +801,7 @@ fn validate_generated_json_schemas(
     staged_root: &Path,
 ) -> Result<(), SchemaError> {
     let schema_root = staged_root.join(SCHEMA_ROOT).join("json");
+    validate_all_schema_documents(&schema_root)?;
     let ir_document = |major: u64, minor: u64| {
         serde_json::json!({
             "version": {"major": major, "minor": minor},
@@ -880,6 +1028,133 @@ fn validate_generated_json_schemas(
                 value
             },
         ),
+        SchemaSemanticCase::valid(
+            "mcp-repo-index-input-1.0.schema.json",
+            "repository root indexing request",
+            serde_json::json!({"root": "C:/fixture", "mode": "auto", "wait_ms": 1000}),
+        ),
+        SchemaSemanticCase::invalid(
+            "mcp-repo-index-input-1.0.schema.json",
+            "repository indexing request has two targets",
+            serde_json::json!({
+                "root": "C:/fixture",
+                "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+            }),
+        ),
+        SchemaSemanticCase::invalid(
+            "mcp-repo-index-input-1.0.schema.json",
+            "optional repository wait cannot be null",
+            serde_json::json!({"root": "C:/fixture", "wait_ms": null}),
+        ),
+        SchemaSemanticCase::valid(
+            "mcp-operation-status-input-1.0.schema.json",
+            "bounded operation status request",
+            serde_json::json!({
+                "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "action": "get",
+                "wait_ms": 1000
+            }),
+        ),
+        SchemaSemanticCase::invalid(
+            "mcp-operation-status-input-1.0.schema.json",
+            "optional operation action cannot be null",
+            serde_json::json!({
+                "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "action": null
+            }),
+        ),
+        SchemaSemanticCase::valid(
+            "mcp-code-locate-input-1.0.schema.json",
+            "bounded locate request",
+            serde_json::json!({
+                "repository": {
+                    "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                },
+                "query": "publish generation",
+                "search_modes": ["exact", "lexical"],
+                "max_results": 20
+            }),
+        ),
+        SchemaSemanticCase::invalid(
+            "mcp-code-locate-input-1.0.schema.json",
+            "locate query is empty",
+            serde_json::json!({
+                "repository": {
+                    "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                },
+                "query": ""
+            }),
+        ),
+        SchemaSemanticCase::invalid(
+            "mcp-code-locate-input-1.0.schema.json",
+            "optional locate limit cannot be null",
+            serde_json::json!({
+                "repository": {
+                    "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                },
+                "query": "publish",
+                "max_results": null
+            }),
+        ),
+        SchemaSemanticCase::valid(
+            "mcp-symbol-explain-input-1.0.schema.json",
+            "bounded symbol explanation request",
+            serde_json::json!({
+                "repository": {
+                    "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                },
+                "symbol_ids": [
+                    "sym1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                ],
+                "include_provenance": "compact"
+            }),
+        ),
+        SchemaSemanticCase::invalid(
+            "mcp-symbol-explain-input-1.0.schema.json",
+            "symbol explanation requires one identity",
+            serde_json::json!({
+                "repository": {
+                    "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                },
+                "symbol_ids": []
+            }),
+        ),
+        SchemaSemanticCase::valid(
+            "mcp-source-read-input-1.0.schema.json",
+            "bounded source read by symbol",
+            serde_json::json!({
+                "repository": {
+                    "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                },
+                "references": [{
+                    "symbol_id": "sym1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }],
+                "context_lines_before": 2
+            }),
+        ),
+        SchemaSemanticCase::invalid(
+            "mcp-source-read-input-1.0.schema.json",
+            "source read requires one selector",
+            serde_json::json!({
+                "repository": {
+                    "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                },
+                "references": []
+            }),
+        ),
+        SchemaSemanticCase::invalid(
+            "mcp-source-read-input-1.0.schema.json",
+            "source context exceeds the hard ceiling",
+            serde_json::json!({
+                "repository": {
+                    "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                },
+                "references": [{
+                    "symbol_id": "sym1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }],
+                "context_lines_before": 51
+            }),
+        ),
     ];
 
     for case in cases {
@@ -939,6 +1214,40 @@ fn validate_generated_json_schemas(
         return Err(SchemaError::GeneratedSchemaSemantics(
             "explicit IR dispatch accepted an unsupported minor".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_all_schema_documents(schema_root: &Path) -> Result<(), SchemaError> {
+    for entry in fs::read_dir(schema_root).map_err(|source| SchemaError::ReadDirectory {
+        path: schema_root.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| SchemaError::ReadDirectory {
+            path: schema_root.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let schema: serde_json::Value =
+            serde_json::from_slice(&read_bytes(&path)?).map_err(|source| {
+                SchemaError::ParseGeneratedJson {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+        jsonschema::draft202012::new(&schema).map_err(|source| {
+            SchemaError::CompileGeneratedSchema {
+                name: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("<non-unicode-schema>")
+                    .to_owned(),
+                detail: source.to_string(),
+            }
+        })?;
     }
     Ok(())
 }
@@ -1123,6 +1432,16 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/ir-extension-rootlight-lexical-1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-response-metadata-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-error-response-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-index-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-index-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-operation-status-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-operation-status-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.0.schema.json"),
     ]);
     paths.sort();
     paths

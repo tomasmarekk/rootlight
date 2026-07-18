@@ -1,15 +1,20 @@
 //! Strict MCP schema foundations for Rootlight's agent-facing boundary.
-//!
-//! This crate owns common response schemas only; it does not implement an MCP
-//! server, transport, dispatcher, or tool behavior during P0.
 
 #![forbid(unsafe_code)]
+
+pub mod vertical;
 
 use rootlight_error::PublicError;
 use rootlight_ids::{GenerationId, RepositoryId};
 use rootlight_ir::CoverageStatus;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+pub use vertical::{
+    CodeLocateInput, CodeLocateOutput, OperationStatusInput, OperationStatusOutput, RepoIndexInput,
+    RepoIndexOutput, SourceReadInput, SourceReadOutput, SymbolExplainInput, SymbolExplainOutput,
+    VerticalTool,
+};
 
 /// The MCP specification revision selected by ADR-015.
 pub const MCP_SPECIFICATION_DATE: &str = "2025-11-25";
