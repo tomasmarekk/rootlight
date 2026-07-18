@@ -833,7 +833,7 @@ fn connect_existing_until(
                 require_quota_setup_window(deadline)?;
                 return Ok(client);
             }
-            Err(error) if is_retryable_control_transport(&error) => {
+            Err(error) if is_retryable_control_failure(&error) => {
                 require_quota_setup_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
@@ -853,7 +853,7 @@ fn wait_for_health_until(
         }
         let health = match client.health() {
             Ok(health) => health,
-            Err(error) if is_retryable_control_transport(&error) => {
+            Err(error) if is_retryable_control_failure(&error) => {
                 if Instant::now() >= deadline {
                     return Err(LifecycleError::HealthStateTimedOut);
                 }
@@ -986,7 +986,7 @@ fn submit_quota_operation_until(
                 require_quota_window(deadline)?;
                 return Ok(status);
             }
-            Err(error) if is_retryable_control_transport(&error) => {
+            Err(error) if is_retryable_control_failure(&error) => {
                 require_quota_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
@@ -1007,7 +1007,7 @@ fn require_quota_rejection_until(
                 require_quota_window(deadline)?;
                 return Ok(());
             }
-            Err(error) if is_retryable_control_transport(&error) => {
+            Err(error) if is_retryable_control_failure(&error) => {
                 require_quota_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
@@ -1017,10 +1017,20 @@ fn require_quota_rejection_until(
     }
 }
 
-fn is_retryable_control_transport(error: &ClientError) -> bool {
+fn is_retryable_control_failure(error: &ClientError) -> bool {
     match error {
         ClientError::Ipc(IpcError::TimedOut | IpcError::ConnectTimedOut) => true,
         ClientError::Ipc(IpcError::Transport(error)) => error.kind() == io::ErrorKind::TimedOut,
+        // The daemon can win its own per-request deadline before the frame
+        // deadline, and a replay can briefly observe the same durable admission.
+        ClientError::Public(error) => {
+            error.code() == ErrorCode::Busy
+                && error.retryable()
+                && matches!(
+                    error.message(),
+                    "daemon request timed out" | "operation admission is still pending"
+                )
+        }
         _ => false,
     }
 }
@@ -1085,7 +1095,7 @@ fn cancel_and_wait(client: &Client, operation: OperationId) -> Result<(), Lifecy
                 return Ok(());
             }
             Ok(_) => return Err(LifecycleError::UnexpectedCancellationState),
-            Err(error) if is_retryable_control_transport(&error) => {
+            Err(error) if is_retryable_control_failure(&error) => {
                 require_operation_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
@@ -1223,7 +1233,7 @@ fn wait_for_client_terminal_until(
         require_operation_window(deadline)?;
         let status = match client.operation_status(operation) {
             Ok(status) => status,
-            Err(error) if is_retryable_control_transport(&error) => {
+            Err(error) if is_retryable_control_failure(&error) => {
                 require_operation_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
                 continue;
@@ -2053,10 +2063,11 @@ mod tests {
     use std::io;
 
     use rootlight_client::ClientError;
+    use rootlight_error::{ErrorCode, PublicError};
     use rootlight_ipc::IpcError;
 
     use super::{
-        QuotaDaemonStderr, is_retryable_control_transport, privacy_checked_quota_stderr,
+        QuotaDaemonStderr, is_retryable_control_failure, privacy_checked_quota_stderr,
         sequences_are_strictly_increasing,
     };
 
@@ -2070,20 +2081,40 @@ mod tests {
     }
 
     #[test]
-    fn control_retry_accepts_only_bounded_transport_timeouts() {
-        assert!(is_retryable_control_transport(&ClientError::Ipc(
+    fn control_retry_accepts_only_bounded_timeout_failures() {
+        assert!(is_retryable_control_failure(&ClientError::Ipc(
             IpcError::TimedOut
         )));
-        assert!(is_retryable_control_transport(&ClientError::Ipc(
+        assert!(is_retryable_control_failure(&ClientError::Ipc(
             IpcError::ConnectTimedOut
         )));
-        assert!(is_retryable_control_transport(&ClientError::Ipc(
+        assert!(is_retryable_control_failure(&ClientError::Ipc(
             IpcError::Transport(io::Error::new(io::ErrorKind::TimedOut, "fixture"))
         )));
-        assert!(!is_retryable_control_transport(&ClientError::Ipc(
+        for message in [
+            "daemon request timed out",
+            "operation admission is still pending",
+        ] {
+            let error = PublicError::builder(ErrorCode::Busy, message)
+                .retryable()
+                .build()
+                .expect("closed timeout fixture builds");
+            assert!(is_retryable_control_failure(&ClientError::Public(
+                Box::new(error)
+            )));
+        }
+        let semantic_busy =
+            PublicError::builder(ErrorCode::Busy, "daemon is not accepting operations")
+                .retryable()
+                .build()
+                .expect("closed busy fixture builds");
+        assert!(!is_retryable_control_failure(&ClientError::Public(
+            Box::new(semantic_busy)
+        )));
+        assert!(!is_retryable_control_failure(&ClientError::Ipc(
             IpcError::Transport(io::Error::new(io::ErrorKind::ConnectionReset, "fixture"))
         )));
-        assert!(!is_retryable_control_transport(
+        assert!(!is_retryable_control_failure(
             &ClientError::UnexpectedResponse
         ));
     }
