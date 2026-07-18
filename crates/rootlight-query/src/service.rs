@@ -19,8 +19,8 @@ use crate::model::{
     CodeLocatePlan, CodeLocateResult, LocateHit, LocateMode, PlanEstimate, PlanExplanation,
     PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage,
     RepositoryDataTrust, SourceChunkResult, SourceReadPlan, SourceReadQueryResult,
-    SymbolExplainPlan, SymbolExplainResult, checked_add, checked_u128_to_u64, checked_usize_to_u64,
-    ensure_estimate, search_mode,
+    SymbolExplainPlan, SymbolExplainResult, TokenAccountingProfile, checked_add,
+    checked_u128_to_u64, checked_usize_to_u64, ensure_estimate, search_mode,
 };
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
@@ -80,29 +80,21 @@ where
             max_results,
         };
         validate_search_request(&request, search_budget)?;
-        let document = self.generation.document();
-        let rows = checked_add(
+        let mandatory_rows = checked_add(
             checked_usize_to_u64(search_budget.max_candidates)?,
-            checked_usize_to_u64(document.coverage_records.len())?,
-            QueryResource::Rows,
-            u64::MAX,
-        )?;
-        let rows = checked_add(
-            rows,
             checked_usize_to_u64(max_results)?,
             QueryResource::Rows,
             u64::MAX,
         )?;
-        let results = checked_add(
-            checked_usize_to_u64(max_results)?,
-            checked_usize_to_u64(document.coverage_records.len())?,
-            QueryResource::Results,
-            u64::MAX,
-        )?;
+        if mandatory_rows > budget.max_rows {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Rows,
+            });
+        }
         let estimate = PlanEstimate {
-            rows,
+            rows: budget.max_rows,
             edges: 0,
-            results,
+            results: budget.max_results,
             source_bytes: 0,
             // Repository metadata is bounded when the generation is admitted,
             // but its exact matching subset is unknown until search executes.
@@ -168,8 +160,13 @@ where
             return Err(QueryError::IndexDrift);
         }
 
+        let matched_candidates = outcome.matched_candidates;
         let mut tracker = UsageTracker::new(plan.budget);
         tracker.add_rows(outcome.matched_candidates)?;
+        let mut limiting_resources = Vec::new();
+        if matched_candidates > checked_usize_to_u64(outcome.hits.len())? {
+            record_limit(&mut limiting_resources, QueryResource::Results)?;
+        }
         let mut located = Vec::new();
         try_reserve(&mut located, outcome.hits.len())?;
         let mut symbols = BTreeSet::new();
@@ -223,17 +220,21 @@ where
             });
         }
 
-        let coverage = collect_coverage(
+        let coverage = collect_coverage_partial(
             self.generation.document(),
             &symbols,
             &files,
             &mut tracker,
             &control,
+            &mut limiting_resources,
         )?;
         let data = CodeLocateResult {
             generation: self.generation.metadata().generation(),
             hits: located,
+            matched_candidates,
             coverage,
+            truncated: !limiting_resources.is_empty(),
+            limiting_resources,
         };
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
     }
@@ -242,51 +243,29 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`QueryError`] for invalid budgets, arithmetic overflow, or a
-    /// conservative full-scan estimate that cannot be admitted.
+    /// Returns [`QueryError`] for invalid budgets or budgets too small for the
+    /// mandatory entity and provenance records. Optional scans are capped and
+    /// report explicit truncation at execution.
     pub fn plan_symbol_explain(
         &self,
         symbol: SymbolId,
         budget: QueryBudget,
     ) -> Result<SymbolExplainPlan, QueryError> {
         budget.validate()?;
-        let document = self.generation.document();
-        let rows = [
-            1_usize,
-            document.relations.len(),
-            document.occurrences.len(),
-            document.provenance.len(),
-            document.coverage_records.len(),
-        ]
-        .into_iter()
-        .try_fold(0_u64, |total, length| {
-            checked_add(
-                total,
-                checked_usize_to_u64(length)?,
-                QueryResource::Rows,
-                u64::MAX,
-            )
-        })?;
-        let edges = checked_usize_to_u64(document.relations.len())?;
-        let results = [
-            2_usize,
-            document.relations.len(),
-            document.occurrences.len(),
-            document.coverage_records.len(),
-        ]
-        .into_iter()
-        .try_fold(0_u64, |total, length| {
-            checked_add(
-                total,
-                checked_usize_to_u64(length)?,
-                QueryResource::Results,
-                u64::MAX,
-            )
-        })?;
+        if budget.max_rows < 2 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Rows,
+            });
+        }
+        if budget.max_results < 2 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
         let estimate = PlanEstimate {
-            rows,
-            edges,
-            results,
+            rows: budget.max_rows,
+            edges: budget.max_edges,
+            results: budget.max_results,
             source_bytes: 0,
             // The normalized generation bounds every record, while the query
             // memory budget remains the conservative aggregate ceiling.
@@ -343,52 +322,77 @@ where
             &control,
         )?)?;
 
-        let mut relations = Vec::new();
-        for relation in &document.relations {
-            control.check()?;
-            tracker.add_rows(1)?;
-            tracker.add_edges(1)?;
-            if endpoint_matches(relation.subject, plan.symbol)
-                || endpoint_matches(relation.object, plan.symbol)
-            {
-                tracker.add_results(1)?;
-                tracker.add_memory(serialized_size(
-                    relation,
-                    tracker.remaining_memory(),
-                    &control,
-                )?)?;
-                try_push(&mut relations, relation.clone())?;
-            }
-        }
-
-        let mut occurrences = Vec::new();
-        for occurrence in &document.occurrences {
-            control.check()?;
-            tracker.add_rows(1)?;
-            if occurrence_matches(occurrence, plan.symbol) {
-                tracker.add_results(1)?;
-                tracker.add_memory(serialized_size(
-                    occurrence,
-                    tracker.remaining_memory(),
-                    &control,
-                )?)?;
-                try_push(&mut occurrences, occurrence.clone())?;
-            }
-        }
-
-        tracker.add_rows(checked_usize_to_u64(document.provenance.len())?)?;
         let provenance = document
             .provenance
             .binary_search_by_key(&entity.provenance, |record| record.id)
             .ok()
             .and_then(|index| document.provenance.get(index))
             .ok_or(QueryError::ProvenanceMissing)?;
+        tracker.add_rows(1)?;
         tracker.add_results(1)?;
         tracker.add_memory(serialized_size(
             provenance,
             tracker.remaining_memory(),
             &control,
         )?)?;
+
+        let mut limiting_resources = Vec::new();
+        let mut relations = Vec::new();
+        for relation in &document.relations {
+            control.check()?;
+            if !tracker.can_add(QueryResource::Rows, 1) {
+                record_limit(&mut limiting_resources, QueryResource::Rows)?;
+                break;
+            }
+            if !tracker.can_add(QueryResource::Edges, 1) {
+                record_limit(&mut limiting_resources, QueryResource::Edges)?;
+                break;
+            }
+            tracker.add_rows(1)?;
+            tracker.add_edges(1)?;
+            if endpoint_matches(relation.subject, plan.symbol)
+                || endpoint_matches(relation.object, plan.symbol)
+            {
+                if !tracker.can_add(QueryResource::Results, 1) {
+                    record_limit(&mut limiting_resources, QueryResource::Results)?;
+                    break;
+                }
+                let bytes = serialized_size(relation, u64::MAX, &control)?;
+                if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
+                    record_limit(&mut limiting_resources, QueryResource::MemoryBytes)?;
+                    break;
+                }
+                tracker.add_results(1)?;
+                tracker.add_memory(bytes)?;
+                try_push(&mut relations, relation.clone())?;
+            }
+        }
+
+        let mut occurrences = Vec::new();
+        if !limits_optional_results(&limiting_resources) {
+            for occurrence in &document.occurrences {
+                control.check()?;
+                if !tracker.can_add(QueryResource::Rows, 1) {
+                    record_limit(&mut limiting_resources, QueryResource::Rows)?;
+                    break;
+                }
+                tracker.add_rows(1)?;
+                if occurrence_matches(occurrence, plan.symbol) {
+                    if !tracker.can_add(QueryResource::Results, 1) {
+                        record_limit(&mut limiting_resources, QueryResource::Results)?;
+                        break;
+                    }
+                    let bytes = serialized_size(occurrence, u64::MAX, &control)?;
+                    if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
+                        record_limit(&mut limiting_resources, QueryResource::MemoryBytes)?;
+                        break;
+                    }
+                    tracker.add_results(1)?;
+                    tracker.add_memory(bytes)?;
+                    try_push(&mut occurrences, occurrence.clone())?;
+                }
+            }
+        }
 
         let symbols = BTreeSet::from([plan.symbol]);
         let files = entity
@@ -397,7 +401,18 @@ where
             .as_ref()
             .map(|source| BTreeSet::from([source.span().file()]))
             .unwrap_or_default();
-        let coverage = collect_coverage(document, &symbols, &files, &mut tracker, &control)?;
+        let coverage = if limits_optional_results(&limiting_resources) {
+            Vec::new()
+        } else {
+            collect_coverage_partial(
+                document,
+                &symbols,
+                &files,
+                &mut tracker,
+                &control,
+                &mut limiting_resources,
+            )?
+        };
         let data = SymbolExplainResult {
             generation: self.generation.metadata().generation(),
             entity: entity.clone(),
@@ -405,6 +420,8 @@ where
             occurrences,
             provenance: provenance.clone(),
             coverage,
+            truncated: !limiting_resources.is_empty(),
+            limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
@@ -616,16 +633,21 @@ fn occurrence_matches(occurrence: &rootlight_ir::OccurrenceRecord, symbol: Symbo
     }
 }
 
-fn collect_coverage(
+fn collect_coverage_partial(
     document: &NormalizedIrDocument,
     symbols: &BTreeSet<SymbolId>,
     files: &BTreeSet<FileId>,
     tracker: &mut UsageTracker,
     control: &QueryControl<'_>,
+    limiting_resources: &mut Vec<QueryResource>,
 ) -> Result<Vec<CoverageRecord>, QueryError> {
     let mut coverage = Vec::new();
     for record in &document.coverage_records {
         control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
         tracker.add_rows(1)?;
         let relevant = match record.scope {
             CoverageScope::Repository(repository) => repository == document.repository,
@@ -633,16 +655,40 @@ fn collect_coverage(
             CoverageScope::Entity(symbol) => symbols.contains(&symbol),
         };
         if relevant {
+            if !tracker.can_add(QueryResource::Results, 1) {
+                record_limit(limiting_resources, QueryResource::Results)?;
+                break;
+            }
+            let bytes = serialized_size(record, u64::MAX, control)?;
+            if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
+                record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+                break;
+            }
             tracker.add_results(1)?;
-            tracker.add_memory(serialized_size(
-                record,
-                tracker.remaining_memory(),
-                control,
-            )?)?;
+            tracker.add_memory(bytes)?;
             try_push(&mut coverage, record.clone())?;
         }
     }
     Ok(coverage)
+}
+
+fn record_limit(
+    limiting_resources: &mut Vec<QueryResource>,
+    resource: QueryResource,
+) -> Result<(), QueryError> {
+    if !limiting_resources.contains(&resource) {
+        try_push(limiting_resources, resource)?;
+    }
+    Ok(())
+}
+
+fn limits_optional_results(limiting_resources: &[QueryResource]) -> bool {
+    limiting_resources.iter().any(|resource| {
+        matches!(
+            resource,
+            QueryResource::Rows | QueryResource::Results | QueryResource::MemoryBytes
+        )
+    })
 }
 
 fn locate_hit_memory(hit: &rootlight_search::SearchHit) -> Result<u64, QueryError> {
@@ -720,36 +766,10 @@ fn finish_response<T>(
 where
     T: Serialize,
 {
-    let json_bytes =
-        serialized_size(&data, tracker.budget.max_json_bytes, control).map_err(|error| {
-            if matches!(
-                error,
-                QueryError::BudgetExceeded {
-                    resource: QueryResource::MemoryBytes,
-                    ..
-                }
-            ) {
-                QueryError::BudgetExceeded {
-                    resource: QueryResource::JsonBytes,
-                    limit: tracker.budget.max_json_bytes,
-                }
-            } else {
-                error
-            }
-        })?;
-    tracker.require(QueryResource::JsonBytes, json_bytes)?;
-    let estimated_tokens = json_bytes
-        .checked_add(3)
-        .ok_or(QueryError::BudgetExceeded {
-            resource: QueryResource::Tokens,
-            limit: tracker.budget.max_tokens,
-        })?
-        / 4;
-    tracker.require(QueryResource::Tokens, estimated_tokens)?;
     control.check()?;
     let elapsed_nanos = started.elapsed().as_nanos();
     let elapsed_micros = checked_u128_to_u64(elapsed_nanos.saturating_add(999) / 1_000);
-    Ok(QueryResponse {
+    let mut response = QueryResponse {
         plan,
         data,
         usage: QueryUsage {
@@ -757,11 +777,54 @@ where
             edges: tracker.edges,
             results: tracker.results,
             source_bytes: tracker.source_bytes,
-            json_bytes,
-            estimated_tokens,
+            json_bytes: 0,
+            estimated_tokens: 0,
+            token_accounting: TokenAccountingProfile::Utf8ByteUpperBoundV1,
             memory_bytes: tracker.memory_bytes,
             elapsed_micros,
         },
+    };
+
+    // The response contains its own byte and token counters. Re-encode until
+    // their decimal widths reach a fixed point, then return the exact object
+    // that was measured.
+    for _ in 0..8 {
+        let json_bytes =
+            serialized_response_size(&response, tracker.budget.max_json_bytes, control)?;
+        tracker.require(QueryResource::JsonBytes, json_bytes)?;
+        let estimated_tokens = json_bytes;
+        tracker.require(QueryResource::Tokens, estimated_tokens)?;
+        if response.usage.json_bytes == json_bytes
+            && response.usage.estimated_tokens == estimated_tokens
+        {
+            return Ok(response);
+        }
+        response.usage.json_bytes = json_bytes;
+        response.usage.estimated_tokens = estimated_tokens;
+    }
+    Err(QueryError::ResultEncoding)
+}
+
+fn serialized_response_size(
+    response: &impl Serialize,
+    limit: u64,
+    control: &QueryControl<'_>,
+) -> Result<u64, QueryError> {
+    serialized_size(response, limit, control).map_err(|error| {
+        if matches!(
+            error,
+            QueryError::BudgetExceeded {
+                resource: QueryResource::MemoryBytes,
+                ..
+            }
+        ) {
+            QueryError::BudgetExceeded {
+                resource: QueryResource::JsonBytes,
+                limit,
+            }
+        } else {
+            error
+        }
     })
 }
 
@@ -846,6 +909,21 @@ impl UsageTracker {
         } else {
             Ok(())
         }
+    }
+
+    fn can_add(&self, resource: QueryResource, amount: u64) -> bool {
+        let (current, limit) = match resource {
+            QueryResource::Rows => (self.rows, self.budget.max_rows),
+            QueryResource::Edges => (self.edges, self.budget.max_edges),
+            QueryResource::Results => (self.results, self.budget.max_results),
+            QueryResource::SourceBytes => (self.source_bytes, self.budget.max_source_bytes),
+            QueryResource::MemoryBytes => (self.memory_bytes, self.budget.max_memory_bytes),
+            QueryResource::JsonBytes => (0, self.budget.max_json_bytes),
+            QueryResource::Tokens => (0, self.budget.max_tokens),
+        };
+        current
+            .checked_add(amount)
+            .is_some_and(|value| value <= limit)
     }
 
     const fn remaining_memory(&self) -> u64 {

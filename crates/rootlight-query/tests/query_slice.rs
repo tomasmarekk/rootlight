@@ -13,8 +13,8 @@ use rootlight_ir::{
     SourceSpan, decode_ir_document,
 };
 use rootlight_query::{
-    GenerationSet, LocateMode, PlanKind, QueryBudget, QueryError, QueryResource, QueryService,
-    RepositoryDataTrust, project_lexical_documents,
+    GenerationSet, LocateMode, PlanKind, QueryBudget, QueryError, QueryResource, QueryResponse,
+    QueryService, RepositoryDataTrust, TokenAccountingProfile, project_lexical_documents,
 };
 use rootlight_search::{
     BuildBudget, LexicalSearch, SearchBudget, SearchError, SearchHit, SearchOutcome, SearchRequest,
@@ -94,6 +94,71 @@ impl LexicalSearch for UnderreportedSearch {
     fn document_count(&self) -> u64 {
         self.0.document_count()
     }
+}
+
+struct TruncatedSearch(FakeSearch);
+
+impl LexicalSearch for TruncatedSearch {
+    fn generation(&self) -> rootlight_ids::GenerationId {
+        self.0.generation
+    }
+
+    fn search_with_stats(
+        &self,
+        request: &SearchRequest,
+        budget: SearchBudget,
+        cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
+        let mut outcome = self.0.search_with_stats(request, budget, cancellation)?;
+        outcome.matched_candidates = outcome
+            .matched_candidates
+            .checked_add(1)
+            .ok_or(SearchError::CandidateBudgetExceeded)?;
+        Ok(outcome)
+    }
+
+    fn document_count(&self) -> u64 {
+        self.0.document_count().saturating_add(1)
+    }
+}
+
+struct BackendCancelledSearch(FakeSearch);
+
+impl LexicalSearch for BackendCancelledSearch {
+    fn generation(&self) -> rootlight_ids::GenerationId {
+        self.0.generation
+    }
+
+    fn search_with_stats(
+        &self,
+        _request: &SearchRequest,
+        _budget: SearchBudget,
+        _cancellation: &Cancellation,
+    ) -> Result<SearchOutcome, SearchError> {
+        Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+    }
+
+    fn document_count(&self) -> u64 {
+        self.0.document_count()
+    }
+}
+
+fn assert_exact_response_accounting<T>(response: &QueryResponse<T>)
+where
+    T: serde::Serialize,
+{
+    let exact_bytes = u64::try_from(
+        serde_json::to_vec(response)
+            .expect("response serializes")
+            .len(),
+    )
+    .expect("response length fits");
+    assert_eq!(response.usage.json_bytes, exact_bytes);
+    assert_eq!(response.usage.estimated_tokens, exact_bytes);
+    assert_eq!(
+        response.usage.token_accounting,
+        TokenAccountingProfile::Utf8ByteUpperBoundV1
+    );
 }
 
 fn fixture_snapshot() -> GenerationSnapshot {
@@ -211,23 +276,22 @@ fn locate_and_explain_use_deterministic_typed_plans() {
         )
         .expect("locate plan is admitted");
     assert_eq!(locate.explanation().kind, PlanKind::CodeLocate);
-    assert_eq!(locate.explanation().estimate.json_bytes, 4 * 1024 * 1024);
+    assert_eq!(locate.explanation().estimate.json_bytes, 1024 * 1024);
     assert_eq!(locate.explanation().estimate.estimated_tokens, 1_000_000);
     assert_eq!(locate.explanation().estimate.duration_micros, 2_000_000);
     let located = service
         .execute_code_locate(&locate, &cancellation)
         .expect("locate query succeeds");
     assert_eq!(located.data.hits.len(), 1);
+    assert_eq!(located.data.matched_candidates, 1);
+    assert!(!located.data.truncated);
     assert_eq!(
         located.data.hits[0].trust,
         RepositoryDataTrust::UntrustedRepositoryData
     );
     assert!(located.usage.rows >= 2);
     assert!(located.usage.json_bytes > 0);
-    assert_eq!(
-        located.usage.estimated_tokens,
-        located.usage.json_bytes.div_ceil(4)
-    );
+    assert_exact_response_accounting(&located);
 
     let explain = service
         .plan_symbol_explain(search.hits[0].symbol_id, QueryBudget::new())
@@ -241,6 +305,8 @@ fn locate_and_explain_use_deterministic_typed_plans() {
         RepositoryDataTrust::UntrustedRepositoryData
     );
     assert!(explained.usage.results >= 2);
+    assert!(!explained.data.truncated);
+    assert_exact_response_accounting(&explained);
 }
 
 #[test]
@@ -262,6 +328,29 @@ fn execution_enforces_cancellation_and_exact_output_bounds() {
     assert!(matches!(
         service.execute_code_locate(&plan, &cancelled),
         Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+    ));
+
+    let backend_cancelled = BackendCancelledSearch(fixture_search(&snapshot));
+    let backend_service =
+        QueryService::new(&snapshot, &backend_cancelled).expect("generation inputs agree");
+    let backend_plan = backend_service
+        .plan_code_locate(
+            "fixture",
+            LocateMode::Text,
+            1,
+            SearchBudget::default(),
+            QueryBudget::new(),
+        )
+        .expect("backend-cancellation plan is admitted");
+    assert!(matches!(
+        backend_service.execute_code_locate(&backend_plan, &Cancellation::new()),
+        Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+    ));
+    assert!(matches!(
+        QueryError::from(rootlight_source::SourceError::Cancelled(
+            CancellationReason::DeadlineExceeded,
+        )),
+        QueryError::Cancelled(CancellationReason::DeadlineExceeded)
     ));
 
     let tiny_output = service
@@ -300,6 +389,51 @@ fn execution_enforces_cancellation_and_exact_output_bounds() {
 }
 
 #[test]
+fn bounded_queries_mark_deterministic_partial_results() {
+    let snapshot = fixture_snapshot();
+    let search = fixture_search(&snapshot);
+    let truncated_search = TruncatedSearch(search.clone());
+    let locate_service =
+        QueryService::new(&snapshot, &truncated_search).expect("generation inputs agree");
+    let locate_plan = locate_service
+        .plan_code_locate(
+            search.hits[0].identifier.clone(),
+            LocateMode::Exact,
+            1,
+            SearchBudget::default(),
+            QueryBudget::new(),
+        )
+        .expect("bounded locate plan is admitted");
+    let located = locate_service
+        .execute_code_locate(&locate_plan, &Cancellation::new())
+        .expect("bounded locate returns a partial prefix");
+    assert!(located.data.truncated);
+    assert_eq!(located.data.matched_candidates, 2);
+    assert_eq!(
+        located.data.limiting_resources,
+        vec![QueryResource::Results]
+    );
+
+    let explain_service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+    let explain_plan = explain_service
+        .plan_symbol_explain(
+            search.hits[0].symbol_id,
+            QueryBudget::new().with_max_rows(2),
+        )
+        .expect("mandatory explain records fit");
+    let first = explain_service
+        .execute_symbol_explain(&explain_plan, &Cancellation::new())
+        .expect("large-neighborhood scan returns a partial result");
+    let second = explain_service
+        .execute_symbol_explain(&explain_plan, &Cancellation::new())
+        .expect("repeated partial scan succeeds");
+    assert!(first.data.truncated);
+    assert_eq!(first.data.limiting_resources, vec![QueryResource::Rows]);
+    assert_eq!(first.data, second.data);
+    assert_eq!(first.usage.rows, 2);
+}
+
+#[test]
 fn plans_and_execution_enforce_all_query_resource_families() {
     let snapshot = fixture_snapshot();
     let search = fixture_search(&snapshot);
@@ -322,6 +456,34 @@ fn plans_and_execution_enforce_all_query_resource_families() {
     assert!(matches!(
         service.plan_symbol_explain(symbol, QueryBudget::new().with_max_duration(Duration::ZERO)),
         Err(QueryError::InvalidDurationBudget { .. })
+    ));
+    assert!(matches!(
+        service.plan_symbol_explain(
+            symbol,
+            QueryBudget::new().with_max_duration(Duration::from_secs(11)),
+        ),
+        Err(QueryError::InvalidDurationBudget { maximum })
+            if maximum == Duration::from_secs(10)
+    ));
+    assert!(matches!(
+        service.plan_symbol_explain(
+            symbol,
+            QueryBudget::new().with_max_json_bytes(4 * 1024 * 1024 + 1),
+        ),
+        Err(QueryError::InvalidBudget {
+            resource: QueryResource::JsonBytes,
+            maximum,
+        }) if maximum == 4 * 1024 * 1024
+    ));
+    assert!(matches!(
+        service.plan_symbol_explain(
+            symbol,
+            QueryBudget::new().with_max_tokens(4 * 1024 * 1024 + 1),
+        ),
+        Err(QueryError::InvalidBudget {
+            resource: QueryResource::Tokens,
+            maximum,
+        }) if maximum == 4 * 1024 * 1024
     ));
     assert!(matches!(
         service.plan_code_locate(
@@ -349,6 +511,7 @@ fn plans_and_execution_enforce_all_query_resource_families() {
         .execute_symbol_explain(&exact_edge_budget, &Cancellation::new())
         .expect("exact edge boundary succeeds");
     assert_eq!(explained.usage.edges, 1);
+    assert!(!explained.data.truncated);
 
     let memory_limited = service
         .plan_symbol_explain(symbol, QueryBudget::new().with_max_memory_bytes(1))
@@ -535,6 +698,7 @@ fn source_plan_reads_only_verified_generation_bound_bytes() {
         result.data.chunks[0].trust,
         RepositoryDataTrust::UntrustedRepositoryData
     );
+    assert_exact_response_accounting(&result);
 }
 
 #[test]

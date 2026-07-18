@@ -13,10 +13,10 @@ const HARD_MAX_QUERY_ROWS: u64 = 1_000_000;
 const HARD_MAX_QUERY_EDGES: u64 = 1_000_000;
 const HARD_MAX_QUERY_RESULTS: u64 = 10_000;
 const HARD_MAX_QUERY_SOURCE_BYTES: u64 = 512 * 1024;
-const HARD_MAX_QUERY_JSON_BYTES: u64 = 64 * 1024 * 1024;
-const HARD_MAX_QUERY_TOKENS: u64 = 16 * 1024 * 1024;
+const HARD_MAX_QUERY_JSON_BYTES: u64 = 4 * 1024 * 1024;
+const HARD_MAX_QUERY_TOKENS: u64 = 4 * 1024 * 1024;
 const HARD_MAX_QUERY_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
-const HARD_MAX_QUERY_DURATION: Duration = Duration::from_secs(30);
+const HARD_MAX_QUERY_DURATION: Duration = Duration::from_secs(10);
 
 /// Shared resource admission for one daemon-independent query plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +40,7 @@ impl QueryBudget {
             max_edges: 100_000,
             max_results: 1_000,
             max_source_bytes: 64 * 1024,
-            max_json_bytes: 4 * 1024 * 1024,
+            max_json_bytes: 1024 * 1024,
             max_tokens: 1_000_000,
             max_memory_bytes: 16 * 1024 * 1024,
             max_duration: Duration::from_secs(2),
@@ -75,7 +75,7 @@ impl QueryBudget {
         self
     }
 
-    /// Replaces the exact serialized-data byte ceiling.
+    /// Replaces the exact serialized-response byte ceiling.
     #[must_use]
     pub const fn with_max_json_bytes(mut self, maximum: u64) -> Self {
         self.max_json_bytes = maximum;
@@ -165,7 +165,7 @@ pub enum QueryResource {
     Results,
     /// Raw source bytes returned.
     SourceBytes,
-    /// Exact JSON bytes for the typed data payload.
+    /// Exact JSON bytes for the complete versioned response.
     JsonBytes,
     /// Conservative output-token estimate.
     Tokens,
@@ -230,7 +230,7 @@ pub struct PlanEstimate {
     pub source_bytes: u64,
     /// Maximum variable-sized response memory.
     pub memory_bytes: u64,
-    /// Maximum exact JSON bytes admitted for the typed data payload.
+    /// Maximum exact JSON bytes admitted for the complete response.
     pub json_bytes: u64,
     /// Maximum conservative output-token estimate.
     pub estimated_tokens: u64,
@@ -262,14 +262,25 @@ pub struct QueryUsage {
     pub results: u64,
     /// Raw source bytes returned before JSON escaping.
     pub source_bytes: u64,
-    /// Exact JSON bytes of the typed data payload.
+    /// Exact JSON bytes of the complete response, including plan and usage.
     pub json_bytes: u64,
-    /// Conservative four-bytes-per-token estimate.
+    /// Conservative output-token upper bound under `token_accounting`.
     pub estimated_tokens: u64,
+    /// Versioned profile used to derive `estimated_tokens`.
+    pub token_accounting: TokenAccountingProfile,
     /// Variable-sized bytes owned by the typed data payload.
     pub memory_bytes: u64,
     /// Monotonic execution duration rounded up to microseconds.
     pub elapsed_micros: u64,
+}
+
+/// Versioned conservative token-accounting profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TokenAccountingProfile {
+    /// Counts each serialized UTF-8 byte as one possible tokenizer token.
+    Utf8ByteUpperBoundV1,
 }
 
 /// Typed plan result with explain and measured resource evidence.
@@ -410,8 +421,14 @@ pub struct CodeLocateResult {
     pub generation: GenerationId,
     /// Hydrated hits in deterministic relevance and identity order.
     pub hits: Vec<LocateHit>,
+    /// Matching lexical candidates before the public result cap.
+    pub matched_candidates: u64,
     /// Deduplicated coverage evidence relevant to returned entities.
     pub coverage: Vec<CoverageRecord>,
+    /// Whether a result or resource limit stopped complete materialization.
+    pub truncated: bool,
+    /// Resource limits that stopped work, in deterministic execution order.
+    pub limiting_resources: Vec<QueryResource>,
 }
 
 /// Data returned by a `symbol.explain` plan.
@@ -429,6 +446,10 @@ pub struct SymbolExplainResult {
     pub provenance: ProvenanceRecord,
     /// Coverage evidence relevant to the entity.
     pub coverage: Vec<CoverageRecord>,
+    /// Whether a resource limit stopped any optional scan.
+    pub truncated: bool,
+    /// Resource limits that stopped optional scans, in deterministic scan order.
+    pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled names and labels.
     pub trust: RepositoryDataTrust,
 }
@@ -547,13 +568,19 @@ pub enum QueryError {
 
 impl From<SearchError> for QueryError {
     fn from(error: SearchError) -> Self {
-        Self::Search(error)
+        match error {
+            SearchError::Cancelled(reason) => Self::Cancelled(reason),
+            error => Self::Search(error),
+        }
     }
 }
 
 impl From<SourceError> for QueryError {
     fn from(error: SourceError) -> Self {
-        Self::Source(error)
+        match error {
+            SourceError::Cancelled(reason) => Self::Cancelled(reason),
+            error => Self::Source(error),
+        }
     }
 }
 
