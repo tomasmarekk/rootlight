@@ -1827,6 +1827,8 @@ dependencies = [
 name = "rootlight-bench"
 version = "0.1.0"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
  "rootlight-adapter-sdk",
  "rootlight-adapter-treesitter",
  "rootlight-cancel",
@@ -1838,6 +1840,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "winapi-util",
 ]
 
 [[package]]
@@ -3339,6 +3342,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "syn",
  "tempfile",
  "thiserror",
  "toml",

@@ -1,0 +1,14 @@
+schema_version = "1.0"
+
+[[boundaries]]
+package = "rootlight-vfs"
+package_version = "0.1.0"
+manifest = "crates/rootlight-vfs/Cargo.toml"
+module = "rootlight_vfs::platform::os"
+source = "crates/rootlight-vfs/src/platform/os.rs"
+status = "proposed"
+adr = "policy/adr/ADR-026-private-handle-tree-boundary.md"
+owner = "@tomasmarekk"
+reason = "native handle APIs are required for private-at-birth creation, exact identity, atomic no-replace publication, and identity-bound cleanup"
+expected_source_tokens = 0
+expected_geiger_count = 0

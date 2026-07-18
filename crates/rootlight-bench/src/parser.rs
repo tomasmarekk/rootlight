@@ -16,10 +16,13 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ir::SourceRef;
 use rootlight_vfs::SourceSnapshot;
 
+use crate::model::MILLION_PPM;
 use crate::{
     Availability, BundleError, BundleLimits, CoverageEvidence, DatasetEntry, EvidenceValue,
-    MetricDistribution, ProcessTreeSample, ProcessTreeSampler, QualityEvidence, RawSample,
-    ResultSummary, SampleOutcome,
+    MAX_SEMANTIC_CALIBRATION_ERROR_PPM, MIN_SEMANTIC_PRECISION_PPM, MIN_SEMANTIC_RECALL_PPM,
+    MetricDistribution, ProcessTreeSample, ProcessTreeSampler, QualityEvidence,
+    RESULT_BUNDLE_SCHEMA_VERSION, RawSample, ResultSummary, SEMANTIC_QUALITY_RUBRIC_ID,
+    SampleOutcome, SemanticQualityMeasurement,
 };
 
 const MAX_SAMPLE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -57,10 +60,19 @@ pub struct ParserBenchmarkConfig {
     pub evidence_limits: BundleLimits,
 }
 
-/// Supplies later normalized semantic fact counts for eligibility checks.
+/// Supplies normalized semantic facts and corpus-backed quality measurements.
 pub trait SemanticFactProbe: Send + Sync {
     /// Returns a normalized fact count, or `None` when extraction is unavailable.
     fn semantic_fact_count(&self, output: &ParseOutput) -> Option<u64>;
+
+    /// Returns corpus-backed quality metrics used by the semantic rubric.
+    ///
+    /// The default keeps count-only probes ineligible. Implementations must
+    /// return observed precision, recall, and calibration error before the
+    /// harness can report semantic availability.
+    fn semantic_quality(&self) -> SemanticQualityMeasurement {
+        SemanticQualityMeasurement::unavailable("semantic_quality_not_measured")
+    }
 }
 
 /// Syntax-only probe that keeps M05 performance evidence ineligible.
@@ -116,7 +128,10 @@ where
         config.seed,
         limits.max_raw_samples,
     )?;
-    let mut raw_samples = Vec::with_capacity(schedule.len());
+    let mut raw_samples = Vec::new();
+    raw_samples
+        .try_reserve_exact(schedule.len())
+        .map_err(|_| ParserRunError::AllocationFailed)?;
     let mut entry_status = BTreeMap::new();
     for (ordinal, scheduled) in schedule.into_iter().enumerate() {
         let input = inputs
@@ -151,7 +166,10 @@ where
     }
 
     mark_outliers(&mut raw_samples)?;
-    let summary = summarize(&raw_samples)?;
+    let fact_eligibility = semantic_fact_eligibility(&raw_samples);
+    let semantic_quality = semantic_probe.semantic_quality();
+    let semantic_eligibility = semantic_quality_eligibility(&fact_eligibility, &semantic_quality);
+    let summary = summarize(&raw_samples, semantic_eligibility.clone())?;
     let committed_entries = entry_status
         .values()
         .filter(|status| **status == EntryStatus::Succeeded)
@@ -161,7 +179,7 @@ where
         .map(|(id, status)| (id, status.as_str().to_owned()))
         .collect();
     let coverage = CoverageEvidence {
-        schema_version: "1.0".to_owned(),
+        schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
         attempted_entries: u64::try_from(parser_status.len())
             .map_err(|_| ParserRunError::SampleCountOverflow)?,
         committed_entries: u64::try_from(committed_entries)
@@ -170,13 +188,13 @@ where
         parser_status,
     };
     let quality = QualityEvidence {
-        schema_version: "1.0".to_owned(),
-        rubric_id: "m05-parser-semantic-eligibility-1.0".to_owned(),
-        semantic_eligibility: summary.semantic_eligibility.clone(),
-        precision_ppm: EvidenceValue::unavailable("quality_corpus_not_integrated"),
-        recall_ppm: EvidenceValue::unavailable("quality_corpus_not_integrated"),
-        expected_calibration_error_ppm: EvidenceValue::unavailable("quality_corpus_not_integrated"),
-        unsupported_cases: BTreeMap::new(),
+        schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
+        rubric_id: SEMANTIC_QUALITY_RUBRIC_ID.to_owned(),
+        semantic_eligibility,
+        precision_ppm: semantic_quality.precision_ppm,
+        recall_ppm: semantic_quality.recall_ppm,
+        expected_calibration_error_ppm: semantic_quality.expected_calibration_error_ppm,
+        unsupported_cases: semantic_quality.unsupported_cases,
     };
     Ok(ParserBenchmarkEvidence {
         raw_samples,
@@ -187,13 +205,13 @@ where
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SamplePhase {
+pub(crate) enum SamplePhase {
     Warmup,
     Trial,
 }
 
 impl SamplePhase {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Warmup => "warmup",
             Self::Trial => "trial",
@@ -202,9 +220,9 @@ impl SamplePhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ScheduledSample {
-    phase: SamplePhase,
-    input_index: usize,
+pub(crate) struct ScheduledSample {
+    pub(crate) phase: SamplePhase,
+    pub(crate) input_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,7 +430,7 @@ fn validate_source_digest(value: &str) -> Result<(), ParserRunError> {
     Ok(())
 }
 
-fn build_schedule(
+pub(crate) fn build_schedule(
     input_count: usize,
     warmup_rounds: u32,
     trial_rounds: u32,
@@ -430,7 +448,10 @@ fn build_schedule(
     if capacity > max_samples {
         return Err(ParserRunError::TooManySamples);
     }
-    let mut schedule = Vec::with_capacity(capacity);
+    let mut schedule = Vec::new();
+    schedule
+        .try_reserve_exact(capacity)
+        .map_err(|_| ParserRunError::AllocationFailed)?;
     let mut random = SplitMix64::new(seed);
     for round in 0..total_rounds {
         let phase = if round < warmup_rounds {
@@ -438,7 +459,11 @@ fn build_schedule(
         } else {
             SamplePhase::Trial
         };
-        let mut indices = (0..input_count).collect::<Vec<_>>();
+        let mut indices = Vec::new();
+        indices
+            .try_reserve_exact(input_count)
+            .map_err(|_| ParserRunError::AllocationFailed)?;
+        indices.extend(0..input_count);
         seeded_shuffle(&mut indices, &mut random)?;
         schedule.extend(
             indices
@@ -525,7 +550,7 @@ fn sample_from_result<E: SemanticFactProbe + ?Sized>(
         ),
     };
     Ok(RawSample {
-        schema_version: "1.0".to_owned(),
+        schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
         ordinal,
         phase: phase.as_str().to_owned(),
         dataset_entry_id: input.entry.id.clone(),
@@ -543,17 +568,34 @@ fn sample_from_result<E: SemanticFactProbe + ?Sized>(
     })
 }
 
-fn mark_outliers(samples: &mut [RawSample]) -> Result<(), ParserRunError> {
+pub(crate) fn mark_outliers(samples: &mut [RawSample]) -> Result<(), ParserRunError> {
+    let fences = outlier_fences(samples)?;
+    for sample in samples {
+        if sample.phase == "trial"
+            && matches!(sample.outcome, SampleOutcome::Succeeded)
+            && let Some((lower, upper)) = fences.get(&sample.grammar_family)
+        {
+            let elapsed = u128::from(sample.elapsed_ns);
+            sample.is_outlier = elapsed < *lower || elapsed > *upper;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn outlier_fences(
+    samples: &[RawSample],
+) -> Result<BTreeMap<String, (u128, u128)>, ParserRunError> {
     let mut families = BTreeMap::<String, Vec<u64>>::new();
     for sample in samples.iter().filter(|sample| {
         sample.phase == "trial" && matches!(sample.outcome, SampleOutcome::Succeeded)
     }) {
-        families
-            .entry(sample.grammar_family.clone())
-            .or_default()
-            .push(sample.elapsed_ns);
+        let durations = families.entry(sample.grammar_family.clone()).or_default();
+        durations
+            .try_reserve(1)
+            .map_err(|_| ParserRunError::AllocationFailed)?;
+        durations.push(sample.elapsed_ns);
     }
-    let fences = families
+    families
         .into_iter()
         .map(|(family, mut durations)| {
             durations.sort_unstable();
@@ -574,31 +616,26 @@ fn mark_outliers(samples: &mut [RawSample]) -> Result<(), ParserRunError> {
                 .ok_or(ParserRunError::MetricOverflow)?;
             Ok((family, (lower, upper)))
         })
-        .collect::<Result<BTreeMap<_, _>, ParserRunError>>()?;
-    for sample in samples {
-        if sample.phase == "trial"
-            && matches!(sample.outcome, SampleOutcome::Succeeded)
-            && let Some((lower, upper)) = fences.get(&sample.grammar_family)
-        {
-            let elapsed = u128::from(sample.elapsed_ns);
-            sample.is_outlier = elapsed < *lower || elapsed > *upper;
-        }
-    }
-    Ok(())
+        .collect::<Result<BTreeMap<_, _>, ParserRunError>>()
 }
 
-fn summarize(samples: &[RawSample]) -> Result<ResultSummary, ParserRunError> {
-    let semantic_eligibility = semantic_eligibility(samples);
+pub(crate) fn summarize(
+    samples: &[RawSample],
+    semantic_eligibility: Availability,
+) -> Result<ResultSummary, ParserRunError> {
     let mut grouped = BTreeMap::<String, Vec<&RawSample>>::new();
     let mut failed_samples = 0_u64;
     let mut timed_out_samples = 0_u64;
     let mut cancelled_samples = 0_u64;
     for sample in samples.iter().filter(|sample| sample.phase == "trial") {
         match sample.outcome {
-            SampleOutcome::Succeeded => grouped
-                .entry(sample.grammar_family.clone())
-                .or_default()
-                .push(sample),
+            SampleOutcome::Succeeded => {
+                let family_samples = grouped.entry(sample.grammar_family.clone()).or_default();
+                family_samples
+                    .try_reserve(1)
+                    .map_err(|_| ParserRunError::AllocationFailed)?;
+                family_samples.push(sample);
+            }
             SampleOutcome::Failed { .. } => {
                 failed_samples = failed_samples
                     .checked_add(1)
@@ -621,7 +658,7 @@ fn summarize(samples: &[RawSample]) -> Result<ResultSummary, ParserRunError> {
         .map(|(family, samples)| distribution(&samples).map(|value| (family, value)))
         .collect::<Result<BTreeMap<_, _>, ParserRunError>>()?;
     Ok(ResultSummary {
-        schema_version: "1.0".to_owned(),
+        schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
         benchmark_id: "BENCH-PARSE-001".to_owned(),
         semantic_eligibility,
         families,
@@ -634,25 +671,23 @@ fn summarize(samples: &[RawSample]) -> Result<ResultSummary, ParserRunError> {
     })
 }
 
-fn semantic_eligibility(samples: &[RawSample]) -> Availability {
-    let trials = samples
-        .iter()
-        .filter(|sample| sample.phase == "trial")
-        .collect::<Vec<_>>();
-    if trials.is_empty() {
+pub(crate) fn semantic_fact_eligibility(samples: &[RawSample]) -> Availability {
+    let mut trials = samples.iter().filter(|sample| sample.phase == "trial");
+    let Some(first_trial) = trials.next() else {
         return Availability::Failed {
             reason_code: "no_measured_samples".to_owned(),
         };
-    }
+    };
+    let mut trials = std::iter::once(first_trial).chain(trials);
     if trials
-        .iter()
+        .clone()
         .any(|sample| !matches!(sample.outcome, SampleOutcome::Succeeded))
     {
         return Availability::Failed {
             reason_code: "incomplete_measured_run".to_owned(),
         };
     }
-    if trials.iter().any(|sample| {
+    if trials.clone().any(|sample| {
         matches!(
             sample.semantic_facts,
             EvidenceValue::Unavailable { .. } | EvidenceValue::Target { .. }
@@ -662,10 +697,7 @@ fn semantic_eligibility(samples: &[RawSample]) -> Availability {
             reason_code: "semantic_extraction_not_integrated".to_owned(),
         };
     }
-    if trials
-        .iter()
-        .any(|sample| matches!(sample.semantic_facts, EvidenceValue::Observed { value: 0 }))
-    {
+    if trials.any(|sample| matches!(sample.semantic_facts, EvidenceValue::Observed { value: 0 })) {
         return Availability::Failed {
             reason_code: "semantic_facts_empty".to_owned(),
         };
@@ -673,11 +705,73 @@ fn semantic_eligibility(samples: &[RawSample]) -> Availability {
     Availability::Available
 }
 
+pub(crate) fn semantic_quality_eligibility(
+    fact_eligibility: &Availability,
+    quality: &SemanticQualityMeasurement,
+) -> Availability {
+    semantic_quality_eligibility_from_values(
+        fact_eligibility,
+        &quality.precision_ppm,
+        &quality.recall_ppm,
+        &quality.expected_calibration_error_ppm,
+    )
+}
+
+pub(crate) fn semantic_quality_eligibility_from_values(
+    fact_eligibility: &Availability,
+    precision: &EvidenceValue<u64>,
+    recall: &EvidenceValue<u64>,
+    calibration_error: &EvidenceValue<u64>,
+) -> Availability {
+    if !matches!(fact_eligibility, Availability::Available) {
+        return fact_eligibility.clone();
+    }
+    let (
+        EvidenceValue::Observed {
+            value: precision_ppm,
+        },
+        EvidenceValue::Observed { value: recall_ppm },
+        EvidenceValue::Observed {
+            value: calibration_error_ppm,
+        },
+    ) = (precision, recall, calibration_error)
+    else {
+        return Availability::Unavailable {
+            reason_code: "semantic_quality_not_measured".to_owned(),
+        };
+    };
+    if *precision_ppm > MILLION_PPM
+        || *recall_ppm > MILLION_PPM
+        || *calibration_error_ppm > MILLION_PPM
+    {
+        return Availability::Failed {
+            reason_code: "semantic_quality_metric_out_of_range".to_owned(),
+        };
+    }
+    if *precision_ppm < MIN_SEMANTIC_PRECISION_PPM {
+        return Availability::Failed {
+            reason_code: "semantic_precision_below_threshold".to_owned(),
+        };
+    }
+    if *recall_ppm < MIN_SEMANTIC_RECALL_PPM {
+        return Availability::Failed {
+            reason_code: "semantic_recall_below_threshold".to_owned(),
+        };
+    }
+    if *calibration_error_ppm > MAX_SEMANTIC_CALIBRATION_ERROR_PPM {
+        return Availability::Failed {
+            reason_code: "semantic_calibration_above_threshold".to_owned(),
+        };
+    }
+    Availability::Available
+}
+
 fn distribution(samples: &[&RawSample]) -> Result<MetricDistribution, ParserRunError> {
-    let mut durations = samples
-        .iter()
-        .map(|sample| sample.elapsed_ns)
-        .collect::<Vec<_>>();
+    let mut durations = Vec::new();
+    durations
+        .try_reserve_exact(samples.len())
+        .map_err(|_| ParserRunError::AllocationFailed)?;
+    durations.extend(samples.iter().map(|sample| sample.elapsed_ns));
     durations.sort_unstable();
     let elapsed = checked_sum(samples, |sample| sample.elapsed_ns)?;
     let lines = checked_sum(samples, |sample| sample.physical_lines)?;
@@ -898,6 +992,9 @@ pub enum ParserRunError {
     /// A retained metric or counter is not representable.
     #[error("parser benchmark metric is not representable")]
     MetricOverflow,
+    /// A bounded in-memory reservation could not be satisfied.
+    #[error("parser benchmark allocation failed")]
+    AllocationFailed,
     /// An internal schedule referred outside the validated dataset.
     #[error("parser benchmark schedule invariant failed")]
     ScheduleInvariant,
@@ -931,6 +1028,28 @@ mod tests {
     impl SemanticFactProbe for FixedSemanticFacts {
         fn semantic_fact_count(&self, _output: &ParseOutput) -> Option<u64> {
             Some(self.0)
+        }
+    }
+
+    struct MeasuredSemanticFacts {
+        count: u64,
+        precision_ppm: u64,
+        recall_ppm: u64,
+        calibration_error_ppm: u64,
+    }
+
+    impl SemanticFactProbe for MeasuredSemanticFacts {
+        fn semantic_fact_count(&self, _output: &ParseOutput) -> Option<u64> {
+            Some(self.count)
+        }
+
+        fn semantic_quality(&self) -> SemanticQualityMeasurement {
+            SemanticQualityMeasurement {
+                precision_ppm: EvidenceValue::observed(self.precision_ppm),
+                recall_ppm: EvidenceValue::observed(self.recall_ppm),
+                expected_calibration_error_ppm: EvidenceValue::observed(self.calibration_error_ppm),
+                unsupported_cases: BTreeMap::new(),
+            }
         }
     }
 
@@ -1076,10 +1195,16 @@ mod tests {
         assert_eq!(first.raw_samples.len(), 5);
         assert_eq!(first.coverage.attempted_entries, 1);
         assert_eq!(first.coverage.committed_entries, 1);
-        assert!(matches!(
+        assert_eq!(
             first.summary.semantic_eligibility,
-            Availability::Available
-        ));
+            Availability::Unavailable {
+                reason_code: "semantic_quality_not_measured".to_owned()
+            }
+        );
+        assert_eq!(
+            first.summary.semantic_eligibility,
+            first.quality.semantic_eligibility
+        );
         assert!(first.raw_samples.iter().all(|sample| {
             matches!(sample.process_tree_cpu_ns, EvidenceValue::Observed { .. })
         }));
@@ -1103,6 +1228,99 @@ mod tests {
             evidence.summary.semantic_eligibility,
             Availability::Unavailable { .. }
         ));
+    }
+
+    #[test]
+    fn measured_quality_at_the_rubric_boundary_is_semantically_eligible() {
+        let fixture = fixture();
+        let provider = provider(&fixture.source);
+        let probe = MeasuredSemanticFacts {
+            count: 1,
+            precision_ppm: MIN_SEMANTIC_PRECISION_PPM,
+            recall_ppm: MIN_SEMANTIC_RECALL_PPM,
+            calibration_error_ppm: MAX_SEMANTIC_CALIBRATION_ERROR_PPM,
+        };
+
+        let evidence = run_parser_benchmark(
+            &provider,
+            std::slice::from_ref(&fixture.input),
+            &config(0, 1),
+            &UnavailableProcessTreeSampler,
+            &probe,
+        )
+        .expect("quality-backed benchmark succeeds");
+
+        assert_eq!(
+            evidence.summary.semantic_eligibility,
+            Availability::Available
+        );
+        assert_eq!(
+            evidence.summary.semantic_eligibility,
+            evidence.quality.semantic_eligibility
+        );
+        assert_eq!(
+            evidence.quality.precision_ppm,
+            EvidenceValue::observed(MIN_SEMANTIC_PRECISION_PPM)
+        );
+    }
+
+    #[test]
+    fn semantic_quality_rubric_rejects_each_failed_or_unmeasured_metric() {
+        let facts_available = Availability::Available;
+        let cases = [
+            (
+                SemanticQualityMeasurement {
+                    precision_ppm: EvidenceValue::observed(MIN_SEMANTIC_PRECISION_PPM - 1),
+                    recall_ppm: EvidenceValue::observed(MIN_SEMANTIC_RECALL_PPM),
+                    expected_calibration_error_ppm: EvidenceValue::observed(
+                        MAX_SEMANTIC_CALIBRATION_ERROR_PPM,
+                    ),
+                    unsupported_cases: BTreeMap::new(),
+                },
+                Availability::Failed {
+                    reason_code: "semantic_precision_below_threshold".to_owned(),
+                },
+            ),
+            (
+                SemanticQualityMeasurement {
+                    precision_ppm: EvidenceValue::observed(MIN_SEMANTIC_PRECISION_PPM),
+                    recall_ppm: EvidenceValue::observed(MIN_SEMANTIC_RECALL_PPM - 1),
+                    expected_calibration_error_ppm: EvidenceValue::observed(
+                        MAX_SEMANTIC_CALIBRATION_ERROR_PPM,
+                    ),
+                    unsupported_cases: BTreeMap::new(),
+                },
+                Availability::Failed {
+                    reason_code: "semantic_recall_below_threshold".to_owned(),
+                },
+            ),
+            (
+                SemanticQualityMeasurement {
+                    precision_ppm: EvidenceValue::observed(MIN_SEMANTIC_PRECISION_PPM),
+                    recall_ppm: EvidenceValue::observed(MIN_SEMANTIC_RECALL_PPM),
+                    expected_calibration_error_ppm: EvidenceValue::observed(
+                        MAX_SEMANTIC_CALIBRATION_ERROR_PPM + 1,
+                    ),
+                    unsupported_cases: BTreeMap::new(),
+                },
+                Availability::Failed {
+                    reason_code: "semantic_calibration_above_threshold".to_owned(),
+                },
+            ),
+            (
+                SemanticQualityMeasurement::unavailable("quality_corpus_not_integrated"),
+                Availability::Unavailable {
+                    reason_code: "semantic_quality_not_measured".to_owned(),
+                },
+            ),
+        ];
+
+        for (quality, expected) in cases {
+            assert_eq!(
+                semantic_quality_eligibility(&facts_available, &quality),
+                expected
+            );
+        }
     }
 
     #[test]

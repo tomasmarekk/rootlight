@@ -26,6 +26,8 @@ use rootlight_ir::{
     FilePathLocator, FilePathLocatorEncoding, MAX_FILE_PATH_LOCATOR_COMPONENTS, SourceRef,
 };
 
+pub mod platform;
+
 /// Hard ceiling for one VFS source capture, independent of caller configuration.
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 const SNAPSHOT_READ_CHUNK_BYTES: usize = 64 * 1024;

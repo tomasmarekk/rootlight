@@ -5,10 +5,20 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+/// Versioned semantic-quality rubric used by the M05 parser evidence slice.
+pub const SEMANTIC_QUALITY_RUBRIC_ID: &str = "m05-parser-semantic-eligibility-2.0";
+/// Minimum accepted semantic precision, in millionths.
+pub const MIN_SEMANTIC_PRECISION_PPM: u64 = 980_000;
+/// Minimum accepted semantic recall, in millionths.
+pub const MIN_SEMANTIC_RECALL_PPM: u64 = 920_000;
+/// Maximum accepted expected calibration error, in millionths.
+pub const MAX_SEMANTIC_CALIBRATION_ERROR_PPM: u64 = 50_000;
+pub(crate) const MILLION_PPM: u64 = 1_000_000;
 
 /// A measurement's evidence classification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EvidenceValue<T> {
     /// A value measured by this recorded run.
@@ -51,7 +61,7 @@ impl<T> EvidenceValue<T> {
 }
 
 /// Availability of a correctness or telemetry requirement.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Availability {
     /// The requirement was measured and satisfied.
@@ -69,7 +79,7 @@ pub enum Availability {
 }
 
 /// Source-free environment facts required by the benchmark contract.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentEvidence {
     /// Environment schema version.
@@ -119,7 +129,7 @@ pub struct EnvironmentEvidence {
 }
 
 /// One immutable dataset input.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetEntry {
     /// Stable dataset-local ID.
@@ -141,7 +151,7 @@ pub struct DatasetEntry {
 }
 
 /// Versioned immutable dataset manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetManifest {
     /// Manifest schema version.
@@ -159,7 +169,7 @@ pub struct DatasetManifest {
 }
 
 /// Exact source and build identity for one run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildProvenance {
     /// Provenance schema version.
@@ -177,7 +187,7 @@ pub struct BuildProvenance {
 }
 
 /// Exact benchmark command and deterministic trial policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BenchmarkCommand {
     /// Command schema version.
@@ -197,7 +207,7 @@ pub struct BenchmarkCommand {
 }
 
 /// Terminal result for one retained raw sample.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SampleOutcome {
     /// The parser transaction committed.
@@ -214,7 +224,7 @@ pub enum SampleOutcome {
 }
 
 /// One retained parser benchmark sample.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawSample {
     /// Sample schema version.
@@ -250,7 +260,7 @@ pub struct RawSample {
 }
 
 /// Deterministic percentile and throughput summary for one metric family.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricDistribution {
     /// Number of successful measured samples.
@@ -274,7 +284,7 @@ pub struct MetricDistribution {
 }
 
 /// Aggregate result summary, including claim eligibility.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultSummary {
     /// Summary schema version.
@@ -296,7 +306,7 @@ pub struct ResultSummary {
 }
 
 /// Coverage evidence retained separately from performance summary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoverageEvidence {
     /// Coverage schema version.
@@ -312,7 +322,7 @@ pub struct CoverageEvidence {
 }
 
 /// Quality evidence and semantic eligibility rubric.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QualityEvidence {
     /// Quality schema version.
@@ -331,8 +341,43 @@ pub struct QualityEvidence {
     pub unsupported_cases: BTreeMap<String, u64>,
 }
 
-/// One retained agent trajectory; parser-only runs normally publish none.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Corpus-backed semantic quality measurements supplied by an extraction probe.
+///
+/// Counts alone do not establish correctness. A run can become semantically
+/// eligible only when all three quality metrics are observed and satisfy the
+/// versioned M05 rubric.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticQualityMeasurement {
+    /// Measured semantic precision in millionths.
+    pub precision_ppm: EvidenceValue<u64>,
+    /// Measured semantic recall in millionths.
+    pub recall_ppm: EvidenceValue<u64>,
+    /// Measured expected calibration error in millionths.
+    pub expected_calibration_error_ppm: EvidenceValue<u64>,
+    /// Unsupported cases by stable category.
+    pub unsupported_cases: BTreeMap<String, u64>,
+}
+
+impl SemanticQualityMeasurement {
+    /// Creates a measurement whose corpus-backed metrics are unavailable.
+    #[must_use]
+    pub fn unavailable(reason_code: impl Into<String>) -> Self {
+        let reason_code = reason_code.into();
+        Self {
+            precision_ppm: EvidenceValue::unavailable(reason_code.clone()),
+            recall_ppm: EvidenceValue::unavailable(reason_code.clone()),
+            expected_calibration_error_ppm: EvidenceValue::unavailable(reason_code),
+            unsupported_cases: BTreeMap::new(),
+        }
+    }
+}
+
+/// Reserved agent-trajectory shape.
+///
+/// Result-bundle schema 2.0 requires the trajectory artifact to remain empty;
+/// a later schema must replace free-form tool-call text with a closed,
+/// source-free record before trajectories can be published.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentTrajectory {
     /// Trajectory schema version.
@@ -341,7 +386,7 @@ pub struct AgentTrajectory {
     pub task_id: String,
     /// Terminal eligibility.
     pub eligibility: Availability,
-    /// Tool calls retained as source-free structured records.
+    /// Reserved tool-call payload; schema 2.0 rejects every non-empty trajectory.
     pub tool_calls: Vec<String>,
     /// Total model tokens, when measured.
     pub total_tokens: EvidenceValue<u64>,
