@@ -1436,7 +1436,8 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    // Apple filesystem APIs reject ill-formed UTF-8 names before Rootlight can open them.
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     #[test]
     fn unix_lossless_locators_disambiguate_raw_and_literal_paths() {
         use std::ffi::OsStr;
