@@ -95,6 +95,20 @@ where
         self.active
     }
 
+    /// Selects an already-retained generation as the active query default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError::GenerationNotFound`] when the identity is no
+    /// longer retained.
+    pub fn activate(&mut self, generation: GenerationId) -> Result<(), QueryError> {
+        if !self.generations.contains_key(&generation) {
+            return Err(QueryError::GenerationNotFound);
+        }
+        self.active = Some(generation);
+        Ok(())
+    }
+
     /// Returns a retained normalized generation for source-service binding.
     ///
     /// # Errors

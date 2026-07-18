@@ -448,6 +448,28 @@ impl RepositoryRoot {
         self.snapshot_with_check(path, maximum_bytes, || Ok(()))
     }
 
+    /// Captures one stable regular file under an inherited cancellation token.
+    ///
+    /// Any monotonic deadline carried by the token is checked before and after
+    /// each fallible handle operation, allocation checkpoint, and read chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::Cancelled`] when the token's cancellation or
+    /// deadline wins, plus the ordinary bounded snapshot errors.
+    pub fn snapshot_with_cancellation(
+        &self,
+        path: &RelativePath,
+        maximum_bytes: u64,
+        cancellation: &Cancellation,
+    ) -> Result<SourceSnapshot, VfsError> {
+        self.snapshot_with_check(path, maximum_bytes, || {
+            cancellation
+                .check()
+                .map_err(|cancelled| VfsError::Cancelled(cancelled.reason()))
+        })
+    }
+
     /// Captures one stable regular file with cooperative cancellation.
     ///
     /// The absolute monotonic deadline is checked before and after every

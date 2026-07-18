@@ -5,19 +5,25 @@
 
 #![forbid(unsafe_code)]
 
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Instant};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 use rootlight_adapter_sdk::{
-    AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId, GenerationBoundSnapshot,
-    LanguageId, MemoryAdmissionPolicy, ParseProvider, StreamLimits, execute_analysis,
+    AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId,
+    GenerationBoundSnapshot, LanguageId, MemoryAdmissionPolicy, ParseProvider, StreamLimits,
+    execute_analysis,
 };
 use rootlight_adapter_treesitter::{
     ParserSettings, RuntimeConfig, TreeSitterAnalyzer, TreeSitterProvider,
 };
-pub use rootlight_cancel::Cancellation;
-use rootlight_catalog::EphemeralOracleWriter;
+pub use rootlight_cancel::{Cancellation, CancellationReason};
+use rootlight_catalog::{CatalogError, CatalogErrorKind, EphemeralOracleWriter};
 use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
-use rootlight_discovery::{DiscoveryLimits, DiscoveryPolicy, InputClass, discover};
+use rootlight_discovery::{DiscoveryError, DiscoveryLimits, DiscoveryPolicy, InputClass, discover};
 use rootlight_ids::{
     ContentHash, GenerationId, GenerationIdentity, RepositoryId, SymbolId, content_hash,
     derive_generation, derive_repository,
@@ -29,20 +35,22 @@ use rootlight_ir::{
 pub use rootlight_query::{
     CodeLocateResult, LocateMode, QueryResponse, SourceReadQueryResult, SymbolExplainResult,
 };
-use rootlight_query::{GenerationSet, QueryBudget, project_lexical_documents};
-use rootlight_search::{BuildBudget, LexicalIndex, SearchBudget};
-use rootlight_source::{SourceBudget, SourceReadOptions, SourceService};
+use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
+use rootlight_search::{BuildBudget, LexicalIndex, SearchBudget, SearchError};
+use rootlight_source::{SourceBudget, SourceError, SourceReadOptions, SourceService};
 use rootlight_storage::{
-    GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationManifestRecipe,
-    GenerationMetadata, IdentityVerifiedGeneration,
+    GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationControlError,
+    GenerationManifestRecipe, GenerationMetadata, IdentityVerificationError,
+    IdentityVerifiedGeneration,
 };
-use rootlight_vfs::{RelativePath, RepositoryRoot};
+use rootlight_vfs::{RelativePath, RepositoryRoot, VfsError};
 use serde::Serialize;
 
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_SYNTAX_NODES: usize = 16_384;
 const MAX_SYNTAX_DEPTH: usize = 128;
 const MAX_REPOSITORY_PATH_IDENTITY_BYTES: usize = 64 * 1024;
+const MAX_RANDOM_ID_ATTEMPTS: usize = 8;
 const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-rust/1";
@@ -81,6 +89,11 @@ pub struct FirstSliceService {
     analysis_limits: AnalysisLimits,
     extensions: ExtensionSupport,
     analyzer: TreeSitterAnalyzer,
+    // The canonical-root digest is only a process-local lookup key. The
+    // nondurable fallback uses a random local UUID rather than path-derived
+    // public identity; durable UUID persistence remains outside this service.
+    repositories: BTreeMap<ContentHash, RepositoryId>,
+    active_by_repository: BTreeMap<RepositoryId, GenerationId>,
     generations: GenerationSet<LexicalIndex>,
     roots: BTreeMap<GenerationId, RepositoryRoot>,
     receipts: BTreeMap<GenerationId, FirstSliceIndexReceipt>,
@@ -123,6 +136,8 @@ impl FirstSliceService {
             analysis_limits,
             extensions: ExtensionSupport::default(),
             analyzer,
+            repositories: BTreeMap::new(),
+            active_by_repository: BTreeMap::new(),
             generations,
             roots: BTreeMap::new(),
             receipts: BTreeMap::new(),
@@ -149,11 +164,19 @@ impl FirstSliceService {
         require_deadline(cancellation)?;
         cancellation
             .check()
-            .map_err(|_| FirstSliceError::Cancelled)?;
-        let absolute = std::path::absolute(path).map_err(|_| FirstSliceError::Repository)?;
-        let repository = derive_repository(repository_path_hash(&absolute)?.as_bytes()).id();
-        let root =
-            RepositoryRoot::open(repository, &absolute).map_err(|_| FirstSliceError::Repository)?;
+            .map_err(|cancelled| FirstSliceError::Cancelled(cancelled.reason()))?;
+        let canonical = canonical_repository_root(path, cancellation)?;
+        let root_identity = repository_path_hash(&canonical)?;
+        let existing_repository = self.repositories.get(&root_identity).copied();
+        let repository_result = match existing_repository {
+            Some(repository) => repository,
+            None => random_repository_id(&self.repositories)?,
+        };
+        check_cancellation(cancellation)?;
+        let repository = repository_result;
+        let root_result = RepositoryRoot::open(repository, &canonical);
+        check_cancellation(cancellation)?;
+        let root = root_result.map_err(|_| FirstSliceError::Repository)?;
         let policy =
             DiscoveryPolicy::build(Vec::new(), false).map_err(|_| FirstSliceError::Discovery)?;
         let manifest = discover(
@@ -163,7 +186,7 @@ impl FirstSliceService {
             DiscoveryLimits::from_config(&self.config),
             cancellation,
         )
-        .map_err(|_| FirstSliceError::Discovery)?;
+        .map_err(|error| map_discovery_error(error, cancellation))?;
         let [input] = manifest.inputs.as_slice() else {
             return Err(FirstSliceError::FixtureShape);
         };
@@ -177,12 +200,13 @@ impl FirstSliceService {
         let relative =
             RelativePath::parse(Path::new(&input.path)).map_err(|_| FirstSliceError::Repository)?;
         let snapshot = root
-            .snapshot(
+            .snapshot_with_cancellation(
                 &relative,
                 u64::try_from(self.analysis_limits.max_source_bytes())
                     .map_err(|_| FirstSliceError::Limits)?,
+                cancellation,
             )
-            .map_err(|_| FirstSliceError::Repository)?;
+            .map_err(|error| map_vfs_error(error, cancellation))?;
         if snapshot.file() != input.file
             || snapshot.content_hash() != input.content_hash
             || u64::try_from(snapshot.content().len()).ok() != Some(input.bytes)
@@ -208,7 +232,7 @@ impl FirstSliceService {
                 .canonical_hash()
                 .map_err(|_| FirstSliceError::Identity)?;
         let provider_set_hash = content_hash(PROVIDER_SET_SEED);
-        let active = self.generations.active_generation();
+        let active = self.active_by_repository.get(&repository).copied();
         if let Some(active) = active
             && let Ok(snapshot) = self.generations.generation(active)
         {
@@ -217,18 +241,16 @@ impl FirstSliceService {
                 && metadata.manifest_hash() == manifest_hash
                 && metadata.configuration_hash() == self.config.hash()
                 && metadata.provider_set_hash() == provider_set_hash
-                && let Some(receipt) = self.receipts.get(&active)
+                && let Some(receipt) = self.receipts.get(&active).copied()
             {
-                return Ok(*receipt);
+                check_cancellation(cancellation)?;
+                self.generations
+                    .activate(active)
+                    .map_err(|_| FirstSliceError::Retention)?;
+                return Ok(receipt);
             }
         }
-        let parent = active.and_then(|generation| {
-            self.generations
-                .generation(generation)
-                .ok()
-                .filter(|snapshot| snapshot.metadata().repository() == repository)
-                .map(|_| generation)
-        });
+        let parent = active;
         let generation = derive_generation(GenerationIdentity {
             repository,
             parent,
@@ -238,8 +260,13 @@ impl FirstSliceService {
             format_version: generation_format_version(),
         })
         .id();
-        if let Some(receipt) = self.receipts.get(&generation) {
-            return Ok(*receipt);
+        if let Some(receipt) = self.receipts.get(&generation).copied() {
+            check_cancellation(cancellation)?;
+            self.generations
+                .activate(generation)
+                .map_err(|_| FirstSliceError::Retention)?;
+            self.active_by_repository.insert(repository, generation);
+            return Ok(receipt);
         }
         let source = SourceRef::new(
             repository,
@@ -267,7 +294,7 @@ impl FirstSliceService {
             MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
             cancellation,
         )
-        .map_err(|_| FirstSliceError::Adapter)?;
+        .map_err(|error| map_adapter_error(error, cancellation))?;
         let metadata = GenerationMetadata::new(
             repository,
             generation,
@@ -285,19 +312,19 @@ impl FirstSliceService {
             &self.extensions,
             &context,
         )
-        .map_err(|_| FirstSliceError::Identity)?;
+        .map_err(|error| map_identity_error(error, cancellation))?;
         let oracle = EphemeralOracleWriter::create()
-            .map_err(|_| FirstSliceError::Catalog)?
+            .map_err(|error| map_catalog_error(&error, cancellation))?
             .seal(verified, &context)
-            .map_err(|_| FirstSliceError::Catalog)?;
+            .map_err(|error| map_catalog_error(&error, cancellation))?;
         let oracle_allocated_bytes = oracle
             .allocated_bytes()
-            .map_err(|_| FirstSliceError::Catalog)?;
+            .map_err(|error| map_catalog_error(&error, cancellation))?;
         let persisted = oracle
             .read(&context)
-            .map_err(|_| FirstSliceError::Catalog)?;
+            .map_err(|error| map_catalog_error(&error, cancellation))?;
         let documents = project_lexical_documents(&persisted, BuildBudget::default(), cancellation)
-            .map_err(|_| FirstSliceError::Search)?;
+            .map_err(|error| map_query_error(error, cancellation))?;
         let lexical_documents =
             u64::try_from(documents.len()).map_err(|_| FirstSliceError::Limits)?;
         let search = LexicalIndex::build_ephemeral(
@@ -306,14 +333,15 @@ impl FirstSliceService {
             BuildBudget::default(),
             cancellation,
         )
-        .map_err(|_| FirstSliceError::Search)?;
+        .map_err(|error| map_search_error(error, cancellation))?;
         let indexed_files =
             u64::try_from(persisted.document().files.len()).map_err(|_| FirstSliceError::Limits)?;
         let entities = u64::try_from(persisted.document().entities.len())
             .map_err(|_| FirstSliceError::Limits)?;
         let verified = oracle
             .read_verified(&context)
-            .map_err(|_| FirstSliceError::Catalog)?;
+            .map_err(|error| map_catalog_error(&error, cancellation))?;
+        check_cancellation(cancellation)?;
         self.generations
             .publish(verified, search, true)
             .map_err(|_| FirstSliceError::Retention)?;
@@ -330,6 +358,10 @@ impl FirstSliceService {
         };
         self.roots.insert(generation, root);
         self.receipts.insert(generation, receipt);
+        self.active_by_repository.insert(repository, generation);
+        if existing_repository.is_none() {
+            self.repositories.insert(root_identity, repository);
+        }
         Ok(receipt)
     }
 
@@ -353,6 +385,7 @@ impl FirstSliceService {
         maximum_results: usize,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<CodeLocateResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
         let service = self
             .generations
             .query(generation)
@@ -365,10 +398,10 @@ impl FirstSliceService {
                 SearchBudget::default(),
                 QueryBudget::new(),
             )
-            .map_err(|_| FirstSliceError::Query)?;
+            .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_code_locate(&plan, cancellation)
-            .map_err(|_| FirstSliceError::Query)
+            .map_err(|error| map_query_error(error, cancellation))
     }
 
     /// Executes a generation-pinned bounded `symbol.explain` query.
@@ -383,16 +416,17 @@ impl FirstSliceService {
         symbol: SymbolId,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<SymbolExplainResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
         let service = self
             .generations
             .query(generation)
             .map_err(|_| FirstSliceError::Query)?;
         let plan = service
             .plan_symbol_explain(symbol, QueryBudget::new())
-            .map_err(|_| FirstSliceError::Query)?;
+            .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_symbol_explain(&plan, cancellation)
-            .map_err(|_| FirstSliceError::Query)
+            .map_err(|error| map_query_error(error, cancellation))
     }
 
     /// Executes a generation-pinned bounded `source.read` query.
@@ -407,6 +441,7 @@ impl FirstSliceService {
         references: Vec<SourceRef>,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<SourceReadQueryResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
         let service = self
             .generations
             .query(generation)
@@ -416,7 +451,8 @@ impl FirstSliceService {
             .generation(generation)
             .map_err(|_| FirstSliceError::Query)?;
         let root = self.roots.get(&generation).ok_or(FirstSliceError::Query)?;
-        let source = SourceService::new(root, snapshot).map_err(|_| FirstSliceError::Source)?;
+        let source = SourceService::new(root, snapshot)
+            .map_err(|error| map_source_error(error, cancellation))?;
         let plan = service
             .plan_source_read(
                 references,
@@ -424,10 +460,10 @@ impl FirstSliceService {
                 SourceBudget::new(),
                 QueryBudget::new(),
             )
-            .map_err(|_| FirstSliceError::Query)?;
+            .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_source_read(&plan, &source, cancellation)
-            .map_err(|_| FirstSliceError::Query)
+            .map_err(|error| map_query_error(error, cancellation))
     }
 }
 
@@ -448,12 +484,15 @@ pub enum FirstSliceError {
     /// Effective configuration could not initialize.
     #[error("first-slice configuration is invalid")]
     Configuration,
+    /// The operating system could not create a local repository UUID.
+    #[error("first-slice repository identity is unavailable")]
+    RandomUnavailable,
     /// The caller omitted the required monotonic deadline.
     #[error("first-slice indexing requires a monotonic deadline")]
     DeadlineRequired,
     /// Cooperative cancellation or deadline stopped the operation.
-    #[error("first-slice operation was cancelled")]
-    Cancelled,
+    #[error("first-slice operation was cancelled: {0:?}")]
+    Cancelled(CancellationReason),
     /// The repository capability could not be established safely.
     #[error("first-slice repository is unavailable")]
     Repository,
@@ -497,6 +536,110 @@ fn require_deadline(cancellation: &Cancellation) -> Result<(), FirstSliceError> 
         Ok(())
     } else {
         Err(FirstSliceError::DeadlineRequired)
+    }
+}
+
+fn check_cancellation(cancellation: &Cancellation) -> Result<(), FirstSliceError> {
+    cancellation
+        .check()
+        .map_err(|cancelled| FirstSliceError::Cancelled(cancelled.reason()))
+}
+
+fn current_cancellation(cancellation: &Cancellation) -> Option<FirstSliceError> {
+    cancellation
+        .check()
+        .err()
+        .map(|cancelled| FirstSliceError::Cancelled(cancelled.reason()))
+}
+
+fn map_discovery_error(error: DiscoveryError, cancellation: &Cancellation) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    match error {
+        DiscoveryError::Cancelled(cancelled) => FirstSliceError::Cancelled(cancelled.reason()),
+        DiscoveryError::Vfs(VfsError::Cancelled(reason)) => FirstSliceError::Cancelled(reason),
+        _ => FirstSliceError::Discovery,
+    }
+}
+
+fn map_vfs_error(error: VfsError, cancellation: &Cancellation) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    match error {
+        VfsError::Cancelled(reason) => FirstSliceError::Cancelled(reason),
+        _ => FirstSliceError::Repository,
+    }
+}
+
+fn map_adapter_error(error: AdapterError, cancellation: &Cancellation) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    match error {
+        AdapterError::Cancelled { reason } => FirstSliceError::Cancelled(reason),
+        _ => FirstSliceError::Adapter,
+    }
+}
+
+fn map_identity_error(
+    error: IdentityVerificationError,
+    cancellation: &Cancellation,
+) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    match error {
+        IdentityVerificationError::Control(GenerationControlError::Cancelled { reason }) => {
+            FirstSliceError::Cancelled(reason)
+        }
+        _ => FirstSliceError::Identity,
+    }
+}
+
+fn map_catalog_error(error: &CatalogError, cancellation: &Cancellation) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    if error.kind() == CatalogErrorKind::Cancelled {
+        FirstSliceError::Cancelled(
+            cancellation
+                .reason()
+                .unwrap_or(CancellationReason::ParentCancelled),
+        )
+    } else {
+        FirstSliceError::Catalog
+    }
+}
+
+fn map_search_error(error: SearchError, cancellation: &Cancellation) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    match error {
+        SearchError::Cancelled(reason) => FirstSliceError::Cancelled(reason),
+        _ => FirstSliceError::Search,
+    }
+}
+
+fn map_source_error(error: SourceError, cancellation: &Cancellation) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    match error {
+        SourceError::Cancelled(reason) => FirstSliceError::Cancelled(reason),
+        _ => FirstSliceError::Source,
+    }
+}
+
+fn map_query_error(error: QueryError, cancellation: &Cancellation) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    match error {
+        QueryError::Cancelled(reason) => FirstSliceError::Cancelled(reason),
+        _ => FirstSliceError::Query,
     }
 }
 
@@ -557,28 +700,82 @@ fn fallible_copy_string(value: &str) -> Result<String, FirstSliceError> {
     Ok(copy)
 }
 
+fn canonical_repository_root(
+    path: &Path,
+    cancellation: &Cancellation,
+) -> Result<PathBuf, FirstSliceError> {
+    validate_repository_path_length(path)?;
+    check_cancellation(cancellation)?;
+    let absolute = std::path::absolute(path).map_err(|_| FirstSliceError::Repository)?;
+    validate_repository_path_length(&absolute)?;
+    check_cancellation(cancellation)?;
+    let canonical_result = std::fs::canonicalize(absolute);
+    check_cancellation(cancellation)?;
+    let canonical = canonical_result.map_err(|_| FirstSliceError::Repository)?;
+    validate_repository_path_length(&canonical)?;
+    Ok(canonical)
+}
+
+fn random_repository_id(
+    repositories: &BTreeMap<ContentHash, RepositoryId>,
+) -> Result<RepositoryId, FirstSliceError> {
+    for _ in 0..MAX_RANDOM_ID_ATTEMPTS {
+        let mut local_uuid = [0_u8; 16];
+        getrandom::fill(&mut local_uuid).map_err(|_| FirstSliceError::RandomUnavailable)?;
+        local_uuid[6] = (local_uuid[6] & 0x0f) | 0x40;
+        local_uuid[8] = (local_uuid[8] & 0x3f) | 0x80;
+        let candidate = derive_repository(&local_uuid).id();
+        if !repositories
+            .values()
+            .any(|repository| *repository == candidate)
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(FirstSliceError::RandomUnavailable)
+}
+
+fn validate_repository_path_length(path: &Path) -> Result<(), FirstSliceError> {
+    if repository_path_identity_bytes(path)? > MAX_REPOSITORY_PATH_IDENTITY_BYTES {
+        return Err(FirstSliceError::Repository);
+    }
+    Ok(())
+}
+
+fn repository_path_identity_bytes(path: &Path) -> Result<usize, FirstSliceError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        Ok(path.as_os_str().as_bytes().len())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+
+        path.as_os_str()
+            .encode_wide()
+            .count()
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or(FirstSliceError::Repository)
+    }
+}
+
 fn repository_path_hash(path: &Path) -> Result<ContentHash, FirstSliceError> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt as _;
 
         let bytes = path.as_os_str().as_bytes();
-        if bytes.len() > MAX_REPOSITORY_PATH_IDENTITY_BYTES {
-            return Err(FirstSliceError::Repository);
-        }
+        validate_repository_path_length(path)?;
         Ok(content_hash(bytes))
     }
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt as _;
 
-        let units = path.as_os_str().encode_wide().count();
-        let byte_length = units
-            .checked_mul(std::mem::size_of::<u16>())
-            .ok_or(FirstSliceError::Repository)?;
-        if byte_length > MAX_REPOSITORY_PATH_IDENTITY_BYTES {
-            return Err(FirstSliceError::Repository);
-        }
+        let byte_length = repository_path_identity_bytes(path)?;
+        validate_repository_path_length(path)?;
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(byte_length)

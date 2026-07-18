@@ -38,10 +38,13 @@ use rootlight_service::{
     Cancellation, CodeLocateResult, FirstSliceError, FirstSliceIndexReceipt, FirstSliceService,
     LocateMode, QueryResponse, SourceReadQueryResult, SymbolExplainResult,
 };
+#[cfg(test)]
+use rootlight_service::CancellationReason;
 use serde::Serialize;
 
 const CLI_CONTRACT_VERSION: &str = "1.0";
 const FIRST_SLICE_DEMO_CONTRACT_VERSION: &str = "1.0";
+const HARD_MAX_CLI_JSON_BYTES: usize = 4 * 1024 * 1024;
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const FIRST_SLICE_SOURCE_BEFORE: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 const FIRST_SLICE_SOURCE_AFTER: &str = "pub fn answer() -> u32 {\n    43\n}\n";
@@ -71,7 +74,49 @@ fn main() -> ExitCode {
 }
 
 fn render_json(value: &CliEnvelope) -> Result<String, ()> {
-    serde_json::to_string(value).map_err(|_| ())
+    let mut output = BoundedJsonBuffer::new(HARD_MAX_CLI_JSON_BYTES);
+    serde_json::to_writer(&mut output, value).map_err(|_| ())?;
+    String::from_utf8(output.into_bytes()).map_err(|_| ())
+}
+
+struct BoundedJsonBuffer {
+    bytes: Vec<u8>,
+    maximum: usize,
+}
+
+impl BoundedJsonBuffer {
+    const fn new(maximum: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            maximum,
+        }
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl std::io::Write for BoundedJsonBuffer {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let required = self
+            .bytes
+            .len()
+            .checked_add(buffer.len())
+            .ok_or_else(|| std::io::Error::other("CLI JSON output limit exceeded"))?;
+        if required > self.maximum {
+            return Err(std::io::Error::other("CLI JSON output limit exceeded"));
+        }
+        self.bytes
+            .try_reserve(buffer.len())
+            .map_err(|_| std::io::Error::other("CLI JSON output allocation failed"))?;
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn run() -> Result<CommandResult, CliError> {
@@ -965,6 +1010,13 @@ impl CliError {
         if let Some(error) = self.embedded_public_error() {
             return error.clone();
         }
+        if matches!(self, Self::FirstSlice(FirstSliceError::Cancelled(_))) {
+            return PublicError::builder(ErrorCode::Cancelled, "operation was cancelled")
+                .build()
+                .unwrap_or_else(|_| {
+                    unreachable!("closed CLI cancellation template is statically bounded")
+                });
+        }
         let (code, message, retryable) = match self.exit_family() {
             ExitFamily::Success => (ErrorCode::Internal, "internal operation failed", false),
             ExitFamily::Usage => (
@@ -1165,5 +1217,22 @@ mod tests {
         assert_eq!(json["exit_family"], "usage");
         assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
         assert!(json.get("result").is_none());
+    }
+
+    #[test]
+    fn first_slice_cancellation_preserves_the_public_error_family() {
+        let error = CliError::FirstSlice(FirstSliceError::Cancelled(
+            CancellationReason::DeadlineExceeded,
+        ));
+
+        assert_eq!(error.public_error().code(), ErrorCode::Cancelled);
+    }
+
+    #[test]
+    fn cli_json_buffer_enforces_the_complete_output_limit() {
+        let mut buffer = BoundedJsonBuffer::new(3);
+        buffer.write_all(b"abc").expect("exact limit fits");
+        assert!(buffer.write_all(b"d").is_err());
+        assert_eq!(buffer.into_bytes(), b"abc");
     }
 }

@@ -2105,6 +2105,7 @@ dependencies = [
 name = "rootlight-service"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "rootlight-adapter-sdk",
  "rootlight-adapter-treesitter",
  "rootlight-cancel",
