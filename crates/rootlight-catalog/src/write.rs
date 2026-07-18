@@ -144,9 +144,8 @@ pub(crate) fn measure(
         add_text(&mut text_bytes, &file.path, context)?;
         if let Some(locator) = &file.path_locator {
             add_text(&mut text_bytes, locator.encoding().as_str(), context)?;
-            for component in locator.components() {
-                add_text(&mut text_bytes, component, context)?;
-            }
+            let components = serialize_json_text(locator.components(), context)?;
+            add_text(&mut text_bytes, &components, context)?;
         }
         add_text(&mut text_bytes, &file.language, context)?;
         add_text(&mut text_bytes, &file.encoding, context)?;
@@ -669,9 +668,8 @@ fn insert_files(
         let locator_components = record
             .path_locator
             .as_ref()
-            .map(|locator| serde_json::to_string(locator.components()))
-            .transpose()
-            .map_err(CatalogError::json)?;
+            .map(|locator| serialize_json_text(locator.components(), context))
+            .transpose()?;
         statement
             .execute(params![
                 record.id.as_bytes().as_slice(),
@@ -1136,10 +1134,13 @@ pub(crate) fn canonical_document_hash(
     Ok(ContentHash::from_bytes(*digest.as_bytes()))
 }
 
-fn serialize_json_text(
-    value: &impl serde::Serialize,
+fn serialize_json_text<T>(
+    value: &T,
     context: &GenerationContext<'_>,
-) -> Result<String, CatalogError> {
+) -> Result<String, CatalogError>
+where
+    T: serde::Serialize + ?Sized,
+{
     let mut writer = CheckedJsonWriter::for_text(Vec::new(), 0, context)?;
     serialize_json(&mut writer, value)?;
     context.check().map_err(CatalogError::control)?;
@@ -1147,10 +1148,13 @@ fn serialize_json_text(
         .map_err(|_| CatalogError::new(CatalogErrorKind::InvalidGeneration))
 }
 
-fn serialize_json(
+fn serialize_json<T>(
     writer: &mut CheckedJsonWriter<'_, impl Write>,
-    value: &impl serde::Serialize,
-) -> Result<(), CatalogError> {
+    value: &T,
+) -> Result<(), CatalogError>
+where
+    T: serde::Serialize + ?Sized,
+{
     match serde_json::to_writer(&mut *writer, value) {
         Ok(()) => Ok(()),
         Err(error) => writer.failure().map_or_else(

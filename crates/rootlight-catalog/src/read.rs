@@ -164,6 +164,8 @@ fn validate_text_bytes(
         (
             "SELECT
                 length(CAST(path AS BLOB))
+              + coalesce(length(CAST(path_locator_encoding AS BLOB)), 0)
+              + coalesce(length(CAST(path_locator_components AS BLOB)), 0)
               + length(CAST(language AS BLOB))
               + length(CAST(encoding AS BLOB))
              FROM files

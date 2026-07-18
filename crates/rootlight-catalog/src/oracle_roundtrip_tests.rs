@@ -665,10 +665,14 @@ fn undeclared_migration_is_rejected() {
     write_fixture(directory.path());
     let connection =
         Connection::open(directory.path().join(ORACLE_FILENAME)).expect("oracle opens");
+    let undeclared_version = oracle_schema_compatibility()
+        .schema_version()
+        .checked_add(1)
+        .expect("fixture schema version has a successor");
     connection
         .execute(
-            "INSERT INTO migrations(migration_id, checksum) VALUES (3, zeroblob(32))",
-            [],
+            "INSERT INTO migrations(migration_id, checksum) VALUES (?1, zeroblob(32))",
+            [undeclared_version],
         )
         .expect("undeclared migration is installed");
     drop(connection);
@@ -838,7 +842,7 @@ fn schema_identity_is_versioned_and_source_body_columns_are_absent() {
     let catalog = catalog_schema_compatibility();
     let oracle = oracle_schema_compatibility();
     assert_eq!(catalog.schema_version(), 2);
-    assert_eq!(oracle.schema_version(), 2);
+    assert_eq!(oracle.schema_version(), 3);
     assert_ne!(catalog.application_id(), oracle.application_id());
     assert_ne!(catalog.checksum(), oracle.checksum());
     assert_eq!(GENERATION_CONTRACT_VERSION.major(), 1);

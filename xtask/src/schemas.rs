@@ -236,10 +236,8 @@ fn validate_storage_compatibility(workspace_root: &Path) -> Result<(), SchemaErr
             })
             .collect::<Vec<_>>()
             != [(1, 0), (1, 1), (1, 2)]
-        || fixtures[0].catalog.application_id != fixtures[1].catalog.application_id
-        || fixtures[0].oracle.application_id != fixtures[1].oracle.application_id
-        || fixtures[0].catalog.schema_version >= fixtures[1].catalog.schema_version
-        || fixtures[0].oracle.schema_version >= fixtures[1].oracle.schema_version
+        || !schema_history_is_valid(&fixtures, |fixture| &fixture.catalog)
+        || !schema_history_is_valid(&fixtures, |fixture| &fixture.oracle)
     {
         return Err(SchemaError::StorageCompatibilityMismatch);
     }
@@ -266,6 +264,22 @@ fn validate_storage_compatibility(workspace_root: &Path) -> Result<(), SchemaErr
         return Err(SchemaError::StorageCompatibilityMismatch);
     }
     Ok(())
+}
+
+fn schema_history_is_valid<'fixture>(
+    fixtures: &'fixture [StorageCompatibilityFixture],
+    select: impl Fn(&'fixture StorageCompatibilityFixture) -> &'fixture SqliteSchemaFixture,
+) -> bool {
+    fixtures.windows(2).all(|pair| {
+        let previous = select(&pair[0]);
+        let current = select(&pair[1]);
+        previous.application_id == current.application_id
+            && if previous.checksum == current.checksum {
+                previous.schema_version == current.schema_version
+            } else {
+                previous.schema_version < current.schema_version
+            }
+    })
 }
 
 fn validate_configuration_schema(
@@ -1605,5 +1619,28 @@ mod tests {
         expected.sort();
 
         assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn schema_history_requires_a_version_bump_for_checksum_changes() {
+        let fixture = |minor, schema_version, checksum: &str| StorageCompatibilityFixture {
+            fixture_version: MANIFEST_VERSION.to_owned(),
+            generation_contract: VersionFixture { major: 1, minor },
+            catalog: SqliteSchemaFixture {
+                application_id: 1,
+                schema_version,
+                checksum: checksum.to_owned(),
+            },
+            oracle: SqliteSchemaFixture {
+                application_id: 2,
+                schema_version,
+                checksum: checksum.to_owned(),
+            },
+        };
+        let valid = [fixture(0, 1, "old"), fixture(1, 2, "new")];
+        let invalid = [fixture(0, 1, "old"), fixture(1, 1, "new")];
+
+        assert!(schema_history_is_valid(&valid, |entry| &entry.oracle));
+        assert!(!schema_history_is_valid(&invalid, |entry| &entry.oracle));
     }
 }
