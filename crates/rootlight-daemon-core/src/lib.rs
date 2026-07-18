@@ -174,6 +174,98 @@ pub struct FirstSliceIpcContext {
     pub cancellation: rootlight_operations::Cancellation,
     /// Absolute monotonic deadline enforced by the daemon transport.
     pub deadline: Instant,
+    /// Admission state that linearizes peer cancellation with index publication.
+    pub index_admission: Option<FirstSliceAdmission>,
+}
+
+const ADMISSION_PENDING: u8 = 0;
+const ADMISSION_INSERTED: u8 = 1;
+const ADMISSION_CANCELLED_BEFORE_INSERT: u8 = 2;
+const ADMISSION_CANCELLED_AFTER_INSERT: u8 = 3;
+const ADMISSION_PUBLICATION_CLAIMED: u8 = 4;
+
+/// Process-local state that binds one index request to its publication race.
+#[derive(Debug, Clone, Default)]
+pub struct FirstSliceAdmission {
+    state: Arc<AtomicU8>,
+}
+
+impl FirstSliceAdmission {
+    /// Records that the handler inserted a new operation for this exact request.
+    pub fn mark_inserted(&self) {
+        let mut observed = self.state.load(Ordering::Acquire);
+        loop {
+            let next = match observed {
+                ADMISSION_PENDING => ADMISSION_INSERTED,
+                ADMISSION_CANCELLED_BEFORE_INSERT => ADMISSION_CANCELLED_AFTER_INSERT,
+                ADMISSION_INSERTED
+                | ADMISSION_CANCELLED_AFTER_INSERT
+                | ADMISSION_PUBLICATION_CLAIMED => return,
+                _ => return,
+            };
+            match self.state.compare_exchange_weak(
+                observed,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => observed = actual,
+            }
+        }
+    }
+
+    /// Reports whether this exact request inserted the operation it named.
+    #[must_use]
+    pub fn was_inserted(&self) -> bool {
+        matches!(
+            self.state.load(Ordering::Acquire),
+            ADMISSION_INSERTED | ADMISSION_CANCELLED_AFTER_INSERT | ADMISSION_PUBLICATION_CLAIMED
+        )
+    }
+
+    /// Prevents publication if peer abandonment or invalid trailing data wins first.
+    pub fn cancel_publication(&self) {
+        let mut observed = self.state.load(Ordering::Acquire);
+        loop {
+            let next = match observed {
+                ADMISSION_PENDING => ADMISSION_CANCELLED_BEFORE_INSERT,
+                ADMISSION_INSERTED => ADMISSION_CANCELLED_AFTER_INSERT,
+                ADMISSION_CANCELLED_BEFORE_INSERT | ADMISSION_CANCELLED_AFTER_INSERT => return,
+                ADMISSION_PUBLICATION_CLAIMED => return,
+                _ => return,
+            };
+            match self.state.compare_exchange_weak(
+                observed,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => observed = actual,
+            }
+        }
+    }
+
+    fn claim_publication(&self) -> PublicationAdmission {
+        match self.state.compare_exchange(
+            ADMISSION_INSERTED,
+            ADMISSION_PUBLICATION_CLAIMED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => PublicationAdmission::Claimed,
+            Err(ADMISSION_CANCELLED_AFTER_INSERT) => PublicationAdmission::Cancelled,
+            Err(_) => PublicationAdmission::NotInserted,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicationAdmission {
+    Claimed,
+    Cancelled,
+    NotInserted,
 }
 
 /// Narrow application extension for first-slice protocol methods.
@@ -691,6 +783,7 @@ enum JournalCommand {
     },
     CompletePublication {
         operation: OperationId,
+        admission: Option<FirstSliceAdmission>,
         claim: Option<MutationClaim>,
         reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
@@ -983,6 +1076,7 @@ impl JournalActorHandle {
             JournalLane::Normal,
             JournalCommand::CompletePublication {
                 operation,
+                admission: None,
                 claim: None,
                 reply,
             },
@@ -1010,6 +1104,33 @@ impl JournalActorHandle {
             JournalLane::Normal,
             JournalCommand::CompletePublication {
                 operation,
+                admission: None,
+                claim: Some(claim.clone()),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
+    /// Commits publication only if peer cancellation has not linearized first.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, cancellation-race, admission, or
+    /// journal failure.
+    pub async fn complete_publication_with_admission_until(
+        &self,
+        operation: OperationId,
+        admission: FirstSliceAdmission,
+        deadline: Instant,
+    ) -> Result<OperationRecord, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::CompletePublication {
+                operation,
+                admission: Some(admission),
                 claim: Some(claim.clone()),
                 reply,
             },
@@ -1518,10 +1639,25 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
         }
         JournalCommand::CompletePublication {
             operation,
+            admission,
             claim,
             reply,
         } => {
             let result = execute_claimed(claim.as_ref(), || {
+                if let Some(admission) = admission {
+                    match admission.claim_publication() {
+                        PublicationAdmission::Claimed => {}
+                        PublicationAdmission::Cancelled => {
+                            journal.request_cancellation(
+                                operation,
+                                CancellationReason::ClientRequest,
+                            )?;
+                        }
+                        PublicationAdmission::NotInserted => {
+                            return Err(OperationError::CorruptState);
+                        }
+                    }
+                }
                 journal.complete_repository_publication(operation)
             });
             let _ = reply.send(result);
@@ -3250,7 +3386,10 @@ pub async fn handle_connection_async_with_first_slice(
     negotiation.finish(TelemetryOutcome::Succeeded, None);
     let envelope = read_request_async(codec, stream).await?;
     let survives_disconnect = request_survives_client_disconnect(&envelope);
-    let disconnect_cancel = attached_index_cancel_request(&envelope);
+    let transport_cancel = index_transport_cancel_request(&envelope);
+    let index_admission = transport_cancel
+        .as_ref()
+        .map(|cancellation| cancellation.admission.clone());
     let timing = RequestTiming::start(&service, &envelope);
     let cancellation = timing
         .deadline
@@ -3267,17 +3406,21 @@ pub async fn handle_connection_async_with_first_slice(
                 selected_protocol_minor,
                 cancellation: cancellation.clone(),
                 timing,
+                index_admission: index_admission.clone(),
             },
         ),
         stream,
         &cancellation,
         survives_disconnect,
+        index_admission.as_ref(),
     )
     .await;
-    if !matches!(dispatch_result, Ok(Some(_))) {
-        cancel_disconnected_attached_index(
+    let cancel_admitted_operation =
+        dispatch_result.is_err() || matches!(dispatch_result, Ok(None)) && !survives_disconnect;
+    if cancel_admitted_operation {
+        cancel_peer_abandoned_index(
             first_slice.as_ref(),
-            disconnect_cancel,
+            transport_cancel,
             client_instance_id,
             selected_protocol_minor,
             timing.deadline,
@@ -3298,26 +3441,31 @@ fn request_survives_client_disconnect(envelope: &daemon::RequestEnvelope) -> boo
     )
 }
 
-fn attached_index_cancel_request(
+fn index_transport_cancel_request(
     envelope: &daemon::RequestEnvelope,
-) -> Option<FirstSliceIpcRequest> {
+) -> Option<IndexTransportCancellation> {
     let Some(daemon::request_envelope::Request::RepositoryIndex(request)) =
         envelope.request.as_ref()
     else {
         return None;
     };
-    if request.detached {
-        return None;
-    }
-    Some(FirstSliceIpcRequest::RepositoryOperationStatus(
-        daemon::RepositoryOperationStatusRequest {
-            schema_version: request.schema_version,
-            operation: request.operation.clone(),
-            action: daemon::RepositoryOperationAction::RepositoryOperationCancel as i32,
-            wait_ms: None,
-            after_revision: None,
-        },
-    ))
+    Some(IndexTransportCancellation {
+        request: FirstSliceIpcRequest::RepositoryOperationStatus(
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: request.schema_version,
+                operation: request.operation.clone(),
+                action: daemon::RepositoryOperationAction::RepositoryOperationCancel as i32,
+                wait_ms: None,
+                after_revision: None,
+            },
+        ),
+        admission: FirstSliceAdmission::default(),
+    })
+}
+
+struct IndexTransportCancellation {
+    request: FirstSliceIpcRequest,
+    admission: FirstSliceAdmission,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3331,6 +3479,7 @@ struct AsyncDispatchContext {
     selected_protocol_minor: u32,
     cancellation: Cancellation,
     timing: RequestTiming,
+    index_admission: Option<FirstSliceAdmission>,
 }
 
 impl RequestTiming {
@@ -3348,28 +3497,32 @@ impl RequestTiming {
     }
 }
 
-async fn cancel_disconnected_attached_index(
+async fn cancel_peer_abandoned_index(
     handler: &dyn FirstSliceIpcHandler,
-    request: Option<FirstSliceIpcRequest>,
+    cancellation: Option<IndexTransportCancellation>,
     client_instance_id: ClientInstanceId,
     selected_protocol_minor: u32,
     deadline: Option<Instant>,
 ) {
-    let (Some(request), Some(deadline)) = (request, deadline) else {
+    let (Some(cancellation), Some(deadline)) = (cancellation, deadline) else {
         return;
     };
+    if !cancellation.admission.was_inserted() {
+        return;
+    }
     let context = FirstSliceIpcContext {
         client_instance_id,
         selected_protocol_minor,
         cancellation: Cancellation::with_deadline(deadline),
         deadline,
+        index_admission: None,
     };
-    // The first-slice host routes status control to an independent lane. A
-    // NotFound race is harmless because the work lane observes the connection
-    // token before and after durable admission.
+    // This independent control-lane request shortens cancellation latency.
+    // The admission state remains authoritative if this best-effort dispatch
+    // misses its deadline or the bounded control lane is unavailable.
     let _ = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        handler.dispatch(request, context),
+        handler.dispatch(cancellation.request, context),
     )
     .await;
 }
@@ -3379,6 +3532,7 @@ async fn dispatch_while_peer_connected<F>(
     stream: &mut AsyncLocalStream,
     cancellation: &Cancellation,
     survives_disconnect: bool,
+    admission: Option<&FirstSliceAdmission>,
 ) -> Result<Option<daemon::ResponseEnvelope>, IpcError>
 where
     F: Future<Output = daemon::ResponseEnvelope>,
@@ -3387,16 +3541,33 @@ where
     let peer_close = wait_for_peer_close_async(stream);
     tokio::pin!(peer_close);
     tokio::select! {
-        // A simultaneously elapsed request deadline must establish its more
-        // specific reason before a peer close can record client cancellation.
+        // Polling the peer first rejects buffered protocol data even when the
+        // handler already has a response. Observing the token before recording
+        // client cancellation preserves an elapsed deadline as first reason.
         biased;
-        response = &mut dispatch => Ok(Some(response)),
         peer = &mut peer_close => {
-            if !survives_disconnect {
-                let _ = cancellation.cancel(CancellationReason::ClientRequest);
+            match peer {
+                Ok(()) => {
+                    if !survives_disconnect && cancellation.reason().is_none() {
+                        if let Some(admission) = admission {
+                            admission.cancel_publication();
+                        }
+                        let _ = cancellation.cancel(CancellationReason::ClientRequest);
+                    }
+                    Ok(None)
+                }
+                Err(error) => {
+                    if cancellation.reason().is_none() {
+                        if let Some(admission) = admission {
+                            admission.cancel_publication();
+                        }
+                        let _ = cancellation.cancel(CancellationReason::ClientRequest);
+                    }
+                    Err(error)
+                }
             }
-            peer.map(|()| None)
-        }
+        },
+        response = &mut dispatch => Ok(Some(response)),
     }
 }
 
@@ -3438,6 +3609,7 @@ async fn dispatch_async(
                     context.selected_protocol_minor,
                     request_deadline,
                     context.cancellation,
+                    context.index_admission,
                 )
                 .await
             }
@@ -3599,6 +3771,7 @@ async fn dispatch_first_slice(
     selected_protocol_minor: u32,
     deadline: Instant,
     cancellation: Cancellation,
+    index_admission: Option<FirstSliceAdmission>,
 ) -> daemon::response_envelope::Response {
     if selected_protocol_minor < 5 {
         return daemon::response_envelope::Response::Error(public_error_to_wire(
@@ -3619,6 +3792,7 @@ async fn dispatch_first_slice(
         selected_protocol_minor,
         cancellation: cancellation.clone(),
         deadline,
+        index_admission,
     };
     // Retain the already-bounded request so the daemon can reject an internal
     // handler response that is well typed but belongs to another identity.
@@ -5536,6 +5710,7 @@ mod tests {
             selected_protocol_minor: PROTOCOL_MINOR,
             cancellation: Cancellation::new(),
             timing: RequestTiming::start(service, envelope),
+            index_admission: None,
         }
     }
 
@@ -5561,15 +5736,22 @@ mod tests {
     #[derive(Debug, Default)]
     struct DisconnectRecordingFirstSlice {
         requests: Mutex<Vec<FirstSliceIpcRequest>>,
+        admit_indexes: bool,
     }
 
     impl FirstSliceIpcHandler for DisconnectRecordingFirstSlice {
         fn dispatch(
             &self,
             request: FirstSliceIpcRequest,
-            _context: FirstSliceIpcContext,
+            context: FirstSliceIpcContext,
         ) -> FirstSliceIpcFuture {
             let is_index = matches!(request, FirstSliceIpcRequest::RepositoryIndex(_));
+            if is_index
+                && self.admit_indexes
+                && let Some(admission) = context.index_admission.as_ref()
+            {
+                admission.mark_inserted();
+            }
             self.requests
                 .lock()
                 .expect("request capture lock is healthy")
@@ -5595,6 +5777,7 @@ mod tests {
                 &mut server,
                 &cancellation,
                 false,
+                None,
             ),
         )
         .await
@@ -5621,6 +5804,7 @@ mod tests {
                 &mut server,
                 &cancellation,
                 true,
+                None,
             ),
         )
         .await
@@ -5648,6 +5832,7 @@ mod tests {
                 &mut server,
                 &cancellation,
                 false,
+                None,
             ),
         )
         .await
@@ -5662,38 +5847,115 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_deadline_reason_wins_over_simultaneous_peer_close() {
-        let (_temporary, client, mut server) =
-            connected_async_streams("deadline-before-disconnect").await;
+    async fn buffered_peer_data_rejects_a_ready_response() {
+        let (_temporary, mut client, mut server) =
+            connected_async_streams("buffered-peer-data").await;
         let cancellation = Cancellation::new();
-        let dispatch_cancellation = cancellation.clone();
-        drop(client);
+        let admission = FirstSliceAdmission::default();
+        admission.mark_inserted();
+        let (release, ready) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            client
+                .write_all(&[0x5a])
+                .await
+                .expect("unexpected byte writes");
+            release.send(()).expect("ready response releases");
+        });
         let expected = daemon::ResponseEnvelope {
-            request_id: 81,
+            request_id: 80,
             response: None,
         };
 
-        let response = tokio::time::timeout(
+        let error = tokio::time::timeout(
             Duration::from_secs(1),
             dispatch_while_peer_connected(
                 async move {
-                    let _ = dispatch_cancellation.cancel(CancellationReason::DeadlineExceeded);
+                    ready.await.expect("ready response is released");
                     expected
                 },
                 &mut server,
                 &cancellation,
                 false,
+                Some(&admission),
             ),
         )
         .await
-        .expect("ready dispatch wins")
-        .expect("dispatch succeeds")
-        .expect("response is retained");
+        .expect("peer data is observed")
+        .expect_err("buffered trailing data rejects a ready response");
+        peer.await.expect("peer writer joins");
 
-        assert_eq!(response.request_id, 81);
+        assert!(matches!(error, IpcError::UnexpectedPeerData));
+        assert_eq!(
+            cancellation.reason(),
+            Some(CancellationReason::ClientRequest)
+        );
+        assert_eq!(
+            admission.claim_publication(),
+            PublicationAdmission::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_deadline_reason_wins_over_simultaneous_peer_close() {
+        let (_temporary, client, mut server) =
+            connected_async_streams("deadline-before-disconnect").await;
+        let cancellation = Cancellation::with_deadline(Instant::now());
+        drop(client);
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatch_while_peer_connected(
+                std::future::pending::<daemon::ResponseEnvelope>(),
+                &mut server,
+                &cancellation,
+                false,
+                None,
+            ),
+        )
+        .await
+        .expect("peer close is observed")
+        .expect("peer EOF is accepted");
+
+        assert!(response.is_none());
         assert_eq!(
             cancellation.reason(),
             Some(CancellationReason::DeadlineExceeded)
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnected_retry_without_new_admission_does_not_cancel() {
+        let handler = DisconnectRecordingFirstSlice::default();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let operation = vec![82; 16];
+
+        cancel_peer_abandoned_index(
+            &handler,
+            Some(IndexTransportCancellation {
+                request: FirstSliceIpcRequest::RepositoryOperationStatus(
+                    daemon::RepositoryOperationStatusRequest {
+                        schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+                        operation: Some(common::OperationId { value: operation }),
+                        action: daemon::RepositoryOperationAction::RepositoryOperationCancel as i32,
+                        wait_ms: None,
+                        after_revision: None,
+                    },
+                ),
+                admission: FirstSliceAdmission::default(),
+            }),
+            ClientInstanceId::from_bytes([82; 16]),
+            PROTOCOL_MINOR,
+            Some(deadline),
+        )
+        .await;
+
+        assert!(
+            handler
+                .requests
+                .lock()
+                .expect("request capture lock is healthy")
+                .is_empty()
         );
     }
 
@@ -5708,7 +5970,10 @@ mod tests {
         let service = Arc::new(ControlService::new(journal, [7; 16]));
         let client_connections = Arc::new(ClientConnectionAdmissions::new(limits));
         let (submissions, _receiver) = tokio::sync::mpsc::channel(4);
-        let handler = Arc::new(DisconnectRecordingFirstSlice::default());
+        let handler = Arc::new(DisconnectRecordingFirstSlice {
+            requests: Mutex::new(Vec::new()),
+            admit_indexes: true,
+        });
         let server_handler = Arc::clone(&handler);
         let server_service = Arc::clone(&service);
         let server_connections = Arc::clone(&client_connections);
@@ -5775,6 +6040,121 @@ mod tests {
         assert!(matches!(
             &requests[0],
             FirstSliceIpcRequest::RepositoryIndex(request) if !request.detached
+        ));
+        assert!(matches!(
+            &requests[1],
+            FirstSliceIpcRequest::RepositoryOperationStatus(request)
+                if request.action
+                    == daemon::RepositoryOperationAction::RepositoryOperationCancel as i32
+                    && request.operation.as_ref().map(|id| &id.value) == Some(&operation)
+        ));
+        drop(requests);
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test]
+    async fn detached_index_trailing_data_uses_independent_cancel_lane() {
+        let temporary = private_tempdir();
+        let endpoint = endpoint_named(&temporary, "detached-index-protocol-error");
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("async listener binds");
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let limits = DaemonLimits::default();
+        let service = Arc::new(ControlService::new(journal, [7; 16]));
+        let client_connections = Arc::new(ClientConnectionAdmissions::new(limits));
+        let (submissions, _receiver) = tokio::sync::mpsc::channel(4);
+        let handler = Arc::new(DisconnectRecordingFirstSlice {
+            requests: Mutex::new(Vec::new()),
+            admit_indexes: true,
+        });
+        let server_handler = Arc::clone(&handler);
+        let server_service = Arc::clone(&service);
+        let server_connections = Arc::clone(&client_connections);
+        let server_journal = actor.handle();
+        let server = tokio::spawn(async move {
+            let mut stream = listener.accept().await.expect("connection accepts");
+            handle_connection_async_with_first_slice(
+                server_service,
+                server_journal,
+                submissions,
+                server_connections,
+                server_handler,
+                FrameCodec::default(),
+                &mut stream,
+            )
+            .await
+        });
+        let mut client = connect_async(&endpoint).await.expect("client connects");
+        write_client_hello_async(
+            FrameCodec::default(),
+            &mut client,
+            &supported_hello(vec![7; 16]),
+        )
+        .await
+        .expect("client hello writes");
+        let hello = read_server_hello_async(FrameCodec::default(), &mut client)
+            .await
+            .expect("server hello reads");
+        assert!(hello.error.is_none());
+        let operation = vec![84; 16];
+        write_request_async(
+            FrameCodec::default(),
+            &mut client,
+            &daemon::RequestEnvelope {
+                request_id: 84,
+                instance_nonce: vec![7; 16],
+                timeout_ms: Some(1_000),
+                request: Some(daemon::request_envelope::Request::RepositoryIndex(
+                    daemon::RepositoryIndexRequest {
+                        schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+                        root: "fixture".to_owned(),
+                        operation: Some(common::OperationId {
+                            value: operation.clone(),
+                        }),
+                        detached: true,
+                    },
+                )),
+            },
+        )
+        .await
+        .expect("index request writes");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !handler
+                    .requests
+                    .lock()
+                    .expect("request capture lock is healthy")
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached request reaches admission");
+        client
+            .write_all(&[0x5a])
+            .await
+            .expect("trailing byte writes");
+
+        let error = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("protocol error completes")
+            .expect("server task joins")
+            .expect_err("trailing data fails closed");
+        assert!(matches!(
+            error,
+            ServiceError::Ipc(IpcError::UnexpectedPeerData)
+        ));
+        let requests = handler
+            .requests
+            .lock()
+            .expect("request capture lock is healthy");
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(
+            &requests[0],
+            FirstSliceIpcRequest::RepositoryIndex(request) if request.detached
         ));
         assert!(matches!(
             &requests[1],
@@ -6064,6 +6444,7 @@ mod tests {
             PROTOCOL_MINOR,
             deadline,
             Cancellation::new(),
+            None,
         )
         .await;
 
