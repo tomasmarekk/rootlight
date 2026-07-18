@@ -448,7 +448,7 @@ mod tests {
 
     fn request(method: &str, params: Value) -> OperatingRequest {
         OperatingRequest {
-            id: RequestId::Integer(1),
+            id: RequestId::Number(serde_json::Number::from(1)),
             method: method.to_owned(),
             params: Some(params),
         }
