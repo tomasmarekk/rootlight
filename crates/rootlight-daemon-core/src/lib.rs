@@ -636,13 +636,65 @@ impl Default for DaemonState {
 /// Reply payload returned by the dedicated journal actor.
 pub type JournalReply = Result<ControlResponse, OperationError>;
 
+const MUTATION_PENDING: u8 = 0;
+const MUTATION_EXECUTING: u8 = 1;
+const MUTATION_ABANDONED: u8 = 2;
+
+#[derive(Debug, Clone)]
+struct MutationClaim {
+    deadline: Instant,
+    state: Arc<AtomicU8>,
+}
+
+impl MutationClaim {
+    fn new(deadline: Instant) -> Self {
+        Self {
+            deadline,
+            state: Arc::new(AtomicU8::new(MUTATION_PENDING)),
+        }
+    }
+
+    fn begin(&self) -> bool {
+        if self
+            .state
+            .compare_exchange(
+                MUTATION_PENDING,
+                MUTATION_EXECUTING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        if Instant::now() >= self.deadline {
+            self.state.store(MUTATION_ABANDONED, Ordering::Release);
+            return false;
+        }
+        true
+    }
+
+    fn abandon(&self) -> bool {
+        self.state
+            .compare_exchange(
+                MUTATION_PENDING,
+                MUTATION_ABANDONED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
 enum JournalCommand {
     Execute {
         request: ControlRequest,
+        claim: Option<MutationClaim>,
         reply: tokio::sync::oneshot::Sender<JournalReply>,
     },
     Submit {
         submission: OperationSubmission,
+        claim: Option<MutationClaim>,
         reply: tokio::sync::oneshot::Sender<Result<SubmissionOutcome, OperationError>>,
     },
     RetryStatus {
@@ -653,17 +705,31 @@ enum JournalCommand {
         operation: OperationId,
         owner: ClientInstanceId,
         expiry_unix_ms: u64,
+        claim: Option<MutationClaim>,
         reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
     ActivateOperation {
         operation: OperationId,
+        claim: Option<MutationClaim>,
         reply: tokio::sync::oneshot::Sender<
             Result<(OperationRecord, rootlight_operations::Cancellation), OperationError>,
         >,
     },
+    CompletePublication {
+        operation: OperationId,
+        claim: Option<MutationClaim>,
+        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
+    },
     FinishOperation {
         operation: OperationId,
         cancellation_reason: Option<rootlight_operations::CancellationReason>,
+        claim: Option<MutationClaim>,
+        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
+    },
+    FailOperation {
+        operation: OperationId,
+        error: PublicError,
+        claim: Option<MutationClaim>,
         reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
     InterruptDeadline {
@@ -681,6 +747,11 @@ enum JournalCommand {
     },
     Checkpoint {
         reply: tokio::sync::oneshot::Sender<Result<(), OperationError>>,
+    },
+    #[cfg(test)]
+    Block {
+        started: SyncSender<()>,
+        release: Receiver<()>,
     },
 }
 
@@ -714,6 +785,30 @@ impl JournalActorHandle {
             .await
     }
 
+    /// Executes one mutating control request with abandonment-safe admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed timeout only when the actor has not begun the command,
+    /// otherwise awaits the already-claimed bounded journal mutation.
+    pub async fn control_until(
+        &self,
+        request: ControlRequest,
+        deadline: Instant,
+    ) -> Result<ControlResponse, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Control,
+            JournalCommand::Execute {
+                request,
+                claim: Some(claim.clone()),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
     /// Executes operation submission on the bounded normal lane.
     ///
     /// # Errors
@@ -736,12 +831,39 @@ impl JournalActorHandle {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.try_send(
             JournalLane::Normal,
-            JournalCommand::Submit { submission, reply },
+            JournalCommand::Submit {
+                submission,
+                claim: None,
+                reply,
+            },
         )?;
         receiver
             .await
             .map_err(|_| ServiceError::ChannelClosed)?
             .map_err(ServiceError::Operations)
+    }
+
+    /// Submits immutable metadata before one absolute lifecycle deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, or journal failure.
+    pub async fn submit_until(
+        &self,
+        submission: OperationSubmission,
+        deadline: Instant,
+    ) -> Result<SubmissionOutcome, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::Submit {
+                submission,
+                claim: Some(claim.clone()),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
     }
 
     /// Returns existing retry-compatible work on the high-priority lane.
@@ -782,6 +904,7 @@ impl JournalActorHandle {
                 operation,
                 owner,
                 expiry_unix_ms,
+                claim: None,
                 reply,
             },
         )?;
@@ -789,6 +912,33 @@ impl JournalActorHandle {
             .await
             .map_err(|_| ServiceError::ChannelClosed)?
             .map_err(ServiceError::Operations)
+    }
+
+    /// Renews an attached lease before one absolute request deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, ownership, expiry, actor, or journal failure.
+    pub async fn renew_lease_until(
+        &self,
+        operation: OperationId,
+        owner: ClientInstanceId,
+        expiry_unix_ms: u64,
+        deadline: Instant,
+    ) -> Result<OperationRecord, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Control,
+            JournalCommand::RenewLease {
+                operation,
+                owner,
+                expiry_unix_ms,
+                claim: Some(claim.clone()),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
     }
 
     /// Atomically activates queued work and returns its process-local cancellation token.
@@ -806,12 +956,91 @@ impl JournalActorHandle {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.try_send(
             JournalLane::Normal,
-            JournalCommand::ActivateOperation { operation, reply },
+            JournalCommand::ActivateOperation {
+                operation,
+                claim: None,
+                reply,
+            },
         )?;
         receiver
             .await
             .map_err(|_| ServiceError::ChannelClosed)?
             .map_err(ServiceError::Operations)
+    }
+
+    /// Activates one queued operation before an absolute lifecycle deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, or journal failure.
+    pub async fn activate_operation_until(
+        &self,
+        operation: OperationId,
+        deadline: Instant,
+    ) -> Result<(OperationRecord, rootlight_operations::Cancellation), ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::ActivateOperation {
+                operation,
+                claim: Some(claim.clone()),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
+    /// Atomically persists successful publication and closes cancellation admission.
+    ///
+    /// A cancellation serialized before this command wins. Success, final
+    /// progress, and cleanup are one journal transaction, so no later lifecycle
+    /// deadline is needed to terminalize a committed publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, actor, cancellation-race, or journal failure.
+    pub async fn complete_publication(
+        &self,
+        operation: OperationId,
+    ) -> Result<OperationRecord, ServiceError> {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::CompletePublication {
+                operation,
+                claim: None,
+                reply,
+            },
+        )?;
+        receiver
+            .await
+            .map_err(|_| ServiceError::ChannelClosed)?
+            .map_err(ServiceError::Operations)
+    }
+
+    /// Commits publication before an absolute lifecycle deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, cancellation-race, or journal
+    /// failure.
+    pub async fn complete_publication_until(
+        &self,
+        operation: OperationId,
+        deadline: Instant,
+    ) -> Result<OperationRecord, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::CompletePublication {
+                operation,
+                claim: Some(claim.clone()),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
     }
 
     /// Persists synthetic completion or cooperative cancellation.
@@ -830,6 +1059,82 @@ impl JournalActorHandle {
             .map_err(ServiceError::Operations)
     }
 
+    /// Persists completion or cancellation before an absolute lifecycle deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, or journal failure.
+    pub async fn finish_operation_until(
+        &self,
+        operation: OperationId,
+        cancellation_reason: Option<rootlight_operations::CancellationReason>,
+        deadline: Instant,
+    ) -> Result<OperationRecord, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::FinishOperation {
+                operation,
+                cancellation_reason,
+                claim: Some(claim.clone()),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
+    /// Persists a checked terminal failure unless cancellation already won.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, actor, journal, or lifecycle failure.
+    pub async fn fail_operation(
+        &self,
+        operation: OperationId,
+        error: PublicError,
+    ) -> Result<OperationRecord, ServiceError> {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::FailOperation {
+                operation,
+                error,
+                claim: None,
+                reply,
+            },
+        )?;
+        receiver
+            .await
+            .map_err(|_| ServiceError::ChannelClosed)?
+            .map_err(ServiceError::Operations)
+    }
+
+    /// Persists checked failure before an absolute lifecycle deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed queue, timeout, actor, journal, or lifecycle failure.
+    pub async fn fail_operation_until(
+        &self,
+        operation: OperationId,
+        error: PublicError,
+        deadline: Instant,
+    ) -> Result<OperationRecord, ServiceError> {
+        let claim = MutationClaim::new(deadline);
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.try_send(
+            JournalLane::Normal,
+            JournalCommand::FailOperation {
+                operation,
+                error,
+                claim: Some(claim.clone()),
+                reply,
+            },
+        )?;
+        await_claimed_mutation(receiver, claim).await
+    }
+
     fn finish_operation_receiver(
         &self,
         operation: OperationId,
@@ -842,6 +1147,7 @@ impl JournalActorHandle {
             JournalCommand::FinishOperation {
                 operation,
                 cancellation_reason,
+                claim: None,
                 reply,
             },
         )?;
@@ -951,11 +1257,60 @@ impl JournalActorHandle {
     ) -> Result<ControlResponse, ServiceError> {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         let JournalCommandKind::Execute(request) = command;
-        self.try_send(lane, JournalCommand::Execute { request, reply })?;
+        self.try_send(
+            lane,
+            JournalCommand::Execute {
+                request,
+                claim: None,
+                reply,
+            },
+        )?;
         receiver
             .await
             .map_err(|_| ServiceError::ChannelClosed)?
             .map_err(ServiceError::Operations)
+    }
+}
+
+async fn await_claimed_mutation<T>(
+    mut receiver: tokio::sync::oneshot::Receiver<Result<T, OperationError>>,
+    claim: MutationClaim,
+) -> Result<T, ServiceError> {
+    // Dropping a request future is another cancellation boundary. The guard
+    // abandons only still-pending work; once the actor claims execution, the
+    // compare-exchange fails and the durable mutation runs to its reply.
+    let guard = MutationClaimGuard {
+        claim: claim.clone(),
+    };
+    tokio::select! {
+        response = &mut receiver => map_claimed_mutation_response(response),
+        () = tokio::time::sleep_until(tokio::time::Instant::from_std(guard.claim.deadline)) => {
+            if guard.claim.abandon() {
+                Err(ServiceError::RequestTimedOut)
+            } else {
+                map_claimed_mutation_response(receiver.await)
+            }
+        }
+    }
+}
+
+fn map_claimed_mutation_response<T>(
+    response: Result<Result<T, OperationError>, tokio::sync::oneshot::error::RecvError>,
+) -> Result<T, ServiceError> {
+    match response {
+        Ok(Err(OperationError::MutationTimedOut)) => Err(ServiceError::RequestTimedOut),
+        Ok(result) => result.map_err(ServiceError::Operations),
+        Err(_) => Err(ServiceError::ChannelClosed),
+    }
+}
+
+struct MutationClaimGuard {
+    claim: MutationClaim,
+}
+
+impl Drop for MutationClaimGuard {
+    fn drop(&mut self) {
+        let _ = self.claim.abandon();
     }
 }
 
@@ -1022,6 +1377,34 @@ impl JournalActor {
             return Ok(());
         };
         join.join().map_err(|_| ServiceError::ThreadPanicked)
+    }
+
+    /// Stops the actor and awaits its thread within one absolute shutdown deadline.
+    ///
+    /// The blocking OS-thread join is owned by a detached coordinator. If the
+    /// deadline elapses, consuming `self` leaves no join handle for `Drop` to
+    /// block on a second time.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed timeout, coordinator-spawn, or actor-panic failure.
+    pub async fn join_until(mut self, deadline: tokio::time::Instant) -> Result<(), ServiceError> {
+        self.handle.stop();
+        let Some(join) = self.join.take() else {
+            return Ok(());
+        };
+        let (completed, completion) = tokio::sync::oneshot::channel();
+        thread::Builder::new()
+            .name("rootlight-journal-join".to_owned())
+            .spawn(move || {
+                let result = join.join().map_err(|_| ServiceError::ThreadPanicked);
+                let _ = completed.send(result);
+            })
+            .map_err(ServiceError::ThreadSpawn)?;
+        tokio::time::timeout_at(deadline, completion)
+            .await
+            .map_err(|_| ServiceError::RequestTimedOut)?
+            .map_err(|_| ServiceError::ThreadPanicked)?
     }
 }
 
@@ -1111,11 +1494,23 @@ fn journal_actor_loop(
 
 fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) {
     match command {
-        JournalCommand::Execute { request, reply } => {
-            let _ = reply.send(execute_journal_request(journal, request));
+        JournalCommand::Execute {
+            request,
+            claim,
+            reply,
+        } => {
+            let _ = reply.send(execute_claimed(claim.as_ref(), || {
+                execute_journal_request(journal, request)
+            }));
         }
-        JournalCommand::Submit { submission, reply } => {
-            let _ = reply.send(journal.submit(submission));
+        JournalCommand::Submit {
+            submission,
+            claim,
+            reply,
+        } => {
+            let _ = reply.send(execute_claimed(claim.as_ref(), || {
+                journal.submit(submission)
+            }));
         }
         JournalCommand::RetryStatus { submission, reply } => {
             let _ = reply.send(journal.retry_status(submission));
@@ -1124,81 +1519,152 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
             operation,
             owner,
             expiry_unix_ms,
+            claim,
             reply,
         } => {
-            let _ = reply.send(journal.renew_lease(operation, owner, expiry_unix_ms));
+            let _ = reply.send(execute_claimed(claim.as_ref(), || {
+                journal.renew_lease(operation, owner, expiry_unix_ms)
+            }));
         }
-        JournalCommand::ActivateOperation { operation, reply } => {
-            let result = journal.start_execution(operation).and_then(|record| {
+        JournalCommand::ActivateOperation {
+            operation,
+            claim,
+            reply,
+        } => {
+            let result = execute_claimed(claim.as_ref(), || {
                 journal
-                    .cancellation_token(operation)
-                    .map(|cancellation| (record, cancellation))
+                    .start_execution_if_live(operation)
+                    .and_then(|record| {
+                        journal
+                            .cancellation_token(operation)
+                            .map(|cancellation| (record, cancellation))
+                    })
+            });
+            let _ = reply.send(result);
+        }
+        JournalCommand::CompletePublication {
+            operation,
+            claim,
+            reply,
+        } => {
+            let result = execute_claimed(claim.as_ref(), || {
+                journal.complete_repository_publication(operation)
             });
             let _ = reply.send(result);
         }
         JournalCommand::FinishOperation {
             operation,
             cancellation_reason,
+            claim,
             reply,
         } => {
-            let current = journal.status(operation);
-            let result = current.and_then(|record| {
-                if matches!(
-                    record.state,
-                    OperationState::Interrupted | OperationState::Cancelled
-                ) {
-                    return Ok(record);
-                }
-                if let Some(reason) = cancellation_reason {
-                    match record.state {
-                        OperationState::Running => journal
-                            .request_cancellation(operation, reason)
-                            .map(|outcome| outcome.operation)
-                            .and_then(|_| journal.update_stage(operation, OperationStage::Cleanup))
+            let result = execute_claimed(claim.as_ref(), || {
+                let current = journal.status(operation);
+                current.and_then(|record| {
+                    if matches!(
+                        record.state,
+                        OperationState::Interrupted | OperationState::Cancelled
+                    ) {
+                        return Ok(record);
+                    }
+                    if cancellation_reason
+                        == Some(rootlight_operations::CancellationReason::DeadlineExceeded)
+                    {
+                        return journal.interrupt_deadline(operation);
+                    }
+                    if let Some(reason) = cancellation_reason {
+                        match record.state {
+                            OperationState::Running => journal
+                                .request_cancellation(operation, reason)
+                                .map(|outcome| outcome.operation)
+                                .and_then(|_| {
+                                    journal.update_stage(operation, OperationStage::Cleanup)
+                                })
+                                .and_then(|_| {
+                                    journal.transition(operation, OperationState::Cancelled, None)
+                                }),
+                            OperationState::Cancelling => journal
+                                .update_stage(operation, OperationStage::Cleanup)
+                                .or_else(|error| {
+                                    if matches!(error, OperationError::InvalidStage) {
+                                        Ok(record.clone())
+                                    } else {
+                                        Err(error)
+                                    }
+                                })
+                                .and_then(|_| {
+                                    journal.transition(operation, OperationState::Cancelled, None)
+                                }),
+                            _ => Err(OperationError::InvalidStage),
+                        }
+                    } else {
+                        journal
+                            .update_progress(
+                                operation,
+                                Progress::new(1, 1).unwrap_or_else(|_| {
+                                    unreachable!("fixed synthetic progress is valid")
+                                }),
+                            )
                             .and_then(|_| {
-                                journal.transition(operation, OperationState::Cancelled, None)
-                            }),
-                        OperationState::Cancelling => journal
-                            .update_stage(operation, OperationStage::Cleanup)
+                                journal.transition(operation, OperationState::Succeeded, None)
+                            })
                             .or_else(|error| {
-                                if matches!(error, OperationError::InvalidStage) {
-                                    Ok(record.clone())
+                                if matches!(error, OperationError::CancellationWon) {
+                                    journal
+                                        .update_stage(operation, OperationStage::Cleanup)
+                                        .and_then(|_| {
+                                            journal.transition(
+                                                operation,
+                                                OperationState::Cancelled,
+                                                None,
+                                            )
+                                        })
                                 } else {
                                     Err(error)
                                 }
                             })
+                    }
+                })
+            });
+            let _ = reply.send(result);
+        }
+        JournalCommand::FailOperation {
+            operation,
+            error,
+            claim,
+            reply,
+        } => {
+            let result = execute_claimed(claim.as_ref(), || {
+                journal.status(operation).and_then(|record| {
+                    if record.state.is_terminal() {
+                        return Ok(record);
+                    }
+                    if record.cancellation_requested || record.state == OperationState::Cancelling {
+                        journal
+                            .update_stage(operation, OperationStage::Cleanup)
+                            .or_else(|stage_error| {
+                                if matches!(stage_error, OperationError::InvalidStage) {
+                                    Ok(record.clone())
+                                } else {
+                                    Err(stage_error)
+                                }
+                            })
                             .and_then(|_| {
                                 journal.transition(operation, OperationState::Cancelled, None)
-                            }),
-                        _ => Err(OperationError::InvalidStage),
+                            })
+                    } else if record.state == OperationState::Running {
+                        let staged = if record.stage == OperationStage::Cleanup {
+                            Ok(record)
+                        } else {
+                            journal.update_stage(operation, OperationStage::Cleanup)
+                        };
+                        staged.and_then(|_| {
+                            journal.transition(operation, OperationState::Failed, Some(&error))
+                        })
+                    } else {
+                        Err(OperationError::InvalidStage)
                     }
-                } else {
-                    journal
-                        .update_progress(
-                            operation,
-                            Progress::new(1, 1).unwrap_or_else(|_| {
-                                unreachable!("fixed synthetic progress is valid")
-                            }),
-                        )
-                        .and_then(|_| {
-                            journal.transition(operation, OperationState::Succeeded, None)
-                        })
-                        .or_else(|error| {
-                            if matches!(error, OperationError::CancellationWon) {
-                                journal
-                                    .update_stage(operation, OperationStage::Cleanup)
-                                    .and_then(|_| {
-                                        journal.transition(
-                                            operation,
-                                            OperationState::Cancelled,
-                                            None,
-                                        )
-                                    })
-                            } else {
-                                Err(error)
-                            }
-                        })
-                }
+                })
             });
             let _ = reply.send(result);
         }
@@ -1218,6 +1684,22 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
         JournalCommand::Checkpoint { reply } => {
             let _ = reply.send(journal.checkpoint());
         }
+        #[cfg(test)]
+        JournalCommand::Block { started, release } => {
+            let _ = started.send(());
+            let _ = release.recv();
+        }
+    }
+}
+
+fn execute_claimed<T>(
+    claim: Option<&MutationClaim>,
+    execute: impl FnOnce() -> Result<T, OperationError>,
+) -> Result<T, OperationError> {
+    if claim.is_some_and(|claim| !claim.begin()) {
+        Err(OperationError::MutationTimedOut)
+    } else {
+        execute()
     }
 }
 
@@ -1750,21 +2232,45 @@ impl SyntheticWorkerPool {
         self.sender.take();
     }
 
-    fn join(&mut self) -> Result<(), ServiceError> {
+    async fn join_until(&mut self, deadline: tokio::time::Instant) -> Result<(), ServiceError> {
         self.close();
-        for worker in self.workers.drain(..) {
-            worker.join().map_err(|_| ServiceError::ThreadPanicked)?;
+        // Wake workers blocked on a full completion channel before awaiting
+        // their OS threads. Buffered completions remain available for permit
+        // finalization after the join.
+        self.completions.close();
+        if self.workers.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let workers = self.workers.drain(..).collect::<Vec<_>>();
+        let (completed, completion) = tokio::sync::oneshot::channel();
+        thread::Builder::new()
+            .name("rootlight-workers-join".to_owned())
+            .spawn(move || {
+                let mut panicked = false;
+                for worker in workers {
+                    panicked |= worker.join().is_err();
+                }
+                let result = if panicked {
+                    Err(ServiceError::ThreadPanicked)
+                } else {
+                    Ok(())
+                };
+                let _ = completed.send(result);
+            })
+            .map_err(ServiceError::ThreadSpawn)?;
+        tokio::time::timeout_at(deadline, completion)
+            .await
+            .map_err(|_| ServiceError::RequestTimedOut)?
+            .map_err(|_| ServiceError::ThreadPanicked)?
     }
 }
 
 impl Drop for SyntheticWorkerPool {
     fn drop(&mut self) {
         self.close();
-        for worker in self.workers.drain(..) {
-            let _ = worker.join();
-        }
+        // Process shutdown owns a single absolute deadline. Dropping the pool
+        // must never start a fresh unbounded wait after that budget expires.
+        self.workers.clear();
     }
 }
 
@@ -2054,23 +2560,30 @@ impl DaemonOrchestrator {
     /// # Errors
     ///
     /// Returns a typed actor, journal, or worker join failure.
-    pub async fn shutdown(&mut self) -> Result<(), ServiceError> {
+    pub async fn shutdown_until(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), ServiceError> {
         self.state.set_lifecycle(DaemonLifecycle::Draining);
         self.workers.close();
         loop {
-            let changed = self.journal.interrupt(256).await?;
+            let changed = tokio::time::timeout_at(deadline, self.journal.interrupt(256))
+                .await
+                .map_err(|_| ServiceError::RequestTimedOut)??;
             if changed == 0 {
                 break;
             }
         }
-        self.workers.join()?;
+        self.workers.join_until(deadline).await?;
         if let Some(completion) = self.pending_completion.take() {
             completion.completion.permit.finish();
         }
         while let Ok(completion) = self.workers.completions.try_recv() {
             completion.permit.finish();
         }
-        self.journal.checkpoint().await?;
+        tokio::time::timeout_at(deadline, self.journal.checkpoint())
+            .await
+            .map_err(|_| ServiceError::RequestTimedOut)??;
         self.state.set_operation_counts(0, 0, 0);
         self.state.set_lifecycle(DaemonLifecycle::Stopped);
         Ok(())
@@ -2783,6 +3296,13 @@ async fn dispatch_async(
     let request_id = envelope.request_id;
     let method = control_method_from_wire(envelope.request.as_ref());
     let started = Instant::now();
+    let request_timeout =
+        envelope
+            .timeout_ms
+            .map_or(service.limits.request_timeout, |milliseconds| {
+                Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout)
+            });
+    let request_deadline = started.checked_add(request_timeout);
     let span = service
         .state
         .telemetry
@@ -2795,16 +3315,19 @@ async fn dispatch_async(
         daemon::response_envelope::Response::Error(public_error_to_wire(&permission_denied(
             "daemon instance nonce does not match",
         )))
+    } else if request_deadline.is_none() {
+        daemon::response_envelope::Response::Error(public_error_to_wire(&request_timed_out()))
     } else {
+        let request_deadline =
+            request_deadline.unwrap_or_else(|| unreachable!("deadline was checked above"));
         match first_slice_request_from_wire(envelope.request) {
             Ok(Some(request)) => {
                 dispatch_first_slice(
-                    service,
                     first_slice,
                     request,
                     client_instance_id,
                     selected_protocol_minor,
-                    envelope.timeout_ms,
+                    request_deadline,
                 )
                 .await
             }
@@ -2844,7 +3367,6 @@ async fn dispatch_async(
                         )))
                     }
                     Ok(ControlRequest::OperationSubmit(submission)) => {
-                        let timeout_ms = envelope.timeout_ms;
                         let response = async {
                             let (admission, receiver) = OperationAdmission::new(submission);
                             match submissions.try_send(admission) {
@@ -2871,30 +3393,46 @@ async fn dispatch_async(
                                 .map_err(|error| ServiceError::Public(Box::new(error)))?;
                             Ok(ControlResponse::OperationSubmit(operation))
                         };
-                        await_journal_response(service, response, timeout_ms).await
+                        await_journal_response_until(
+                            response,
+                            request_deadline,
+                            service.limits.operation_queue_limit,
+                        )
+                        .await
                     }
                     Ok(ControlRequest::OperationLeaseRenew {
                         operation,
                         owner,
                         expiry_unix_ms,
                     }) => {
-                        await_journal_response(
-                            service,
+                        await_claimed_journal_response(
                             async {
                                 journal
-                                    .renew_lease(operation, owner, expiry_unix_ms)
+                                    .renew_lease_until(
+                                        operation,
+                                        owner,
+                                        expiry_unix_ms,
+                                        request_deadline,
+                                    )
                                     .await
                                     .map(ControlResponse::OperationLeaseRenew)
                             },
-                            envelope.timeout_ms,
+                            service.limits.operation_queue_limit,
+                        )
+                        .await
+                    }
+                    Ok(request @ ControlRequest::OperationCancel(_)) => {
+                        await_claimed_journal_response(
+                            journal.control_until(request, request_deadline),
+                            service.limits.operation_queue_limit,
                         )
                         .await
                     }
                     Ok(request) => {
-                        await_journal_response(
-                            service,
+                        await_journal_response_until(
                             journal.control(request),
-                            envelope.timeout_ms,
+                            request_deadline,
+                            service.limits.operation_queue_limit,
                         )
                         .await
                     }
@@ -2942,12 +3480,11 @@ fn first_slice_request_from_wire(
 }
 
 async fn dispatch_first_slice(
-    service: &ControlService,
     handler: &dyn FirstSliceIpcHandler,
     request: FirstSliceIpcRequest,
     client_instance_id: ClientInstanceId,
     selected_protocol_minor: u32,
-    requested_timeout_ms: Option<u32>,
+    deadline: Instant,
 ) -> daemon::response_envelope::Response {
     if selected_protocol_minor < 5 {
         return daemon::response_envelope::Response::Error(public_error_to_wire(
@@ -2955,16 +3492,8 @@ async fn dispatch_first_slice(
         ));
     }
     if let Err(error) = validate_first_slice_request(&request) {
-        return daemon::response_envelope::Response::Error(public_error_to_wire(&error));
+        return daemon::response_envelope::Response::Error(public_error_to_wire(error.as_ref()));
     }
-    let timeout = requested_timeout_ms.map_or(service.limits.request_timeout, |milliseconds| {
-        Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout)
-    });
-    let Some(deadline) = Instant::now().checked_add(timeout) else {
-        return daemon::response_envelope::Response::Error(public_error_to_wire(
-            &request_timed_out(),
-        ));
-    };
     let cancellation = rootlight_operations::Cancellation::with_deadline(deadline);
     let context = FirstSliceIpcContext {
         client_instance_id,
@@ -2998,7 +3527,7 @@ fn correlated_first_slice_response(
     }
 }
 
-fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), PublicError> {
+fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Box<PublicError>> {
     match request {
         FirstSliceIpcRequest::RepositoryIndex(request) => {
             require_first_slice_schema(request.schema_version.as_ref())?;
@@ -3007,7 +3536,7 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Pu
                 || request.root.len() > 4096
                 || request.root.as_bytes().contains(&0)
             {
-                return Err(invalid_argument("repository root is invalid"));
+                return Err(Box::new(invalid_argument("repository root is invalid")));
             }
         }
         FirstSliceIpcRequest::RepositoryOperationStatus(request) => {
@@ -3019,7 +3548,9 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Pu
                     | daemon::RepositoryOperationAction::RepositoryOperationCancel)
             ) || request.wait_ms.is_some_and(|wait| wait > 30_000)
             {
-                return Err(invalid_argument("repository operation request is invalid"));
+                return Err(Box::new(invalid_argument(
+                    "repository operation request is invalid",
+                )));
             }
         }
         FirstSliceIpcRequest::CodeLocate(request) => {
@@ -3041,7 +3572,7 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Pu
                         | daemon::FirstSliceLocateMode::FirstSliceLocateGlob)
                 )
             {
-                return Err(invalid_argument("code locate request is invalid"));
+                return Err(Box::new(invalid_argument("code locate request is invalid")));
             }
         }
         FirstSliceIpcRequest::SymbolExplain(request) => {
@@ -3052,13 +3583,17 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Pu
             )?;
             validate_generation_selector(request.generation.as_ref())?;
             if request.symbols.is_empty() || request.symbols.len() > 16 {
-                return Err(invalid_argument("symbol explanation request is invalid"));
+                return Err(Box::new(invalid_argument(
+                    "symbol explanation request is invalid",
+                )));
             }
             let mut observed = std::collections::BTreeSet::new();
             for symbol in &request.symbols {
                 require_wire_id(Some(symbol.value.as_slice()), 20)?;
                 if !observed.insert(symbol.value.as_slice()) {
-                    return Err(invalid_argument("symbol identifiers must be distinct"));
+                    return Err(Box::new(invalid_argument(
+                        "symbol identifiers must be distinct",
+                    )));
                 }
             }
         }
@@ -3068,11 +3603,11 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Pu
                 .repository
                 .as_ref()
                 .map(|id| id.value.as_slice())
-                .ok_or_else(|| invalid_argument("source repository is invalid"))?;
+                .ok_or_else(|| Box::new(invalid_argument("source repository is invalid")))?;
             require_wire_id(Some(repository), 16)?;
             validate_generation_selector(request.generation.as_ref())?;
             if request.references.is_empty() || request.references.len() > 32 {
-                return Err(invalid_argument("source references are invalid"));
+                return Err(Box::new(invalid_argument("source references are invalid")));
             }
             let explicit_generation = explicit_generation_bytes(request.generation.as_ref());
             let mut observed_generation: Option<&[u8]> = None;
@@ -3083,17 +3618,19 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Pu
                     .repository
                     .as_ref()
                     .map(|id| id.value.as_slice())
-                    .ok_or_else(|| invalid_argument("source repository is invalid"))?;
+                    .ok_or_else(|| Box::new(invalid_argument("source repository is invalid")))?;
                 let reference_generation = reference
                     .generation
                     .as_ref()
                     .map(|id| id.value.as_slice())
-                    .ok_or_else(|| invalid_argument("source generation is invalid"))?;
+                    .ok_or_else(|| Box::new(invalid_argument("source generation is invalid")))?;
                 if reference_repository != repository
                     || explicit_generation.is_some_and(|value| value != reference_generation)
                     || observed_generation.is_some_and(|value| value != reference_generation)
                 {
-                    return Err(invalid_argument("source reference correlation is invalid"));
+                    return Err(Box::new(invalid_argument(
+                        "source reference correlation is invalid",
+                    )));
                 }
                 observed_generation = Some(reference_generation);
                 let key = (
@@ -3103,7 +3640,9 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Pu
                     reference.end_byte,
                 );
                 if !observed.insert(key) {
-                    return Err(invalid_argument("source references must be distinct"));
+                    return Err(Box::new(invalid_argument(
+                        "source references must be distinct",
+                    )));
                 }
             }
         }
@@ -3113,33 +3652,35 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Pu
 
 fn require_first_slice_schema(
     version: Option<&common::ContractVersion>,
-) -> Result<(), PublicError> {
+) -> Result<(), Box<PublicError>> {
     if version.is_some_and(|version| version.major == 1 && version.minor == 0) {
         Ok(())
     } else {
-        Err(protocol_mismatch(
+        Err(Box::new(protocol_mismatch(
             "first-slice schema version is unsupported",
-        ))
+        )))
     }
 }
 
-fn require_wire_id(value: Option<&[u8]>, expected: usize) -> Result<(), PublicError> {
+fn require_wire_id(value: Option<&[u8]>, expected: usize) -> Result<(), Box<PublicError>> {
     if value.is_some_and(|value| value.len() == expected) {
         Ok(())
     } else {
-        Err(invalid_argument("first-slice identifier is invalid"))
+        Err(Box::new(invalid_argument(
+            "first-slice identifier is invalid",
+        )))
     }
 }
 
 fn validate_generation_selector(
     selector: Option<&daemon::GenerationSelector>,
-) -> Result<(), PublicError> {
+) -> Result<(), Box<PublicError>> {
     match selector.and_then(|selector| selector.selector.as_ref()) {
         Some(daemon::generation_selector::Selector::Active(true)) => Ok(()),
         Some(daemon::generation_selector::Selector::Generation(generation)) => {
             require_wire_id(Some(generation.value.as_slice()), 20)
         }
-        _ => Err(invalid_argument("generation selector is invalid")),
+        _ => Err(Box::new(invalid_argument("generation selector is invalid"))),
     }
 }
 
@@ -3152,7 +3693,9 @@ fn explicit_generation_bytes(selector: Option<&daemon::GenerationSelector>) -> O
     }
 }
 
-fn validate_source_reference(reference: &daemon::FirstSliceSourceRef) -> Result<(), PublicError> {
+fn validate_source_reference(
+    reference: &daemon::FirstSliceSourceRef,
+) -> Result<(), Box<PublicError>> {
     require_wire_id(
         reference.repository.as_ref().map(|id| id.value.as_slice()),
         16,
@@ -3175,7 +3718,9 @@ fn validate_source_reference(reference: &daemon::FirstSliceSourceRef) -> Result<
         _ => false,
     };
     if reference.start_byte > reference.end_byte || !lines_valid {
-        return Err(invalid_argument("source reference range is invalid"));
+        return Err(Box::new(invalid_argument(
+            "source reference range is invalid",
+        )));
     }
     Ok(())
 }
@@ -3311,28 +3856,44 @@ async fn run_diagnostic_request(
     response
 }
 
-async fn await_journal_response(
-    service: &ControlService,
+async fn await_journal_response_until(
     response: impl std::future::Future<Output = Result<ControlResponse, ServiceError>>,
-    requested_timeout_ms: Option<u32>,
+    deadline: Instant,
+    queue_limit: u32,
 ) -> daemon::response_envelope::Response {
-    let requested = requested_timeout_ms.map_or(service.limits.request_timeout, |milliseconds| {
-        Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout)
-    });
-    match tokio::time::timeout(requested, response).await {
-        Ok(Ok(response)) => response_to_wire(response),
-        Ok(Err(ServiceError::Operations(error))) => response_to_wire(ControlResponse::Error(
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response).await {
+        Ok(response) => journal_response_to_wire(response, queue_limit),
+        Err(_) => response_to_wire(ControlResponse::Error(request_timed_out())),
+    }
+}
+
+async fn await_claimed_journal_response(
+    response: impl std::future::Future<Output = Result<ControlResponse, ServiceError>>,
+    queue_limit: u32,
+) -> daemon::response_envelope::Response {
+    journal_response_to_wire(response.await, queue_limit)
+}
+
+fn journal_response_to_wire(
+    response: Result<ControlResponse, ServiceError>,
+    queue_limit: u32,
+) -> daemon::response_envelope::Response {
+    match response {
+        Ok(response) => response_to_wire(response),
+        Err(ServiceError::Operations(error)) => response_to_wire(ControlResponse::Error(
             operation_error_to_public(&error, None),
         )),
-        Ok(Err(ServiceError::Public(error))) => response_to_wire(ControlResponse::Error(*error)),
-        Ok(Err(ServiceError::QueueFull)) => response_to_wire(ControlResponse::Error(queue_full(
-            service.limits.operation_queue_limit,
-        ))),
-        Ok(Err(ServiceError::ClientOperationLimit { limit })) => {
+        Err(ServiceError::Public(error)) => response_to_wire(ControlResponse::Error(*error)),
+        Err(ServiceError::QueueFull) => {
+            response_to_wire(ControlResponse::Error(queue_full(queue_limit)))
+        }
+        Err(ServiceError::ClientOperationLimit { limit }) => {
             response_to_wire(ControlResponse::Error(client_operation_limit(limit)))
         }
-        Ok(Err(_)) => response_to_wire(ControlResponse::Error(internal_error())),
-        Err(_) => response_to_wire(ControlResponse::Error(request_timed_out())),
+        Err(ServiceError::RequestTimedOut) => {
+            response_to_wire(ControlResponse::Error(request_timed_out()))
+        }
+        Err(_) => response_to_wire(ControlResponse::Error(internal_error())),
     }
 }
 
@@ -3840,7 +4401,9 @@ const fn daemon_lifecycle_to_wire(lifecycle: DaemonLifecycle) -> daemon::DaemonL
     }
 }
 
-fn operation_record_to_wire(record: &OperationRecord) -> daemon::OperationStatus {
+/// Converts one checked durable record into its stable protobuf representation.
+#[must_use]
+pub fn operation_record_to_wire(record: &OperationRecord) -> daemon::OperationStatus {
     daemon::OperationStatus {
         operation: Some(common::OperationId {
             value: record.operation.as_bytes().to_vec(),
@@ -3927,6 +4490,11 @@ fn operation_error_to_public(
         OperationError::DiagnosticTimedOut => {
             (ErrorCode::Busy, "operation diagnostic timed out", true)
         }
+        OperationError::MutationTimedOut => (
+            ErrorCode::Busy,
+            "operation lifecycle mutation timed out",
+            true,
+        ),
         OperationError::UnsupportedSqlite { .. }
         | OperationError::UnsupportedSqliteCompileOptions
         | OperationError::UnsupportedSqliteConfiguration
@@ -4088,7 +4656,9 @@ fn nonce_matches(observed: &[u8], expected: [u8; 16]) -> bool {
             == 0
 }
 
-fn public_error_to_wire(error: &PublicError) -> common::PublicError {
+/// Converts one checked public error into its stable protobuf representation.
+#[must_use]
+pub fn public_error_to_wire(error: &PublicError) -> common::PublicError {
     checked_public_error_to_wire(error).unwrap_or_else(|_| common::PublicError {
         code: common::ErrorCode::Internal as i32,
         message: "internal operation failed".to_owned(),
@@ -4329,6 +4899,25 @@ mod tests {
             temporary.path().display().to_string().len()
         ));
         Endpoint::new(path).expect("endpoint is valid")
+    }
+
+    #[derive(Debug, Default)]
+    struct DeadlineCapturingFirstSlice {
+        observed: Mutex<Option<Instant>>,
+    }
+
+    impl FirstSliceIpcHandler for DeadlineCapturingFirstSlice {
+        fn dispatch(
+            &self,
+            _request: FirstSliceIpcRequest,
+            context: FirstSliceIpcContext,
+        ) -> FirstSliceIpcFuture {
+            *self
+                .observed
+                .lock()
+                .expect("deadline capture lock is healthy") = Some(context.deadline);
+            Box::pin(async { Err(first_slice_unavailable()) })
+        }
     }
 
     #[test]
@@ -4584,6 +5173,175 @@ mod tests {
         actor.join().expect("actor joins");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn first_slice_dispatch_preserves_outer_absolute_deadline() {
+        let handler = DeadlineCapturingFirstSlice::default();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let request = FirstSliceIpcRequest::RepositoryOperationStatus(
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+                operation: Some(common::OperationId {
+                    value: vec![92; 16],
+                }),
+                action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                wait_ms: None,
+                after_revision: None,
+            },
+        );
+
+        let response = dispatch_first_slice(
+            &handler,
+            request,
+            ClientInstanceId::from_bytes([92; 16]),
+            PROTOCOL_MINOR,
+            deadline,
+        )
+        .await;
+
+        assert!(matches!(
+            response,
+            daemon::response_envelope::Response::Error(_)
+        ));
+        assert_eq!(
+            *handler
+                .observed
+                .lock()
+                .expect("deadline capture lock is healthy"),
+            Some(deadline)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timed_out_dispatch_does_not_apply_late_cancel_or_lease_renewal() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let owner = ClientInstanceId::new([91; 16]).expect("client identity is valid");
+        let cancelled = OperationId::from_bytes([90; 16]);
+        journal
+            .enqueue(cancelled)
+            .expect("cancel operation enqueues");
+        journal
+            .start_execution(cancelled)
+            .expect("cancel operation starts");
+        let leased = OperationId::from_bytes([91; 16]);
+        let lease_expiry = unix_time_ms()
+            .expect("wall clock reads")
+            .checked_add(60_000)
+            .expect("lease expiry is representable");
+        journal
+            .submit(
+                OperationSubmission::new(
+                    leased,
+                    OperationKind::ControlProbe,
+                    PlanHash::from_bytes([91; 32]),
+                    owner,
+                    false,
+                    None,
+                    Some(lease_expiry),
+                )
+                .expect("lease submission is valid"),
+            )
+            .expect("lease operation submits");
+
+        let actor = JournalActor::start(Arc::clone(&journal), 8, 8).expect("actor starts");
+        let handle = actor.handle();
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Block {
+                    started: started_tx,
+                    release: release_rx,
+                },
+            )
+            .expect("actor blocker queues");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("actor reaches blocker");
+
+        let state = Arc::new(DaemonState::starting());
+        state.set_catalog_status(HealthStatus::Healthy);
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let service = ControlService::with_state(
+            Arc::clone(&journal),
+            [7; 16],
+            state,
+            DaemonLimits::default(),
+        );
+        let (submissions, _receiver) = tokio::sync::mpsc::channel(4);
+        let cancel_response = dispatch_async(
+            &service,
+            &handle,
+            &submissions,
+            &UnavailableFirstSliceIpcHandler,
+            daemon::RequestEnvelope {
+                request_id: 90,
+                instance_nonce: vec![7; 16],
+                timeout_ms: Some(20),
+                request: Some(daemon::request_envelope::Request::OperationCancel(
+                    daemon::OperationCancelRequest {
+                        operation: Some(common::OperationId {
+                            value: cancelled.as_bytes().to_vec(),
+                        }),
+                    },
+                )),
+            },
+            owner,
+            PROTOCOL_MINOR,
+        )
+        .await;
+        assert!(matches!(
+            cancel_response.response,
+            Some(daemon::response_envelope::Response::Error(error))
+                if error.code == common::ErrorCode::Busy as i32
+        ));
+
+        let renew_response = dispatch_async(
+            &service,
+            &handle,
+            &submissions,
+            &UnavailableFirstSliceIpcHandler,
+            daemon::RequestEnvelope {
+                request_id: 91,
+                instance_nonce: vec![7; 16],
+                timeout_ms: Some(20),
+                request: Some(daemon::request_envelope::Request::OperationLeaseRenew(
+                    daemon::OperationLeaseRenewRequest {
+                        operation: Some(common::OperationId {
+                            value: leased.as_bytes().to_vec(),
+                        }),
+                        lease_expires_unix_ms: lease_expiry + 60_000,
+                    },
+                )),
+            },
+            owner,
+            PROTOCOL_MINOR,
+        )
+        .await;
+        assert!(matches!(
+            renew_response.response,
+            Some(daemon::response_envelope::Response::Error(error))
+                if error.code == common::ErrorCode::Busy as i32
+        ));
+
+        release_tx.send(()).expect("actor resumes");
+        handle
+            .control(ControlRequest::Health)
+            .await
+            .expect("control-lane barrier completes");
+        let cancelled_record = journal.status(cancelled).expect("cancel state loads");
+        assert_eq!(cancelled_record.state, OperationState::Running);
+        assert!(!cancelled_record.cancellation_requested);
+        assert_eq!(
+            journal
+                .status(leased)
+                .expect("lease state loads")
+                .lease_expires_unix_ms,
+            Some(lease_expiry)
+        );
+        actor.join().expect("actor joins");
+    }
+
     #[test]
     fn typed_and_wire_health_share_semantics() {
         let service = service();
@@ -4701,6 +5459,7 @@ mod tests {
         control_tx
             .try_send(JournalCommand::Submit {
                 submission: OperationSubmission::control_probe(operation),
+                claim: None,
                 reply,
             })
             .expect("command buffers");
@@ -4721,6 +5480,7 @@ mod tests {
         let (reply, _receiver) = tokio::sync::oneshot::channel();
         let command = JournalCommand::Submit {
             submission: OperationSubmission::control_probe(OperationId::from_bytes([11; 16])),
+            claim: None,
             reply,
         };
         let senders = handle.senders.lock().expect("sender lock is available");
@@ -5256,7 +6016,7 @@ mod tests {
             .expect("completion exists");
         assert_eq!(completion.state, OperationState::Succeeded);
         orchestrator
-            .shutdown()
+            .shutdown_until(tokio::time::Instant::now() + Duration::from_secs(5))
             .await
             .expect("orchestrator shuts down");
         actor.join().expect("actor joins");
@@ -5374,7 +6134,7 @@ mod tests {
         assert_eq!(completed.state, OperationState::Succeeded);
         assert!(orchestrator.is_idle());
         orchestrator
-            .shutdown()
+            .shutdown_until(tokio::time::Instant::now() + Duration::from_secs(5))
             .await
             .expect("orchestrator shuts down");
         actor.join().expect("actor joins");
@@ -5407,6 +6167,533 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::ResourceExhausted);
         assert!(error.retryable());
         assert_eq!(error.details().get(&key), Some(&PublicValue::Unsigned(3)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn synthetic_worker_join_is_bounded_and_drop_does_not_rejoin() {
+        let state = Arc::new(DaemonState::starting());
+        let admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
+        let permit = SchedulerPermit::reserve(
+            Arc::clone(&state),
+            admissions,
+            ClientInstanceId::SYSTEM,
+            1,
+            1,
+        )
+        .expect("permit reserves");
+        let cancellation = rootlight_operations::Cancellation::new();
+        let mut workers = SyntheticWorkerPool::start(1, 1).expect("worker pool starts");
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        workers
+            .submit(WorkerJob {
+                operation: OperationId::from_bytes([70; 16]),
+                cancellation: cancellation.clone(),
+                permit,
+                started: Some(started_tx),
+            })
+            .expect("worker job submits");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker starts");
+
+        let started = Instant::now();
+        assert!(matches!(
+            workers
+                .join_until(tokio::time::Instant::now() + Duration::from_millis(20))
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let drop_started = Instant::now();
+        drop(workers);
+        assert!(drop_started.elapsed() < Duration::from_millis(100));
+        let _ = cancellation.cancel(rootlight_operations::CancellationReason::Shutdown);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn synthetic_worker_join_wakes_full_completion_channel() {
+        let state = Arc::new(DaemonState::starting());
+        let admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
+        let mut workers = SyntheticWorkerPool::start(1, 1).expect("worker pool starts");
+        let first_cancellation = rootlight_operations::Cancellation::new();
+        let second_cancellation = rootlight_operations::Cancellation::new();
+        assert!(first_cancellation.cancel(rootlight_operations::CancellationReason::Shutdown));
+        assert!(second_cancellation.cancel(rootlight_operations::CancellationReason::Shutdown));
+        let (first_started_tx, first_started_rx) = mpsc::sync_channel(0);
+        workers
+            .submit(WorkerJob {
+                operation: OperationId::from_bytes([80; 16]),
+                cancellation: first_cancellation,
+                permit: SchedulerPermit::reserve(
+                    Arc::clone(&state),
+                    Arc::clone(&admissions),
+                    ClientInstanceId::SYSTEM,
+                    2,
+                    2,
+                )
+                .expect("first permit reserves"),
+                started: Some(first_started_tx),
+            })
+            .expect("first job submits");
+        first_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first job starts");
+
+        let (second_started_tx, second_started_rx) = mpsc::sync_channel(0);
+        workers
+            .submit(WorkerJob {
+                operation: OperationId::from_bytes([81; 16]),
+                cancellation: second_cancellation,
+                permit: SchedulerPermit::reserve(
+                    Arc::clone(&state),
+                    admissions,
+                    ClientInstanceId::SYSTEM,
+                    2,
+                    2,
+                )
+                .expect("second permit reserves"),
+                started: Some(second_started_tx),
+            })
+            .expect("second job submits");
+        second_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second job reaches the full completion channel");
+
+        workers
+            .join_until(tokio::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("closed completion admission wakes the worker");
+        while let Ok(completion) = workers.completions.try_recv() {
+            completion.permit.finish();
+        }
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orchestrator_timeout_does_not_block_drop_on_running_worker() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let limits = DaemonLimits::new(
+            4,
+            4,
+            4,
+            1,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+        )
+        .expect("limits are valid");
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let handle = actor.handle();
+        let mut orchestrator = DaemonOrchestrator::new(handle.clone(), Arc::clone(&state), limits)
+            .expect("orchestrator starts");
+        orchestrator
+            .schedule(OperationSubmission::control_probe(OperationId::from_bytes(
+                [79; 16],
+            )))
+            .await
+            .expect("operation schedules");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.running_operations.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker begins execution");
+
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Block {
+                    started: started_tx,
+                    release: release_rx,
+                },
+            )
+            .expect("actor blocker queues");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("actor reaches blocker");
+        assert!(matches!(
+            orchestrator
+                .shutdown_until(tokio::time::Instant::now() + Duration::from_millis(20))
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        let drop_started = Instant::now();
+        drop(orchestrator);
+        assert!(drop_started.elapsed() < Duration::from_millis(100));
+
+        release_tx.send(()).expect("journal actor resumes");
+        handle
+            .control(ControlRequest::Health)
+            .await
+            .expect("queued shutdown interruption completes first");
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn abandoned_claimed_mutations_never_run_after_actor_unblocks() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let owner = ClientInstanceId::new([71; 16]).expect("client identity is valid");
+        let queued = OperationId::from_bytes([72; 16]);
+        let publication = OperationId::from_bytes([73; 16]);
+        let completion = OperationId::from_bytes([74; 16]);
+        let failure = OperationId::from_bytes([75; 16]);
+        let cancellation = OperationId::from_bytes([76; 16]);
+        let lease = OperationId::from_bytes([82; 16]);
+        let lease_expiry = unix_time_ms()
+            .expect("wall clock reads")
+            .checked_add(60_000)
+            .expect("lease expiry is representable");
+        for (operation, seed) in [
+            (queued, 72),
+            (publication, 73),
+            (completion, 74),
+            (failure, 75),
+            (cancellation, 76),
+        ] {
+            journal
+                .submit(
+                    OperationSubmission::new(
+                        operation,
+                        OperationKind::RepositoryIndex,
+                        PlanHash::from_bytes([seed; 32]),
+                        owner,
+                        true,
+                        None,
+                        None,
+                    )
+                    .expect("submission is valid"),
+                )
+                .expect("operation submits");
+        }
+        for operation in [publication, completion, failure, cancellation] {
+            journal
+                .start_execution(operation)
+                .expect("operation starts");
+        }
+        journal
+            .submit(
+                OperationSubmission::new(
+                    lease,
+                    OperationKind::ControlProbe,
+                    PlanHash::from_bytes([82; 32]),
+                    owner,
+                    false,
+                    None,
+                    Some(lease_expiry),
+                )
+                .expect("lease submission is valid"),
+            )
+            .expect("lease operation submits");
+
+        let actor = JournalActor::start(Arc::clone(&journal), 16, 16).expect("actor starts");
+        let handle = actor.handle();
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Block {
+                    started: started_tx,
+                    release: release_rx,
+                },
+            )
+            .expect("actor blocker queues");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("actor reaches blocker");
+
+        let new_operation = OperationId::from_bytes([77; 16]);
+        let submission = OperationSubmission::new(
+            new_operation,
+            OperationKind::RepositoryIndex,
+            PlanHash::from_bytes([77; 32]),
+            owner,
+            true,
+            None,
+            None,
+        )
+        .expect("submission is valid");
+        let timeout = || Instant::now() + Duration::from_millis(10);
+        assert!(matches!(
+            handle.submit_until(submission, timeout()).await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        assert!(matches!(
+            handle.activate_operation_until(queued, timeout()).await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        assert!(matches!(
+            handle
+                .complete_publication_until(publication, timeout())
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        assert!(matches!(
+            handle
+                .finish_operation_until(completion, None, timeout())
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        let checked_error = PublicError::builder(ErrorCode::Internal, "checked failure")
+            .build()
+            .expect("error is valid");
+        assert!(matches!(
+            handle
+                .fail_operation_until(failure, checked_error, timeout())
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        assert!(matches!(
+            handle
+                .control_until(ControlRequest::OperationCancel(cancellation), timeout(),)
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        assert!(matches!(
+            handle
+                .renew_lease_until(lease, owner, lease_expiry + 60_000, timeout())
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+
+        release_tx.send(()).expect("actor resumes");
+        handle
+            .normal(ControlRequest::Health)
+            .await
+            .expect("normal-lane barrier completes");
+        assert!(matches!(
+            journal.status(new_operation),
+            Err(OperationError::NotFound)
+        ));
+        assert_eq!(
+            journal.status(queued).expect("queued state loads").state,
+            OperationState::Queued
+        );
+        assert_eq!(
+            journal
+                .status(lease)
+                .expect("lease state loads")
+                .lease_expires_unix_ms,
+            Some(lease_expiry)
+        );
+        for operation in [publication, completion, failure, cancellation] {
+            let record = journal.status(operation).expect("running state loads");
+            assert_eq!(record.state, OperationState::Running);
+            assert_eq!(record.stage, OperationStage::Executing);
+            assert!(!record.cancellation_requested);
+        }
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admission_and_cancel_claims_expire_before_finalization_grace() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let cancelled = OperationId::from_bytes([84; 16]);
+        journal
+            .enqueue(cancelled)
+            .expect("cancel operation enqueues");
+        journal
+            .start_execution(cancelled)
+            .expect("cancel operation starts");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let handle = actor.handle();
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Block {
+                    started: started_tx,
+                    release: release_rx,
+                },
+            )
+            .expect("actor blocker queues");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("actor reaches blocker");
+
+        let admitted = OperationId::from_bytes([85; 16]);
+        let client_deadline = Instant::now() + Duration::from_millis(20);
+        let finalization_deadline = client_deadline + Duration::from_secs(2);
+        assert!(matches!(
+            handle
+                .submit_until(
+                    OperationSubmission::control_probe(admitted),
+                    client_deadline,
+                )
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        assert!(matches!(
+            handle
+                .control_until(ControlRequest::OperationCancel(cancelled), client_deadline,)
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        assert!(Instant::now() < finalization_deadline);
+
+        release_tx.send(()).expect("actor resumes during grace");
+        handle
+            .normal(ControlRequest::Health)
+            .await
+            .expect("normal-lane barrier completes");
+        assert!(matches!(
+            journal.status(admitted),
+            Err(OperationError::NotFound)
+        ));
+        let cancelled_record = journal.status(cancelled).expect("cancel state loads");
+        assert_eq!(cancelled_record.state, OperationState::Running);
+        assert!(!cancelled_record.cancellation_requested);
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_claimed_future_abandons_queued_mutation() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let lease = OperationId::from_bytes([83; 16]);
+        let lease_owner = ClientInstanceId::new([83; 16]).expect("client identity is valid");
+        let lease_expiry = unix_time_ms()
+            .expect("wall clock reads")
+            .checked_add(60_000)
+            .expect("lease expiry is representable");
+        journal
+            .submit(
+                OperationSubmission::new(
+                    lease,
+                    OperationKind::ControlProbe,
+                    PlanHash::from_bytes([83; 32]),
+                    lease_owner,
+                    false,
+                    None,
+                    Some(lease_expiry),
+                )
+                .expect("lease submission is valid"),
+            )
+            .expect("lease operation submits");
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let handle = actor.handle();
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Block {
+                    started: started_tx,
+                    release: release_rx,
+                },
+            )
+            .expect("actor blocker queues");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("actor reaches blocker");
+
+        let operation = OperationId::from_bytes([78; 16]);
+        let owner = ClientInstanceId::new([78; 16]).expect("client identity is valid");
+        let task_handle = handle.clone();
+        let mutation = tokio::spawn(async move {
+            task_handle
+                .submit_until(
+                    OperationSubmission::new(
+                        operation,
+                        OperationKind::RepositoryIndex,
+                        PlanHash::from_bytes([78; 32]),
+                        owner,
+                        true,
+                        None,
+                        None,
+                    )
+                    .expect("submission is valid"),
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        mutation.abort();
+        assert!(
+            mutation
+                .await
+                .expect_err("mutation task is cancelled")
+                .is_cancelled()
+        );
+        let lease_handle = handle.clone();
+        let lease_mutation = tokio::spawn(async move {
+            lease_handle
+                .renew_lease_until(
+                    lease,
+                    lease_owner,
+                    lease_expiry + 60_000,
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        lease_mutation.abort();
+        assert!(
+            lease_mutation
+                .await
+                .expect_err("lease mutation task is cancelled")
+                .is_cancelled()
+        );
+
+        release_tx.send(()).expect("actor resumes");
+        handle
+            .normal(ControlRequest::Health)
+            .await
+            .expect("normal-lane barrier completes");
+        assert!(matches!(
+            journal.status(operation),
+            Err(OperationError::NotFound)
+        ));
+        assert_eq!(
+            journal
+                .status(lease)
+                .expect("lease state loads")
+                .lease_expires_unix_ms,
+            Some(lease_expiry)
+        );
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn journal_actor_join_is_bounded_by_shutdown_deadline() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(journal, 4, 4).expect("actor starts");
+        let live_handle = actor.handle();
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        live_handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Block {
+                    started: started_tx,
+                    release: release_rx,
+                },
+            )
+            .expect("actor blocker queues");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("actor reaches blocker");
+
+        let started = Instant::now();
+        assert!(matches!(
+            actor
+                .join_until(tokio::time::Instant::now() + Duration::from_millis(20))
+                .await,
+            Err(ServiceError::RequestTimedOut)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(
+            live_handle.control(ControlRequest::Health).await,
+            Err(ServiceError::ChannelClosed)
+        ));
+        release_tx
+            .send(())
+            .expect("detached join coordinator resumes");
     }
 
     #[tokio::test]
@@ -5444,6 +6731,98 @@ mod tests {
             .await
             .expect("stale completion loads durable state");
         assert_eq!(observed.state, OperationState::Cancelled);
+
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test]
+    async fn publication_completion_serializes_with_cancellation() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 8, 8).expect("actor starts");
+        let handle = actor.handle();
+        let owner = ClientInstanceId::new([31; 16]).expect("client identity is valid");
+
+        let authorized = OperationId::from_bytes([32; 16]);
+        handle
+            .submit(
+                OperationSubmission::new(
+                    authorized,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([32; 32]),
+                    owner,
+                    true,
+                    None,
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .await
+            .expect("operation submits");
+        handle
+            .activate_operation(authorized)
+            .await
+            .expect("operation activates");
+        let publication = handle
+            .complete_publication(authorized)
+            .await
+            .expect("publication completion wins");
+        assert_eq!(publication.stage, OperationStage::Cleanup);
+        assert_eq!(publication.state, OperationState::Succeeded);
+        let cancellation = handle
+            .control(ControlRequest::OperationCancel(authorized))
+            .await
+            .expect("late cancellation responds");
+        assert!(matches!(
+            cancellation,
+            ControlResponse::OperationCancel {
+                accepted: false,
+                operation: OperationRecord {
+                    state: OperationState::Succeeded,
+                    ..
+                },
+            }
+        ));
+
+        let cancelled = OperationId::from_bytes([33; 16]);
+        handle
+            .submit(
+                OperationSubmission::new(
+                    cancelled,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([33; 32]),
+                    owner,
+                    true,
+                    None,
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .await
+            .expect("operation submits");
+        handle
+            .activate_operation(cancelled)
+            .await
+            .expect("operation activates");
+        let cancellation = handle
+            .control(ControlRequest::OperationCancel(cancelled))
+            .await
+            .expect("early cancellation responds");
+        assert!(matches!(
+            cancellation,
+            ControlResponse::OperationCancel { accepted: true, .. }
+        ));
+        assert!(matches!(
+            handle.complete_publication(cancelled).await,
+            Err(ServiceError::Operations(OperationError::CancellationWon))
+        ));
+        let terminal = handle
+            .finish_operation(
+                cancelled,
+                Some(rootlight_operations::CancellationReason::ClientRequest),
+            )
+            .await
+            .expect("cancelled operation terminalizes");
+        assert_eq!(terminal.state, OperationState::Cancelled);
 
         actor.join().expect("actor joins");
     }
@@ -5505,7 +6884,9 @@ mod tests {
             Some(rootlight_operations::CancellationReason::ClientRequest)
         );
         completion.permit.finish();
-        pool.join().expect("worker joins");
+        pool.join_until(tokio::time::Instant::now() + Duration::from_secs(5))
+            .await
+            .expect("worker joins");
         assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
     }
 
@@ -5551,7 +6932,7 @@ mod tests {
         assert_eq!(completed.state, OperationState::Succeeded);
         assert!(orchestrator.is_idle());
         orchestrator
-            .shutdown()
+            .shutdown_until(tokio::time::Instant::now() + Duration::from_secs(5))
             .await
             .expect("orchestrator shuts down");
         actor.join().expect("actor joins");
@@ -5584,7 +6965,7 @@ mod tests {
             .expect("operation schedules");
 
         orchestrator
-            .shutdown()
+            .shutdown_until(tokio::time::Instant::now() + Duration::from_secs(5))
             .await
             .expect("orchestrator drains completion");
         drop(orchestrator);

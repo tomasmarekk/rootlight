@@ -32,16 +32,21 @@ pub const MAX_PUBLIC_ERROR_BYTES: usize = 16 * 1024;
 /// Minimum bundled SQLite version required by the P1 catalog.
 pub const MIN_SQLITE_VERSION_NUMBER: i32 = 3_051_003;
 /// Current operation-journal schema version.
-pub const OPERATION_SCHEMA_VERSION: u32 = 2;
+pub const OPERATION_SCHEMA_VERSION: u32 = 3;
 /// SQLite application identifier for Rootlight's per-user catalog.
 pub const CATALOG_APPLICATION_ID: u32 = 0x5254_4c54;
 /// Bounded wait for transient catalog contention.
 pub const CATALOG_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
-const OPERATION_SCHEMA_MIGRATION_ID: u32 = 2;
+const OPERATION_SCHEMA_MIGRATION_ID: u32 = 3;
 // SHA-256 of the three canonical schema statements in `migration_checksum_input`;
 // change this reviewed ledger value rather than silently accepting schema drift.
 const OPERATION_SCHEMA_MIGRATION_CHECKSUM: [u8; 32] = [
+    0x7e, 0x4d, 0xbe, 0x02, 0x6e, 0x5d, 0x52, 0x66, 0xf2, 0x65, 0x18, 0xec, 0x94, 0x92, 0x59, 0x97,
+    0xc5, 0x3e, 0x7b, 0x45, 0x6f, 0x23, 0x54, 0x80, 0xd2, 0x65, 0xdf, 0xeb, 0xb9, 0xc7, 0x1a, 0xaf,
+];
+const VERSION_TWO_MIGRATION_ID: u32 = 2;
+const VERSION_TWO_MIGRATION_CHECKSUM: [u8; 32] = [
     0x38, 0x93, 0xf3, 0xf0, 0x33, 0x07, 0xb8, 0x8e, 0x9c, 0x15, 0x64, 0xa5, 0x53, 0x6f, 0x76, 0x92,
     0x55, 0xe3, 0xbd, 0xc9, 0x36, 0x57, 0x73, 0x57, 0x4e, 0xfd, 0xfc, 0x8a, 0x09, 0xe6, 0x66, 0xfe,
 ];
@@ -99,7 +104,7 @@ impl PlanHash {
     }
 }
 
-/// Durable operation kind supported by the M04 infrastructure slice.
+/// Durable operation kind supported by the current journal contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OperationKind {
     /// Deterministic infrastructure work used to prove lifecycle behavior.
@@ -432,6 +437,15 @@ pub struct OperationJournal {
     cancellations: Mutex<BTreeMap<OperationId, Cancellation>>,
     lease_deadlines: Mutex<BTreeMap<OperationId, LeaseDeadline>>,
     errors: Mutex<BTreeMap<OperationId, PublicError>>,
+    #[cfg(test)]
+    cancellation_signal_hook: Mutex<Option<CancellationSignalHook>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct CancellationSignalHook {
+    committed: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 
 impl OperationJournal {
@@ -470,6 +484,8 @@ impl OperationJournal {
             cancellations: Mutex::new(BTreeMap::new()),
             lease_deadlines: Mutex::new(BTreeMap::new()),
             errors: Mutex::new(BTreeMap::new()),
+            #[cfg(test)]
+            cancellation_signal_hook: Mutex::new(None),
         };
         journal.recover_nonterminal(now_unix_ms)?;
         journal.prune_to(MAX_OPERATION_HISTORY)?;
@@ -708,6 +724,82 @@ impl OperationJournal {
         self.status(operation)
     }
 
+    /// Atomically starts queued work only while its process-local deadline is live.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::CancellationWon`] after persisting an elapsed
+    /// deadline, or a typed state/storage failure.
+    pub fn start_execution_if_live(
+        &self,
+        operation: OperationId,
+    ) -> Result<OperationRecord, OperationError> {
+        self.start_execution_if_live_at(operation, Instant::now())
+    }
+
+    fn start_execution_if_live_at(
+        &self,
+        operation: OperationId,
+        now: Instant,
+    ) -> Result<OperationRecord, OperationError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if matches!(
+            current.state,
+            OperationState::Cancelled | OperationState::Interrupted
+        ) {
+            return Err(OperationError::CancellationWon);
+        }
+        if current.state != OperationState::Queued || current.stage != OperationStage::Accepted {
+            return Err(OperationError::IllegalTransition {
+                from: current.state,
+                to: OperationState::Running,
+            });
+        }
+        let mut cancellations = self.lock_cancellations()?;
+        let cancellation = cancellations
+            .get(&operation)
+            .ok_or(OperationError::CorruptState)?;
+        if let Some(reason) = cancellation.reason_at(now) {
+            if reason != CancellationReason::DeadlineExceeded {
+                return Err(OperationError::CorruptState);
+            }
+            if update_interrupted(&transaction, operation, RecoveryClass::DeadlineElapsed)? != 1 {
+                return Err(OperationError::ConcurrentUpdate);
+            }
+            transaction.commit().map_err(map_sqlite_error)?;
+            cancellations.remove(&operation);
+            drop(cancellations);
+            self.lock_lease_deadlines()?.remove(&operation);
+            drop(connection);
+            self.prune_to(MAX_OPERATION_HISTORY)?;
+            return Err(OperationError::CancellationWon);
+        }
+        let revision = next_revision(current.revision)?;
+        let updated = transaction
+            .execute(
+                "UPDATE operations
+                 SET state = 'running', stage = 'executing', revision = ?1
+                 WHERE operation = ?2 AND revision = ?3
+                   AND state = 'queued' AND stage = 'accepted'
+                   AND cancellation_requested = 0",
+                params![
+                    u64_to_i64(revision)?,
+                    operation.as_bytes().as_slice(),
+                    u64_to_i64(current.revision)?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if updated != 1 {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        transaction.commit().map_err(map_sqlite_error)?;
+        drop(cancellations);
+        drop(connection);
+        self.status(operation)
+    }
+
     /// Advances the monotonic operation stage.
     ///
     /// # Errors
@@ -800,8 +892,10 @@ impl OperationJournal {
 
     /// Durably requests cancellation before signalling in-memory workers.
     ///
-    /// Queued work becomes terminal immediately; running work enters cleanup.
-    /// Repeated or terminal requests are idempotent and return `accepted = false`.
+    /// Queued work becomes terminal immediately; running work first enters
+    /// `Cancelling` and reaches cleanup only during cooperative finalization.
+    /// Repeated and terminal requests are idempotent. Repository-index work
+    /// additionally closes cancellation admission once publication commits.
     ///
     /// # Errors
     ///
@@ -815,7 +909,11 @@ impl OperationJournal {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
-        if current.state.is_terminal() || current.cancellation_requested {
+        if current.state.is_terminal()
+            || current.cancellation_requested
+            || current.kind == OperationKind::RepositoryIndex
+                && current.stage == OperationStage::Cleanup
+        {
             transaction.commit().map_err(map_sqlite_error)?;
             return Ok(CancellationOutcome {
                 accepted: false,
@@ -839,6 +937,7 @@ impl OperationJournal {
                      cancellation_reason = ?2, revision = ?3
                  WHERE operation = ?4 AND revision = ?5
                    AND cancellation_requested = 0
+                   AND NOT (kind = 'repository_index' AND stage = 'cleanup')
                    AND state IN ('queued', 'running', 'cancelling')",
                 params![
                     next_state.as_str(),
@@ -853,18 +952,197 @@ impl OperationJournal {
             return Err(OperationError::ConcurrentUpdate);
         }
         transaction.commit().map_err(map_sqlite_error)?;
-        drop(connection);
+        // Commit durable intent before waking workers, but retain the writer
+        // lock through signalling so publication cannot observe a cancellation
+        // row whose process-local token does not yet carry the same reason.
+        #[cfg(test)]
+        self.pause_after_cancellation_commit()?;
         let token = self.cancellation_token(operation)?;
         let _ = token.cancel(reason);
         if next_state.is_terminal() {
             self.lock_cancellations()?.remove(&operation);
             self.lock_lease_deadlines()?.remove(&operation);
+        }
+        drop(connection);
+        if next_state.is_terminal() {
             self.prune_to(MAX_OPERATION_HISTORY)?;
         }
         Ok(CancellationOutcome {
             accepted: true,
             operation: self.status(operation)?,
         })
+    }
+
+    #[cfg(test)]
+    fn install_cancellation_signal_hook(
+        &self,
+        committed: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> Result<(), OperationError> {
+        *self
+            .cancellation_signal_hook
+            .lock()
+            .map_err(|_| OperationError::MutexPoisoned)? =
+            Some(CancellationSignalHook { committed, release });
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn pause_after_cancellation_commit(&self) -> Result<(), OperationError> {
+        let hook = self
+            .cancellation_signal_hook
+            .lock()
+            .map_err(|_| OperationError::MutexPoisoned)?
+            .take();
+        let Some(hook) = hook else {
+            return Ok(());
+        };
+        hook.committed
+            .send(())
+            .map_err(|_| OperationError::CorruptState)?;
+        hook.release
+            .recv()
+            .map_err(|_| OperationError::CorruptState)
+    }
+
+    /// Atomically commits repository-index publication at one monotonic instant.
+    ///
+    /// The journal serialization point checks the live cancellation token and
+    /// durable state together. A deadline or cancellation that already won is
+    /// terminalized before this method returns. Success, final progress, and
+    /// cleanup are one durable transaction, so a deadline cannot win between
+    /// the publication decision and terminal completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::CancellationWon`] after persisting an elapsed
+    /// deadline or cancellation, or a typed state/storage failure.
+    pub fn complete_repository_publication(
+        &self,
+        operation: OperationId,
+    ) -> Result<OperationRecord, OperationError> {
+        self.complete_repository_publication_at(operation, Instant::now())
+    }
+
+    fn complete_repository_publication_at(
+        &self,
+        operation: OperationId,
+        now: Instant,
+    ) -> Result<OperationRecord, OperationError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if current.kind != OperationKind::RepositoryIndex {
+            return Err(OperationError::InvalidStage);
+        }
+        if matches!(
+            current.state,
+            OperationState::Cancelled | OperationState::Interrupted
+        ) {
+            return Err(OperationError::CancellationWon);
+        }
+        if current.state.is_terminal() {
+            return if current.state == OperationState::Succeeded {
+                Ok(current)
+            } else {
+                Err(OperationError::InvalidStage)
+            };
+        }
+        let mut cancellations = self.lock_cancellations()?;
+        let cancellation = cancellations
+            .get(&operation)
+            .ok_or(OperationError::CorruptState)?;
+        if let Some(reason) = cancellation.reason_at(now) {
+            match reason {
+                CancellationReason::DeadlineExceeded => {
+                    if update_interrupted(&transaction, operation, RecoveryClass::DeadlineElapsed)?
+                        != 1
+                    {
+                        return Err(OperationError::ConcurrentUpdate);
+                    }
+                }
+                CancellationReason::ClientRequest
+                | CancellationReason::ParentCancelled
+                | CancellationReason::Shutdown
+                | CancellationReason::ResourceLimit => {
+                    if !matches!(
+                        current.state,
+                        OperationState::Running | OperationState::Cancelling
+                    ) || current.stage != OperationStage::Executing
+                    {
+                        return Err(OperationError::InvalidStage);
+                    }
+                    let revision = if current.state == OperationState::Cancelling {
+                        next_revision(next_revision(current.revision)?)?
+                    } else {
+                        next_revision(next_revision(next_revision(current.revision)?)?)?
+                    };
+                    let updated = transaction
+                        .execute(
+                            "UPDATE operations
+                             SET state = 'cancelled', stage = 'cleanup',
+                                 cancellation_requested = 1,
+                                 cancellation_reason = ?1, revision = ?2
+                             WHERE operation = ?3 AND revision = ?4
+                               AND state IN ('running', 'cancelling')
+                               AND stage = 'executing'",
+                            params![
+                                cancellation_reason_as_str(reason)?,
+                                u64_to_i64(revision)?,
+                                operation.as_bytes().as_slice(),
+                                u64_to_i64(current.revision)?,
+                            ],
+                        )
+                        .map_err(map_sqlite_error)?;
+                    if updated != 1 {
+                        return Err(OperationError::ConcurrentUpdate);
+                    }
+                }
+                _ => return Err(OperationError::UnsupportedCancellationReason),
+            }
+            transaction.commit().map_err(map_sqlite_error)?;
+            cancellations.remove(&operation);
+            drop(cancellations);
+            self.lock_lease_deadlines()?.remove(&operation);
+            drop(connection);
+            self.prune_to(MAX_OPERATION_HISTORY)?;
+            return Err(OperationError::CancellationWon);
+        }
+        if current.state != OperationState::Running
+            || current.stage != OperationStage::Executing
+            || current.cancellation_requested
+        {
+            return Err(OperationError::CancellationWon);
+        }
+        let revision = next_revision(current.revision)?;
+        let revision = next_revision(revision)?;
+        let revision = next_revision(revision)?;
+        let updated = transaction
+            .execute(
+                "UPDATE operations
+                 SET state = 'succeeded', stage = 'cleanup',
+                     completed = 1, total = 1, revision = ?1
+                 WHERE operation = ?2 AND revision = ?3
+                   AND kind = 'repository_index'
+                   AND state = 'running' AND stage = 'executing'
+                   AND cancellation_requested = 0",
+                params![
+                    u64_to_i64(revision)?,
+                    operation.as_bytes().as_slice(),
+                    u64_to_i64(current.revision)?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if updated != 1 {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        transaction.commit().map_err(map_sqlite_error)?;
+        cancellations.remove(&operation);
+        drop(cancellations);
+        self.lock_lease_deadlines()?.remove(&operation);
+        drop(connection);
+        self.prune_to(MAX_OPERATION_HISTORY)?;
+        self.status(operation)
     }
 
     /// Requests client cancellation and returns acknowledgement plus state.
@@ -1627,6 +1905,7 @@ fn migrate_schema(
         0 if !table_exists(&transaction, "operations")? => create_schema(&transaction)?,
         0 if is_prototype_schema(&transaction)? => migrate_prototype(&transaction)?,
         1 if is_version_one_operations_schema(&transaction)? => migrate_version_one(&transaction)?,
+        2 if is_version_two_operations_schema(&transaction)? => migrate_version_two(&transaction)?,
         _ => return Err(OperationError::UnsupportedLegacySchema),
     }
     record_catalog_metadata(&transaction)?;
@@ -1684,9 +1963,45 @@ const VERSION_ONE_OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
                 CHECK((state = 'interrupted' AND recovery_class != 'not_applicable')
                    OR (state != 'interrupted' AND recovery_class = 'not_applicable'))
             )";
-const OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
+const VERSION_TWO_OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
                 operation BLOB PRIMARY KEY NOT NULL CHECK(length(operation) = 16),
                 kind TEXT NOT NULL CHECK(kind IN ('control_probe')),
+                plan_hash BLOB NOT NULL CHECK(length(plan_hash) = 32),
+                owner BLOB NOT NULL CHECK(length(owner) = 16),
+                detached INTEGER NOT NULL CHECK(detached IN (0, 1)),
+                deadline_unix_ms INTEGER CHECK(deadline_unix_ms > 0),
+                lease_expires_unix_ms INTEGER CHECK(lease_expires_unix_ms > 0),
+                state TEXT NOT NULL CHECK(state IN (
+                    'queued', 'running', 'cancelling', 'succeeded', 'failed',
+                    'cancelled', 'interrupted'
+                )),
+                stage TEXT NOT NULL CHECK(stage IN ('accepted', 'executing', 'cleanup')),
+                cancellation_requested INTEGER NOT NULL CHECK(cancellation_requested IN (0, 1)),
+                cancellation_reason TEXT CHECK(cancellation_reason IN (
+                    'client_request', 'parent_cancelled', 'deadline_exceeded',
+                    'shutdown', 'resource_limit'
+                )),
+                recovery_class TEXT NOT NULL CHECK(recovery_class IN (
+                    'not_applicable', 'interrupted_by_restart', 'deadline_elapsed', 'lease_expired'
+                )),
+                revision INTEGER NOT NULL CHECK(revision >= 1),
+                completed INTEGER NOT NULL CHECK(completed >= 0 AND completed <= 4294967295),
+                total INTEGER NOT NULL CHECK(total >= 0 AND total <= 4294967295),
+                error_json TEXT CHECK(length(error_json) <= 16384),
+                sequence INTEGER NOT NULL UNIQUE CHECK(sequence >= 1),
+                CHECK(total = 0 OR completed <= total),
+                CHECK((detached = 1 AND lease_expires_unix_ms IS NULL)
+                   OR (detached = 0 AND lease_expires_unix_ms IS NOT NULL)),
+                CHECK((cancellation_requested = 0 AND cancellation_reason IS NULL)
+                   OR (cancellation_requested = 1 AND cancellation_reason IS NOT NULL)),
+                CHECK((state = 'failed' AND error_json IS NOT NULL)
+                   OR (state != 'failed' AND error_json IS NULL)),
+                CHECK((state = 'interrupted' AND recovery_class != 'not_applicable')
+                   OR (state != 'interrupted' AND recovery_class = 'not_applicable'))
+            ) STRICT";
+const OPERATIONS_SCHEMA_SQL: &str = "CREATE TABLE operations (
+                operation BLOB PRIMARY KEY NOT NULL CHECK(length(operation) = 16),
+                kind TEXT NOT NULL CHECK(kind IN ('control_probe', 'repository_index')),
                 plan_hash BLOB NOT NULL CHECK(length(plan_hash) = 32),
                 owner BLOB NOT NULL CHECK(length(owner) = 16),
                 detached INTEGER NOT NULL CHECK(detached IN (0, 1)),
@@ -1732,6 +2047,18 @@ fn migration_checksum_input() -> String {
 
 fn operation_schema_migration_checksum() -> [u8; 32] {
     Sha256::digest(migration_checksum_input()).into()
+}
+
+fn version_two_migration_checksum() -> [u8; 32] {
+    Sha256::digest(
+        [
+            APPLICATION_META_SCHEMA_SQL,
+            MIGRATIONS_SCHEMA_SQL,
+            VERSION_TWO_OPERATIONS_SCHEMA_SQL,
+        ]
+        .join("\n"),
+    )
+    .into()
 }
 
 fn create_schema(connection: &Connection) -> Result<(), OperationError> {
@@ -1797,23 +2124,43 @@ fn migrate_version_one(transaction: &Transaction<'_>) -> Result<(), OperationErr
         .map_err(map_sqlite_error)
 }
 
-fn record_catalog_metadata(connection: &Connection) -> Result<(), OperationError> {
-    let expected_checksum = operation_schema_migration_checksum();
-    if expected_checksum != OPERATION_SCHEMA_MIGRATION_CHECKSUM {
-        return Err(OperationError::MigrationChecksumMismatch);
-    }
-    let existing_checksum: Option<Vec<u8>> = connection
-        .query_row(
-            "SELECT checksum FROM migrations WHERE migration_id = ?1",
-            [OPERATION_SCHEMA_MIGRATION_ID],
-            |row| row.get(0),
-        )
-        .optional()
+fn migrate_version_two(transaction: &Transaction<'_>) -> Result<(), OperationError> {
+    transaction
+        .execute_batch("ALTER TABLE operations RENAME TO operations_v2;")
         .map_err(map_sqlite_error)?;
-    if existing_checksum
-        .as_deref()
-        .is_some_and(|checksum| checksum != OPERATION_SCHEMA_MIGRATION_CHECKSUM)
-    {
+    transaction
+        .execute_batch(OPERATIONS_SCHEMA_SQL)
+        .map_err(map_sqlite_error)?;
+    transaction
+        .execute_batch(
+            "INSERT INTO operations (
+                operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                lease_expires_unix_ms, state, stage, cancellation_requested,
+                cancellation_reason, recovery_class, revision, completed, total,
+                error_json, sequence
+             ) SELECT operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                      lease_expires_unix_ms, state, stage, cancellation_requested,
+                      cancellation_reason, recovery_class, revision, completed, total,
+                      error_json, sequence
+               FROM operations_v2;
+             DROP TABLE operations_v2;",
+        )
+        .map_err(map_sqlite_error)
+}
+
+fn record_catalog_metadata(connection: &Connection) -> Result<(), OperationError> {
+    validate_frozen_migration_checksums()?;
+    if migration_ledger(connection)?.into_iter().any(|entry| {
+        !matches!(
+            entry,
+            (VERSION_TWO_MIGRATION_ID, checksum)
+                if checksum == VERSION_TWO_MIGRATION_CHECKSUM
+        ) && !matches!(
+            entry,
+            (OPERATION_SCHEMA_MIGRATION_ID, checksum)
+                if checksum == OPERATION_SCHEMA_MIGRATION_CHECKSUM
+        )
+    }) {
         return Err(OperationError::MigrationChecksumMismatch);
     }
     connection
@@ -1843,6 +2190,16 @@ fn record_catalog_metadata(connection: &Connection) -> Result<(), OperationError
             "INSERT INTO migrations(migration_id, checksum) VALUES (?1, ?2)
              ON CONFLICT(migration_id) DO NOTHING",
             params![
+                VERSION_TWO_MIGRATION_ID,
+                VERSION_TWO_MIGRATION_CHECKSUM.as_slice(),
+            ],
+        )
+        .map_err(map_sqlite_error)?;
+    connection
+        .execute(
+            "INSERT INTO migrations(migration_id, checksum) VALUES (?1, ?2)
+             ON CONFLICT(migration_id) DO NOTHING",
+            params![
                 OPERATION_SCHEMA_MIGRATION_ID,
                 OPERATION_SCHEMA_MIGRATION_CHECKSUM.as_slice(),
             ],
@@ -1852,9 +2209,7 @@ fn record_catalog_metadata(connection: &Connection) -> Result<(), OperationError
 }
 
 fn validate_catalog_identity(connection: &Connection) -> Result<(), OperationError> {
-    if operation_schema_migration_checksum() != OPERATION_SCHEMA_MIGRATION_CHECKSUM {
-        return Err(OperationError::MigrationChecksumMismatch);
-    }
+    validate_frozen_migration_checksums()?;
     if pragma_u32(connection, "application_id")? != CATALOG_APPLICATION_ID
         || pragma_u32(connection, "user_version")? != OPERATION_SCHEMA_VERSION
     {
@@ -1871,18 +2226,46 @@ fn validate_catalog_identity(connection: &Connection) -> Result<(), OperationErr
     if kind.as_deref() != Some(b"rootlight".as_slice()) {
         return Err(OperationError::ForeignCatalog);
     }
-    let checksum: Option<Vec<u8>> = connection
-        .query_row(
-            "SELECT checksum FROM migrations WHERE migration_id = ?1",
-            [OPERATION_SCHEMA_MIGRATION_ID],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(map_sqlite_error)?;
-    if checksum.as_deref() != Some(OPERATION_SCHEMA_MIGRATION_CHECKSUM.as_slice()) {
+    if migration_ledger(connection)?
+        != [
+            (VERSION_TWO_MIGRATION_ID, VERSION_TWO_MIGRATION_CHECKSUM),
+            (
+                OPERATION_SCHEMA_MIGRATION_ID,
+                OPERATION_SCHEMA_MIGRATION_CHECKSUM,
+            ),
+        ]
+    {
         return Err(OperationError::MigrationChecksumMismatch);
     }
     Ok(())
+}
+
+fn validate_frozen_migration_checksums() -> Result<(), OperationError> {
+    if version_two_migration_checksum() != VERSION_TWO_MIGRATION_CHECKSUM
+        || operation_schema_migration_checksum() != OPERATION_SCHEMA_MIGRATION_CHECKSUM
+    {
+        return Err(OperationError::MigrationChecksumMismatch);
+    }
+    Ok(())
+}
+
+fn migration_ledger(connection: &Connection) -> Result<Vec<(u32, [u8; 32])>, OperationError> {
+    connection
+        .prepare("SELECT migration_id, checksum FROM migrations ORDER BY migration_id")
+        .map_err(map_sqlite_error)?
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(map_sqlite_error)?
+        .map(|row| {
+            let (migration_id, checksum) = row.map_err(map_sqlite_error)?;
+            Ok((
+                u32::try_from(migration_id).map_err(|_| OperationError::CorruptSchema)?,
+                <[u8; 32]>::try_from(checksum)
+                    .map_err(|_| OperationError::MigrationChecksumMismatch)?,
+            ))
+        })
+        .collect()
 }
 
 fn validate_schema(connection: &Connection, storage: CatalogStorage) -> Result<(), OperationError> {
@@ -2040,6 +2423,65 @@ fn is_version_one_operations_schema(connection: &Connection) -> Result<bool, Ope
         && !table_is_strict(connection, "operations")?
         && normalize_sql(&table_definition(connection, "operations")?)
             == normalize_sql(VERSION_ONE_OPERATIONS_SCHEMA_SQL))
+}
+
+fn is_version_two_operations_schema(connection: &Connection) -> Result<bool, OperationError> {
+    if !has_exact_auxiliary_schema(connection)? {
+        return Ok(false);
+    }
+    let catalog_kind: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT value FROM application_meta WHERE key = 'catalog_kind'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    Ok(table_columns(connection)?
+        == [
+            "operation",
+            "kind",
+            "plan_hash",
+            "owner",
+            "detached",
+            "deadline_unix_ms",
+            "lease_expires_unix_ms",
+            "state",
+            "stage",
+            "cancellation_requested",
+            "cancellation_reason",
+            "recovery_class",
+            "revision",
+            "completed",
+            "total",
+            "error_json",
+            "sequence",
+        ]
+        && table_is_strict(connection, "operations")?
+        && normalize_sql(&table_definition(connection, "operations")?)
+            == normalize_sql(VERSION_TWO_OPERATIONS_SCHEMA_SQL)
+        && pragma_u32(connection, "application_id")? == CATALOG_APPLICATION_ID
+        && pragma_u32(connection, "user_version")? == VERSION_TWO_MIGRATION_ID
+        && catalog_kind.as_deref() == Some(b"rootlight".as_slice())
+        && migration_ledger(connection)?
+            == [(VERSION_TWO_MIGRATION_ID, VERSION_TWO_MIGRATION_CHECKSUM)]
+        && version_two_migration_checksum() == VERSION_TWO_MIGRATION_CHECKSUM)
+}
+
+fn has_exact_auxiliary_schema(connection: &Connection) -> Result<bool, OperationError> {
+    if !table_exists(connection, "application_meta")? || !table_exists(connection, "migrations")? {
+        return Ok(false);
+    }
+    Ok(
+        table_columns_named(connection, "application_meta")? == ["key", "value"]
+            && table_columns_named(connection, "migrations")? == ["migration_id", "checksum"]
+            && table_is_strict(connection, "application_meta")?
+            && table_is_strict(connection, "migrations")?
+            && normalize_sql(&table_definition(connection, "application_meta")?)
+                == normalize_sql(APPLICATION_META_SCHEMA_SQL)
+            && normalize_sql(&table_definition(connection, "migrations")?)
+                == normalize_sql(MIGRATIONS_SCHEMA_SQL),
+    )
 }
 
 fn table_columns(connection: &Connection) -> Result<Vec<String>, OperationError> {
@@ -2670,6 +3112,9 @@ pub enum OperationError {
     /// A bounded diagnostic exceeded its monotonic deadline.
     #[error("operation journal diagnostic timed out")]
     DiagnosticTimedOut,
+    /// A queued lifecycle mutation was abandoned before actor execution.
+    #[error("operation journal lifecycle mutation timed out")]
+    MutationTimedOut,
     /// Persisted operation state failed validation.
     #[error("operation journal contains invalid state")]
     CorruptState,
@@ -2988,6 +3433,282 @@ mod tests {
             journal.transition(operation(44), OperationState::Succeeded, None),
             Err(OperationError::CancellationWon)
         ));
+    }
+
+    #[test]
+    fn durable_cancellation_signal_is_visible_to_publication_completion() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = operation(51);
+        journal
+            .submit(
+                OperationSubmission::new(
+                    operation,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([51; 32]),
+                    ClientInstanceId::new([51; 16]).expect("client identity is valid"),
+                    true,
+                    None,
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let (committed_tx, committed_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        journal
+            .install_cancellation_signal_hook(committed_tx, release_rx)
+            .expect("cancellation hook installs");
+        let cancellation_journal = Arc::clone(&journal);
+        let cancellation = thread::spawn(move || {
+            cancellation_journal.request_cancellation(operation, CancellationReason::ClientRequest)
+        });
+        committed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("durable cancellation commits before signalling");
+        assert!(matches!(
+            journal.connection.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+
+        let publication_barrier = Arc::new(Barrier::new(2));
+        let publication_journal = Arc::clone(&journal);
+        let publication_worker_barrier = Arc::clone(&publication_barrier);
+        let (publication_tx, publication_rx) = std::sync::mpsc::sync_channel(1);
+        let publication = thread::spawn(move || {
+            publication_worker_barrier.wait();
+            let result = publication_journal.complete_repository_publication(operation);
+            publication_tx
+                .send(result)
+                .expect("publication result is observed");
+        });
+        publication_barrier.wait();
+
+        release_tx
+            .send(())
+            .expect("cancellation signalling resumes");
+        let cancellation = cancellation
+            .join()
+            .expect("cancellation worker joins")
+            .expect("cancellation commits and signals");
+        assert_eq!(cancellation.operation.state, OperationState::Cancelling);
+        assert!(matches!(
+            publication_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("publication completion returns"),
+            Err(OperationError::CancellationWon)
+        ));
+        publication.join().expect("publication worker joins");
+        let terminal = journal.status(operation).expect("terminal state loads");
+        assert_eq!(terminal.state, OperationState::Cancelled);
+        assert_eq!(terminal.stage, OperationStage::Cleanup);
+    }
+
+    #[test]
+    fn repository_index_cleanup_closes_cancellation_admission() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = operation(45);
+        let submission = OperationSubmission::new(
+            operation,
+            OperationKind::RepositoryIndex,
+            PlanHash::from_bytes([4; 32]),
+            ClientInstanceId::new([5; 16]).expect("client identity is valid"),
+            true,
+            None,
+            None,
+        )
+        .expect("submission is valid");
+        journal.submit(submission).expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        journal
+            .update_stage(operation, OperationStage::Cleanup)
+            .expect("publication is authorized");
+
+        let outcome = journal
+            .request_cancellation(operation, CancellationReason::ClientRequest)
+            .expect("late cancellation is idempotent");
+
+        assert!(!outcome.accepted);
+        assert_eq!(outcome.operation.state, OperationState::Running);
+        assert_eq!(outcome.operation.stage, OperationStage::Cleanup);
+        assert!(!outcome.operation.cancellation_requested);
+        assert!(
+            journal
+                .transition(operation, OperationState::Succeeded, None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn unrelated_cleanup_work_remains_cancellable() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = operation(46);
+        journal.enqueue(operation).expect("operation enqueues");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        journal
+            .update_stage(operation, OperationStage::Cleanup)
+            .expect("operation enters cleanup");
+
+        let outcome = journal
+            .request_cancellation(operation, CancellationReason::Shutdown)
+            .expect("control work cancellation succeeds");
+
+        assert!(outcome.accepted);
+        assert_eq!(outcome.operation.state, OperationState::Cancelling);
+        assert!(outcome.operation.cancellation_requested);
+    }
+
+    #[test]
+    fn publication_completion_linearizes_live_deadline() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let owner = ClientInstanceId::new([47; 16]).expect("client identity is valid");
+        let deadline_unix_ms = unix_time_ms()
+            .expect("wall clock reads")
+            .checked_add(60_000)
+            .expect("deadline is representable");
+        let after_deadline = Instant::now() + Duration::from_secs(120);
+
+        let expired = operation(47);
+        journal
+            .submit(
+                OperationSubmission::new(
+                    expired,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([47; 32]),
+                    owner,
+                    true,
+                    Some(deadline_unix_ms),
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .expect("operation submits");
+        journal.start_execution(expired).expect("operation starts");
+        assert!(matches!(
+            journal.complete_repository_publication_at(expired, after_deadline),
+            Err(OperationError::CancellationWon)
+        ));
+        let terminal = journal.status(expired).expect("deadline state persists");
+        assert_eq!(terminal.state, OperationState::Interrupted);
+        assert_eq!(terminal.recovery_class, RecoveryClass::DeadlineElapsed);
+
+        let authorized = operation(48);
+        journal
+            .submit(
+                OperationSubmission::new(
+                    authorized,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([48; 32]),
+                    owner,
+                    true,
+                    Some(deadline_unix_ms),
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .expect("operation submits");
+        journal
+            .start_execution(authorized)
+            .expect("operation starts");
+        let publication = journal
+            .complete_repository_publication_at(authorized, Instant::now())
+            .expect("publication wins before deadline");
+        assert_eq!(publication.stage, OperationStage::Cleanup);
+        assert_eq!(publication.state, OperationState::Succeeded);
+        assert_eq!(
+            publication.progress,
+            Progress::new(1, 1).expect("fixed progress is valid")
+        );
+        assert_eq!(
+            journal
+                .expire_due(after_deadline, 8)
+                .expect("late expiry is idempotent"),
+            0
+        );
+        let cancellation = journal
+            .request_cancellation(authorized, CancellationReason::ClientRequest)
+            .expect("late cancellation responds");
+        assert!(!cancellation.accepted);
+        assert_eq!(cancellation.operation.state, OperationState::Succeeded);
+    }
+
+    #[test]
+    fn expired_activation_terminalizes_without_starting_work() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let owner = ClientInstanceId::new([49; 16]).expect("client identity is valid");
+        let deadline_unix_ms = unix_time_ms()
+            .expect("wall clock reads")
+            .checked_add(60_000)
+            .expect("deadline is representable");
+        let operation = operation(49);
+        journal
+            .submit(
+                OperationSubmission::new(
+                    operation,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([49; 32]),
+                    owner,
+                    true,
+                    Some(deadline_unix_ms),
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .expect("operation submits");
+
+        assert!(matches!(
+            journal
+                .start_execution_if_live_at(operation, Instant::now() + Duration::from_secs(120)),
+            Err(OperationError::CancellationWon)
+        ));
+        let terminal = journal.status(operation).expect("deadline state persists");
+        assert_eq!(terminal.state, OperationState::Interrupted);
+        assert_eq!(terminal.stage, OperationStage::Accepted);
+        assert_eq!(terminal.recovery_class, RecoveryClass::DeadlineElapsed);
+    }
+
+    #[test]
+    fn publication_after_prior_interruption_reports_cancellation() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = operation(50);
+        journal
+            .submit(
+                OperationSubmission::new(
+                    operation,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([50; 32]),
+                    ClientInstanceId::new([50; 16]).expect("client identity is valid"),
+                    true,
+                    None,
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        journal
+            .interrupt_deadline(operation)
+            .expect("deadline interruption persists first");
+
+        assert!(matches!(
+            journal.complete_repository_publication(operation),
+            Err(OperationError::CancellationWon)
+        ));
+        assert_eq!(
+            journal
+                .status(operation)
+                .expect("terminal state loads")
+                .state,
+            OperationState::Interrupted
+        );
     }
 
     #[test]
@@ -3566,6 +4287,315 @@ mod tests {
     }
 
     #[test]
+    fn version_two_schema_migrates_atomically_and_preserves_ledger() {
+        assert_eq!(
+            version_two_migration_checksum(),
+            VERSION_TWO_MIGRATION_CHECKSUM
+        );
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        {
+            let connection = Connection::open(&path).expect("database opens");
+            connection
+                .execute_batch(APPLICATION_META_SCHEMA_SQL)
+                .expect("application metadata schema creates");
+            connection
+                .execute_batch(MIGRATIONS_SCHEMA_SQL)
+                .expect("migration ledger schema creates");
+            connection
+                .execute_batch(VERSION_TWO_OPERATIONS_SCHEMA_SQL)
+                .expect("version-two operations schema creates");
+            connection
+                .execute(
+                    "INSERT INTO application_meta(key, value) VALUES ('catalog_kind', ?1)",
+                    [b"rootlight".as_slice()],
+                )
+                .expect("catalog identity inserts");
+            connection
+                .execute(
+                    "INSERT INTO migrations(migration_id, checksum) VALUES (?1, ?2)",
+                    params![
+                        VERSION_TWO_MIGRATION_ID,
+                        VERSION_TWO_MIGRATION_CHECKSUM.as_slice()
+                    ],
+                )
+                .expect("version-two migration row inserts");
+            connection
+                .pragma_update(None, "application_id", CATALOG_APPLICATION_ID)
+                .expect("application ID writes");
+            connection
+                .pragma_update(None, "user_version", VERSION_TWO_MIGRATION_ID)
+                .expect("version-two marker writes");
+            connection
+                .execute(
+                    "INSERT INTO operations (
+                        operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                        lease_expires_unix_ms, state, stage, cancellation_requested,
+                        cancellation_reason, recovery_class, revision, completed, total,
+                        error_json, sequence
+                     ) VALUES (?1, 'control_probe', ?2, ?3, 1, NULL, NULL, 'succeeded',
+                               'cleanup', 0, NULL, 'not_applicable', 3, 1, 1, NULL, 1)",
+                    params![
+                        operation(23).as_bytes().as_slice(),
+                        [7_u8; 32].as_slice(),
+                        [8_u8; 16].as_slice(),
+                    ],
+                )
+                .expect("version-two operation inserts");
+        }
+
+        let migrated = OperationJournal::open(&path).expect("version-two catalog migrates");
+        assert_eq!(
+            migrated.status(operation(23)).expect("row survives").state,
+            OperationState::Succeeded
+        );
+        let repository_index = OperationSubmission::new(
+            operation(24),
+            OperationKind::RepositoryIndex,
+            PlanHash::from_bytes([9; 32]),
+            ClientInstanceId::new([10; 16]).expect("client identity is valid"),
+            true,
+            None,
+            None,
+        )
+        .expect("repository-index submission is valid");
+        migrated
+            .submit(repository_index)
+            .expect("new operation kind persists after migration");
+        assert_eq!(
+            migrated
+                .status(repository_index.operation)
+                .expect("new operation reloads")
+                .kind,
+            OperationKind::RepositoryIndex
+        );
+        {
+            let connection = migrated.lock_connection().expect("catalog lock is healthy");
+            let ledger = connection
+                .prepare("SELECT migration_id, checksum FROM migrations ORDER BY migration_id")
+                .expect("ledger query prepares")
+                .query_map([], |row| {
+                    Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .expect("ledger query runs")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("ledger rows decode");
+            assert_eq!(
+                ledger,
+                vec![
+                    (
+                        VERSION_TWO_MIGRATION_ID,
+                        VERSION_TWO_MIGRATION_CHECKSUM.to_vec()
+                    ),
+                    (
+                        OPERATION_SCHEMA_MIGRATION_ID,
+                        OPERATION_SCHEMA_MIGRATION_CHECKSUM.to_vec()
+                    ),
+                ]
+            );
+        }
+        migrated.quick_check().expect("migrated catalog validates");
+        drop(migrated);
+        OperationJournal::open(&path)
+            .expect("current schema reopens idempotently")
+            .quick_check()
+            .expect("reopened current catalog validates");
+    }
+
+    #[test]
+    fn version_two_schema_rejects_tampered_ledger_and_definition() {
+        for tamper_schema in [false, true] {
+            let temporary = tempdir().expect("temporary directory is available");
+            let path = temporary.path().join("operations.sqlite");
+            let connection = Connection::open(&path).expect("database opens");
+            connection
+                .execute_batch(APPLICATION_META_SCHEMA_SQL)
+                .expect("application metadata schema creates");
+            connection
+                .execute_batch(MIGRATIONS_SCHEMA_SQL)
+                .expect("migration ledger schema creates");
+            let schema = if tamper_schema {
+                VERSION_TWO_OPERATIONS_SCHEMA_SQL
+                    .replace("CHECK(revision >= 1)", "CHECK(revision >= 0)")
+            } else {
+                VERSION_TWO_OPERATIONS_SCHEMA_SQL.to_owned()
+            };
+            connection
+                .execute_batch(&schema)
+                .expect("version-two operations schema creates");
+            connection
+                .execute(
+                    "INSERT INTO application_meta(key, value) VALUES ('catalog_kind', ?1)",
+                    [b"rootlight".as_slice()],
+                )
+                .expect("catalog identity inserts");
+            let checksum = if tamper_schema {
+                VERSION_TWO_MIGRATION_CHECKSUM
+            } else {
+                [0_u8; 32]
+            };
+            connection
+                .execute(
+                    "INSERT INTO migrations(migration_id, checksum) VALUES (?1, ?2)",
+                    params![VERSION_TWO_MIGRATION_ID, checksum.as_slice()],
+                )
+                .expect("migration row inserts");
+            connection
+                .pragma_update(None, "application_id", CATALOG_APPLICATION_ID)
+                .expect("application ID writes");
+            connection
+                .pragma_update(None, "user_version", VERSION_TWO_MIGRATION_ID)
+                .expect("version-two marker writes");
+            drop(connection);
+
+            assert!(matches!(
+                OperationJournal::open(&path),
+                Err(OperationError::UnsupportedLegacySchema)
+            ));
+        }
+    }
+
+    #[test]
+    fn version_two_rejects_auxiliary_schema_without_partial_migration() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        {
+            let connection = Connection::open(&path).expect("database opens");
+            connection
+                .execute_batch(
+                    "CREATE TABLE application_meta (
+                        key TEXT PRIMARY KEY NOT NULL,
+                        value BLOB NOT NULL,
+                        unexpected BLOB
+                    ) STRICT;",
+                )
+                .expect("tampered application metadata schema creates");
+            connection
+                .execute_batch(MIGRATIONS_SCHEMA_SQL)
+                .expect("migration ledger schema creates");
+            connection
+                .execute_batch(VERSION_TWO_OPERATIONS_SCHEMA_SQL)
+                .expect("version-two operations schema creates");
+            connection
+                .execute(
+                    "INSERT INTO application_meta(key, value, unexpected)
+                     VALUES ('catalog_kind', ?1, NULL)",
+                    [b"rootlight".as_slice()],
+                )
+                .expect("catalog identity inserts");
+            connection
+                .execute(
+                    "INSERT INTO migrations(migration_id, checksum) VALUES (?1, ?2)",
+                    params![
+                        VERSION_TWO_MIGRATION_ID,
+                        VERSION_TWO_MIGRATION_CHECKSUM.as_slice()
+                    ],
+                )
+                .expect("version-two migration row inserts");
+            connection
+                .pragma_update(None, "application_id", CATALOG_APPLICATION_ID)
+                .expect("application ID writes");
+            connection
+                .pragma_update(None, "user_version", VERSION_TWO_MIGRATION_ID)
+                .expect("version-two marker writes");
+        }
+
+        assert!(matches!(
+            OperationJournal::open(&path),
+            Err(OperationError::UnsupportedLegacySchema)
+        ));
+        let connection = Connection::open(&path).expect("rejected database reopens");
+        assert_eq!(
+            pragma_u32(&connection, "user_version").expect("schema version reads"),
+            VERSION_TWO_MIGRATION_ID
+        );
+        assert_eq!(
+            normalize_sql(&table_definition(&connection, "operations").expect("schema reads")),
+            normalize_sql(VERSION_TWO_OPERATIONS_SCHEMA_SQL)
+        );
+        assert!(!table_exists(&connection, "operations_v2").expect("table lookup succeeds"));
+        assert_eq!(
+            migration_ledger(&connection).expect("ledger remains readable"),
+            [(VERSION_TWO_MIGRATION_ID, VERSION_TWO_MIGRATION_CHECKSUM)]
+        );
+    }
+
+    #[test]
+    fn version_two_rejects_missing_or_foreign_identity_without_partial_migration() {
+        for (label, catalog_kind) in [
+            ("missing", None),
+            ("foreign", Some(b"another-application".as_slice())),
+        ] {
+            let temporary = tempdir().expect("temporary directory is available");
+            let path = temporary.path().join(format!("{label}.sqlite"));
+            {
+                let connection = Connection::open(&path).expect("database opens");
+                connection
+                    .execute_batch(APPLICATION_META_SCHEMA_SQL)
+                    .expect("application metadata schema creates");
+                connection
+                    .execute_batch(MIGRATIONS_SCHEMA_SQL)
+                    .expect("migration ledger schema creates");
+                connection
+                    .execute_batch(VERSION_TWO_OPERATIONS_SCHEMA_SQL)
+                    .expect("version-two operations schema creates");
+                if let Some(catalog_kind) = catalog_kind {
+                    connection
+                        .execute(
+                            "INSERT INTO application_meta(key, value)
+                             VALUES ('catalog_kind', ?1)",
+                            [catalog_kind],
+                        )
+                        .expect("foreign catalog identity inserts");
+                }
+                connection
+                    .execute(
+                        "INSERT INTO migrations(migration_id, checksum) VALUES (?1, ?2)",
+                        params![
+                            VERSION_TWO_MIGRATION_ID,
+                            VERSION_TWO_MIGRATION_CHECKSUM.as_slice()
+                        ],
+                    )
+                    .expect("version-two migration row inserts");
+                connection
+                    .pragma_update(None, "application_id", CATALOG_APPLICATION_ID)
+                    .expect("application ID writes");
+                connection
+                    .pragma_update(None, "user_version", VERSION_TWO_MIGRATION_ID)
+                    .expect("version-two marker writes");
+            }
+
+            assert!(matches!(
+                OperationJournal::open(&path),
+                Err(OperationError::UnsupportedLegacySchema)
+            ));
+            let connection = Connection::open(&path).expect("rejected database reopens");
+            assert_eq!(
+                pragma_u32(&connection, "user_version").expect("schema version reads"),
+                VERSION_TWO_MIGRATION_ID
+            );
+            assert_eq!(
+                normalize_sql(&table_definition(&connection, "operations").expect("schema reads")),
+                normalize_sql(VERSION_TWO_OPERATIONS_SCHEMA_SQL)
+            );
+            assert!(!table_exists(&connection, "operations_v2").expect("table lookup succeeds"));
+            assert_eq!(
+                migration_ledger(&connection).expect("ledger remains readable"),
+                [(VERSION_TWO_MIGRATION_ID, VERSION_TWO_MIGRATION_CHECKSUM)]
+            );
+            let observed_kind: Option<Vec<u8>> = connection
+                .query_row(
+                    "SELECT value FROM application_meta WHERE key = 'catalog_kind'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .expect("catalog identity remains readable");
+            assert_eq!(observed_kind.as_deref(), catalog_kind);
+        }
+    }
+
+    #[test]
     fn prototype_schema_migrates_and_future_schema_is_rejected() {
         let temporary = tempdir().expect("temporary directory is available");
         let path = temporary.path().join("operations.sqlite");
@@ -3755,6 +4785,16 @@ mod tests {
                 .expect("migration checksum reads"),
             OPERATION_SCHEMA_MIGRATION_CHECKSUM
         );
+        assert_eq!(
+            migration_ledger(&connection).expect("complete ledger reads"),
+            [
+                (VERSION_TWO_MIGRATION_ID, VERSION_TWO_MIGRATION_CHECKSUM),
+                (
+                    OPERATION_SCHEMA_MIGRATION_ID,
+                    OPERATION_SCHEMA_MIGRATION_CHECKSUM
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -3785,6 +4825,38 @@ mod tests {
         }
         assert!(matches!(
             OperationJournal::open(&checksum_path),
+            Err(OperationError::MigrationChecksumMismatch)
+        ));
+
+        let missing_history_path = temporary.path().join("missing-history.sqlite");
+        drop(OperationJournal::open(&missing_history_path).expect("catalog creates"));
+        {
+            let connection = Connection::open(&missing_history_path).expect("catalog reopens");
+            connection
+                .execute(
+                    "DELETE FROM migrations WHERE migration_id = ?1",
+                    [VERSION_TWO_MIGRATION_ID],
+                )
+                .expect("historical migration row is deleted");
+        }
+        assert!(matches!(
+            OperationJournal::open(&missing_history_path),
+            Err(OperationError::MigrationChecksumMismatch)
+        ));
+
+        let unexpected_history_path = temporary.path().join("unexpected-history.sqlite");
+        drop(OperationJournal::open(&unexpected_history_path).expect("catalog creates"));
+        {
+            let connection = Connection::open(&unexpected_history_path).expect("catalog reopens");
+            connection
+                .execute(
+                    "INSERT INTO migrations(migration_id, checksum) VALUES (99, zeroblob(32))",
+                    [],
+                )
+                .expect("unexpected migration row inserts");
+        }
+        assert!(matches!(
+            OperationJournal::open(&unexpected_history_path),
             Err(OperationError::MigrationChecksumMismatch)
         ));
 
