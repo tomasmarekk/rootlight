@@ -830,7 +830,8 @@ where
                 }
                 frame = frames.read_next() => {
                     let frame = frame?;
-                    let unterminated = matches!(frame, ReadFrame::Unterminated);
+                    let terminal =
+                        matches!(frame, ReadFrame::Oversized | ReadFrame::Unterminated);
                     let dispatch = match frame {
                         ReadFrame::Eof => break Ok(()),
                         ReadFrame::Complete(frame) => session.process_frame(&frame, limits)?,
@@ -915,7 +916,7 @@ where
                             break Err(SessionError::TooManyInvalidMessages);
                         }
                     }
-                    if unterminated {
+                    if terminal {
                         break Ok(());
                     }
                 }
@@ -1126,12 +1127,13 @@ enum ReadFrame {
 
 // Framing state lives outside the future returned by `read_next`. The serve
 // loop may drop that future whenever another `select!` branch wins; retaining
-// partial bytes and drain mode here prevents the next poll from losing sync.
+// partial bytes here prevents the next poll from losing progress.
 struct FrameReader<R> {
     input: R,
     frame: Vec<u8>,
     maximum: usize,
-    draining_oversized: bool,
+    #[cfg(test)]
+    reservation_growths: usize,
 }
 
 impl<R> FrameReader<R>
@@ -1143,7 +1145,8 @@ where
             input,
             frame: Vec::new(),
             maximum,
-            draining_oversized: false,
+            #[cfg(test)]
+            reservation_growths: 0,
         }
     }
 
@@ -1151,10 +1154,6 @@ where
         loop {
             let buffer = self.input.fill_buf().await.map_err(SessionError::Io)?;
             if buffer.is_empty() {
-                if self.draining_oversized {
-                    self.draining_oversized = false;
-                    return Ok(ReadFrame::Oversized);
-                }
                 return if self.frame.is_empty() {
                     Ok(ReadFrame::Eof)
                 } else {
@@ -1163,38 +1162,40 @@ where
                 };
             }
 
-            let newline = buffer.iter().position(|byte| *byte == b'\n');
-            if self.draining_oversized {
-                let consumed = newline.map_or(buffer.len(), |index| index.saturating_add(1));
-                self.input.consume(consumed);
-                if newline.is_some() {
-                    self.draining_oversized = false;
-                    return Ok(ReadFrame::Oversized);
-                }
-                continue;
-            }
-
-            let payload_len = newline.unwrap_or(buffer.len());
-            let next_len = self
-                .frame
-                .len()
-                .checked_add(payload_len)
+            let remaining = self
+                .maximum
+                .checked_sub(self.frame.len())
                 .ok_or(SessionError::MemoryUnavailable)?;
-            if next_len > self.maximum {
+            let inspected_len = buffer.len().min(remaining.saturating_add(1));
+            let newline = buffer
+                .get(..inspected_len)
+                .and_then(|bounded| bounded.iter().position(|byte| *byte == b'\n'));
+            let payload_len = newline.unwrap_or(inspected_len);
+            if newline.is_none() && buffer.len() > remaining {
+                self.input.consume(inspected_len);
                 self.frame.clear();
-                let consumed = newline.map_or(buffer.len(), |index| index.saturating_add(1));
-                self.input.consume(consumed);
-                if newline.is_some() {
-                    return Ok(ReadFrame::Oversized);
-                }
-                self.draining_oversized = true;
-                continue;
+                return Ok(ReadFrame::Oversized);
             }
 
-            self.frame
-                .try_reserve_exact(payload_len)
-                .map_err(|_| SessionError::MemoryUnavailable)?;
-            self.frame.extend_from_slice(&buffer[..payload_len]);
+            let _grew = match try_reserve_bounded(&mut self.frame, payload_len, self.maximum) {
+                Ok(grew) => grew,
+                Err(BoundedReserveError::Limit) => {
+                    self.frame.clear();
+                    return Ok(ReadFrame::Oversized);
+                }
+                Err(BoundedReserveError::Memory) => {
+                    return Err(SessionError::MemoryUnavailable);
+                }
+            };
+            #[cfg(test)]
+            if _grew {
+                self.reservation_growths = self.reservation_growths.saturating_add(1);
+            }
+            self.frame.extend_from_slice(
+                buffer
+                    .get(..payload_len)
+                    .ok_or(SessionError::MemoryUnavailable)?,
+            );
             let consumed = newline.map_or(payload_len, |index| index.saturating_add(1));
             self.input.consume(consumed);
             if newline.is_some() {
@@ -1202,6 +1203,41 @@ where
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoundedReserveError {
+    Limit,
+    Memory,
+}
+
+pub(crate) fn try_reserve_bounded<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    maximum: usize,
+) -> Result<bool, BoundedReserveError> {
+    let required = values
+        .len()
+        .checked_add(additional)
+        .ok_or(BoundedReserveError::Limit)?;
+    if required > maximum {
+        return Err(BoundedReserveError::Limit);
+    }
+    if required <= values.capacity() {
+        return Ok(false);
+    }
+
+    // Geometric growth bounds allocator calls while the explicit maximum
+    // prevents spare capacity requests from following untrusted lengths.
+    let doubled = values.capacity().max(1).saturating_mul(2);
+    let target = required.max(doubled.min(maximum));
+    let reserve = target
+        .checked_sub(values.len())
+        .ok_or(BoundedReserveError::Limit)?;
+    values
+        .try_reserve_exact(reserve)
+        .map_err(|_| BoundedReserveError::Memory)?;
+    Ok(true)
 }
 
 fn readable_id(value: &Value) -> Option<RequestId> {
@@ -1537,10 +1573,12 @@ fn encode_response(
             None => Err(SessionError::Serialization(error)),
         };
     }
-    writer
-        .bytes
-        .try_reserve_exact(1)
-        .map_err(|_| SessionError::MemoryUnavailable)?;
+    try_reserve_bounded(&mut writer.bytes, 1, limits.max_response_bytes).map_err(|failure| {
+        match failure {
+            BoundedReserveError::Limit => SessionError::ResponseTooLarge,
+            BoundedReserveError::Memory => SessionError::MemoryUnavailable,
+        }
+    })?;
     writer.bytes.push(b'\n');
     Ok(writer.bytes)
 }
@@ -1555,6 +1593,8 @@ struct BoundedResponseWriter {
     bytes: Vec<u8>,
     maximum: usize,
     failure: Option<ResponseWriteFailure>,
+    #[cfg(test)]
+    reservation_growths: usize,
 }
 
 impl BoundedResponseWriter {
@@ -1563,24 +1603,30 @@ impl BoundedResponseWriter {
             bytes: Vec::new(),
             maximum,
             failure: None,
+            #[cfg(test)]
+            reservation_growths: 0,
         }
     }
 }
 
 impl io::Write for BoundedResponseWriter {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        let Some(next_length) = self.bytes.len().checked_add(buffer.len()) else {
-            self.failure = Some(ResponseWriteFailure::Limit);
-            return Err(io::Error::other("response limit exceeded"));
-        };
-        if next_length > self.maximum {
-            self.failure = Some(ResponseWriteFailure::Limit);
-            return Err(io::Error::other("response limit exceeded"));
+        let _grew = try_reserve_bounded(&mut self.bytes, buffer.len(), self.maximum).map_err(
+            |failure| match failure {
+                BoundedReserveError::Limit => {
+                    self.failure = Some(ResponseWriteFailure::Limit);
+                    io::Error::other("response limit exceeded")
+                }
+                BoundedReserveError::Memory => {
+                    self.failure = Some(ResponseWriteFailure::Memory);
+                    io::Error::other("response memory unavailable")
+                }
+            },
+        )?;
+        #[cfg(test)]
+        if _grew {
+            self.reservation_growths = self.reservation_growths.saturating_add(1);
         }
-        self.bytes.try_reserve_exact(buffer.len()).map_err(|_| {
-            self.failure = Some(ResponseWriteFailure::Memory);
-            io::Error::other("response memory unavailable")
-        })?;
         self.bytes.extend_from_slice(buffer);
         Ok(buffer.len())
     }

@@ -6,6 +6,8 @@ use serde::{
 };
 use serde_json::{Map, Number, Value};
 
+use crate::{BoundedReserveError, try_reserve_bounded};
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct JsonLimits {
     pub(crate) max_depth: usize,
@@ -29,6 +31,21 @@ pub(crate) enum ParseFailure {
 }
 
 pub(crate) fn parse_bounded(input: &[u8], limits: JsonLimits) -> Result<Value, ParseFailure> {
+    parse_bounded_with_state(input, limits).map(|(value, _state)| value)
+}
+
+fn parse_bounded_with_state(
+    input: &[u8],
+    limits: JsonLimits,
+) -> Result<(Value, Rc<ParseState>), ParseFailure> {
+    match preflight_string_limits(input, limits.max_string_bytes) {
+        Ok(()) => {}
+        Err(StringScanFailure::Limits) => {
+            return Err(ParseFailure::Rejected(JsonIssue::Limits));
+        }
+        Err(StringScanFailure::Malformed) => return Err(ParseFailure::Malformed),
+    }
+
     let state = Rc::new(ParseState::new(limits));
     let mut deserializer = serde_json::Deserializer::from_slice(input);
     let value = NodeSeed {
@@ -47,7 +64,142 @@ pub(crate) fn parse_bounded(input: &[u8], limits: JsonLimits) -> Result<Value, P
         }
     })?;
     deserializer.end().map_err(|_| ParseFailure::Malformed)?;
-    Ok(value)
+    Ok((value, state))
+}
+
+#[cfg(test)]
+pub(crate) fn parse_bounded_with_array_growths(
+    input: &[u8],
+    limits: JsonLimits,
+) -> Result<(Value, usize), ParseFailure> {
+    parse_bounded_with_state(input, limits)
+        .map(|(value, state)| (value, state.array_reservation_growths.get()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StringScanFailure {
+    Limits,
+    Malformed,
+}
+
+fn preflight_string_limits(input: &[u8], maximum: usize) -> Result<(), StringScanFailure> {
+    let mut index = 0usize;
+    while let Some(byte) = input.get(index) {
+        if *byte == b'"' {
+            index = scan_string(input, index.saturating_add(1), maximum)?;
+        } else {
+            index = index.saturating_add(1);
+        }
+    }
+    Ok(())
+}
+
+fn scan_string(input: &[u8], mut index: usize, maximum: usize) -> Result<usize, StringScanFailure> {
+    let mut decoded_bytes = 0usize;
+    loop {
+        let byte = *input.get(index).ok_or(StringScanFailure::Malformed)?;
+        match byte {
+            b'"' => return Ok(index.saturating_add(1)),
+            b'\\' => {
+                let escaped_index = index.checked_add(1).ok_or(StringScanFailure::Malformed)?;
+                let escaped = *input
+                    .get(escaped_index)
+                    .ok_or(StringScanFailure::Malformed)?;
+                match escaped {
+                    b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {
+                        count_decoded_bytes(&mut decoded_bytes, 1, maximum)?;
+                        index = escaped_index.saturating_add(1);
+                    }
+                    b'u' => {
+                        let quad_index = escaped_index
+                            .checked_add(1)
+                            .ok_or(StringScanFailure::Malformed)?;
+                        let (first, next_index) = parse_hex_quad(input, quad_index)?;
+                        let character = if (0xD800..=0xDBFF).contains(&first) {
+                            if input.get(next_index) != Some(&b'\\')
+                                || input.get(next_index.saturating_add(1)) != Some(&b'u')
+                            {
+                                return Err(StringScanFailure::Malformed);
+                            }
+                            let low_index = next_index
+                                .checked_add(2)
+                                .ok_or(StringScanFailure::Malformed)?;
+                            let (low, after_low) = parse_hex_quad(input, low_index)?;
+                            if !(0xDC00..=0xDFFF).contains(&low) {
+                                return Err(StringScanFailure::Malformed);
+                            }
+                            index = after_low;
+                            let scalar = 0x1_0000
+                                + ((u32::from(first) - 0xD800) << 10)
+                                + (u32::from(low) - 0xDC00);
+                            char::from_u32(scalar).ok_or(StringScanFailure::Malformed)?
+                        } else {
+                            if (0xDC00..=0xDFFF).contains(&first) {
+                                return Err(StringScanFailure::Malformed);
+                            }
+                            index = next_index;
+                            char::from_u32(u32::from(first)).ok_or(StringScanFailure::Malformed)?
+                        };
+                        count_decoded_bytes(&mut decoded_bytes, character.len_utf8(), maximum)?;
+                    }
+                    _ => return Err(StringScanFailure::Malformed),
+                }
+            }
+            0x00..=0x1F => return Err(StringScanFailure::Malformed),
+            0x20..=0x7F => {
+                count_decoded_bytes(&mut decoded_bytes, 1, maximum)?;
+                index = index.saturating_add(1);
+            }
+            _ => {
+                let width = match byte {
+                    0xC2..=0xDF => 2,
+                    0xE0..=0xEF => 3,
+                    0xF0..=0xF4 => 4,
+                    _ => return Err(StringScanFailure::Malformed),
+                };
+                let end = index
+                    .checked_add(width)
+                    .ok_or(StringScanFailure::Malformed)?;
+                let encoded = input.get(index..end).ok_or(StringScanFailure::Malformed)?;
+                std::str::from_utf8(encoded).map_err(|_| StringScanFailure::Malformed)?;
+                count_decoded_bytes(&mut decoded_bytes, width, maximum)?;
+                index = end;
+            }
+        }
+    }
+}
+
+fn parse_hex_quad(input: &[u8], index: usize) -> Result<(u16, usize), StringScanFailure> {
+    let end = index.checked_add(4).ok_or(StringScanFailure::Malformed)?;
+    let digits = input.get(index..end).ok_or(StringScanFailure::Malformed)?;
+    let mut value = 0u16;
+    for digit in digits {
+        let nibble = match digit {
+            b'0'..=b'9' => *digit - b'0',
+            b'a'..=b'f' => *digit - b'a' + 10,
+            b'A'..=b'F' => *digit - b'A' + 10,
+            _ => return Err(StringScanFailure::Malformed),
+        };
+        value = value
+            .checked_mul(16)
+            .and_then(|current| current.checked_add(u16::from(nibble)))
+            .ok_or(StringScanFailure::Malformed)?;
+    }
+    Ok((value, end))
+}
+
+fn count_decoded_bytes(
+    decoded: &mut usize,
+    additional: usize,
+    maximum: usize,
+) -> Result<(), StringScanFailure> {
+    *decoded = decoded
+        .checked_add(additional)
+        .ok_or(StringScanFailure::Limits)?;
+    if *decoded > maximum {
+        return Err(StringScanFailure::Limits);
+    }
+    Ok(())
 }
 
 struct ParseState {
@@ -55,6 +207,8 @@ struct ParseState {
     nodes: Cell<usize>,
     issue: Cell<Option<JsonIssue>>,
     memory_unavailable: Cell<bool>,
+    #[cfg(test)]
+    array_reservation_growths: Cell<usize>,
 }
 
 impl ParseState {
@@ -64,6 +218,8 @@ impl ParseState {
             nodes: Cell::new(0),
             issue: Cell::new(None),
             memory_unavailable: Cell::new(false),
+            #[cfg(test)]
+            array_reservation_growths: Cell::new(0),
         }
     }
 
@@ -96,6 +252,29 @@ impl ParseState {
 
     fn mark_memory_unavailable(&self) {
         self.memory_unavailable.set(true);
+    }
+
+    fn reserve_array<E: serde::de::Error>(
+        &self,
+        values: &mut Vec<Value>,
+        additional: usize,
+    ) -> Result<(), E> {
+        let _grew = match try_reserve_bounded(values, additional, self.limits.max_array_items) {
+            Ok(grew) => grew,
+            Err(BoundedReserveError::Limit) => {
+                return Err(self.rejection(JsonIssue::Limits));
+            }
+            Err(BoundedReserveError::Memory) => {
+                self.mark_memory_unavailable();
+                return Err(E::custom("JSON memory is unavailable"));
+            }
+        };
+        #[cfg(test)]
+        if _grew {
+            self.array_reservation_growths
+                .set(self.array_reservation_growths.get().saturating_add(1));
+        }
+        Ok(())
     }
 }
 
@@ -225,10 +404,7 @@ impl<'de> Visitor<'de> for NodeVisitor {
         let mut values = Vec::new();
         if let Some(size) = sequence.size_hint() {
             let bounded = size.min(self.state.limits.max_array_items);
-            values.try_reserve_exact(bounded).map_err(|_| {
-                self.state.mark_memory_unavailable();
-                serde::de::Error::custom("JSON memory is unavailable")
-            })?;
+            self.state.reserve_array::<A::Error>(&mut values, bounded)?;
         }
 
         let mut item_count = 0usize;
@@ -236,12 +412,7 @@ impl<'de> Visitor<'de> for NodeVisitor {
             .next_element_seed(self.child_seed(item_count < self.state.limits.max_array_items))?
         {
             item_count += 1;
-            if values.len() == values.capacity() {
-                values.try_reserve_exact(1).map_err(|_| {
-                    self.state.mark_memory_unavailable();
-                    serde::de::Error::custom("JSON memory is unavailable")
-                })?;
-            }
+            self.state.reserve_array::<A::Error>(&mut values, 1)?;
             values.push(value);
         }
         Ok(Value::Array(values))

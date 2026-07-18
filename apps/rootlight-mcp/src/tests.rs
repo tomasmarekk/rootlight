@@ -7,7 +7,7 @@ use std::{
 
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     sync::{Notify, watch},
     task::JoinHandle,
     time::timeout,
@@ -433,6 +433,83 @@ fn configured_collection_limits_win_before_hostile_near_frame_tails_are_parsed()
 }
 
 #[test]
+fn escaped_string_limits_abort_before_hostile_keys_or_values_are_materialized() {
+    let limits = JsonLimits {
+        max_depth: DEFAULT_MAX_JSON_DEPTH,
+        max_string_bytes: 8,
+        max_object_properties: DEFAULT_MAX_OBJECT_PROPERTIES,
+        max_array_items: DEFAULT_MAX_ARRAY_ITEMS,
+        max_nodes: DEFAULT_MAX_JSON_NODES,
+    };
+
+    for prefix in [b"{\"".as_slice(), b"{\"safe\":\"".as_slice()] {
+        let mut hostile = Vec::with_capacity(900 * 1024);
+        hostile.extend_from_slice(prefix);
+        for _ in 0..9 {
+            hostile.extend_from_slice(br"\u0061");
+        }
+        hostile.resize(900 * 1024, b'x');
+
+        let failure =
+            parse_bounded(&hostile, limits).expect_err("decoded string limit is enforced");
+        assert_eq!(failure, ParseFailure::Rejected(JsonIssue::Limits));
+    }
+}
+
+#[test]
+fn string_preflight_counts_utf8_and_surrogate_escapes_by_decoded_bytes() {
+    let fixture = r#"{"é":"\uD83D\uDE00"}"#;
+    let limits = JsonLimits {
+        max_depth: 1,
+        max_string_bytes: 4,
+        max_object_properties: 1,
+        max_array_items: 1,
+        max_nodes: 2,
+    };
+    assert!(parse_bounded(fixture.as_bytes(), limits).is_ok());
+    let failure = parse_bounded(
+        fixture.as_bytes(),
+        JsonLimits {
+            max_string_bytes: 3,
+            ..limits
+        },
+    )
+    .expect_err("four-byte scalar exceeds a three-byte limit");
+    assert_eq!(failure, ParseFailure::Rejected(JsonIssue::Limits));
+}
+
+#[test]
+fn hostile_fragmented_array_uses_logarithmic_reservation_growth() {
+    let item_count = 16 * 1024;
+    let mut input = Vec::with_capacity(item_count * 2 + 1);
+    input.push(b'[');
+    for index in 0..item_count {
+        if index != 0 {
+            input.push(b',');
+        }
+        input.push(b'0');
+    }
+    input.push(b']');
+    let limits = JsonLimits {
+        max_depth: 1,
+        max_string_bytes: 1,
+        max_object_properties: 1,
+        max_array_items: item_count,
+        max_nodes: item_count + 1,
+    };
+
+    let (value, growths) = json::parse_bounded_with_array_growths(&input, limits)
+        .expect("exact-limit array is accepted");
+    assert_eq!(
+        value.as_array().map(Vec::len),
+        Some(item_count),
+        "all array items are retained"
+    );
+    let logarithmic_bound = usize::try_from(usize::BITS).expect("usize bit width fits in usize");
+    assert!(growths <= logarithmic_bound);
+}
+
+#[test]
 fn response_limit_is_inclusive_and_bounds_serialization() {
     let id = RequestId::String("response-boundary".to_owned());
     let encoded = result_response(&id, &EmptyObject {}, StdioLimits::default())
@@ -453,24 +530,39 @@ fn response_limit_is_inclusive_and_bounds_serialization() {
     assert!(matches!(error, SessionError::ResponseTooLarge));
 }
 
+#[test]
+fn hostile_escaped_identity_uses_logarithmic_response_reservations() {
+    let id = RequestId::String("\0".repeat(32 * 1024));
+    let response = ResultResponse {
+        jsonrpc: JSON_RPC_VERSION,
+        id: &id,
+        result: &EmptyObject {},
+    };
+    let mut writer = BoundedResponseWriter::new(DEFAULT_MAX_RESPONSE_BYTES);
+    serde_json::to_writer(&mut writer, &response).expect("bounded response is encoded");
+
+    let logarithmic_bound = usize::try_from(usize::BITS).expect("usize bit width fits in usize");
+    assert!(writer.reservation_growths <= logarithmic_bound);
+    assert!(writer.bytes.len() <= DEFAULT_MAX_RESPONSE_BYTES);
+}
+
 #[tokio::test]
-async fn frame_limit_is_inclusive_and_oversized_input_is_drained() {
-    let payload = "x".repeat(PING_TWO.len() + 1);
-    let bytes = format!("{payload}\n{PING_TWO}\n").into_bytes();
-    let mut frames = FrameReader::new(BufReader::new(bytes.as_slice()), PING_TWO.len());
+async fn frame_limit_is_inclusive_and_oversized_input_is_terminal() {
+    let exact = format!("{PING_TWO}\n").into_bytes();
+    let mut frames = FrameReader::new(BufReader::new(exact.as_slice()), PING_TWO.len());
     assert!(matches!(
-        frames
-            .read_next()
-            .await
-            .expect("oversized frame is drained"),
-        ReadFrame::Oversized
-    ));
-    assert!(matches!(
-        frames
-            .read_next()
-            .await
-            .expect("next exact frame is read"),
+        frames.read_next().await.expect("exact frame is read"),
         ReadFrame::Complete(frame) if frame == PING_TWO.as_bytes()
+    ));
+
+    let oversized = vec![b'x'; PING_TWO.len() + 1];
+    let mut frames = FrameReader::new(BufReader::new(oversized.as_slice()), PING_TWO.len());
+    assert!(matches!(
+        frames
+            .read_next()
+            .await
+            .expect("oversized frame is reported"),
+        ReadFrame::Oversized
     ));
 }
 
@@ -528,39 +620,67 @@ async fn partial_frame_survives_a_cancelled_read_future() {
 }
 
 #[tokio::test]
-async fn oversized_drain_survives_a_cancelled_read_future() {
-    let (client, server) = tokio::io::duplex(1024);
-    let (_client_read, mut client_write) = tokio::io::split(client);
-    let (server_read, _server_write) = tokio::io::split(server);
-    let mut frames = FrameReader::new(BufReader::new(server_read), PING_TWO.len());
-    let oversized = vec![b'x'; PING_TWO.len() + 1];
-
-    client_write
-        .write_all(&oversized)
-        .await
-        .expect("oversized prefix writes");
-    assert!(
-        timeout(Duration::from_millis(20), frames.read_next())
-            .await
-            .is_err(),
-        "oversized frame remains pending until its delimiter"
-    );
-
-    client_write
-        .write_all(format!("\n{PING_TWO}\n").as_bytes())
-        .await
-        .expect("delimiter and next frame write");
+async fn unterminated_oversized_source_is_rejected_after_maximum_plus_one_bytes() {
+    let maximum = 32;
+    let source = tokio::io::repeat(b'x');
+    let mut frames = FrameReader::new(BufReader::with_capacity(1, source), maximum);
     assert!(matches!(
-        frames
-            .read_next()
+        timeout(Duration::from_secs(1), frames.read_next())
             .await
-            .expect("oversized frame finishes draining"),
+            .expect("bounded work completes")
+            .expect("infinite source remains readable"),
         ReadFrame::Oversized
     ));
+}
+
+#[tokio::test]
+async fn one_byte_frame_fragments_use_logarithmic_reservation_growth() {
+    let maximum = 16 * 1024;
+    let mut input = vec![b'x'; maximum];
+    input.push(b'\n');
+    let mut frames = FrameReader::new(BufReader::with_capacity(1, input.as_slice()), maximum);
     assert!(matches!(
-        frames.read_next().await.expect("next frame is retained"),
-        ReadFrame::Complete(frame) if frame == PING_TWO.as_bytes()
+        frames.read_next().await.expect("fragmented frame is read"),
+        ReadFrame::Complete(frame) if frame.len() == maximum
     ));
+    let logarithmic_bound = usize::try_from(usize::BITS).expect("usize bit width fits in usize");
+    assert!(frames.reservation_growths <= logarithmic_bound);
+}
+
+#[tokio::test]
+async fn serve_closes_after_an_oversized_unterminated_frame() {
+    let maximum = 32;
+    let mut input = vec![b'x'; maximum + 1];
+    input.extend_from_slice(format!("\n{PING_TWO}\n").as_bytes());
+    let (server_output, mut client_output) = tokio::io::duplex(4096);
+    let server = tokio::spawn(async move {
+        let mut session = Session::rootlight();
+        serve(
+            BufReader::new(io::Cursor::new(input)),
+            server_output,
+            &mut session,
+            Arc::new(NoopRequestHandler),
+            StdioLimits::default().with_max_frame_bytes(maximum),
+        )
+        .await
+    });
+
+    server
+        .await
+        .expect("server task joins")
+        .expect("oversized input closes the session cleanly");
+    let mut output = Vec::new();
+    client_output
+        .read_to_end(&mut output)
+        .await
+        .expect("response output reads");
+    let responses: Vec<Value> = output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("response line is valid JSON"))
+        .collect();
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["error"]["code"], INVALID_REQUEST);
 }
 
 #[tokio::test]
