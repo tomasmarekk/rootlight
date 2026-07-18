@@ -1003,6 +1003,12 @@ impl Telemetry {
     }
 
     fn record_log(&self, event: LogEvent) {
+        // Sequence allocation, ring order, and external emission share one
+        // linearization point so concurrent callers cannot publish out of order.
+        let mut logs = self
+            .logs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(sequence) = self.next_sequence() else {
             return;
         };
@@ -1016,10 +1022,7 @@ impl Telemetry {
             target,
             event,
         };
-        self.logs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(record);
+        logs.push(record);
         if self.output == TelemetryOutput::StderrJson && !write_log_record(record) {
             saturating_increment(&self.log_write_failures);
         }
@@ -1032,24 +1035,27 @@ impl Telemetry {
         outcome: TelemetryOutcome,
         error_code: Option<ErrorCode>,
     ) {
+        // Completion order, retained order, and sequence order must agree for
+        // clients that validate bounded telemetry snapshots.
+        let mut traces = self
+            .traces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(sequence) = self.next_sequence() else {
             return;
         };
         let elapsed = started.elapsed();
         let elapsed_us = duration_us(elapsed);
         let started_uptime_us = duration_us(self.started.elapsed().saturating_sub(elapsed));
-        self.traces
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(CompletedSpan {
-                schema_version: TELEMETRY_SCHEMA_VERSION,
-                sequence,
-                started_uptime_us,
-                duration_us: elapsed_us,
-                kind,
-                outcome,
-                error_code,
-            });
+        traces.push(CompletedSpan {
+            schema_version: TELEMETRY_SCHEMA_VERSION,
+            sequence,
+            started_uptime_us,
+            duration_us: elapsed_us,
+            kind,
+            outcome,
+            error_code,
+        });
     }
 
     fn next_sequence(&self) -> Option<u64> {
@@ -1461,7 +1467,7 @@ pub enum SupportBundleError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read as _;
+    use std::{io::Read as _, sync::Barrier, thread};
 
     use super::*;
 
@@ -1592,6 +1598,82 @@ mod tests {
                 .all(|pair| pair[0].sequence < pair[1].sequence)
         );
         assert_eq!(snapshot.logs.first().map(|record| record.sequence), Some(2));
+    }
+
+    #[test]
+    fn concurrent_logs_preserve_publication_sequence() {
+        const THREADS: usize = 8;
+        const RECORDS_PER_THREAD: usize = 256;
+
+        let telemetry = Arc::new(Telemetry::default());
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let writers = (0..THREADS)
+            .map(|_| {
+                let telemetry = Arc::clone(&telemetry);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..RECORDS_PER_THREAD {
+                        telemetry.record_lifecycle(DaemonLifecycle::Ready);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for writer in writers {
+            writer.join().expect("telemetry writer completes");
+        }
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.logs.len(), RECENT_LOG_CAPACITY);
+        assert!(
+            snapshot
+                .logs
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+        assert_eq!(
+            snapshot.logs.last().map(|record| record.sequence),
+            Some(u64::try_from(THREADS * RECORDS_PER_THREAD).expect("test record count fits u64"))
+        );
+    }
+
+    #[test]
+    fn concurrent_spans_preserve_completion_sequence() {
+        const THREADS: usize = 8;
+        const SPANS_PER_THREAD: usize = 256;
+
+        let telemetry = Arc::new(Telemetry::default());
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let writers = (0..THREADS)
+            .map(|_| {
+                let telemetry = Arc::clone(&telemetry);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..SPANS_PER_THREAD {
+                        telemetry
+                            .start_span(SpanKind::IpcNegotiation)
+                            .finish(TelemetryOutcome::Succeeded, None);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for writer in writers {
+            writer.join().expect("telemetry writer completes");
+        }
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.traces.len(), RECENT_TRACE_CAPACITY);
+        assert!(
+            snapshot
+                .traces
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+        assert_eq!(
+            snapshot.traces.last().map(|span| span.sequence),
+            Some(u64::try_from(THREADS * SPANS_PER_THREAD).expect("test span count fits u64"))
+        );
     }
 
     #[test]
