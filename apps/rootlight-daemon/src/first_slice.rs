@@ -586,6 +586,20 @@ fn repository_index(
         runtime,
         journal.activate_operation_until(operation, lifecycle_deadline),
     )?;
+    // The journal owns cancellation fan-out while the IPC boundary owns the
+    // process-local work deadline. Installing it on this exact token keeps
+    // later journal cancellation linked to every synchronous service stage.
+    if let Err(error) = bind_journal_cancellation_deadline(&cancellation, context.deadline) {
+        finish_failed_index(
+            runtime,
+            lifecycle_deadline,
+            journal,
+            operation,
+            &cancellation,
+            &error,
+        )?;
+        return Err(error);
+    }
     if let Some(hook) = publication_hook
         && let Err(error) = hook.pause(PublicationBoundary::AfterActivation)
     {
@@ -754,6 +768,22 @@ fn finish_failed_index(
         )?;
     }
     Ok(())
+}
+
+fn bind_journal_cancellation_deadline(
+    cancellation: &Cancellation,
+    deadline: Instant,
+) -> Result<(), PublicError> {
+    if cancellation.has_deadline() {
+        return Err(internal_error());
+    }
+    cancellation.extend_deadline(deadline).map_err(|_| {
+        if cancellation.reason().is_some() {
+            cancelled_error()
+        } else {
+            internal_error()
+        }
+    })
 }
 
 fn retry_index_response(
@@ -2175,6 +2205,30 @@ mod tests {
                 .expect("metadata remains inspectable")
                 .publication,
             PublicationState::FailedClosed
+        );
+    }
+
+    #[test]
+    fn journal_cancellation_deadline_binding_is_single_use_and_cancellation_aware() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let cancellation = Cancellation::new();
+        bind_journal_cancellation_deadline(&cancellation, deadline)
+            .expect("journal token accepts the IPC deadline");
+        assert!(cancellation.has_deadline());
+        assert_eq!(
+            bind_journal_cancellation_deadline(&cancellation, deadline)
+                .expect_err("a pre-bound journal token fails closed")
+                .code(),
+            ErrorCode::Internal
+        );
+
+        let cancelled = Cancellation::new();
+        assert!(cancelled.cancel(rootlight_operations::CancellationReason::ClientRequest));
+        assert_eq!(
+            bind_journal_cancellation_deadline(&cancelled, deadline)
+                .expect_err("an existing cancellation reason wins")
+                .code(),
+            ErrorCode::Cancelled
         );
     }
 
