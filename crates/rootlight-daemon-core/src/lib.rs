@@ -688,7 +688,7 @@ impl JournalActorHandle {
         operation: OperationId,
         deadline: &WorkerDeadline,
     ) -> WorkerStart {
-        let (started, receiver) = mpsc::sync_channel(1);
+        let (started, receiver) = mpsc::sync_channel(0);
         let mut command = JournalCommand::StartOperation {
             operation,
             deadline: deadline.clone(),
@@ -974,7 +974,9 @@ fn journal_actor_loop(
             match control.try_recv() {
                 Ok(command) => {
                     handled = true;
-                    execute_journal_command(&journal, command);
+                    if execute_journal_command(&journal, command).is_err() {
+                        return;
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -987,7 +989,9 @@ fn journal_actor_loop(
             match normal.try_recv() {
                 Ok(command) => {
                     handled = true;
-                    execute_journal_command(&journal, command);
+                    if execute_journal_command(&journal, command).is_err() {
+                        return;
+                    }
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => normal_open = false,
@@ -1001,13 +1005,21 @@ fn journal_actor_loop(
         }
         if control_open {
             match control.recv_timeout(Duration::from_millis(10)) {
-                Ok(command) => execute_journal_command(&journal, command),
+                Ok(command) => {
+                    if execute_journal_command(&journal, command).is_err() {
+                        return;
+                    }
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => control_open = false,
             }
         } else if normal_open {
             match normal.recv_timeout(Duration::from_millis(10)) {
-                Ok(command) => execute_journal_command(&journal, command),
+                Ok(command) => {
+                    if execute_journal_command(&journal, command).is_err() {
+                        return;
+                    }
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => normal_open = false,
             }
@@ -1015,19 +1027,28 @@ fn journal_actor_loop(
     }
 }
 
-fn start_operation(
+fn start_operation_before(
     journal: &OperationJournal,
     operation: OperationId,
-) -> Result<(OperationRecord, Option<rootlight_operations::Cancellation>), OperationError> {
-    let current = journal.status(operation)?;
+    deadline: &WorkerDeadline,
+) -> WorkerStart {
+    let current = journal
+        .status(operation)
+        .map_err(ServiceError::Operations)?;
     if current.state.is_terminal() || current.cancellation_requested {
         return Ok((current, None));
     }
-    let cancellation = journal.cancellation_token(operation)?;
+    if deadline.remaining().is_none() {
+        return Err(ServiceError::RequestTimedOut);
+    }
+    let cancellation = journal
+        .cancellation_token(operation)
+        .map_err(ServiceError::Operations)?;
     journal
-        .start_execution(operation)
+        .start_execution_before(operation, deadline.expires_at())
         .map(|started| (started, Some(cancellation)))
         .or_else(|error| match error {
+            OperationError::StartDeadlineElapsed => Err(error),
             OperationError::CancellationWon
             | OperationError::ConcurrentUpdate
             | OperationError::IllegalTransition { .. } => {
@@ -1040,9 +1061,19 @@ fn start_operation(
             }
             _ => Err(error),
         })
+        .map_err(|error| {
+            if matches!(error, OperationError::StartDeadlineElapsed) {
+                ServiceError::RequestTimedOut
+            } else {
+                ServiceError::Operations(error)
+            }
+        })
 }
 
-fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) {
+fn execute_journal_command(
+    journal: &OperationJournal,
+    command: JournalCommand,
+) -> Result<(), OperationError> {
     match command {
         #[cfg(test)]
         JournalCommand::Barrier { entered, release } => {
@@ -1073,12 +1104,15 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
             deadline,
             started,
         } => {
-            let result = if deadline.remaining().is_none() {
-                Err(ServiceError::RequestTimedOut)
-            } else {
-                start_operation(journal, operation).map_err(ServiceError::Operations)
-            };
-            let _ = started.send(result);
+            let result = start_operation_before(journal, operation, &deadline);
+            if let Err(send_error) = started.send(result)
+                && matches!(
+                    &send_error.0,
+                    Ok((record, Some(_))) if record.state == OperationState::Running
+                )
+            {
+                journal.interrupt_unacknowledged_start(operation)?;
+            }
         }
         JournalCommand::FinishOperation {
             operation,
@@ -1163,6 +1197,7 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
             let _ = reply.send(journal.checkpoint());
         }
     }
+    Ok(())
 }
 
 fn execute_journal_request(
@@ -2022,6 +2057,10 @@ impl WorkerDeadline {
         self.expires_at
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
+    }
+
+    const fn expires_at(&self) -> Instant {
+        self.expires_at
     }
 
     #[cfg(test)]
@@ -4457,6 +4496,9 @@ fn operation_error_to_public(
         OperationError::DiagnosticTimedOut => {
             (ErrorCode::Busy, "operation diagnostic timed out", true)
         }
+        OperationError::StartDeadlineElapsed => {
+            (ErrorCode::Busy, "operation start timed out", true)
+        }
         OperationError::UnsupportedSqlite { .. }
         | OperationError::UnsupportedSqliteCompileOptions
         | OperationError::UnsupportedSqliteConfiguration
@@ -4525,7 +4567,8 @@ impl ServiceError {
                 | OperationError::ConcurrentUpdate
                 | OperationError::Busy
                 | OperationError::WriterBusy
-                | OperationError::DiagnosticTimedOut,
+                | OperationError::DiagnosticTimedOut
+                | OperationError::StartDeadlineElapsed,
             ) => false,
             Self::Ipc(_)
             | Self::InvalidNegotiatedClient
@@ -5564,11 +5607,39 @@ mod tests {
         let command = normal_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("start command remains admitted");
-        execute_journal_command(&journal, command);
+        execute_journal_command(&journal, command).expect("journal command executes");
 
         assert_eq!(
             journal.status(operation).expect("status loads").state,
             OperationState::Queued
+        );
+    }
+
+    #[test]
+    fn worker_start_acknowledgement_loss_interrupts_durable_running_state() {
+        let operation = OperationId::from_bytes([62; 16]);
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        journal.enqueue(operation).expect("operation enqueues");
+        let deadline =
+            WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT).expect("deadline is valid");
+        let (started, receiver) = mpsc::sync_channel(0);
+        drop(receiver);
+
+        execute_journal_command(
+            &journal,
+            JournalCommand::StartOperation {
+                operation,
+                deadline,
+                started,
+            },
+        )
+        .expect("lost acknowledgement is compensated");
+
+        let operation = journal.status(operation).expect("status loads");
+        assert_eq!(operation.state, OperationState::Interrupted);
+        assert_eq!(
+            operation.recovery_class,
+            RecoveryClass::InterruptedByRestart
         );
     }
 
@@ -6804,7 +6875,7 @@ mod tests {
                 ..
             } if *observed == operation
         ));
-        execute_journal_command(&journal, command);
+        execute_journal_command(&journal, command).expect("journal command executes");
         assert_eq!(
             journal.status(operation).expect("operation persists").state,
             OperationState::Interrupted
@@ -6885,7 +6956,7 @@ mod tests {
                 ) => {}
                 _ => panic!("unexpected control-lane ordering"),
             }
-            execute_journal_command(&journal, command);
+            execute_journal_command(&journal, command).expect("journal command executes");
         }
         assert!(matches!(
             status_receiver

@@ -727,16 +727,50 @@ impl OperationJournal {
         &self,
         operation: OperationId,
     ) -> Result<OperationRecord, OperationError> {
-        let current = self.status(operation)?;
+        self.start_execution_while(operation, || true)
+    }
+
+    /// Atomically starts queued work before a monotonic deadline.
+    ///
+    /// The deadline remains authoritative while the journal writer is blocked.
+    /// A start that cannot commit in time is rolled back or durably interrupted
+    /// before this method reports the elapsed deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::StartDeadlineElapsed`] when durable worker
+    /// ownership cannot be established before `deadline`, or another typed
+    /// lifecycle or storage error.
+    pub fn start_execution_before(
+        &self,
+        operation: OperationId,
+        deadline: Instant,
+    ) -> Result<OperationRecord, OperationError> {
+        self.start_execution_while(operation, || Instant::now() < deadline)
+    }
+
+    fn start_execution_while(
+        &self,
+        operation: OperationId,
+        mut can_start: impl FnMut() -> bool,
+    ) -> Result<OperationRecord, OperationError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if current.cancellation_requested {
+            return Err(OperationError::CancellationWon);
+        }
         if current.state != OperationState::Queued || current.stage != OperationStage::Accepted {
             return Err(OperationError::IllegalTransition {
                 from: current.state,
                 to: OperationState::Running,
             });
         }
+        if !can_start() {
+            return Err(OperationError::StartDeadlineElapsed);
+        }
         let revision = next_revision(current.revision)?;
-        let connection = self.lock_connection()?;
-        let updated = connection
+        let updated = transaction
             .execute(
                 "UPDATE operations
                  SET state = 'running', stage = 'executing', revision = ?1
@@ -750,15 +784,48 @@ impl OperationJournal {
                 ],
             )
             .map_err(map_sqlite_error)?;
-        drop(connection);
         if updated != 1 {
-            let observed = self.status(operation)?;
+            let observed = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
             if observed.cancellation_requested {
                 return Err(OperationError::CancellationWon);
             }
             return Err(OperationError::ConcurrentUpdate);
         }
-        self.status(operation)
+        if !can_start() {
+            return Err(OperationError::StartDeadlineElapsed);
+        }
+        transaction.commit().map_err(map_sqlite_error)?;
+        let started = load_record(&connection, operation)?.ok_or(OperationError::NotFound)?;
+        if can_start() {
+            return Ok(started);
+        }
+        drop(connection);
+        self.interrupt_started(
+            operation,
+            RecoveryClass::DeadlineElapsed,
+            CancellationReason::DeadlineExceeded,
+        )?;
+        Err(OperationError::StartDeadlineElapsed)
+    }
+
+    /// Interrupts a durable start whose worker acknowledgement was lost.
+    ///
+    /// This fail-closed transition is only valid after a successful start. It
+    /// prevents actor or worker teardown from leaving ownerless running work.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed lifecycle or storage error when the operation is neither
+    /// active nor already terminal.
+    pub fn interrupt_unacknowledged_start(
+        &self,
+        operation: OperationId,
+    ) -> Result<OperationRecord, OperationError> {
+        self.interrupt_started(
+            operation,
+            RecoveryClass::InterruptedByRestart,
+            CancellationReason::Shutdown,
+        )
     }
 
     /// Advances the monotonic operation stage.
@@ -1279,6 +1346,38 @@ impl OperationJournal {
                 return Err(OperationError::CatalogRowLimitExceeded);
             }
         }
+    }
+
+    fn interrupt_started(
+        &self,
+        operation: OperationId,
+        recovery: RecoveryClass,
+        reason: CancellationReason,
+    ) -> Result<OperationRecord, OperationError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if current.state.is_terminal() {
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(current);
+        }
+        if !matches!(
+            current.state,
+            OperationState::Running | OperationState::Cancelling
+        ) {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        if update_interrupted(&transaction, operation, recovery)? != 1 {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        transaction.commit().map_err(map_sqlite_error)?;
+        if let Some(token) = self.lock_cancellations()?.remove(&operation) {
+            let _ = token.cancel(reason);
+        }
+        let interrupted = load_record(&connection, operation)?.ok_or(OperationError::NotFound)?;
+        drop(connection);
+        self.prune_to(MAX_OPERATION_HISTORY)?;
+        Ok(interrupted)
     }
 
     fn recover_nonterminal_batch(
@@ -2891,6 +2990,9 @@ pub enum OperationError {
     /// A bounded diagnostic exceeded its monotonic deadline.
     #[error("operation journal diagnostic timed out")]
     DiagnosticTimedOut,
+    /// Durable worker ownership could not be established before its monotonic deadline.
+    #[error("operation start deadline elapsed")]
+    StartDeadlineElapsed,
     /// A persistent catalog or SQLite sidecar exceeded its physical storage bound.
     #[error("operation journal exceeds its storage limit")]
     CatalogTooLarge,
@@ -2977,6 +3079,7 @@ pub type SharedOperationJournal = Arc<OperationJournal>;
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::Cell,
         sync::{Arc, Barrier},
         thread,
     };
@@ -3095,6 +3198,63 @@ mod tests {
                     Progress::new(2, 10).expect("progress shape is valid")
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn start_deadline_rolls_back_or_interrupts_every_commit_boundary() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let before_commit = operation(70);
+        let after_commit = operation(71);
+        journal.enqueue(before_commit).expect("operation enqueues");
+        journal.enqueue(after_commit).expect("operation enqueues");
+
+        let checks = Cell::new(0_u32);
+        let before_commit_result = journal.start_execution_while(before_commit, || {
+            let check = checks.get();
+            checks.set(check + 1);
+            check == 0
+        });
+        assert!(matches!(
+            before_commit_result,
+            Err(OperationError::StartDeadlineElapsed)
+        ));
+        assert_eq!(
+            journal.status(before_commit).expect("status loads").state,
+            OperationState::Queued
+        );
+
+        let checks = Cell::new(0_u32);
+        let after_commit_result = journal.start_execution_while(after_commit, || {
+            let check = checks.get();
+            checks.set(check + 1);
+            check < 2
+        });
+        assert!(matches!(
+            after_commit_result,
+            Err(OperationError::StartDeadlineElapsed)
+        ));
+        let interrupted = journal.status(after_commit).expect("status loads");
+        assert_eq!(interrupted.state, OperationState::Interrupted);
+        assert_eq!(interrupted.recovery_class, RecoveryClass::DeadlineElapsed);
+    }
+
+    #[test]
+    fn cancellation_precedes_an_elapsed_start_deadline() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = operation(72);
+        journal.enqueue(operation).expect("operation enqueues");
+        journal
+            .request_cancellation(operation, CancellationReason::ClientRequest)
+            .expect("cancellation wins");
+
+        assert!(matches!(
+            journal.start_execution_while(operation, || false),
+            Err(OperationError::CancellationWon)
+        ));
+        assert_eq!(
+            journal.status(operation).expect("status loads").state,
+            OperationState::Cancelled
         );
     }
 
