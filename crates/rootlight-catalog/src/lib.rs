@@ -248,7 +248,7 @@ impl OracleReader {
         context.check().map_err(CatalogError::control)?;
         let connection = schema::open_oracle_reader(&path, context)?;
         let (metadata, stats) = read::read_header(&connection, context)?;
-        schema::validate_oracle(&connection)?;
+        schema::validate_oracle(&connection, context)?;
         drop(connection);
         Ok(Self {
             path,
@@ -269,7 +269,7 @@ impl OracleReader {
     ) -> Result<GenerationSnapshot, CatalogError> {
         let connection = schema::open_oracle_reader(&self.path, context)?;
         let snapshot = read::read_generation(&connection, self.metadata, self.stats, context)?;
-        schema::validate_oracle(&connection)?;
+        schema::validate_oracle(&connection, context)?;
         Ok(snapshot)
     }
 

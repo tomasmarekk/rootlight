@@ -11,7 +11,7 @@ use std::{
 };
 
 use rootlight_ids::content_hash;
-use rootlight_storage::GenerationContext;
+use rootlight_storage::{GenerationContext, GenerationResource};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension,
     config::DbConfig,
@@ -29,6 +29,9 @@ const CONTROL_APPLICATION_ID: u32 = 0x524c_4354;
 const ORACLE_APPLICATION_ID: u32 = 0x524c_4f52;
 const CONTROL_SCHEMA_VERSION: u32 = 2;
 const ORACLE_SCHEMA_VERSION: u32 = 2;
+const ORACLE_SCHEMA_OVERHEAD_BYTES: u64 = 4 * 1024 * 1024;
+const ORACLE_FIXED_BYTES_PER_ROW: u64 = 2 * 1024;
+const ORACLE_TEXT_REPLICATION_FACTOR: u64 = 3;
 
 const APPLICATION_META_SQL: &str = "CREATE TABLE application_meta (
     key TEXT PRIMARY KEY NOT NULL,
@@ -599,8 +602,13 @@ pub(crate) fn validate_control(connection: &Connection) -> Result<(), CatalogErr
     validate(connection, &control_definition())
 }
 
-pub(crate) fn validate_oracle(connection: &Connection) -> Result<(), CatalogError> {
-    validate(connection, &oracle_definition())
+pub(crate) fn validate_oracle(
+    connection: &Connection,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    validate_schema(connection, &oracle_definition())?;
+    validate_oracle_size(connection, context)?;
+    validate_integrity(connection, Some(context))
 }
 
 fn control_definition() -> SchemaDefinition<'static> {
@@ -689,7 +697,7 @@ fn validate(
     definition: &SchemaDefinition<'_>,
 ) -> Result<(), CatalogError> {
     validate_schema(connection, definition)?;
-    validate_integrity(connection)
+    validate_integrity(connection, None)
 }
 
 fn validate_schema(
@@ -732,19 +740,55 @@ fn validate_schema(
     if expected.len() != definition.objects.len() {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
+    let max_kind_bytes = definition
+        .objects
+        .iter()
+        .map(|object| object.kind.len())
+        .max()
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    let max_name_bytes = definition
+        .objects
+        .iter()
+        .map(|object| object.name.len())
+        .max()
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    let max_sql_bytes = definition
+        .objects
+        .iter()
+        .map(|object| object.sql.len())
+        .max()
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    let row_limit = definition
+        .objects
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
     let mut statement = connection
         .prepare(
-            "SELECT type, name, sql
+            "SELECT
+                CASE WHEN length(CAST(type AS BLOB)) <= ?1 THEN type END,
+                CASE WHEN length(CAST(name AS BLOB)) <= ?2 THEN name END,
+                CASE WHEN length(CAST(sql AS BLOB)) <= ?3 THEN sql END
              FROM sqlite_schema
              WHERE sql IS NOT NULL
-             ORDER BY type, name",
+             LIMIT ?4",
         )
         .map_err(CatalogError::sqlite)?;
-    let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
+    let mut rows = statement
+        .query(params![
+            bounded_i64(max_kind_bytes)?,
+            bounded_i64(max_name_bytes)?,
+            bounded_i64(max_sql_bytes)?,
+            bounded_i64(row_limit)?,
+        ])
+        .map_err(CatalogError::sqlite)?;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
-        let kind: String = row.get(0).map_err(CatalogError::sqlite)?;
-        let name: String = row.get(1).map_err(CatalogError::sqlite)?;
-        let sql: String = row.get(2).map_err(CatalogError::sqlite)?;
+        let kind: Option<String> = row.get(0).map_err(CatalogError::sqlite)?;
+        let name: Option<String> = row.get(1).map_err(CatalogError::sqlite)?;
+        let sql: Option<String> = row.get(2).map_err(CatalogError::sqlite)?;
+        let (Some(kind), Some(name), Some(sql)) = (kind, name, sql) else {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        };
         let Some(expected_sql) = expected.remove(&(kind, name)) else {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         };
@@ -819,10 +863,49 @@ fn validate_migration_ledger(
     Ok(())
 }
 
-fn validate_integrity(connection: &Connection) -> Result<(), CatalogError> {
+fn validate_oracle_size(
+    connection: &Connection,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    let page_count = pragma_nonnegative_u64(connection, "page_count")?;
+    let page_size = pragma_nonnegative_u64(connection, "page_size")?;
+    if page_size == 0 {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    let physical_bytes = page_count
+        .checked_mul(page_size)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    // The allowance covers fixed record and B-tree overhead, schema pages,
+    // and duplicate text held by the two name/path indexes.
+    let maximum_bytes = context
+        .budget()
+        .limit(GenerationResource::Rows)
+        .checked_mul(ORACLE_FIXED_BYTES_PER_ROW)
+        .and_then(|value| value.checked_add(ORACLE_SCHEMA_OVERHEAD_BYTES))
+        .and_then(|value| {
+            context
+                .budget()
+                .limit(GenerationResource::TextBytes)
+                .checked_mul(ORACLE_TEXT_REPLICATION_FACTOR)
+                .and_then(|text| value.checked_add(text))
+        })
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    if physical_bytes > maximum_bytes {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    context.check().map_err(CatalogError::control)
+}
+
+fn validate_integrity(
+    connection: &Connection,
+    context: Option<&GenerationContext<'_>>,
+) -> Result<(), CatalogError> {
+    check_context(context)?;
     let quick: String = connection
         .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
         .map_err(CatalogError::sqlite)?;
+    check_context(context)?;
     if quick != "ok" {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
@@ -833,7 +916,29 @@ fn validate_integrity(connection: &Connection) -> Result<(), CatalogError> {
     if rows.next().map_err(CatalogError::sqlite)?.is_some() {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
-    Ok(())
+    check_context(context)
+}
+
+fn check_context(context: Option<&GenerationContext<'_>>) -> Result<(), CatalogError> {
+    context.map_or(Ok(()), |context| {
+        context.check().map_err(CatalogError::control)
+    })
+}
+
+fn pragma_nonnegative_u64(connection: &Connection, pragma: &str) -> Result<u64, CatalogError> {
+    let sql = match pragma {
+        "page_count" => "PRAGMA page_count",
+        "page_size" => "PRAGMA page_size",
+        _ => return Err(CatalogError::new(CatalogErrorKind::Corrupt)),
+    };
+    let value: i64 = connection
+        .query_row(sql, [], |row| row.get(0))
+        .map_err(CatalogError::sqlite)?;
+    u64::try_from(value).map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
+}
+
+fn bounded_i64(value: usize) -> Result<i64, CatalogError> {
+    i64::try_from(value).map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
 }
 
 fn normalize_sql(sql: &str) -> String {
@@ -1110,6 +1215,10 @@ impl JournalMode {
 
 #[cfg(test)]
 mod tests {
+    use rootlight_cancel::Cancellation;
+    use rootlight_storage::GenerationBudget;
+    use tempfile::TempDir;
+
     use super::*;
 
     #[test]
@@ -1131,5 +1240,33 @@ mod tests {
             error.kind(),
             CatalogErrorKind::UnsupportedPrivateFileBoundary
         );
+    }
+
+    #[test]
+    fn oracle_integrity_scan_rejects_files_above_its_physical_budget() {
+        let directory = TempDir::new().expect("temporary oracle directory is created");
+        let connection =
+            create_oracle(&directory.path().join("bounded.sqlite3")).expect("oracle initializes");
+        connection
+            .execute_batch(
+                "CREATE TABLE physical_padding(payload BLOB) STRICT;
+                 WITH RECURSIVE padding(value) AS (
+                     SELECT 1
+                     UNION ALL
+                     SELECT value + 1 FROM padding WHERE value < 6
+                 )
+                 INSERT INTO physical_padding(payload)
+                 SELECT zeroblob(1048576) FROM padding;
+                 DROP TABLE physical_padding;",
+            )
+            .expect("free pages inflate the hostile oracle");
+        let cancellation = Cancellation::new();
+        let budget = GenerationBudget::new(1, 1, 1).expect("tiny physical budget is valid");
+        let context = GenerationContext::new(&cancellation, budget);
+
+        let error = validate_oracle(&connection, &context)
+            .expect_err("quick-check must not scan an oversized physical oracle");
+
+        assert_eq!(error.kind(), CatalogErrorKind::Corrupt);
     }
 }

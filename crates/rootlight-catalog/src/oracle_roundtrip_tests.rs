@@ -713,6 +713,49 @@ fn actual_text_bytes_are_checked_before_materialization() {
 }
 
 #[test]
+fn excess_text_rows_are_rejected_by_bounded_preflight() {
+    let directory = TempDir::new().expect("temporary generation directory is created");
+    write_fixture(directory.path());
+    let connection =
+        Connection::open(directory.path().join(ORACLE_FILENAME)).expect("oracle opens");
+    connection
+        .execute_batch(
+            "WITH RECURSIVE hostile(value) AS (
+                 SELECT 1
+                 UNION ALL
+                 SELECT value + 1 FROM hostile WHERE value < 1000
+             )
+             INSERT INTO files(
+                 file_id, repository_id, generation_id, path, content_hash,
+                 byte_length, language, encoding, generated, provenance_id,
+                 evidence_source_ordinal
+             )
+             SELECT
+                 CAST(printf('%020d', hostile.value) AS BLOB),
+                 fixture.repository_id,
+                 fixture.generation_id,
+                 fixture.path || '-hostile-' || hostile.value,
+                 fixture.content_hash,
+                 fixture.byte_length,
+                 fixture.language,
+                 fixture.encoding,
+                 fixture.generated,
+                 fixture.provenance_id,
+                 fixture.evidence_source_ordinal
+             FROM hostile
+             CROSS JOIN (SELECT * FROM files LIMIT 1) AS fixture;",
+        )
+        .expect("hostile extra text rows are installed");
+    drop(connection);
+
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let error = OracleReader::open_in(directory.path(), &context)
+        .expect_err("bounded text preflight rejects the first excess row");
+    assert_eq!(error.kind(), CatalogErrorKind::Corrupt);
+}
+
+#[test]
 fn oversized_application_metadata_is_rejected_without_returning_the_blob() {
     let directory = TempDir::new().expect("temporary generation directory is created");
     write_fixture(directory.path());

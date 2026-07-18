@@ -151,56 +151,135 @@ pub(crate) fn read_header(
     context
         .require(GenerationResource::TextBytes, stats.text_bytes())
         .map_err(CatalogError::control)?;
-    validate_text_bytes(connection, stats.text_bytes(), context)?;
+    validate_text_bytes(connection, stats, context)?;
     Ok((metadata, stats))
 }
 
 fn validate_text_bytes(
     connection: &Connection,
-    expected: u64,
+    stats: GenerationStats,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    let queries = [
+        (
+            "SELECT
+                length(CAST(path AS BLOB))
+              + length(CAST(language AS BLOB))
+              + length(CAST(encoding AS BLOB))
+             FROM files
+             LIMIT ?1",
+            stats.files(),
+        ),
+        (
+            "SELECT
+                length(CAST(language AS BLOB))
+              + length(CAST(canonical_name AS BLOB))
+              + length(CAST(display_name AS BLOB))
+              + length(CAST(qualified_name AS BLOB))
+             FROM entities
+             LIMIT ?1",
+            stats.entities(),
+        ),
+        (
+            "SELECT length(CAST(syntax_kind AS BLOB))
+             FROM occurrences
+             LIMIT ?1",
+            stats.occurrences(),
+        ),
+        (
+            "SELECT
+                length(CAST(producer_name AS BLOB))
+              + length(CAST(producer_version AS BLOB))
+              + coalesce(length(CAST(frontend_version AS BLOB)), 0)
+              + length(CAST(language AS BLOB))
+              + coalesce(length(CAST(rule AS BLOB)), 0)
+             FROM provenance
+             LIMIT ?1",
+            stats.provenance(),
+        ),
+        (
+            "SELECT length(CAST(payload AS BLOB))
+             FROM source_mappings
+             LIMIT ?1",
+            stats.source_mappings(),
+        ),
+        (
+            "SELECT length(CAST(payload AS BLOB))
+             FROM skipped_regions
+             LIMIT ?1",
+            stats.skipped_regions(),
+        ),
+        (
+            "SELECT length(CAST(payload AS BLOB))
+             FROM diagnostics
+             LIMIT ?1",
+            stats.diagnostics(),
+        ),
+        (
+            "SELECT length(CAST(payload AS BLOB))
+             FROM extensions
+             LIMIT ?1",
+            stats.extensions(),
+        ),
+    ];
+    let mut observed_bytes = 0_u64;
+    let mut observed_rows = 0_u64;
+    for (sql, expected_rows) in queries {
+        accumulate_text_rows(
+            connection,
+            sql,
+            expected_rows,
+            &mut observed_rows,
+            &mut observed_bytes,
+            context,
+        )?;
+    }
+    if observed_bytes != stats.text_bytes() {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    context.check().map_err(CatalogError::control)
+}
+
+fn accumulate_text_rows(
+    connection: &Connection,
+    sql: &str,
+    expected_rows: u64,
+    observed_rows: &mut u64,
+    observed_bytes: &mut u64,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     context.check().map_err(CatalogError::control)?;
-    let observed: i64 = connection
-        .query_row(
-            "SELECT
-                coalesce((SELECT sum(
-                    length(CAST(path AS BLOB))
-                  + length(CAST(language AS BLOB))
-                  + length(CAST(encoding AS BLOB))
-                ) FROM files), 0)
-              + coalesce((SELECT sum(
-                    length(CAST(language AS BLOB))
-                  + length(CAST(canonical_name AS BLOB))
-                  + length(CAST(display_name AS BLOB))
-                  + length(CAST(qualified_name AS BLOB))
-                ) FROM entities), 0)
-              + coalesce((SELECT sum(length(CAST(syntax_kind AS BLOB)))
-                          FROM occurrences), 0)
-              + coalesce((SELECT sum(
-                    length(CAST(producer_name AS BLOB))
-                  + length(CAST(producer_version AS BLOB))
-                  + coalesce(length(CAST(frontend_version AS BLOB)), 0)
-                  + length(CAST(language AS BLOB))
-                  + coalesce(length(CAST(rule AS BLOB)), 0)
-                ) FROM provenance), 0)
-              + coalesce((SELECT sum(length(CAST(payload AS BLOB)))
-                          FROM source_mappings), 0)
-              + coalesce((SELECT sum(length(CAST(payload AS BLOB)))
-                          FROM skipped_regions), 0)
-              + coalesce((SELECT sum(length(CAST(payload AS BLOB)))
-                          FROM diagnostics), 0)
-              + coalesce((SELECT sum(length(CAST(payload AS BLOB)))
-                          FROM extensions), 0)",
-            [],
-            |row| row.get(0),
-        )
+    let row_limit = expected_rows
+        .checked_add(1)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    let mut statement = connection.prepare(sql).map_err(CatalogError::sqlite)?;
+    let mut rows = statement
+        .query([codec::sqlite_i64(row_limit)?])
         .map_err(CatalogError::sqlite)?;
-    let observed = codec::nonnegative_u64(observed)?;
-    context
-        .require(GenerationResource::TextBytes, observed)
-        .map_err(CatalogError::control)?;
-    if observed != expected {
+    let mut table_rows = 0_u64;
+    while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
+        context.check().map_err(CatalogError::control)?;
+        table_rows = table_rows
+            .checked_add(1)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        if table_rows > expected_rows {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        *observed_rows = observed_rows
+            .checked_add(1)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        context
+            .require(GenerationResource::Rows, *observed_rows)
+            .map_err(CatalogError::control)?;
+        let row_bytes = codec::nonnegative_u64(get(row, 0)?)?;
+        *observed_bytes = observed_bytes
+            .checked_add(row_bytes)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        context
+            .require(GenerationResource::TextBytes, *observed_bytes)
+            .map_err(CatalogError::control)?;
+    }
+    if table_rows != expected_rows {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
     Ok(())
@@ -388,83 +467,175 @@ fn validate_payload_cardinality(
     .into_iter()
     .try_fold(0_u64, u64::checked_add)
     .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
-    let expected = [
-        Some(1),
-        Some(identity_rows),
-        Some(stats.source_refs()),
-        Some(stats.provenance()),
-        Some(stats.files()),
-        Some(stats.entities()),
-        None,
-        Some(stats.occurrences()),
-        None,
-        Some(stats.relations()),
-        Some(stats.source_mappings()),
-        Some(stats.coverage()),
-        Some(stats.skipped_regions()),
-        Some(stats.diagnostics()),
-        Some(stats.extensions()),
-        None,
-        None,
-        None,
-        Some(1),
+    let tables = [
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM generation_meta LIMIT ?1
+             )",
+            Some(1),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM identity_registry LIMIT ?1
+             )",
+            Some(identity_rows),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM source_refs LIMIT ?1
+             )",
+            Some(stats.source_refs()),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM provenance LIMIT ?1
+             )",
+            Some(stats.provenance()),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM files LIMIT ?1
+             )",
+            Some(stats.files()),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM entities LIMIT ?1
+             )",
+            Some(stats.entities()),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM entity_flags LIMIT ?1
+             )",
+            None,
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM occurrences LIMIT ?1
+             )",
+            Some(stats.occurrences()),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM occurrence_candidates LIMIT ?1
+             )",
+            None,
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM relations LIMIT ?1
+             )",
+            Some(stats.relations()),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM source_mappings LIMIT ?1
+             )",
+            Some(stats.source_mappings()),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM coverage_records LIMIT ?1
+             )",
+            Some(stats.coverage()),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM skipped_regions LIMIT ?1
+             )",
+            Some(stats.skipped_regions()),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM diagnostics LIMIT ?1
+             )",
+            Some(stats.diagnostics()),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM extensions LIMIT ?1
+             )",
+            Some(stats.extensions()),
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM evidence_derivations LIMIT ?1
+             )",
+            None,
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM provenance_sources LIMIT ?1
+             )",
+            None,
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM provenance_derivations LIMIT ?1
+             )",
+            None,
+        ),
+        (
+            "SELECT count(*) FROM (
+                SELECT 1 FROM application_meta
+                WHERE key = 'document_hash'
+                LIMIT ?1
+             )",
+            Some(1),
+        ),
     ];
-    let mut statement = connection
-        .prepare(
-            "SELECT 0 AS ordinal, count(*) AS row_count FROM generation_meta
-             UNION ALL SELECT 1, count(*) FROM identity_registry
-             UNION ALL SELECT 2, count(*) FROM source_refs
-             UNION ALL SELECT 3, count(*) FROM provenance
-             UNION ALL SELECT 4, count(*) FROM files
-             UNION ALL SELECT 5, count(*) FROM entities
-             UNION ALL SELECT 6, count(*) FROM entity_flags
-             UNION ALL SELECT 7, count(*) FROM occurrences
-             UNION ALL SELECT 8, count(*) FROM occurrence_candidates
-             UNION ALL SELECT 9, count(*) FROM relations
-             UNION ALL SELECT 10, count(*) FROM source_mappings
-             UNION ALL SELECT 11, count(*) FROM coverage_records
-             UNION ALL SELECT 12, count(*) FROM skipped_regions
-             UNION ALL SELECT 13, count(*) FROM diagnostics
-             UNION ALL SELECT 14, count(*) FROM extensions
-             UNION ALL SELECT 15, count(*) FROM evidence_derivations
-             UNION ALL SELECT 16, count(*) FROM provenance_sources
-             UNION ALL SELECT 17, count(*) FROM provenance_derivations
-             UNION ALL SELECT 18, count(*) FROM application_meta
-                 WHERE key = 'document_hash'
-             ORDER BY ordinal",
-        )
-        .map_err(CatalogError::sqlite)?;
-    let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
+    let physical_row_limit = if contract_version == GenerationContractVersion::new(1, 1) {
+        stats.stored_rows().checked_add(1)
+    } else {
+        Some(stats.stored_rows())
+    }
+    .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
     let mut observed_total = 0_u64;
-    let mut observed_tables = 0_usize;
-    while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
-        context.check().map_err(CatalogError::control)?;
-        let ordinal: i64 = get(row, 0)?;
-        if ordinal != usize_to_i64(observed_tables)? || observed_tables >= expected.len() {
-            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
-        }
-        let count = codec::nonnegative_u64(get(row, 1)?)?;
-        if expected[observed_tables].is_some_and(|expected| expected != count) {
+    for (sql, expected) in tables {
+        let remaining = physical_row_limit
+            .checked_sub(observed_total)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        let maximum = match expected {
+            Some(expected) if expected > remaining => {
+                return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+            }
+            Some(expected) => expected,
+            None => remaining,
+        };
+        let count = bounded_table_count(connection, sql, maximum, context)?;
+        if expected.is_some_and(|expected| expected != count) {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
         observed_total = observed_total
             .checked_add(count)
             .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
-        context
-            .require(GenerationResource::Rows, observed_total)
-            .map_err(CatalogError::control)?;
-        observed_tables += 1;
     }
-    let generation_owned_rows = if contract_version == GenerationContractVersion::new(1, 1) {
-        observed_total.checked_sub(1)
-    } else {
-        Some(observed_total)
-    }
-    .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
-    if observed_tables != expected.len() || generation_owned_rows != stats.stored_rows() {
+    if observed_total != physical_row_limit {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
     Ok(())
+}
+
+fn bounded_table_count(
+    connection: &Connection,
+    sql: &str,
+    maximum: u64,
+    context: &GenerationContext<'_>,
+) -> Result<u64, CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    let limit = maximum
+        .checked_add(1)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    let observed: i64 = connection
+        .query_row(sql, [codec::sqlite_i64(limit)?], |row| row.get(0))
+        .map_err(CatalogError::sqlite)?;
+    context.check().map_err(CatalogError::control)?;
+    let observed = codec::nonnegative_u64(observed)?;
+    if observed > maximum {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    Ok(observed)
 }
 
 fn validate_identity_registry(

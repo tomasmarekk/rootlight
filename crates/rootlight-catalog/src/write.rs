@@ -108,7 +108,7 @@ pub(crate) fn write_generation(
     )?;
     context.check().map_err(CatalogError::control)?;
     transaction.commit().map_err(CatalogError::sqlite)?;
-    schema::validate_oracle(connection)?;
+    schema::validate_oracle(connection, context)?;
     Ok(plan.stats)
 }
 
