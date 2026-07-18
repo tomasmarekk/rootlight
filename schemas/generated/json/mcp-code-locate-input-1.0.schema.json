@@ -1,0 +1,482 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/code.locate/input/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CodeLocateInput",
+  "description": "Strict input for `code.locate`.",
+  "type": "object",
+  "properties": {
+    "budget": {
+      "description": "Optional lower response limits.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResponseBudget"
+        }
+      ]
+    },
+    "cursor": {
+      "description": "Opaque generation-bound continuation cursor.",
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1
+    },
+    "generation": {
+      "description": "Immutable generation selector.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationSelector"
+        }
+      ]
+    },
+    "kinds": {
+      "description": "Entity kinds to retain.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EntityKind"
+      },
+      "maxItems": 32,
+      "uniqueItems": true
+    },
+    "languages": {
+      "description": "Language identity filters.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 32,
+      "uniqueItems": true
+    },
+    "max_results": {
+      "description": "Maximum returned matches.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 200,
+      "minimum": 1
+    },
+    "min_confidence": {
+      "description": "Minimum relation confidence from 0 through 1000.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 1000,
+      "minimum": 0
+    },
+    "query": {
+      "description": "Identifier, path, text, or concept query.",
+      "type": "string",
+      "maxLength": 2048,
+      "minLength": 1
+    },
+    "related_to": {
+      "description": "Structural seed symbols.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SymbolId"
+      },
+      "maxItems": 16,
+      "uniqueItems": true
+    },
+    "repository": {
+      "description": "Repository to query.",
+      "$ref": "#/$defs/RepositorySelector"
+    },
+    "response_profile": {
+      "description": "Requested representation.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResponseProfile"
+        }
+      ]
+    },
+    "scope": {
+      "description": "Optional structural scope.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScopeSelector"
+        }
+      ]
+    },
+    "search_modes": {
+      "description": "Retrieval modes.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SearchMode"
+      },
+      "maxItems": 6,
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "repository",
+    "query"
+  ],
+  "$defs": {
+    "ActiveGeneration": {
+      "description": "Active-generation keyword.",
+      "oneOf": [
+        {
+          "description": "Select the active generation.",
+          "type": "string",
+          "const": "active"
+        }
+      ]
+    },
+    "BuildTargetScope": {
+      "description": "Build-target scope.",
+      "type": "object",
+      "properties": {
+        "build_targets": {
+          "description": "Distinct build-target identities.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "build_targets"
+      ]
+    },
+    "EntityKind": {
+      "description": "Entity classes supported by the first locate slice.",
+      "oneOf": [
+        {
+          "description": "Source file.",
+          "type": "string",
+          "const": "file"
+        },
+        {
+          "description": "Namespace or module.",
+          "type": "string",
+          "const": "module"
+        },
+        {
+          "description": "Type declaration.",
+          "type": "string",
+          "const": "type"
+        },
+        {
+          "description": "Function declaration.",
+          "type": "string",
+          "const": "function"
+        },
+        {
+          "description": "Method declaration.",
+          "type": "string",
+          "const": "method"
+        },
+        {
+          "description": "Field declaration.",
+          "type": "string",
+          "const": "field"
+        },
+        {
+          "description": "Constant declaration.",
+          "type": "string",
+          "const": "constant"
+        },
+        {
+          "description": "Variable declaration.",
+          "type": "string",
+          "const": "variable"
+        },
+        {
+          "description": "Configuration record.",
+          "type": "string",
+          "const": "configuration"
+        }
+      ]
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "GenerationSelector": {
+      "description": "Generation selector shared by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Resolve the currently active immutable generation.",
+          "$ref": "#/$defs/ActiveGeneration"
+        },
+        {
+          "description": "Pin an explicit immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        }
+      ]
+    },
+    "PackageScope": {
+      "description": "Package scope.",
+      "type": "object",
+      "properties": {
+        "packages": {
+          "description": "Distinct package identities.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "packages"
+      ]
+    },
+    "PathScope": {
+      "description": "Repository-relative path scope.",
+      "type": "object",
+      "properties": {
+        "paths": {
+          "description": "Distinct repository-relative paths.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "paths"
+      ]
+    },
+    "ProvenanceLevel": {
+      "description": "Provenance detail requested by a read tool.",
+      "oneOf": [
+        {
+          "description": "Omit provenance detail beyond mandatory source identity.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "Return compact provider and confidence evidence.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "Return maximum bounded provenance evidence.",
+          "type": "string",
+          "const": "full"
+        }
+      ]
+    },
+    "RepositoryAliasSelector": {
+      "description": "Registered repository-alias selector.",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "description": "Registered alias, resolved to exactly one repository.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "alias"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RepositoryIdSelector": {
+      "description": "Stable repository-ID selector.",
+      "type": "object",
+      "properties": {
+        "repository_id": {
+          "description": "Repository identity.",
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id"
+      ]
+    },
+    "RepositorySelector": {
+      "description": "Repository selector accepted by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Select by stable repository identifier.",
+          "$ref": "#/$defs/RepositoryIdSelector"
+        },
+        {
+          "description": "Select by a configured local alias.",
+          "$ref": "#/$defs/RepositoryAliasSelector"
+        }
+      ]
+    },
+    "ResponseBudget": {
+      "description": "Optional response limits that can only reduce server hard limits.",
+      "type": "object",
+      "properties": {
+        "evidence_level": {
+          "description": "Requested evidence detail.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProvenanceLevel"
+            }
+          ]
+        },
+        "max_depth": {
+          "description": "Maximum plan depth.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 16,
+          "minimum": 1
+        },
+        "max_paths": {
+          "description": "Maximum independently returned paths.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "max_results": {
+          "description": "Maximum returned result objects.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "max_source_bytes": {
+          "description": "Maximum source bytes before JSON escaping.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 524288,
+          "minimum": 1
+        },
+        "max_tokens": {
+          "description": "Maximum estimated output tokens.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 3200,
+          "minimum": 100
+        },
+        "max_traversal_facts": {
+          "description": "Maximum relationship or traversal facts examined.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 100000,
+          "minimum": 1
+        },
+        "timeout_ms": {
+          "description": "Cooperative request deadline in milliseconds.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 30000,
+          "minimum": 10
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResponseProfile": {
+      "description": "Requested response representation.",
+      "oneOf": [
+        {
+          "description": "Smallest complete correctness-bearing response.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "More explanatory response within the same hard budgets.",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "Maximum bounded provenance and evidence.",
+          "type": "string",
+          "const": "evidence"
+        }
+      ]
+    },
+    "ScopeSelector": {
+      "description": "Common scope selector for read tools.",
+      "anyOf": [
+        {
+          "description": "Limit to repository-relative paths.",
+          "$ref": "#/$defs/PathScope"
+        },
+        {
+          "description": "Limit to packages.",
+          "$ref": "#/$defs/PackageScope"
+        },
+        {
+          "description": "Limit to build targets.",
+          "$ref": "#/$defs/BuildTargetScope"
+        },
+        {
+          "description": "Limit to stable symbols.",
+          "$ref": "#/$defs/SymbolScope"
+        }
+      ]
+    },
+    "SearchMode": {
+      "description": "Locate retrieval mode.",
+      "oneOf": [
+        {
+          "description": "Exact identifier match.",
+          "type": "string",
+          "const": "exact"
+        },
+        {
+          "description": "Indexed lexical retrieval.",
+          "type": "string",
+          "const": "lexical"
+        },
+        {
+          "description": "Structural filtering.",
+          "type": "string",
+          "const": "structural"
+        },
+        {
+          "description": "Documentation retrieval.",
+          "type": "string",
+          "const": "docs"
+        },
+        {
+          "description": "Repository-relative path retrieval.",
+          "type": "string",
+          "const": "path"
+        },
+        {
+          "description": "Optional local semantic extension.",
+          "type": "string",
+          "const": "semantic"
+        }
+      ]
+    },
+    "SymbolId": {
+      "type": "string",
+      "pattern": "^sym1_[a-z2-7]{39}$"
+    },
+    "SymbolScope": {
+      "description": "Stable-symbol scope.",
+      "type": "object",
+      "properties": {
+        "symbols": {
+          "description": "Distinct symbol identities.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SymbolId"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "symbols"
+      ]
+    }
+  }
+}

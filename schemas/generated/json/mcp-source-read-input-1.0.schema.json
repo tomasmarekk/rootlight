@@ -1,0 +1,443 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/source.read/input/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SourceReadInput",
+  "description": "Strict input for `source.read`.",
+  "type": "object",
+  "properties": {
+    "budget": {
+      "description": "Optional lower response limits.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResponseBudget"
+        }
+      ]
+    },
+    "context_lines_after": {
+      "description": "Trailing context lines.",
+      "type": "integer",
+      "format": "uint8",
+      "maximum": 50,
+      "minimum": 0
+    },
+    "context_lines_before": {
+      "description": "Leading context lines.",
+      "type": "integer",
+      "format": "uint8",
+      "maximum": 50,
+      "minimum": 0
+    },
+    "encoding": {
+      "description": "Requested encoding.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceEncodingRequest"
+        }
+      ]
+    },
+    "generation": {
+      "description": "Immutable generation selector.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationSelector"
+        }
+      ]
+    },
+    "include_line_numbers": {
+      "description": "Include one-based line numbers.",
+      "type": "boolean"
+    },
+    "max_source_bytes": {
+      "description": "Aggregate raw source-byte ceiling.",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 524288,
+      "minimum": 1
+    },
+    "merge_overlaps": {
+      "description": "Merge overlapping verified ranges.",
+      "type": "boolean"
+    },
+    "references": {
+      "description": "Exact source selectors.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SourceReadSelector"
+      },
+      "maxItems": 32,
+      "minItems": 1
+    },
+    "repository": {
+      "description": "Owning repository.",
+      "$ref": "#/$defs/RepositorySelector"
+    },
+    "response_profile": {
+      "description": "Requested representation.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResponseProfile"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "repository",
+    "references"
+  ],
+  "$defs": {
+    "ActiveGeneration": {
+      "description": "Active-generation keyword.",
+      "oneOf": [
+        {
+          "description": "Select the active generation.",
+          "type": "string",
+          "const": "active"
+        }
+      ]
+    },
+    "ContentHash": {
+      "type": "string",
+      "pattern": "^b3_[a-z2-7]{58}$"
+    },
+    "FileId": {
+      "type": "string",
+      "pattern": "^file1_[a-z2-7]{39}$"
+    },
+    "FileRangeSelector": {
+      "description": "Explicit indexed-file range selector.",
+      "type": "object",
+      "properties": {
+        "end_byte": {
+          "description": "Exclusive end byte.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "file_id": {
+          "description": "Stable indexed file identity.",
+          "$ref": "#/$defs/FileId"
+        },
+        "start_byte": {
+          "description": "Inclusive start byte.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "file_id",
+        "start_byte",
+        "end_byte"
+      ]
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "GenerationSelector": {
+      "description": "Generation selector shared by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Resolve the currently active immutable generation.",
+          "$ref": "#/$defs/ActiveGeneration"
+        },
+        {
+          "description": "Pin an explicit immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        }
+      ]
+    },
+    "LineRange": {
+      "description": "A validated one-based inclusive source line range.",
+      "type": "object",
+      "properties": {
+        "end_line": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "start_line": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "start_line",
+        "end_line"
+      ]
+    },
+    "ProvenanceLevel": {
+      "description": "Provenance detail requested by a read tool.",
+      "oneOf": [
+        {
+          "description": "Omit provenance detail beyond mandatory source identity.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "Return compact provider and confidence evidence.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "Return maximum bounded provenance evidence.",
+          "type": "string",
+          "const": "full"
+        }
+      ]
+    },
+    "RepositoryAliasSelector": {
+      "description": "Registered repository-alias selector.",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "description": "Registered alias, resolved to exactly one repository.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "alias"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RepositoryIdSelector": {
+      "description": "Stable repository-ID selector.",
+      "type": "object",
+      "properties": {
+        "repository_id": {
+          "description": "Repository identity.",
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id"
+      ]
+    },
+    "RepositorySelector": {
+      "description": "Repository selector accepted by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Select by stable repository identifier.",
+          "$ref": "#/$defs/RepositoryIdSelector"
+        },
+        {
+          "description": "Select by a configured local alias.",
+          "$ref": "#/$defs/RepositoryAliasSelector"
+        }
+      ]
+    },
+    "ResponseBudget": {
+      "description": "Optional response limits that can only reduce server hard limits.",
+      "type": "object",
+      "properties": {
+        "evidence_level": {
+          "description": "Requested evidence detail.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProvenanceLevel"
+            }
+          ]
+        },
+        "max_depth": {
+          "description": "Maximum plan depth.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 16,
+          "minimum": 1
+        },
+        "max_paths": {
+          "description": "Maximum independently returned paths.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "max_results": {
+          "description": "Maximum returned result objects.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "max_source_bytes": {
+          "description": "Maximum source bytes before JSON escaping.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 524288,
+          "minimum": 1
+        },
+        "max_tokens": {
+          "description": "Maximum estimated output tokens.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 3200,
+          "minimum": 100
+        },
+        "max_traversal_facts": {
+          "description": "Maximum relationship or traversal facts examined.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 100000,
+          "minimum": 1
+        },
+        "timeout_ms": {
+          "description": "Cooperative request deadline in milliseconds.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 30000,
+          "minimum": 10
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResponseProfile": {
+      "description": "Requested response representation.",
+      "oneOf": [
+        {
+          "description": "Smallest complete correctness-bearing response.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "More explanatory response within the same hard budgets.",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "Maximum bounded provenance and evidence.",
+          "type": "string",
+          "const": "evidence"
+        }
+      ]
+    },
+    "SourceEncodingRequest": {
+      "description": "Requested source encoding.",
+      "oneOf": [
+        {
+          "description": "Return exact UTF-8 when the complete verified file is valid UTF-8.",
+          "type": "string",
+          "const": "utf8_lossless_when_valid"
+        },
+        {
+          "description": "Return explicit base64 for a small non-UTF-8 read.",
+          "type": "string",
+          "const": "bytes_base64"
+        }
+      ]
+    },
+    "SourceReadSelector": {
+      "description": "One source selector accepted by `source.read`.",
+      "anyOf": [
+        {
+          "description": "Select an exact source reference.",
+          "$ref": "#/$defs/SourceReferenceSelector"
+        },
+        {
+          "description": "Select a symbol definition.",
+          "$ref": "#/$defs/SymbolDefinitionSelector"
+        },
+        {
+          "description": "Select a verified byte range in one indexed file.",
+          "$ref": "#/$defs/FileRangeSelector"
+        }
+      ]
+    },
+    "SourceRef": {
+      "description": "A generation-bound reference to immutable repository source.",
+      "type": "object",
+      "properties": {
+        "content_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "generation": {
+          "$ref": "#/$defs/GenerationId"
+        },
+        "line_hint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LineRange"
+            }
+          ]
+        },
+        "repository": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "span": {
+          "$ref": "#/$defs/SourceSpan"
+        }
+      },
+      "required": [
+        "repository",
+        "generation",
+        "span",
+        "content_hash"
+      ]
+    },
+    "SourceReferenceSelector": {
+      "description": "Exact source-reference selector.",
+      "type": "object",
+      "properties": {
+        "source_ref": {
+          "description": "Generation-bound source reference.",
+          "$ref": "#/$defs/SourceRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_ref"
+      ]
+    },
+    "SourceSpan": {
+      "description": "A validated half-open source byte span within one file.",
+      "type": "object",
+      "properties": {
+        "end_byte": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "file": {
+          "$ref": "#/$defs/FileId"
+        },
+        "start_byte": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "file",
+        "start_byte",
+        "end_byte"
+      ]
+    },
+    "SymbolDefinitionSelector": {
+      "description": "Symbol-definition selector.",
+      "type": "object",
+      "properties": {
+        "symbol_id": {
+          "description": "Stable symbol identity.",
+          "$ref": "#/$defs/SymbolId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "symbol_id"
+      ]
+    },
+    "SymbolId": {
+      "type": "string",
+      "pattern": "^sym1_[a-z2-7]{39}$"
+    }
+  }
+}

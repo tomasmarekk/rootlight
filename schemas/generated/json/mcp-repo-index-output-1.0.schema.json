@@ -1,0 +1,248 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/repo.index/output/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RepoIndexOutput",
+  "description": "Strict output for `repo.index`.",
+  "type": "object",
+  "properties": {
+    "data": {
+      "description": "Operational result.",
+      "$ref": "#/$defs/RepoIndexData"
+    },
+    "schema_version": {
+      "description": "Tool response schema version.",
+      "$ref": "#/$defs/SchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "data"
+  ],
+  "$defs": {
+    "Diagnostic": {
+      "description": "Source-free diagnostic attached to an operational response.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Stable diagnostic code.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "message": {
+          "description": "Static or Rootlight-generated source-free message.",
+          "type": "string",
+          "maxLength": 1024,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "IndexMode": {
+      "description": "Indexing mode requested by `repo.index`.",
+      "oneOf": [
+        {
+          "description": "Select the strongest available safe mode.",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "Build the structural tier only.",
+          "type": "string",
+          "const": "structural"
+        },
+        {
+          "description": "Request available deep tiers.",
+          "type": "string",
+          "const": "deep"
+        },
+        {
+          "description": "Rebuild from a clean generation.",
+          "type": "string",
+          "const": "rebuild"
+        }
+      ]
+    },
+    "IndexPlanScope": {
+      "description": "Compact normalized scope class.",
+      "oneOf": [
+        {
+          "description": "Whole repository.",
+          "type": "string",
+          "const": "repository"
+        },
+        {
+          "description": "Selected paths.",
+          "type": "string",
+          "const": "paths"
+        },
+        {
+          "description": "Selected packages.",
+          "type": "string",
+          "const": "packages"
+        },
+        {
+          "description": "Selected build targets.",
+          "type": "string",
+          "const": "build_targets"
+        }
+      ]
+    },
+    "IndexPlanSummary": {
+      "description": "Summary of one admitted indexing plan.",
+      "type": "object",
+      "properties": {
+        "estimated_disk_bytes": {
+          "description": "Estimated staging and publication bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "mode": {
+          "description": "Selected analysis mode.",
+          "$ref": "#/$defs/IndexMode"
+        },
+        "parent_generation": {
+          "description": "Parent generation, when an active generation existed.",
+          "$ref": "#/$defs/RequiredNullable"
+        },
+        "providers": {
+          "description": "Admitted providers in deterministic order.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64
+        },
+        "scope": {
+          "description": "Normalized scope class.",
+          "$ref": "#/$defs/IndexPlanScope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "mode",
+        "providers",
+        "parent_generation",
+        "estimated_disk_bytes"
+      ]
+    },
+    "OperationId": {
+      "type": "string",
+      "pattern": "^op1_[a-z2-7]{32}$"
+    },
+    "OperationState": {
+      "description": "Durable operation state.",
+      "oneOf": [
+        {
+          "description": "Accepted but not started.",
+          "type": "string",
+          "const": "queued"
+        },
+        {
+          "description": "Actively running.",
+          "type": "string",
+          "const": "running"
+        },
+        {
+          "description": "Published an immutable generation.",
+          "type": "string",
+          "const": "published"
+        },
+        {
+          "description": "Failed without publishing partial state.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Cancelled without publishing partial state.",
+          "type": "string",
+          "const": "cancelled"
+        },
+        {
+          "description": "Waiting for explicit build or environment context.",
+          "type": "string",
+          "const": "waiting_for_context"
+        }
+      ]
+    },
+    "RepoIndexData": {
+      "description": "`repo.index` result data.",
+      "type": "object",
+      "properties": {
+        "accepted_plan": {
+          "description": "Plan admitted by policy and resource checks.",
+          "$ref": "#/$defs/IndexPlanSummary"
+        },
+        "diagnostics": {
+          "description": "Source-free validation and capability notes.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Diagnostic"
+          },
+          "maxItems": 100
+        },
+        "operation_id": {
+          "description": "Durable operation identity.",
+          "$ref": "#/$defs/OperationId"
+        },
+        "published_generation": {
+          "description": "Generation published within `wait_ms`, if any.",
+          "$ref": "#/$defs/RequiredNullable"
+        },
+        "repository_id": {
+          "description": "Registered repository identity.",
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "state": {
+          "description": "Current operation state.",
+          "$ref": "#/$defs/OperationState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id",
+        "operation_id",
+        "accepted_plan",
+        "state",
+        "published_generation",
+        "diagnostics"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RequiredNullable": {
+      "description": "A property that must be present and may contain JSON `null`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "SchemaVersion": {
+      "description": "Version marker carried by every first-slice response.",
+      "oneOf": [
+        {
+          "description": "Tool contract version 1.0.",
+          "type": "string",
+          "const": "1.0"
+        }
+      ]
+    }
+  }
+}

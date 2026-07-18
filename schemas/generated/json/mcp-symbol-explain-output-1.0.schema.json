@@ -1,0 +1,733 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/symbol.explain/output/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReadEnvelope",
+  "description": "Common strict response envelope for generation-pinned reads.",
+  "type": "object",
+  "properties": {
+    "coverage": {
+      "description": "Relevant coverage.",
+      "$ref": "#/$defs/CoverageSummary"
+    },
+    "data": {
+      "description": "Tool-specific result.",
+      "$ref": "#/$defs/SymbolExplainData"
+    },
+    "generation": {
+      "description": "Pinned generation and freshness.",
+      "$ref": "#/$defs/GenerationSummary"
+    },
+    "next_cursor": {
+      "description": "Safe continuation cursor, when the result is pageable.",
+      "type": "string"
+    },
+    "repository": {
+      "description": "Resolved repository.",
+      "$ref": "#/$defs/ResolvedRepository"
+    },
+    "schema_version": {
+      "description": "Tool response schema version.",
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "truncated": {
+      "description": "Whether any hard or requested limit stopped completion.",
+      "type": "boolean"
+    },
+    "usage": {
+      "description": "Runtime resource accounting.",
+      "$ref": "#/$defs/UsageSummary"
+    },
+    "warnings": {
+      "description": "Source-free warnings.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ResponseWarning"
+      },
+      "maxItems": 100
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repository",
+    "generation",
+    "coverage",
+    "data",
+    "truncated",
+    "next_cursor",
+    "usage",
+    "warnings"
+  ],
+  "$defs": {
+    "AnalysisTier": {
+      "description": "Requested or observed language support tier.",
+      "oneOf": [
+        {
+          "description": "Compiler-quality or equivalent semantic evidence.",
+          "type": "string",
+          "const": "A"
+        },
+        {
+          "description": "High-confidence partial semantic evidence.",
+          "type": "string",
+          "const": "B"
+        },
+        {
+          "description": "Generic structural extraction.",
+          "type": "string",
+          "const": "C"
+        },
+        {
+          "description": "Lexical-only support.",
+          "type": "string",
+          "const": "D"
+        }
+      ]
+    },
+    "CacheStatus": {
+      "description": "Cache classification for usage reporting.",
+      "oneOf": [
+        {
+          "description": "No cache entry was used.",
+          "type": "string",
+          "const": "miss"
+        },
+        {
+          "description": "A verified generation-bound cache entry was used.",
+          "type": "string",
+          "const": "hit"
+        },
+        {
+          "description": "The operator does not use a cache.",
+          "type": "string",
+          "const": "not_applicable"
+        }
+      ]
+    },
+    "ContentHash": {
+      "type": "string",
+      "pattern": "^b3_[a-z2-7]{58}$"
+    },
+    "CoverageStatus": {
+      "description": "Completeness of a bounded fact or result set.",
+      "oneOf": [
+        {
+          "description": "The declared domain was completely analyzed.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "A documented bound truncated the domain.",
+          "type": "string",
+          "const": "bounded"
+        },
+        {
+          "description": "A representative sample was analyzed.",
+          "type": "string",
+          "const": "sampled"
+        },
+        {
+          "description": "Completeness could not be established.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "CoverageSummary": {
+      "description": "Coverage metadata relevant to one query.",
+      "type": "object",
+      "properties": {
+        "languages": {
+          "description": "Deterministically ordered language coverage.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LanguageCoverage"
+          },
+          "maxItems": 64
+        },
+        "skipped_inputs": {
+          "description": "Inputs skipped by policy, limits, or capability.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "description": "Aggregate query-domain coverage.",
+          "$ref": "#/$defs/CoverageStatus"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "languages",
+        "skipped_inputs"
+      ]
+    },
+    "DetailHandle": {
+      "description": "Progressive detail handle.",
+      "type": "object",
+      "properties": {
+        "handle": {
+          "description": "Opaque generation-bound handle.",
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "kind": {
+          "description": "Detail class exposed by the handle.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "handle",
+        "kind"
+      ]
+    },
+    "EntityKind": {
+      "description": "Entity classes supported by the first locate slice.",
+      "oneOf": [
+        {
+          "description": "Source file.",
+          "type": "string",
+          "const": "file"
+        },
+        {
+          "description": "Namespace or module.",
+          "type": "string",
+          "const": "module"
+        },
+        {
+          "description": "Type declaration.",
+          "type": "string",
+          "const": "type"
+        },
+        {
+          "description": "Function declaration.",
+          "type": "string",
+          "const": "function"
+        },
+        {
+          "description": "Method declaration.",
+          "type": "string",
+          "const": "method"
+        },
+        {
+          "description": "Field declaration.",
+          "type": "string",
+          "const": "field"
+        },
+        {
+          "description": "Constant declaration.",
+          "type": "string",
+          "const": "constant"
+        },
+        {
+          "description": "Variable declaration.",
+          "type": "string",
+          "const": "variable"
+        },
+        {
+          "description": "Configuration record.",
+          "type": "string",
+          "const": "configuration"
+        }
+      ]
+    },
+    "FileId": {
+      "type": "string",
+      "pattern": "^file1_[a-z2-7]{39}$"
+    },
+    "Freshness": {
+      "description": "Freshness of one immutable generation.",
+      "oneOf": [
+        {
+          "description": "Matches the currently observed repository snapshot.",
+          "type": "string",
+          "const": "current"
+        },
+        {
+          "description": "Queryable but a newer generation exists.",
+          "type": "string",
+          "const": "superseded"
+        },
+        {
+          "description": "Queryable with a known stale source snapshot.",
+          "type": "string",
+          "const": "stale"
+        }
+      ]
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "GenerationSummary": {
+      "description": "Generation metadata carried by each read response.",
+      "type": "object",
+      "properties": {
+        "generation_id": {
+          "description": "Pinned generation.",
+          "$ref": "#/$defs/GenerationId"
+        },
+        "parent_generation": {
+          "description": "Parent generation, if any.",
+          "$ref": "#/$defs/RequiredNullable"
+        },
+        "semantic_freshness": {
+          "description": "Semantic freshness.",
+          "$ref": "#/$defs/Freshness"
+        },
+        "structural_freshness": {
+          "description": "Structural freshness.",
+          "$ref": "#/$defs/Freshness"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "generation_id",
+        "parent_generation",
+        "structural_freshness",
+        "semantic_freshness"
+      ]
+    },
+    "LanguageCoverage": {
+      "description": "Per-language coverage summary.",
+      "type": "object",
+      "properties": {
+        "language": {
+          "description": "Language identity.",
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "status": {
+          "description": "Coverage state for this language.",
+          "$ref": "#/$defs/CoverageStatus"
+        },
+        "tier": {
+          "description": "Observed support tier.",
+          "$ref": "#/$defs/AnalysisTier"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "language",
+        "tier",
+        "status"
+      ]
+    },
+    "LineRange": {
+      "description": "A validated one-based inclusive source line range.",
+      "type": "object",
+      "properties": {
+        "end_line": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "start_line": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "start_line",
+        "end_line"
+      ]
+    },
+    "ProvenanceSummary": {
+      "description": "Compact provenance item.",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "description": "Confidence from 0 through 1000.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 0
+        },
+        "evidence": {
+          "description": "Evidence class.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "provider": {
+          "description": "Provider identity.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "evidence",
+        "confidence"
+      ]
+    },
+    "RelationSummary": {
+      "description": "Compact relation counts for one symbol.",
+      "type": "object",
+      "properties": {
+        "inbound_candidates": {
+          "description": "Candidate inbound calls.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "inbound_exact": {
+          "description": "Exact inbound calls.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "outbound_candidates": {
+          "description": "Candidate outbound calls.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "outbound_exact": {
+          "description": "Exact outbound calls.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "references_exact": {
+          "description": "Exact references.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "outbound_exact",
+        "outbound_candidates",
+        "inbound_exact",
+        "inbound_candidates",
+        "references_exact"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RequiredNullable": {
+      "description": "A property that must be present and may contain JSON `null`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ResolvedRepository": {
+      "description": "Resolved repository metadata.",
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "description": "Rootlight-owned display label.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "repository_id": {
+          "description": "Stable repository identity.",
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id",
+        "display_name"
+      ]
+    },
+    "ResponseWarning": {
+      "description": "Source-free response warning.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Stable warning code.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "message": {
+          "description": "Rootlight-generated source-free explanation.",
+          "type": "string",
+          "maxLength": 1024,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "SchemaVersion": {
+      "description": "Version marker carried by every first-slice response.",
+      "oneOf": [
+        {
+          "description": "Tool contract version 1.0.",
+          "type": "string",
+          "const": "1.0"
+        }
+      ]
+    },
+    "SourceRef": {
+      "description": "A generation-bound reference to immutable repository source.",
+      "type": "object",
+      "properties": {
+        "content_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "generation": {
+          "$ref": "#/$defs/GenerationId"
+        },
+        "line_hint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LineRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repository": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "span": {
+          "$ref": "#/$defs/SourceSpan"
+        }
+      },
+      "required": [
+        "repository",
+        "generation",
+        "span",
+        "content_hash"
+      ]
+    },
+    "SourceSpan": {
+      "description": "A validated half-open source byte span within one file.",
+      "type": "object",
+      "properties": {
+        "end_byte": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "file": {
+          "$ref": "#/$defs/FileId"
+        },
+        "start_byte": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "file",
+        "start_byte",
+        "end_byte"
+      ]
+    },
+    "SymbolExplainData": {
+      "description": "`symbol.explain` result data.",
+      "type": "object",
+      "properties": {
+        "detail_handles": {
+          "description": "Bounded progressive-disclosure handles.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DetailHandle"
+          },
+          "maxItems": 64
+        },
+        "symbols": {
+          "description": "Explanations in request identity order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SymbolExplanation"
+          },
+          "maxItems": 16
+        },
+        "unresolved_ids": {
+          "description": "Requested identities absent from the pinned generation.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SymbolId"
+          },
+          "maxItems": 16
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "symbols",
+        "unresolved_ids",
+        "detail_handles"
+      ]
+    },
+    "SymbolExplanation": {
+      "description": "One bounded symbol explanation.",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "description": "Aggregate confidence from 0 through 1000.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 0
+        },
+        "definition": {
+          "description": "Exact definition evidence.",
+          "$ref": "#/$defs/SourceRef"
+        },
+        "display_name": {
+          "description": "Repository-controlled display name.",
+          "type": "string",
+          "maxLength": 1024,
+          "minLength": 1
+        },
+        "kind": {
+          "description": "Entity kind.",
+          "$ref": "#/$defs/EntityKind"
+        },
+        "provenance": {
+          "description": "Bounded provenance.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProvenanceSummary"
+          },
+          "maxItems": 64
+        },
+        "relations": {
+          "description": "Compact relation counts.",
+          "$ref": "#/$defs/RelationSummary"
+        },
+        "signature": {
+          "description": "Repository-controlled signature.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        },
+        "symbol_id": {
+          "description": "Stable symbol identity.",
+          "$ref": "#/$defs/SymbolId"
+        },
+        "trust": {
+          "description": "Mandatory repository-data trust marker.",
+          "$ref": "#/$defs/TrustClassification"
+        },
+        "uncertainty": {
+          "description": "Source-free uncertainty notes.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResponseWarning"
+          },
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "symbol_id",
+        "kind",
+        "display_name",
+        "definition",
+        "relations",
+        "provenance",
+        "confidence",
+        "uncertainty",
+        "trust"
+      ]
+    },
+    "SymbolId": {
+      "type": "string",
+      "pattern": "^sym1_[a-z2-7]{39}$"
+    },
+    "TrustClassification": {
+      "description": "Trust classification attached to every future source-bearing value.",
+      "oneOf": [
+        {
+          "description": "Content originated in a repository and must be treated as data.",
+          "type": "string",
+          "const": "untrusted_repository_data"
+        }
+      ]
+    },
+    "UsageSummary": {
+      "description": "Bounded counters returned by each read tool.",
+      "type": "object",
+      "properties": {
+        "cache_status": {
+          "description": "Cache outcome.",
+          "$ref": "#/$defs/CacheStatus"
+        },
+        "edges": {
+          "description": "Relationship edges examined.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "estimated_tokens": {
+          "description": "Deterministic token estimate.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "json_bytes": {
+          "description": "Encoded structured result bytes.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rows": {
+          "description": "Storage rows examined.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source_bytes": {
+          "description": "Raw source bytes returned.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "trace_id": {
+          "description": "Source-free trace identity.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "wall_time_ms": {
+          "description": "Cooperative wall time in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rows",
+        "edges",
+        "source_bytes",
+        "json_bytes",
+        "estimated_tokens",
+        "wall_time_ms",
+        "cache_status",
+        "trace_id"
+      ]
+    }
+  }
+}
