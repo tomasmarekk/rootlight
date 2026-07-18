@@ -10,12 +10,11 @@ use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageRecord, CoverageStatus, EntityFlag, EntityKind,
     EntityRecord, EntityVisibility, EvidenceKind, ExtensionEnvelope, ExtensionEnvelopeDecodeError,
     ExtensionSupport, FactDomain, FactEvidence, FactRef, FilePathLocator, FilePathLocatorEncoding,
-    FileRecord, IrLimits, NORMALIZED_IR_VERSION, NormalizedIrDocument,
-    NormalizedRecordDecodeError, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
-    ProducerIdentity, ProducerKind, ProvenanceRecord, RelationPredicate, RelationRecord,
-    SkippedRegion, SourceMappingRecord, SourceRef, decode_diagnostic_record_with_checkpoint,
-    decode_extension_envelope_with_checkpoint, decode_skipped_region_with_checkpoint,
-    decode_source_mapping_record_with_checkpoint,
+    FileRecord, IrLimits, NORMALIZED_IR_VERSION, NormalizedIrDocument, NormalizedRecordDecodeError,
+    OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind,
+    ProvenanceRecord, RelationPredicate, RelationRecord, SkippedRegion, SourceMappingRecord,
+    SourceRef, decode_diagnostic_record_with_checkpoint, decode_extension_envelope_with_checkpoint,
+    decode_skipped_region_with_checkpoint, decode_source_mapping_record_with_checkpoint,
 };
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationContext, GenerationContractVersion, GenerationMetadata,

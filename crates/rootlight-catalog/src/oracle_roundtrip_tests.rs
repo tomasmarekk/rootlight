@@ -32,9 +32,9 @@ use rootlight_ir::{
     ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim,
     FilePathLocator, FilePathLocatorEncoding, FileRecord, IrDocument, IrLimits, ProducerIdentity,
     ProducerKind, ProvenanceRecord, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, SourceSpan,
-    decode_file_identity_claim_envelope, decode_ir_document,
-    decode_symbol_identity_claim_envelope, derive_provenance_record_id,
-    new_file_identity_claim_envelope, new_symbol_identity_claim_envelope,
+    decode_file_identity_claim_envelope, decode_ir_document, decode_symbol_identity_claim_envelope,
+    derive_provenance_record_id, new_file_identity_claim_envelope,
+    new_symbol_identity_claim_envelope,
 };
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationManifestRecipe,
