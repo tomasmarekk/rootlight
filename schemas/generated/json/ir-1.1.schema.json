@@ -1029,6 +1029,41 @@
       "type": "string",
       "pattern": "^file1_[a-z2-7]{39}$"
     },
+    "FilePathLocator": {
+      "description": "A lossless, component-preserving locator for one repository-relative file.\n\n`FileRecord::path` remains untrusted presentation text. Capability-bearing\nreaders must instead decode this locator and verify the resulting file ID.",
+      "type": "object",
+      "properties": {
+        "components": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "encoding": {
+          "$ref": "#/$defs/FilePathLocatorEncoding"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "encoding",
+        "components"
+      ]
+    },
+    "FilePathLocatorEncoding": {
+      "description": "Platform representation used by a lossless file-path locator.",
+      "oneOf": [
+        {
+          "description": "Lowercase hexadecimal Unix path-component bytes.",
+          "type": "string",
+          "const": "unix_bytes_v1"
+        },
+        {
+          "description": "Lowercase hexadecimal little-endian Windows UTF-16 code units.",
+          "type": "string",
+          "const": "windows_wide_v1"
+        }
+      ]
+    },
     "FileRecord": {
       "description": "One immutable file owned by the document repository and generation.",
       "type": "object",
@@ -1068,8 +1103,19 @@
           "type": "string"
         },
         "path": {
-          "description": "Canonical repository-relative path.",
+          "description": "Canonical repository-relative presentation path.",
           "type": "string"
+        },
+        "path_locator": {
+          "description": "Lossless capability locator, absent only in older compatible documents.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FilePathLocator"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "provenance": {
           "description": "Deduplicated provenance record.",

@@ -23,12 +23,14 @@ pub use lexical::{
 pub use normalized::{
     ContainerRef, CoverageRecord, CoverageScope, DiagnosticRecord, DiagnosticSeverity, EntityFlag,
     EntityKind, EntityRecord, EntityVisibility, ExtensionCriticality, ExtensionEnvelope,
-    ExtensionEnvelopeDecodeError, FactDomain, FactEvidence, FactRef, FileRecord, IrDocument,
-    IrDocumentDecodeError, LegacyIrDocumentDecodeError, NORMALIZED_IR_VERSION,
-    NormalizedIrDocument, NormalizedIrVersion, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
-    ProducerKind, ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord,
-    SkippedRegion, SkippedRegionReason, SourceMappingKind, SourceMappingRecord,
-    decode_extension_envelope, decode_ir_document, decode_legacy_ir_document,
+    ExtensionEnvelopeDecodeError, FactDomain, FactEvidence, FactRef, FilePathLocator,
+    FilePathLocatorEncoding, FilePathLocatorError, FileRecord, IrDocument, IrDocumentDecodeError,
+    LegacyIrDocumentDecodeError, MAX_FILE_PATH_LOCATOR_COMPONENTS,
+    MAX_FILE_PATH_LOCATOR_ENCODED_BYTES, NORMALIZED_IR_VERSION, NormalizedIrDocument,
+    NormalizedIrVersion, OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerKind,
+    ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SkippedRegion,
+    SkippedRegionReason, SourceMappingKind, SourceMappingRecord, decode_extension_envelope,
+    decode_ir_document, decode_legacy_ir_document,
 };
 pub use validation::{
     ExtensionIdentifier, ExtensionSupport, IrDocumentValidationError, IrLimits,

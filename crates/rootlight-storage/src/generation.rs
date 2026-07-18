@@ -14,7 +14,7 @@ use rootlight_ir::{
 
 /// Current backend-neutral generation contract version.
 pub const GENERATION_CONTRACT_VERSION: GenerationContractVersion =
-    GenerationContractVersion::new(1, 0);
+    GenerationContractVersion::new(1, 1);
 
 /// Hard ceiling for physical rows written or materialized by one operation.
 pub const HARD_MAX_GENERATION_ROWS: u64 = 1_000_000;
@@ -93,7 +93,7 @@ impl GenerationMetadata {
         })
     }
 
-    /// Returns the logical storage contract version.
+    /// Returns the additive logical storage contract version.
     #[must_use]
     pub const fn contract_version(&self) -> GenerationContractVersion {
         GENERATION_CONTRACT_VERSION

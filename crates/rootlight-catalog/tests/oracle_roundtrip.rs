@@ -12,7 +12,8 @@ use rootlight_catalog::{
 };
 use rootlight_ids::{FileId, content_hash};
 use rootlight_ir::{
-    ExtensionSupport, IrDocument, IrLimits, SourceRef, SourceSpan, decode_ir_document,
+    ExtensionSupport, FilePathLocator, FilePathLocatorEncoding, IrDocument, IrLimits, SourceRef,
+    SourceSpan, decode_ir_document,
 };
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationMetadata,
@@ -38,10 +39,21 @@ fn fixture_documents() -> (
     document.skipped_regions.clear();
     document.diagnostics.clear();
     document.extensions.clear();
+    document.files[0].path = "@raw-ff".to_owned();
+    document.files[0].path_locator = Some(
+        FilePathLocator::new(FilePathLocatorEncoding::UnixBytesV1, vec!["ff".to_owned()])
+            .expect("fixture path locator is canonical"),
+    );
 
     let mut second_file = document.files[0].clone();
     second_file.id = FileId::from_bytes([0xf0; 20]);
-    second_file.path = "src/second.rs".to_owned();
+    second_file.path_locator = Some(
+        FilePathLocator::new(
+            FilePathLocatorEncoding::UnixBytesV1,
+            vec!["407261772d6666".to_owned()],
+        )
+        .expect("second fixture path locator is canonical"),
+    );
     second_file.content_hash = content_hash(b"let second = true;\n");
     second_file.byte_length = 19;
     second_file.evidence.source = Some(SourceRef::new(
@@ -409,11 +421,11 @@ fn schema_identity_is_versioned_and_source_body_columns_are_absent() {
     let catalog = catalog_schema_compatibility();
     let oracle = oracle_schema_compatibility();
     assert_eq!(catalog.schema_version(), 1);
-    assert_eq!(oracle.schema_version(), 1);
+    assert_eq!(oracle.schema_version(), 2);
     assert_ne!(catalog.application_id(), oracle.application_id());
     assert_ne!(catalog.checksum(), oracle.checksum());
     assert_eq!(GENERATION_CONTRACT_VERSION.major(), 1);
-    assert_eq!(GENERATION_CONTRACT_VERSION.minor(), 0);
+    assert_eq!(GENERATION_CONTRACT_VERSION.minor(), 1);
 
     let directory = TempDir::new().expect("temporary generation directory is created");
     write_fixture(directory.path());

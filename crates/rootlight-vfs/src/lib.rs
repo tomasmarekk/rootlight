@@ -22,7 +22,9 @@ use cap_std::{
 };
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{ContentHash, FileId, FileIdentity, RepositoryId, derive_file};
-use rootlight_ir::SourceRef;
+use rootlight_ir::{
+    FilePathLocator, FilePathLocatorEncoding, MAX_FILE_PATH_LOCATOR_COMPONENTS, SourceRef,
+};
 
 /// Hard ceiling for one VFS source capture, independent of caller configuration.
 pub const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
@@ -96,6 +98,88 @@ impl RelativePath {
             display: display_parts.join("/"),
             identity,
         })
+    }
+
+    /// Reconstructs a validated relative path from a lossless IR locator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError`] when the locator belongs to another platform,
+    /// contains a non-canonical component, or exceeds VFS path bounds.
+    pub fn from_locator(locator: &FilePathLocator) -> Result<Self, VfsError> {
+        if locator.encoding() != platform_locator_encoding()
+            || locator.components().len() > MAX_PATH_COMPONENTS
+            || locator.components().len() > MAX_FILE_PATH_LOCATOR_COMPONENTS
+        {
+            return Err(VfsError::InvalidRelativePath);
+        }
+
+        let component_count = locator.components().len();
+        let mut components = Vec::new();
+        components
+            .try_reserve_exact(component_count)
+            .map_err(|_| VfsError::MemoryUnavailable)?;
+        let mut display_parts = Vec::new();
+        display_parts
+            .try_reserve_exact(component_count)
+            .map_err(|_| VfsError::MemoryUnavailable)?;
+        let mut identity = Vec::new();
+        let mut path_bytes = 0usize;
+        for (index, encoded) in locator.components().iter().enumerate() {
+            let raw = decode_lower_hex(encoded)?;
+            let component = platform_os_string(raw)?;
+            if !is_single_normal_component(&component) {
+                return Err(VfsError::InvalidRelativePath);
+            }
+            let component_bytes =
+                platform_path_byte_len(&component).ok_or(VfsError::PathTooLong {
+                    maximum: MAX_PATH_BYTES,
+                })?;
+            if index > 0 {
+                path_bytes = path_bytes
+                    .checked_add(platform_separator_byte_len())
+                    .ok_or(VfsError::PathTooLong {
+                        maximum: MAX_PATH_BYTES,
+                    })?;
+            }
+            path_bytes = path_bytes
+                .checked_add(component_bytes)
+                .ok_or(VfsError::PathTooLong {
+                    maximum: MAX_PATH_BYTES,
+                })?;
+            if path_bytes > MAX_PATH_BYTES {
+                return Err(VfsError::PathTooLong {
+                    maximum: MAX_PATH_BYTES,
+                });
+            }
+            let (display, identity_bytes) = canonical_component(&component);
+            append_identity_component(&mut identity, &identity_bytes)?;
+            display_parts.push(display);
+            components.push(component);
+        }
+
+        Ok(Self {
+            components,
+            display: display_parts.join("/"),
+            identity,
+        })
+    }
+
+    /// Encodes this path as a lossless producer-neutral IR locator.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if this crate's validated path invariants diverge from the
+    /// normalized IR locator contract.
+    #[must_use]
+    pub fn to_locator(&self) -> FilePathLocator {
+        let components = self
+            .components
+            .iter()
+            .map(|component| encode_lower_hex(&platform_path_bytes(component)))
+            .collect();
+        FilePathLocator::new(platform_locator_encoding(), components)
+            .expect("validated relative paths produce canonical path locators")
     }
 
     /// Returns the canonical forward-slash presentation path.
@@ -734,6 +818,41 @@ fn append_identity_component(identity: &mut Vec<u8>, bytes: &[u8]) -> Result<(),
     Ok(())
 }
 
+fn encode_lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn decode_lower_hex(encoded: &str) -> Result<Vec<u8>, VfsError> {
+    let mut decoded = Vec::new();
+    decoded
+        .try_reserve_exact(encoded.len() / 2)
+        .map_err(|_| VfsError::MemoryUnavailable)?;
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let [high, low] = pair else {
+            return Err(VfsError::InvalidRelativePath);
+        };
+        let high = decode_lower_hex_nibble(*high).ok_or(VfsError::InvalidRelativePath)?;
+        let low = decode_lower_hex_nibble(*low).ok_or(VfsError::InvalidRelativePath)?;
+        decoded.push((high << 4) | low);
+    }
+    Ok(decoded)
+}
+
+const fn decode_lower_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
 fn is_single_normal_component(name: &OsStr) -> bool {
     if name.is_empty() || contains_separator_alias(name) {
         return false;
@@ -766,6 +885,23 @@ fn platform_path_byte_len(value: &OsStr) -> Option<usize> {
     Some(value.as_bytes().len())
 }
 
+#[cfg(unix)]
+const fn platform_separator_byte_len() -> usize {
+    1
+}
+
+#[cfg(unix)]
+const fn platform_locator_encoding() -> FilePathLocatorEncoding {
+    FilePathLocatorEncoding::UnixBytesV1
+}
+
+#[cfg(unix)]
+fn platform_os_string(raw: Vec<u8>) -> Result<OsString, VfsError> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    Ok(OsString::from_vec(raw))
+}
+
 #[cfg(windows)]
 fn platform_path_byte_len(value: &OsStr) -> Option<usize> {
     use std::os::windows::ffi::OsStrExt as _;
@@ -773,6 +909,35 @@ fn platform_path_byte_len(value: &OsStr) -> Option<usize> {
     value.encode_wide().try_fold(0usize, |length, _| {
         length.checked_add(std::mem::size_of::<u16>())
     })
+}
+
+#[cfg(windows)]
+const fn platform_separator_byte_len() -> usize {
+    std::mem::size_of::<u16>()
+}
+
+#[cfg(windows)]
+const fn platform_locator_encoding() -> FilePathLocatorEncoding {
+    FilePathLocatorEncoding::WindowsWideV1
+}
+
+#[cfg(windows)]
+fn platform_os_string(raw: Vec<u8>) -> Result<OsString, VfsError> {
+    use std::os::windows::ffi::OsStringExt as _;
+
+    if !raw.len().is_multiple_of(2) {
+        return Err(VfsError::InvalidRelativePath);
+    }
+    let mut wide = Vec::new();
+    wide.try_reserve_exact(raw.len() / 2)
+        .map_err(|_| VfsError::MemoryUnavailable)?;
+    for pair in raw.chunks_exact(2) {
+        let [low, high] = pair else {
+            return Err(VfsError::InvalidRelativePath);
+        };
+        wide.push(u16::from_le_bytes([*low, *high]));
+    }
+    Ok(OsString::from_wide(&wide))
 }
 
 #[cfg(unix)]
@@ -947,6 +1112,50 @@ mod tests {
 
         let (_, root) = fixture();
         assert_eq!(root.file_id(&joined), root.file_id(&parsed));
+    }
+
+    #[test]
+    fn lossless_locators_preserve_canonical_path_identity() {
+        let path = RelativePath::parse(Path::new("src/lib.rs")).expect("fixture path is canonical");
+        let reconstructed =
+            RelativePath::from_locator(&path.to_locator()).expect("locator reconstructs");
+
+        assert_eq!(reconstructed, path);
+        let (_, root) = fixture();
+        assert_eq!(root.file_id(&reconstructed), root.file_id(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_locators_distinguish_invalid_bytes_from_literal_raw_labels() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let raw = RelativePath::parse(Path::new(OsStr::from_bytes(b"\xff")))
+            .expect("raw Unix component is valid");
+        let literal = RelativePath::parse(Path::new("@raw-ff")).expect("literal path is valid");
+        assert_eq!(raw.as_str(), literal.as_str());
+        assert_ne!(raw.identity_bytes(), literal.identity_bytes());
+        assert_eq!(
+            RelativePath::from_locator(&raw.to_locator()).expect("raw locator reconstructs"),
+            raw
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_locators_distinguish_unpaired_wide_names_from_literal_raw_labels() {
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let raw_name = OsString::from_wide(&[0xd800]);
+        let raw =
+            RelativePath::parse(Path::new(&raw_name)).expect("unpaired wide component is valid");
+        let literal = RelativePath::parse(Path::new("@raw-00d8")).expect("literal path is valid");
+        assert_eq!(raw.as_str(), literal.as_str());
+        assert_ne!(raw.identity_bytes(), literal.identity_bytes());
+        assert_eq!(
+            RelativePath::from_locator(&raw.to_locator()).expect("wide locator reconstructs"),
+            raw
+        );
     }
 
     #[test]
