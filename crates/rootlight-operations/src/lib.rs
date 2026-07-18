@@ -7,9 +7,9 @@
 
 use std::{
     collections::BTreeMap,
-    fs::{File, TryLockError},
+    fs::{self, File, TryLockError},
     io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -27,8 +27,18 @@ use sha2::{Digest as _, Sha256};
 
 /// Maximum terminal operation records retained after pruning.
 pub const MAX_OPERATION_HISTORY: usize = 10_000;
+/// Maximum nonterminal records admitted across one catalog.
+pub const MAX_NONTERMINAL_OPERATIONS: u32 = 65_536;
+/// Maximum total rows accepted from one operation catalog.
+pub const MAX_OPERATION_ROWS: usize = MAX_OPERATION_HISTORY + 65_536;
 /// Maximum serialized public error retained for one terminal operation.
 pub const MAX_PUBLIC_ERROR_BYTES: usize = 16 * 1024;
+/// Maximum accepted size of the main SQLite catalog before opening it.
+pub const MAX_CATALOG_BYTES: u64 = 256 * 1024 * 1024;
+/// Maximum accepted size of the SQLite write-ahead log before opening a catalog.
+pub const MAX_CATALOG_WAL_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum accepted size of SQLite's shared-memory sidecar before opening a catalog.
+pub const MAX_CATALOG_SHM_BYTES: u64 = 8 * 1024 * 1024;
 /// Minimum bundled SQLite version required by the P1 catalog.
 pub const MIN_SQLITE_VERSION_NUMBER: i32 = 3_051_003;
 /// Current operation-journal schema version.
@@ -50,6 +60,7 @@ const OPERATION_SCHEMA_MIGRATION_CHECKSUM: [u8; 32] = [
 const RELATIVE_TIMEOUT_META_PREFIX: &str = "operation_relative_timeout/";
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const SYSTEM_CLIENT_INSTANCE_ID: [u8; 16] = [0; 16];
+const CATALOG_MUTATION_BATCH: usize = 256;
 
 /// Checked client-declared identity carried over an OS-authorized local connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -460,6 +471,7 @@ impl OperationJournal {
     ///
     /// Returns [`OperationError`] for SQLite version, schema, integrity, or recovery failures.
     pub fn open(path: &Path) -> Result<Self, OperationError> {
+        validate_catalog_file_sizes(path)?;
         let connection = Connection::open(path).map_err(map_sqlite_error)?;
         Self::initialize(connection, CatalogStorage::Persistent, unix_time_ms()?)
     }
@@ -483,6 +495,7 @@ impl OperationJournal {
         configure_catalog_connection(&connection, storage)?;
         migrate_schema(&mut connection, storage)?;
         validate_catalog_identity(&connection)?;
+        validate_operation_row_limit(&connection)?;
         install_catalog_authorizer(&connection)?;
         let journal = Self {
             connection: Mutex::new(connection),
@@ -540,6 +553,7 @@ impl OperationJournal {
             }
             return Err(OperationError::SubmissionConflict);
         }
+        ensure_operation_row_capacity(&transaction)?;
         let sequence = next_sequence(&transaction)?;
         transaction
             .execute(
@@ -1071,6 +1085,9 @@ impl OperationJournal {
 
     /// Interrupts at most `max_records` remaining nonterminal operations.
     ///
+    /// One call is additionally capped to the journal's fixed mutation batch so
+    /// a hostile caller cannot turn shutdown into an attacker-sized allocation.
+    ///
     /// # Errors
     ///
     /// Returns a typed storage or bound error.
@@ -1182,6 +1199,7 @@ impl OperationJournal {
         let storage = catalog_storage(&connection)?;
         validate_catalog_identity(&connection)?;
         validate_schema(&connection, storage)?;
+        validate_operation_row_limit(&connection)?;
         validate_relative_timeout_intents(&connection)
     }
 
@@ -1224,6 +1242,9 @@ impl OperationJournal {
     /// schema, or integrity failure.
     pub fn quick_check_path_until(path: &Path, deadline: Instant) -> Result<(), OperationError> {
         check_diagnostic_deadline(deadline)?;
+        let file_sizes = validate_catalog_file_sizes(path);
+        check_diagnostic_deadline(deadline)?;
+        file_sizes?;
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_URI;
@@ -1238,15 +1259,24 @@ impl OperationJournal {
         check_diagnostic_deadline(deadline)?;
         map_diagnostic_timeout(validate_schema(&connection, CatalogStorage::Persistent))?;
         check_diagnostic_deadline(deadline)?;
+        map_diagnostic_timeout(validate_operation_row_limit(&connection))?;
+        check_diagnostic_deadline(deadline)?;
         map_diagnostic_timeout(validate_relative_timeout_intents(&connection))?;
         check_diagnostic_deadline(deadline)
     }
 
     fn recover_nonterminal(&self, now_unix_ms: u64) -> Result<(), OperationError> {
+        let mut recovered = 0_usize;
         loop {
-            let changed = self.recover_nonterminal_batch(now_unix_ms, 256)?;
+            let changed = self.recover_nonterminal_batch(now_unix_ms, CATALOG_MUTATION_BATCH)?;
             if changed == 0 {
                 return Ok(());
+            }
+            recovered = recovered
+                .checked_add(usize::try_from(changed).map_err(|_| OperationError::CorruptState)?)
+                .ok_or(OperationError::CorruptState)?;
+            if recovered > MAX_OPERATION_ROWS {
+                return Err(OperationError::CatalogRowLimitExceeded);
             }
         }
     }
@@ -1256,6 +1286,10 @@ impl OperationJournal {
         now_unix_ms: u64,
         max_records: usize,
     ) -> Result<u32, OperationError> {
+        let max_records = max_records.min(CATALOG_MUTATION_BATCH);
+        if max_records == 0 {
+            return Ok(0);
+        }
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let ids = select_operation_ids(
@@ -1265,66 +1299,78 @@ impl OperationJournal {
             &[],
         )?;
         let mut changed = 0_u32;
-        for operation in ids {
+        for operation in &ids {
             let record =
-                load_record(&transaction, operation)?.ok_or(OperationError::CorruptState)?;
+                load_record(&transaction, *operation)?.ok_or(OperationError::CorruptState)?;
             let recovery = recovery_for(&record, now_unix_ms);
             changed = changed
-                .checked_add(update_interrupted(&transaction, operation, recovery)?)
+                .checked_add(update_interrupted(&transaction, *operation, recovery)?)
                 .ok_or(OperationError::CorruptState)?;
+        }
+        if changed != u32::try_from(ids.len()).map_err(|_| OperationError::CorruptState)? {
+            return Err(OperationError::CorruptState);
         }
         transaction.commit().map_err(map_sqlite_error)?;
         Ok(changed)
     }
 
     fn prune_to(&self, limit: usize) -> Result<(), OperationError> {
-        let limit = i64::try_from(limit).map_err(|_| OperationError::CorruptState)?;
-        let mut connection = self.lock_connection()?;
-        let transaction = connection.transaction().map_err(map_sqlite_error)?;
-        let mut statement = transaction
-            .prepare(
-                "SELECT operation FROM operations
-                 WHERE state IN ('succeeded', 'failed', 'cancelled', 'interrupted')
-                 ORDER BY sequence DESC LIMIT -1 OFFSET ?1",
-            )
-            .map_err(map_sqlite_error)?;
-        let pruned = statement
-            .query_map([limit], |row| row.get::<_, Vec<u8>>(0))
-            .map_err(map_sqlite_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(map_sqlite_error)?;
-        drop(statement);
-        transaction
-            .execute(
-                "DELETE FROM application_meta
-                 WHERE key IN (
-                    SELECT ?2 || lower(hex(operation)) FROM operations
-                    WHERE state IN ('succeeded', 'failed', 'cancelled', 'interrupted')
-                    ORDER BY sequence DESC LIMIT -1 OFFSET ?1
-                 )",
-                params![limit, RELATIVE_TIMEOUT_META_PREFIX],
-            )
-            .map_err(map_sqlite_error)?;
-        transaction
-            .execute(
-                "DELETE FROM operations
-                 WHERE operation IN (
-                    SELECT operation FROM operations
-                    WHERE state IN ('succeeded', 'failed', 'cancelled', 'interrupted')
-                    ORDER BY sequence DESC LIMIT -1 OFFSET ?1
-                 )",
-                [limit],
-            )
-            .map_err(map_sqlite_error)?;
-        transaction.commit().map_err(map_sqlite_error)?;
-        drop(connection);
-        let mut errors = self.lock_errors()?;
-        for bytes in pruned {
-            if let Ok(array) = <[u8; 16]>::try_from(bytes) {
-                errors.remove(&OperationId::from_bytes(array));
+        if limit > MAX_OPERATION_ROWS {
+            return Err(OperationError::CorruptState);
+        }
+        let mut pruned_total = 0_usize;
+        loop {
+            let pruned = self.prune_batch(limit, CATALOG_MUTATION_BATCH)?;
+            if pruned == 0 {
+                return Ok(());
+            }
+            pruned_total = pruned_total
+                .checked_add(pruned)
+                .ok_or(OperationError::CorruptState)?;
+            if pruned_total > MAX_OPERATION_ROWS {
+                return Err(OperationError::CatalogRowLimitExceeded);
             }
         }
-        Ok(())
+    }
+
+    fn prune_batch(&self, limit: usize, batch: usize) -> Result<usize, OperationError> {
+        let batch = batch.min(CATALOG_MUTATION_BATCH);
+        if batch == 0 {
+            return Ok(0);
+        }
+        let pruned = {
+            let mut connection = self.lock_connection()?;
+            let transaction = connection.transaction().map_err(map_sqlite_error)?;
+            let pruned = select_prunable_operation_ids(&transaction, limit, batch)?;
+            for operation in &pruned {
+                transaction
+                    .execute(
+                        "DELETE FROM application_meta
+                         WHERE key = ?1 || lower(hex(?2))",
+                        params![
+                            RELATIVE_TIMEOUT_META_PREFIX,
+                            operation.as_bytes().as_slice()
+                        ],
+                    )
+                    .map_err(map_sqlite_error)?;
+                let deleted = transaction
+                    .execute(
+                        "DELETE FROM operations WHERE operation = ?1",
+                        [operation.as_bytes().as_slice()],
+                    )
+                    .map_err(map_sqlite_error)?;
+                if deleted != 1 {
+                    return Err(OperationError::CorruptState);
+                }
+            }
+            transaction.commit().map_err(map_sqlite_error)?;
+            pruned
+        };
+        let mut errors = self.lock_errors()?;
+        for operation in &pruned {
+            errors.remove(operation);
+        }
+        Ok(pruned.len())
     }
 
     fn lock_connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, OperationError> {
@@ -1348,6 +1394,65 @@ impl OperationJournal {
         self.errors
             .lock()
             .map_err(|_| OperationError::MutexPoisoned)
+    }
+}
+
+fn validate_catalog_file_sizes(path: &Path) -> Result<(), OperationError> {
+    for (candidate, maximum) in [
+        (path.to_path_buf(), MAX_CATALOG_BYTES),
+        (sqlite_sidecar_path(path, "-wal"), MAX_CATALOG_WAL_BYTES),
+        (sqlite_sidecar_path(path, "-shm"), MAX_CATALOG_SHM_BYTES),
+    ] {
+        match fs::metadata(candidate) {
+            Ok(metadata) if metadata.len() > maximum => {
+                return Err(OperationError::CatalogTooLarge);
+            }
+            Ok(_) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(OperationError::CatalogInspection(source)),
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
+}
+
+fn validate_operation_row_limit(connection: &Connection) -> Result<(), OperationError> {
+    let offset = i64::try_from(MAX_OPERATION_ROWS).map_err(|_| OperationError::CorruptState)?;
+    let excess = connection
+        .query_row(
+            "SELECT 1 FROM operations ORDER BY sequence ASC LIMIT 1 OFFSET ?1",
+            [offset],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    if excess.is_some() {
+        Err(OperationError::CatalogRowLimitExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_operation_row_capacity(connection: &Connection) -> Result<(), OperationError> {
+    let last_available =
+        i64::try_from(MAX_OPERATION_ROWS - 1).map_err(|_| OperationError::CorruptState)?;
+    let at_capacity = connection
+        .query_row(
+            "SELECT 1 FROM operations ORDER BY sequence ASC LIMIT 1 OFFSET ?1",
+            [last_available],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    if at_capacity.is_some() {
+        Err(OperationError::CatalogRowLimitExceeded)
+    } else {
+        Ok(())
     }
 }
 
@@ -2287,6 +2392,7 @@ fn select_operation_ids(
     max_records: usize,
     values: &[i64],
 ) -> Result<Vec<OperationId>, OperationError> {
+    let max_records = max_records.min(CATALOG_MUTATION_BATCH);
     let limit = i64::try_from(max_records).map_err(|_| OperationError::CorruptState)?;
     let sql = format!(
         "SELECT operation FROM operations WHERE {predicate} ORDER BY sequence ASC LIMIT ?{}",
@@ -2301,6 +2407,34 @@ fn select_operation_ids(
         .prepare(&sql)
         .map_err(map_sqlite_error)?
         .query_map(parameters.as_slice(), |row| row.get::<_, Vec<u8>>(0))
+        .map_err(map_sqlite_error)?
+        .map(|value| {
+            value
+                .map_err(map_sqlite_error)
+                .and_then(|bytes| {
+                    <[u8; 16]>::try_from(bytes).map_err(|_| OperationError::CorruptState)
+                })
+                .map(OperationId::from_bytes)
+        })
+        .collect()
+}
+
+fn select_prunable_operation_ids(
+    connection: &Connection,
+    retained: usize,
+    maximum: usize,
+) -> Result<Vec<OperationId>, OperationError> {
+    let retained = i64::try_from(retained).map_err(|_| OperationError::CorruptState)?;
+    let maximum = i64::try_from(maximum.min(CATALOG_MUTATION_BATCH))
+        .map_err(|_| OperationError::CorruptState)?;
+    connection
+        .prepare(
+            "SELECT operation FROM operations
+             WHERE state IN ('succeeded', 'failed', 'cancelled', 'interrupted')
+             ORDER BY sequence DESC LIMIT ?2 OFFSET ?1",
+        )
+        .map_err(map_sqlite_error)?
+        .query_map(params![retained, maximum], |row| row.get::<_, Vec<u8>>(0))
         .map_err(map_sqlite_error)?
         .map(|value| {
             value
@@ -2757,6 +2891,15 @@ pub enum OperationError {
     /// A bounded diagnostic exceeded its monotonic deadline.
     #[error("operation journal diagnostic timed out")]
     DiagnosticTimedOut,
+    /// A persistent catalog or SQLite sidecar exceeded its physical storage bound.
+    #[error("operation journal exceeds its storage limit")]
+    CatalogTooLarge,
+    /// A validated operation table exceeded its logical row bound.
+    #[error("operation journal exceeds its row limit")]
+    CatalogRowLimitExceeded,
+    /// Persistent catalog metadata could not be inspected before SQLite open.
+    #[error("operation journal file inspection failed")]
+    CatalogInspection(#[source] io::Error),
     /// Persisted operation state failed validation.
     #[error("operation journal contains invalid state")]
     CorruptState,
@@ -2862,6 +3005,54 @@ mod tests {
             Some(lease),
         )
         .expect("submission is valid")
+    }
+
+    fn insert_generated_operations(connection: &Connection, rows: usize, state: OperationState) {
+        let rows = i64::try_from(rows).expect("test row count fits SQLite");
+        connection
+            .execute(
+                "WITH digits(digit) AS (
+                    VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+                 ),
+                 numbered(value) AS (
+                    SELECT 1 + ones.digit
+                             + 10 * tens.digit
+                             + 100 * hundreds.digit
+                             + 1000 * thousands.digit
+                             + 10000 * ten_thousands.digit
+                    FROM digits AS ones
+                    CROSS JOIN digits AS tens
+                    CROSS JOIN digits AS hundreds
+                    CROSS JOIN digits AS thousands
+                    CROSS JOIN digits AS ten_thousands
+                    ORDER BY 1
+                    LIMIT ?1
+                 )
+                 INSERT INTO operations (
+                    operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                    lease_expires_unix_ms, state, stage, cancellation_requested,
+                    cancellation_reason, recovery_class, revision, completed, total,
+                    error_json, sequence
+                 )
+                 SELECT CAST(printf('%016x', value) AS BLOB), 'control_probe',
+                        zeroblob(32), zeroblob(16), 1, NULL, NULL, ?2, 'accepted',
+                        0, NULL,
+                        CASE WHEN ?2 = 'interrupted' THEN 'interrupted_by_restart'
+                             ELSE 'not_applicable' END,
+                        1, 0, 0, NULL, value
+                 FROM numbered",
+                params![rows, state.as_str()],
+            )
+            .expect("generated operation rows insert");
+    }
+
+    fn generated_operation(value: usize) -> OperationId {
+        let encoded = format!("{value:016x}");
+        let bytes: [u8; 16] = encoded
+            .as_bytes()
+            .try_into()
+            .expect("fixed-width hex operation ID");
+        OperationId::from_bytes(bytes)
     }
 
     #[test]
@@ -3934,6 +4125,71 @@ mod tests {
     }
 
     #[test]
+    fn recovery_and_pruning_cap_each_mutation_batch() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        {
+            let connection = journal.lock_connection().expect("catalog lock is healthy");
+            insert_generated_operations(
+                &connection,
+                CATALOG_MUTATION_BATCH + 44,
+                OperationState::Queued,
+            );
+        }
+
+        assert_eq!(
+            journal
+                .recover_nonterminal_batch(100, usize::MAX)
+                .expect("first recovery batch succeeds"),
+            u32::try_from(CATALOG_MUTATION_BATCH).expect("batch fits u32")
+        );
+        assert_eq!(
+            journal
+                .recover_nonterminal_batch(100, usize::MAX)
+                .expect("second recovery batch succeeds"),
+            44
+        );
+        assert_eq!(
+            journal
+                .recover_nonterminal_batch(100, usize::MAX)
+                .expect("recovery reaches fixed point"),
+            0
+        );
+
+        assert_eq!(
+            journal
+                .prune_batch(2, usize::MAX)
+                .expect("first pruning batch succeeds"),
+            CATALOG_MUTATION_BATCH
+        );
+        assert_eq!(
+            journal
+                .prune_batch(2, usize::MAX)
+                .expect("second pruning batch succeeds"),
+            42
+        );
+        assert_eq!(
+            journal
+                .prune_batch(2, usize::MAX)
+                .expect("pruning reaches fixed point"),
+            0
+        );
+        assert!(matches!(
+            journal.status(generated_operation(1)),
+            Err(OperationError::NotFound)
+        ));
+        assert!(
+            journal
+                .status(generated_operation(CATALOG_MUTATION_BATCH + 43))
+                .is_ok()
+        );
+        assert!(
+            journal
+                .status(generated_operation(CATALOG_MUTATION_BATCH + 44))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn version_one_schema_rebuilds_as_strict_without_losing_rows() {
         let temporary = tempdir().expect("temporary directory is available");
         let path = temporary.path().join("operations.sqlite");
@@ -4195,6 +4451,77 @@ mod tests {
     }
 
     #[test]
+    fn persistent_open_rejects_oversized_catalog_files_before_sqlite() {
+        let temporary = tempdir().expect("temporary directory is available");
+        for (name, suffix, maximum) in [
+            ("oversized-main.sqlite", None, MAX_CATALOG_BYTES),
+            ("oversized-wal.sqlite", Some("-wal"), MAX_CATALOG_WAL_BYTES),
+            ("oversized-shm.sqlite", Some("-shm"), MAX_CATALOG_SHM_BYTES),
+        ] {
+            let path = temporary.path().join(name);
+            let artifact =
+                suffix.map_or_else(|| path.clone(), |suffix| sqlite_sidecar_path(&path, suffix));
+            File::create(&artifact)
+                .and_then(|file| file.set_len(maximum + 1))
+                .expect("oversized sparse fixture creates");
+
+            let error = OperationJournal::open(&path).expect_err("oversized catalog is rejected");
+            assert!(matches!(error, OperationError::CatalogTooLarge));
+            assert!(!error.to_string().contains(name));
+            assert!(matches!(
+                OperationJournal::quick_check_path(&path),
+                Err(OperationError::CatalogTooLarge)
+            ));
+        }
+    }
+
+    #[test]
+    fn catalog_row_limit_bounds_reopen_and_new_submission() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let journal = OperationJournal::open(&path).expect("catalog opens");
+        {
+            let connection = journal.lock_connection().expect("catalog lock is healthy");
+            insert_generated_operations(&connection, MAX_OPERATION_ROWS, OperationState::Succeeded);
+        }
+        assert!(matches!(
+            journal.submit(OperationSubmission::control_probe(OperationId::from_bytes(
+                [0xff; 16]
+            ))),
+            Err(OperationError::CatalogRowLimitExceeded)
+        ));
+        {
+            let connection = journal.lock_connection().expect("catalog lock is healthy");
+            connection
+                .execute(
+                    "INSERT INTO operations (
+                        operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                        lease_expires_unix_ms, state, stage, cancellation_requested,
+                        cancellation_reason, recovery_class, revision, completed, total,
+                        error_json, sequence
+                     ) VALUES (?1, 'control_probe', zeroblob(32), zeroblob(16), 1,
+                               NULL, NULL, 'succeeded', 'accepted', 0, NULL,
+                               'not_applicable', 1, 0, 0, NULL, ?2)",
+                    params![
+                        [0xff_u8; 16].as_slice(),
+                        i64::try_from(MAX_OPERATION_ROWS + 1).expect("row limit fits SQLite")
+                    ],
+                )
+                .expect("hostile overflow row inserts");
+        }
+        drop(journal);
+
+        assert!(matches!(
+            OperationJournal::open(&path),
+            Err(OperationError::CatalogRowLimitExceeded)
+        ));
+        assert!(matches!(
+            OperationJournal::quick_check_path(&path),
+            Err(OperationError::CatalogRowLimitExceeded)
+        ));
+    }
+
+    #[test]
     fn read_only_quick_check_honors_zero_timeout_before_opening() {
         let temporary = tempdir().expect("temporary directory is available");
         let path = temporary.path().join("operations.sqlite");
@@ -4210,7 +4537,9 @@ mod tests {
     fn read_only_quick_check_rejects_an_expired_absolute_deadline() {
         let temporary = tempdir().expect("temporary directory is available");
         let path = temporary.path().join("operations.sqlite");
-        OperationJournal::open(&path).expect("catalog opens");
+        File::create(&path)
+            .and_then(|file| file.set_len(MAX_CATALOG_BYTES + 1))
+            .expect("oversized sparse fixture creates");
 
         assert!(matches!(
             OperationJournal::quick_check_path_until(

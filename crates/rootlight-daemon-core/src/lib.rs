@@ -83,8 +83,9 @@ pub const MAX_CONNECTION_LIMIT: u32 = 4_096;
 /// Hard maximum capacity of the high-priority control lane.
 pub const MAX_CONTROL_QUEUE_LIMIT: usize = 4_096;
 /// Hard maximum admitted nonterminal operation count.
-pub const MAX_OPERATION_QUEUE_LIMIT: u32 = 65_536;
-const MAX_OPERATION_QUEUE_CAPACITY: usize = 65_536;
+pub const MAX_OPERATION_QUEUE_LIMIT: u32 = rootlight_operations::MAX_NONTERMINAL_OPERATIONS;
+const MAX_OPERATION_QUEUE_CAPACITY: usize =
+    rootlight_operations::MAX_OPERATION_ROWS - rootlight_operations::MAX_OPERATION_HISTORY;
 /// Hard maximum synthetic operation worker count.
 pub const MAX_OPERATION_WORKERS: usize = 64;
 /// Hard maximum server-side request response time.
@@ -4466,7 +4467,9 @@ fn operation_error_to_public(
         | OperationError::UnsupportedLegacySchema
         | OperationError::UnsupportedSchemaVersion { .. }
         | OperationError::DeserializePublicError(_)
-        | OperationError::PublicErrorTooLarge => (
+        | OperationError::PublicErrorTooLarge
+        | OperationError::CatalogTooLarge
+        | OperationError::CatalogRowLimitExceeded => (
             ErrorCode::IndexCorrupt,
             "operation journal is corrupt",
             false,
@@ -4479,6 +4482,7 @@ fn operation_error_to_public(
         | OperationError::TimestampOverflow
         | OperationError::InsecureLockFile
         | OperationError::WindowsSecurityPolicy
+        | OperationError::CatalogInspection(_)
         | OperationError::Sqlite(_)
         | OperationError::LockIo(_) => (ErrorCode::Internal, "internal operation failed", false),
     };
@@ -4546,6 +4550,8 @@ impl ServiceError {
                 | OperationError::UnsupportedSchemaVersion { .. }
                 | OperationError::DeserializePublicError(_)
                 | OperationError::PublicErrorTooLarge
+                | OperationError::CatalogTooLarge
+                | OperationError::CatalogRowLimitExceeded
                 | OperationError::RevisionOverflow
                 | OperationError::UnsupportedCancellationReason
                 | OperationError::MutexPoisoned
@@ -4554,6 +4560,7 @@ impl ServiceError {
                 | OperationError::TimestampOverflow
                 | OperationError::InsecureLockFile
                 | OperationError::WindowsSecurityPolicy
+                | OperationError::CatalogInspection(_)
                 | OperationError::Sqlite(_)
                 | OperationError::LockIo(_),
             )
