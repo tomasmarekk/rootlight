@@ -42,13 +42,15 @@ external-default-features = "allow"
 allow-workspace = true
 skip = [
   { crate = "bitflags@1.3.2", reason = "reviewed Windows ACL wrapper dependency for protected per-user runtime DACLs; owner @tomasmarekk; review by 2026-10-16" },
-  { crate = "getrandom@0.2.17", reason = "Redox-only current-user directory dependency retained by the cross-target lockfile; owner @tomasmarekk; review by 2026-10-16" },
   { crate = "foldhash@0.1.5", reason = "tooling-only duplicate via prost-build 0.14.4; owner @tomasmarekk; review by 2026-10-15" },
+  { crate = "getrandom@0.2.17", reason = "Redox-only current-user directory dependency retained by the cross-target lockfile; owner @tomasmarekk; review by 2026-10-16" },
+  { crate = "getrandom@0.4.3", reason = "Tantivy UUID dependency duplicates the established random backend; owner @tomasmarekk; review by 2026-10-17" },
   { crate = "hashbrown@0.15.5", reason = "tooling-only duplicate via petgraph 0.8.3; owner @tomasmarekk; review by 2026-10-15" },
   { crate = "hashbrown@0.16.1", reason = "wasm-only rusqlite VFS dependency retained by the cross-target lockfile; owner @tomasmarekk; review by 2026-10-15" },
+  { crate = "r-efi@6.0.0", reason = "Tantivy UUID dependency retains the newer UEFI target bindings in the cross-target lockfile; owner @tomasmarekk; review by 2026-10-17" },
+  { crate = "windows-link@0.1.3", reason = "pinned nt-token Windows 0.61 dependency for owned current-user and logon SIDs; owner @tomasmarekk; review by 2026-10-16" },
   { crate = "windows-sys@0.52.0", reason = "local IPC Windows dependency; owner @tomasmarekk; review by 2026-10-15" },
   { crate = "windows-sys@0.59.0", reason = "capability VFS Windows dependency; owner @tomasmarekk; review by 2026-10-15" },
-  { crate = "windows-link@0.1.3", reason = "pinned nt-token Windows 0.61 dependency for owned current-user and logon SIDs; owner @tomasmarekk; review by 2026-10-16" },
 ]
 
 [[bans.features]]
