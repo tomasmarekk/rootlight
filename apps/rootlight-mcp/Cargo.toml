@@ -7,6 +7,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+jsonschema.workspace = true
 rootlight-mcp-contract = { path = "../../crates/rootlight-mcp-contract" }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }

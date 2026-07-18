@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod json;
+mod tools;
 
 use std::{collections::BTreeMap, fmt, future::Future, io, pin::Pin, sync::Arc};
 
@@ -20,6 +21,10 @@ use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt},
     sync::{Semaphore, mpsc, watch},
     task::JoinSet,
+};
+
+pub use tools::{
+    ToolExecutionError, ToolExecutionFuture, ToolExecutor, ToolRegistryError, ToolRouter,
 };
 
 const JSON_RPC_VERSION: &str = "2.0";
@@ -266,6 +271,7 @@ impl RequestId {
 /// Stateful MCP lifecycle dispatcher for one client connection.
 pub struct Session {
     state: LifecycleState,
+    capabilities: HandlerCapabilities,
 }
 
 impl Session {
@@ -274,6 +280,7 @@ impl Session {
     pub const fn rootlight() -> Self {
         Self {
             state: LifecycleState::AwaitInitialize,
+            capabilities: HandlerCapabilities::none(),
         }
     }
 
@@ -497,7 +504,11 @@ impl Session {
         // differs; the client then decides whether it can continue.
         let result = InitializeResult {
             protocol_version: MCP_SPECIFICATION_DATE,
-            capabilities: ServerCapabilities {},
+            capabilities: ServerCapabilities {
+                tools: self.capabilities.tools.then_some(ToolsCapability {
+                    list_changed: false,
+                }),
+            },
             server_info: ServerImplementation {
                 name: "rootlight",
                 title: "Rootlight",
@@ -545,6 +556,10 @@ impl OperatingRequest {
     pub const fn params(&self) -> Option<&Value> {
         self.params.as_ref()
     }
+
+    fn into_method_params(self) -> (String, Option<Value>) {
+        (self.method, self.params)
+    }
 }
 
 impl fmt::Debug for OperatingRequest {
@@ -559,6 +574,7 @@ impl fmt::Debug for OperatingRequest {
 }
 
 /// Cancellation signal scoped to one in-flight request.
+#[derive(Clone)]
 pub struct RequestCancellation {
     receiver: watch::Receiver<bool>,
 }
@@ -659,9 +675,34 @@ pub type HandlerFuture = Pin<Box<dyn Future<Output = HandlerResponse> + Send + '
 /// blocking work must cross [`BoundedBlockingPool`] rather than running on the
 /// Tokio worker or spawning an unbounded blocking task.
 pub trait RequestHandler: Send + Sync + 'static {
+    /// Reports only the capabilities this handler serves for the full session.
+    fn capabilities(&self) -> HandlerCapabilities {
+        HandlerCapabilities::none()
+    }
+
     /// Begins one bounded operating-phase request.
     fn handle(&self, request: OperatingRequest, cancellation: RequestCancellation)
     -> HandlerFuture;
+}
+
+/// MCP capabilities backed by one operating-phase handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandlerCapabilities {
+    tools: bool,
+}
+
+impl HandlerCapabilities {
+    /// No optional server capability.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self { tools: false }
+    }
+
+    /// The handler serves both tool discovery and invocation.
+    #[must_use]
+    pub const fn tools() -> Self {
+        Self { tools: true }
+    }
 }
 
 /// Default handler used while Rootlight advertises no domain capabilities.
@@ -765,6 +806,10 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let limits = limits.validate()?;
+    if !matches!(session.state, LifecycleState::AwaitInitialize) {
+        return Err(SessionError::SessionAlreadyStarted);
+    }
+    session.capabilities = handler.capabilities();
     let mut frames = FrameReader::new(input, limits.max_frame_bytes);
     let (response_tx, response_rx) = mpsc::channel(limits.response_channel_capacity);
     let mut writer = tokio::spawn(write_responses(output, response_rx));
@@ -936,6 +981,9 @@ pub enum SessionError {
     /// A private serialization helper violated its response invariant.
     #[error("MCP response invariant failed")]
     SerializationInvariant,
+    /// A serve loop was started after lifecycle processing began.
+    #[error("MCP session has already started")]
+    SessionAlreadyStarted,
 }
 
 impl fmt::Debug for SessionError {
@@ -962,6 +1010,7 @@ impl SessionError {
             Self::WriterTaskFailed => "writer_task",
             Self::RequestTaskFailed => "request_task",
             Self::SerializationInvariant => "serialization_invariant",
+            Self::SessionAlreadyStarted => "configuration",
         }
     }
 }
@@ -1003,7 +1052,16 @@ struct InitializeResult<'a> {
 }
 
 #[derive(Serialize)]
-struct ServerCapabilities {}
+struct ServerCapabilities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<ToolsCapability>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolsCapability {
+    list_changed: bool,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
