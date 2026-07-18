@@ -5,7 +5,7 @@
 
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -59,6 +59,12 @@ fn create_private_test_file(path: &Path) {
             .open(path)
             .expect("private test database is created"),
     );
+}
+
+fn canonical_test_root(directory: &TempDir) -> PathBuf {
+    // macOS exposes its default temporary directory through the `/var` alias,
+    // which the VFS no-follow boundary intentionally rejects.
+    fs::canonicalize(directory.path()).expect("temporary root canonicalizes")
 }
 
 fn fixture_documents() -> (
@@ -921,14 +927,15 @@ fn schema_identity_is_versioned_and_source_body_columns_are_absent() {
 fn real_treesitter_generation_obtains_verified_capability_and_round_trips() {
     const SOURCE: &str = "pub fn answer() -> u32 { 42 }\n";
     let directory = TempDir::new().expect("temporary generation root is created");
-    fs::create_dir(directory.path().join("src")).expect("source directory is created");
-    fs::write(directory.path().join("src/lib.rs"), SOURCE).expect("source fixture is written");
-    let generation_directory = directory.path().join("generation");
+    let root_path = canonical_test_root(&directory);
+    fs::create_dir(root_path.join("src")).expect("source directory is created");
+    fs::write(root_path.join("src/lib.rs"), SOURCE).expect("source fixture is written");
+    let generation_directory = root_path.join("generation");
     fs::create_dir(&generation_directory).expect("generation directory is created");
 
     let repository = derive_repository(b"catalog-real-treesitter").id();
     let relative = RelativePath::parse(Path::new("src/lib.rs")).expect("relative path is valid");
-    let root = RepositoryRoot::open(repository, directory.path()).expect("repository root opens");
+    let root = RepositoryRoot::open(repository, &root_path).expect("repository root opens");
     let source_snapshot = root
         .snapshot(&relative, 1024 * 1024)
         .expect("source snapshot is stable");
@@ -1155,10 +1162,11 @@ fn real_treesitter_generation_obtains_verified_capability_and_round_trips() {
 fn independent_sdk_producer_uses_the_same_identity_verifier() {
     const SOURCE: &str = "opaque mock input\n";
     let directory = TempDir::new().expect("temporary source root is created");
-    fs::write(directory.path().join("input.txt"), SOURCE).expect("source fixture is written");
+    let root_path = canonical_test_root(&directory);
+    fs::write(root_path.join("input.txt"), SOURCE).expect("source fixture is written");
     let repository = derive_repository(b"catalog-independent-sdk").id();
     let relative = RelativePath::parse(Path::new("input.txt")).expect("relative path is valid");
-    let root = RepositoryRoot::open(repository, directory.path()).expect("repository root opens");
+    let root = RepositoryRoot::open(repository, &root_path).expect("repository root opens");
     let source_snapshot = root
         .snapshot(&relative, 1024 * 1024)
         .expect("source snapshot is stable");

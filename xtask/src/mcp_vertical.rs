@@ -1549,6 +1549,10 @@ fn normalize_read_response(value: &Value) -> Result<Value, VerticalError> {
         .ok_or(VerticalError::Invariant(
             "read response omitted usage metadata",
         ))?;
+    // Serialized sizes include runtime timing and process-local identity
+    // widths, so they measure one wire response rather than logical content.
+    usage.remove("estimated_tokens");
+    usage.remove("json_bytes");
     usage.remove("wall_time_ms");
     usage.remove("trace_id");
     Ok(normalized)
@@ -3535,6 +3539,8 @@ mod tests {
             "schema_version": "1.0",
             "usage": {
                 "rows": 3,
+                "estimated_tokens": 17,
+                "json_bytes": 68,
                 "wall_time_ms": 9,
                 "trace_id": "dynamic",
                 "cache_status": "miss"

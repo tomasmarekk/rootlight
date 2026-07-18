@@ -3670,6 +3670,11 @@ mod tests {
         #[cfg(unix)]
         let path = {
             let _ = label;
+            use std::os::unix::fs::PermissionsExt as _;
+
+            // Listener security must not depend on the CI runner's ambient umask.
+            std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("temporary endpoint parent becomes private");
             temporary.path().join("daemon.sock")
         };
         #[cfg(windows)]
