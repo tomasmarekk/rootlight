@@ -13,7 +13,7 @@ use std::{
 };
 
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
-use rootlight_ids::{GenerationId, OperationId, RepositoryId};
+use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ipc::{
     Endpoint, FrameCodec, IpcError, connect, read_response, read_server_hello, write_client_hello,
     write_request,
@@ -21,10 +21,11 @@ use rootlight_ipc::{
 use rootlight_observability::{
     CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION, ControlMethod, DURATION_BUCKET_UPPER_US,
     DiagnosticsQuickSnapshot as SupportDiagnosticsQuick, HealthSnapshot as SupportHealth,
-    OperationsSummary as SupportOperations, RECENT_LOG_CAPACITY, RECENT_TRACE_CAPACITY,
-    RedactionReport, SUPPORT_BUNDLE_SCHEMA_VERSION, SUPPORT_ENTRY_NAMES, SUPPORT_ENTRY_NAMES_V2,
-    SupportBundleInput, SupportBundleSchema, SupportManifest, TELEMETRY_SCHEMA_VERSION,
-    TelemetrySnapshot, build_support_bundle_for_schema,
+    OperationsSummary as SupportOperations, PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION,
+    RECENT_LOG_CAPACITY, RECENT_TRACE_CAPACITY, RedactionReport, SUPPORT_BUNDLE_SCHEMA_VERSION,
+    SUPPORT_ENTRY_NAMES, SUPPORT_ENTRY_NAMES_V2, SUPPORT_ENTRY_NAMES_V3, SupportBundleInput,
+    SupportBundleSchema, SupportManifest, TELEMETRY_SCHEMA_VERSION, TelemetrySnapshot,
+    build_support_bundle_for_schema,
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR,
@@ -35,6 +36,7 @@ use sha2::{Digest as _, Sha256};
 use zip::CompressionMethod;
 
 const CLIENT_CAPABILITIES: &[&str] = &[
+    "code.locate.v1",
     "diagnostics.quick",
     "health",
     "operation.cancel",
@@ -42,8 +44,12 @@ const CLIENT_CAPABILITIES: &[&str] = &[
     "operation.lifecycle.v1",
     "operation.status",
     "operation.submit",
+    "repository.index.v1",
+    "source.read.v1",
+    "symbol.explain.v1",
     "support.bundle.v1",
     "support.bundle.v2",
+    "support.bundle.v3",
 ];
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_IO_TIMEOUT: Duration = Duration::from_secs(6);
@@ -288,6 +294,425 @@ pub enum OperationState {
     Cancelled,
 }
 
+/// Selects the active or one immutable repository generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationSelector {
+    /// Resolve the active generation at request admission.
+    Active,
+    /// Query one explicit immutable generation.
+    Generation(GenerationId),
+}
+
+/// Action applied to one repository-index operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryOperationAction {
+    /// Read the latest durable operation state.
+    Get,
+    /// Request cooperative cancellation.
+    Cancel,
+}
+
+/// Bounded lexical matching mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocateMode {
+    /// Match the complete identifier.
+    Exact,
+    /// Match an identifier prefix.
+    Prefix,
+    /// Match normalized lexical text.
+    Text,
+    /// Match a bounded safe regular expression.
+    SafeRegex,
+    /// Match a bounded glob.
+    Glob,
+}
+
+/// Aggregate language-analysis support tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisTier {
+    /// Compiler-grade or equivalent evidence.
+    TierA,
+    /// Build-aware structural evidence.
+    TierB,
+    /// Parser-backed structural evidence.
+    TierC,
+    /// Lexical or heuristic evidence.
+    TierD,
+}
+
+/// Aggregate completeness of one query response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageStatus {
+    /// All admitted inputs were analyzed for the reported scope.
+    Complete,
+    /// A declared bound excluded part of the scope.
+    Bounded,
+    /// The result represents a declared sample.
+    Sampled,
+    /// Parser recovery or unavailable evidence prevents a stronger claim.
+    Unknown,
+}
+
+/// One immutable generation-bound source selection.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SourceReference {
+    repository: RepositoryId,
+    generation: GenerationId,
+    file: FileId,
+    start_byte: u64,
+    end_byte: u64,
+    content_hash: ContentHash,
+    start_line: Option<u64>,
+    end_line: Option<u64>,
+}
+
+impl SourceReference {
+    /// Creates a checked half-open byte selection with an optional inclusive line hint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::InvalidSourceReference`] for an inverted byte
+    /// range, a partial line hint, line zero, or an inverted line range.
+    pub fn new(
+        repository: RepositoryId,
+        generation: GenerationId,
+        file: FileId,
+        bytes: std::ops::Range<u64>,
+        content_hash: ContentHash,
+        lines: Option<std::ops::RangeInclusive<u64>>,
+    ) -> Result<Self, ClientError> {
+        let (start_line, end_line) = match lines {
+            Some(lines) if *lines.start() > 0 && lines.start() <= lines.end() => {
+                (Some(*lines.start()), Some(*lines.end()))
+            }
+            Some(_) => return Err(ClientError::InvalidSourceReference),
+            None => (None, None),
+        };
+        if bytes.start > bytes.end {
+            return Err(ClientError::InvalidSourceReference);
+        }
+        Ok(Self {
+            repository,
+            generation,
+            file,
+            start_byte: bytes.start,
+            end_byte: bytes.end,
+            content_hash,
+            start_line,
+            end_line,
+        })
+    }
+
+    /// Returns the repository identity.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the immutable generation identity.
+    #[must_use]
+    pub const fn generation(&self) -> GenerationId {
+        self.generation
+    }
+
+    /// Returns the file identity.
+    #[must_use]
+    pub const fn file(&self) -> FileId {
+        self.file
+    }
+
+    /// Returns the half-open byte range.
+    #[must_use]
+    pub const fn byte_range(&self) -> std::ops::Range<u64> {
+        self.start_byte..self.end_byte
+    }
+
+    /// Returns the immutable content digest.
+    #[must_use]
+    pub const fn content_hash(&self) -> ContentHash {
+        self.content_hash
+    }
+
+    /// Returns the optional inclusive line hint.
+    #[must_use]
+    pub const fn line_range(&self) -> Option<std::ops::RangeInclusive<u64>> {
+        match (self.start_line, self.end_line) {
+            (Some(start), Some(end)) => Some(start..=end),
+            _ => None,
+        }
+    }
+}
+
+/// Measured bounded usage for one first-slice query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct QueryUsage {
+    /// Rows examined.
+    pub rows: u64,
+    /// Edges examined.
+    pub edges: u64,
+    /// Results returned.
+    pub results: u64,
+    /// Source bytes returned.
+    pub source_bytes: u64,
+    /// Encoded JSON bytes measured by the daemon.
+    pub json_bytes: u64,
+    /// Estimated tokenizer usage.
+    pub estimated_tokens: u64,
+    /// Monotonic query duration.
+    pub elapsed_micros: u64,
+}
+
+/// Repository, generation, coverage, and usage correlation for one query.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct QueryContext {
+    /// Repository identity.
+    pub repository: RepositoryId,
+    /// Resolved immutable generation.
+    pub generation: GenerationId,
+    /// Parent immutable generation, when present.
+    pub parent_generation: Option<GenerationId>,
+    /// Whether the resolved generation is currently active.
+    pub active_generation: bool,
+    /// Weakest relevant analysis tier.
+    pub tier: AnalysisTier,
+    /// Aggregate result completeness.
+    pub coverage_status: CoverageStatus,
+    /// Inputs skipped for the relevant scope.
+    pub skipped_inputs: u64,
+    /// Measured query usage.
+    pub usage: QueryUsage,
+}
+
+/// Successful repository-index publication.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryIndex {
+    /// Repository identity.
+    pub repository: RepositoryId,
+    /// Durable operation identity.
+    pub operation: OperationId,
+    /// Terminal operation state.
+    pub state: OperationState,
+    /// Durable operation revision.
+    pub revision: u64,
+    /// Previous generation, when present.
+    pub parent_generation: Option<GenerationId>,
+    /// Newly published immutable generation after successful completion.
+    pub published_generation: Option<GenerationId>,
+    /// Discovered repository inputs.
+    pub discovered_inputs: u64,
+    /// Rust source files included in the generation.
+    pub indexed_files: u64,
+    /// Indexed semantic entities.
+    pub entities: u64,
+    /// Monotonic indexing duration.
+    pub elapsed_micros: u64,
+}
+
+/// Durable repository-index operation state and process-local evidence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryOperationStatus {
+    /// Durable operation state.
+    pub operation: OperationStatus,
+    /// Published generation after successful completion.
+    pub published_generation: Option<GenerationId>,
+    /// Best-effort operation start time.
+    pub started_unix_ms: u64,
+    /// Peak resident memory measured for this operation.
+    pub peak_rss_bytes: u64,
+    /// Bytes written for this operation.
+    pub written_bytes: u64,
+    /// Repository inputs examined.
+    pub files_examined: u64,
+    /// Bounded polling delay for a nonterminal operation.
+    pub retry_after_ms: Option<u32>,
+}
+
+/// One generation-pinned lexical result.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LocateHit {
+    /// Stable symbol identity.
+    pub symbol: SymbolId,
+    /// Stable file identity.
+    pub file: FileId,
+    /// Untrusted repository identifier text.
+    pub identifier: String,
+    /// Untrusted repository-qualified name.
+    pub qualified_name: String,
+    /// Untrusted repository-relative path.
+    pub path: String,
+    /// Stable normalized entity kind.
+    pub kind: String,
+    /// Stable normalized language label.
+    pub language: String,
+    /// Evidence tier for this hit.
+    pub tier: AnalysisTier,
+    /// Whether generated-code policy applies.
+    pub generated: bool,
+    /// Fixed-point relevance score in the range 0 through 1000.
+    pub score: u32,
+    /// Optional immutable source selection.
+    pub source: Option<SourceReference>,
+}
+
+impl std::fmt::Debug for LocateHit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocateHit")
+            .field("symbol", &self.symbol)
+            .field("file", &self.file)
+            .field("tier", &self.tier)
+            .field("generated", &self.generated)
+            .field("score", &self.score)
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Bounded lexical results for one generation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CodeLocate {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Deterministically ordered hits.
+    pub hits: Vec<LocateHit>,
+    /// Candidates matching before the result cap.
+    pub matched_candidates: u64,
+    /// Whether the response was cut by a bound.
+    pub truncated: bool,
+}
+
+/// One compact generation-pinned symbol explanation.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SymbolExplanation {
+    /// Stable symbol identity.
+    pub symbol: SymbolId,
+    /// Stable normalized entity kind.
+    pub kind: String,
+    /// Untrusted repository display name.
+    pub display_name: String,
+    /// Optional untrusted repository signature.
+    pub signature: Option<String>,
+    /// Immutable definition selection.
+    pub definition: SourceReference,
+    /// Exact outgoing call edges.
+    pub outbound_exact: u64,
+    /// Candidate outgoing call edges.
+    pub outbound_candidates: u64,
+    /// Exact incoming call edges.
+    pub inbound_exact: u64,
+    /// Candidate incoming call edges.
+    pub inbound_candidates: u64,
+    /// Exact reference count.
+    pub references_exact: u64,
+    /// Stable provider label.
+    pub provider: String,
+    /// Stable evidence label.
+    pub evidence: String,
+    /// Fixed-point confidence in the range 0 through 1000.
+    pub confidence: u32,
+}
+
+impl std::fmt::Debug for SymbolExplanation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SymbolExplanation")
+            .field("symbol", &self.symbol)
+            .field("definition", &self.definition)
+            .field("outbound_exact", &self.outbound_exact)
+            .field("outbound_candidates", &self.outbound_candidates)
+            .field("inbound_exact", &self.inbound_exact)
+            .field("inbound_candidates", &self.inbound_candidates)
+            .field("references_exact", &self.references_exact)
+            .field("confidence", &self.confidence)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Bounded explanations and unresolved identities for one generation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SymbolExplain {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Resolved explanations in request-subsequence order.
+    pub symbols: Vec<SymbolExplanation>,
+    /// Unresolved identities in request-subsequence order.
+    pub unresolved_symbols: Vec<SymbolId>,
+    /// Whether the response was cut by a bound.
+    pub truncated: bool,
+}
+
+/// One verified UTF-8 source chunk.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SourceChunk {
+    /// Exact immutable source selection.
+    pub source: SourceReference,
+    /// Untrusted repository-relative path.
+    pub path: String,
+    /// Returned half-open byte range.
+    pub start_byte: u64,
+    /// Returned half-open byte range end.
+    pub end_byte: u64,
+    /// Returned first one-based line.
+    pub start_line: u64,
+    /// Returned final one-based line.
+    pub end_line: u64,
+    /// Untrusted repository source text.
+    pub content: String,
+    /// Verified content digest.
+    pub content_hash: ContentHash,
+    /// Stable normalized language label.
+    pub language: String,
+    /// Whether generated-code policy applies.
+    pub generated: bool,
+}
+
+impl std::fmt::Debug for SourceChunk {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceChunk")
+            .field("source", &self.source)
+            .field("start_byte", &self.start_byte)
+            .field("end_byte", &self.end_byte)
+            .field("start_line", &self.start_line)
+            .field("end_line", &self.end_line)
+            .field("content_bytes", &self.content.len())
+            .field("content_hash", &self.content_hash)
+            .field("language", &self.language)
+            .field("generated", &self.generated)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Bounded verified source response.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SourceRead {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Verified source chunks in request order.
+    pub chunks: Vec<SourceChunk>,
+    /// Total returned source bytes.
+    pub total_source_bytes: u64,
+    /// Whether the response was cut by a bound.
+    pub truncated: bool,
+}
+
+impl std::fmt::Debug for SourceRead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceRead")
+            .field("context", &self.context)
+            .field("chunk_count", &self.chunks.len())
+            .field("total_source_bytes", &self.total_source_bytes)
+            .field("truncated", &self.truncated)
+            .finish()
+    }
+}
+
 /// Policy for resolving a daemon control client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectPolicy {
@@ -517,7 +942,7 @@ impl Client {
             },
         ))? {
             daemon::response_envelope::Response::OperationLeaseRenew(response) => {
-                parse_operation_status(response.operation)
+                parse_expected_operation_status(response.operation, operation)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -527,9 +952,10 @@ impl Client {
         &self,
         request: daemon::OperationSubmitRequest,
     ) -> Result<OperationStatus, ClientError> {
+        let operation = parse_operation(request.operation.clone())?;
         match self.request(daemon::request_envelope::Request::OperationSubmit(request))? {
             daemon::response_envelope::Response::OperationSubmit(response) => {
-                parse_operation_status(response.operation)
+                parse_expected_operation_status(response.operation, operation)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -547,7 +973,7 @@ impl Client {
             },
         ))? {
             daemon::response_envelope::Response::OperationStatus(response) => {
-                parse_operation_status(response.operation)
+                parse_expected_operation_status(response.operation, operation)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -569,8 +995,186 @@ impl Client {
         ))? {
             daemon::response_envelope::Response::OperationCancel(response) => Ok((
                 response.accepted,
-                parse_operation_status(response.operation)?,
+                parse_expected_operation_status(response.operation, operation)?,
             )),
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Indexes one bounded repository root and publishes one immutable generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid request bounds, unavailable protocol
+    /// support, transport failure, or a malformed or uncorrelated response.
+    pub fn repository_index(
+        &self,
+        root: &str,
+        operation: OperationId,
+        detached: bool,
+    ) -> Result<RepositoryIndex, ClientError> {
+        if root.is_empty() || root.len() > 4096 || root.as_bytes().contains(&0) {
+            return Err(ClientError::InvalidFirstSliceRequest);
+        }
+        let request = daemon::RepositoryIndexRequest {
+            schema_version: Some(first_slice_schema()),
+            root: root.to_owned(),
+            operation: Some(operation_to_wire(operation)),
+            detached,
+        };
+        match self.request(daemon::request_envelope::Request::RepositoryIndex(request))? {
+            daemon::response_envelope::Response::RepositoryIndex(response) => {
+                parse_repository_index(response, operation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Reads or cooperatively cancels one repository-index operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid wait bounds, unavailable protocol
+    /// support, transport failure, or a malformed or uncorrelated response.
+    pub fn repository_operation_status(
+        &self,
+        operation: OperationId,
+        action: RepositoryOperationAction,
+        wait_ms: Option<u32>,
+        after_revision: Option<u64>,
+    ) -> Result<RepositoryOperationStatus, ClientError> {
+        if wait_ms.is_some_and(|wait| wait > 30_000) {
+            return Err(ClientError::InvalidFirstSliceRequest);
+        }
+        let request = daemon::RepositoryOperationStatusRequest {
+            schema_version: Some(first_slice_schema()),
+            operation: Some(operation_to_wire(operation)),
+            action: match action {
+                RepositoryOperationAction::Get => {
+                    daemon::RepositoryOperationAction::RepositoryOperationGet as i32
+                }
+                RepositoryOperationAction::Cancel => {
+                    daemon::RepositoryOperationAction::RepositoryOperationCancel as i32
+                }
+            },
+            wait_ms,
+            after_revision,
+        };
+        match self.request(daemon::request_envelope::Request::RepositoryOperationStatus(request))? {
+            daemon::response_envelope::Response::RepositoryOperationStatus(response) => {
+                parse_repository_operation_status(response, operation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Executes one bounded generation-pinned lexical lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query bounds, unavailable protocol
+    /// support, transport failure, or a malformed or uncorrelated response.
+    pub fn code_locate(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query: &str,
+        mode: LocateMode,
+        maximum_results: u32,
+    ) -> Result<CodeLocate, ClientError> {
+        if query.is_empty() || query.len() > 2048 || !(1..=200).contains(&maximum_results) {
+            return Err(ClientError::InvalidFirstSliceRequest);
+        }
+        let request = daemon::CodeLocateRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            query: query.to_owned(),
+            mode: locate_mode_to_wire(mode) as i32,
+            maximum_results,
+        };
+        match self.request(daemon::request_envelope::Request::CodeLocate(request))? {
+            daemon::response_envelope::Response::CodeLocate(response) => {
+                parse_code_locate(response, repository, generation, maximum_results)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Explains a bounded set of generation-pinned symbols.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid symbol bounds, unavailable protocol
+    /// support, transport failure, or a malformed or uncorrelated response.
+    pub fn symbol_explain(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        symbols: &[SymbolId],
+    ) -> Result<SymbolExplain, ClientError> {
+        if symbols.is_empty()
+            || symbols.len() > 16
+            || symbols
+                .iter()
+                .enumerate()
+                .any(|(index, symbol)| symbols[..index].contains(symbol))
+        {
+            return Err(ClientError::InvalidFirstSliceRequest);
+        }
+        let request = daemon::SymbolExplainRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            symbols: symbols.iter().copied().map(symbol_to_wire).collect(),
+        };
+        match self.request(daemon::request_envelope::Request::SymbolExplain(request))? {
+            daemon::response_envelope::Response::SymbolExplain(response) => {
+                parse_symbol_explain(response, repository, generation, symbols)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Reads a bounded ordered set of immutable source selections.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid reference bounds or correlation,
+    /// unavailable protocol support, transport failure, or a malformed response.
+    pub fn source_read(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        references: &[SourceReference],
+    ) -> Result<SourceRead, ClientError> {
+        if references.is_empty()
+            || references.len() > 32
+            || references.iter().enumerate().any(|(index, reference)| {
+                reference.repository != repository
+                    || matches!(
+                        generation,
+                        GenerationSelector::Generation(selected)
+                            if reference.generation != selected
+                    )
+                    || references[..index].contains(reference)
+            })
+            || references
+                .windows(2)
+                .any(|pair| pair[0].generation != pair[1].generation)
+        {
+            return Err(ClientError::InvalidFirstSliceRequest);
+        }
+        let request = daemon::SourceReadRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            references: references.iter().map(source_reference_to_wire).collect(),
+        };
+        match self.request(daemon::request_envelope::Request::SourceRead(request))? {
+            daemon::response_envelope::Response::SourceRead(response) => {
+                parse_source_read(response, repository, generation, references)
+            }
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -614,16 +1218,23 @@ impl Client {
             },
         )?;
         let response = read_response(self.codec, &mut stream)?;
-        if response.request_id != request_id {
-            return Err(ClientError::MismatchedRequestId);
-        }
-        match response.response.ok_or(ClientError::MissingResponse)? {
+        match correlated_response(response, request_id)? {
             daemon::response_envelope::Response::Error(error) => {
                 Err(ClientError::Public(Box::new(parse_public_error(error)?)))
             }
             response => Ok((response, selected_protocol_minor)),
         }
     }
+}
+
+fn correlated_response(
+    response: daemon::ResponseEnvelope,
+    request_id: u64,
+) -> Result<daemon::response_envelope::Response, ClientError> {
+    if response.request_id != request_id {
+        return Err(ClientError::MismatchedRequestId);
+    }
+    response.response.ok_or(ClientError::MissingResponse)
 }
 
 fn coordinate_start(
@@ -1029,8 +1640,10 @@ fn parse_support_bundle(
     response: daemon::SupportBundleResponse,
     selected_protocol_minor: u32,
 ) -> Result<SupportBundle, ClientError> {
-    let expected_schema = if selected_protocol_minor >= 4 {
+    let expected_schema = if selected_protocol_minor >= 5 {
         CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+    } else if selected_protocol_minor >= 4 {
+        PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION
     } else {
         SUPPORT_BUNDLE_SCHEMA_VERSION
     };
@@ -1067,7 +1680,8 @@ fn validate_support_archive(
 ) -> Result<Option<TelemetrySnapshot>, ClientError> {
     let expected_names: &[&str] = match schema_version {
         SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES,
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V2,
+        PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V2,
+        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V3,
         _ => return Err(ClientError::InvalidSupportBundle),
     };
     let mut zip = zip::ZipArchive::new(Cursor::new(archive))
@@ -1105,7 +1719,7 @@ fn validate_support_archive(
     let operations: SupportOperations = decode_support_entry(&entries, "operations-summary.json")?;
     let manifest: SupportManifest = decode_support_entry(&entries, "manifest.json")?;
     let redaction: RedactionReport = decode_support_entry(&entries, "redaction-report.json")?;
-    let telemetry = if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+    let telemetry = if schema_version != SUPPORT_BUNDLE_SCHEMA_VERSION {
         Some(decode_support_entry(&entries, "telemetry.json")?)
     } else {
         None
@@ -1131,8 +1745,10 @@ fn validate_support_archive(
         },
         if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION {
             SupportBundleSchema::V1
-        } else {
+        } else if schema_version == PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION {
             SupportBundleSchema::V2
+        } else {
+            SupportBundleSchema::V3
         },
     )
     .map_err(|_| ClientError::InvalidSupportBundle)?;
@@ -1162,7 +1778,10 @@ fn validate_support_semantics(
     let schema_version = manifest.schema_version;
     let expected_omissions = if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION {
         rootlight_observability::OMITTED_DATA_CLASSES.as_slice()
-    } else if schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION {
+    } else if matches!(
+        schema_version,
+        PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+    ) {
         rootlight_observability::OMITTED_DATA_CLASSES_V2.as_slice()
     } else {
         return Err(ClientError::InvalidSupportBundle);
@@ -1184,12 +1803,12 @@ fn validate_support_semantics(
                 .map(|value| (*value).to_owned())
                 .collect::<Vec<_>>()
         || (schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION && telemetry.is_some())
-        || (schema_version == CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION && telemetry.is_none())
+        || (schema_version != SUPPORT_BUNDLE_SCHEMA_VERSION && telemetry.is_none())
     {
         return Err(ClientError::InvalidSupportBundle);
     }
     if let Some(telemetry) = telemetry {
-        validate_telemetry_snapshot(telemetry)?;
+        validate_telemetry_snapshot(telemetry, schema_version)?;
     }
     let expected_manifest_names: &[&str] = if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION {
         &[
@@ -1229,7 +1848,10 @@ fn validate_support_semantics(
     Ok(())
 }
 
-fn validate_telemetry_snapshot(telemetry: &TelemetrySnapshot) -> Result<(), ClientError> {
+fn validate_telemetry_snapshot(
+    telemetry: &TelemetrySnapshot,
+    support_schema_version: u32,
+) -> Result<(), ClientError> {
     let log_capacity =
         u32::try_from(RECENT_LOG_CAPACITY).map_err(|_| ClientError::InvalidSupportBundle)?;
     let trace_capacity =
@@ -1240,18 +1862,18 @@ fn validate_telemetry_snapshot(telemetry: &TelemetrySnapshot) -> Result<(), Clie
         || telemetry.logs.len() > RECENT_LOG_CAPACITY
         || telemetry.traces.len() > RECENT_TRACE_CAPACITY
         || telemetry.metrics.schema_version != TELEMETRY_SCHEMA_VERSION
-        || telemetry.metrics.ipc_requests.len() != ControlMethod::ALL.len()
+        || telemetry.metrics.ipc_requests.len()
+            != expected_control_methods(support_schema_version).len()
         || !sequences_increase(&telemetry.logs, |record| record.sequence)
         || !sequences_increase(&telemetry.traces, |span| span.sequence)
     {
         return Err(ClientError::InvalidSupportBundle);
     }
-    for (metric, method) in telemetry
-        .metrics
-        .ipc_requests
-        .iter()
-        .zip(ControlMethod::ALL)
-    {
+    for (metric, method) in telemetry.metrics.ipc_requests.iter().zip(
+        expected_control_methods(support_schema_version)
+            .iter()
+            .copied(),
+    ) {
         let bucket_total = metric
             .duration_us
             .bucket_counts
@@ -1278,6 +1900,24 @@ fn validate_telemetry_snapshot(telemetry: &TelemetrySnapshot) -> Result<(), Clie
         }
     }
     Ok(())
+}
+
+fn expected_control_methods(schema_version: u32) -> &'static [ControlMethod] {
+    const V2_METHODS: &[ControlMethod] = &[
+        ControlMethod::Unknown,
+        ControlMethod::Health,
+        ControlMethod::DiagnosticsQuick,
+        ControlMethod::SupportBundle,
+        ControlMethod::OperationSubmit,
+        ControlMethod::OperationStatus,
+        ControlMethod::OperationCancel,
+        ControlMethod::OperationLeaseRenew,
+    ];
+    if schema_version == PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION {
+        V2_METHODS
+    } else {
+        &ControlMethod::ALL
+    }
 }
 
 fn sequences_increase<T>(records: &[T], sequence: impl Fn(&T) -> u64) -> bool {
@@ -1386,6 +2026,562 @@ fn operation_to_wire(operation: OperationId) -> common::OperationId {
     common::OperationId {
         value: operation.as_bytes().to_vec(),
     }
+}
+
+fn parse_expected_operation_status(
+    status: Option<daemon::OperationStatus>,
+    expected: OperationId,
+) -> Result<OperationStatus, ClientError> {
+    let status = parse_operation_status(status)?;
+    if status.operation != expected {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(status)
+}
+
+const fn first_slice_schema() -> common::ContractVersion {
+    common::ContractVersion { major: 1, minor: 0 }
+}
+
+fn require_first_slice_response_schema(
+    schema: Option<common::ContractVersion>,
+) -> Result<(), ClientError> {
+    if schema == Some(first_slice_schema()) {
+        Ok(())
+    } else {
+        Err(ClientError::InvalidResponseSchema)
+    }
+}
+
+fn repository_to_wire(repository: RepositoryId) -> common::RepositoryId {
+    common::RepositoryId {
+        value: repository.as_bytes().to_vec(),
+    }
+}
+
+fn generation_to_wire(generation: GenerationId) -> common::GenerationId {
+    common::GenerationId {
+        value: generation.as_bytes().to_vec(),
+    }
+}
+
+fn symbol_to_wire(symbol: SymbolId) -> common::SymbolId {
+    common::SymbolId {
+        value: symbol.as_bytes().to_vec(),
+    }
+}
+
+fn file_to_wire(file: FileId) -> common::FileId {
+    common::FileId {
+        value: file.as_bytes().to_vec(),
+    }
+}
+
+fn content_hash_to_wire(content_hash: ContentHash) -> common::ContentHash {
+    common::ContentHash {
+        value: content_hash.as_bytes().to_vec(),
+    }
+}
+
+fn generation_selector_to_wire(selector: GenerationSelector) -> daemon::GenerationSelector {
+    daemon::GenerationSelector {
+        selector: Some(match selector {
+            GenerationSelector::Active => daemon::generation_selector::Selector::Active(true),
+            GenerationSelector::Generation(generation) => {
+                daemon::generation_selector::Selector::Generation(generation_to_wire(generation))
+            }
+        }),
+    }
+}
+
+const fn locate_mode_to_wire(mode: LocateMode) -> daemon::FirstSliceLocateMode {
+    match mode {
+        LocateMode::Exact => daemon::FirstSliceLocateMode::FirstSliceLocateExact,
+        LocateMode::Prefix => daemon::FirstSliceLocateMode::FirstSliceLocatePrefix,
+        LocateMode::Text => daemon::FirstSliceLocateMode::FirstSliceLocateText,
+        LocateMode::SafeRegex => daemon::FirstSliceLocateMode::FirstSliceLocateSafeRegex,
+        LocateMode::Glob => daemon::FirstSliceLocateMode::FirstSliceLocateGlob,
+    }
+}
+
+fn source_reference_to_wire(reference: &SourceReference) -> daemon::FirstSliceSourceRef {
+    daemon::FirstSliceSourceRef {
+        repository: Some(repository_to_wire(reference.repository)),
+        generation: Some(generation_to_wire(reference.generation)),
+        file: Some(file_to_wire(reference.file)),
+        start_byte: reference.start_byte,
+        end_byte: reference.end_byte,
+        content_hash: Some(content_hash_to_wire(reference.content_hash)),
+        start_line: reference.start_line,
+        end_line: reference.end_line,
+    }
+}
+
+fn parse_repository_index(
+    response: daemon::RepositoryIndexResponse,
+    expected_operation: OperationId,
+) -> Result<RepositoryIndex, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let operation = parse_operation(response.operation)?;
+    let state = parse_operation_state(response.state)?;
+    let published_generation = response
+        .published_generation
+        .map(parse_generation)
+        .transpose()?;
+    if operation != expected_operation
+        || response.indexed_files > response.discovered_inputs
+        || match state {
+            OperationState::Succeeded => published_generation.is_none(),
+            OperationState::Queued
+            | OperationState::Running
+            | OperationState::Cancelling
+            | OperationState::Failed
+            | OperationState::Interrupted
+            | OperationState::Cancelled => published_generation.is_some(),
+        }
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(RepositoryIndex {
+        repository: parse_repository(
+            response
+                .repository
+                .ok_or(ClientError::InvalidResponseCorrelation)?,
+        )?,
+        operation,
+        state,
+        revision: response.revision,
+        parent_generation: response
+            .parent_generation
+            .map(parse_generation)
+            .transpose()?,
+        published_generation,
+        discovered_inputs: response.discovered_inputs,
+        indexed_files: response.indexed_files,
+        entities: response.entities,
+        elapsed_micros: response.elapsed_micros,
+    })
+}
+
+fn parse_repository_operation_status(
+    response: daemon::RepositoryOperationStatusResponse,
+    expected_operation: OperationId,
+) -> Result<RepositoryOperationStatus, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let operation = parse_expected_operation_status(response.operation, expected_operation)?;
+    if operation.kind != OperationKind::RepositoryIndex {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let published_generation = response
+        .published_generation
+        .map(parse_generation)
+        .transpose()?;
+    let coherent = match operation.state {
+        OperationState::Queued | OperationState::Running | OperationState::Cancelling => {
+            published_generation.is_none()
+        }
+        OperationState::Succeeded => {
+            published_generation.is_some() && response.retry_after_ms.is_none()
+        }
+        OperationState::Failed | OperationState::Interrupted | OperationState::Cancelled => {
+            published_generation.is_none() && response.retry_after_ms.is_none()
+        }
+    };
+    if !coherent {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(RepositoryOperationStatus {
+        operation,
+        published_generation,
+        started_unix_ms: response.started_unix_ms,
+        peak_rss_bytes: response.peak_rss_bytes,
+        written_bytes: response.written_bytes,
+        files_examined: response.files_examined,
+        retry_after_ms: response.retry_after_ms,
+    })
+}
+
+fn parse_code_locate(
+    response: daemon::CodeLocateResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+    maximum_results: u32,
+) -> Result<CodeLocate, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(response.context, repository, selector)?;
+    if response.hits.len()
+        > usize::try_from(maximum_results).map_err(|_| ClientError::InvalidResponseCorrelation)?
+        || response.matched_candidates
+            < u64::try_from(response.hits.len())
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut hits = Vec::new();
+    hits.try_reserve_exact(response.hits.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for hit in response.hits {
+        let file = parse_file(hit.file)?;
+        let source = hit
+            .source
+            .map(|source| parse_source_reference(source, &context))
+            .transpose()?;
+        if hit.score > 1_000 || source.as_ref().is_some_and(|source| source.file != file) {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        hits.push(LocateHit {
+            symbol: parse_symbol(hit.symbol)?,
+            file,
+            identifier: hit.identifier,
+            qualified_name: hit.qualified_name,
+            path: hit.path,
+            kind: hit.kind,
+            language: hit.language,
+            tier: parse_analysis_tier(hit.tier)?,
+            generated: hit.generated,
+            score: hit.score,
+            source,
+        });
+    }
+    Ok(CodeLocate {
+        context,
+        hits,
+        matched_candidates: response.matched_candidates,
+        truncated: response.truncated,
+    })
+}
+
+fn parse_symbol_explain(
+    response: daemon::SymbolExplainResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+    requested: &[SymbolId],
+) -> Result<SymbolExplain, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(response.context, repository, selector)?;
+    let total = response
+        .symbols
+        .len()
+        .checked_add(response.unresolved_symbols.len())
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    if total > requested.len() || (!response.truncated && total != requested.len()) {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut symbols = Vec::new();
+    symbols
+        .try_reserve_exact(response.symbols.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for explanation in response.symbols {
+        let symbol = parse_symbol(explanation.symbol)?;
+        let definition = parse_source_reference(
+            explanation
+                .definition
+                .ok_or(ClientError::InvalidResponseCorrelation)?,
+            &context,
+        )?;
+        if explanation.confidence > 1_000
+            || symbols
+                .iter()
+                .any(|prior: &SymbolExplanation| prior.symbol == symbol)
+            || !requested.contains(&symbol)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        symbols.push(SymbolExplanation {
+            symbol,
+            kind: explanation.kind,
+            display_name: explanation.display_name,
+            signature: explanation.signature,
+            definition,
+            outbound_exact: explanation.outbound_exact,
+            outbound_candidates: explanation.outbound_candidates,
+            inbound_exact: explanation.inbound_exact,
+            inbound_candidates: explanation.inbound_candidates,
+            references_exact: explanation.references_exact,
+            provider: explanation.provider,
+            evidence: explanation.evidence,
+            confidence: explanation.confidence,
+        });
+    }
+    let mut unresolved_symbols = Vec::new();
+    unresolved_symbols
+        .try_reserve_exact(response.unresolved_symbols.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for unresolved in response.unresolved_symbols {
+        let unresolved = parse_symbol(Some(unresolved))?;
+        if !requested.contains(&unresolved)
+            || unresolved_symbols.contains(&unresolved)
+            || symbols.iter().any(|resolved| resolved.symbol == unresolved)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        unresolved_symbols.push(unresolved);
+    }
+    if !ids_form_subsequence(symbols.iter().map(|item| item.symbol), requested)
+        || !ids_form_subsequence(unresolved_symbols.iter().copied(), requested)
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(SymbolExplain {
+        context,
+        symbols,
+        unresolved_symbols,
+        truncated: response.truncated,
+    })
+}
+
+fn parse_source_read(
+    response: daemon::SourceReadResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+    requested: &[SourceReference],
+) -> Result<SourceRead, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(response.context, repository, selector)?;
+    if context.generation != requested[0].generation
+        || response.chunks.len() > requested.len()
+        || (!response.truncated && response.chunks.len() != requested.len())
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut chunks = Vec::new();
+    chunks
+        .try_reserve_exact(response.chunks.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    let mut source_bytes = 0_u64;
+    for (chunk, expected) in response.chunks.into_iter().zip(requested) {
+        let source = parse_source_reference(
+            chunk
+                .source
+                .ok_or(ClientError::InvalidResponseCorrelation)?,
+            &context,
+        )?;
+        let content_hash = parse_content_hash(chunk.content_hash)?;
+        let length = chunk
+            .end_byte
+            .checked_sub(chunk.start_byte)
+            .ok_or(ClientError::InvalidResponseCorrelation)?;
+        if &source != expected
+            || chunk.start_byte > source.start_byte
+            || chunk.end_byte < source.end_byte
+            || chunk.start_line == 0
+            || chunk.start_line > chunk.end_line
+            || source
+                .start_line
+                .is_some_and(|line| chunk.start_line > line)
+            || source.end_line.is_some_and(|line| chunk.end_line < line)
+            || content_hash != source.content_hash
+            || u64::try_from(chunk.content.len())
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?
+                != length
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        source_bytes = source_bytes
+            .checked_add(length)
+            .ok_or(ClientError::InvalidResponseCorrelation)?;
+        chunks.push(SourceChunk {
+            source,
+            path: chunk.path,
+            start_byte: chunk.start_byte,
+            end_byte: chunk.end_byte,
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            content: chunk.content,
+            content_hash,
+            language: chunk.language,
+            generated: chunk.generated,
+        });
+    }
+    if source_bytes != response.total_source_bytes
+        || source_bytes != context.usage.source_bytes
+        || context.usage.results
+            != u64::try_from(chunks.len()).map_err(|_| ClientError::InvalidResponseCorrelation)?
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(SourceRead {
+        context,
+        chunks,
+        total_source_bytes: response.total_source_bytes,
+        truncated: response.truncated,
+    })
+}
+
+fn parse_query_context(
+    context: Option<daemon::FirstSliceQueryContext>,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+) -> Result<QueryContext, ClientError> {
+    let context = context.ok_or(ClientError::InvalidResponseCorrelation)?;
+    let observed_repository = parse_repository(
+        context
+            .repository
+            .ok_or(ClientError::InvalidResponseCorrelation)?,
+    )?;
+    let generation = parse_generation(
+        context
+            .generation
+            .ok_or(ClientError::InvalidResponseCorrelation)?,
+    )?;
+    let parent_generation = context
+        .parent_generation
+        .map(parse_generation)
+        .transpose()?;
+    let selector_matches = match selector {
+        GenerationSelector::Active => context.active_generation,
+        GenerationSelector::Generation(selected) => generation == selected,
+    };
+    if observed_repository != repository
+        || !selector_matches
+        || parent_generation == Some(generation)
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(QueryContext {
+        repository,
+        generation,
+        parent_generation,
+        active_generation: context.active_generation,
+        tier: parse_analysis_tier(context.tier)?,
+        coverage_status: parse_coverage_status(context.coverage_status)?,
+        skipped_inputs: context.skipped_inputs,
+        usage: parse_query_usage(context.usage)?,
+    })
+}
+
+fn parse_query_usage(
+    usage: Option<daemon::FirstSliceQueryUsage>,
+) -> Result<QueryUsage, ClientError> {
+    let usage = usage.ok_or(ClientError::InvalidResponseCorrelation)?;
+    Ok(QueryUsage {
+        rows: usage.rows,
+        edges: usage.edges,
+        results: usage.results,
+        source_bytes: usage.source_bytes,
+        json_bytes: usage.json_bytes,
+        estimated_tokens: usage.estimated_tokens,
+        elapsed_micros: usage.elapsed_micros,
+    })
+}
+
+fn parse_source_reference(
+    reference: daemon::FirstSliceSourceRef,
+    context: &QueryContext,
+) -> Result<SourceReference, ClientError> {
+    let repository = parse_repository(
+        reference
+            .repository
+            .ok_or(ClientError::InvalidResponseCorrelation)?,
+    )?;
+    let generation = parse_generation(
+        reference
+            .generation
+            .ok_or(ClientError::InvalidResponseCorrelation)?,
+    )?;
+    if repository != context.repository || generation != context.generation {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    SourceReference::new(
+        repository,
+        generation,
+        parse_file(reference.file)?,
+        reference.start_byte..reference.end_byte,
+        parse_content_hash(reference.content_hash)?,
+        match (reference.start_line, reference.end_line) {
+            (None, None) => None,
+            (Some(start), Some(end)) => Some(start..=end),
+            _ => return Err(ClientError::InvalidResponseCorrelation),
+        },
+    )
+    .map_err(|_| ClientError::InvalidResponseCorrelation)
+}
+
+fn parse_analysis_tier(value: i32) -> Result<AnalysisTier, ClientError> {
+    match daemon::FirstSliceAnalysisTier::try_from(value)
+        .map_err(|_| ClientError::InvalidResponseCorrelation)?
+    {
+        daemon::FirstSliceAnalysisTier::FirstSliceTierA => Ok(AnalysisTier::TierA),
+        daemon::FirstSliceAnalysisTier::FirstSliceTierB => Ok(AnalysisTier::TierB),
+        daemon::FirstSliceAnalysisTier::FirstSliceTierC => Ok(AnalysisTier::TierC),
+        daemon::FirstSliceAnalysisTier::FirstSliceTierD => Ok(AnalysisTier::TierD),
+        daemon::FirstSliceAnalysisTier::Unspecified => Err(ClientError::InvalidResponseCorrelation),
+    }
+}
+
+fn parse_coverage_status(value: i32) -> Result<CoverageStatus, ClientError> {
+    match daemon::FirstSliceCoverageStatus::try_from(value)
+        .map_err(|_| ClientError::InvalidResponseCorrelation)?
+    {
+        daemon::FirstSliceCoverageStatus::FirstSliceCoverageComplete => {
+            Ok(CoverageStatus::Complete)
+        }
+        daemon::FirstSliceCoverageStatus::FirstSliceCoverageBounded => Ok(CoverageStatus::Bounded),
+        daemon::FirstSliceCoverageStatus::FirstSliceCoverageSampled => Ok(CoverageStatus::Sampled),
+        daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown => Ok(CoverageStatus::Unknown),
+        daemon::FirstSliceCoverageStatus::Unspecified => {
+            Err(ClientError::InvalidResponseCorrelation)
+        }
+    }
+}
+
+fn parse_operation_state(value: i32) -> Result<OperationState, ClientError> {
+    match daemon::OperationState::try_from(value).map_err(|_| ClientError::InvalidOperationState)? {
+        daemon::OperationState::Queued => Ok(OperationState::Queued),
+        daemon::OperationState::Running => Ok(OperationState::Running),
+        daemon::OperationState::Cancelling => Ok(OperationState::Cancelling),
+        daemon::OperationState::Succeeded => Ok(OperationState::Succeeded),
+        daemon::OperationState::Failed => Ok(OperationState::Failed),
+        daemon::OperationState::Interrupted => Ok(OperationState::Interrupted),
+        daemon::OperationState::Cancelled => Ok(OperationState::Cancelled),
+        daemon::OperationState::Unspecified => Err(ClientError::InvalidOperationState),
+    }
+}
+
+fn parse_file(file: Option<common::FileId>) -> Result<FileId, ClientError> {
+    let bytes: [u8; 20] = file
+        .ok_or(ClientError::InvalidResponseCorrelation)?
+        .value
+        .try_into()
+        .map_err(|_| ClientError::InvalidIdentifier)?;
+    Ok(FileId::from_bytes(bytes))
+}
+
+fn parse_symbol(symbol: Option<common::SymbolId>) -> Result<SymbolId, ClientError> {
+    let bytes: [u8; 20] = symbol
+        .ok_or(ClientError::InvalidResponseCorrelation)?
+        .value
+        .try_into()
+        .map_err(|_| ClientError::InvalidIdentifier)?;
+    Ok(SymbolId::from_bytes(bytes))
+}
+
+fn parse_content_hash(
+    content_hash: Option<common::ContentHash>,
+) -> Result<ContentHash, ClientError> {
+    let bytes: [u8; 32] = content_hash
+        .ok_or(ClientError::InvalidResponseCorrelation)?
+        .value
+        .try_into()
+        .map_err(|_| ClientError::InvalidIdentifier)?;
+    Ok(ContentHash::from_bytes(bytes))
+}
+
+fn ids_form_subsequence(
+    candidates: impl IntoIterator<Item = SymbolId>,
+    requested: &[SymbolId],
+) -> bool {
+    let mut start = 0;
+    for candidate in candidates {
+        let Some(offset) = requested[start..]
+            .iter()
+            .position(|requested| *requested == candidate)
+        else {
+            return false;
+        };
+        start += offset + 1;
+    }
+    true
 }
 
 fn operation_submit_request(
@@ -1585,6 +2781,21 @@ pub enum ClientError {
     /// Response kind did not match the request.
     #[error("daemon response kind is invalid")]
     UnexpectedResponse,
+    /// A first-slice request violated a closed bound or identity invariant.
+    #[error("daemon first-slice request is invalid")]
+    InvalidFirstSliceRequest,
+    /// A source reference violated its closed range contract.
+    #[error("daemon source reference is invalid")]
+    InvalidSourceReference,
+    /// A first-slice response selected an unsupported schema.
+    #[error("daemon response schema is invalid")]
+    InvalidResponseSchema,
+    /// A response did not correlate with the submitted request.
+    #[error("daemon response correlation is invalid")]
+    InvalidResponseCorrelation,
+    /// A bounded response allocation could not be reserved.
+    #[error("daemon response resources are exhausted")]
+    ResponseAllocationFailed,
     /// Operation payload was missing.
     #[error("daemon operation status is missing")]
     MissingOperation,
@@ -1682,6 +2893,70 @@ mod tests {
         Endpoint::new(path).expect("test endpoint validates")
     }
 
+    fn test_repository() -> RepositoryId {
+        RepositoryId::from_bytes([1; 16])
+    }
+
+    fn test_generation() -> GenerationId {
+        GenerationId::from_bytes([2; 20])
+    }
+
+    fn test_source(file_byte: u8, start: u64, end: u64) -> SourceReference {
+        SourceReference::new(
+            test_repository(),
+            test_generation(),
+            FileId::from_bytes([file_byte; 20]),
+            start..end,
+            ContentHash::from_bytes([file_byte; 32]),
+            Some(1..=1),
+        )
+        .expect("test source reference validates")
+    }
+
+    fn wire_query_context(results: u64, source_bytes: u64) -> daemon::FirstSliceQueryContext {
+        daemon::FirstSliceQueryContext {
+            repository: Some(repository_to_wire(test_repository())),
+            generation: Some(generation_to_wire(test_generation())),
+            parent_generation: Some(generation_to_wire(GenerationId::from_bytes([3; 20]))),
+            active_generation: true,
+            tier: daemon::FirstSliceAnalysisTier::FirstSliceTierC as i32,
+            coverage_status: daemon::FirstSliceCoverageStatus::FirstSliceCoverageComplete as i32,
+            skipped_inputs: 0,
+            usage: Some(daemon::FirstSliceQueryUsage {
+                rows: results,
+                edges: 0,
+                results,
+                source_bytes,
+                json_bytes: 0,
+                estimated_tokens: 0,
+                elapsed_micros: 1,
+            }),
+        }
+    }
+
+    fn wire_source(reference: &SourceReference) -> daemon::FirstSliceSourceRef {
+        source_reference_to_wire(reference)
+    }
+
+    fn wire_operation(operation: OperationId) -> daemon::OperationStatus {
+        daemon::OperationStatus {
+            operation: Some(operation_to_wire(operation)),
+            state: daemon::OperationState::Succeeded as i32,
+            revision: 2,
+            completed_units: 1,
+            total_units: 1,
+            error: None,
+            kind: daemon::OperationKind::RepositoryIndex as i32,
+            stage: daemon::OperationStage::Cleanup as i32,
+            plan_hash: vec![4; 32],
+            detached: true,
+            cancellation_requested: false,
+            deadline_unix_ms: Some(10),
+            lease_expires_unix_ms: None,
+            recovery_class: daemon::RecoveryClass::NotApplicable as i32,
+        }
+    }
+
     #[test]
     fn launch_lock_remains_exclusive_until_startup_authority_releases_it() {
         let temporary = tempfile::tempdir().expect("temporary directory is available");
@@ -1772,6 +3047,327 @@ mod tests {
         ));
         assert!(ensure_request_supported(&diagnostics, 3).is_ok());
         assert!(ensure_request_supported(&support, 3).is_ok());
+
+        let first_slice =
+            daemon::request_envelope::Request::CodeLocate(daemon::CodeLocateRequest::default());
+        assert!(matches!(
+            ensure_request_supported(&first_slice, 4),
+            Err(ClientError::ProtocolFeatureUnavailable)
+        ));
+        assert!(ensure_request_supported(&first_slice, 5).is_ok());
+        for capability in [
+            "code.locate.v1",
+            "repository.index.v1",
+            "source.read.v1",
+            "symbol.explain.v1",
+        ] {
+            assert!(CLIENT_CAPABILITIES.contains(&capability));
+        }
+    }
+
+    #[test]
+    fn first_slice_input_bounds_and_outer_pairing_fail_closed() {
+        let client = Client::new(test_endpoint("first-slice-bounds"), [1; 16], [2; 16]);
+        let operation = OperationId::from_bytes([8; 16]);
+        assert!(matches!(
+            client.repository_index("", operation, true),
+            Err(ClientError::InvalidFirstSliceRequest)
+        ));
+        assert!(matches!(
+            client.repository_operation_status(
+                operation,
+                RepositoryOperationAction::Get,
+                Some(30_001),
+                None,
+            ),
+            Err(ClientError::InvalidFirstSliceRequest)
+        ));
+        assert!(matches!(
+            client.code_locate(
+                test_repository(),
+                GenerationSelector::Active,
+                "",
+                LocateMode::Exact,
+                1,
+            ),
+            Err(ClientError::InvalidFirstSliceRequest)
+        ));
+        assert!(matches!(
+            client.symbol_explain(test_repository(), GenerationSelector::Active, &[]),
+            Err(ClientError::InvalidFirstSliceRequest)
+        ));
+        let source = test_source(4, 0, 2);
+        assert!(matches!(
+            client.source_read(
+                test_repository(),
+                GenerationSelector::Active,
+                &[source.clone(), source],
+            ),
+            Err(ClientError::InvalidFirstSliceRequest)
+        ));
+        assert!(matches!(
+            SourceReference::new(
+                test_repository(),
+                test_generation(),
+                FileId::from_bytes([4; 20]),
+                {
+                    let start = 3;
+                    let end = 2;
+                    start..end
+                },
+                ContentHash::from_bytes([4; 32]),
+                None,
+            ),
+            Err(ClientError::InvalidSourceReference)
+        ));
+
+        let response = daemon::ResponseEnvelope {
+            request_id: 9,
+            response: Some(daemon::response_envelope::Response::Health(
+                daemon::HealthResponse::default(),
+            )),
+        };
+        assert!(matches!(
+            correlated_response(response, 8),
+            Err(ClientError::MismatchedRequestId)
+        ));
+    }
+
+    #[test]
+    fn first_slice_decoders_validate_schema_identity_and_nested_correlation() {
+        let operation = OperationId::from_bytes([8; 16]);
+        let foreign_operation = OperationId::from_bytes([9; 16]);
+        assert!(matches!(
+            parse_expected_operation_status(Some(wire_operation(foreign_operation)), operation),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+
+        let index = daemon::RepositoryIndexResponse {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(test_repository())),
+            operation: Some(operation_to_wire(operation)),
+            state: daemon::OperationState::Succeeded as i32,
+            revision: 1,
+            parent_generation: None,
+            published_generation: Some(generation_to_wire(test_generation())),
+            discovered_inputs: 5,
+            indexed_files: 3,
+            entities: 2,
+            elapsed_micros: 10,
+        };
+        assert!(parse_repository_index(index.clone(), operation).is_ok());
+        let mut wrong_schema = index.clone();
+        wrong_schema.schema_version = Some(common::ContractVersion { major: 1, minor: 1 });
+        assert!(matches!(
+            parse_repository_index(wrong_schema, operation),
+            Err(ClientError::InvalidResponseSchema)
+        ));
+        let mut wrong_operation = index;
+        wrong_operation.operation = Some(operation_to_wire(foreign_operation));
+        assert!(matches!(
+            parse_repository_index(wrong_operation, operation),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+
+        let status = daemon::RepositoryOperationStatusResponse {
+            schema_version: Some(first_slice_schema()),
+            operation: Some(wire_operation(operation)),
+            published_generation: Some(generation_to_wire(test_generation())),
+            started_unix_ms: 1,
+            peak_rss_bytes: 0,
+            written_bytes: 0,
+            files_examined: 5,
+            retry_after_ms: None,
+        };
+        assert!(parse_repository_operation_status(status.clone(), operation).is_ok());
+        let mut queued_without_retry = status.clone();
+        queued_without_retry
+            .operation
+            .as_mut()
+            .expect("operation exists")
+            .state = daemon::OperationState::Queued as i32;
+        queued_without_retry.published_generation = None;
+        assert!(parse_repository_operation_status(queued_without_retry.clone(), operation).is_ok());
+        queued_without_retry.retry_after_ms = Some(0);
+        assert!(parse_repository_operation_status(queued_without_retry, operation).is_ok());
+        let mut foreign_status = status;
+        foreign_status
+            .operation
+            .as_mut()
+            .expect("operation exists")
+            .operation = Some(operation_to_wire(foreign_operation));
+        assert!(matches!(
+            parse_repository_operation_status(foreign_status, operation),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+
+        let source = test_source(4, 0, 2);
+        let symbol = SymbolId::from_bytes([5; 20]);
+        let locate = daemon::CodeLocateResponse {
+            schema_version: Some(first_slice_schema()),
+            context: Some(wire_query_context(1, 0)),
+            hits: vec![daemon::FirstSliceLocateHit {
+                symbol: Some(symbol_to_wire(symbol)),
+                file: Some(file_to_wire(source.file)),
+                identifier: "answer".to_owned(),
+                qualified_name: "answer".to_owned(),
+                path: "src/lib.rs".to_owned(),
+                kind: "function".to_owned(),
+                language: "rust".to_owned(),
+                tier: daemon::FirstSliceAnalysisTier::FirstSliceTierC as i32,
+                generated: false,
+                score: 1_000,
+                source: Some(wire_source(&source)),
+            }],
+            matched_candidates: 1,
+            truncated: false,
+        };
+        assert!(
+            parse_code_locate(
+                locate.clone(),
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+            )
+            .is_ok()
+        );
+        assert!(
+            parse_code_locate(
+                locate.clone(),
+                test_repository(),
+                GenerationSelector::Generation(test_generation()),
+                1,
+            )
+            .is_ok()
+        );
+        let mut foreign_context = locate.clone();
+        foreign_context
+            .context
+            .as_mut()
+            .expect("context exists")
+            .repository = Some(repository_to_wire(RepositoryId::from_bytes([9; 16])));
+        assert!(matches!(
+            parse_code_locate(
+                foreign_context,
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let mut foreign_source = locate;
+        foreign_source.hits[0]
+            .source
+            .as_mut()
+            .expect("source exists")
+            .file = Some(file_to_wire(FileId::from_bytes([9; 20])));
+        assert!(matches!(
+            parse_code_locate(
+                foreign_source,
+                test_repository(),
+                GenerationSelector::Active,
+                1,
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+
+        let second_symbol = SymbolId::from_bytes([6; 20]);
+        let explain = daemon::SymbolExplainResponse {
+            schema_version: Some(first_slice_schema()),
+            context: Some(wire_query_context(2, 0)),
+            symbols: vec![daemon::FirstSliceSymbolExplanation {
+                symbol: Some(symbol_to_wire(symbol)),
+                kind: "function".to_owned(),
+                display_name: "answer".to_owned(),
+                signature: None,
+                definition: Some(wire_source(&source)),
+                outbound_exact: 0,
+                outbound_candidates: 0,
+                inbound_exact: 0,
+                inbound_candidates: 0,
+                references_exact: 0,
+                provider: "tree-sitter".to_owned(),
+                evidence: "parser".to_owned(),
+                confidence: 1_000,
+            }],
+            unresolved_symbols: vec![symbol_to_wire(second_symbol)],
+            truncated: false,
+        };
+        assert!(
+            parse_symbol_explain(
+                explain.clone(),
+                test_repository(),
+                GenerationSelector::Active,
+                &[symbol, second_symbol],
+            )
+            .is_ok()
+        );
+        let mut duplicate = explain;
+        duplicate.unresolved_symbols[0] = symbol_to_wire(symbol);
+        assert!(matches!(
+            parse_symbol_explain(
+                duplicate,
+                test_repository(),
+                GenerationSelector::Active,
+                &[symbol, second_symbol],
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+
+        let first = test_source(4, 1, 2);
+        let second = test_source(5, 4, 5);
+        let chunk = |reference: &SourceReference, start_byte: u64, end_byte: u64, content: &str| {
+            daemon::FirstSliceSourceChunk {
+                source: Some(wire_source(reference)),
+                path: "src/lib.rs".to_owned(),
+                start_byte,
+                end_byte,
+                start_line: 1,
+                end_line: 1,
+                content: content.to_owned(),
+                content_hash: Some(content_hash_to_wire(reference.content_hash)),
+                language: "rust".to_owned(),
+                generated: false,
+            }
+        };
+        let source_read = daemon::SourceReadResponse {
+            schema_version: Some(first_slice_schema()),
+            context: Some(wire_query_context(2, 6)),
+            chunks: vec![chunk(&first, 0, 3, "aaa"), chunk(&second, 3, 6, "bbb")],
+            total_source_bytes: 6,
+            truncated: false,
+        };
+        assert!(
+            parse_source_read(
+                source_read.clone(),
+                test_repository(),
+                GenerationSelector::Active,
+                &[first.clone(), second.clone()],
+            )
+            .is_ok()
+        );
+        let mut reordered = source_read.clone();
+        reordered.chunks.swap(0, 1);
+        assert!(matches!(
+            parse_source_read(
+                reordered,
+                test_repository(),
+                GenerationSelector::Active,
+                &[first.clone(), second.clone()],
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        let mut wrong_total = source_read;
+        wrong_total.total_source_bytes = 3;
+        assert!(matches!(
+            parse_source_read(
+                wrong_total,
+                test_repository(),
+                GenerationSelector::Active,
+                &[first, second],
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
     }
 
     #[test]
@@ -1886,10 +3482,27 @@ mod tests {
     }
 
     fn valid_support_archive_v2() -> Vec<u8> {
+        valid_telemetry_support_archive(
+            rootlight_observability::ProtocolVersion::V1_4,
+            SupportBundleSchema::V2,
+        )
+    }
+
+    fn valid_support_archive_v3() -> Vec<u8> {
+        valid_telemetry_support_archive(
+            rootlight_observability::ProtocolVersion::V1_5,
+            SupportBundleSchema::V3,
+        )
+    }
+
+    fn valid_telemetry_support_archive(
+        protocol_version: rootlight_observability::ProtocolVersion,
+        schema: SupportBundleSchema,
+    ) -> Vec<u8> {
         let telemetry = rootlight_observability::Telemetry::default();
         telemetry.record_lifecycle(rootlight_observability::DaemonLifecycle::Ready);
         let input = rootlight_observability::SupportBundleInput {
-            protocol_version: rootlight_observability::ProtocolVersion::V1_4,
+            protocol_version,
             operating_system: rootlight_observability::OperatingSystem::Windows,
             architecture: rootlight_observability::Architecture::X86_64,
             health: SupportHealth {
@@ -1925,8 +3538,8 @@ mod tests {
             },
             telemetry: Some(telemetry.snapshot()),
         };
-        build_support_bundle_for_schema(&input, SupportBundleSchema::V2)
-            .expect("test schema v2 support bundle builds")
+        build_support_bundle_for_schema(&input, schema)
+            .expect("test telemetry support bundle builds")
             .archive()
             .to_vec()
     }
@@ -2126,14 +3739,36 @@ mod tests {
 
     #[test]
     fn support_bundle_decoder_negotiates_telemetry_schema() {
-        let archive = valid_support_archive_v2();
-        let response = support_response_with_schema(archive, CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION);
-        let parsed = parse_support_bundle(response.clone(), 4)
+        let v2 = support_response_with_schema(
+            valid_support_archive_v2(),
+            PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        );
+        let parsed = parse_support_bundle(v2.clone(), 4)
             .expect("protocol 1.4 accepts schema v2 support evidence");
+        assert_eq!(
+            parsed.schema_version,
+            PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION
+        );
+        assert!(parsed.telemetry.is_some());
+        assert!(matches!(
+            parse_support_bundle(v2.clone(), 3),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+        assert!(matches!(
+            parse_support_bundle(v2, 5),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+
+        let v3 = support_response_with_schema(
+            valid_support_archive_v3(),
+            CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        );
+        let parsed = parse_support_bundle(v3.clone(), 5)
+            .expect("protocol 1.5 accepts schema v3 support evidence");
         assert_eq!(parsed.schema_version, CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION);
         assert!(parsed.telemetry.is_some());
         assert!(matches!(
-            parse_support_bundle(response, 3),
+            parse_support_bundle(v3, 4),
             Err(ClientError::InvalidSupportBundle)
         ));
         assert!(matches!(
