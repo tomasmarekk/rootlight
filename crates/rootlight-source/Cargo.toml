@@ -1,0 +1,21 @@
+[package]
+name = "rootlight-source"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+rootlight-cancel = { path = "../rootlight-cancel" }
+rootlight-ids = { path = "../rootlight-ids" }
+rootlight-ir = { path = "../rootlight-ir" }
+rootlight-storage = { path = "../rootlight-storage" }
+rootlight-vfs = { path = "../rootlight-vfs" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
