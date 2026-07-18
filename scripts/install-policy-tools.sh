@@ -94,6 +94,57 @@ cargo install \
     --path "$geiger_source" \
     --root "$(dirname "$install_root")"
 
+geiger_binary="$install_root/cargo-geiger"
+geiger_version="$("$geiger_binary" --version)"
+if [[ "$geiger_version" != "cargo-geiger 0.13.0" ]]; then
+    printf 'unsupported installed cargo-geiger version: %s\n' "$geiger_version" >&2
+    exit 1
+fi
+python - \
+    "$geiger_binary" \
+    "$install_root/cargo-geiger.identity.json" \
+    "$geiger_version" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import sys
+
+binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
+digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+identity = {
+    "schema_version": "1.0",
+    "tool": "cargo-geiger",
+    "version": sys.argv[3],
+    "executable_sha256": digest,
+    "source_url": (
+        "https://static.crates.io/crates/cargo-geiger/"
+        "cargo-geiger-0.13.0.crate"
+    ),
+    "source_sha256": (
+        "f36131e0c6e5b9464ca742a88c697b07b3a387e72fc05ff50850279ba52d8879"
+    ),
+    "lockfile": "scripts/cargo-geiger-0.13.0.lock",
+    "lockfile_sha256": (
+        "e87104c9738f274e7f20e294027c863556bc9e41a4f60044f8b68898ba97a477"
+    ),
+}
+identity_path = pathlib.Path(sys.argv[2])
+if os.path.lexists(identity_path):
+    metadata = identity_path.lstat()
+    reparse = getattr(metadata, "st_file_attributes", 0) & getattr(
+        stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
+    )
+    if stat.S_ISLNK(metadata.st_mode) or reparse:
+        raise SystemExit("cargo-geiger install identity must not be an alias")
+identity_path.write_text(
+    json.dumps(identity, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+    newline="\n",
+)
+PY
+
 if [[ -n "${GITHUB_PATH:-}" ]]; then
     printf '%s\n' "$install_root" >> "$GITHUB_PATH"
 fi
