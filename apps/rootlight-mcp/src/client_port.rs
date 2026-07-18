@@ -524,7 +524,6 @@ fn map_client_error(error: ClientError) -> ClientPortError {
         | ClientError::UnexpectedResponse
         | ClientError::InvalidResponseSchema
         | ClientError::InvalidResponseCorrelation
-        | ClientError::ResponseAllocationFailed
         | ClientError::MissingOperation
         | ClientError::InvalidDaemonLifecycle
         | ClientError::InvalidHealthStatus
@@ -538,7 +537,8 @@ fn map_client_error(error: ClientError) -> ClientPortError {
         | ClientError::InvalidPlanHash
         | ClientError::InvalidIdentifier
         | ClientError::InvalidPublicError => ClientPortError::InvalidResponse,
-        ClientError::InvalidFirstSliceRequest
+        ClientError::ResponseAllocationFailed
+        | ClientError::InvalidFirstSliceRequest
         | ClientError::InvalidSourceReference
         | ClientError::InvalidRequestTimeout
         | ClientError::InvalidOperationTiming

@@ -39,6 +39,7 @@ use crate::{
 
 const DEFAULT_LOCATE_RESULTS: u16 = 20;
 const CURRENT_SOURCE_CONTEXT_LINES: u8 = 2;
+const INVALID_ARGUMENT_MESSAGE: &str = "tool arguments are invalid";
 const UNSUPPORTED_MESSAGE: &str = "requested option is not supported";
 
 /// Future returned by one injected first-slice client-port operation.
@@ -443,11 +444,15 @@ pub enum ToolExecutorBuildError {
     /// The built-in unsupported-capability error violated the public contract.
     #[error("built-in unsupported capability error is invalid")]
     UnsupportedError(#[source] PublicErrorBuildError),
+    /// The built-in invalid-argument error violated the public contract.
+    #[error("built-in invalid argument error is invalid")]
+    InvalidArgumentError(#[source] PublicErrorBuildError),
 }
 
 /// Production MCP executor over an injected asynchronous daemon-client port.
 pub struct FirstSliceToolExecutor<P> {
     port: Arc<P>,
+    invalid_arguments: PublicError,
     unsupported: PublicError,
 }
 
@@ -469,8 +474,16 @@ where
                 .next_action(NextAction::CorrectField { field })
                 .build()
                 .map_err(ToolExecutorBuildError::UnsupportedError)?;
+        let field =
+            DetailKey::parse("arguments").map_err(ToolExecutorBuildError::InvalidArgumentError)?;
+        let invalid_arguments =
+            PublicError::builder(ErrorCode::InvalidArgument, INVALID_ARGUMENT_MESSAGE)
+                .next_action(NextAction::CorrectField { field })
+                .build()
+                .map_err(ToolExecutorBuildError::InvalidArgumentError)?;
         Ok(Self {
             port: Arc::new(port),
+            invalid_arguments,
             unsupported,
         })
     }
@@ -487,11 +500,19 @@ where
         cancellation: RequestCancellation,
     ) -> ToolExecutionFuture {
         let port = Arc::clone(&self.port);
+        let invalid_arguments = self.invalid_arguments.clone();
         let unsupported = self.unsupported.clone();
         Box::pin(async move {
             match tool {
                 VerticalTool::RepoIndex => {
-                    execute_repository_index(port, arguments, cancellation, &unsupported).await
+                    execute_repository_index(
+                        port,
+                        arguments,
+                        cancellation,
+                        &unsupported,
+                        &invalid_arguments,
+                    )
+                    .await
                 }
                 VerticalTool::OperationStatus => {
                     execute_operation_status(port, arguments, cancellation).await
@@ -503,7 +524,14 @@ where
                     execute_symbol_explain(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::SourceRead => {
-                    execute_source_read(port, arguments, cancellation, &unsupported).await
+                    execute_source_read(
+                        port,
+                        arguments,
+                        cancellation,
+                        &unsupported,
+                        &invalid_arguments,
+                    )
+                    .await
                 }
             }
         })
@@ -523,12 +551,13 @@ async fn execute_repository_index<P>(
     arguments: Map<String, Value>,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
+    invalid_arguments: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
     let input: RepoIndexInput = decode_input(arguments)?;
-    let request = normalize_repository_index(input, unsupported)?;
+    let request = normalize_repository_index(input, unsupported, invalid_arguments)?;
     let expected_mode = request.mode;
     let future = port.repository_index(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -602,12 +631,13 @@ async fn execute_source_read<P>(
     arguments: Map<String, Value>,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
+    invalid_arguments: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
     let input: SourceReadInput = decode_input(arguments)?;
-    let request = normalize_source_read(input, unsupported)?;
+    let request = normalize_source_read(input, unsupported, invalid_arguments)?;
     let expected = request.clone();
     let future = port.source_read(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -637,6 +667,7 @@ where
 fn normalize_repository_index(
     input: RepoIndexInput,
     unsupported: &PublicError,
+    invalid_arguments: &PublicError,
 ) -> Result<RepositoryIndexPortRequest, ToolExecutionError> {
     if input.repository_id.is_some()
         || !matches!(input.scope, None | Some(IndexScope::Repository(_)))
@@ -656,6 +687,9 @@ fn normalize_repository_index(
     let root = input
         .root
         .ok_or_else(|| internal(ToolExecutionFailure::Executor))?;
+    if root.contains('\0') {
+        return Err(ToolExecutionError::new(invalid_arguments.clone()));
+    }
     Ok(RepositoryIndexPortRequest {
         root,
         mode: input.mode.unwrap_or(IndexMode::Auto),
@@ -721,6 +755,7 @@ fn normalize_symbol_explain(
 fn normalize_source_read(
     input: SourceReadInput,
     unsupported: &PublicError,
+    invalid_arguments: &PublicError,
 ) -> Result<SourceReadPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
     if !matches!(
@@ -741,6 +776,11 @@ fn normalize_source_read(
     }
 
     let generation = client_generation(input.generation);
+    let explicit_generation = match generation {
+        client::GenerationSelector::Active => None,
+        client::GenerationSelector::Generation(generation) => Some(generation),
+    };
+    let mut reference_generation = None;
     let mut references = Vec::new();
     references
         .try_reserve_exact(input.references.len())
@@ -750,21 +790,30 @@ fn normalize_source_read(
             return Err(ToolExecutionError::new(unsupported.clone()));
         };
         let source = reference.source_ref;
+        if source.repository() != repository
+            || explicit_generation.is_some_and(|generation| source.generation() != generation)
+            || reference_generation.is_some_and(|generation| source.generation() != generation)
+        {
+            return Err(ToolExecutionError::new(invalid_arguments.clone()));
+        }
+        reference_generation = Some(source.generation());
         let span = source.span();
         let lines = source
             .line_hint()
             .map(|lines| lines.start_line()..=lines.end_line());
-        references.push(
-            client::SourceReference::new(
-                source.repository(),
-                source.generation(),
-                span.file(),
-                span.start_byte()..span.end_byte(),
-                source.content_hash(),
-                lines,
-            )
-            .map_err(|_| internal(ToolExecutionFailure::Executor))?,
-        );
+        let reference = client::SourceReference::new(
+            source.repository(),
+            source.generation(),
+            span.file(),
+            span.start_byte()..span.end_byte(),
+            source.content_hash(),
+            lines,
+        )
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        if references.contains(&reference) {
+            return Err(ToolExecutionError::new(invalid_arguments.clone()));
+        }
+        references.push(reference);
     }
     Ok(SourceReadPortRequest {
         repository,

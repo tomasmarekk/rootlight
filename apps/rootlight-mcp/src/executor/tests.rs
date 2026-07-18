@@ -275,13 +275,96 @@ fn source_reference(
 }
 
 fn wire_source_reference(start: u64, end: u64, start_line: u64, end_line: u64) -> SourceRef {
+    wire_source_reference_for(repository(), generation(), start, end, start_line, end_line)
+}
+
+fn wire_source_reference_for(
+    repository: RepositoryId,
+    generation: GenerationId,
+    start: u64,
+    end: u64,
+    start_line: u64,
+    end_line: u64,
+) -> SourceRef {
     SourceRef::new(
-        repository(),
-        generation(),
+        repository,
+        generation,
         SourceSpan::new(file(), start, end).expect("test span is valid"),
         content_hash(),
         Some(LineRange::new(start_line, end_line).expect("test lines are valid")),
     )
+}
+
+fn schema_valid_invalid_inputs() -> Vec<(VerticalTool, Value)> {
+    let exact = wire_source_reference(5, 10, 2, 2);
+    vec![
+        (
+            VerticalTool::RepoIndex,
+            json!({"root": "C:/fixture\0invalid"}),
+        ),
+        (
+            VerticalTool::SourceRead,
+            json!({
+                "repository": {"repository_id": repository()},
+                "references": [{
+                    "source_ref": wire_source_reference_for(
+                        RepositoryId::from_bytes([9; 16]),
+                        generation(),
+                        5,
+                        10,
+                        2,
+                        2,
+                    )
+                }]
+            }),
+        ),
+        (
+            VerticalTool::SourceRead,
+            json!({
+                "repository": {"repository_id": repository()},
+                "generation": generation(),
+                "references": [{
+                    "source_ref": wire_source_reference_for(
+                        repository(),
+                        parent_generation(),
+                        5,
+                        10,
+                        2,
+                        2,
+                    )
+                }]
+            }),
+        ),
+        (
+            VerticalTool::SourceRead,
+            json!({
+                "repository": {"repository_id": repository()},
+                "references": [
+                    {"source_ref": exact.clone()},
+                    {
+                        "source_ref": wire_source_reference_for(
+                            repository(),
+                            parent_generation(),
+                            10,
+                            15,
+                            3,
+                            3,
+                        )
+                    }
+                ]
+            }),
+        ),
+        (
+            VerticalTool::SourceRead,
+            json!({
+                "repository": {"repository_id": repository()},
+                "references": [
+                    {"source_ref": exact.clone()},
+                    {"source_ref": exact}
+                ]
+            }),
+        ),
+    ]
 }
 
 fn usage(results: u64, source_bytes: u64) -> QueryUsage {
@@ -996,6 +1079,51 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
     }
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn executor_rejects_semantically_invalid_arguments_before_the_port() {
+    let harness = Harness::new(FakeOutcome::RepositoryIndex(Err(ClientPortError::Executor)));
+
+    for (tool, arguments) in schema_valid_invalid_inputs() {
+        let error = execute(&harness.executor, tool, arguments)
+            .await
+            .expect_err("semantically invalid arguments are rejected");
+        let public = error
+            .public_error()
+            .expect("caller-controlled invalid input is a checked public error");
+        assert_eq!(public.code(), ErrorCode::InvalidArgument);
+        assert_eq!(public.message(), INVALID_ARGUMENT_MESSAGE);
+    }
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn router_returns_invalid_argument_for_semantically_invalid_inputs() {
+    let harness = Harness::new(FakeOutcome::RepositoryIndex(Err(ClientPortError::Executor)));
+    let call_count = Arc::clone(&harness.call_count);
+    let router = ToolRouter::new(harness.executor).expect("router compiles");
+
+    for (tool, arguments) in schema_valid_invalid_inputs() {
+        let response = router
+            .handle(
+                operating_request(json!({
+                    "name": tool.name(),
+                    "arguments": arguments
+                })),
+                cancellation(),
+            )
+            .await;
+        let HandlerResponse::Success(result) = response else {
+            panic!("invalid arguments are an MCP tool result");
+        };
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["structuredContent"]["error"]["code"],
+            "INVALID_ARGUMENT"
+        );
+    }
+    assert_eq!(call_count.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
