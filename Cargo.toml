@@ -48,9 +48,7 @@ prost = { version = "0.14.4", default-features = false, features = ["derive", "s
 prost-build = { version = "0.14.4", default-features = false, features = ["format"] }
 prost-types = { version = "0.14.4", default-features = false, features = ["std"] }
 protoc-bin-vendored = { version = "3.2.0", default-features = false }
-renamore = { version = "=0.3.2", default-features = false }
 rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled", "column_decltype", "hooks", "modern_sqlite"] }
-rustix = { version = "=1.1.4", default-features = false }
 schemars = { version = "1.2.1", default-features = false, features = ["derive", "std"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
