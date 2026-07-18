@@ -1709,6 +1709,8 @@ dependencies = [
  "rootlight-cancel",
  "rootlight-ids",
  "rootlight-ir",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

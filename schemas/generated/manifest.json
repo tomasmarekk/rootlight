@@ -14,7 +14,7 @@
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
-      "blake3": "a8dd049006d8f51143eaac59d2d711817ae1d3357881e98f11bc017f09c10ca3"
+      "blake3": "bfb622218a7a5eab54759130fd372c74e460793dd6f51896454a121558970e57"
     },
     {
       "path": "proto/adapter_v1.proto",
@@ -87,6 +87,10 @@
     {
       "path": "tests/fixtures/compatibility/storage/1.1/schema-fingerprints.json",
       "blake3": "4117e9c17ed88c38030e076643e9d4959e32627b664dfeb41d14bf622e3a9d4b"
+    },
+    {
+      "path": "tests/fixtures/compatibility/storage/1.2/schema-fingerprints.json",
+      "blake3": "0331923051326f8a61ed8ef1491bbaa2d8d26b1295a0f1dde67b938e23dccd14"
     }
   ],
   "artifacts": [

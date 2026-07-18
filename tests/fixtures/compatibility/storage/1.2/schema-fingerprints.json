@@ -1,0 +1,17 @@
+{
+  "fixture_version": "1.0",
+  "generation_contract": {
+    "major": 1,
+    "minor": 2
+  },
+  "catalog": {
+    "application_id": 1380729684,
+    "schema_version": 2,
+    "checksum": "b3_lssg33qrrqrb2pvnciszj67k7diffe3omtpp6ofejtquszlcvspiaimmpy"
+  },
+  "oracle": {
+    "application_id": 1380732754,
+    "schema_version": 2,
+    "checksum": "b3_bevdhmdbqvi5ufolgiql35ttvqwfxgsmp35dhc4xrwreigvs3dtegmljpu"
+  }
+}
