@@ -28,7 +28,7 @@ use rootlight_discovery::{
     discover,
 };
 use rootlight_ids::{
-    ContentHash, GenerationId, GenerationIdentity, RepositoryId, SymbolId, content_hash,
+    ContentHash, FileId, GenerationId, GenerationIdentity, RepositoryId, SymbolId, content_hash,
     derive_generation, derive_repository,
 };
 use rootlight_ir::{
@@ -50,6 +50,7 @@ use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot, VfsError};
 use serde::Serialize;
 
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
+const MAX_RETAINED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SYNTAX_NODES: usize = 16_384;
 const MAX_SYNTAX_DEPTH: usize = 128;
 const MAX_REPOSITORY_PATH_IDENTITY_BYTES: usize = 64 * 1024;
@@ -127,7 +128,7 @@ impl FirstSliceIndexPreparation {
 pub struct PreparedFirstSliceIndex {
     verified: IdentityVerifiedGeneration,
     search: LexicalIndex,
-    root: RepositoryRoot,
+    sources: Vec<RustSourceInput>,
     receipt: FirstSliceIndexReceipt,
     root_identity: ContentHash,
     register_repository: bool,
@@ -153,7 +154,6 @@ impl FirstSliceStagedIndex {
 enum FirstSlicePublication {
     Retained,
     Pending {
-        root: RepositoryRoot,
         root_identity: ContentHash,
         register_repository: bool,
     },
@@ -164,12 +164,359 @@ struct RustSourceInput {
     generated: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SourceSnapshotIdentity {
+    file: FileId,
+    content_hash: ContentHash,
+}
+
+impl From<&SourceSnapshot> for SourceSnapshotIdentity {
+    fn from(snapshot: &SourceSnapshot) -> Self {
+        Self {
+            file: snapshot.file(),
+            content_hash: snapshot.content_hash(),
+        }
+    }
+}
+
+struct SharedSourceSnapshot {
+    snapshot: Arc<SourceSnapshot>,
+    generation_references: usize,
+}
+
+struct SourceSnapshotAdmission {
+    generation: GenerationId,
+    retained: Vec<Arc<SourceSnapshot>>,
+    additional_bytes: usize,
+}
+
+struct SourceSnapshotRelease {
+    generation: GenerationId,
+    snapshots: Vec<Arc<SourceSnapshot>>,
+    updates: Vec<SourceSnapshotReleaseUpdate>,
+    retained_bytes_after: usize,
+}
+
+enum SourceSnapshotReleaseUpdate {
+    Retain {
+        identity: SourceSnapshotIdentity,
+        snapshot: Arc<SourceSnapshot>,
+        generation_references: usize,
+    },
+    Remove(SourceSnapshotIdentity),
+}
+
+/// Bounded process-local source fallback mirroring generation publication.
+///
+/// Source bodies remain outside the core index and are never persisted. The
+/// byte ceiling and content-identity sharing keep this Gate-1 fallback bounded
+/// until the later durable source-retention architecture is authorized.
+struct SourceSnapshotRetention {
+    maximum_generations: usize,
+    maximum_bytes: usize,
+    retained_bytes: usize,
+    shared: BTreeMap<SourceSnapshotIdentity, SharedSourceSnapshot>,
+    committed: BTreeMap<GenerationId, Vec<Arc<SourceSnapshot>>>,
+    staged: BTreeMap<GenerationId, Vec<Arc<SourceSnapshot>>>,
+}
+
+impl SourceSnapshotRetention {
+    fn new(maximum_generations: usize, maximum_bytes: usize) -> Result<Self, FirstSliceError> {
+        if maximum_generations == 0 || maximum_bytes == 0 {
+            return Err(FirstSliceError::Retention);
+        }
+        Ok(Self {
+            maximum_generations,
+            maximum_bytes,
+            retained_bytes: 0,
+            shared: BTreeMap::new(),
+            committed: BTreeMap::new(),
+            staged: BTreeMap::new(),
+        })
+    }
+
+    fn admit(
+        &self,
+        generation: GenerationId,
+        mut sources: Vec<RustSourceInput>,
+        cancellation: &Cancellation,
+    ) -> Result<SourceSnapshotAdmission, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        if self.committed.contains_key(&generation) || self.staged.contains_key(&generation) {
+            return Err(FirstSliceError::Retention);
+        }
+        let retained_generations = self
+            .committed
+            .len()
+            .checked_add(self.staged.len())
+            .ok_or(FirstSliceError::Retention)?;
+        if retained_generations >= self.maximum_generations {
+            return Err(FirstSliceError::Retention);
+        }
+
+        sources.sort_unstable_by_key(|source| SourceSnapshotIdentity::from(&source.snapshot));
+        let mut retained = Vec::new();
+        retained
+            .try_reserve_exact(sources.len())
+            .map_err(|_| FirstSliceError::Retention)?;
+        let mut previous_file = None;
+        let mut additional_bytes = 0usize;
+        for source in &sources {
+            check_cancellation(cancellation)?;
+            let identity = SourceSnapshotIdentity::from(&source.snapshot);
+            if previous_file == Some(identity.file) {
+                return Err(FirstSliceError::Retention);
+            }
+            previous_file = Some(identity.file);
+            if !self.shared.contains_key(&identity) {
+                additional_bytes = additional_bytes
+                    .checked_add(source.snapshot.content().len())
+                    .ok_or(FirstSliceError::Retention)?;
+            }
+        }
+        let admitted_bytes = self
+            .retained_bytes
+            .checked_add(additional_bytes)
+            .ok_or(FirstSliceError::Retention)?;
+        if admitted_bytes > self.maximum_bytes {
+            return Err(FirstSliceError::Retention);
+        }
+        check_cancellation(cancellation)?;
+
+        for source in sources {
+            check_cancellation(cancellation)?;
+            let identity = SourceSnapshotIdentity::from(&source.snapshot);
+            let snapshot = self
+                .shared
+                .get(&identity)
+                .map(|shared| Arc::clone(&shared.snapshot))
+                .unwrap_or_else(|| Arc::new(source.snapshot));
+            retained.push(snapshot);
+        }
+        check_cancellation(cancellation)?;
+
+        Ok(SourceSnapshotAdmission {
+            generation,
+            retained,
+            additional_bytes,
+        })
+    }
+
+    fn stage(&mut self, admission: SourceSnapshotAdmission) -> Result<(), FirstSliceError> {
+        if self.committed.contains_key(&admission.generation)
+            || self.staged.contains_key(&admission.generation)
+        {
+            return Err(FirstSliceError::Retention);
+        }
+        let retained_generations = self
+            .committed
+            .len()
+            .checked_add(self.staged.len())
+            .ok_or(FirstSliceError::Retention)?;
+        if retained_generations >= self.maximum_generations {
+            return Err(FirstSliceError::Retention);
+        }
+        let admitted_bytes = self
+            .retained_bytes
+            .checked_add(admission.additional_bytes)
+            .ok_or(FirstSliceError::Retention)?;
+        if admitted_bytes > self.maximum_bytes {
+            return Err(FirstSliceError::Retention);
+        }
+        let mut reference_updates = Vec::new();
+        reference_updates
+            .try_reserve_exact(admission.retained.len())
+            .map_err(|_| FirstSliceError::Retention)?;
+        for snapshot in &admission.retained {
+            let identity = SourceSnapshotIdentity::from(snapshot.as_ref());
+            let generation_references = self.shared.get(&identity).map_or(Ok(1), |shared| {
+                shared
+                    .generation_references
+                    .checked_add(1)
+                    .ok_or(FirstSliceError::Retention)
+            })?;
+            reference_updates.push((identity, generation_references));
+        }
+
+        let SourceSnapshotAdmission {
+            generation,
+            retained,
+            additional_bytes: _,
+        } = admission;
+        let Self {
+            retained_bytes,
+            shared,
+            staged,
+            ..
+        } = self;
+        let std::collections::btree_map::Entry::Vacant(staged_entry) = staged.entry(generation)
+        else {
+            return Err(FirstSliceError::Retention);
+        };
+        for ((identity, generation_references), snapshot) in
+            reference_updates.into_iter().zip(&retained)
+        {
+            match shared.entry(identity) {
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().generation_references = generation_references;
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(SharedSourceSnapshot {
+                        snapshot: Arc::clone(snapshot),
+                        generation_references,
+                    });
+                }
+            }
+        }
+        staged_entry.insert(retained);
+        *retained_bytes = admitted_bytes;
+        Ok(())
+    }
+
+    fn commit_staged(&mut self, generation: GenerationId) -> Result<(), FirstSliceError> {
+        let Self {
+            committed, staged, ..
+        } = self;
+        let std::collections::btree_map::Entry::Vacant(committed_entry) =
+            committed.entry(generation)
+        else {
+            return Err(FirstSliceError::Retention);
+        };
+        let snapshots = staged
+            .remove(&generation)
+            .ok_or(FirstSliceError::Retention)?;
+        committed_entry.insert(snapshots);
+        Ok(())
+    }
+
+    fn rollback_commit(&mut self, generation: GenerationId) -> Result<(), FirstSliceError> {
+        let Self {
+            committed, staged, ..
+        } = self;
+        let std::collections::btree_map::Entry::Vacant(staged_entry) = staged.entry(generation)
+        else {
+            return Err(FirstSliceError::Retention);
+        };
+        let snapshots = committed
+            .remove(&generation)
+            .ok_or(FirstSliceError::Retention)?;
+        staged_entry.insert(snapshots);
+        Ok(())
+    }
+
+    fn begin_discard(
+        &mut self,
+        generation: GenerationId,
+    ) -> Result<SourceSnapshotRelease, FirstSliceError> {
+        let snapshots = self
+            .staged
+            .get(&generation)
+            .ok_or(FirstSliceError::Retention)?;
+        let mut updates = Vec::new();
+        updates
+            .try_reserve_exact(snapshots.len())
+            .map_err(|_| FirstSliceError::Retention)?;
+        let mut released_bytes = 0usize;
+        for snapshot in snapshots {
+            let identity = SourceSnapshotIdentity::from(snapshot.as_ref());
+            let shared = self
+                .shared
+                .get(&identity)
+                .ok_or(FirstSliceError::Retention)?;
+            if shared.generation_references == 0 {
+                return Err(FirstSliceError::Retention);
+            }
+            if shared.generation_references == 1 {
+                released_bytes = released_bytes
+                    .checked_add(shared.snapshot.content().len())
+                    .ok_or(FirstSliceError::Retention)?;
+                updates.push(SourceSnapshotReleaseUpdate::Remove(identity));
+            } else {
+                let generation_references = shared
+                    .generation_references
+                    .checked_sub(1)
+                    .ok_or(FirstSliceError::Retention)?;
+                updates.push(SourceSnapshotReleaseUpdate::Retain {
+                    identity,
+                    snapshot: Arc::clone(&shared.snapshot),
+                    generation_references,
+                });
+            }
+        }
+        let retained_bytes_after = self
+            .retained_bytes
+            .checked_sub(released_bytes)
+            .ok_or(FirstSliceError::Retention)?;
+        let snapshots = self
+            .staged
+            .remove(&generation)
+            .ok_or(FirstSliceError::Retention)?;
+        Ok(SourceSnapshotRelease {
+            generation,
+            snapshots,
+            updates,
+            retained_bytes_after,
+        })
+    }
+
+    fn finish_discard(&mut self, release: SourceSnapshotRelease) {
+        for update in release.updates {
+            match update {
+                SourceSnapshotReleaseUpdate::Retain {
+                    identity,
+                    snapshot,
+                    generation_references,
+                } => match self.shared.entry(identity) {
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        entry.get_mut().generation_references = generation_references;
+                    }
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(SharedSourceSnapshot {
+                            snapshot,
+                            generation_references,
+                        });
+                    }
+                },
+                SourceSnapshotReleaseUpdate::Remove(identity) => {
+                    self.shared.remove(&identity);
+                }
+            }
+        }
+        self.retained_bytes = release.retained_bytes_after;
+    }
+
+    fn rollback_discard(&mut self, release: SourceSnapshotRelease) -> Result<(), FirstSliceError> {
+        let std::collections::btree_map::Entry::Vacant(staged_entry) =
+            self.staged.entry(release.generation)
+        else {
+            return Err(FirstSliceError::Retention);
+        };
+        staged_entry.insert(release.snapshots);
+        Ok(())
+    }
+
+    fn snapshots(&self, generation: GenerationId) -> Option<&[Arc<SourceSnapshot>]> {
+        self.committed.get(&generation).map(Vec::as_slice)
+    }
+
+    #[cfg(test)]
+    const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    #[cfg(test)]
+    fn staged_generations(&self) -> usize {
+        self.staged.len()
+    }
+}
+
 /// Transport-independent owner of bounded ephemeral fixture generations.
 ///
-/// The service intentionally retains at most the caller-selected hard-bounded
-/// generation count. SQLite and lexical state are in memory because ADR-026
-/// has not authorized durable private-file creation. Full crash recovery,
-/// leases, and filesystem publication remain M12 work.
+/// The service retains at most the caller-selected hard-bounded generation
+/// count and 64 MiB of deduplicated source content bytes. SQLite, lexical, and
+/// source state are process-local because ADR-026 has not authorized durable
+/// private-file creation. Full crash recovery, leases, and filesystem
+/// publication remain M12 work.
 pub struct FirstSliceService {
     config: ConfigSnapshot,
     analysis_limits: AnalysisLimits,
@@ -181,7 +528,7 @@ pub struct FirstSliceService {
     repositories: BTreeMap<ContentHash, RepositoryId>,
     active_by_repository: BTreeMap<RepositoryId, GenerationId>,
     generations: GenerationSet<LexicalIndex>,
-    roots: BTreeMap<GenerationId, RepositoryRoot>,
+    source_snapshots: SourceSnapshotRetention,
     receipts: BTreeMap<GenerationId, FirstSliceIndexReceipt>,
 }
 
@@ -191,8 +538,16 @@ impl FirstSliceService {
     /// # Errors
     ///
     /// Returns [`FirstSliceError`] when a required bounded parser, analyzer,
-    /// configuration, or generation-retention contract cannot initialize.
+    /// configuration, generation-retention, or source-retention contract cannot
+    /// initialize.
     pub fn new(maximum_generations: usize) -> Result<Self, FirstSliceError> {
+        Self::new_with_source_limit(maximum_generations, MAX_RETAINED_SOURCE_BYTES)
+    }
+
+    fn new_with_source_limit(
+        maximum_generations: usize,
+        maximum_source_bytes: usize,
+    ) -> Result<Self, FirstSliceError> {
         let config = ConfigSnapshot::resolve(&[ConfigLayer {
             source: ConfigSource::Defaults,
             contents: "version = \"1.0\"",
@@ -217,6 +572,8 @@ impl FirstSliceService {
         .map_err(|_| FirstSliceError::Adapter)?;
         let generations =
             GenerationSet::new(maximum_generations).map_err(|_| FirstSliceError::Retention)?;
+        let source_snapshots =
+            SourceSnapshotRetention::new(maximum_generations, maximum_source_bytes)?;
         Ok(Self {
             config,
             analysis_limits,
@@ -225,7 +582,7 @@ impl FirstSliceService {
             repositories: BTreeMap::new(),
             active_by_repository: BTreeMap::new(),
             generations,
-            roots: BTreeMap::new(),
+            source_snapshots,
             receipts: BTreeMap::new(),
         })
     }
@@ -475,7 +832,7 @@ impl FirstSliceService {
             PreparedFirstSliceIndex {
                 verified,
                 search,
-                root,
+                sources: rust_sources,
                 receipt,
                 root_identity,
                 register_repository: existing_repository.is_none(),
@@ -529,16 +886,31 @@ impl FirstSliceService {
                 publication: FirstSlicePublication::Retained,
             }),
             FirstSliceIndexPreparation::Pending(prepared) => {
-                let receipt = prepared.receipt;
+                let PreparedFirstSliceIndex {
+                    verified,
+                    search,
+                    sources,
+                    receipt,
+                    root_identity,
+                    register_repository,
+                } = prepared;
+                let source_admission =
+                    self.source_snapshots
+                        .admit(receipt.generation, sources, cancellation)?;
                 self.generations
-                    .stage(prepared.verified, prepared.search)
+                    .stage(verified, search)
                     .map_err(|_| FirstSliceError::Retention)?;
+                if let Err(error) = self.source_snapshots.stage(source_admission) {
+                    self.generations
+                        .discard_staged(receipt.generation)
+                        .map_err(|_| FirstSliceError::Retention)?;
+                    return Err(error);
+                }
                 Ok(FirstSliceStagedIndex {
                     receipt,
                     publication: FirstSlicePublication::Pending {
-                        root: prepared.root,
-                        root_identity: prepared.root_identity,
-                        register_repository: prepared.register_repository,
+                        root_identity,
+                        register_repository,
                     },
                 })
             }
@@ -568,14 +940,22 @@ impl FirstSliceService {
                     .map_err(|_| FirstSliceError::Retention)?;
             }
             FirstSlicePublication::Pending {
-                root,
                 root_identity,
                 register_repository,
             } => {
-                self.generations
-                    .commit_staged(receipt.generation, true)
+                self.source_snapshots
+                    .commit_staged(receipt.generation)
                     .map_err(|_| FirstSliceError::Retention)?;
-                self.roots.insert(receipt.generation, root);
+                if self
+                    .generations
+                    .commit_staged(receipt.generation, true)
+                    .is_err()
+                {
+                    self.source_snapshots
+                        .rollback_commit(receipt.generation)
+                        .map_err(|_| FirstSliceError::Retention)?;
+                    return Err(FirstSliceError::Retention);
+                }
                 self.receipts.insert(receipt.generation, receipt);
                 if register_repository {
                     self.repositories.insert(root_identity, receipt.repository);
@@ -595,9 +975,20 @@ impl FirstSliceService {
     /// was already consumed or does not belong to this service.
     pub fn discard_staged(&mut self, staged: FirstSliceStagedIndex) -> Result<(), FirstSliceError> {
         if matches!(staged.publication, FirstSlicePublication::Pending { .. }) {
-            self.generations
+            let source_release = self
+                .source_snapshots
+                .begin_discard(staged.receipt.generation)?;
+            if self
+                .generations
                 .discard_staged(staged.receipt.generation)
-                .map_err(|_| FirstSliceError::Retention)?;
+                .is_err()
+            {
+                self.source_snapshots
+                    .rollback_discard(source_release)
+                    .map_err(|_| FirstSliceError::Retention)?;
+                return Err(FirstSliceError::Retention);
+            }
+            self.source_snapshots.finish_discard(source_release);
         }
         Ok(())
     }
@@ -735,8 +1126,11 @@ impl FirstSliceService {
             .generations
             .generation(generation)
             .map_err(|_| FirstSliceError::Query)?;
-        let root = self.roots.get(&generation).ok_or(FirstSliceError::Query)?;
-        let source = SourceService::new(root, snapshot)
+        let source_snapshots = self
+            .source_snapshots
+            .snapshots(generation)
+            .ok_or(FirstSliceError::Query)?;
+        let source = SourceService::from_snapshots(source_snapshots, snapshot)
             .map_err(|error| map_source_error(error, cancellation))?;
         let plan = service
             .plan_source_read(
@@ -817,8 +1211,8 @@ pub enum FirstSliceError {
     /// The immutable generation belongs to another repository.
     #[error("first-slice generation does not belong to the repository")]
     GenerationMismatch,
-    /// The retained generation set cannot admit another generation.
-    #[error("first-slice generation retention is exhausted")]
+    /// Generation or process-local source retention cannot admit more state.
+    #[error("first-slice retention is exhausted")]
     Retention,
     /// A configured integer or duration is not representable.
     #[error("first-slice limits are invalid")]
@@ -1315,6 +1709,130 @@ mod tests {
     }
 
     #[test]
+    fn source_retention_is_byte_bounded_deduplicated_and_cleanup_aware() {
+        const FIRST: &str = "pub fn answer() -> u32 {\n    42\n}\n";
+        const SECOND: &str = "pub fn answer() -> u32 {\n    43\n}\n";
+        const THIRD: &str = "pub fn answer() -> u32 {\n    44\n}\n";
+        const STABLE: &str = "pub fn stable() -> bool {\n    true\n}\n";
+
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let answer_path = fixture.path().join("src/lib.rs");
+        fs::write(&answer_path, FIRST).expect("first source writes");
+        fs::write(fixture.path().join("src/stable.rs"), STABLE).expect("stable source writes");
+        let first_generation_bytes = FIRST.len() + STABLE.len();
+        let exact_retention_bytes = first_generation_bytes + SECOND.len();
+        let mut service = FirstSliceService::new_with_source_limit(3, exact_retention_bytes)
+            .expect("bounded first-slice service initializes");
+
+        let cancelled = deadline();
+        let prepared = service
+            .prepare_rust_fixture(fixture.path(), &cancelled)
+            .expect("first generation prepares");
+        let staged = service
+            .stage_prepared(prepared, &cancelled)
+            .expect("first generation stages");
+        assert_eq!(
+            service.source_snapshots.retained_bytes(),
+            first_generation_bytes
+        );
+        assert_eq!(service.source_snapshots.staged_generations(), 1);
+        assert!(cancelled.cancel(CancellationReason::ClientRequest));
+        service
+            .discard_staged(staged)
+            .expect("cancelled staging releases source retention");
+        assert_eq!(service.source_snapshots.retained_bytes(), 0);
+        assert_eq!(service.source_snapshots.staged_generations(), 0);
+
+        let first = service
+            .index_rust_fixture(fixture.path(), &deadline())
+            .expect("first generation publishes after cleanup");
+        let first_locate = service
+            .code_locate(
+                first.generation,
+                "answer".to_owned(),
+                LocateMode::Exact,
+                1,
+                &deadline(),
+            )
+            .expect("first answer locates");
+        let first_reference = first_locate.data.hits[0]
+            .source
+            .clone()
+            .expect("first answer has exact source evidence");
+
+        fs::write(&answer_path, SECOND).expect("second source writes");
+        let second = service
+            .index_rust_fixture(fixture.path(), &deadline())
+            .expect("exact source retention cap admits the successor");
+        assert_eq!(
+            service.source_snapshots.retained_bytes(),
+            exact_retention_bytes
+        );
+        let second_locate = service
+            .code_locate(
+                second.generation,
+                "answer".to_owned(),
+                LocateMode::Exact,
+                1,
+                &deadline(),
+            )
+            .expect("second answer locates");
+        let second_reference = second_locate.data.hits[0]
+            .source
+            .clone()
+            .expect("second answer has exact source evidence");
+
+        fs::write(&answer_path, THIRD).expect("third source writes");
+        let prepared = service
+            .prepare_rust_fixture(fixture.path(), &deadline())
+            .expect("over-cap successor prepares before retention admission");
+        let third = prepared.receipt();
+        assert!(matches!(
+            service.stage_prepared(prepared, &deadline()),
+            Err(FirstSliceError::Retention)
+        ));
+        assert_eq!(
+            service.source_snapshots.retained_bytes(),
+            exact_retention_bytes
+        );
+        assert_eq!(service.source_snapshots.staged_generations(), 0);
+        assert_eq!(
+            service.active_generation_for(first.repository),
+            Some(second.generation)
+        );
+        assert_eq!(
+            service.resolve_generation(first.repository, Some(third.generation)),
+            Err(FirstSliceError::GenerationNotFound)
+        );
+        assert!(matches!(
+            service.source_read(third.generation, vec![first_reference.clone()], &deadline(),),
+            Err(FirstSliceError::Query)
+        ));
+
+        let first_source = service
+            .source_read(first.generation, vec![first_reference.clone()], &deadline())
+            .expect("published first snapshot remains readable");
+        assert_eq!(first_source.data.chunks[0].text, FIRST);
+        assert_eq!(
+            first_source.data.chunks[0].content_hash,
+            first_reference.content_hash()
+        );
+        let second_source = service
+            .source_read(
+                second.generation,
+                vec![second_reference.clone()],
+                &deadline(),
+            )
+            .expect("published second snapshot remains readable");
+        assert_eq!(second_source.data.chunks[0].text, SECOND);
+        assert_eq!(
+            second_source.data.chunks[0].content_hash,
+            second_reference.content_hash()
+        );
+    }
+
+    #[test]
     fn gate_fixture_preserves_nested_policy_recovery_and_generation_lineage() {
         let fixture = materialize_gate_fixture();
         let cancellation = Cancellation::with_deadline(
@@ -1349,7 +1867,7 @@ mod tests {
             .clone()
             .expect("v1 answer retains exact source evidence");
         let cached_v1_source = service
-            .source_read(first.generation, vec![first_answer], &cancellation)
+            .source_read(first.generation, vec![first_answer.clone()], &cancellation)
             .expect("v1 answer source reads");
         assert_eq!(cached_v1_source.data.chunks.len(), 1);
         let cached_v1_text = &cached_v1_source.data.chunks[0].text;
@@ -1454,6 +1972,20 @@ mod tests {
         assert_eq!(prior_answer.data.hits.len(), 1);
         assert_eq!(prior_answer.data.hits[0].symbol, first_symbol);
         assert_eq!(prior_answer.data.hits[0].path, "src/lib.rs");
+        let prior_reference = prior_answer.data.hits[0]
+            .source
+            .clone()
+            .expect("prior answer retains exact source evidence");
+        assert_eq!(prior_reference, first_answer);
+        let prior_source = service
+            .source_read(first.generation, vec![prior_reference], &cancellation)
+            .expect("prior source snapshot remains readable");
+        assert_eq!(prior_source.data.chunks.len(), 1);
+        assert_eq!(prior_source.data.chunks[0].text, *cached_v1_text);
+        assert_eq!(
+            prior_source.data.chunks[0].content_hash,
+            first_answer.content_hash()
+        );
         assert!(
             !service
                 .resolve_generation(first.repository, Some(first.generation))
@@ -1515,6 +2047,14 @@ mod tests {
         );
         fs::write(path, source.replacen(&removed, &added, 1))
             .expect("Gate-1 v2 source materializes");
+    }
+
+    fn deadline() -> Cancellation {
+        Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        )
     }
 
     fn assert_indexed_gate_paths(service: &FirstSliceService, generation: GenerationId) {
