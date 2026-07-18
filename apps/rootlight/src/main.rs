@@ -34,12 +34,12 @@ use rootlight_operations::{
     RecoveryClass as JournalRecoveryClass,
 };
 use rootlight_runtime::RuntimePaths;
+#[cfg(test)]
+use rootlight_service::CancellationReason;
 use rootlight_service::{
     Cancellation, CodeLocateResult, FirstSliceError, FirstSliceIndexReceipt, FirstSliceService,
     LocateMode, QueryResponse, SourceReadQueryResult, SymbolExplainResult,
 };
-#[cfg(test)]
-use rootlight_service::CancellationReason;
 use serde::Serialize;
 
 const CLI_CONTRACT_VERSION: &str = "1.0";
