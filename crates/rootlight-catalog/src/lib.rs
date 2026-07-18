@@ -19,6 +19,7 @@ use std::{
     error::Error,
     fmt, io,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use rootlight_ids::ContentHash;
@@ -318,6 +319,152 @@ impl fmt::Debug for OracleReader {
 }
 
 impl GenerationReader for OracleReader {
+    type Error = CatalogError;
+
+    fn metadata(&self) -> GenerationMetadata {
+        self.metadata
+    }
+
+    fn stats(&self) -> GenerationStats {
+        self.stats
+    }
+
+    fn read_generation(
+        &self,
+        context: &GenerationContext<'_>,
+    ) -> Result<IdentityVerifiedGeneration, Self::Error> {
+        self.read_verified(context)
+    }
+}
+
+/// Single-use writer for an in-memory SQLite oracle.
+///
+/// This backend exercises the same normalized schema and logical contracts as
+/// [`OracleWriter`] without creating a filesystem object. It is suitable for
+/// bounded first-slice demos and tests, but it provides no durability,
+/// cross-process sharing, crash recovery, or atomic filesystem publication.
+pub struct EphemeralOracleWriter {
+    connection: Connection,
+}
+
+impl EphemeralOracleWriter {
+    /// Creates an empty in-memory oracle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when the bundled SQLite implementation cannot
+    /// enforce the required defensive configuration or schema.
+    pub fn create() -> Result<Self, CatalogError> {
+        schema::create_ephemeral_oracle().map(|connection| Self { connection })
+    }
+
+    /// Writes and verifies one identity-checked generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] for cancellation, budget exhaustion, invalid
+    /// generation data, corruption, or storage failure.
+    pub fn seal(
+        self,
+        generation: IdentityVerifiedGeneration,
+        context: &GenerationContext<'_>,
+    ) -> Result<EphemeralOracleReader, CatalogError> {
+        let Self { mut connection } = self;
+        let snapshot = generation.into_snapshot();
+        schema::install_generation_cancellation(&connection, context)?;
+        let expected_stats = write::write_generation(&mut connection, &snapshot, context)?;
+        schema::configure_ephemeral_oracle_reader(&connection, context)?;
+        let (metadata, stats) = read::read_header(&connection, context)?;
+        let reader = EphemeralOracleReader {
+            connection: Mutex::new(connection),
+            metadata,
+            stats,
+        };
+        if stats != expected_stats || reader.read(context)? != snapshot {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        Ok(reader)
+    }
+}
+
+impl fmt::Debug for EphemeralOracleWriter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EphemeralOracleWriter")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Read-only owner of one sealed in-memory SQLite oracle.
+pub struct EphemeralOracleReader {
+    connection: Mutex<Connection>,
+    metadata: GenerationMetadata,
+    stats: GenerationStats,
+}
+
+impl EphemeralOracleReader {
+    /// Materializes the canonical generation from the in-memory oracle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] for cancellation, budget exhaustion,
+    /// corruption, or storage failure.
+    pub fn read(
+        &self,
+        context: &GenerationContext<'_>,
+    ) -> Result<GenerationSnapshot, CatalogError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
+        schema::install_generation_cancellation(&connection, context)?;
+        let snapshot = read::read_generation(&connection, self.metadata, self.stats, context)?;
+        schema::validate_oracle(&connection, context)?;
+        Ok(snapshot)
+    }
+
+    /// Materializes and revalidates the generation identity proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogErrorKind::IdentityProofRequired`] when the stored
+    /// generation does not carry the current identity contract.
+    pub fn read_verified(
+        &self,
+        context: &GenerationContext<'_>,
+    ) -> Result<IdentityVerifiedGeneration, CatalogError> {
+        let snapshot = self.read(context)?;
+        IdentityVerifiedGeneration::verify_snapshot(snapshot, context).map_err(
+            |error| match error {
+                IdentityVerificationError::Control(error) => CatalogError::control(error),
+                IdentityVerificationError::LegacyContract
+                | IdentityVerificationError::MissingClaim => {
+                    CatalogError::new(CatalogErrorKind::IdentityProofRequired)
+                }
+                IdentityVerificationError::InvalidGeneration
+                | IdentityVerificationError::DuplicateClaim
+                | IdentityVerificationError::IdentityMismatch
+                | IdentityVerificationError::ManifestMismatch
+                | IdentityVerificationError::UnsupportedExtension
+                | IdentityVerificationError::RecipeEncoding => {
+                    CatalogError::new(CatalogErrorKind::Corrupt)
+                }
+            },
+        )
+    }
+}
+
+impl fmt::Debug for EphemeralOracleReader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EphemeralOracleReader")
+            .field("metadata", &self.metadata)
+            .field("stats", &self.stats)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GenerationReader for EphemeralOracleReader {
     type Error = CatalogError;
 
     fn metadata(&self) -> GenerationMetadata {

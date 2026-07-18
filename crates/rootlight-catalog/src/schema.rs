@@ -566,6 +566,27 @@ pub(crate) fn create_oracle(path: &Path) -> Result<Connection, CatalogError> {
     Ok(connection)
 }
 
+pub(crate) fn create_ephemeral_oracle() -> Result<Connection, CatalogError> {
+    let connection = Connection::open_in_memory().map_err(CatalogError::sqlite)?;
+    configure_limits(&connection)?;
+    verify_sqlite(&connection)?;
+    configure_writer(&connection, JournalMode::Memory)?;
+    let definition = oracle_definition();
+    initialize(&connection, &definition)?;
+    validate(&connection, &definition)?;
+    install_authorizer(&connection)?;
+    Ok(connection)
+}
+
+pub(crate) fn configure_ephemeral_oracle_reader(
+    connection: &Connection,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    install_generation_cancellation(connection, context)?;
+    configure_reader(connection)?;
+    validate_oracle(connection, context)
+}
+
 pub(crate) fn open_oracle_reader(
     path: &Path,
     context: &GenerationContext<'_>,
@@ -1201,6 +1222,7 @@ fn validate_private_file(path: &Path) -> Result<(), CatalogError> {
 enum JournalMode {
     Wal,
     Delete,
+    Memory,
 }
 
 impl JournalMode {
@@ -1208,6 +1230,7 @@ impl JournalMode {
         match self {
             Self::Wal => "WAL",
             Self::Delete => "DELETE",
+            Self::Memory => "MEMORY",
         }
     }
 
@@ -1215,6 +1238,7 @@ impl JournalMode {
         match self {
             Self::Wal => "wal",
             Self::Delete => "delete",
+            Self::Memory => "memory",
         }
     }
 }
