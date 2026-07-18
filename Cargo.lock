@@ -1494,10 +1494,14 @@ dependencies = [
 name = "rootlight-catalog"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "rootlight-adapter-sdk",
+ "rootlight-adapter-treesitter",
  "rootlight-cancel",
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-storage",
+ "rootlight-vfs",
  "rusqlite",
  "serde",
  "serde_json",

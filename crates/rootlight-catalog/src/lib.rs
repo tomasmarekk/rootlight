@@ -25,7 +25,7 @@ use rootlight_ids::ContentHash;
 use rootlight_storage::{
     GenerationContext, GenerationControlError, GenerationMetadata, GenerationReader,
     GenerationResource, GenerationSnapshot, GenerationStats, GenerationValidationError,
-    GenerationWriter,
+    GenerationWriter, IdentityVerificationError, IdentityVerifiedGeneration,
 };
 use rusqlite::Connection;
 
@@ -166,6 +166,23 @@ impl OracleWriter {
     /// corruption, contention, or storage failures.
     pub fn seal(
         self,
+        generation: IdentityVerifiedGeneration,
+        context: &GenerationContext<'_>,
+    ) -> Result<OracleReader, CatalogError> {
+        self.seal_snapshot(generation.into_snapshot(), context)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seal_unverified_for_test(
+        self,
+        generation: GenerationSnapshot,
+        context: &GenerationContext<'_>,
+    ) -> Result<OracleReader, CatalogError> {
+        self.seal_snapshot(generation, context)
+    }
+
+    fn seal_snapshot(
+        self,
         generation: GenerationSnapshot,
         context: &GenerationContext<'_>,
     ) -> Result<OracleReader, CatalogError> {
@@ -197,7 +214,7 @@ impl GenerationWriter for OracleWriter {
 
     fn write_generation(
         self: Box<Self>,
-        generation: GenerationSnapshot,
+        generation: IdentityVerifiedGeneration,
         context: &GenerationContext<'_>,
     ) -> Result<GenerationStats, Self::Error> {
         self.seal(generation, context).map(|reader| reader.stats)
@@ -255,6 +272,39 @@ impl OracleReader {
         schema::validate_oracle(&connection)?;
         Ok(snapshot)
     }
+
+    /// Materializes only generations carrying a validated identity proof.
+    ///
+    /// Legacy schema version 2 oracles remain readable through [`Self::read`]
+    /// for compatibility, but cannot enter the backend-neutral query contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogErrorKind::IdentityProofRequired`] for readable legacy
+    /// generations that predate the proposed identity-claim recipe.
+    pub fn read_verified(
+        &self,
+        context: &GenerationContext<'_>,
+    ) -> Result<IdentityVerifiedGeneration, CatalogError> {
+        let snapshot = self.read(context)?;
+        IdentityVerifiedGeneration::verify_snapshot(snapshot, context).map_err(
+            |error| match error {
+                IdentityVerificationError::Control(error) => CatalogError::control(error),
+                IdentityVerificationError::LegacyContract
+                | IdentityVerificationError::MissingClaim => {
+                    CatalogError::new(CatalogErrorKind::IdentityProofRequired)
+                }
+                IdentityVerificationError::InvalidGeneration
+                | IdentityVerificationError::DuplicateClaim
+                | IdentityVerificationError::IdentityMismatch
+                | IdentityVerificationError::ManifestMismatch
+                | IdentityVerificationError::UnsupportedExtension
+                | IdentityVerificationError::RecipeEncoding => {
+                    CatalogError::new(CatalogErrorKind::Corrupt)
+                }
+            },
+        )
+    }
 }
 
 impl fmt::Debug for OracleReader {
@@ -281,8 +331,8 @@ impl GenerationReader for OracleReader {
     fn read_generation(
         &self,
         context: &GenerationContext<'_>,
-    ) -> Result<GenerationSnapshot, Self::Error> {
-        self.read(context)
+    ) -> Result<IdentityVerifiedGeneration, Self::Error> {
+        self.read_verified(context)
     }
 }
 
@@ -317,6 +367,10 @@ pub enum CatalogErrorKind {
     UnsupportedSqlite,
     /// SQLite refused a mandatory defensive setting.
     UnsupportedConfiguration,
+    /// Critical extensions cannot be sealed without a persisted support policy.
+    UnsupportedCriticalExtensions,
+    /// The generation does not carry an accepted, validated identity proof.
+    IdentityProofRequired,
     /// ADR-026 has no accepted handle-bound SQLite file implementation.
     UnsupportedPrivateFileBoundary,
     /// The database file is linked, non-regular, or not private.
@@ -440,6 +494,10 @@ impl fmt::Display for CatalogError {
             CatalogErrorKind::UnsupportedConfiguration => {
                 "SQLite defensive configuration is unsupported"
             }
+            CatalogErrorKind::UnsupportedCriticalExtensions => {
+                "critical extensions are unsupported by this storage contract"
+            }
+            CatalogErrorKind::IdentityProofRequired => "generation identity proof is required",
             CatalogErrorKind::UnsupportedPrivateFileBoundary => {
                 "private SQLite file boundary is unavailable"
             }

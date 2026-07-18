@@ -3,10 +3,15 @@
 //! The complete write is preflighted against hard operation budgets before the
 //! single bounded transaction begins. Statements are fixed and parameterized.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::{self, Write},
+};
 
-use rootlight_ids::content_hash;
-use rootlight_ir::{FactEvidence, NormalizedIrDocument, OccurrenceTarget, SourceRef};
+use rootlight_ids::{ContentHash, FactId, FileId, RepositoryId, SymbolId};
+use rootlight_ir::{
+    ExtensionCriticality, FactEvidence, IrLimits, NormalizedIrDocument, OccurrenceTarget, SourceRef,
+};
 use rootlight_storage::{
     GenerationContext, GenerationResource, GenerationSnapshot, GenerationStats,
 };
@@ -14,9 +19,40 @@ use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
 use crate::{CatalogError, CatalogErrorKind, codec, schema};
 
-struct WritePlan {
-    source_ordinals: BTreeMap<SourceRef, i64>,
-    stats: GenerationStats,
+const JSON_CHECKPOINT_BYTES: usize = 4 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RegistryIdentity {
+    Repository(RepositoryId),
+    File(FileId),
+    Entity(SymbolId),
+    Fact(FactId),
+}
+
+impl RegistryIdentity {
+    pub(crate) const fn kind(self) -> &'static str {
+        match self {
+            Self::Repository(_) => "repository",
+            Self::File(_) => "file",
+            Self::Entity(_) => "entity",
+            Self::Fact(_) => "fact",
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Repository(id) => id.as_bytes(),
+            Self::File(id) => id.as_bytes(),
+            Self::Entity(id) => id.as_bytes(),
+            Self::Fact(id) => id.as_bytes(),
+        }
+    }
+}
+
+pub(crate) struct WritePlan {
+    pub(crate) identities: BTreeSet<RegistryIdentity>,
+    pub(crate) source_ordinals: BTreeMap<SourceRef, i64>,
+    pub(crate) stats: GenerationStats,
 }
 
 pub(crate) fn write_generation(
@@ -30,8 +66,8 @@ pub(crate) fn write_generation(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(CatalogError::sqlite)?;
 
-    insert_header(&transaction, generation, plan.stats)?;
-    insert_identities(&transaction, generation.document(), context)?;
+    insert_header(&transaction, generation, plan.stats, context)?;
+    insert_identities(&transaction, &plan.identities, context)?;
     insert_sources(&transaction, &plan.source_ordinals, context)?;
     insert_provenance(
         &transaction,
@@ -76,30 +112,46 @@ pub(crate) fn write_generation(
     Ok(plan.stats)
 }
 
-pub(crate) fn measure_stats(
-    generation: &GenerationSnapshot,
-    context: &GenerationContext<'_>,
-) -> Result<GenerationStats, CatalogError> {
-    measure(generation, context).map(|plan| plan.stats)
-}
-
-fn measure(
+pub(crate) fn measure(
     generation: &GenerationSnapshot,
     context: &GenerationContext<'_>,
 ) -> Result<WritePlan, CatalogError> {
     context.check().map_err(CatalogError::control)?;
     let document = generation.document();
+    if document
+        .extensions
+        .iter()
+        .any(|extension| extension.criticality == ExtensionCriticality::Critical)
+    {
+        return Err(CatalogError::new(
+            CatalogErrorKind::UnsupportedCriticalExtensions,
+        ));
+    }
     let mut sources = BTreeSet::new();
+    let mut identities = BTreeSet::new();
     let mut child_rows = 0_u64;
     let mut text_bytes = 0_u64;
 
+    insert_measured_identity(
+        &mut identities,
+        RegistryIdentity::Repository(document.repository),
+        context,
+    )?;
     for file in &document.files {
+        context.check().map_err(CatalogError::control)?;
+        insert_measured_identity(&mut identities, RegistryIdentity::File(file.id), context)?;
         collect_evidence(&file.evidence, &mut sources, &mut child_rows, context)?;
         add_text(&mut text_bytes, &file.path, context)?;
         add_text(&mut text_bytes, &file.language, context)?;
         add_text(&mut text_bytes, &file.encoding, context)?;
     }
     for entity in &document.entities {
+        context.check().map_err(CatalogError::control)?;
+        insert_measured_identity(
+            &mut identities,
+            RegistryIdentity::Entity(entity.id),
+            context,
+        )?;
         collect_evidence(&entity.evidence, &mut sources, &mut child_rows, context)?;
         add_rows(&mut child_rows, usize_to_u64(entity.flags.len())?, context)?;
         add_text(&mut text_bytes, &entity.language, context)?;
@@ -108,6 +160,12 @@ fn measure(
         add_text(&mut text_bytes, &entity.qualified_name, context)?;
     }
     for occurrence in &document.occurrences {
+        context.check().map_err(CatalogError::control)?;
+        insert_measured_identity(
+            &mut identities,
+            RegistryIdentity::Fact(occurrence.id),
+            context,
+        )?;
         collect_source(&occurrence.source, &mut sources, context)?;
         collect_evidence(&occurrence.evidence, &mut sources, &mut child_rows, context)?;
         if let OccurrenceTarget::Candidates { symbols, .. } = &occurrence.target {
@@ -116,14 +174,27 @@ fn measure(
         add_text(&mut text_bytes, &occurrence.syntax_kind, context)?;
     }
     for relation in &document.relations {
+        context.check().map_err(CatalogError::control)?;
+        insert_measured_identity(
+            &mut identities,
+            RegistryIdentity::Fact(relation.id),
+            context,
+        )?;
         collect_evidence(&relation.evidence, &mut sources, &mut child_rows, context)?;
     }
     for provenance in &document.provenance {
+        context.check().map_err(CatalogError::control)?;
+        insert_measured_identity(
+            &mut identities,
+            RegistryIdentity::Fact(provenance.id),
+            context,
+        )?;
         for source in provenance
             .input_sources
             .iter()
             .chain(&provenance.evidence_sources)
         {
+            context.check().map_err(CatalogError::control)?;
             collect_source(source, &mut sources, context)?;
             add_rows(&mut child_rows, 1, context)?;
         }
@@ -143,20 +214,36 @@ fn measure(
         add_optional_text(&mut text_bytes, provenance.rule.as_deref(), context)?;
     }
     for mapping in &document.source_mappings {
+        context.check().map_err(CatalogError::control)?;
+        insert_measured_identity(&mut identities, RegistryIdentity::Fact(mapping.id), context)?;
         collect_source(&mapping.from, &mut sources, context)?;
         collect_source(&mapping.to, &mut sources, context)?;
         collect_opaque_evidence_source(&mapping.evidence, &mut sources, context)?;
         add_serialized_text(&mut text_bytes, mapping, context)?;
     }
     for coverage in &document.coverage_records {
+        context.check().map_err(CatalogError::control)?;
+        insert_measured_identity(
+            &mut identities,
+            RegistryIdentity::Fact(coverage.id),
+            context,
+        )?;
         collect_evidence(&coverage.evidence, &mut sources, &mut child_rows, context)?;
     }
     for region in &document.skipped_regions {
+        context.check().map_err(CatalogError::control)?;
+        insert_measured_identity(&mut identities, RegistryIdentity::Fact(region.id), context)?;
         collect_source(&region.source, &mut sources, context)?;
         collect_opaque_evidence_source(&region.evidence, &mut sources, context)?;
         add_serialized_text(&mut text_bytes, region, context)?;
     }
     for diagnostic in &document.diagnostics {
+        context.check().map_err(CatalogError::control)?;
+        insert_measured_identity(
+            &mut identities,
+            RegistryIdentity::Fact(diagnostic.id),
+            context,
+        )?;
         if let Some(source) = &diagnostic.source {
             collect_source(source, &mut sources, context)?;
         }
@@ -164,6 +251,12 @@ fn measure(
         add_serialized_text(&mut text_bytes, diagnostic, context)?;
     }
     for extension in &document.extensions {
+        context.check().map_err(CatalogError::control)?;
+        insert_measured_identity(
+            &mut identities,
+            RegistryIdentity::Fact(extension.id),
+            context,
+        )?;
         collect_opaque_evidence_source(&extension.evidence, &mut sources, context)?;
         add_serialized_text(&mut text_bytes, extension, context)?;
     }
@@ -188,10 +281,15 @@ fn measure(
         .into_iter()
         .try_fold(0_u64, u64::checked_add)
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
-    let identity_rows = logical_rows
-        .checked_add(1)
-        .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
-    let stored_rows = 1_u64
+    let identity_rows = usize_to_u64(identities.len())?;
+    if identity_rows
+        != logical_rows
+            .checked_add(1)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?
+    {
+        return Err(CatalogError::new(CatalogErrorKind::InvalidGeneration));
+    }
+    let stored_rows = 2_u64
         .checked_add(identity_rows)
         .and_then(|value| value.checked_add(source_count))
         .and_then(|value| value.checked_add(logical_rows))
@@ -220,15 +318,30 @@ fn measure(
         text_bytes,
     )
     .map_err(CatalogError::invalid_generation)?;
-    let source_ordinals = sources
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, source)| Ok((source, usize_to_i64(ordinal)?)))
-        .collect::<Result<_, CatalogError>>()?;
+    let mut source_ordinals = BTreeMap::new();
+    for (ordinal, source) in sources.into_iter().enumerate() {
+        context.check().map_err(CatalogError::control)?;
+        source_ordinals.insert(source, usize_to_i64(ordinal)?);
+    }
     Ok(WritePlan {
+        identities,
         source_ordinals,
         stats,
     })
+}
+
+fn insert_measured_identity(
+    identities: &mut BTreeSet<RegistryIdentity>,
+    identity: RegistryIdentity,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    if !identities.insert(identity) {
+        return Err(CatalogError::new(CatalogErrorKind::InvalidGeneration));
+    }
+    context
+        .require(GenerationResource::Rows, usize_to_u64(identities.len())?)
+        .map_err(CatalogError::control)
 }
 
 fn collect_evidence(
@@ -263,6 +376,7 @@ fn collect_source(
     sources: &mut BTreeSet<SourceRef>,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
+    context.check().map_err(CatalogError::control)?;
     sources.insert(source.clone());
     context
         .require(
@@ -277,6 +391,7 @@ fn add_rows(
     increment: u64,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
+    context.check().map_err(CatalogError::control)?;
     *rows = rows
         .checked_add(increment)
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
@@ -290,6 +405,7 @@ fn add_text(
     value: &str,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
+    context.check().map_err(CatalogError::control)?;
     *bytes = bytes
         .checked_add(usize_to_u64(value.len())?)
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
@@ -314,20 +430,19 @@ fn add_serialized_text(
     value: &impl serde::Serialize,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
-    let encoded = serde_json::to_vec(value).map_err(CatalogError::json)?;
-    *bytes = bytes
-        .checked_add(usize_to_u64(encoded.len())?)
-        .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
-    context
-        .require(GenerationResource::TextBytes, *bytes)
-        .map_err(CatalogError::control)
+    let mut writer = CheckedJsonWriter::for_text(io::sink(), *bytes, context)?;
+    serialize_json(&mut writer, value)?;
+    *bytes = writer.total_bytes();
+    Ok(())
 }
 
 fn insert_header(
     transaction: &Transaction<'_>,
     generation: &GenerationSnapshot,
     stats: GenerationStats,
+    context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
+    context.check().map_err(CatalogError::control)?;
     let metadata = generation.metadata();
     let contract = metadata.contract_version();
     let ir = metadata.ir_version();
@@ -375,11 +490,15 @@ fn insert_header(
             ],
         )
         .map_err(CatalogError::sqlite)?;
-    let document = serde_json::to_vec(generation.document()).map_err(CatalogError::json)?;
+    let document_hash = canonical_document_hash(
+        generation.document(),
+        context,
+        CatalogErrorKind::InvalidGeneration,
+    )?;
     transaction
         .execute(
             "INSERT INTO application_meta(key, value) VALUES ('document_hash', ?1)",
-            [content_hash(&document).as_bytes().as_slice()],
+            [document_hash.as_bytes().as_slice()],
         )
         .map_err(CatalogError::sqlite)?;
     Ok(())
@@ -387,80 +506,16 @@ fn insert_header(
 
 fn insert_identities(
     transaction: &Transaction<'_>,
-    document: &NormalizedIrDocument,
+    identities: &BTreeSet<RegistryIdentity>,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     let mut statement = transaction
         .prepare("INSERT INTO identity_registry(kind, identity) VALUES (?1, ?2)")
         .map_err(CatalogError::sqlite)?;
-    statement
-        .execute(params![
-            "repository",
-            document.repository.as_bytes().as_slice()
-        ])
-        .map_err(CatalogError::sqlite)?;
-    for (kind, id) in document
-        .files
-        .iter()
-        .map(|record| ("file", record.id.as_bytes().as_slice()))
-        .chain(
-            document
-                .entities
-                .iter()
-                .map(|record| ("entity", record.id.as_bytes().as_slice())),
-        )
-        .chain(
-            document
-                .occurrences
-                .iter()
-                .map(|record| ("fact", record.id.as_bytes().as_slice())),
-        )
-        .chain(
-            document
-                .relations
-                .iter()
-                .map(|record| ("fact", record.id.as_bytes().as_slice())),
-        )
-        .chain(
-            document
-                .provenance
-                .iter()
-                .map(|record| ("fact", record.id.as_bytes().as_slice())),
-        )
-        .chain(
-            document
-                .coverage_records
-                .iter()
-                .map(|record| ("fact", record.id.as_bytes().as_slice())),
-        )
-        .chain(
-            document
-                .source_mappings
-                .iter()
-                .map(|record| ("fact", record.id.as_bytes().as_slice())),
-        )
-        .chain(
-            document
-                .skipped_regions
-                .iter()
-                .map(|record| ("fact", record.id.as_bytes().as_slice())),
-        )
-        .chain(
-            document
-                .diagnostics
-                .iter()
-                .map(|record| ("fact", record.id.as_bytes().as_slice())),
-        )
-        .chain(
-            document
-                .extensions
-                .iter()
-                .map(|record| ("fact", record.id.as_bytes().as_slice())),
-        )
-    {
+    for identity in identities {
         context.check().map_err(CatalogError::control)?;
         statement
-            .execute(params![kind, id])
+            .execute(params![identity.kind(), identity.bytes()])
             .map_err(CatalogError::sqlite)?;
     }
     Ok(())
@@ -556,6 +611,7 @@ fn insert_provenance(
             ("evidence", record.evidence_sources.as_slice()),
         ] {
             for (position, source) in values.iter().enumerate() {
+                context.check().map_err(CatalogError::control)?;
                 source_statement
                     .execute(params![
                         record.id.as_bytes().as_slice(),
@@ -567,6 +623,7 @@ fn insert_provenance(
             }
         }
         for (position, reference) in record.derivation_parents.iter().enumerate() {
+            context.check().map_err(CatalogError::control)?;
             let (kind, id) = codec::encode_fact_ref(reference);
             derivation_statement
                 .execute(params![
@@ -619,6 +676,7 @@ fn insert_files(
             "file",
             record.id.as_bytes(),
             &record.evidence,
+            context,
         )?;
     }
     Ok(())
@@ -665,6 +723,7 @@ fn insert_entities(
             ])
             .map_err(CatalogError::sqlite)?;
         for flag in &record.flags {
+            context.check().map_err(CatalogError::control)?;
             flag_statement
                 .execute(params![
                     record.id.as_bytes().as_slice(),
@@ -677,6 +736,7 @@ fn insert_entities(
             "entity",
             record.id.as_bytes(),
             &record.evidence,
+            context,
         )?;
     }
     Ok(())
@@ -737,6 +797,7 @@ fn insert_occurrences(
             .map_err(CatalogError::sqlite)?;
         if let OccurrenceTarget::Candidates { symbols, .. } = &record.target {
             for (position, symbol) in symbols.iter().enumerate() {
+                context.check().map_err(CatalogError::control)?;
                 candidate_statement
                     .execute(params![
                         record.id.as_bytes().as_slice(),
@@ -751,6 +812,7 @@ fn insert_occurrences(
             "fact",
             record.id.as_bytes(),
             &record.evidence,
+            context,
         )?;
     }
     Ok(())
@@ -835,6 +897,7 @@ fn insert_relations(
             "fact",
             record.id.as_bytes(),
             &record.evidence,
+            context,
         )?;
     }
     Ok(())
@@ -881,6 +944,7 @@ fn insert_coverage(
             "fact",
             record.id.as_bytes(),
             &record.evidence,
+            context,
         )?;
     }
     Ok(())
@@ -891,95 +955,99 @@ fn insert_opaque_facts(
     document: &NormalizedIrDocument,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
-    for (sql, records) in [
-        (
+    let mut statement = transaction
+        .prepare(
             "INSERT INTO source_mappings (
                 source_mapping_id, repository_id, generation_id, provenance_id, payload
              ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            document
-                .source_mappings
-                .iter()
-                .map(|record| {
-                    (
-                        record.id.as_bytes().as_slice(),
-                        record.repository.as_bytes().as_slice(),
-                        record.generation.as_bytes().as_slice(),
-                        record.provenance.as_bytes().as_slice(),
-                        serde_json::to_string(record),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        ),
-        (
+        )
+        .map_err(CatalogError::sqlite)?;
+    for record in &document.source_mappings {
+        insert_opaque_record(
+            &mut statement,
+            record.id.as_bytes(),
+            record.repository.as_bytes(),
+            record.generation.as_bytes(),
+            record.provenance.as_bytes(),
+            record,
+            context,
+        )?;
+    }
+
+    let mut statement = transaction
+        .prepare(
             "INSERT INTO skipped_regions (
                 skipped_region_id, repository_id, generation_id, provenance_id, payload
              ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            document
-                .skipped_regions
-                .iter()
-                .map(|record| {
-                    (
-                        record.id.as_bytes().as_slice(),
-                        record.repository.as_bytes().as_slice(),
-                        record.generation.as_bytes().as_slice(),
-                        record.provenance.as_bytes().as_slice(),
-                        serde_json::to_string(record),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        ),
-        (
+        )
+        .map_err(CatalogError::sqlite)?;
+    for record in &document.skipped_regions {
+        insert_opaque_record(
+            &mut statement,
+            record.id.as_bytes(),
+            record.repository.as_bytes(),
+            record.generation.as_bytes(),
+            record.provenance.as_bytes(),
+            record,
+            context,
+        )?;
+    }
+
+    let mut statement = transaction
+        .prepare(
             "INSERT INTO diagnostics (
                 diagnostic_id, repository_id, generation_id, provenance_id, payload
              ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            document
-                .diagnostics
-                .iter()
-                .map(|record| {
-                    (
-                        record.id.as_bytes().as_slice(),
-                        record.repository.as_bytes().as_slice(),
-                        record.generation.as_bytes().as_slice(),
-                        record.provenance.as_bytes().as_slice(),
-                        serde_json::to_string(record),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        ),
-        (
+        )
+        .map_err(CatalogError::sqlite)?;
+    for record in &document.diagnostics {
+        insert_opaque_record(
+            &mut statement,
+            record.id.as_bytes(),
+            record.repository.as_bytes(),
+            record.generation.as_bytes(),
+            record.provenance.as_bytes(),
+            record,
+            context,
+        )?;
+    }
+
+    let mut statement = transaction
+        .prepare(
             "INSERT INTO extensions (
                 extension_id, repository_id, generation_id, provenance_id, payload
              ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            document
-                .extensions
-                .iter()
-                .map(|record| {
-                    (
-                        record.id.as_bytes().as_slice(),
-                        record.repository.as_bytes().as_slice(),
-                        record.generation.as_bytes().as_slice(),
-                        record.provenance.as_bytes().as_slice(),
-                        serde_json::to_string(record),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        ),
-    ] {
-        let mut statement = transaction.prepare(sql).map_err(CatalogError::sqlite)?;
-        for (id, repository, generation, provenance, payload) in records {
-            context.check().map_err(CatalogError::control)?;
-            statement
-                .execute(params![
-                    id,
-                    repository,
-                    generation,
-                    provenance,
-                    payload.map_err(CatalogError::json)?,
-                ])
-                .map_err(CatalogError::sqlite)?;
-        }
+        )
+        .map_err(CatalogError::sqlite)?;
+    for record in &document.extensions {
+        insert_opaque_record(
+            &mut statement,
+            record.id.as_bytes(),
+            record.repository.as_bytes(),
+            record.generation.as_bytes(),
+            record.provenance.as_bytes(),
+            record,
+            context,
+        )?;
     }
     Ok(())
+}
+
+fn insert_opaque_record(
+    statement: &mut rusqlite::Statement<'_>,
+    id: &[u8],
+    repository: &[u8],
+    generation: &[u8],
+    provenance: &[u8],
+    record: &impl serde::Serialize,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    let payload = serialize_json_text(record, context)?;
+    statement
+        .execute(params![id, repository, generation, provenance, payload])
+        .map_err(CatalogError::sqlite)?;
+    context.check().map_err(CatalogError::control)
 }
 
 fn evidence_statement<'transaction>(
@@ -999,8 +1067,10 @@ fn insert_evidence(
     owner_kind: &str,
     owner_id: &[u8],
     evidence: &FactEvidence,
+    context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     for (position, reference) in evidence.derivation.iter().enumerate() {
+        context.check().map_err(CatalogError::control)?;
         let (reference_kind, reference_id) = codec::encode_fact_ref(reference);
         statement
             .execute(params![
@@ -1034,10 +1104,224 @@ fn optional_source_ordinal(
         .transpose()
 }
 
+pub(crate) fn canonical_document_hash(
+    document: &NormalizedIrDocument,
+    context: &GenerationContext<'_>,
+    overflow_kind: CatalogErrorKind,
+) -> Result<ContentHash, CatalogError> {
+    let maximum = usize_to_u64(IrLimits::default().max_document_bytes)?;
+    let mut writer =
+        CheckedJsonWriter::new(Blake3Writer::default(), 0, maximum, overflow_kind, context)?;
+    serialize_json(&mut writer, document)?;
+    context.check().map_err(CatalogError::control)?;
+    let digest = writer.into_inner().0.finalize();
+    Ok(ContentHash::from_bytes(*digest.as_bytes()))
+}
+
+fn serialize_json_text(
+    value: &impl serde::Serialize,
+    context: &GenerationContext<'_>,
+) -> Result<String, CatalogError> {
+    let mut writer = CheckedJsonWriter::for_text(Vec::new(), 0, context)?;
+    serialize_json(&mut writer, value)?;
+    context.check().map_err(CatalogError::control)?;
+    String::from_utf8(writer.into_inner())
+        .map_err(|_| CatalogError::new(CatalogErrorKind::InvalidGeneration))
+}
+
+fn serialize_json(
+    writer: &mut CheckedJsonWriter<'_, impl Write>,
+    value: &impl serde::Serialize,
+) -> Result<(), CatalogError> {
+    match serde_json::to_writer(&mut *writer, value) {
+        Ok(()) => Ok(()),
+        Err(error) => writer.failure().map_or_else(
+            || Err(CatalogError::json(error)),
+            |kind| Err(CatalogError::new(kind)),
+        ),
+    }
+}
+
+struct CheckedJsonWriter<'a, W> {
+    inner: W,
+    context: GenerationContext<'a>,
+    total_bytes: u64,
+    maximum_bytes: u64,
+    overflow_kind: CatalogErrorKind,
+    failure: Option<CatalogErrorKind>,
+}
+
+impl<'a, W: Write> CheckedJsonWriter<'a, W> {
+    fn new(
+        inner: W,
+        initial_bytes: u64,
+        maximum_bytes: u64,
+        overflow_kind: CatalogErrorKind,
+        context: &GenerationContext<'a>,
+    ) -> Result<Self, CatalogError> {
+        context.check().map_err(CatalogError::control)?;
+        if initial_bytes > maximum_bytes {
+            return Err(CatalogError::new(overflow_kind));
+        }
+        Ok(Self {
+            inner,
+            context: *context,
+            total_bytes: initial_bytes,
+            maximum_bytes,
+            overflow_kind,
+            failure: None,
+        })
+    }
+
+    fn for_text(
+        inner: W,
+        initial_bytes: u64,
+        context: &GenerationContext<'a>,
+    ) -> Result<Self, CatalogError> {
+        let maximum = context.budget().limit(GenerationResource::TextBytes);
+        Self::new(
+            inner,
+            initial_bytes,
+            maximum,
+            CatalogErrorKind::BudgetExceeded {
+                resource: GenerationResource::TextBytes,
+                limit: maximum,
+            },
+            context,
+        )
+    }
+
+    const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    const fn failure(&self) -> Option<CatalogErrorKind> {
+        self.failure
+    }
+
+    fn into_inner(self) -> W {
+        self.inner
+    }
+
+    fn stop(&mut self, kind: CatalogErrorKind) -> io::Error {
+        self.failure = Some(kind);
+        io::Error::other("controlled JSON write stopped")
+    }
+}
+
+impl<W: Write> Write for CheckedJsonWriter<'_, W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        for chunk in buffer.chunks(JSON_CHECKPOINT_BYTES) {
+            if let Err(error) = self.context.check() {
+                return Err(self.stop(CatalogError::control(error).kind()));
+            }
+            let increment =
+                u64::try_from(chunk.len()).map_err(|_| self.stop(self.overflow_kind))?;
+            let next = self
+                .total_bytes
+                .checked_add(increment)
+                .ok_or_else(|| self.stop(self.overflow_kind))?;
+            if next > self.maximum_bytes {
+                return Err(self.stop(self.overflow_kind));
+            }
+            self.inner.write_all(chunk)?;
+            self.total_bytes = next;
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+#[derive(Default)]
+struct Blake3Writer(blake3::Hasher);
+
+impl Write for Blake3Writer {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0.update(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 fn usize_to_u64(value: usize) -> Result<u64, CatalogError> {
     u64::try_from(value).map_err(|_| CatalogError::new(CatalogErrorKind::InvalidGeneration))
 }
 
 fn usize_to_i64(value: usize) -> Result<i64, CatalogError> {
     i64::try_from(value).map_err(|_| CatalogError::new(CatalogErrorKind::InvalidGeneration))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use rootlight_cancel::{Cancellation, CancellationReason};
+    use rootlight_storage::GenerationBudget;
+    use serde::ser::SerializeSeq;
+
+    use super::*;
+
+    struct StopDuringSerialization<'a> {
+        cancellation: &'a Cancellation,
+        reason: Option<CancellationReason>,
+    }
+
+    impl serde::Serialize for StopDuringSerialization<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let mut sequence = serializer.serialize_seq(Some(2))?;
+            sequence.serialize_element(&"x".repeat(2 * JSON_CHECKPOINT_BYTES))?;
+            match self.reason {
+                Some(reason) => {
+                    self.cancellation.cancel(reason);
+                }
+                None => {
+                    while self.cancellation.check().is_ok() {
+                        std::thread::yield_now();
+                    }
+                }
+            }
+            sequence.serialize_element("unreachable after the next writer checkpoint")?;
+            sequence.end()
+        }
+    }
+
+    #[test]
+    fn streaming_json_observes_mid_operation_cancellation_and_deadline() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let error = serialize_json_text(
+            &StopDuringSerialization {
+                cancellation: &cancellation,
+                reason: Some(CancellationReason::ClientRequest),
+            },
+            &context,
+        )
+        .expect_err("the writer observes explicit cancellation between values");
+        assert_eq!(error.kind(), CatalogErrorKind::Cancelled);
+
+        let deadline = Cancellation::with_deadline(Instant::now() + Duration::from_millis(1));
+        let context = GenerationContext::new(&deadline, GenerationBudget::default());
+        let error = serialize_json_text(
+            &StopDuringSerialization {
+                cancellation: &deadline,
+                reason: None,
+            },
+            &context,
+        )
+        .expect_err("the writer observes deadline expiry between values");
+        assert_eq!(error.kind(), CatalogErrorKind::Cancelled);
+        assert_eq!(
+            deadline.reason(),
+            Some(CancellationReason::DeadlineExceeded)
+        );
+    }
 }

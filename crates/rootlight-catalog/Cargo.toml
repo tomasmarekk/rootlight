@@ -7,6 +7,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+blake3.workspace = true
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 rootlight-storage = { path = "../rootlight-storage" }
@@ -15,7 +16,10 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
+rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
 rootlight-cancel = { path = "../rootlight-cancel" }
+rootlight-vfs = { path = "../rootlight-vfs" }
 tempfile.workspace = true
 
 [lints]

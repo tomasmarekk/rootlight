@@ -5,17 +5,20 @@
 
 use std::collections::BTreeMap;
 
-use rootlight_ids::{FactId, SymbolId, content_hash};
+use rootlight_ids::{FactId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageRecord, CoverageStatus, EntityFlag, EntityKind,
-    EntityRecord, EntityVisibility, EvidenceKind, ExtensionSupport, FactDomain, FactEvidence,
-    FactRef, FileRecord, IrDocument, IrLimits, NORMALIZED_IR_VERSION, NormalizedIrDocument,
-    OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind,
-    ProvenanceRecord, RelationPredicate, RelationRecord, SourceRef, decode_ir_document,
+    EntityRecord, EntityVisibility, EvidenceKind, ExtensionEnvelope, ExtensionEnvelopeDecodeError,
+    ExtensionSupport, FactDomain, FactEvidence, FactRef, FileRecord, IrLimits,
+    NORMALIZED_IR_VERSION, NormalizedIrDocument, NormalizedRecordDecodeError, OccurrenceRecord,
+    OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord,
+    RelationPredicate, RelationRecord, SkippedRegion, SourceMappingRecord, SourceRef,
+    decode_diagnostic_record_with_checkpoint, decode_extension_envelope_with_checkpoint,
+    decode_skipped_region_with_checkpoint, decode_source_mapping_record_with_checkpoint,
 };
 use rootlight_storage::{
-    GENERATION_CONTRACT_VERSION, GenerationContext, GenerationMetadata, GenerationResource,
-    GenerationSnapshot, GenerationStats,
+    GENERATION_CONTRACT_VERSION, GenerationContext, GenerationContractVersion, GenerationMetadata,
+    GenerationResource, GenerationSnapshot, GenerationSnapshotError, GenerationStats,
 };
 use rusqlite::{Connection, OptionalExtension, Row, types::FromSql};
 
@@ -99,15 +102,22 @@ pub(crate) fn read_header(
             },
         )
         .map_err(CatalogError::sqlite)?;
+    let contract_version = GenerationContractVersion::new(
+        u16::try_from(raw.contract_major)
+            .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?,
+        u16::try_from(raw.contract_minor)
+            .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?,
+    );
     if raw.sealed != 1
-        || raw.contract_major != i64::from(GENERATION_CONTRACT_VERSION.major())
-        || raw.contract_minor != i64::from(GENERATION_CONTRACT_VERSION.minor())
+        || (contract_version != GENERATION_CONTRACT_VERSION
+            && contract_version != GenerationContractVersion::new(1, 1))
         || raw.ir_major != i64::from(NORMALIZED_IR_VERSION.major())
         || raw.ir_minor != i64::from(NORMALIZED_IR_VERSION.minor())
     {
         return Err(CatalogError::new(CatalogErrorKind::IncompatibleSchema));
     }
-    let metadata = GenerationMetadata::new(
+    let metadata = GenerationMetadata::new_for_contract(
+        contract_version,
         codec::repository_id(raw.repository)?,
         codec::generation_id(raw.generation)?,
         codec::optional_generation_id(raw.parent)?,
@@ -209,7 +219,7 @@ pub(crate) fn read_generation(
     if metadata != expected_metadata || stats != expected_stats {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
-    validate_payload_cardinality(&transaction, stats, context)?;
+    validate_payload_cardinality(&transaction, metadata.contract_version(), stats, context)?;
     let sources = read_sources(&transaction, stats.source_refs(), context)?;
     let mut evidence = read_evidence(&transaction, context)?;
     let mut flags = read_flags(&transaction, context)?;
@@ -237,12 +247,12 @@ pub(crate) fn read_generation(
     let document = read_complete_document(
         &transaction,
         metadata,
-        &files,
-        &entities,
-        &occurrences,
-        &relations,
-        &provenance,
-        &coverage_records,
+        files,
+        entities,
+        occurrences,
+        relations,
+        provenance,
+        coverage_records,
         context,
     )?;
 
@@ -255,16 +265,22 @@ pub(crate) fn read_generation(
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
     for (observed, expected) in [
-        (usize_to_u64(files.len())?, stats.files()),
-        (usize_to_u64(entities.len())?, stats.entities()),
-        (usize_to_u64(occurrences.len())?, stats.occurrences()),
-        (usize_to_u64(relations.len())?, stats.relations()),
-        (usize_to_u64(provenance.len())?, stats.provenance()),
+        (usize_to_u64(document.files.len())?, stats.files()),
+        (usize_to_u64(document.entities.len())?, stats.entities()),
+        (
+            usize_to_u64(document.occurrences.len())?,
+            stats.occurrences(),
+        ),
+        (usize_to_u64(document.relations.len())?, stats.relations()),
+        (usize_to_u64(document.provenance.len())?, stats.provenance()),
         (
             usize_to_u64(document.source_mappings.len())?,
             stats.source_mappings(),
         ),
-        (usize_to_u64(coverage_records.len())?, stats.coverage()),
+        (
+            usize_to_u64(document.coverage_records.len())?,
+            stats.coverage(),
+        ),
         (
             usize_to_u64(document.skipped_regions.len())?,
             stats.skipped_regions(),
@@ -280,18 +296,46 @@ pub(crate) fn read_generation(
         }
     }
 
-    validate_document_hash(&transaction, &document)?;
-    let snapshot = GenerationSnapshot::new(
+    validate_document_hash(&transaction, &document, context)?;
+    let snapshot = GenerationSnapshot::new_with_context(
         metadata,
         document,
         &IrLimits::default(),
         &ExtensionSupport::default(),
+        context,
+    )
+    .map_err(|error| match error {
+        GenerationSnapshotError::Control(error) => CatalogError::control(error),
+        GenerationSnapshotError::Validation(error) => CatalogError::corrupt_generation(error),
+    })?;
+    context.check().map_err(CatalogError::control)?;
+    let plan = write::measure(&snapshot, context)?;
+    let comparable_stats = GenerationStats::new(
+        stats.files(),
+        stats.entities(),
+        stats.occurrences(),
+        stats.relations(),
+        stats.provenance(),
+        stats.source_mappings(),
+        stats.coverage(),
+        stats.skipped_regions(),
+        stats.diagnostics(),
+        stats.extensions(),
+        stats.source_refs(),
+        plan.stats.stored_rows(),
+        stats.text_bytes(),
     )
     .map_err(CatalogError::corrupt_generation)?;
-    let observed_stats = write::measure_stats(&snapshot, context)?;
-    if observed_stats != stats {
+    let stored_rows_match = if metadata.contract_version() == GenerationContractVersion::new(1, 1) {
+        stats.stored_rows().checked_add(1) == Some(plan.stats.stored_rows())
+    } else {
+        stats.stored_rows() == plan.stats.stored_rows()
+    };
+    if comparable_stats != plan.stats || !stored_rows_match {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
+    validate_identity_registry(&transaction, &plan.identities, context)?;
+    validate_source_registry(&sources, &plan.source_ordinals, context)?;
     transaction.commit().map_err(CatalogError::sqlite)?;
     Ok(snapshot)
 }
@@ -299,7 +343,9 @@ pub(crate) fn read_generation(
 fn validate_document_hash(
     connection: &Connection,
     document: &NormalizedIrDocument,
+    context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
+    context.check().map_err(CatalogError::control)?;
     let expected: Option<Vec<u8>> = connection
         .query_row(
             "SELECT value
@@ -313,8 +359,8 @@ fn validate_document_hash(
     let expected = expected
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))
         .and_then(codec::content_hash)?;
-    let encoded = serde_json::to_vec(document).map_err(CatalogError::json)?;
-    if content_hash(&encoded) != expected {
+    let observed = write::canonical_document_hash(document, context, CatalogErrorKind::Corrupt)?;
+    if observed != expected {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
     Ok(())
@@ -322,6 +368,7 @@ fn validate_document_hash(
 
 fn validate_payload_cardinality(
     connection: &Connection,
+    contract_version: GenerationContractVersion,
     stats: GenerationStats,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
@@ -360,6 +407,7 @@ fn validate_payload_cardinality(
         None,
         None,
         None,
+        Some(1),
     ];
     let mut statement = connection
         .prepare(
@@ -381,6 +429,8 @@ fn validate_payload_cardinality(
              UNION ALL SELECT 15, count(*) FROM evidence_derivations
              UNION ALL SELECT 16, count(*) FROM provenance_sources
              UNION ALL SELECT 17, count(*) FROM provenance_derivations
+             UNION ALL SELECT 18, count(*) FROM application_meta
+                 WHERE key = 'document_hash'
              ORDER BY ordinal",
         )
         .map_err(CatalogError::sqlite)?;
@@ -405,8 +455,68 @@ fn validate_payload_cardinality(
             .map_err(CatalogError::control)?;
         observed_tables += 1;
     }
-    if observed_tables != expected.len() || observed_total != stats.stored_rows() {
+    let generation_owned_rows = if contract_version == GenerationContractVersion::new(1, 1) {
+        observed_total.checked_sub(1)
+    } else {
+        Some(observed_total)
+    }
+    .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    if observed_tables != expected.len() || generation_owned_rows != stats.stored_rows() {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    Ok(())
+}
+
+fn validate_identity_registry(
+    connection: &Connection,
+    expected: &std::collections::BTreeSet<write::RegistryIdentity>,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT kind, identity
+             FROM identity_registry
+             ORDER BY CASE kind
+                 WHEN 'repository' THEN 0
+                 WHEN 'file' THEN 1
+                 WHEN 'entity' THEN 2
+                 WHEN 'fact' THEN 3
+                 ELSE 4
+             END, identity",
+        )
+        .map_err(CatalogError::sqlite)?;
+    let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
+    let mut expected = expected.iter();
+    while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
+        context.check().map_err(CatalogError::control)?;
+        let Some(expected_identity) = expected.next() else {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        };
+        let kind: String = get(row, 0)?;
+        let identity: Vec<u8> = get(row, 1)?;
+        if kind != expected_identity.kind() || identity != expected_identity.bytes() {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+    }
+    if expected.next().is_some() {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    Ok(())
+}
+
+fn validate_source_registry(
+    observed: &BTreeMap<i64, SourceRef>,
+    expected: &BTreeMap<SourceRef, i64>,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    if observed.len() != expected.len() {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    for (source, ordinal) in expected {
+        context.check().map_err(CatalogError::control)?;
+        if observed.get(ordinal) != Some(source) {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
     }
     Ok(())
 }
@@ -878,91 +988,135 @@ fn read_coverage(
 fn read_complete_document(
     connection: &Connection,
     metadata: GenerationMetadata,
-    files: &[FileRecord],
-    entities: &[EntityRecord],
-    occurrences: &[OccurrenceRecord],
-    relations: &[RelationRecord],
-    provenance: &[ProvenanceRecord],
-    coverage_records: &[CoverageRecord],
+    files: Vec<FileRecord>,
+    entities: Vec<EntityRecord>,
+    occurrences: Vec<OccurrenceRecord>,
+    relations: Vec<RelationRecord>,
+    provenance: Vec<ProvenanceRecord>,
+    coverage_records: Vec<CoverageRecord>,
     context: &GenerationContext<'_>,
 ) -> Result<NormalizedIrDocument, CatalogError> {
-    let source_mappings = read_opaque_values(
+    let source_mappings = read_opaque_records(
         connection,
         "SELECT
             source_mapping_id, repository_id, generation_id, provenance_id, payload
          FROM source_mappings
          ORDER BY source_mapping_id",
         context,
+        |encoded, context| {
+            decode_source_mapping_record_with_checkpoint(encoded, &IrLimits::default(), || {
+                context.check().is_ok()
+            })
+            .map_err(|error| map_record_decode_error(error, context))
+        },
     )?;
-    let skipped_regions = read_opaque_values(
+    let skipped_regions = read_opaque_records(
         connection,
         "SELECT
             skipped_region_id, repository_id, generation_id, provenance_id, payload
          FROM skipped_regions
          ORDER BY skipped_region_id",
         context,
+        |encoded, context| {
+            decode_skipped_region_with_checkpoint(encoded, &IrLimits::default(), || {
+                context.check().is_ok()
+            })
+            .map_err(|error| map_record_decode_error(error, context))
+        },
     )?;
-    let diagnostics = read_opaque_values(
+    let diagnostics = read_opaque_records(
         connection,
         "SELECT
             diagnostic_id, repository_id, generation_id, provenance_id, payload
          FROM diagnostics
          ORDER BY diagnostic_id",
         context,
+        |encoded, context| {
+            decode_diagnostic_record_with_checkpoint(encoded, &IrLimits::default(), || {
+                context.check().is_ok()
+            })
+            .map_err(|error| map_record_decode_error(error, context))
+        },
     )?;
-    let extensions = read_opaque_values(
+    let extensions = read_opaque_records(
         connection,
         "SELECT
             extension_id, repository_id, generation_id, provenance_id, payload
          FROM extensions
          ORDER BY extension_id",
         context,
-    )?;
-    let encoded = serde_json::to_vec(&serde_json::json!({
-        "version": {
-            "major": NORMALIZED_IR_VERSION.major(),
-            "minor": NORMALIZED_IR_VERSION.minor(),
+        |encoded, context| {
+            decode_extension_envelope_with_checkpoint(encoded, &IrLimits::default(), || {
+                context.check().is_ok()
+            })
+            .map_err(|error| map_extension_decode_error(error, context))
         },
-        "repository": metadata.repository(),
-        "generation": metadata.generation(),
-        "files": files,
-        "entities": entities,
-        "occurrences": occurrences,
-        "relations": relations,
-        "provenance": provenance,
-        "source_mappings": source_mappings,
-        "coverage_records": coverage_records,
-        "skipped_regions": skipped_regions,
-        "diagnostics": diagnostics,
-        "extensions": extensions,
-    }))
-    .map_err(CatalogError::json)?;
-    match decode_ir_document(&encoded, &IrLimits::default(), &ExtensionSupport::default())
-        .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?
-    {
-        IrDocument::NormalizedV1_1(document) => Ok(document),
-        IrDocument::LegacyV1_0(_) => Err(CatalogError::new(CatalogErrorKind::Corrupt)),
-    }
+    )?;
+    context.check().map_err(CatalogError::control)?;
+    let mut document = NormalizedIrDocument::empty(metadata.repository(), metadata.generation());
+    document.files = files;
+    document.entities = entities;
+    document.occurrences = occurrences;
+    document.relations = relations;
+    document.provenance = provenance;
+    document.source_mappings = source_mappings;
+    document.coverage_records = coverage_records;
+    document.skipped_regions = skipped_regions;
+    document.diagnostics = diagnostics;
+    document.extensions = extensions;
+    Ok(document)
 }
 
-fn read_opaque_values(
+trait OpaqueRecord {
+    fn id(&self) -> FactId;
+    fn repository(&self) -> RepositoryId;
+    fn generation(&self) -> GenerationId;
+    fn provenance(&self) -> FactId;
+}
+
+macro_rules! opaque_record {
+    ($type:ty) => {
+        impl OpaqueRecord for $type {
+            fn id(&self) -> FactId {
+                self.id
+            }
+
+            fn repository(&self) -> RepositoryId {
+                self.repository
+            }
+
+            fn generation(&self) -> GenerationId {
+                self.generation
+            }
+
+            fn provenance(&self) -> FactId {
+                self.provenance
+            }
+        }
+    };
+}
+
+opaque_record!(SourceMappingRecord);
+opaque_record!(SkippedRegion);
+opaque_record!(rootlight_ir::DiagnosticRecord);
+opaque_record!(ExtensionEnvelope);
+
+fn read_opaque_records<T: OpaqueRecord>(
     connection: &Connection,
     sql: &'static str,
     context: &GenerationContext<'_>,
-) -> Result<Vec<serde_json::Value>, CatalogError> {
+    decode: impl Fn(&[u8], &GenerationContext<'_>) -> Result<T, CatalogError>,
+) -> Result<Vec<T>, CatalogError> {
     let mut statement = connection.prepare(sql).map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut values = Vec::new();
+    let mut records = Vec::new();
     let mut payload_bytes = 0_u64;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
-        let id = serde_json::to_value(codec::fact_id(get(row, 0)?)?).map_err(CatalogError::json)?;
-        let repository = serde_json::to_value(codec::repository_id(get(row, 1)?)?)
-            .map_err(CatalogError::json)?;
-        let generation = serde_json::to_value(codec::generation_id(get(row, 2)?)?)
-            .map_err(CatalogError::json)?;
-        let provenance =
-            serde_json::to_value(codec::fact_id(get(row, 3)?)?).map_err(CatalogError::json)?;
+        let id = codec::fact_id(get(row, 0)?)?;
+        let repository = codec::repository_id(get(row, 1)?)?;
+        let generation = codec::generation_id(get(row, 2)?)?;
+        let provenance = codec::fact_id(get(row, 3)?)?;
         let payload: String = get(row, 4)?;
         payload_bytes = payload_bytes
             .checked_add(usize_to_u64(payload.len())?)
@@ -970,24 +1124,41 @@ fn read_opaque_values(
         context
             .require(GenerationResource::TextBytes, payload_bytes)
             .map_err(CatalogError::control)?;
-        let value: serde_json::Value =
-            serde_json::from_str(&payload).map_err(CatalogError::json)?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
-        for (field, expected) in [
-            ("id", &id),
-            ("repository", &repository),
-            ("generation", &generation),
-            ("provenance", &provenance),
-        ] {
-            if object.get(field) != Some(expected) {
-                return Err(CatalogError::new(CatalogErrorKind::Corrupt));
-            }
+        let record = decode(payload.as_bytes(), context)?;
+        if record.id() != id
+            || record.repository() != repository
+            || record.generation() != generation
+            || record.provenance() != provenance
+        {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
-        values.push(value);
+        records.push(record);
     }
-    Ok(values)
+    Ok(records)
+}
+
+fn map_record_decode_error(
+    error: NormalizedRecordDecodeError,
+    context: &GenerationContext<'_>,
+) -> CatalogError {
+    if error == NormalizedRecordDecodeError::Interrupted {
+        return context.check().map_or_else(CatalogError::control, |()| {
+            CatalogError::new(CatalogErrorKind::Corrupt)
+        });
+    }
+    CatalogError::new(CatalogErrorKind::Corrupt)
+}
+
+fn map_extension_decode_error(
+    error: ExtensionEnvelopeDecodeError,
+    context: &GenerationContext<'_>,
+) -> CatalogError {
+    if error == ExtensionEnvelopeDecodeError::Interrupted {
+        return context.check().map_or_else(CatalogError::control, |()| {
+            CatalogError::new(CatalogErrorKind::Corrupt)
+        });
+    }
+    CatalogError::new(CatalogErrorKind::Corrupt)
 }
 
 fn take_evidence(
