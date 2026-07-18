@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 blake3.workspace = true
 cargo_metadata.workspace = true
+getrandom.workspace = true
 jsonschema.workspace = true
 prost.workspace = true
 prost-build.workspace = true
@@ -23,6 +24,7 @@ rootlight-ipc = { path = "../crates/rootlight-ipc" }
 rootlight-ir = { path = "../crates/rootlight-ir", features = ["schema"] }
 rootlight-mcp-contract = { path = "../crates/rootlight-mcp-contract" }
 rootlight-observability = { path = "../crates/rootlight-observability" }
+rootlight-operations = { path = "../crates/rootlight-operations" }
 rootlight-runtime = { path = "../crates/rootlight-runtime" }
 rootlight-storage = { path = "../crates/rootlight-storage" }
 rootlight-protocol = { path = "../crates/rootlight-protocol" }

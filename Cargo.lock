@@ -3316,6 +3316,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "cargo_metadata",
+ "getrandom 0.3.4",
  "jsonschema",
  "prost",
  "prost-build",
@@ -3330,6 +3331,7 @@ dependencies = [
  "rootlight-ir",
  "rootlight-mcp-contract",
  "rootlight-observability",
+ "rootlight-operations",
  "rootlight-protocol",
  "rootlight-runtime",
  "rootlight-storage",
