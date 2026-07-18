@@ -608,6 +608,7 @@ enum JournalCommand {
         operation: OperationId,
         deadline: WorkerDeadline,
         started: SyncSender<WorkerStart>,
+        acknowledged: Receiver<WorkerStartAcknowledgement>,
     },
     FinishOperation {
         operation: OperationId,
@@ -634,6 +635,14 @@ enum JournalCommand {
     Barrier {
         entered: SyncSender<()>,
         release: Receiver<()>,
+    },
+    #[cfg(test)]
+    DeliverStart {
+        operation: OperationId,
+        deadline: WorkerDeadline,
+        started: SyncSender<WorkerStart>,
+        acknowledged: Receiver<WorkerStartAcknowledgement>,
+        result: Box<WorkerStart>,
     },
 }
 
@@ -759,10 +768,12 @@ impl JournalActorHandle {
         deadline: &WorkerDeadline,
     ) -> WorkerStart {
         let (started, receiver) = mpsc::sync_channel(0);
+        let (acknowledged, acknowledgement) = mpsc::sync_channel(0);
         let mut command = JournalCommand::StartOperation {
             operation,
             deadline: deadline.clone(),
             started,
+            acknowledged: acknowledgement,
         };
         let mut queue_saturated = false;
         loop {
@@ -788,7 +799,33 @@ impl JournalActorHandle {
                 return Err(ServiceError::RequestTimedOut);
             };
             match receiver.recv_timeout(remaining.min(WORKER_HANDSHAKE_POLL_INTERVAL)) {
-                Ok(start) => return start,
+                Ok(start) => {
+                    if !matches!(
+                        &start,
+                        Ok((record, Some(_))) if record.state == OperationState::Running
+                    ) {
+                        return start;
+                    }
+                    deadline.pause_after_start_receipt();
+                    let accepted = deadline.remaining().is_some();
+                    let acknowledgement = if accepted {
+                        WorkerStartAcknowledgement::Accepted
+                    } else {
+                        WorkerStartAcknowledgement::Expired
+                    };
+                    if acknowledged.send(acknowledgement).is_err() {
+                        return Err(if accepted {
+                            ServiceError::ChannelClosed
+                        } else {
+                            ServiceError::RequestTimedOut
+                        });
+                    }
+                    return if accepted {
+                        start
+                    } else {
+                        Err(ServiceError::RequestTimedOut)
+                    };
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(if deadline.remaining().is_none() {
@@ -1151,6 +1188,23 @@ fn execute_journal_command(
                 let _ = release.recv();
             }
         }
+        #[cfg(test)]
+        JournalCommand::DeliverStart {
+            operation,
+            deadline,
+            started,
+            acknowledged,
+            result,
+        } => {
+            deliver_worker_start(
+                journal,
+                operation,
+                &deadline,
+                started,
+                acknowledged,
+                *result,
+            )?;
+        }
         JournalCommand::Execute { request, reply } => {
             let _ = reply.send(execute_journal_request(journal, request));
         }
@@ -1173,16 +1227,10 @@ fn execute_journal_command(
             operation,
             deadline,
             started,
+            acknowledged,
         } => {
             let result = start_operation_before(journal, operation, &deadline);
-            if let Err(send_error) = started.send(result)
-                && matches!(
-                    &send_error.0,
-                    Ok((record, Some(_))) if record.state == OperationState::Running
-                )
-            {
-                journal.interrupt_unacknowledged_start(operation)?;
-            }
+            deliver_worker_start(journal, operation, &deadline, started, acknowledged, result)?;
         }
         JournalCommand::FinishOperation {
             operation,
@@ -1266,6 +1314,49 @@ fn execute_journal_command(
         JournalCommand::Checkpoint { reply } => {
             let _ = reply.send(journal.checkpoint());
         }
+    }
+    Ok(())
+}
+
+fn deliver_worker_start(
+    journal: &OperationJournal,
+    operation: OperationId,
+    deadline: &WorkerDeadline,
+    started: SyncSender<WorkerStart>,
+    acknowledged: Receiver<WorkerStartAcknowledgement>,
+    result: WorkerStart,
+) -> Result<(), OperationError> {
+    if matches!(
+        &result,
+        Err(ServiceError::Operations(
+            OperationError::CommittedStartCompensationFailed
+        ))
+    ) {
+        return Err(OperationError::CommittedStartCompensationFailed);
+    }
+    let durable_start = matches!(
+        &result,
+        Ok((record, Some(_))) if record.state == OperationState::Running
+    );
+    if let Err(send_error) = started.send(result) {
+        if matches!(
+            &send_error.0,
+            Ok((record, Some(_))) if record.state == OperationState::Running
+        ) {
+            journal.interrupt_unacknowledged_start(operation)?;
+        }
+        return Ok(());
+    }
+    if !durable_start {
+        return Ok(());
+    }
+    let acknowledgement = deadline
+        .remaining()
+        .map_or(Err(mpsc::RecvTimeoutError::Timeout), |remaining| {
+            acknowledged.recv_timeout(remaining)
+        });
+    if !matches!(acknowledgement, Ok(WorkerStartAcknowledgement::Accepted)) {
+        journal.interrupt_unacknowledged_start(operation)?;
     }
     Ok(())
 }
@@ -2079,6 +2170,27 @@ impl Drop for ClientConnectionPermit {
 type WorkerStart =
     Result<(OperationRecord, Option<rootlight_operations::Cancellation>), ServiceError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerStartAcknowledgement {
+    Accepted,
+    Expired,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct WorkerStartReceiptHook {
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+struct ControlledStartReceipt {
+    deadline: WorkerDeadline,
+    force_expired: Arc<AtomicBool>,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
 /// One monotonic budget shared by admission, actor enqueue, and actor execution.
 ///
 /// Keeping the deadline in the command prevents a start authorization that
@@ -2090,6 +2202,8 @@ struct WorkerDeadline {
     forced_expired: Option<Arc<AtomicBool>>,
     #[cfg(test)]
     remaining_checks: Option<Arc<AtomicU32>>,
+    #[cfg(test)]
+    start_receipt_hook: Option<Arc<WorkerStartReceiptHook>>,
 }
 
 impl WorkerDeadline {
@@ -2103,6 +2217,8 @@ impl WorkerDeadline {
             forced_expired: None,
             #[cfg(test)]
             remaining_checks: None,
+            #[cfg(test)]
+            start_receipt_hook: None,
         })
     }
 
@@ -2133,6 +2249,14 @@ impl WorkerDeadline {
         self.expires_at
     }
 
+    fn pause_after_start_receipt(&self) {
+        #[cfg(test)]
+        if let Some(hook) = self.start_receipt_hook.as_ref() {
+            hook.entered.wait();
+            hook.release.wait();
+        }
+    }
+
     #[cfg(test)]
     fn controlled(timeout: Duration) -> Result<(Self, Arc<AtomicBool>), ServiceError> {
         let mut deadline = Self::from_timeout(timeout)?;
@@ -2146,6 +2270,25 @@ impl WorkerDeadline {
         let mut deadline = Self::from_timeout(timeout)?;
         deadline.remaining_checks = Some(Arc::new(AtomicU32::new(checks)));
         Ok(deadline)
+    }
+
+    #[cfg(test)]
+    fn controlled_at_start_receipt(
+        timeout: Duration,
+    ) -> Result<ControlledStartReceipt, ServiceError> {
+        let (mut deadline, forced_expired) = Self::controlled(timeout)?;
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        deadline.start_receipt_hook = Some(Arc::new(WorkerStartReceiptHook {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }));
+        Ok(ControlledStartReceipt {
+            deadline,
+            force_expired: forced_expired,
+            entered,
+            release,
+        })
     }
 }
 
@@ -4597,6 +4740,7 @@ fn operation_error_to_public(
         | OperationError::SerializePublicError(_)
         | OperationError::SystemClockBeforeEpoch
         | OperationError::TimestampOverflow
+        | OperationError::CommittedStartCompensationFailed
         | OperationError::InsecureLockFile
         | OperationError::WindowsSecurityPolicy
         | OperationError::CatalogInspection(_)
@@ -4676,6 +4820,7 @@ impl ServiceError {
                 | OperationError::SerializePublicError(_)
                 | OperationError::SystemClockBeforeEpoch
                 | OperationError::TimestampOverflow
+                | OperationError::CommittedStartCompensationFailed
                 | OperationError::InsecureLockFile
                 | OperationError::WindowsSecurityPolicy
                 | OperationError::CatalogInspection(_)
@@ -5584,11 +5729,13 @@ mod tests {
             .expect("normal lane fills");
         let operation = OperationId::from_bytes([39; 16]);
         let (started, _start_response) = mpsc::sync_channel(1);
+        let (_acknowledged, acknowledgement) = mpsc::sync_channel(1);
         let command = JournalCommand::StartOperation {
             operation,
             deadline: WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT)
                 .expect("deadline is valid"),
             started,
+            acknowledged: acknowledgement,
         };
         let (error, command) = handle
             .try_send_preserving(JournalLane::Normal, command)
@@ -5698,6 +5845,7 @@ mod tests {
         let deadline =
             WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT).expect("deadline is valid");
         let (started, receiver) = mpsc::sync_channel(0);
+        let (_acknowledged, acknowledgement) = mpsc::sync_channel(0);
         drop(receiver);
 
         execute_journal_command(
@@ -5706,6 +5854,7 @@ mod tests {
                 operation,
                 deadline,
                 started,
+                acknowledged: acknowledgement,
             },
         )
         .expect("lost acknowledgement is compensated");
@@ -5716,6 +5865,111 @@ mod tests {
             operation.recovery_class,
             RecoveryClass::InterruptedByRestart
         );
+    }
+
+    #[test]
+    fn worker_start_expiry_after_rendezvous_receipt_prevents_execution() {
+        let operation = OperationId::from_bytes([63; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        journal.enqueue(operation).expect("operation enqueues");
+        let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
+        let handle = actor.handle();
+        let ControlledStartReceipt {
+            deadline,
+            force_expired,
+            entered,
+            release,
+        } = WorkerDeadline::controlled_at_start_receipt(DEFAULT_REQUEST_TIMEOUT)
+            .expect("deadline is valid");
+        let worker_handle = handle.clone();
+        let worker =
+            thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
+
+        entered.wait();
+        force_expired.store(true, Ordering::Release);
+        release.wait();
+
+        assert!(matches!(
+            worker.join().expect("worker joins"),
+            Err(ServiceError::RequestTimedOut)
+        ));
+        let (entered, entered_receiver) = mpsc::sync_channel(0);
+        let (release, release_receiver) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered,
+                    release: release_receiver,
+                },
+            )
+            .expect("actor barrier queues");
+        entered_receiver.recv().expect("actor reaches barrier");
+        release.send(()).expect("actor barrier releases");
+
+        let operation = journal.status(operation).expect("status loads");
+        assert_eq!(operation.state, OperationState::Interrupted);
+        assert_eq!(
+            operation.recovery_class,
+            RecoveryClass::InterruptedByRestart
+        );
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn committed_start_compensation_failure_stops_the_journal_actor() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(journal, 1, 2).expect("actor starts");
+        let handle = actor.handle();
+        let (barrier_entered, barrier_entered_receiver) = mpsc::sync_channel(0);
+        let (barrier_release, barrier_release_receiver) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered: barrier_entered,
+                    release: barrier_release_receiver,
+                },
+            )
+            .expect("barrier queues");
+        barrier_entered_receiver
+            .recv()
+            .expect("actor enters barrier");
+        let deadline =
+            WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT).expect("deadline is valid");
+        let (started, receiver) = mpsc::sync_channel(0);
+        let (_acknowledged, acknowledgement) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Normal,
+                JournalCommand::DeliverStart {
+                    operation: OperationId::from_bytes([64; 16]),
+                    deadline,
+                    started,
+                    acknowledged: acknowledgement,
+                    result: Box::new(Err(ServiceError::Operations(
+                        OperationError::CommittedStartCompensationFailed,
+                    ))),
+                },
+            )
+            .expect("faulting delivery queues");
+        let (sentinel_entered, sentinel_receiver) = mpsc::sync_channel(0);
+        let (_sentinel_release, sentinel_release_receiver) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Normal,
+                JournalCommand::Barrier {
+                    entered: sentinel_entered,
+                    release: sentinel_release_receiver,
+                },
+            )
+            .expect("sentinel queues behind the fault");
+
+        barrier_release.send(()).expect("barrier releases");
+
+        assert!(matches!(receiver.recv(), Err(mpsc::RecvError)));
+        assert!(matches!(sentinel_receiver.recv(), Err(mpsc::RecvError)));
+        actor.join().expect("faulted actor joins");
     }
 
     #[test]

@@ -727,7 +727,12 @@ impl OperationJournal {
         &self,
         operation: OperationId,
     ) -> Result<OperationRecord, OperationError> {
-        self.start_execution_while(operation, || true)
+        self.start_execution_with(
+            operation,
+            || true,
+            || Ok(()),
+            |recovery, reason| self.interrupt_started(operation, recovery, reason),
+        )
     }
 
     /// Atomically starts queued work before a monotonic deadline.
@@ -746,13 +751,23 @@ impl OperationJournal {
         operation: OperationId,
         deadline: Instant,
     ) -> Result<OperationRecord, OperationError> {
-        self.start_execution_while(operation, || Instant::now() < deadline)
+        self.start_execution_with(
+            operation,
+            || Instant::now() < deadline,
+            || Ok(()),
+            |recovery, reason| self.interrupt_started(operation, recovery, reason),
+        )
     }
 
-    fn start_execution_while(
+    fn start_execution_with(
         &self,
         operation: OperationId,
         mut can_start: impl FnMut() -> bool,
+        mut after_commit: impl FnMut() -> Result<(), OperationError>,
+        mut compensate: impl FnMut(
+            RecoveryClass,
+            CancellationReason,
+        ) -> Result<OperationRecord, OperationError>,
     ) -> Result<OperationRecord, OperationError> {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
@@ -794,18 +809,40 @@ impl OperationJournal {
         if !can_start() {
             return Err(OperationError::StartDeadlineElapsed);
         }
+        let started = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if started.state != OperationState::Running
+            || started.stage != OperationStage::Executing
+            || started.revision != revision
+            || started.cancellation_requested
+        {
+            return Err(OperationError::CorruptState);
+        }
+        if !can_start() {
+            return Err(OperationError::StartDeadlineElapsed);
+        }
         transaction.commit().map_err(map_sqlite_error)?;
-        let started = load_record(&connection, operation)?.ok_or(OperationError::NotFound)?;
+        drop(connection);
+        if let Err(error) = after_commit() {
+            compensate(
+                RecoveryClass::InterruptedByRestart,
+                CancellationReason::Shutdown,
+            )
+            .map_err(|_| OperationError::CommittedStartCompensationFailed)?;
+            return Err(error);
+        }
         if can_start() {
             return Ok(started);
         }
-        drop(connection);
-        self.interrupt_started(
-            operation,
+        let compensated = compensate(
             RecoveryClass::DeadlineElapsed,
             CancellationReason::DeadlineExceeded,
-        )?;
-        Err(OperationError::StartDeadlineElapsed)
+        )
+        .map_err(|_| OperationError::CommittedStartCompensationFailed)?;
+        if compensated.cancellation_requested {
+            Err(OperationError::CancellationWon)
+        } else {
+            Err(OperationError::StartDeadlineElapsed)
+        }
     }
 
     /// Interrupts a durable start whose worker acknowledgement was lost.
@@ -826,6 +863,7 @@ impl OperationJournal {
             RecoveryClass::InterruptedByRestart,
             CancellationReason::Shutdown,
         )
+        .map_err(|_| OperationError::CommittedStartCompensationFailed)
     }
 
     /// Advances the monotonic operation stage.
@@ -1367,14 +1405,46 @@ impl OperationJournal {
         ) {
             return Err(OperationError::ConcurrentUpdate);
         }
-        if update_interrupted(&transaction, operation, recovery)? != 1 {
+        let updated = if current.cancellation_requested {
+            transaction
+                .execute(
+                    "UPDATE operations
+                     SET state = 'cancelled', revision = ?1
+                     WHERE operation = ?2 AND revision = ?3
+                       AND state = 'cancelling' AND cancellation_requested = 1",
+                    params![
+                        u64_to_i64(next_revision(current.revision)?)?,
+                        operation.as_bytes().as_slice(),
+                        u64_to_i64(current.revision)?,
+                    ],
+                )
+                .map_err(map_sqlite_error)?
+        } else {
+            transaction
+                .execute(
+                    "UPDATE operations
+                     SET state = 'interrupted', recovery_class = ?1, revision = ?2
+                     WHERE operation = ?3 AND revision = ?4
+                       AND state = 'running' AND cancellation_requested = 0",
+                    params![
+                        recovery.as_str(),
+                        u64_to_i64(next_revision(current.revision)?)?,
+                        operation.as_bytes().as_slice(),
+                        u64_to_i64(current.revision)?,
+                    ],
+                )
+                .map_err(map_sqlite_error)?
+        };
+        if updated != 1 {
             return Err(OperationError::ConcurrentUpdate);
         }
+        let interrupted = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
         transaction.commit().map_err(map_sqlite_error)?;
-        if let Some(token) = self.lock_cancellations()?.remove(&operation) {
+        if let Some(token) = self.lock_cancellations()?.remove(&operation)
+            && !current.cancellation_requested
+        {
             let _ = token.cancel(reason);
         }
-        let interrupted = load_record(&connection, operation)?.ok_or(OperationError::NotFound)?;
         drop(connection);
         self.prune_to(MAX_OPERATION_HISTORY)?;
         Ok(interrupted)
@@ -2993,6 +3063,9 @@ pub enum OperationError {
     /// Durable worker ownership could not be established before its monotonic deadline.
     #[error("operation start deadline elapsed")]
     StartDeadlineElapsed,
+    /// A committed start could not be returned to a terminal fail-closed state.
+    #[error("committed operation start compensation failed")]
+    CommittedStartCompensationFailed,
     /// A persistent catalog or SQLite sidecar exceeded its physical storage bound.
     #[error("operation journal exceeds its storage limit")]
     CatalogTooLarge,
@@ -3210,11 +3283,16 @@ mod tests {
         journal.enqueue(after_commit).expect("operation enqueues");
 
         let checks = Cell::new(0_u32);
-        let before_commit_result = journal.start_execution_while(before_commit, || {
-            let check = checks.get();
-            checks.set(check + 1);
-            check == 0
-        });
+        let before_commit_result = journal.start_execution_with(
+            before_commit,
+            || {
+                let check = checks.get();
+                checks.set(check + 1);
+                check == 0
+            },
+            || Ok(()),
+            |recovery, reason| journal.interrupt_started(before_commit, recovery, reason),
+        );
         assert!(matches!(
             before_commit_result,
             Err(OperationError::StartDeadlineElapsed)
@@ -3225,11 +3303,16 @@ mod tests {
         );
 
         let checks = Cell::new(0_u32);
-        let after_commit_result = journal.start_execution_while(after_commit, || {
-            let check = checks.get();
-            checks.set(check + 1);
-            check < 2
-        });
+        let after_commit_result = journal.start_execution_with(
+            after_commit,
+            || {
+                let check = checks.get();
+                checks.set(check + 1);
+                check < 3
+            },
+            || Ok(()),
+            |recovery, reason| journal.interrupt_started(after_commit, recovery, reason),
+        );
         assert!(matches!(
             after_commit_result,
             Err(OperationError::StartDeadlineElapsed)
@@ -3249,13 +3332,115 @@ mod tests {
             .expect("cancellation wins");
 
         assert!(matches!(
-            journal.start_execution_while(operation, || false),
+            journal.start_execution_with(
+                operation,
+                || false,
+                || Ok(()),
+                |recovery, reason| journal.interrupt_started(operation, recovery, reason),
+            ),
             Err(OperationError::CancellationWon)
         ));
         assert_eq!(
             journal.status(operation).expect("status loads").state,
             OperationState::Cancelled
         );
+    }
+
+    #[test]
+    fn post_commit_record_materialization_fault_is_compensated() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = operation(73);
+        journal.enqueue(operation).expect("operation enqueues");
+
+        let result = journal.start_execution_with(
+            operation,
+            || true,
+            || Err(OperationError::CorruptState),
+            |recovery, reason| journal.interrupt_started(operation, recovery, reason),
+        );
+
+        assert!(matches!(result, Err(OperationError::CorruptState)));
+        assert_eq!(
+            journal.status(operation).expect("status loads").state,
+            OperationState::Interrupted
+        );
+    }
+
+    #[test]
+    fn failed_committed_start_compensation_has_a_fatal_signal() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = operation(74);
+        journal.enqueue(operation).expect("operation enqueues");
+
+        let result = journal.start_execution_with(
+            operation,
+            || true,
+            || Err(OperationError::CorruptState),
+            |_recovery, _reason| Err(OperationError::Busy),
+        );
+
+        assert!(matches!(
+            result,
+            Err(OperationError::CommittedStartCompensationFailed)
+        ));
+        assert_eq!(
+            journal.status(operation).expect("status loads").state,
+            OperationState::Running
+        );
+        journal
+            .interrupt_unacknowledged_start(operation)
+            .expect("test cleanup interrupts the committed start");
+    }
+
+    #[test]
+    fn cancellation_committed_after_start_wins_deadline_compensation() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = operation(75);
+        journal.enqueue(operation).expect("operation enqueues");
+        let committed = Arc::new(Barrier::new(2));
+        let cancellation_complete = Arc::new(Barrier::new(2));
+        let start_journal = Arc::clone(&journal);
+        let start_committed = Arc::clone(&committed);
+        let start_cancellation_complete = Arc::clone(&cancellation_complete);
+        let start = thread::spawn(move || {
+            let checks = Cell::new(0_u32);
+            let compensation_journal = Arc::clone(&start_journal);
+            start_journal.start_execution_with(
+                operation,
+                || {
+                    let check = checks.get();
+                    checks.set(check + 1);
+                    check < 3
+                },
+                || {
+                    start_committed.wait();
+                    start_cancellation_complete.wait();
+                    Ok(())
+                },
+                move |recovery, reason| {
+                    compensation_journal.interrupt_started(operation, recovery, reason)
+                },
+            )
+        });
+
+        committed.wait();
+        journal
+            .request_cancellation(operation, CancellationReason::ClientRequest)
+            .expect("cancellation commits in the post-commit gap");
+        cancellation_complete.wait();
+
+        assert!(matches!(
+            start.join().expect("start thread joins"),
+            Err(OperationError::CancellationWon)
+        ));
+        let cancelled = journal.status(operation).expect("status loads");
+        assert_eq!(cancelled.state, OperationState::Cancelled);
+        assert!(cancelled.cancellation_requested);
+        assert_eq!(
+            cancelled.cancellation_reason,
+            Some(CancellationReason::ClientRequest)
+        );
+        assert_eq!(cancelled.recovery_class, RecoveryClass::NotApplicable);
     }
 
     #[test]
