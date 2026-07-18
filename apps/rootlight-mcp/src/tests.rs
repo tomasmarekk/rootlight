@@ -1,14 +1,49 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    sync::Notify,
+    sync::{Notify, watch},
     task::JoinHandle,
     time::timeout,
 };
 
 use super::*;
+
+struct PendingWriter {
+    polled: watch::Sender<bool>,
+    dropped: watch::Sender<bool>,
+}
+
+impl AsyncWrite for PendingWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        _buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.polled.send_replace(true);
+        Poll::Pending
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Pending
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl Drop for PendingWriter {
+    fn drop(&mut self) {
+        self.dropped.send_replace(true);
+    }
+}
 
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1.0"}}}"#;
 const INITIALIZED: &str = r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#;
@@ -485,6 +520,61 @@ async fn oversized_drain_survives_a_cancelled_read_future() {
         frames.read_next().await.expect("next frame is retained"),
         ReadFrame::Complete(frame) if frame == PING_TWO.as_bytes()
     ));
+}
+
+#[tokio::test]
+async fn dropping_serve_aborts_and_drops_a_pending_response_writer() {
+    let (mut client_input, server_input) = tokio::io::duplex(2048);
+    let (polled_tx, mut polled_rx) = watch::channel(false);
+    let (dropped_tx, mut dropped_rx) = watch::channel(false);
+    let server = tokio::spawn(async move {
+        let mut session = Session::rootlight();
+        serve(
+            BufReader::new(server_input),
+            PendingWriter {
+                polled: polled_tx,
+                dropped: dropped_tx,
+            },
+            &mut session,
+            Arc::new(NoopRequestHandler),
+            StdioLimits::default(),
+        )
+        .await
+    });
+
+    client_input
+        .write_all(INITIALIZE.as_bytes())
+        .await
+        .expect("initialize writes");
+    client_input
+        .write_all(b"\n")
+        .await
+        .expect("initialize delimiter writes");
+    client_input.flush().await.expect("initialize flushes");
+    timeout(Duration::from_secs(1), async {
+        while !*polled_rx.borrow() {
+            polled_rx
+                .changed()
+                .await
+                .expect("pending writer keeps its signal open");
+        }
+    })
+    .await
+    .expect("response writer is polled");
+
+    server.abort();
+    let join_error = server.await.expect_err("serve task is cancelled");
+    assert!(join_error.is_cancelled());
+    timeout(Duration::from_secs(1), async {
+        while !*dropped_rx.borrow() {
+            dropped_rx
+                .changed()
+                .await
+                .expect("pending writer drops after cancellation");
+        }
+    })
+    .await
+    .expect("cancelled serve drops its response writer");
 }
 
 #[derive(Clone)]

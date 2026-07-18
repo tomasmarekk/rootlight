@@ -19,7 +19,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt},
     sync::{Semaphore, mpsc, watch},
-    task::JoinSet,
+    task::{JoinHandle, JoinSet},
 };
 
 const JSON_RPC_VERSION: &str = "2.0";
@@ -766,7 +766,7 @@ where
     let limits = limits.validate()?;
     let mut frames = FrameReader::new(input, limits.max_frame_bytes);
     let (response_tx, response_rx) = mpsc::channel(limits.response_channel_capacity);
-    let mut writer = tokio::spawn(write_responses(output, response_rx));
+    let mut writer = AbortOnDropTask::new(tokio::spawn(write_responses(output, response_rx)));
     let mut writer_finished = false;
     let mut requests = JoinSet::<(RequestId, HandlerResponse)>::new();
     let mut in_flight = BTreeMap::<RequestId, watch::Sender<bool>>::new();
@@ -777,7 +777,7 @@ where
     let result = async {
         loop {
             tokio::select! {
-                writer_result = &mut writer => {
+                writer_result = writer.join() => {
                     writer_finished = true;
                     break flatten_writer_result(writer_result);
                 }
@@ -894,12 +894,34 @@ where
     drop(response_tx);
 
     if !writer_finished {
-        let writer_result = writer.await;
+        let writer_result = writer.join().await;
         if result.is_ok() {
             return flatten_writer_result(writer_result);
         }
     }
     result
+}
+
+// Tokio detaches a JoinHandle when it is dropped. This owner aborts the
+// response writer if an embedding cancels `serve` before its async cleanup.
+struct AbortOnDropTask<T> {
+    handle: JoinHandle<T>,
+}
+
+impl<T> AbortOnDropTask<T> {
+    const fn new(handle: JoinHandle<T>) -> Self {
+        Self { handle }
+    }
+
+    async fn join(&mut self) -> Result<T, tokio::task::JoinError> {
+        (&mut self.handle).await
+    }
+}
+
+impl<T> Drop for AbortOnDropTask<T> {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
 }
 
 /// Local failures that terminate an MCP stdio session.
