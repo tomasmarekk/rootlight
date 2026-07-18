@@ -123,6 +123,8 @@ impl VerifiedLexicalArtifact {
     /// non-portable or colliding names, manifest drift, and all declared budget
     /// overruns. File contents are hashed through no-follow handles with
     /// cooperative cancellation checkpoints around every read.
+    /// Production path-backed verification remains unavailable until the
+    /// private file-handle boundary is accepted.
     ///
     /// # Errors
     ///
@@ -134,6 +136,7 @@ impl VerifiedLexicalArtifact {
         budget: ArtifactBudget,
         cancellation: &Cancellation,
     ) -> Result<Self, SearchError> {
+        crate::require_private_file_boundary(cfg!(test))?;
         validate_artifact_budget(budget)?;
         validate_manifest(&manifest, budget)?;
         let observed = inspect_directory(

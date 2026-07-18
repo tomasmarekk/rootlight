@@ -19,3 +19,11 @@ pub use model::{
     BuildBudget, BuildStats, DocumentField, LexicalDocument, QueryViolation, SearchBudget,
     SearchError, SearchHit, SearchMode, SearchOutcome, SearchRequest,
 };
+
+fn require_private_file_boundary(test_scaffold: bool) -> Result<(), SearchError> {
+    if test_scaffold {
+        Ok(())
+    } else {
+        Err(SearchError::UnsupportedPrivateFileBoundary)
+    }
+}

@@ -55,7 +55,7 @@ const HARD_MAX_EXPANDED_TERMS: usize = 4_096;
 const HARD_MAX_EXAMINED_TERMS: usize = 100_000;
 const HARD_MAX_QUERY_POSTINGS: u64 = 1_000_000;
 const HARD_MAX_RETURNED_TEXT_BYTES: usize = 64 * 1024 * 1024;
-const HARD_MAX_QUERY_DURATION: Duration = Duration::from_secs(30);
+const HARD_MAX_QUERY_DURATION: Duration = Duration::from_secs(10);
 
 type QueryClause = (Occur, Box<dyn Query>);
 
@@ -68,6 +68,9 @@ impl LexicalIndexBuilder {
     /// Publication and cleanup are intentionally outside this crate. The caller
     /// must supply an empty directory rooted in its private generation staging tree.
     /// The returned manifest is created only after the writer and index handles close.
+    /// Production path-backed construction remains unavailable until the
+    /// private file-handle boundary is accepted; unit tests exercise the
+    /// proposed artifact contract without enabling it for callers.
     ///
     /// # Errors
     ///
@@ -81,6 +84,7 @@ impl LexicalIndexBuilder {
         artifact_budget: ArtifactBudget,
         cancellation: &Cancellation,
     ) -> Result<LexicalArtifactManifest, SearchError> {
+        crate::require_private_file_boundary(cfg!(test))?;
         cancellation.check()?;
         validate_build_budget(budget)?;
         ensure_empty_directory(directory)?;
@@ -183,6 +187,9 @@ pub struct LexicalIndex {
 impl LexicalIndex {
     /// Consumes a verified artifact only when schema, metadata, count, and generation align.
     ///
+    /// Production path-backed opening remains unavailable until the private
+    /// file-handle boundary is accepted.
+    ///
     /// # Errors
     ///
     /// Returns [`SearchError`] when the index cannot be opened, contains deleted
@@ -191,6 +198,7 @@ impl LexicalIndex {
         artifact: VerifiedLexicalArtifact,
         expected_generation: GenerationId,
     ) -> Result<Self, SearchError> {
+        crate::require_private_file_boundary(cfg!(test))?;
         if artifact.generation() != expected_generation {
             return Err(SearchError::GenerationMismatch {
                 expected: expected_generation,
@@ -1952,6 +1960,79 @@ mod tests {
         );
         assert_eq!(first, other);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn ordering_is_stable_across_permutations_and_parallel_callers() {
+        let documents = [
+            document(1, "same_name", "src/a.rs"),
+            document(2, "same_name", "src/b.rs"),
+            document(3, "same_name", "src/c.rs"),
+        ];
+        let permutations = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        let expected = [
+            SymbolId::from_bytes([1; 20]),
+            SymbolId::from_bytes([2; 20]),
+            SymbolId::from_bytes([3; 20]),
+        ];
+
+        for permutation in permutations {
+            let ordered = permutation
+                .map(|index| documents[index].clone())
+                .into_iter()
+                .collect::<Vec<_>>();
+            let index = LexicalIndex::build_ephemeral(
+                generation(29),
+                ordered,
+                BuildBudget::default(),
+                &Cancellation::new(),
+            )
+            .expect("permuted ephemeral index builds");
+            let actual = search(&index, "same name", SearchMode::Text)
+                .into_iter()
+                .map(|hit| hit.symbol_id)
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
+
+        for caller_count in [1_usize, 2, 4] {
+            let handles = (0..caller_count)
+                .map(|caller| {
+                    let permutation = permutations[caller % permutations.len()];
+                    let ordered = permutation
+                        .map(|index| documents[index].clone())
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    std::thread::spawn(move || {
+                        let index = LexicalIndex::build_ephemeral(
+                            generation(29),
+                            ordered,
+                            BuildBudget::default(),
+                            &Cancellation::new(),
+                        )
+                        .expect("parallel ephemeral index builds");
+                        search(&index, "same name", SearchMode::Text)
+                            .into_iter()
+                            .map(|hit| hit.symbol_id)
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for handle in handles {
+                assert_eq!(
+                    handle.join().expect("parallel search caller joins"),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]
