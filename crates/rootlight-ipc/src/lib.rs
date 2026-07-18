@@ -629,6 +629,38 @@ pub async fn read_response_async(
     codec.read_message_async(stream).await
 }
 
+/// Waits for an accepted asynchronous peer to close its receive direction.
+///
+/// The single-request protocol permits no further client bytes while daemon
+/// work is running. This operation reads at most one byte and adds no timeout;
+/// the caller owns the surrounding deadline or cancellation selection. Dropping
+/// the future before completion does not consume a byte.
+///
+/// # Errors
+///
+/// Returns [`IpcError::UnexpectedPeerData`] when the peer sends another byte,
+/// or [`IpcError::Transport`] for a read failure that does not signal closure.
+pub async fn wait_for_peer_close_async(stream: &mut AsyncLocalStream) -> Result<(), IpcError> {
+    let mut byte = [0_u8; 1];
+    match stream.read(&mut byte).await {
+        Ok(0) => Ok(()),
+        Ok(_) => Err(IpcError::UnexpectedPeerData),
+        Err(source) if is_peer_close_error(&source) => Ok(()),
+        Err(source) => Err(IpcError::Transport(source)),
+    }
+}
+
+fn is_peer_close_error(source: &io::Error) -> bool {
+    matches!(
+        source.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::UnexpectedEof
+    )
+}
+
 async fn read_exact_async<R: AsyncRead + Unpin>(
     stream: &mut R,
     buffer: &mut [u8],
@@ -919,6 +951,9 @@ pub enum IpcError {
     /// The peer closed the stream before one complete frame arrived.
     #[error("local IPC frame ended unexpectedly")]
     UnexpectedEof,
+    /// The peer sent data where closure was the only valid protocol event.
+    #[error("local IPC peer sent unexpected trailing data")]
+    UnexpectedPeerData,
     /// A write reported no progress before the frame completed.
     #[error("local IPC write made no progress")]
     WriteZero,
@@ -991,6 +1026,40 @@ mod tests {
         frame.extend_from_slice(&wire_length.to_be_bytes());
         message.encode(&mut frame).expect("test frame encodes");
         frame
+    }
+
+    #[cfg(unix)]
+    fn async_test_endpoint(temporary: &TempDir, label: &str) -> Endpoint {
+        Endpoint::new(temporary.path().join(format!("{label}.sock"))).expect("endpoint is valid")
+    }
+
+    #[cfg(windows)]
+    fn async_test_endpoint(_temporary: &TempDir, label: &str) -> Endpoint {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
+        let sequence = NEXT_PIPE.fetch_add(1, Ordering::Relaxed);
+        Endpoint::new(PathBuf::from(format!(
+            r"\\.\pipe\rootlight-{label}-{}-{sequence}",
+            std::process::id()
+        )))
+        .expect("endpoint is valid")
+    }
+
+    async fn connected_async_streams(label: &str) -> (TempDir, AsyncLocalStream, AsyncLocalStream) {
+        let temporary = private_tempdir();
+        let endpoint = async_test_endpoint(&temporary, label);
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("listener binds");
+        let (client, server) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(connect_async(&endpoint), listener.accept())
+        })
+        .await
+        .expect("connection setup completes");
+        (
+            temporary,
+            client.expect("client connects"),
+            server.expect("connection accepts"),
+        )
     }
 
     #[test]
@@ -1090,6 +1159,40 @@ mod tests {
             .expect("request writes");
 
         assert_eq!(server.await.expect("server task joins"), request(73));
+    }
+
+    #[tokio::test]
+    async fn peer_close_monitor_accepts_eof() {
+        let (_temporary, client, mut server) = connected_async_streams("peer-close-eof").await;
+        drop(client);
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_peer_close_async(&mut server),
+        )
+        .await
+        .expect("peer-close monitor completes")
+        .expect("peer close is accepted");
+    }
+
+    #[tokio::test]
+    async fn peer_close_monitor_rejects_unexpected_byte_without_a_source() {
+        let (_temporary, mut client, mut server) = connected_async_streams("peer-close-byte").await;
+        client
+            .write_all(&[0x5a])
+            .await
+            .expect("unexpected byte writes");
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_peer_close_async(&mut server),
+        )
+        .await
+        .expect("peer-close monitor completes")
+        .expect_err("unexpected byte is rejected");
+
+        assert!(matches!(error, IpcError::UnexpectedPeerData));
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     #[tokio::test]
