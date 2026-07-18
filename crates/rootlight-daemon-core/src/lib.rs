@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     pin::Pin,
     sync::{
@@ -36,9 +36,9 @@ use rootlight_observability::{
     build_support_bundle_for_schema,
 };
 use rootlight_operations::{
-    Cancellation, CancellationReason, ClientInstanceId, OperationError, OperationJournal,
-    OperationKind, OperationRecord, OperationStage, OperationState, OperationSubmission, PlanHash,
-    Progress, RecoveryClass, SubmissionOutcome,
+    Cancellation, CancellationReason, ClientInstanceId, DeadlineRetry, OperationError,
+    OperationJournal, OperationKind, OperationRecord, OperationStage, OperationState,
+    OperationSubmission, PlanHash, Progress, RecoveryClass, SubmissionOutcome,
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR, PROTOCOL_VERSION,
@@ -59,7 +59,6 @@ const CAPABILITIES: &[&str] = &[
     "diagnostics.quick",
     "health",
     "operation.cancel",
-    "operation.lease.renew",
     "operation.lifecycle.v1",
     "operation.status",
     "operation.submit",
@@ -86,10 +85,29 @@ pub const DEFAULT_OPERATION_WORKERS: usize = 4;
 pub const CONTROL_PROBE_WORK: Duration = Duration::from_secs(3);
 /// Default maximum server-side request response time.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-/// Default interval between bounded deadline and lease maintenance passes.
+/// Retained compatibility interval from the former polling scheduler.
 pub const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 /// Default orderly shutdown grace period.
 pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// Hard maximum simultaneous negotiated connection count.
+pub const MAX_CONNECTION_LIMIT: u32 = 4_096;
+/// Hard maximum capacity of the high-priority control lane.
+pub const MAX_CONTROL_QUEUE_LIMIT: usize = 4_096;
+/// Hard maximum admitted nonterminal operation count.
+pub const MAX_OPERATION_QUEUE_LIMIT: u32 = rootlight_operations::MAX_NONTERMINAL_OPERATIONS;
+const MAX_OPERATION_QUEUE_CAPACITY: usize =
+    rootlight_operations::MAX_OPERATION_ROWS - rootlight_operations::MAX_OPERATION_HISTORY;
+/// Hard maximum synthetic operation worker count.
+pub const MAX_OPERATION_WORKERS: usize = 64;
+/// Hard maximum server-side request response time.
+pub const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Hard maximum retained maintenance interval.
+pub const MAX_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
+/// Hard maximum graceful drain duration.
+pub const MAX_SHUTDOWN_GRACE: Duration = Duration::from_secs(60);
+const WORKER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(1);
+const WORKER_HANDSHAKE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const SHUTDOWN_INTERRUPT_BATCH: usize = 256;
 
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const LIFECYCLE_STARTING: u8 = 1;
@@ -407,23 +425,23 @@ impl ResourcePressure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DaemonLimits {
     /// Maximum simultaneous negotiated connections.
-    pub connection_limit: u32,
+    connection_limit: u32,
     /// Maximum simultaneous negotiated connections for one validated client-declared identity.
-    pub client_connection_limit: u32,
+    client_connection_limit: u32,
     /// Capacity of the high-priority control lane.
-    pub control_queue_limit: usize,
+    control_queue_limit: usize,
     /// Maximum admitted nonterminal operations.
-    pub operation_queue_limit: u32,
+    operation_queue_limit: u32,
     /// Maximum admitted nonterminal operations for one validated client-declared identity.
-    pub client_operation_limit: u32,
+    client_operation_limit: u32,
     /// Exact number of synthetic operation workers.
-    pub operation_workers: usize,
+    operation_workers: usize,
     /// Maximum response time accepted from a request envelope.
-    pub request_timeout: Duration,
-    /// Interval between bounded expiry maintenance passes.
-    pub maintenance_interval: Duration,
+    request_timeout: Duration,
+    /// Retained compatibility interval from the former polling scheduler.
+    maintenance_interval: Duration,
     /// Maximum graceful drain duration.
-    pub shutdown_grace: Duration,
+    shutdown_grace: Duration,
 }
 
 impl DaemonLimits {
@@ -431,7 +449,8 @@ impl DaemonLimits {
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration is zero.
+    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration
+    /// falls outside the documented hard bounds.
     pub const fn new(
         connection_limit: u32,
         control_queue_limit: usize,
@@ -461,8 +480,9 @@ impl DaemonLimits {
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration is zero,
-    /// or when the client operation limit exceeds the global operation limit.
+    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration
+    /// falls outside the documented hard bounds, or when the client operation
+    /// limit exceeds the global operation limit.
     #[expect(
         clippy::too_many_arguments,
         reason = "each argument is one validated daemon resource dimension"
@@ -494,8 +514,9 @@ impl DaemonLimits {
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration is zero,
-    /// or when a client limit exceeds its corresponding global limit.
+    /// Returns [`ServiceError::InvalidLimits`] when any capacity or duration
+    /// falls outside the documented hard bounds, or when a client limit exceeds
+    /// its corresponding global limit.
     #[expect(
         clippy::too_many_arguments,
         reason = "each argument is one validated daemon resource dimension"
@@ -512,16 +533,23 @@ impl DaemonLimits {
         shutdown_grace: Duration,
     ) -> Result<Self, ServiceError> {
         if connection_limit == 0
+            || connection_limit > MAX_CONNECTION_LIMIT
             || client_connection_limit == 0
             || client_connection_limit > connection_limit
             || control_queue_limit == 0
+            || control_queue_limit > MAX_CONTROL_QUEUE_LIMIT
             || operation_queue_limit == 0
+            || operation_queue_limit > MAX_OPERATION_QUEUE_LIMIT
             || client_operation_limit == 0
             || client_operation_limit > operation_queue_limit
             || operation_workers == 0
+            || operation_workers > MAX_OPERATION_WORKERS
             || request_timeout.is_zero()
+            || duration_exceeds(request_timeout, MAX_REQUEST_TIMEOUT)
             || maintenance_interval.is_zero()
+            || duration_exceeds(maintenance_interval, MAX_MAINTENANCE_INTERVAL)
             || shutdown_grace.is_zero()
+            || duration_exceeds(shutdown_grace, MAX_SHUTDOWN_GRACE)
         {
             return Err(ServiceError::InvalidLimits);
         }
@@ -537,6 +565,80 @@ impl DaemonLimits {
             shutdown_grace,
         })
     }
+
+    /// Returns the validated global connection limit.
+    #[must_use]
+    pub const fn connection_limit(&self) -> u32 {
+        self.connection_limit
+    }
+
+    /// Returns the validated per-client connection limit.
+    #[must_use]
+    pub const fn client_connection_limit(&self) -> u32 {
+        self.client_connection_limit
+    }
+
+    /// Returns the validated control-lane capacity.
+    #[must_use]
+    pub const fn control_queue_limit(&self) -> usize {
+        self.control_queue_limit
+    }
+
+    /// Returns the validated global nonterminal operation limit.
+    #[must_use]
+    pub const fn operation_queue_limit(&self) -> u32 {
+        self.operation_queue_limit
+    }
+
+    /// Returns the validated per-client nonterminal operation limit.
+    #[must_use]
+    pub const fn client_operation_limit(&self) -> u32 {
+        self.client_operation_limit
+    }
+
+    /// Returns the validated synthetic worker count.
+    #[must_use]
+    pub const fn operation_workers(&self) -> usize {
+        self.operation_workers
+    }
+
+    /// Returns the validated request timeout.
+    #[must_use]
+    pub const fn request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+
+    /// Returns the validated retained maintenance interval.
+    #[must_use]
+    pub const fn maintenance_interval(&self) -> Duration {
+        self.maintenance_interval
+    }
+
+    /// Returns the validated graceful shutdown duration.
+    #[must_use]
+    pub const fn shutdown_grace(&self) -> Duration {
+        self.shutdown_grace
+    }
+}
+
+const fn duration_exceeds(value: Duration, maximum: Duration) -> bool {
+    value.as_secs() > maximum.as_secs()
+        || value.as_secs() == maximum.as_secs() && value.subsec_nanos() > maximum.subsec_nanos()
+}
+
+fn shutdown_interrupt_rounds(maximum_nonterminal: u32) -> Result<usize, ServiceError> {
+    let maximum = usize::try_from(maximum_nonterminal).map_err(|_| ServiceError::InvalidLimits)?;
+    let rounded = maximum
+        .checked_add(
+            SHUTDOWN_INTERRUPT_BATCH
+                .checked_sub(1)
+                .ok_or(ServiceError::InvalidLimits)?,
+        )
+        .ok_or(ServiceError::InvalidLimits)?;
+    let mutation_rounds = rounded / SHUTDOWN_INTERRUPT_BATCH;
+    mutation_rounds
+        .checked_add(1)
+        .ok_or(ServiceError::InvalidLimits)
 }
 
 impl Default for DaemonLimits {
@@ -761,21 +863,23 @@ enum JournalCommand {
     Submit {
         submission: OperationSubmission,
         claim: Option<MutationClaim>,
+        deadline_retry: DeadlineRetry,
         reply: tokio::sync::oneshot::Sender<Result<SubmissionOutcome, OperationError>>,
     },
     RetryStatus {
         submission: OperationSubmission,
+        deadline_retry: DeadlineRetry,
         reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
-    RenewLease {
+    StartOperation {
         operation: OperationId,
-        owner: ClientInstanceId,
-        expiry_unix_ms: u64,
-        claim: Option<MutationClaim>,
-        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
+        deadline: WorkerDeadline,
+        started: SyncSender<WorkerStart>,
+        acknowledged: Receiver<WorkerStartAcknowledgement>,
     },
     ActivateOperation {
         operation: OperationId,
+        deadline: Instant,
         claim: Option<MutationClaim>,
         reply: tokio::sync::oneshot::Sender<
             Result<(OperationRecord, rootlight_operations::Cancellation), OperationError>,
@@ -803,10 +907,10 @@ enum JournalCommand {
         operation: OperationId,
         reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
-    ExpireDue {
-        now: std::time::Instant,
-        maximum: usize,
-        reply: tokio::sync::oneshot::Sender<Result<u32, OperationError>>,
+    InterruptLease {
+        operation: OperationId,
+        expected_expiry_unix_ms: u64,
+        reply: tokio::sync::oneshot::Sender<Result<OperationRecord, OperationError>>,
     },
     Interrupt {
         maximum: usize,
@@ -820,6 +924,19 @@ enum JournalCommand {
         started: SyncSender<()>,
         release: Receiver<()>,
     },
+    #[cfg(test)]
+    Barrier {
+        entered: SyncSender<()>,
+        release: Receiver<()>,
+    },
+    #[cfg(test)]
+    DeliverStart {
+        operation: OperationId,
+        deadline: WorkerDeadline,
+        started: SyncSender<WorkerStart>,
+        acknowledged: Receiver<WorkerStartAcknowledgement>,
+        result: Box<WorkerStart>,
+    },
 }
 
 #[derive(Debug)]
@@ -828,11 +945,16 @@ struct JournalSenders {
     normal: SyncSender<JournalCommand>,
 }
 
+#[derive(Debug)]
+enum JournalActorState {
+    Accepting(JournalSenders),
+    Draining,
+}
+
 /// Bounded two-lane handle to one journal-owning thread.
 #[derive(Debug, Clone)]
 pub struct JournalActorHandle {
-    senders: Arc<Mutex<Option<JournalSenders>>>,
-    stopping: Arc<AtomicBool>,
+    state: Arc<Mutex<JournalActorState>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -895,12 +1017,22 @@ impl JournalActorHandle {
         &self,
         submission: OperationSubmission,
     ) -> Result<SubmissionOutcome, ServiceError> {
+        self.submit_with_deadline_retry(submission, DeadlineRetry::Exact)
+            .await
+    }
+
+    async fn submit_with_deadline_retry(
+        &self,
+        submission: OperationSubmission,
+        deadline_retry: DeadlineRetry,
+    ) -> Result<SubmissionOutcome, ServiceError> {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.try_send(
             JournalLane::Normal,
             JournalCommand::Submit {
                 submission,
                 claim: None,
+                deadline_retry,
                 reply,
             },
         )?;
@@ -927,6 +1059,7 @@ impl JournalActorHandle {
             JournalCommand::Submit {
                 submission,
                 claim: Some(claim.clone()),
+                deadline_retry: DeadlineRetry::Exact,
                 reply,
             },
         )?;
@@ -942,36 +1075,21 @@ impl JournalActorHandle {
         &self,
         submission: OperationSubmission,
     ) -> Result<OperationRecord, ServiceError> {
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        self.try_send(
-            JournalLane::Control,
-            JournalCommand::RetryStatus { submission, reply },
-        )?;
-        receiver
+        self.retry_status_with_deadline_retry(submission, DeadlineRetry::Exact)
             .await
-            .map_err(|_| ServiceError::ChannelClosed)?
-            .map_err(ServiceError::Operations)
     }
 
-    /// Renews an attached operation lease on the high-priority lane.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed queue, ownership, expiry, actor, or journal failure.
-    pub async fn renew_lease(
+    async fn retry_status_with_deadline_retry(
         &self,
-        operation: OperationId,
-        owner: ClientInstanceId,
-        expiry_unix_ms: u64,
+        submission: OperationSubmission,
+        deadline_retry: DeadlineRetry,
     ) -> Result<OperationRecord, ServiceError> {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.try_send(
             JournalLane::Control,
-            JournalCommand::RenewLease {
-                operation,
-                owner,
-                expiry_unix_ms,
-                claim: None,
+            JournalCommand::RetryStatus {
+                submission,
+                deadline_retry,
                 reply,
             },
         )?;
@@ -981,37 +1099,94 @@ impl JournalActorHandle {
             .map_err(ServiceError::Operations)
     }
 
-    /// Renews an attached lease before one absolute request deadline.
+    /// Queues durable worker authorization after a bounded worker owns the job.
     ///
     /// # Errors
     ///
-    /// Returns a typed queue, timeout, ownership, expiry, actor, or journal failure.
-    pub async fn renew_lease_until(
+    /// Returns a typed queue or actor failure.
+    fn start_operation_blocking(
         &self,
         operation: OperationId,
-        owner: ClientInstanceId,
-        expiry_unix_ms: u64,
-        deadline: Instant,
-    ) -> Result<OperationRecord, ServiceError> {
-        let claim = MutationClaim::new(deadline);
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        self.try_send(
-            JournalLane::Control,
-            JournalCommand::RenewLease {
-                operation,
-                owner,
-                expiry_unix_ms,
-                claim: Some(claim.clone()),
-                reply,
-            },
-        )?;
-        await_claimed_mutation(receiver, claim).await
+        deadline: &WorkerDeadline,
+    ) -> WorkerStart {
+        // Capacity one lets each peer install its deadline wait after sending,
+        // without making scheduler progress on the other thread a prerequisite.
+        let (started, receiver) = mpsc::sync_channel(1);
+        let (acknowledged, acknowledgement) = mpsc::sync_channel(1);
+        let mut command = JournalCommand::StartOperation {
+            operation,
+            deadline: deadline.clone(),
+            started,
+            acknowledged: acknowledgement,
+        };
+        let mut queue_saturated = false;
+        loop {
+            let Some(remaining) = deadline.remaining() else {
+                return Err(if queue_saturated {
+                    ServiceError::QueueFull
+                } else {
+                    ServiceError::RequestTimedOut
+                });
+            };
+            match self.try_send_preserving(JournalLane::Normal, command) {
+                Ok(()) => break,
+                Err((ServiceError::QueueFull, returned)) => {
+                    queue_saturated = true;
+                    command = *returned;
+                    thread::sleep(remaining.min(WORKER_HANDSHAKE_RETRY_INTERVAL));
+                }
+                Err((error, _)) => return Err(error),
+            }
+        }
+        deadline.pause_before_start_receive();
+        loop {
+            let Some(remaining) = deadline.remaining() else {
+                return Err(ServiceError::RequestTimedOut);
+            };
+            match receiver.recv_timeout(remaining.min(WORKER_HANDSHAKE_POLL_INTERVAL)) {
+                Ok(start) => {
+                    if !matches!(
+                        &start,
+                        Ok((record, Some(_))) if record.state == OperationState::Running
+                    ) {
+                        return start;
+                    }
+                    deadline.pause_after_start_receipt();
+                    let accepted = deadline.remaining().is_some();
+                    deadline.pause_before_start_acknowledgement();
+                    if !accepted {
+                        let _ = acknowledged.try_send(WorkerStartAcknowledgement::Expired);
+                        return Err(ServiceError::RequestTimedOut);
+                    }
+                    let (authorized, authorization) = mpsc::sync_channel(1);
+                    if acknowledged
+                        .try_send(WorkerStartAcknowledgement::Accepted(authorized))
+                        .is_err()
+                    {
+                        return Err(if deadline.remaining().is_none() {
+                            ServiceError::RequestTimedOut
+                        } else {
+                            ServiceError::ChannelClosed
+                        });
+                    }
+                    return wait_for_worker_start_authorization(start, authorization, deadline);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(if deadline.remaining().is_none() {
+                        ServiceError::RequestTimedOut
+                    } else {
+                        ServiceError::ChannelClosed
+                    });
+                }
+            }
+        }
     }
 
-    /// Atomically activates queued work and returns its process-local cancellation token.
+    /// Atomically activates queued first-slice work and returns its cancellation token.
     ///
     /// Keeping both steps inside one actor command prevents control-lane pressure from
-    /// leaving durable running work without a worker owner.
+    /// leaving durable running work without a first-slice worker owner.
     ///
     /// # Errors
     ///
@@ -1020,11 +1195,15 @@ impl JournalActorHandle {
         &self,
         operation: OperationId,
     ) -> Result<(OperationRecord, rootlight_operations::Cancellation), ServiceError> {
+        let deadline = Instant::now()
+            .checked_add(DEFAULT_REQUEST_TIMEOUT)
+            .ok_or(ServiceError::InvalidLimits)?;
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.try_send(
             JournalLane::Normal,
             JournalCommand::ActivateOperation {
                 operation,
+                deadline,
                 claim: None,
                 reply,
             },
@@ -1051,6 +1230,7 @@ impl JournalActorHandle {
             JournalLane::Normal,
             JournalCommand::ActivateOperation {
                 operation,
+                deadline,
                 claim: Some(claim.clone()),
                 reply,
             },
@@ -1262,29 +1442,22 @@ impl JournalActorHandle {
         Ok(receiver)
     }
 
-    /// Runs one bounded deadline and lease expiry pass.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed queue, actor, or journal failure.
-    pub async fn expire_due(
+    fn interrupt_lease_receiver(
         &self,
-        now: std::time::Instant,
-        maximum: usize,
-    ) -> Result<u32, ServiceError> {
+        operation: OperationId,
+        expected_expiry_unix_ms: u64,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<OperationRecord, OperationError>>, ServiceError>
+    {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         self.try_send(
             JournalLane::Control,
-            JournalCommand::ExpireDue {
-                now,
-                maximum,
+            JournalCommand::InterruptLease {
+                operation,
+                expected_expiry_unix_ms,
                 reply,
             },
         )?;
-        receiver
-            .await
-            .map_err(|_| ServiceError::ChannelClosed)?
-            .map_err(ServiceError::Operations)
+        Ok(receiver)
     }
 
     /// Interrupts one bounded batch of remaining nonterminal work.
@@ -1318,31 +1491,42 @@ impl JournalActorHandle {
             .map_err(ServiceError::Operations)
     }
 
-    fn stop(&self) {
-        let Ok(mut senders) = self.senders.lock() else {
-            self.stopping.store(true, Ordering::Release);
-            return;
+    fn begin_drain(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
         };
-        self.stopping.store(true, Ordering::Release);
-        senders.take();
+        *state = JournalActorState::Draining;
     }
 
     fn try_send(&self, lane: JournalLane, command: JournalCommand) -> Result<(), ServiceError> {
-        let senders = self
-            .senders
-            .lock()
-            .map_err(|_| ServiceError::ChannelClosed)?;
-        if self.stopping.load(Ordering::Acquire) {
-            return Err(ServiceError::ChannelClosed);
-        }
-        let Some(senders) = senders.as_ref() else {
-            return Err(ServiceError::ChannelClosed);
+        self.try_send_preserving(lane, command)
+            .map_err(|(error, _)| error)
+    }
+
+    fn try_send_preserving(
+        &self,
+        lane: JournalLane,
+        command: JournalCommand,
+    ) -> Result<(), (ServiceError, Box<JournalCommand>)> {
+        let state = match self.state.lock() {
+            Ok(state) => state,
+            Err(_) => return Err((ServiceError::ChannelClosed, Box::new(command))),
+        };
+        let JournalActorState::Accepting(senders) = &*state else {
+            return Err((ServiceError::ChannelClosed, Box::new(command)));
         };
         let sender = match lane {
             JournalLane::Control => &senders.control,
             JournalLane::Normal => &senders.normal,
         };
-        try_send_command(sender, command)
+        match sender.try_send(command) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(command)) => Err((ServiceError::QueueFull, Box::new(command))),
+            Err(TrySendError::Disconnected(command)) => {
+                Err((ServiceError::ChannelClosed, Box::new(command)))
+            }
+        }
     }
 
     async fn send(
@@ -1425,31 +1609,33 @@ impl JournalActor {
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError::InvalidLimits`] for a zero queue capacity or a
-    /// thread-spawn failure.
+    /// Returns [`ServiceError::InvalidLimits`] for a queue capacity outside the
+    /// daemon hard bounds, or [`ServiceError::ThreadSpawn`] when the journal
+    /// thread cannot start.
     pub fn start(
         journal: Arc<OperationJournal>,
         control_capacity: usize,
         normal_capacity: usize,
     ) -> Result<Self, ServiceError> {
-        if control_capacity == 0 || normal_capacity == 0 {
+        if control_capacity == 0
+            || control_capacity > MAX_CONTROL_QUEUE_LIMIT
+            || normal_capacity == 0
+            || normal_capacity > MAX_OPERATION_QUEUE_CAPACITY
+        {
             return Err(ServiceError::InvalidLimits);
         }
         let (control_tx, control_rx) = mpsc::sync_channel(control_capacity);
         let (normal_tx, normal_rx) = mpsc::sync_channel(normal_capacity);
-        let stopping = Arc::new(AtomicBool::new(false));
-        let actor_stopping = Arc::clone(&stopping);
         let thread = thread::Builder::new()
             .name("rootlight-journal".to_owned())
-            .spawn(move || journal_actor_loop(journal, control_rx, normal_rx, actor_stopping))
+            .spawn(move || journal_actor_loop(journal, control_rx, normal_rx))
             .map_err(ServiceError::ThreadSpawn)?;
         Ok(Self {
             handle: JournalActorHandle {
-                senders: Arc::new(Mutex::new(Some(JournalSenders {
+                state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
                     control: control_tx,
                     normal: normal_tx,
                 }))),
-                stopping,
             },
             join: Some(thread),
         })
@@ -1461,13 +1647,13 @@ impl JournalActor {
         self.handle.clone()
     }
 
-    /// Stops and joins the journal thread.
+    /// Closes admission, drains both bounded lanes, and joins the journal thread.
     ///
     /// # Errors
     ///
     /// Returns [`ServiceError::ThreadPanicked`] when the actor panicked.
     pub fn join(mut self) -> Result<(), ServiceError> {
-        self.handle.stop();
+        self.handle.begin_drain();
         let Some(join) = self.join.take() else {
             return Ok(());
         };
@@ -1484,7 +1670,7 @@ impl JournalActor {
     ///
     /// Returns a typed timeout, coordinator-spawn, or actor-panic failure.
     pub async fn join_until(mut self, deadline: tokio::time::Instant) -> Result<(), ServiceError> {
-        self.handle.stop();
+        self.handle.begin_drain();
         let Some(join) = self.join.take() else {
             return Ok(());
         };
@@ -1505,21 +1691,10 @@ impl JournalActor {
 
 impl Drop for JournalActor {
     fn drop(&mut self) {
-        self.handle.stop();
+        self.handle.begin_drain();
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
-    }
-}
-
-fn try_send_command(
-    sender: &SyncSender<JournalCommand>,
-    command: JournalCommand,
-) -> Result<(), ServiceError> {
-    match sender.try_send(command) {
-        Ok(()) => Ok(()),
-        Err(TrySendError::Full(_)) => Err(ServiceError::QueueFull),
-        Err(TrySendError::Disconnected(_)) => Err(ServiceError::ChannelClosed),
     }
 }
 
@@ -1527,68 +1702,143 @@ fn journal_actor_loop(
     journal: Arc<OperationJournal>,
     control: Receiver<JournalCommand>,
     normal: Receiver<JournalCommand>,
-    stopping: Arc<AtomicBool>,
 ) {
     const CONTROL_BURST: usize = 16;
+    let mut control_open = true;
+    let mut normal_open = true;
     loop {
-        if stopping.load(Ordering::Acquire) {
-            return;
-        }
         let mut handled = false;
         for _ in 0..CONTROL_BURST {
-            if stopping.load(Ordering::Acquire) {
-                return;
+            if !control_open {
+                break;
             }
             match control.try_recv() {
                 Ok(command) => {
                     handled = true;
-                    execute_journal_command(&journal, command);
+                    if execute_journal_command(&journal, command).is_err() {
+                        return;
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return,
+                Err(TryRecvError::Disconnected) => {
+                    control_open = false;
+                    break;
+                }
             }
         }
-        if stopping.load(Ordering::Acquire) {
-            return;
-        }
-        match normal.try_recv() {
-            Ok(command) => {
-                handled = true;
-                execute_journal_command(&journal, command);
+        if normal_open {
+            match normal.try_recv() {
+                Ok(command) => {
+                    handled = true;
+                    if execute_journal_command(&journal, command).is_err() {
+                        return;
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => normal_open = false,
             }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) if !handled => return,
-            Err(TryRecvError::Disconnected) => {}
         }
         if handled {
             continue;
         }
-        match control.recv_timeout(Duration::from_millis(10)) {
-            Ok(command) => {
-                if stopping.load(Ordering::Acquire) {
-                    return;
-                }
-                execute_journal_command(&journal, command);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if stopping.load(Ordering::Acquire) {
-                    return;
-                }
-                match normal.try_recv() {
-                    Ok(command) => {
-                        execute_journal_command(&journal, command);
+        if !control_open && !normal_open {
+            return;
+        }
+        if control_open {
+            match control.recv_timeout(Duration::from_millis(10)) {
+                Ok(command) => {
+                    if execute_journal_command(&journal, command).is_err() {
+                        return;
                     }
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => return,
                 }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => control_open = false,
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        } else if normal_open {
+            match normal.recv_timeout(Duration::from_millis(10)) {
+                Ok(command) => {
+                    if execute_journal_command(&journal, command).is_err() {
+                        return;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => normal_open = false,
+            }
         }
     }
 }
 
-fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) {
+fn start_operation_before(
+    journal: &OperationJournal,
+    operation: OperationId,
+    deadline: &WorkerDeadline,
+) -> WorkerStart {
+    let current = journal
+        .status(operation)
+        .map_err(ServiceError::Operations)?;
+    if current.state.is_terminal() || current.cancellation_requested {
+        return Ok((current, None));
+    }
+    if deadline.remaining().is_none() {
+        return Err(ServiceError::RequestTimedOut);
+    }
+    let cancellation = journal
+        .cancellation_token(operation)
+        .map_err(ServiceError::Operations)?;
+    journal
+        .start_execution_before(operation, deadline.expires_at())
+        .map(|started| (started, Some(cancellation)))
+        .or_else(|error| match error {
+            OperationError::StartDeadlineElapsed => Err(error),
+            OperationError::CancellationWon
+            | OperationError::ConcurrentUpdate
+            | OperationError::IllegalTransition { .. } => {
+                let observed = journal.status(operation)?;
+                if observed.state.is_terminal() || observed.cancellation_requested {
+                    Ok((observed, None))
+                } else {
+                    Err(error)
+                }
+            }
+            _ => Err(error),
+        })
+        .map_err(|error| {
+            if matches!(error, OperationError::StartDeadlineElapsed) {
+                ServiceError::RequestTimedOut
+            } else {
+                ServiceError::Operations(error)
+            }
+        })
+}
+
+fn execute_journal_command(
+    journal: &OperationJournal,
+    command: JournalCommand,
+) -> Result<(), OperationError> {
     match command {
+        #[cfg(test)]
+        JournalCommand::Barrier { entered, release } => {
+            if entered.send(()).is_ok() {
+                let _ = release.recv();
+            }
+        }
+        #[cfg(test)]
+        JournalCommand::DeliverStart {
+            operation,
+            deadline,
+            started,
+            acknowledged,
+            result,
+        } => {
+            deliver_worker_start(
+                journal,
+                operation,
+                &deadline,
+                started,
+                acknowledged,
+                *result,
+            )?;
+        }
         JournalCommand::Execute {
             request,
             claim,
@@ -1601,34 +1851,39 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
         JournalCommand::Submit {
             submission,
             claim,
+            deadline_retry,
             reply,
         } => {
             let _ = reply.send(execute_claimed(claim.as_ref(), || {
-                journal.submit(submission)
+                journal.submit_with_deadline_retry(submission, deadline_retry)
             }));
         }
-        JournalCommand::RetryStatus { submission, reply } => {
-            let _ = reply.send(journal.retry_status(submission));
+        JournalCommand::RetryStatus {
+            submission,
+            deadline_retry,
+            reply,
+        } => {
+            let _ =
+                reply.send(journal.retry_status_with_deadline_retry(submission, deadline_retry));
         }
-        JournalCommand::RenewLease {
+        JournalCommand::StartOperation {
             operation,
-            owner,
-            expiry_unix_ms,
-            claim,
-            reply,
+            deadline,
+            started,
+            acknowledged,
         } => {
-            let _ = reply.send(execute_claimed(claim.as_ref(), || {
-                journal.renew_lease(operation, owner, expiry_unix_ms)
-            }));
+            let result = start_operation_before(journal, operation, &deadline);
+            deliver_worker_start(journal, operation, &deadline, started, acknowledged, result)?;
         }
         JournalCommand::ActivateOperation {
             operation,
+            deadline,
             claim,
             reply,
         } => {
             let result = execute_claimed(claim.as_ref(), || {
                 journal
-                    .start_execution_if_live(operation)
+                    .start_execution_before(operation, deadline)
                     .and_then(|record| {
                         journal
                             .cancellation_token(operation)
@@ -1781,12 +2036,12 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
         JournalCommand::InterruptDeadline { operation, reply } => {
             let _ = reply.send(journal.interrupt_deadline(operation));
         }
-        JournalCommand::ExpireDue {
-            now,
-            maximum,
+        JournalCommand::InterruptLease {
+            operation,
+            expected_expiry_unix_ms,
             reply,
         } => {
-            let _ = reply.send(journal.expire_due(now, maximum));
+            let _ = reply.send(journal.interrupt_lease(operation, expected_expiry_unix_ms));
         }
         JournalCommand::Interrupt { maximum, reply } => {
             let _ = reply.send(journal.interrupt_nonterminal(maximum));
@@ -1800,6 +2055,7 @@ fn execute_journal_command(journal: &OperationJournal, command: JournalCommand) 
             let _ = release.recv();
         }
     }
+    Ok(())
 }
 
 fn execute_claimed<T>(
@@ -1813,6 +2069,137 @@ fn execute_claimed<T>(
     }
 }
 
+fn wait_for_worker_start_authorization(
+    start: WorkerStart,
+    authorization: Receiver<WorkerStartAuthorization>,
+    deadline: &WorkerDeadline,
+) -> WorkerStart {
+    loop {
+        match authorization.try_recv() {
+            Ok(WorkerStartAuthorization::Authorized) => return start,
+            Ok(WorkerStartAuthorization::Expired) => {
+                return Err(ServiceError::RequestTimedOut);
+            }
+            Err(TryRecvError::Disconnected) => {
+                return Err(if deadline.remaining().is_none() {
+                    ServiceError::RequestTimedOut
+                } else {
+                    ServiceError::ChannelClosed
+                });
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+        let Some(remaining) = deadline.remaining() else {
+            return Err(ServiceError::RequestTimedOut);
+        };
+        match authorization.recv_timeout(remaining.min(WORKER_HANDSHAKE_POLL_INTERVAL)) {
+            Ok(WorkerStartAuthorization::Authorized) => return start,
+            Ok(WorkerStartAuthorization::Expired) => {
+                return Err(ServiceError::RequestTimedOut);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(if deadline.remaining().is_none() {
+                    ServiceError::RequestTimedOut
+                } else {
+                    ServiceError::ChannelClosed
+                });
+            }
+        }
+    }
+}
+
+fn receive_worker_start_acknowledgement(
+    acknowledged: &Receiver<WorkerStartAcknowledgement>,
+    deadline: &WorkerDeadline,
+) -> Result<WorkerStartAcknowledgement, mpsc::RecvTimeoutError> {
+    loop {
+        match acknowledged.try_recv() {
+            Ok(acknowledgement) => return Ok(acknowledgement),
+            Err(TryRecvError::Disconnected) => {
+                return Err(mpsc::RecvTimeoutError::Disconnected);
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+        let Some(remaining) = deadline.remaining() else {
+            return Err(mpsc::RecvTimeoutError::Timeout);
+        };
+        match acknowledged.recv_timeout(remaining.min(WORKER_HANDSHAKE_POLL_INTERVAL)) {
+            Ok(acknowledgement) => return Ok(acknowledgement),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(mpsc::RecvTimeoutError::Disconnected);
+            }
+        }
+    }
+}
+
+fn compensate_unacknowledged_worker_start(
+    journal: &OperationJournal,
+    operation: OperationId,
+    deadline: &WorkerDeadline,
+) -> Result<(), OperationError> {
+    if deadline.remaining().is_none() {
+        journal.interrupt_deadline(operation)?;
+    } else {
+        journal.interrupt_unacknowledged_start(operation)?;
+    }
+    Ok(())
+}
+
+fn deliver_worker_start(
+    journal: &OperationJournal,
+    operation: OperationId,
+    deadline: &WorkerDeadline,
+    started: SyncSender<WorkerStart>,
+    acknowledged: Receiver<WorkerStartAcknowledgement>,
+    result: WorkerStart,
+) -> Result<(), OperationError> {
+    if matches!(
+        &result,
+        Err(ServiceError::Operations(
+            OperationError::CommittedStartCompensationFailed
+        ))
+    ) {
+        return Err(OperationError::CommittedStartCompensationFailed);
+    }
+    let durable_start = matches!(
+        &result,
+        Ok((record, Some(_))) if record.state == OperationState::Running
+    );
+    if started.try_send(result).is_err() {
+        if durable_start {
+            compensate_unacknowledged_worker_start(journal, operation, deadline)?;
+        }
+        return Ok(());
+    }
+    if !durable_start {
+        return Ok(());
+    }
+    match receive_worker_start_acknowledgement(&acknowledged, deadline) {
+        Ok(WorkerStartAcknowledgement::Accepted(authorized)) => {
+            // This actor-owned check is the authorization linearization point:
+            // durable deadline compensation must precede any worker execution.
+            if deadline.remaining().is_none() {
+                journal.interrupt_deadline(operation)?;
+                let _ = authorized.try_send(WorkerStartAuthorization::Expired);
+            } else if authorized
+                .try_send(WorkerStartAuthorization::Authorized)
+                .is_err()
+            {
+                compensate_unacknowledged_worker_start(journal, operation, deadline)?;
+            }
+        }
+        Ok(WorkerStartAcknowledgement::Expired) | Err(mpsc::RecvTimeoutError::Timeout) => {
+            journal.interrupt_deadline(operation)?;
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            compensate_unacknowledged_worker_start(journal, operation, deadline)?;
+        }
+    }
+    Ok(())
+}
+
 fn execute_journal_request(
     journal: &OperationJournal,
     request: ControlRequest,
@@ -1823,19 +2210,15 @@ fn execute_journal_request(
         | ControlRequest::SupportBundle(_) => Ok(ControlResponse::Error(invalid_argument(
             "request is served outside the journal actor",
         ))),
-        ControlRequest::OperationSubmit(submission) => journal
-            .submit(submission)
-            .map(|outcome| ControlResponse::OperationSubmit(outcome.operation)),
+        ControlRequest::OperationSubmit(_) => Ok(ControlResponse::Error(invalid_argument(
+            "operation submission requires asynchronous orchestration",
+        ))),
         ControlRequest::OperationStatus(operation) => journal
             .status(operation)
             .map(ControlResponse::OperationStatus),
-        ControlRequest::OperationLeaseRenew {
-            operation,
-            owner,
-            expiry_unix_ms,
-        } => journal
-            .renew_lease(operation, owner, expiry_unix_ms)
-            .map(ControlResponse::OperationLeaseRenew),
+        ControlRequest::OperationLeaseRenew { operation, .. } => {
+            Ok(ControlResponse::Error(lease_renewal_unsupported(operation)))
+        }
         ControlRequest::OperationCancel(operation) => {
             journal.cancel(operation).map(|(accepted, operation)| {
                 ControlResponse::OperationCancel {
@@ -1955,13 +2338,16 @@ pub enum ControlRequest {
     OperationSubmit(OperationSubmission),
     /// Read one durable operation status.
     OperationStatus(OperationId),
-    /// Extend one attached operation lease for its authenticated owner.
+    /// Legacy lease-renewal request retained only for source compatibility.
+    ///
+    /// P1 does not support lease renewal. Every daemon and standalone execution
+    /// path returns an `UnsupportedCapability` public error for this variant.
     OperationLeaseRenew {
-        /// Stable operation identifier.
+        /// Stable operation identifier from the legacy request payload.
         operation: OperationId,
-        /// Authenticated owner from the negotiated client hello.
+        /// Authenticated owner retained for legacy payload compatibility.
         owner: ClientInstanceId,
-        /// New absolute lease expiry.
+        /// Requested expiry retained for legacy payload compatibility.
         expiry_unix_ms: u64,
     },
     /// Request cooperative cancellation.
@@ -1981,7 +2367,10 @@ pub enum ControlResponse {
     OperationSubmit(OperationRecord),
     /// Durable operation status.
     OperationStatus(OperationRecord),
-    /// Durable operation after attached lease renewal.
+    /// Legacy response shape retained for source and wire compatibility.
+    ///
+    /// Current services never produce this variant because P1 lease renewal is
+    /// unsupported.
     OperationLeaseRenew(OperationRecord),
     /// Cancellation acknowledgement and resulting state.
     OperationCancel {
@@ -1994,24 +2383,382 @@ pub enum ControlResponse {
     Error(PublicError),
 }
 
+/// A durable submission paired with process-local monotonic timing authority.
+#[derive(Debug, Clone, Copy)]
+pub struct PreparedOperationSubmission {
+    submission: OperationSubmission,
+    deadline: Option<tokio::time::Instant>,
+    lease_deadline: Option<tokio::time::Instant>,
+    deadline_retry: DeadlineRetry,
+}
+
+impl PreparedOperationSubmission {
+    /// Prepares a detached control probe with an optional relative timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationPreparationError`] for a zero or unrepresentable timeout,
+    /// or when the system wall clock cannot provide durable audit metadata.
+    pub fn control_probe(
+        operation: OperationId,
+        owner: ClientInstanceId,
+        timeout: Option<Duration>,
+    ) -> Result<Self, OperationPreparationError> {
+        match timeout {
+            Some(timeout) => {
+                Self::control_probe_at(operation, owner, timeout, capture_admission_clock()?)
+            }
+            None => Self::new(
+                OperationSubmission::new(
+                    operation,
+                    OperationKind::ControlProbe,
+                    PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
+                    owner,
+                    true,
+                    None,
+                    None,
+                )
+                .map_err(|_| OperationPreparationError::InvalidTimeout)?,
+                None,
+                None,
+            ),
+        }
+    }
+
+    fn control_probe_at(
+        operation: OperationId,
+        owner: ClientInstanceId,
+        timeout: Duration,
+        clock: AdmissionClockSample,
+    ) -> Result<Self, OperationPreparationError> {
+        let timeout_ms = duration_millis(timeout)?;
+        let deadline_unix_ms = clock
+            .wall_unix_ms
+            .checked_add(timeout_ms)
+            .ok_or(OperationPreparationError::InvalidTimeout)?;
+        let deadline = clock
+            .monotonic
+            .checked_add(Duration::from_millis(timeout_ms))
+            .ok_or(OperationPreparationError::InvalidTimeout)?;
+        Self::new_with_deadline_retry(
+            OperationSubmission::new(
+                operation,
+                OperationKind::ControlProbe,
+                PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
+                owner,
+                true,
+                Some(deadline_unix_ms),
+                None,
+            )
+            .map_err(|_| OperationPreparationError::InvalidTimeout)?,
+            Some(deadline),
+            None,
+            DeadlineRetry::ReanchoredRelative { timeout_ms },
+        )
+    }
+
+    /// Prepares one control probe with explicit durable deadline and lease metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationPreparationError`] when timing metadata is invalid or the
+    /// paired wall/monotonic clock sample cannot be captured.
+    pub fn control_probe_timing(
+        operation: OperationId,
+        owner: ClientInstanceId,
+        detached: bool,
+        deadline_unix_ms: Option<u64>,
+        lease_expires_unix_ms: Option<u64>,
+    ) -> Result<Self, OperationPreparationError> {
+        let submission = OperationSubmission::new(
+            operation,
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
+            owner,
+            detached,
+            deadline_unix_ms,
+            lease_expires_unix_ms,
+        )
+        .map_err(|_| OperationPreparationError::InvalidTimeout)?;
+        if deadline_unix_ms.is_none() && lease_expires_unix_ms.is_none() {
+            return Self::new(submission, None, None);
+        }
+        let clock = capture_admission_clock()?;
+        let deadline = deadline_unix_ms
+            .map(|target| monotonic_target(clock, target))
+            .transpose()?;
+        let lease_deadline = lease_expires_unix_ms
+            .map(|target| monotonic_target(clock, target))
+            .transpose()?;
+        Self::new(submission, deadline, lease_deadline)
+    }
+
+    #[cfg(test)]
+    fn from_submission(submission: OperationSubmission) -> Result<Self, OperationPreparationError> {
+        if submission.deadline_unix_ms.is_none() && submission.lease_expires_unix_ms.is_none() {
+            return Self::new(submission, None, None);
+        }
+        let clock = capture_admission_clock()?;
+        let deadline = submission
+            .deadline_unix_ms
+            .map(|target| monotonic_target(clock, target))
+            .transpose()?;
+        let lease_deadline = submission
+            .lease_expires_unix_ms
+            .map(|target| monotonic_target(clock, target))
+            .transpose()?;
+        Self::new(submission, deadline, lease_deadline)
+    }
+
+    fn new(
+        submission: OperationSubmission,
+        deadline: Option<tokio::time::Instant>,
+        lease_deadline: Option<tokio::time::Instant>,
+    ) -> Result<Self, OperationPreparationError> {
+        Self::new_with_deadline_retry(submission, deadline, lease_deadline, DeadlineRetry::Exact)
+    }
+
+    fn new_with_deadline_retry(
+        submission: OperationSubmission,
+        deadline: Option<tokio::time::Instant>,
+        lease_deadline: Option<tokio::time::Instant>,
+        deadline_retry: DeadlineRetry,
+    ) -> Result<Self, OperationPreparationError> {
+        if submission.deadline_unix_ms.is_some() != deadline.is_some()
+            || submission.lease_expires_unix_ms.is_some() != lease_deadline.is_some()
+        {
+            return Err(OperationPreparationError::InvalidTimeout);
+        }
+        Ok(Self {
+            submission,
+            deadline,
+            lease_deadline,
+            deadline_retry,
+        })
+    }
+
+    /// Returns the stable operation identifier.
+    #[must_use]
+    pub const fn operation(self) -> OperationId {
+        self.submission.operation
+    }
+
+    fn into_parts(
+        self,
+    ) -> (
+        OperationSubmission,
+        Option<tokio::time::Instant>,
+        Option<tokio::time::Instant>,
+        DeadlineRetry,
+    ) {
+        (
+            self.submission,
+            self.deadline,
+            self.lease_deadline,
+            self.deadline_retry,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AdmissionClockSample {
+    wall_unix_ms: u64,
+    monotonic: tokio::time::Instant,
+}
+
+fn capture_admission_clock() -> Result<AdmissionClockSample, OperationPreparationError> {
+    // Sampling monotonic time first makes a suspension between reads consume the
+    // live budget instead of extending execution past its durable wall deadline.
+    let monotonic = tokio::time::Instant::now();
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| OperationPreparationError::Clock)?;
+    admission_clock_sample(monotonic, elapsed)
+}
+
+fn admission_clock_sample(
+    monotonic: tokio::time::Instant,
+    wall_elapsed: Duration,
+) -> Result<AdmissionClockSample, OperationPreparationError> {
+    let whole_milliseconds =
+        u64::try_from(wall_elapsed.as_millis()).map_err(|_| OperationPreparationError::Clock)?;
+    let partial_millisecond = u64::from(!wall_elapsed.subsec_nanos().is_multiple_of(1_000_000));
+    let wall_unix_ms = whole_milliseconds
+        .checked_add(partial_millisecond)
+        .ok_or(OperationPreparationError::Clock)?;
+    Ok(AdmissionClockSample {
+        wall_unix_ms,
+        monotonic,
+    })
+}
+
+fn duration_millis(timeout: Duration) -> Result<u64, OperationPreparationError> {
+    let milliseconds = u64::try_from(timeout.as_millis())
+        .map_err(|_| OperationPreparationError::InvalidTimeout)?;
+    if milliseconds == 0 {
+        return Err(OperationPreparationError::InvalidTimeout);
+    }
+    Ok(milliseconds)
+}
+
+fn monotonic_target(
+    clock: AdmissionClockSample,
+    target_unix_ms: u64,
+) -> Result<tokio::time::Instant, OperationPreparationError> {
+    clock
+        .monotonic
+        .checked_add(Duration::from_millis(
+            target_unix_ms.saturating_sub(clock.wall_unix_ms),
+        ))
+        .ok_or(OperationPreparationError::InvalidTimeout)
+}
+
+/// Failure to prepare durable and process-local operation timing.
+#[derive(Debug, thiserror::Error)]
+pub enum OperationPreparationError {
+    /// A timeout or absolute timestamp is zero or cannot be represented.
+    #[error("operation timeout is invalid")]
+    InvalidTimeout,
+    /// The system wall clock cannot provide a supported audit timestamp.
+    #[error("system clock is invalid")]
+    Clock,
+}
+
+/// Bounded host lanes serialized by the host-owned orchestrator.
+#[derive(Debug, Clone)]
+pub struct OrchestratorSenders {
+    submissions: tokio::sync::mpsc::Sender<OperationAdmission>,
+}
+
+impl OrchestratorSenders {
+    /// Creates the bounded operation-submission lane.
+    #[must_use]
+    pub const fn new(submissions: tokio::sync::mpsc::Sender<OperationAdmission>) -> Self {
+        Self { submissions }
+    }
+}
+
+#[derive(Debug)]
+struct PendingAdmissionRegistry {
+    next_generation: u64,
+    by_operation: BTreeMap<OperationId, BTreeMap<u64, Arc<AtomicBool>>>,
+}
+
+impl Default for PendingAdmissionRegistry {
+    fn default() -> Self {
+        Self {
+            next_generation: 1,
+            by_operation: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PendingAdmissionHandle {
+    operation: OperationId,
+    generation: Option<u64>,
+    cancelled: Arc<AtomicBool>,
+    registry: Arc<Mutex<PendingAdmissionRegistry>>,
+}
+
+impl PendingAdmissionHandle {
+    #[cfg(test)]
+    fn cancelled(&self) -> &AtomicBool {
+        self.cancelled.as_ref()
+    }
+
+    fn handoff_to_durable(&mut self) -> Result<bool, ServiceError> {
+        let registry = Arc::clone(&self.registry);
+        let mut registry = registry
+            .lock()
+            .map_err(|_| ServiceError::AdmissionStatePoisoned)?;
+        self.unregister(&mut registry);
+        Ok(self.cancelled.load(Ordering::Acquire))
+    }
+
+    fn unregister(&mut self, registry: &mut PendingAdmissionRegistry) {
+        let Some(generation) = self.generation.take() else {
+            return;
+        };
+        let remove_operation =
+            if let Some(generations) = registry.by_operation.get_mut(&self.operation) {
+                generations.remove(&generation);
+                generations.is_empty()
+            } else {
+                false
+            };
+        if remove_operation {
+            registry.by_operation.remove(&self.operation);
+        }
+    }
+}
+
+impl Drop for PendingAdmissionHandle {
+    fn drop(&mut self) {
+        let registry = Arc::clone(&self.registry);
+        let Ok(mut registry) = registry.lock() else {
+            return;
+        };
+        self.unregister(&mut registry);
+    }
+}
+
 /// One queued operation admission paired with its response channel.
 #[derive(Debug)]
 pub struct OperationAdmission {
-    submission: OperationSubmission,
+    prepared: PreparedOperationSubmission,
     reply: tokio::sync::oneshot::Sender<Result<OperationRecord, PublicError>>,
+    pending: Option<PendingAdmissionHandle>,
 }
 
 impl OperationAdmission {
     /// Creates one bounded admission and its response receiver.
     #[must_use]
     pub fn new(
-        submission: OperationSubmission,
+        prepared: PreparedOperationSubmission,
+        cancelled_before_persist: Arc<AtomicBool>,
     ) -> (
         Self,
         tokio::sync::oneshot::Receiver<Result<OperationRecord, PublicError>>,
     ) {
         let (reply, receiver) = tokio::sync::oneshot::channel();
-        (Self { submission, reply }, receiver)
+        (
+            Self {
+                prepared,
+                reply,
+                pending: Some(PendingAdmissionHandle {
+                    operation: prepared.operation(),
+                    generation: None,
+                    cancelled: cancelled_before_persist,
+                    registry: Arc::new(Mutex::new(PendingAdmissionRegistry::default())),
+                }),
+            },
+            receiver,
+        )
+    }
+
+    fn registered(
+        prepared: PreparedOperationSubmission,
+        pending: PendingAdmissionHandle,
+    ) -> (
+        Self,
+        tokio::sync::oneshot::Receiver<Result<OperationRecord, PublicError>>,
+    ) {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        (
+            Self {
+                prepared,
+                reply,
+                pending: Some(pending),
+            },
+            receiver,
+        )
+    }
+
+    /// Returns the admitted operation identifier.
+    #[must_use]
+    pub const fn operation(&self) -> OperationId {
+        self.prepared.operation()
     }
 }
 
@@ -2197,7 +2944,7 @@ impl ClientConnectionAdmissions {
     #[must_use]
     pub fn new(limits: DaemonLimits) -> Self {
         Self {
-            limit: limits.client_connection_limit,
+            limit: limits.client_connection_limit(),
             active: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -2259,10 +3006,221 @@ impl Drop for ClientConnectionPermit {
     }
 }
 
+type WorkerStart =
+    Result<(OperationRecord, Option<rootlight_operations::Cancellation>), ServiceError>;
+
+#[derive(Debug)]
+enum WorkerStartAcknowledgement {
+    Accepted(SyncSender<WorkerStartAuthorization>),
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerStartAuthorization {
+    Authorized,
+    Expired,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct WorkerStartReceiptHook {
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+struct ControlledStartReceive {
+    deadline: WorkerDeadline,
+    force_expired: Arc<AtomicBool>,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+struct ControlledStartReceipt {
+    deadline: WorkerDeadline,
+    force_expired: Arc<AtomicBool>,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+struct ControlledStartAcknowledgement {
+    deadline: WorkerDeadline,
+    force_expired: Arc<AtomicBool>,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+/// One monotonic budget shared by admission, actor enqueue, and actor execution.
+///
+/// Keeping the deadline in the command prevents a start authorization that
+/// outlived its worker from transitioning durable state when the actor catches up.
+#[derive(Debug, Clone)]
+struct WorkerDeadline {
+    expires_at: Instant,
+    #[cfg(test)]
+    forced_expired: Option<Arc<AtomicBool>>,
+    #[cfg(test)]
+    remaining_checks: Option<Arc<AtomicU32>>,
+    #[cfg(test)]
+    start_receive_hook: Option<Arc<WorkerStartReceiptHook>>,
+    #[cfg(test)]
+    start_receipt_hook: Option<Arc<WorkerStartReceiptHook>>,
+    #[cfg(test)]
+    start_acknowledgement_hook: Option<Arc<WorkerStartReceiptHook>>,
+}
+
+impl WorkerDeadline {
+    fn from_timeout(timeout: Duration) -> Result<Self, ServiceError> {
+        let expires_at = Instant::now()
+            .checked_add(timeout)
+            .ok_or(ServiceError::InvalidLimits)?;
+        Ok(Self {
+            expires_at,
+            #[cfg(test)]
+            forced_expired: None,
+            #[cfg(test)]
+            remaining_checks: None,
+            #[cfg(test)]
+            start_receive_hook: None,
+            #[cfg(test)]
+            start_receipt_hook: None,
+            #[cfg(test)]
+            start_acknowledgement_hook: None,
+        })
+    }
+
+    fn remaining(&self) -> Option<Duration> {
+        #[cfg(test)]
+        if self
+            .forced_expired
+            .as_ref()
+            .is_some_and(|expired| expired.load(Ordering::Acquire))
+        {
+            return None;
+        }
+        #[cfg(test)]
+        if let Some(remaining_checks) = self.remaining_checks.as_ref() {
+            let available = remaining_checks
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |checks| {
+                    checks.checked_sub(1)
+                })
+                .ok()?;
+            debug_assert!(available > 0);
+        }
+        self.expires_at
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+    }
+
+    const fn expires_at(&self) -> Instant {
+        self.expires_at
+    }
+
+    fn pause_before_start_receive(&self) {
+        #[cfg(test)]
+        if let Some(hook) = self.start_receive_hook.as_ref() {
+            hook.entered.wait();
+            hook.release.wait();
+        }
+    }
+
+    fn pause_after_start_receipt(&self) {
+        #[cfg(test)]
+        if let Some(hook) = self.start_receipt_hook.as_ref() {
+            hook.entered.wait();
+            hook.release.wait();
+        }
+    }
+
+    fn pause_before_start_acknowledgement(&self) {
+        #[cfg(test)]
+        if let Some(hook) = self.start_acknowledgement_hook.as_ref() {
+            hook.entered.wait();
+            hook.release.wait();
+        }
+    }
+
+    #[cfg(test)]
+    fn controlled(timeout: Duration) -> Result<(Self, Arc<AtomicBool>), ServiceError> {
+        let mut deadline = Self::from_timeout(timeout)?;
+        let forced_expired = Arc::new(AtomicBool::new(false));
+        deadline.forced_expired = Some(Arc::clone(&forced_expired));
+        Ok((deadline, forced_expired))
+    }
+
+    #[cfg(test)]
+    fn with_remaining_checks(timeout: Duration, checks: u32) -> Result<Self, ServiceError> {
+        let mut deadline = Self::from_timeout(timeout)?;
+        deadline.remaining_checks = Some(Arc::new(AtomicU32::new(checks)));
+        Ok(deadline)
+    }
+
+    #[cfg(test)]
+    fn controlled_before_start_receive(
+        timeout: Duration,
+    ) -> Result<ControlledStartReceive, ServiceError> {
+        let (mut deadline, forced_expired) = Self::controlled(timeout)?;
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        deadline.start_receive_hook = Some(Arc::new(WorkerStartReceiptHook {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }));
+        Ok(ControlledStartReceive {
+            deadline,
+            force_expired: forced_expired,
+            entered,
+            release,
+        })
+    }
+
+    #[cfg(test)]
+    fn controlled_at_start_receipt(
+        timeout: Duration,
+    ) -> Result<ControlledStartReceipt, ServiceError> {
+        let (mut deadline, forced_expired) = Self::controlled(timeout)?;
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        deadline.start_receipt_hook = Some(Arc::new(WorkerStartReceiptHook {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }));
+        Ok(ControlledStartReceipt {
+            deadline,
+            force_expired: forced_expired,
+            entered,
+            release,
+        })
+    }
+
+    #[cfg(test)]
+    fn controlled_before_start_acknowledgement(
+        timeout: Duration,
+    ) -> Result<ControlledStartAcknowledgement, ServiceError> {
+        let (mut deadline, forced_expired) = Self::controlled(timeout)?;
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        deadline.start_acknowledgement_hook = Some(Arc::new(WorkerStartReceiptHook {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }));
+        Ok(ControlledStartAcknowledgement {
+            deadline,
+            force_expired: forced_expired,
+            entered,
+            release,
+        })
+    }
+}
+
 #[derive(Debug)]
 struct WorkerJob {
     operation: OperationId,
-    cancellation: rootlight_operations::Cancellation,
+    admitted: Receiver<()>,
+    handshake_deadline: WorkerDeadline,
+    journal: JournalActorHandle,
     permit: SchedulerPermit,
     #[cfg(test)]
     started: Option<SyncSender<()>>,
@@ -2271,6 +3229,7 @@ struct WorkerJob {
 #[derive(Debug)]
 struct WorkerCompletion {
     operation: OperationId,
+    start: WorkerStart,
     cancellation_reason: Option<rootlight_operations::CancellationReason>,
     permit: SchedulerPermit,
 }
@@ -2294,24 +3253,41 @@ impl SyntheticWorkerPool {
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError::InvalidLimits`] for zero bounds or a thread error.
+    /// Returns [`ServiceError::InvalidLimits`] for bounds outside the daemon
+    /// hard caps or a join-handle allocation failure, and
+    /// [`ServiceError::ThreadSpawn`] when a worker cannot start.
     pub fn start(workers: usize, queue_limit: usize) -> Result<Self, ServiceError> {
-        if workers == 0 || queue_limit == 0 {
+        if workers == 0
+            || workers > MAX_OPERATION_WORKERS
+            || queue_limit == 0
+            || queue_limit > MAX_OPERATION_QUEUE_CAPACITY
+        {
             return Err(ServiceError::InvalidLimits);
         }
         let (sender, receiver) = mpsc::sync_channel(queue_limit);
         let receiver = Arc::new(std::sync::Mutex::new(receiver));
         let (completion_tx, completions) = tokio::sync::mpsc::channel(queue_limit);
-        let mut joins = Vec::with_capacity(workers);
+        let mut joins = Vec::new();
+        joins
+            .try_reserve_exact(workers)
+            .map_err(|_| ServiceError::InvalidLimits)?;
         for index in 0..workers {
             let receiver = Arc::clone(&receiver);
-            let completion_tx = completion_tx.clone();
-            joins.push(
-                thread::Builder::new()
-                    .name(format!("rootlight-worker-{index}"))
-                    .spawn(move || synthetic_worker_loop(receiver, completion_tx))
-                    .map_err(ServiceError::ThreadSpawn)?,
-            );
+            let worker_completion_tx = completion_tx.clone();
+            let worker = thread::Builder::new()
+                .name(format!("rootlight-worker-{index}"))
+                .spawn(move || synthetic_worker_loop(receiver, worker_completion_tx));
+            match worker {
+                Ok(worker) => joins.push(worker),
+                Err(source) => {
+                    drop(sender);
+                    drop(completion_tx);
+                    for worker in joins {
+                        let _ = worker.join();
+                    }
+                    return Err(ServiceError::ThreadSpawn(source));
+                }
+            }
         }
         drop(completion_tx);
         Ok(Self {
@@ -2396,51 +3372,221 @@ fn synthetic_worker_loop(
         let Ok(mut job) = job else {
             return;
         };
-        job.permit.start();
-        #[cfg(test)]
-        if let Some(started) = job.started.as_ref() {
-            let _ = started.send(());
+        if !wait_for_worker_admission(&job.admitted, &job.handshake_deadline) {
+            continue;
         }
-        let deadline = std::time::Instant::now() + CONTROL_PROBE_WORK;
-        let mut state = u64::from(job.operation.as_bytes()[0]) | 1;
-        let cancellation_reason = loop {
-            if let Err(cancelled) = job.cancellation.check() {
-                break Some(cancelled.reason());
+        let start = job
+            .journal
+            .start_operation_blocking(job.operation, &job.handshake_deadline);
+        let cancellation_reason = match &start {
+            Ok((operation, Some(cancellation))) if operation.state == OperationState::Running => {
+                job.permit.start();
+                #[cfg(test)]
+                if let Some(started) = job.started.as_ref() {
+                    let _ = started.send(());
+                }
+                let deadline = std::time::Instant::now() + CONTROL_PROBE_WORK;
+                let mut state = u64::from(job.operation.as_bytes()[0]) | 1;
+                loop {
+                    if let Err(cancelled) = cancellation.check() {
+                        break Some(cancelled.reason());
+                    }
+                    for _ in 0..1_024 {
+                        state = state
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        std::hint::black_box(state);
+                    }
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        break None;
+                    }
+                    thread::sleep((deadline - now).min(Duration::from_millis(1)));
+                }
             }
-            for _ in 0..1_024 {
-                state = state
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407);
-                std::hint::black_box(state);
-            }
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                break None;
-            }
-            thread::sleep((deadline - now).min(Duration::from_millis(1)));
+            Ok((_, None)) | Err(_) | Ok(_) => None,
         };
-        job.permit.persist(cancellation_reason.is_some());
-        if completion
-            .blocking_send(WorkerCompletion {
+        if matches!(start, Ok((_, Some(_)))) {
+            job.permit.persist(cancellation_reason.is_some());
+        }
+        if !deliver_worker_completion(
+            &completion,
+            WorkerCompletion {
                 operation: job.operation,
+                start,
                 cancellation_reason,
                 permit: job.permit,
-            })
-            .is_err()
-        {
+            },
+        ) {
             return;
         }
     }
 }
 
-/// Bounded daemon scheduling and maintenance coordinator.
+fn wait_for_worker_admission(admitted: &Receiver<()>, deadline: &WorkerDeadline) -> bool {
+    loop {
+        let Some(remaining) = deadline.remaining() else {
+            return false;
+        };
+        match admitted.recv_timeout(remaining.min(WORKER_HANDSHAKE_POLL_INTERVAL)) {
+            Ok(()) => return true,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+}
+
+fn deliver_worker_completion(
+    sender: &tokio::sync::mpsc::Sender<WorkerCompletion>,
+    completion: WorkerCompletion,
+) -> bool {
+    match sender.try_send(completion) {
+        Ok(()) => true,
+        Err(
+            tokio::sync::mpsc::error::TrySendError::Closed(_)
+            | tokio::sync::mpsc::error::TrySendError::Full(_),
+        ) => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TimerKind {
+    Deadline,
+    Lease,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct TimerId {
+    operation: OperationId,
+    kind: TimerKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TimerReason {
+    Deadline,
+    Lease { expected_expiry_unix_ms: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ScheduledTimer {
+    operation: OperationId,
+    reason: TimerReason,
+}
+
+impl ScheduledTimer {
+    const fn id(self) -> TimerId {
+        let kind = match self.reason {
+            TimerReason::Deadline => TimerKind::Deadline,
+            TimerReason::Lease { .. } => TimerKind::Lease,
+        };
+        TimerId {
+            operation: self.operation,
+            kind,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct TimerSchedule {
+    by_deadline: BTreeSet<(tokio::time::Instant, ScheduledTimer)>,
+    by_timer: BTreeMap<TimerId, (tokio::time::Instant, ScheduledTimer)>,
+}
+
+impl TimerSchedule {
+    fn register(
+        &mut self,
+        timer: ScheduledTimer,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), ServiceError> {
+        let id = timer.id();
+        if self.by_timer.contains_key(&id) {
+            return Err(ServiceError::TimerAlreadyRegistered);
+        }
+        self.by_timer.insert(id, (deadline, timer));
+        self.by_deadline.insert((deadline, timer));
+        Ok(())
+    }
+
+    fn remove(&mut self, id: TimerId) {
+        if let Some((deadline, timer)) = self.by_timer.remove(&id) {
+            self.by_deadline.remove(&(deadline, timer));
+        }
+    }
+
+    fn remove_operation(&mut self, operation: OperationId) {
+        self.remove(TimerId {
+            operation,
+            kind: TimerKind::Deadline,
+        });
+        self.remove(TimerId {
+            operation,
+            kind: TimerKind::Lease,
+        });
+    }
+
+    fn next_deadline(&self) -> Option<tokio::time::Instant> {
+        self.by_deadline.first().map(|(deadline, _)| *deadline)
+    }
+
+    fn take_next_due(
+        &mut self,
+        now: tokio::time::Instant,
+    ) -> Option<(tokio::time::Instant, ScheduledTimer)> {
+        let (deadline, timer) = self.by_deadline.first().copied()?;
+        if deadline > now {
+            return None;
+        }
+        self.remove(timer.id());
+        Some((deadline, timer))
+    }
+
+    fn due_for_operation(
+        &self,
+        operation: OperationId,
+        now: tokio::time::Instant,
+    ) -> Vec<ScheduledTimer> {
+        self.by_deadline
+            .iter()
+            .filter(|(deadline, timer)| *deadline <= now && timer.operation == operation)
+            .map(|(_, timer)| *timer)
+            .collect()
+    }
+}
+
+/// One ready orchestrator event that still requires durable processing.
+#[derive(Debug)]
+#[must_use]
+pub struct OrchestratorEvent {
+    kind: OrchestratorEventKind,
+}
+
+#[derive(Debug)]
+enum OrchestratorEventKind {
+    Timer,
+    TimerDelivery,
+    Completion,
+}
+
+#[derive(Debug)]
+struct PendingTimerInterrupt {
+    scheduled_at: tokio::time::Instant,
+    timer: ScheduledTimer,
+    delivery_deadline: tokio::time::Instant,
+    reply: tokio::sync::oneshot::Receiver<Result<OperationRecord, OperationError>>,
+    result: Option<Result<OperationRecord, ServiceError>>,
+}
+
+/// Bounded daemon scheduling and monotonic-timer coordinator.
 #[derive(Debug)]
 pub struct DaemonOrchestrator {
     journal: JournalActorHandle,
     workers: SyntheticWorkerPool,
     pending_completion: Option<PendingWorkerCompletion>,
+    pending_timer: Option<PendingTimerInterrupt>,
+    timers: TimerSchedule,
     state: Arc<DaemonState>,
     client_admissions: Arc<Mutex<ClientOperationAdmissions>>,
+    active_operations: BTreeMap<OperationId, OperationRecord>,
     limits: DaemonLimits,
 }
 
@@ -2455,14 +3601,17 @@ impl DaemonOrchestrator {
         state: Arc<DaemonState>,
         limits: DaemonLimits,
     ) -> Result<Self, ServiceError> {
-        let queue_limit = usize::try_from(limits.operation_queue_limit)
+        let queue_limit = usize::try_from(limits.operation_queue_limit())
             .map_err(|_| ServiceError::InvalidLimits)?;
         Ok(Self {
             journal,
-            workers: SyntheticWorkerPool::start(limits.operation_workers, queue_limit)?,
+            workers: SyntheticWorkerPool::start(limits.operation_workers(), queue_limit)?,
             pending_completion: None,
+            pending_timer: None,
+            timers: TimerSchedule::default(),
             state,
             client_admissions: Arc::new(Mutex::new(ClientOperationAdmissions::default())),
+            active_operations: BTreeMap::new(),
             limits,
         })
     }
@@ -2473,11 +3622,15 @@ impl DaemonOrchestrator {
     ///
     /// Returns a typed admission, actor, journal, or worker-queue failure.
     pub async fn submit(
-        &self,
+        &mut self,
         admission: OperationAdmission,
     ) -> Result<OperationRecord, ServiceError> {
-        let OperationAdmission { submission, reply } = admission;
-        let result = self.schedule_submission(submission).await;
+        let OperationAdmission {
+            prepared,
+            reply,
+            pending,
+        } = admission;
+        let result = self.schedule_submission(prepared, pending).await;
         let response = match &result {
             Ok(operation) => Ok(operation.clone()),
             Err(error) => Err(error.to_public()),
@@ -2495,29 +3648,41 @@ impl DaemonOrchestrator {
     ///
     /// Returns a typed admission, actor, journal, or worker-queue failure.
     pub async fn schedule(
-        &self,
-        submission: OperationSubmission,
+        &mut self,
+        prepared: PreparedOperationSubmission,
     ) -> Result<OperationRecord, ServiceError> {
-        self.schedule_submission(submission).await
+        self.schedule_submission(prepared, None).await
     }
 
     async fn schedule_submission(
-        &self,
-        submission: OperationSubmission,
+        &mut self,
+        prepared: PreparedOperationSubmission,
+        mut pending: Option<PendingAdmissionHandle>,
     ) -> Result<OperationRecord, ServiceError> {
+        let (submission, deadline, lease_deadline, deadline_retry) = prepared.into_parts();
         if !self.state.accepting_operations.load(Ordering::Acquire) {
             return Err(ServiceError::NotAccepting);
+        }
+        if self.active_operations.contains_key(&submission.operation) {
+            return self
+                .journal
+                .retry_status_with_deadline_retry(submission, deadline_retry)
+                .await;
         }
         let permit = match SchedulerPermit::reserve(
             Arc::clone(&self.state),
             Arc::clone(&self.client_admissions),
             submission.owner,
-            self.limits.operation_queue_limit,
-            self.limits.client_operation_limit,
+            self.limits.operation_queue_limit(),
+            self.limits.client_operation_limit(),
         ) {
             Ok(permit) => permit,
             Err(error @ (ServiceError::QueueFull | ServiceError::ClientOperationLimit { .. })) => {
-                return match self.journal.retry_status(submission).await {
+                return match self
+                    .journal
+                    .retry_status_with_deadline_retry(submission, deadline_retry)
+                    .await
+                {
                     Ok(operation) => Ok(operation),
                     Err(ServiceError::Operations(OperationError::NotFound)) => Err(error),
                     Err(retry_error) => Err(retry_error),
@@ -2525,144 +3690,392 @@ impl DaemonOrchestrator {
             }
             Err(error) => return Err(error),
         };
-        let outcome = self.journal.submit(submission).await?;
+        let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
+        let handshake_deadline = WorkerDeadline::from_timeout(self.limits.request_timeout())?;
+        if let Err(failure) = self.workers.submit(WorkerJob {
+            operation: submission.operation,
+            admitted: admitted_rx,
+            handshake_deadline,
+            journal: self.journal.clone(),
+            permit,
+            #[cfg(test)]
+            started: None,
+        }) {
+            let (error, job) = *failure;
+            drop(job);
+            return Err(error);
+        }
+        let outcome = self
+            .journal
+            .submit_with_deadline_retry(submission, deadline_retry)
+            .await?;
+        let cancelled_at_handoff = pending
+            .as_mut()
+            .map(PendingAdmissionHandle::handoff_to_durable)
+            .transpose()?
+            .unwrap_or(false);
+        if cancelled_at_handoff {
+            let ControlResponse::OperationCancel { operation, .. } = self
+                .journal
+                .control(ControlRequest::OperationCancel(outcome.operation.operation))
+                .await?
+            else {
+                return Err(ServiceError::UnexpectedResponse);
+            };
+            return Ok(operation);
+        }
         if !outcome.inserted {
             return Ok(outcome.operation);
         }
         let operation = outcome.operation;
-        let (running, token) = match operation.state {
-            OperationState::Queued => self.journal.activate_operation(operation.operation).await?,
+        if let Some(deadline) = deadline {
+            self.timers.register(
+                ScheduledTimer {
+                    operation: operation.operation,
+                    reason: TimerReason::Deadline,
+                },
+                deadline,
+            )?;
+        }
+        if let (Some(lease_deadline), Some(expected_expiry_unix_ms)) =
+            (lease_deadline, operation.lease_expires_unix_ms)
+        {
+            self.timers.register(
+                ScheduledTimer {
+                    operation: operation.operation,
+                    reason: TimerReason::Lease {
+                        expected_expiry_unix_ms,
+                    },
+                },
+                lease_deadline,
+            )?;
+        }
+        if let Some(terminal) = self.expire_operation_if_due(operation.operation).await? {
+            return Ok(terminal);
+        }
+        match operation.state {
+            OperationState::Queued => {}
             OperationState::Running | OperationState::Cancelling => {
                 return Err(ServiceError::UnexpectedResponse);
             }
             OperationState::Succeeded
             | OperationState::Failed
             | OperationState::Cancelled
-            | OperationState::Interrupted => return Ok(operation),
-        };
-        if running.state != OperationState::Running {
-            return Err(ServiceError::UnexpectedResponse);
-        }
-        match self.workers.submit(WorkerJob {
-            operation: running.operation,
-            cancellation: token,
-            permit,
-            #[cfg(test)]
-            started: None,
-        }) {
-            Ok(()) => {}
-            Err(failure) => {
-                let (error, job) = *failure;
-                let compensation = self
-                    .journal
-                    .finish_operation(
-                        job.operation,
-                        Some(rootlight_operations::CancellationReason::ResourceLimit),
-                    )
-                    .await;
-                drop(job);
-                compensation?;
-                return Err(error);
+            | OperationState::Interrupted => {
+                self.timers.remove_operation(operation.operation);
+                return Ok(operation);
             }
         }
-        Ok(running)
+        self.active_operations
+            .insert(operation.operation, operation.clone());
+        if admitted_tx.send(()).is_err() {
+            self.timers.remove_operation(operation.operation);
+            self.active_operations.remove(&operation.operation);
+            return Err(ServiceError::ChannelClosed);
+        }
+        Ok(operation)
     }
 
-    /// Reports whether no synthetic worker result is currently pending.
+    async fn expire_operation_if_due(
+        &mut self,
+        operation: OperationId,
+    ) -> Result<Option<OperationRecord>, ServiceError> {
+        let now = tokio::time::Instant::now();
+        let due = self.timers.due_for_operation(operation, now);
+        for timer in due {
+            let observed = self.interrupt_timer_bounded(timer).await?;
+            self.timers.remove(timer.id());
+            if observed.state.is_terminal() || observed.cancellation_requested {
+                self.timers.remove_operation(operation);
+                self.active_operations.remove(&operation);
+                return Ok(Some(observed));
+            }
+        }
+        Ok(None)
+    }
+
+    fn interrupt_timer_receiver(
+        &self,
+        timer: ScheduledTimer,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<OperationRecord, OperationError>>, ServiceError>
+    {
+        match timer.reason {
+            TimerReason::Deadline => self.journal.interrupt_deadline_receiver(timer.operation),
+            TimerReason::Lease {
+                expected_expiry_unix_ms,
+            } => self
+                .journal
+                .interrupt_lease_receiver(timer.operation, expected_expiry_unix_ms),
+        }
+    }
+
+    fn fail_timer_delivery(&self, error: ServiceError) -> ServiceError {
+        self.state.set_journal_healthy(false);
+        error
+    }
+
+    async fn interrupt_timer_bounded(
+        &self,
+        timer: ScheduledTimer,
+    ) -> Result<OperationRecord, ServiceError> {
+        let receiver = self
+            .interrupt_timer_receiver(timer)
+            .map_err(|error| self.fail_timer_delivery(error))?;
+        match tokio::time::timeout(self.limits.request_timeout(), receiver).await {
+            Ok(Ok(Ok(operation))) => Ok(operation),
+            Ok(Ok(Err(error))) => Err(self.fail_timer_delivery(ServiceError::Operations(error))),
+            Ok(Err(_)) => Err(self.fail_timer_delivery(ServiceError::ChannelClosed)),
+            Err(_) => Err(self.fail_timer_delivery(ServiceError::TimerDeliveryTimedOut)),
+        }
+    }
+
+    fn start_due_timer_delivery(&mut self, now: tokio::time::Instant) -> Result<(), ServiceError> {
+        if self.pending_timer.is_some() {
+            return Err(ServiceError::UnexpectedResponse);
+        }
+        let Some((scheduled_at, timer)) = self.timers.take_next_due(now) else {
+            return Ok(());
+        };
+        let reply = match self.interrupt_timer_receiver(timer) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.timers
+                    .register(timer, scheduled_at)
+                    .map_err(|_| self.fail_timer_delivery(ServiceError::UnexpectedResponse))?;
+                return Err(self.fail_timer_delivery(error));
+            }
+        };
+        self.pending_timer = Some(PendingTimerInterrupt {
+            scheduled_at,
+            timer,
+            delivery_deadline: now + self.limits.request_timeout(),
+            reply,
+            result: None,
+        });
+        Ok(())
+    }
+
+    async fn await_pending_timer_delivery(&mut self) -> Result<(), ServiceError> {
+        let pending = self
+            .pending_timer
+            .as_mut()
+            .ok_or(ServiceError::UnexpectedResponse)?;
+        if pending.result.is_some() {
+            return Ok(());
+        }
+        let result = tokio::select! {
+            biased;
+            result = &mut pending.reply => match result {
+                Ok(Ok(operation)) => Ok(operation),
+                Ok(Err(error)) => Err(ServiceError::Operations(error)),
+                Err(_) => Err(ServiceError::ChannelClosed),
+            },
+            () = tokio::time::sleep_until(pending.delivery_deadline) => {
+                Err(ServiceError::TimerDeliveryTimedOut)
+            }
+        };
+        pending.result = Some(result);
+        Ok(())
+    }
+
+    fn process_pending_timer_delivery(&mut self) -> Result<Option<OperationRecord>, ServiceError> {
+        let pending = self
+            .pending_timer
+            .take()
+            .ok_or(ServiceError::UnexpectedResponse)?;
+        let result = pending.result.ok_or(ServiceError::UnexpectedResponse);
+        match result {
+            Ok(Ok(operation)) => {
+                if operation.state.is_terminal() || operation.cancellation_requested {
+                    self.timers.remove_operation(pending.timer.operation);
+                    self.active_operations.remove(&pending.timer.operation);
+                }
+                Ok(Some(operation))
+            }
+            Ok(Err(error)) | Err(error) => {
+                if self
+                    .timers
+                    .register(pending.timer, pending.scheduled_at)
+                    .is_err()
+                {
+                    return Err(self.fail_timer_delivery(ServiceError::UnexpectedResponse));
+                }
+                Err(self.fail_timer_delivery(error))
+            }
+        }
+    }
+
+    /// Reports whether no synthetic worker result or durable timer delivery is pending.
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.pending_completion.is_none()
+            && self.pending_timer.is_none()
             && self.state.admitted_operations.load(Ordering::Acquire) == 0
     }
 
-    /// Persists one completed worker result and releases admission counters.
+    /// Waits until a worker completion or process-local timer is ready.
     ///
-    /// A received completion and its journal reply remain owned by the orchestrator so
-    /// cancellation of a surrounding `select!` cannot lose either durable work or quota state.
+    /// This method only consumes readiness. Call [`Self::process_event`] after the
+    /// surrounding host `select!` chooses this branch so durable work is not dropped.
     ///
     /// # Errors
     ///
-    /// Returns a typed actor or journal failure.
-    pub async fn complete_next(&mut self) -> Result<Option<OperationRecord>, ServiceError> {
-        if self.pending_completion.is_none() {
-            let Some(completion) = self.workers.completion().await else {
-                return Ok(None);
-            };
+    /// Returns [`ServiceError::ChannelClosed`] when no completion can arrive.
+    pub async fn next_event(&mut self) -> Result<OrchestratorEvent, ServiceError> {
+        if self.pending_timer.is_some() {
+            self.await_pending_timer_delivery().await?;
+            return Ok(OrchestratorEvent {
+                kind: OrchestratorEventKind::TimerDelivery,
+            });
+        }
+        if self.pending_completion.is_some() {
+            return Ok(OrchestratorEvent {
+                kind: OrchestratorEventKind::Completion,
+            });
+        }
+        if let Some(deadline) = self.timers.next_deadline() {
+            tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(deadline) => Ok(OrchestratorEvent {
+                    kind: OrchestratorEventKind::Timer,
+                }),
+                completion = self.workers.completion() => {
+                    let completion = completion.ok_or(ServiceError::ChannelClosed)?;
+                    self.pending_completion = Some(PendingWorkerCompletion {
+                        completion,
+                        reply: None,
+                    });
+                    Ok(OrchestratorEvent {
+                        kind: OrchestratorEventKind::Completion,
+                    })
+                }
+            }
+        } else {
+            let completion = self
+                .workers
+                .completion()
+                .await
+                .ok_or(ServiceError::ChannelClosed)?;
             self.pending_completion = Some(PendingWorkerCompletion {
                 completion,
                 reply: None,
             });
+            Ok(OrchestratorEvent {
+                kind: OrchestratorEventKind::Completion,
+            })
         }
+    }
+
+    /// Durably processes one event returned by [`Self::next_event`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed actor, journal, or timer failure.
+    pub async fn process_event(
+        &mut self,
+        event: OrchestratorEvent,
+    ) -> Result<Option<OperationRecord>, ServiceError> {
+        match event.kind {
+            OrchestratorEventKind::Timer => {
+                self.start_due_timer_delivery(tokio::time::Instant::now())?;
+                Ok(None)
+            }
+            OrchestratorEventKind::TimerDelivery => self.process_pending_timer_delivery(),
+            OrchestratorEventKind::Completion => {
+                let pending = self
+                    .pending_completion
+                    .as_ref()
+                    .ok_or(ServiceError::UnexpectedResponse)?;
+                match &pending.completion.start {
+                    Ok((operation, Some(_))) if operation.state == OperationState::Running => {}
+                    Ok((operation, None)) => {
+                        let operation = operation.clone();
+                        let pending = self
+                            .pending_completion
+                            .take()
+                            .ok_or(ServiceError::UnexpectedResponse)?;
+                        pending.completion.permit.finish();
+                        if operation.state.is_terminal() || operation.cancellation_requested {
+                            self.timers.remove_operation(operation.operation);
+                            self.active_operations.remove(&operation.operation);
+                        }
+                        return Ok(Some(operation));
+                    }
+                    Ok(_) => return Err(ServiceError::UnexpectedResponse),
+                    Err(_) => {
+                        let pending = self
+                            .pending_completion
+                            .take()
+                            .ok_or(ServiceError::UnexpectedResponse)?;
+                        let error = match pending.completion.start {
+                            Err(error) => error,
+                            Ok(_) => return Err(ServiceError::UnexpectedResponse),
+                        };
+                        pending.completion.permit.finish();
+                        return Err(error);
+                    }
+                }
+                let operation = pending.completion.operation;
+                if let Some(terminal) = self.expire_operation_if_due(operation).await? {
+                    let pending = self
+                        .pending_completion
+                        .take()
+                        .ok_or(ServiceError::UnexpectedResponse)?;
+                    pending.completion.permit.finish();
+                    return Ok(Some(terminal));
+                }
+                self.process_pending_completion().await
+            }
+        }
+    }
+
+    async fn process_pending_completion(
+        &mut self,
+    ) -> Result<Option<OperationRecord>, ServiceError> {
         let pending = self
             .pending_completion
             .as_mut()
-            .unwrap_or_else(|| unreachable!("pending completion was retained"));
+            .ok_or(ServiceError::UnexpectedResponse)?;
         if pending.reply.is_none() {
             let completion = &pending.completion;
-            pending.reply = Some(if completion.cancellation_reason
-                == Some(rootlight_operations::CancellationReason::DeadlineExceeded)
-            {
-                self.journal
-                    .interrupt_deadline_receiver(completion.operation)
-            } else {
-                self.journal
-                    .finish_operation_receiver(completion.operation, completion.cancellation_reason)
-            }?);
+            pending.reply =
+                Some(self.journal.finish_operation_receiver(
+                    completion.operation,
+                    completion.cancellation_reason,
+                )?);
         }
         let result = pending
             .reply
             .as_mut()
-            .unwrap_or_else(|| unreachable!("completion reply was initialized"))
+            .ok_or(ServiceError::UnexpectedResponse)?
             .await
             .map_err(|_| ServiceError::ChannelClosed)?
             .map_err(ServiceError::Operations);
         match result {
             Ok(operation) => {
-                self.pending_completion
+                let pending = self
+                    .pending_completion
                     .take()
-                    .unwrap_or_else(|| unreachable!("pending completion was retained"))
-                    .completion
-                    .permit
-                    .finish();
+                    .ok_or(ServiceError::UnexpectedResponse)?;
+                pending.completion.permit.finish();
+                if operation.state.is_terminal() {
+                    self.timers.remove_operation(operation.operation);
+                    self.active_operations.remove(&operation.operation);
+                }
                 Ok(Some(operation))
             }
             Err(error) => Err(error),
         }
     }
 
-    /// Persists every worker completion that is already available.
+    /// Waits for and durably processes one orchestrator event.
     ///
     /// # Errors
     ///
-    /// Returns a typed actor or journal failure.
-    pub async fn drain_ready_completions(&mut self) -> Result<u32, ServiceError> {
-        let mut drained = 0_u32;
-        loop {
-            if self.pending_completion.is_none() {
-                self.pending_completion =
-                    self.workers.completions.try_recv().ok().map(|completion| {
-                        PendingWorkerCompletion {
-                            completion,
-                            reply: None,
-                        }
-                    });
-            }
-            if self.pending_completion.is_none() {
-                break;
-            }
-            self.complete_next().await?;
-            drained = drained.checked_add(1).ok_or(ServiceError::InvalidLimits)?;
-        }
-        Ok(drained)
-    }
-
-    /// Runs one bounded deadline and lease maintenance pass.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed actor, clock, or journal failure.
-    pub async fn maintain(&self) -> Result<u32, ServiceError> {
-        self.journal.expire_due(std::time::Instant::now(), 64).await
+    /// Returns a typed actor, journal, timer, or worker-channel failure.
+    pub async fn complete_next(&mut self) -> Result<Option<OperationRecord>, ServiceError> {
+        let event = self.next_event().await?;
+        self.process_event(event).await
     }
 
     /// Stops admission, interrupts remaining work, and checkpoints the journal.
@@ -2670,33 +4083,115 @@ impl DaemonOrchestrator {
     /// # Errors
     ///
     /// Returns a typed actor, journal, or worker join failure.
+    pub async fn shutdown(&mut self) -> Result<(), ServiceError> {
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.limits.shutdown_grace())
+            .ok_or(ServiceError::InvalidLimits)?;
+        self.shutdown_until(deadline).await
+    }
+
+    /// Stops admission, interrupts remaining work, and checkpoints the journal
+    /// within one absolute deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed actor, journal, timer-delivery, timeout, or worker join
+    /// failure.
     pub async fn shutdown_until(
         &mut self,
         deadline: tokio::time::Instant,
     ) -> Result<(), ServiceError> {
+        let maximum_rounds =
+            shutdown_interrupt_rounds(rootlight_operations::MAX_NONTERMINAL_OPERATIONS)?;
         self.state.set_lifecycle(DaemonLifecycle::Draining);
         self.workers.close();
-        loop {
-            let changed = tokio::time::timeout_at(deadline, self.journal.interrupt(256))
-                .await
-                .map_err(|_| ServiceError::RequestTimedOut)??;
-            if changed == 0 {
-                break;
+        let mut failure = None;
+        if self.pending_timer.is_some() {
+            match tokio::time::timeout_at(deadline, self.await_pending_timer_delivery()).await {
+                Ok(Ok(())) => {
+                    if let Err(error) = self.process_pending_timer_delivery() {
+                        failure = Some(error);
+                    }
+                }
+                Ok(Err(error)) => {
+                    failure = Some(error);
+                }
+                Err(_) => {
+                    if let Some(pending) = self.pending_timer.as_mut() {
+                        pending.result = Some(Err(ServiceError::RequestTimedOut));
+                    }
+                    let error = self
+                        .process_pending_timer_delivery()
+                        .err()
+                        .unwrap_or(ServiceError::RequestTimedOut);
+                    failure = Some(error);
+                }
             }
         }
-        self.workers.join_until(deadline).await?;
+        let mut interruption_complete = false;
+        for _ in 0..maximum_rounds {
+            let request_deadline = deadline.min(
+                tokio::time::Instant::now()
+                    .checked_add(self.limits.request_timeout())
+                    .ok_or(ServiceError::InvalidLimits)?,
+            );
+            let interrupt = tokio::time::timeout_at(
+                request_deadline,
+                self.journal.interrupt(SHUTDOWN_INTERRUPT_BATCH),
+            )
+            .await;
+            match interrupt {
+                Ok(Ok(0)) => {
+                    interruption_complete = true;
+                    break;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    failure.get_or_insert(error);
+                    break;
+                }
+                Err(_) => {
+                    failure.get_or_insert(ServiceError::RequestTimedOut);
+                    break;
+                }
+            }
+        }
+        if !interruption_complete && failure.is_none() {
+            failure = Some(ServiceError::UnexpectedResponse);
+        }
+        if let Err(error) = self.workers.join_until(deadline).await {
+            failure.get_or_insert(error);
+        }
         if let Some(completion) = self.pending_completion.take() {
             completion.completion.permit.finish();
         }
         while let Ok(completion) = self.workers.completions.try_recv() {
             completion.permit.finish();
         }
-        tokio::time::timeout_at(deadline, self.journal.checkpoint())
-            .await
-            .map_err(|_| ServiceError::RequestTimedOut)??;
-        self.state.set_operation_counts(0, 0, 0);
-        self.state.set_lifecycle(DaemonLifecycle::Stopped);
-        Ok(())
+        let checkpoint_deadline = deadline.min(
+            tokio::time::Instant::now()
+                .checked_add(self.limits.request_timeout())
+                .ok_or(ServiceError::InvalidLimits)?,
+        );
+        match tokio::time::timeout_at(checkpoint_deadline, self.journal.checkpoint()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                failure.get_or_insert(error);
+            }
+            Err(_) => {
+                failure.get_or_insert(ServiceError::RequestTimedOut);
+            }
+        }
+        match failure {
+            Some(error) => Err(self.fail_timer_delivery(error)),
+            None => {
+                self.timers = TimerSchedule::default();
+                self.active_operations.clear();
+                self.state.set_operation_counts(0, 0, 0);
+                self.state.set_lifecycle(DaemonLifecycle::Stopped);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -2869,6 +4364,34 @@ pub struct ControlService {
     state: Arc<DaemonState>,
     limits: DaemonLimits,
     diagnostic_actor: Option<DiagnosticActorHandle>,
+    pending_admissions: Arc<Mutex<PendingAdmissionRegistry>>,
+    #[cfg(test)]
+    cancellation_handoff_hook: Option<CancellationHandoffTestHook>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct CancellationHandoffTestHook {
+    initial_not_found: Arc<tokio::sync::Barrier>,
+    resume: Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(test)]
+const CANCELLATION_HANDOFF_TEST_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[cfg(test)]
+impl CancellationHandoffTestHook {
+    async fn pause_after_initial_not_found(&self) {
+        tokio::time::timeout(
+            CANCELLATION_HANDOFF_TEST_TIMEOUT,
+            self.initial_not_found.wait(),
+        )
+        .await
+        .expect("cancellation handoff test did not observe the initial NotFound");
+        tokio::time::timeout(CANCELLATION_HANDOFF_TEST_TIMEOUT, self.resume.wait())
+            .await
+            .expect("cancellation handoff test did not resume the dispatch");
+    }
 }
 
 impl ControlService {
@@ -2897,6 +4420,9 @@ impl ControlService {
             state,
             limits,
             diagnostic_actor: None,
+            pending_admissions: Arc::new(Mutex::new(PendingAdmissionRegistry::default())),
+            #[cfg(test)]
+            cancellation_handoff_hook: None,
         }
     }
 
@@ -2934,6 +4460,48 @@ impl ControlService {
     #[must_use]
     pub const fn limits(&self) -> DaemonLimits {
         self.limits
+    }
+
+    fn register_pending_admission(
+        &self,
+        operation: OperationId,
+    ) -> Result<PendingAdmissionHandle, ServiceError> {
+        let mut registry = self
+            .pending_admissions
+            .lock()
+            .map_err(|_| ServiceError::AdmissionStatePoisoned)?;
+        let generation = registry.next_generation;
+        registry.next_generation = registry
+            .next_generation
+            .checked_add(1)
+            .ok_or(ServiceError::InvalidLimits)?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        registry
+            .by_operation
+            .entry(operation)
+            .or_default()
+            .insert(generation, Arc::clone(&cancelled));
+        drop(registry);
+        Ok(PendingAdmissionHandle {
+            operation,
+            generation: Some(generation),
+            cancelled,
+            registry: Arc::clone(&self.pending_admissions),
+        })
+    }
+
+    fn cancel_pending_admission(&self, operation: OperationId) -> Result<bool, ServiceError> {
+        let registry = self
+            .pending_admissions
+            .lock()
+            .map_err(|_| ServiceError::AdmissionStatePoisoned)?;
+        let Some(generations) = registry.by_operation.get(&operation) else {
+            return Ok(false);
+        };
+        for cancelled in generations.values() {
+            cancelled.store(true, Ordering::Release);
+        }
+        Ok(true)
     }
 
     /// Records the current admitted work count for compatibility callers.
@@ -3010,10 +4578,10 @@ impl ControlService {
             lifecycle,
             accepting_operations: self.state.accepting_operations.load(Ordering::Acquire),
             active_connections: self.state.active_connections.load(Ordering::Acquire),
-            connection_limit: self.limits.connection_limit,
+            connection_limit: self.limits.connection_limit(),
             queued_operations,
             running_operations,
-            operation_queue_limit: self.limits.operation_queue_limit,
+            operation_queue_limit: self.limits.operation_queue_limit(),
             journal_healthy,
             catalog_status,
             catalog_schema_version: rootlight_operations::OPERATION_SCHEMA_VERSION,
@@ -3184,7 +4752,7 @@ impl ControlService {
     /// Executes the quick check through a separate read-only catalog connection.
     #[must_use]
     pub fn execute_diagnostics_path(&self, path: &std::path::Path) -> ControlResponse {
-        self.diagnostics_quick_path(path, self.limits.request_timeout)
+        self.diagnostics_quick_path(path, self.limits.request_timeout())
     }
 
     /// Executes one typed control request.
@@ -3192,38 +4760,29 @@ impl ControlService {
     pub fn execute(&self, request: ControlRequest) -> ControlResponse {
         match request {
             ControlRequest::Health => ControlResponse::Health(self.health()),
-            ControlRequest::DiagnosticsQuick => self.diagnostics_quick(self.limits.request_timeout),
+            ControlRequest::DiagnosticsQuick => {
+                self.diagnostics_quick(self.limits.request_timeout())
+            }
             ControlRequest::SupportBundle(schema) => {
-                self.support_bundle(schema, self.limits.request_timeout)
+                self.support_bundle(schema, self.limits.request_timeout())
             }
             ControlRequest::OperationSubmit(submission)
                 if !self.state.accepting_operations.load(Ordering::Acquire) =>
             {
                 ControlResponse::Error(daemon_not_accepting(submission.operation))
             }
-            ControlRequest::OperationSubmit(submission) => match self.journal.submit(submission) {
-                Ok(outcome) => ControlResponse::OperationSubmit(outcome.operation),
-                Err(error) => ControlResponse::Error(operation_error_to_public(
-                    &error,
-                    Some(submission.operation),
-                )),
-            },
+            ControlRequest::OperationSubmit(_) => ControlResponse::Error(invalid_argument(
+                "operation submission requires asynchronous orchestration",
+            )),
             ControlRequest::OperationStatus(operation) => match self.journal.status(operation) {
                 Ok(record) => ControlResponse::OperationStatus(record),
                 Err(error) => {
                     ControlResponse::Error(operation_error_to_public(&error, Some(operation)))
                 }
             },
-            ControlRequest::OperationLeaseRenew {
-                operation,
-                owner,
-                expiry_unix_ms,
-            } => match self.journal.renew_lease(operation, owner, expiry_unix_ms) {
-                Ok(record) => ControlResponse::OperationLeaseRenew(record),
-                Err(error) => {
-                    ControlResponse::Error(operation_error_to_public(&error, Some(operation)))
-                }
-            },
+            ControlRequest::OperationLeaseRenew { operation, .. } => {
+                ControlResponse::Error(lease_renewal_unsupported(operation))
+            }
             ControlRequest::OperationCancel(operation) => match self.journal.cancel(operation) {
                 Ok((accepted, operation)) => ControlResponse::OperationCancel {
                     accepted,
@@ -3263,7 +4822,12 @@ impl ControlService {
                 client_instance_id,
                 selected_protocol_minor,
             ) {
-                Ok(request) => response_to_wire(self.execute(request)),
+                Ok(DecodedRequest::Control(request)) => response_to_wire(self.execute(request)),
+                Ok(DecodedRequest::Submission(_)) => daemon::response_envelope::Response::Error(
+                    public_error_to_wire(&invalid_argument(
+                        "operation lifecycle mutation requires asynchronous orchestration",
+                    )),
+                ),
                 Err(error) => {
                     daemon::response_envelope::Response::Error(public_error_to_wire(&error))
                 }
@@ -3323,7 +4887,7 @@ pub fn handle_connection(
 pub async fn handle_connection_async(
     service: Arc<ControlService>,
     journal: JournalActorHandle,
-    submissions: tokio::sync::mpsc::Sender<OperationAdmission>,
+    commands: OrchestratorSenders,
     client_connections: Arc<ClientConnectionAdmissions>,
     codec: FrameCodec,
     stream: &mut AsyncLocalStream,
@@ -3331,7 +4895,7 @@ pub async fn handle_connection_async(
     handle_connection_async_with_first_slice(
         service,
         journal,
-        submissions,
+        commands,
         client_connections,
         Arc::new(UnavailableFirstSliceIpcHandler),
         codec,
@@ -3348,7 +4912,7 @@ pub async fn handle_connection_async(
 pub async fn handle_connection_async_with_first_slice(
     service: Arc<ControlService>,
     journal: JournalActorHandle,
-    submissions: tokio::sync::mpsc::Sender<OperationAdmission>,
+    commands: OrchestratorSenders,
     client_connections: Arc<ClientConnectionAdmissions>,
     first_slice: Arc<dyn FirstSliceIpcHandler>,
     codec: FrameCodec,
@@ -3398,7 +4962,7 @@ pub async fn handle_connection_async_with_first_slice(
         dispatch_async(
             &service,
             &journal,
-            &submissions,
+            &commands,
             first_slice.as_ref(),
             envelope,
             AsyncDispatchContext {
@@ -3485,11 +5049,13 @@ struct AsyncDispatchContext {
 impl RequestTiming {
     fn start(service: &ControlService, envelope: &daemon::RequestEnvelope) -> Self {
         let started = Instant::now();
-        let timeout = envelope
-            .timeout_ms
-            .map_or(service.limits.request_timeout, |milliseconds| {
-                Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout)
-            });
+        let timeout =
+            envelope
+                .timeout_ms
+                .map_or(service.limits.request_timeout(), |milliseconds| {
+                    Duration::from_millis(u64::from(milliseconds))
+                        .min(service.limits.request_timeout())
+                });
         Self {
             started,
             deadline: started.checked_add(timeout),
@@ -3574,7 +5140,7 @@ where
 async fn dispatch_async(
     service: &ControlService,
     journal: &JournalActorHandle,
-    submissions: &tokio::sync::mpsc::Sender<OperationAdmission>,
+    commands: &OrchestratorSenders,
     first_slice: &dyn FirstSliceIpcHandler,
     envelope: daemon::RequestEnvelope,
     context: AsyncDispatchContext,
@@ -3622,10 +5188,10 @@ async fn dispatch_async(
                     context.client_instance_id,
                     context.selected_protocol_minor,
                 ) {
-                    Ok(ControlRequest::Health) => {
+                    Ok(DecodedRequest::Control(ControlRequest::Health)) => {
                         response_to_wire(ControlResponse::Health(service.health()))
                     }
-                    Ok(ControlRequest::DiagnosticsQuick) => {
+                    Ok(DecodedRequest::Control(ControlRequest::DiagnosticsQuick)) => {
                         run_diagnostic_request(
                             service.clone(),
                             DiagnosticKind::Quick,
@@ -3633,7 +5199,7 @@ async fn dispatch_async(
                         )
                         .await
                     }
-                    Ok(ControlRequest::SupportBundle(schema)) => {
+                    Ok(DecodedRequest::Control(ControlRequest::SupportBundle(schema))) => {
                         run_diagnostic_request(
                             service.clone(),
                             DiagnosticKind::SupportBundle(schema),
@@ -3641,24 +5207,31 @@ async fn dispatch_async(
                         )
                         .await
                     }
-                    Ok(request @ ControlRequest::OperationSubmit(_))
+                    Ok(DecodedRequest::Submission(prepared))
                         if !service.state.accepting_operations.load(Ordering::Acquire) =>
                     {
-                        let ControlRequest::OperationSubmit(submission) = request else {
-                            unreachable!("guard restricts request kind");
-                        };
                         response_to_wire(ControlResponse::Error(daemon_not_accepting(
-                            submission.operation,
+                            prepared.operation(),
                         )))
                     }
-                    Ok(ControlRequest::OperationSubmit(submission)) => {
+                    Ok(DecodedRequest::Submission(prepared)) => {
+                        let operation = prepared.operation();
                         let response = async {
-                            let (admission, receiver) = OperationAdmission::new(submission);
-                            match submissions.try_send(admission) {
+                            let pending = service.register_pending_admission(operation)?;
+                            let (admission, receiver) =
+                                OperationAdmission::registered(prepared, pending);
+                            match commands.submissions.try_send(admission) {
                                 Ok(()) => {}
                                 Err(tokio::sync::mpsc::error::TrySendError::Full(admission)) => {
-                                    let submission = admission.submission;
-                                    return match journal.retry_status(submission).await {
+                                    let (submission, _, _, deadline_retry) =
+                                        admission.prepared.into_parts();
+                                    return match journal
+                                        .retry_status_with_deadline_retry(
+                                            submission,
+                                            deadline_retry,
+                                        )
+                                        .await
+                                    {
                                         Ok(operation) => {
                                             Ok(ControlResponse::OperationSubmit(operation))
                                         }
@@ -3681,43 +5254,58 @@ async fn dispatch_async(
                         await_journal_response_until(
                             response,
                             request_deadline,
-                            service.limits.operation_queue_limit,
+                            service.limits.operation_queue_limit(),
                         )
                         .await
                     }
-                    Ok(ControlRequest::OperationLeaseRenew {
-                        operation,
-                        owner,
-                        expiry_unix_ms,
-                    }) => {
+                    Ok(DecodedRequest::Control(ControlRequest::OperationCancel(operation))) => {
+                        let response = async {
+                            match journal
+                                .control_until(
+                                    ControlRequest::OperationCancel(operation),
+                                    request_deadline,
+                                )
+                                .await
+                            {
+                                Err(ServiceError::Operations(OperationError::NotFound)) => {
+                                    #[cfg(test)]
+                                    if let Some(hook) = &service.cancellation_handoff_hook {
+                                        // The barriers expose both sides of the
+                                        // durable-admission handoff without sleeps.
+                                        hook.pause_after_initial_not_found().await;
+                                    }
+                                    let pending = service.cancel_pending_admission(operation)?;
+                                    match journal
+                                        .control_until(
+                                            ControlRequest::OperationCancel(operation),
+                                            request_deadline,
+                                        )
+                                        .await
+                                    {
+                                        Err(ServiceError::Operations(OperationError::NotFound))
+                                            if pending =>
+                                        {
+                                            Ok(ControlResponse::Error(operation_not_ready(
+                                                operation,
+                                            )))
+                                        }
+                                        result => result,
+                                    }
+                                }
+                                result => result,
+                            }
+                        };
                         await_claimed_journal_response(
-                            async {
-                                journal
-                                    .renew_lease_until(
-                                        operation,
-                                        owner,
-                                        expiry_unix_ms,
-                                        request_deadline,
-                                    )
-                                    .await
-                                    .map(ControlResponse::OperationLeaseRenew)
-                            },
-                            service.limits.operation_queue_limit,
+                            response,
+                            service.limits.operation_queue_limit(),
                         )
                         .await
                     }
-                    Ok(request @ ControlRequest::OperationCancel(_)) => {
-                        await_claimed_journal_response(
-                            journal.control_until(request, request_deadline),
-                            service.limits.operation_queue_limit,
-                        )
-                        .await
-                    }
-                    Ok(request) => {
+                    Ok(DecodedRequest::Control(request)) => {
                         await_journal_response_until(
                             journal.control(request),
                             request_deadline,
-                            service.limits.operation_queue_limit,
+                            service.limits.operation_queue_limit(),
                         )
                         .await
                     }
@@ -4591,9 +6179,7 @@ async fn run_diagnostic_request(
         DiagnosticKind::SupportBundle(_) => (ControlMethod::SupportBundle, SpanKind::SupportBundle),
     };
     let span = service.state.telemetry.start_span(span_kind);
-    let timeout = requested_timeout_ms.map_or(service.limits.request_timeout, |milliseconds| {
-        Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout)
-    });
+    let timeout = bounded_request_timeout(&service, requested_timeout_ms);
     let Some(deadline) = Instant::now().checked_add(timeout) else {
         return response_to_wire(ControlResponse::Error(request_timed_out()));
     };
@@ -4675,6 +6261,15 @@ fn journal_response_to_wire(
         }
         Err(_) => response_to_wire(ControlResponse::Error(internal_error())),
     }
+}
+
+fn bounded_request_timeout(
+    service: &ControlService,
+    requested_timeout_ms: Option<u32>,
+) -> Duration {
+    requested_timeout_ms.map_or(service.limits.request_timeout(), |milliseconds| {
+        Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout())
+    })
 }
 
 fn duration_ms(duration: Duration) -> u32 {
@@ -4894,20 +6489,27 @@ fn validate_client_hello(
     })
 }
 
+enum DecodedRequest {
+    Control(ControlRequest),
+    Submission(PreparedOperationSubmission),
+}
+
 fn request_from_wire(
     request: Option<daemon::request_envelope::Request>,
     client_instance_id: ClientInstanceId,
     selected_protocol_minor: u32,
-) -> Result<ControlRequest, Box<PublicError>> {
+) -> Result<DecodedRequest, Box<PublicError>> {
     match request {
-        Some(daemon::request_envelope::Request::Health(_)) => Ok(ControlRequest::Health),
+        Some(daemon::request_envelope::Request::Health(_)) => {
+            Ok(DecodedRequest::Control(ControlRequest::Health))
+        }
         Some(daemon::request_envelope::Request::DiagnosticsQuick(_)) => {
             if selected_protocol_minor < 3 {
                 return Err(Box::new(protocol_mismatch(
                     "quick diagnostics need protocol minor three",
                 )));
             }
-            Ok(ControlRequest::DiagnosticsQuick)
+            Ok(DecodedRequest::Control(ControlRequest::DiagnosticsQuick))
         }
         Some(daemon::request_envelope::Request::SupportBundle(_)) => {
             if selected_protocol_minor < 3 {
@@ -4915,7 +6517,7 @@ fn request_from_wire(
                     "support bundle needs protocol minor three",
                 )));
             }
-            Ok(ControlRequest::SupportBundle(
+            Ok(DecodedRequest::Control(ControlRequest::SupportBundle(
                 if selected_protocol_minor >= 5 {
                     SupportBundleSchema::V3
                 } else if selected_protocol_minor >= 4 {
@@ -4923,17 +6525,21 @@ fn request_from_wire(
                 } else {
                     SupportBundleSchema::V1
                 },
-            ))
+            )))
         }
         Some(daemon::request_envelope::Request::OperationSubmit(request)) => {
             operation_submission_from_wire(request, client_instance_id, selected_protocol_minor)
-                .map(ControlRequest::OperationSubmit)
+                .map(DecodedRequest::Submission)
         }
         Some(daemon::request_envelope::Request::OperationStatus(request)) => {
-            parse_operation(request.operation).map(ControlRequest::OperationStatus)
+            parse_operation(request.operation)
+                .map(ControlRequest::OperationStatus)
+                .map(DecodedRequest::Control)
         }
         Some(daemon::request_envelope::Request::OperationCancel(request)) => {
-            parse_operation(request.operation).map(ControlRequest::OperationCancel)
+            parse_operation(request.operation)
+                .map(ControlRequest::OperationCancel)
+                .map(DecodedRequest::Control)
         }
         Some(daemon::request_envelope::Request::OperationLeaseRenew(request)) => {
             if selected_protocol_minor < 2 {
@@ -4946,11 +6552,8 @@ fn request_from_wire(
                     "operation lease expiry is invalid",
                 )));
             }
-            Ok(ControlRequest::OperationLeaseRenew {
-                operation: parse_operation(request.operation)?,
-                owner: client_instance_id,
-                expiry_unix_ms: request.lease_expires_unix_ms,
-            })
+            let operation = parse_operation(request.operation)?;
+            Err(Box::new(lease_renewal_unsupported(operation)))
         }
         Some(
             daemon::request_envelope::Request::RepositoryIndex(_)
@@ -4967,7 +6570,7 @@ fn operation_submission_from_wire(
     request: daemon::OperationSubmitRequest,
     owner: ClientInstanceId,
     selected_protocol_minor: u32,
-) -> Result<OperationSubmission, Box<PublicError>> {
+) -> Result<PreparedOperationSubmission, Box<PublicError>> {
     if daemon::OperationKind::try_from(request.kind).ok()
         != Some(daemon::OperationKind::ControlProbe)
     {
@@ -4997,10 +6600,27 @@ fn operation_submission_from_wire(
             "operation deadline is ambiguous",
         )));
     }
+    let clock = if request.timeout_ms.is_some()
+        || request.deadline_unix_ms.is_some()
+        || request.lease_expires_unix_ms.is_some()
+    {
+        Some(capture_admission_clock().map_err(operation_preparation_public)?)
+    } else {
+        None
+    };
     let deadline_unix_ms = match request.deadline_unix_ms {
         Some(0) => return Err(Box::new(invalid_argument("operation deadline is invalid"))),
         Some(deadline) => Some(deadline),
-        None => request.timeout_ms.map(operation_deadline).transpose()?,
+        None => match request.timeout_ms {
+            Some(timeout_ms) => Some(
+                clock
+                    .ok_or_else(|| Box::new(invalid_argument("system clock is invalid")))?
+                    .wall_unix_ms
+                    .checked_add(timeout_ms)
+                    .ok_or_else(|| Box::new(invalid_argument("operation timeout is invalid")))?,
+            ),
+            None => None,
+        },
     };
     let detached = request.detached;
     let lease_expires_unix_ms = match (detached, request.lease_expires_unix_ms) {
@@ -5017,7 +6637,7 @@ fn operation_submission_from_wire(
         }
         (false, Some(expiry)) => Some(expiry),
     };
-    OperationSubmission::new(
+    let submission = OperationSubmission::new(
         operation,
         OperationKind::ControlProbe,
         PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
@@ -5026,7 +6646,37 @@ fn operation_submission_from_wire(
         deadline_unix_ms,
         lease_expires_unix_ms,
     )
-    .map_err(|_| Box::new(invalid_argument("operation submission is invalid")))
+    .map_err(|_| Box::new(invalid_argument("operation submission is invalid")))?;
+    let deadline = deadline_unix_ms
+        .zip(clock)
+        .map(|(target, clock)| monotonic_target(clock, target))
+        .transpose()
+        .map_err(operation_preparation_public)?;
+    let lease_deadline = lease_expires_unix_ms
+        .zip(clock)
+        .map(|(target, clock)| monotonic_target(clock, target))
+        .transpose()
+        .map_err(operation_preparation_public)?;
+    let deadline_retry = match request.timeout_ms {
+        Some(timeout_ms) => DeadlineRetry::ReanchoredRelative { timeout_ms },
+        None => DeadlineRetry::Exact,
+    };
+    PreparedOperationSubmission::new_with_deadline_retry(
+        submission,
+        deadline,
+        lease_deadline,
+        deadline_retry,
+    )
+    .map_err(operation_preparation_public)
+}
+
+fn operation_preparation_public(error: OperationPreparationError) -> Box<PublicError> {
+    match error {
+        OperationPreparationError::InvalidTimeout => {
+            Box::new(invalid_argument("operation timeout is invalid"))
+        }
+        OperationPreparationError::Clock => Box::new(invalid_argument("system clock is invalid")),
+    }
 }
 
 fn parse_client_instance_id(bytes: &[u8]) -> Result<ClientInstanceId, Box<PublicError>> {
@@ -5035,20 +6685,6 @@ fn parse_client_instance_id(bytes: &[u8]) -> Result<ClientInstanceId, Box<Public
         .map_err(|_| Box::new(invalid_argument("client instance identifier is invalid")))?;
     ClientInstanceId::new(bytes)
         .map_err(|_| Box::new(invalid_argument("client instance identifier is invalid")))
-}
-
-fn operation_deadline(timeout_ms: u64) -> Result<u64, Box<PublicError>> {
-    unix_time_ms()?
-        .checked_add(timeout_ms)
-        .ok_or_else(|| Box::new(invalid_argument("operation timeout is invalid")))
-}
-
-fn unix_time_ms() -> Result<u64, Box<PublicError>> {
-    let duration = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| Box::new(invalid_argument("system clock is invalid")))?;
-    u64::try_from(duration.as_millis())
-        .map_err(|_| Box::new(invalid_argument("system clock is invalid")))
 }
 
 fn parse_operation(
@@ -5277,6 +6913,9 @@ fn operation_error_to_public(
             "operation lifecycle mutation timed out",
             true,
         ),
+        OperationError::StartDeadlineElapsed => {
+            (ErrorCode::Busy, "operation start timed out", true)
+        }
         OperationError::UnsupportedSqlite { .. }
         | OperationError::UnsupportedSqliteCompileOptions
         | OperationError::UnsupportedSqliteConfiguration
@@ -5287,7 +6926,9 @@ fn operation_error_to_public(
         | OperationError::UnsupportedLegacySchema
         | OperationError::UnsupportedSchemaVersion { .. }
         | OperationError::DeserializePublicError(_)
-        | OperationError::PublicErrorTooLarge => (
+        | OperationError::PublicErrorTooLarge
+        | OperationError::CatalogTooLarge
+        | OperationError::CatalogRowLimitExceeded => (
             ErrorCode::IndexCorrupt,
             "operation journal is corrupt",
             false,
@@ -5298,8 +6939,10 @@ fn operation_error_to_public(
         | OperationError::SerializePublicError(_)
         | OperationError::SystemClockBeforeEpoch
         | OperationError::TimestampOverflow
+        | OperationError::CommittedStartCompensationFailed
         | OperationError::InsecureLockFile
         | OperationError::WindowsSecurityPolicy
+        | OperationError::CatalogInspection(_)
         | OperationError::Sqlite(_)
         | OperationError::LockIo(_) => (ErrorCode::Internal, "internal operation failed", false),
     };
@@ -5318,6 +6961,79 @@ fn operation_error_to_public(
 }
 
 impl ServiceError {
+    /// Reports whether one orchestration failure makes the daemon unusable.
+    #[must_use]
+    pub const fn is_fatal_submission_failure(&self) -> bool {
+        match self {
+            Self::QueueFull
+            | Self::ClientOperationLimit { .. }
+            | Self::NotAccepting
+            | Self::Public(_)
+            | Self::Operations(
+                OperationError::NotFound
+                | OperationError::AlreadyExists
+                | OperationError::SubmissionConflict
+                | OperationError::InvalidClientInstanceId
+                | OperationError::InvalidSubmission
+                | OperationError::IllegalTransition { .. }
+                | OperationError::CancellationWon
+                | OperationError::InvalidTerminalError
+                | OperationError::InvalidProgress
+                | OperationError::InvalidStage
+                | OperationError::LeaseOwnerMismatch
+                | OperationError::InvalidLease
+                | OperationError::ConcurrentUpdate
+                | OperationError::Busy
+                | OperationError::WriterBusy
+                | OperationError::DiagnosticTimedOut
+                | OperationError::MutationTimedOut
+                | OperationError::StartDeadlineElapsed,
+            ) => false,
+            Self::Ipc(_)
+            | Self::InvalidNegotiatedClient
+            | Self::UnsupportedPublicErrorVariant
+            | Self::InvalidLimits
+            | Self::ChannelClosed
+            | Self::ClientConnectionLimit { .. }
+            | Self::AdmissionStatePoisoned
+            | Self::RequestTimedOut
+            | Self::TaskFailed(_)
+            | Self::ThreadSpawn(_)
+            | Self::ThreadPanicked
+            | Self::Operations(
+                OperationError::UnsupportedSqlite { .. }
+                | OperationError::UnsupportedSqliteCompileOptions
+                | OperationError::UnsupportedSqliteConfiguration
+                | OperationError::CorruptState
+                | OperationError::CorruptSchema
+                | OperationError::ForeignCatalog
+                | OperationError::MigrationChecksumMismatch
+                | OperationError::UnsupportedLegacySchema
+                | OperationError::UnsupportedSchemaVersion { .. }
+                | OperationError::DeserializePublicError(_)
+                | OperationError::PublicErrorTooLarge
+                | OperationError::CatalogTooLarge
+                | OperationError::CatalogRowLimitExceeded
+                | OperationError::RevisionOverflow
+                | OperationError::UnsupportedCancellationReason
+                | OperationError::MutexPoisoned
+                | OperationError::SerializePublicError(_)
+                | OperationError::SystemClockBeforeEpoch
+                | OperationError::TimestampOverflow
+                | OperationError::CommittedStartCompensationFailed
+                | OperationError::InsecureLockFile
+                | OperationError::WindowsSecurityPolicy
+                | OperationError::CatalogInspection(_)
+                | OperationError::Sqlite(_)
+                | OperationError::LockIo(_),
+            )
+            | Self::UnexpectedResponse
+            | Self::Clock
+            | Self::TimerAlreadyRegistered
+            | Self::TimerDeliveryTimedOut => true,
+        }
+    }
+
     fn to_public(&self) -> PublicError {
         match self {
             Self::QueueFull => queue_full(DEFAULT_OPERATION_QUEUE_LIMIT),
@@ -5399,6 +7115,15 @@ fn internal_error() -> PublicError {
         .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
 }
 
+fn operation_not_ready(operation: OperationId) -> PublicError {
+    PublicError::builder(ErrorCode::Busy, "operation admission is still pending")
+        .retryable()
+        .operation(operation)
+        .next_action(NextAction::InspectOperation)
+        .build()
+        .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
+}
+
 fn daemon_not_accepting(operation: OperationId) -> PublicError {
     PublicError::builder(ErrorCode::Busy, "daemon is not accepting operations")
         .retryable()
@@ -5412,6 +7137,16 @@ fn invalid_argument(message: &'static str) -> PublicError {
     PublicError::builder(ErrorCode::InvalidArgument, message)
         .build()
         .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
+}
+
+fn lease_renewal_unsupported(operation: OperationId) -> PublicError {
+    PublicError::builder(
+        ErrorCode::UnsupportedCapability,
+        "operation lease renewal is unsupported",
+    )
+    .operation(operation)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
 }
 
 fn permission_denied(message: &'static str) -> PublicError {
@@ -5562,7 +7297,7 @@ pub enum ServiceError {
     /// A future public-error variant has no representation in this protocol minor.
     #[error("daemon public error variant is unsupported")]
     UnsupportedPublicErrorVariant,
-    /// Daemon capacities or deadlines were zero.
+    /// Daemon limits violated a hard bound, relationship, conversion, or allocation constraint.
     #[error("daemon resource limits are invalid")]
     InvalidLimits,
     /// A bounded daemon orchestration lane closed unexpectedly.
@@ -5610,6 +7345,12 @@ pub enum ServiceError {
     /// The system clock cannot provide a supported timestamp.
     #[error("daemon clock is invalid")]
     Clock,
+    /// A process-local timer was registered twice.
+    #[error("operation timer is already registered")]
+    TimerAlreadyRegistered,
+    /// A due interruption was not durably acknowledged within the fixed delivery budget.
+    #[error("operation timer delivery timed out")]
+    TimerDeliveryTimedOut,
     /// A stable public error was returned by bounded orchestration.
     #[error("daemon request failed")]
     Public(Box<PublicError>),
@@ -5633,6 +7374,68 @@ mod tests {
             Arc::new(OperationJournal::open_in_memory().expect("journal opens")),
             [7; 16],
         )
+    }
+
+    fn prepared(submission: OperationSubmission) -> PreparedOperationSubmission {
+        PreparedOperationSubmission::from_submission(submission)
+            .expect("submission timing prepares")
+    }
+
+    fn prepared_at(
+        submission: OperationSubmission,
+        clock: AdmissionClockSample,
+    ) -> PreparedOperationSubmission {
+        let deadline = submission
+            .deadline_unix_ms
+            .map(|target| monotonic_target(clock, target).expect("deadline fits"));
+        let lease_deadline = submission
+            .lease_expires_unix_ms
+            .map(|target| monotonic_target(clock, target).expect("lease fits"));
+        PreparedOperationSubmission::new(submission, deadline, lease_deadline)
+            .expect("submission timing prepares")
+    }
+
+    fn admission(
+        submission: OperationSubmission,
+    ) -> (
+        OperationAdmission,
+        tokio::sync::oneshot::Receiver<Result<OperationRecord, PublicError>>,
+    ) {
+        OperationAdmission::new(prepared(submission), Arc::new(AtomicBool::new(false)))
+    }
+
+    fn manual_orchestrator(
+        control_capacity: usize,
+        request_timeout: Duration,
+    ) -> (
+        DaemonOrchestrator,
+        Arc<DaemonState>,
+        Receiver<JournalCommand>,
+        Receiver<JournalCommand>,
+    ) {
+        let (control, control_rx) = mpsc::sync_channel(control_capacity);
+        let (normal, normal_rx) = mpsc::sync_channel(4);
+        let journal = JournalActorHandle {
+            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
+                control,
+                normal,
+            }))),
+        };
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let limits = DaemonLimits::new(
+            4,
+            control_capacity,
+            32,
+            1,
+            request_timeout,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .expect("test limits are valid");
+        let orchestrator = DaemonOrchestrator::new(journal, Arc::clone(&state), limits)
+            .expect("orchestrator starts");
+        (orchestrator, state, control_rx, normal_rx)
     }
 
     fn supported_hello(nonce: Vec<u8>) -> daemon::ClientHello {
@@ -5983,7 +7786,7 @@ mod tests {
             handle_connection_async_with_first_slice(
                 server_service,
                 server_journal,
-                submissions,
+                OrchestratorSenders::new(submissions),
                 server_connections,
                 server_handler,
                 FrameCodec::default(),
@@ -6076,7 +7879,7 @@ mod tests {
             handle_connection_async_with_first_slice(
                 server_service,
                 server_journal,
-                submissions,
+                OrchestratorSenders::new(submissions),
                 server_connections,
                 server_handler,
                 FrameCodec::default(),
@@ -6222,6 +8025,71 @@ mod tests {
             rejected.error.expect("negotiation fails").code,
             common::ErrorCode::ProtocolMismatch as i32
         );
+    }
+
+    #[test]
+    fn negotiated_capabilities_never_advertise_lease_renewal() {
+        let service = service();
+        for minor in MINIMUM_PROTOCOL_MINOR..=PROTOCOL_MINOR {
+            let hello = daemon::ClientHello {
+                supported_protocols: Some(common::VersionRange {
+                    minimum: Some(common::ContractVersion { major: 1, minor }),
+                    maximum: Some(common::ContractVersion { major: 1, minor }),
+                }),
+                capabilities: vec!["operation.lease.renew".to_owned()],
+                expected_instance_nonce: vec![7; 16],
+                client_instance_id: vec![9; 16],
+            };
+
+            let negotiated = service.negotiate(&hello);
+
+            assert!(negotiated.error.is_none());
+            assert_eq!(
+                negotiated
+                    .selected_protocol
+                    .expect("supported minor negotiates"),
+                common::ContractVersion { major: 1, minor }
+            );
+            let expected = if minor >= 5 {
+                CAPABILITIES.to_vec()
+            } else if minor >= 4 {
+                vec![
+                    "diagnostics.quick",
+                    "health",
+                    "operation.cancel",
+                    "operation.lifecycle.v1",
+                    "operation.status",
+                    "operation.submit",
+                    "support.bundle.v1",
+                    "support.bundle.v2",
+                ]
+            } else if minor >= 3 {
+                vec![
+                    "diagnostics.quick",
+                    "health",
+                    "operation.cancel",
+                    "operation.lifecycle.v1",
+                    "operation.status",
+                    "operation.submit",
+                    "support.bundle.v1",
+                ]
+            } else {
+                vec![
+                    "health",
+                    "operation.cancel",
+                    "operation.lifecycle.v1",
+                    "operation.status",
+                    "operation.submit",
+                ]
+            };
+            assert_eq!(negotiated.capabilities, expected);
+            assert!(
+                !negotiated
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "operation.lease.renew")
+            );
+        }
     }
 
     #[test]
@@ -6379,6 +8247,7 @@ mod tests {
             DaemonLimits::default(),
         );
         let (submissions, _receiver) = tokio::sync::mpsc::channel(4);
+        let commands = OrchestratorSenders::new(submissions);
         let envelope = daemon::RequestEnvelope {
             request_id: 1,
             instance_nonce: vec![7; 16],
@@ -6392,7 +8261,7 @@ mod tests {
         let response = dispatch_async(
             &service,
             &actor.handle(),
-            &submissions,
+            &commands,
             &UnavailableFirstSliceIpcHandler,
             envelope,
             context,
@@ -6462,7 +8331,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn timed_out_dispatch_does_not_apply_late_cancel_or_lease_renewal() {
+    async fn timed_out_cancel_is_abandoned_and_lease_renewal_is_unsupported() {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
         let owner = ClientInstanceId::new([91; 16]).expect("client identity is valid");
         let cancelled = OperationId::from_bytes([90; 16]);
@@ -6473,8 +8342,9 @@ mod tests {
             .start_execution(cancelled)
             .expect("cancel operation starts");
         let leased = OperationId::from_bytes([91; 16]);
-        let lease_expiry = unix_time_ms()
-            .expect("wall clock reads")
+        let lease_expiry = capture_admission_clock()
+            .expect("admission clock reads")
+            .wall_unix_ms
             .checked_add(60_000)
             .expect("lease expiry is representable");
         journal
@@ -6519,6 +8389,7 @@ mod tests {
             DaemonLimits::default(),
         );
         let (submissions, _receiver) = tokio::sync::mpsc::channel(4);
+        let commands = OrchestratorSenders::new(submissions);
         let cancel_envelope = daemon::RequestEnvelope {
             request_id: 90,
             instance_nonce: vec![7; 16],
@@ -6535,7 +8406,7 @@ mod tests {
         let cancel_response = dispatch_async(
             &service,
             &handle,
-            &submissions,
+            &commands,
             &UnavailableFirstSliceIpcHandler,
             cancel_envelope,
             cancel_context,
@@ -6564,7 +8435,7 @@ mod tests {
         let renew_response = dispatch_async(
             &service,
             &handle,
-            &submissions,
+            &commands,
             &UnavailableFirstSliceIpcHandler,
             renew_envelope,
             renew_context,
@@ -6573,7 +8444,7 @@ mod tests {
         assert!(matches!(
             renew_response.response,
             Some(daemon::response_envelope::Response::Error(error))
-                if error.code == common::ErrorCode::Busy as i32
+                if error.code == common::ErrorCode::UnsupportedCapability as i32
         ));
 
         release_tx.send(()).expect("actor resumes");
@@ -6701,52 +8572,659 @@ mod tests {
     }
 
     #[test]
-    fn journal_actor_stop_preempts_buffered_commands() {
+    fn journal_actor_drop_drains_buffered_durable_commands() {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-        let (control_tx, control_rx) = mpsc::sync_channel(2);
-        let (_normal_tx, normal_rx) = mpsc::sync_channel(1);
-        let stopping = Arc::new(AtomicBool::new(true));
         let operation = OperationId::from_bytes([10; 16]);
-        let (reply, _receiver) = tokio::sync::oneshot::channel();
-        control_tx
-            .try_send(JournalCommand::Submit {
-                submission: OperationSubmission::control_probe(operation),
-                claim: None,
-                reply,
-            })
-            .expect("command buffers");
-
-        journal_actor_loop(Arc::clone(&journal), control_rx, normal_rx, stopping);
-
-        assert!(matches!(
-            journal.status(operation),
-            Err(OperationError::NotFound)
-        ));
-    }
-
-    #[test]
-    fn journal_actor_stop_rejects_new_commands_and_joins_with_full_lane() {
-        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-        let actor = JournalActor::start(Arc::clone(&journal), 1, 1).expect("actor starts");
+        journal.enqueue(operation).expect("operation enqueues");
+        let actor = JournalActor::start(Arc::clone(&journal), 2, 1).expect("actor starts");
         let handle = actor.handle();
-        let (reply, _receiver) = tokio::sync::oneshot::channel();
-        let command = JournalCommand::Submit {
-            submission: OperationSubmission::control_probe(OperationId::from_bytes([11; 16])),
-            claim: None,
-            reply,
-        };
-        let senders = handle.senders.lock().expect("sender lock is available");
-        let sender = &senders.as_ref().expect("actor is accepting").control;
-        let _ = sender.try_send(command);
-        drop(senders);
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+            )
+            .expect("barrier queues");
+        entered_rx.recv().expect("actor enters barrier");
+        let response = handle
+            .interrupt_deadline_receiver(operation)
+            .expect("durable interrupt queues");
 
-        actor.join().expect("actor joins without an in-band stop");
-
+        handle.begin_drain();
         let (reply, _receiver) = tokio::sync::oneshot::channel();
         assert!(matches!(
             handle.try_send(JournalLane::Control, JournalCommand::Checkpoint { reply }),
             Err(ServiceError::ChannelClosed)
         ));
+        let dropped = thread::spawn(move || drop(actor));
+        release_tx.send(()).expect("actor barrier releases");
+        dropped.join().expect("actor owner drops");
+
+        let observed = response
+            .blocking_recv()
+            .expect("accepted command returns")
+            .expect("durable interrupt succeeds");
+        assert_eq!(observed.state, OperationState::Interrupted);
+        assert_eq!(
+            journal
+                .status(operation)
+                .expect("durable state remains readable")
+                .state,
+            OperationState::Interrupted
+        );
+    }
+
+    #[test]
+    fn journal_actor_drain_rejects_new_commands_and_joins_with_full_lane() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 1, 1).expect("actor starts");
+        let handle = actor.handle();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+            )
+            .expect("barrier queues");
+        entered_rx.recv().expect("actor enters barrier");
+        let (reply, _receiver) = tokio::sync::oneshot::channel();
+        handle
+            .try_send(JournalLane::Control, JournalCommand::Checkpoint { reply })
+            .expect("control lane fills");
+        handle.begin_drain();
+        let (reply, _receiver) = tokio::sync::oneshot::channel();
+        assert!(matches!(
+            handle.try_send(JournalLane::Control, JournalCommand::Checkpoint { reply }),
+            Err(ServiceError::ChannelClosed)
+        ));
+        release_tx.send(()).expect("actor barrier releases");
+        actor.join().expect("actor drains and joins");
+    }
+
+    #[test]
+    fn full_normal_lane_preserves_worker_authorization_for_retry() {
+        let (control, _control_rx) = mpsc::sync_channel(1);
+        let (normal, normal_rx) = mpsc::sync_channel(1);
+        let handle = JournalActorHandle {
+            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
+                control,
+                normal,
+            }))),
+        };
+        let (checkpoint_reply, _checkpoint_response) = tokio::sync::oneshot::channel();
+        handle
+            .try_send(
+                JournalLane::Normal,
+                JournalCommand::Checkpoint {
+                    reply: checkpoint_reply,
+                },
+            )
+            .expect("normal lane fills");
+        let operation = OperationId::from_bytes([39; 16]);
+        let (started, _start_response) = mpsc::sync_channel(1);
+        let (_acknowledged, acknowledgement) = mpsc::sync_channel(1);
+        let command = JournalCommand::StartOperation {
+            operation,
+            deadline: WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT)
+                .expect("deadline is valid"),
+            started,
+            acknowledged: acknowledgement,
+        };
+        let (error, command) = handle
+            .try_send_preserving(JournalLane::Normal, command)
+            .expect_err("full lane returns authorization");
+        assert!(matches!(error, ServiceError::QueueFull));
+        assert!(matches!(
+            &*command,
+            JournalCommand::StartOperation {
+                operation: observed,
+                ..
+            } if *observed == operation
+        ));
+        assert!(matches!(
+            normal_rx.try_recv(),
+            Ok(JournalCommand::Checkpoint { .. })
+        ));
+        assert!(matches!(
+            handle.try_send_preserving(JournalLane::Normal, *command),
+            Ok(())
+        ));
+        assert!(matches!(
+            normal_rx.try_recv(),
+            Ok(JournalCommand::StartOperation {
+                operation: observed,
+                ..
+            }) if observed == operation
+        ));
+    }
+
+    #[test]
+    fn worker_start_handshake_bounds_saturation_and_actor_close() {
+        let (control, _control_rx) = mpsc::sync_channel(1);
+        let (normal, normal_rx) = mpsc::sync_channel(1);
+        let handle = JournalActorHandle {
+            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
+                control,
+                normal,
+            }))),
+        };
+        let (checkpoint_reply, _checkpoint_response) = tokio::sync::oneshot::channel();
+        handle
+            .try_send(
+                JournalLane::Normal,
+                JournalCommand::Checkpoint {
+                    reply: checkpoint_reply,
+                },
+            )
+            .expect("normal lane fills");
+        let saturated_deadline = WorkerDeadline::with_remaining_checks(DEFAULT_REQUEST_TIMEOUT, 1)
+            .expect("deadline is valid");
+
+        assert!(matches!(
+            handle.start_operation_blocking(OperationId::from_bytes([58; 16]), &saturated_deadline),
+            Err(ServiceError::QueueFull)
+        ));
+        assert!(matches!(
+            normal_rx.try_recv(),
+            Ok(JournalCommand::Checkpoint { .. })
+        ));
+        assert!(matches!(normal_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        handle.begin_drain();
+        let deadline =
+            WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT).expect("deadline is valid");
+        assert!(matches!(
+            handle.start_operation_blocking(OperationId::from_bytes([59; 16]), &deadline),
+            Err(ServiceError::ChannelClosed)
+        ));
+    }
+
+    #[test]
+    fn worker_start_handshake_rejects_a_stale_admitted_command() {
+        let operation = OperationId::from_bytes([60; 16]);
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        journal.enqueue(operation).expect("operation enqueues");
+        let (control, _control_rx) = mpsc::sync_channel(1);
+        let (normal, normal_rx) = mpsc::sync_channel(1);
+        let handle = JournalActorHandle {
+            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
+                control,
+                normal,
+            }))),
+        };
+        let deadline = WorkerDeadline::with_remaining_checks(DEFAULT_REQUEST_TIMEOUT, 2)
+            .expect("deadline is valid");
+
+        assert!(matches!(
+            handle.start_operation_blocking(operation, &deadline),
+            Err(ServiceError::RequestTimedOut)
+        ));
+        let command = normal_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("start command remains admitted");
+        execute_journal_command(&journal, command).expect("journal command executes");
+
+        assert_eq!(
+            journal.status(operation).expect("status loads").state,
+            OperationState::Queued
+        );
+    }
+
+    #[test]
+    fn worker_start_acknowledgement_loss_interrupts_durable_running_state() {
+        let operation = OperationId::from_bytes([62; 16]);
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        journal.enqueue(operation).expect("operation enqueues");
+        let deadline =
+            WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT).expect("deadline is valid");
+        let (started, receiver) = mpsc::sync_channel(0);
+        let (_acknowledged, acknowledgement) = mpsc::sync_channel(0);
+        drop(receiver);
+
+        execute_journal_command(
+            &journal,
+            JournalCommand::StartOperation {
+                operation,
+                deadline,
+                started,
+                acknowledged: acknowledgement,
+            },
+        )
+        .expect("lost acknowledgement is compensated");
+
+        let operation = journal.status(operation).expect("status loads");
+        assert_eq!(operation.state, OperationState::Interrupted);
+        assert_eq!(
+            operation.recovery_class,
+            RecoveryClass::InterruptedByRestart
+        );
+    }
+
+    #[test]
+    fn worker_acknowledgement_disconnect_preserves_restart_provenance() {
+        let operation = OperationId::from_bytes([66; 16]);
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let cancellation = journal.enqueue(operation).expect("operation enqueues");
+        let running = journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let deadline =
+            WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT).expect("deadline is valid");
+        let (started, start_receiver) = mpsc::sync_channel(1);
+        let (acknowledged, acknowledgement) = mpsc::sync_channel(0);
+        drop(acknowledged);
+
+        deliver_worker_start(
+            &journal,
+            operation,
+            &deadline,
+            started,
+            acknowledgement,
+            Ok((running, Some(cancellation.clone()))),
+        )
+        .expect("disconnected acknowledgement is compensated");
+
+        assert!(matches!(start_receiver.recv(), Ok(Ok(_))));
+        let operation = journal.status(operation).expect("status loads");
+        assert_eq!(operation.state, OperationState::Interrupted);
+        assert_eq!(
+            operation.recovery_class,
+            RecoveryClass::InterruptedByRestart
+        );
+        assert_eq!(
+            cancellation.reason(),
+            Some(rootlight_operations::CancellationReason::Shutdown)
+        );
+    }
+
+    #[test]
+    fn worker_start_delivery_does_not_wait_for_worker_receive() {
+        let operation = OperationId::from_bytes([67; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let cancellation = journal.enqueue(operation).expect("operation enqueues");
+        let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
+        let handle = actor.handle();
+        let ControlledStartReceive {
+            deadline,
+            force_expired,
+            entered,
+            release,
+        } = WorkerDeadline::controlled_before_start_receive(DEFAULT_REQUEST_TIMEOUT)
+            .expect("deadline is valid");
+        let worker_handle = handle.clone();
+        let worker =
+            thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
+
+        entered.wait();
+        let durable_start_observed = (0..100).any(|_| {
+            if journal
+                .status(operation)
+                .is_ok_and(|record| record.state == OperationState::Running)
+            {
+                true
+            } else {
+                thread::sleep(Duration::from_millis(1));
+                false
+            }
+        });
+        assert!(
+            durable_start_observed,
+            "actor must deliver the buffered start before worker receive"
+        );
+        force_expired.store(true, Ordering::Release);
+
+        let (sentinel_entered, sentinel_receiver) = mpsc::sync_channel(0);
+        let (sentinel_release, sentinel_release_receiver) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered: sentinel_entered,
+                    release: sentinel_release_receiver,
+                },
+            )
+            .expect("control sentinel queues");
+        sentinel_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("actor remains responsive after worker deadline");
+        sentinel_release
+            .send(())
+            .expect("control sentinel releases");
+        release.wait();
+
+        assert!(matches!(
+            worker.join().expect("worker joins"),
+            Err(ServiceError::RequestTimedOut)
+        ));
+        let operation = journal.status(operation).expect("status loads");
+        assert_eq!(operation.state, OperationState::Interrupted);
+        assert_eq!(operation.recovery_class, RecoveryClass::DeadlineElapsed);
+        assert_eq!(
+            cancellation.reason(),
+            Some(rootlight_operations::CancellationReason::DeadlineExceeded)
+        );
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn worker_start_expiry_after_rendezvous_receipt_prevents_execution() {
+        let operation = OperationId::from_bytes([63; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let cancellation = journal.enqueue(operation).expect("operation enqueues");
+        let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
+        let handle = actor.handle();
+        let ControlledStartReceipt {
+            deadline,
+            force_expired,
+            entered,
+            release,
+        } = WorkerDeadline::controlled_at_start_receipt(DEFAULT_REQUEST_TIMEOUT)
+            .expect("deadline is valid");
+        let worker_handle = handle.clone();
+        let worker =
+            thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
+
+        entered.wait();
+        force_expired.store(true, Ordering::Release);
+        release.wait();
+
+        assert!(matches!(
+            worker.join().expect("worker joins"),
+            Err(ServiceError::RequestTimedOut)
+        ));
+        let (entered, entered_receiver) = mpsc::sync_channel(0);
+        let (release, release_receiver) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered,
+                    release: release_receiver,
+                },
+            )
+            .expect("actor barrier queues");
+        entered_receiver.recv().expect("actor reaches barrier");
+        release.send(()).expect("actor barrier releases");
+
+        let operation = journal.status(operation).expect("status loads");
+        assert_eq!(operation.state, OperationState::Interrupted);
+        assert_eq!(operation.recovery_class, RecoveryClass::DeadlineElapsed);
+        assert_eq!(
+            cancellation.reason(),
+            Some(rootlight_operations::CancellationReason::DeadlineExceeded)
+        );
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn stale_start_acknowledgement_cannot_authorize_after_deadline() {
+        let operation = OperationId::from_bytes([65; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let cancellation = journal.enqueue(operation).expect("operation enqueues");
+        let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
+        let handle = actor.handle();
+        let ControlledStartAcknowledgement {
+            deadline,
+            force_expired,
+            entered,
+            release,
+        } = WorkerDeadline::controlled_before_start_acknowledgement(DEFAULT_REQUEST_TIMEOUT)
+            .expect("deadline is valid");
+        let worker_handle = handle.clone();
+        let worker =
+            thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
+
+        entered.wait();
+        force_expired.store(true, Ordering::Release);
+        release.wait();
+
+        assert!(matches!(
+            worker.join().expect("worker joins"),
+            Err(ServiceError::RequestTimedOut)
+        ));
+        let (sentinel_entered, sentinel_receiver) = mpsc::sync_channel(0);
+        let (sentinel_release, sentinel_release_receiver) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered: sentinel_entered,
+                    release: sentinel_release_receiver,
+                },
+            )
+            .expect("control sentinel queues");
+        sentinel_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("actor processes the stale acknowledgement");
+        sentinel_release
+            .send(())
+            .expect("control sentinel releases");
+
+        let interrupted = journal.status(operation).expect("status loads");
+        assert_eq!(interrupted.state, OperationState::Interrupted);
+        assert_eq!(interrupted.recovery_class, RecoveryClass::DeadlineElapsed);
+        assert_eq!(
+            cancellation.reason(),
+            Some(rootlight_operations::CancellationReason::DeadlineExceeded)
+        );
+        actor.join().expect("actor joins");
+    }
+
+    #[test]
+    fn real_deadline_at_start_acknowledgement_never_authorizes_work() {
+        for byte in 80..100 {
+            let operation = OperationId::from_bytes([byte; 16]);
+            let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+            let cancellation = journal.enqueue(operation).expect("operation enqueues");
+            let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
+            let handle = actor.handle();
+            let ControlledStartAcknowledgement {
+                deadline,
+                force_expired: _,
+                entered,
+                release,
+            } = WorkerDeadline::controlled_before_start_acknowledgement(Duration::from_millis(100))
+                .expect("deadline is valid");
+            let expires_at = deadline.expires_at();
+            let worker_handle = handle.clone();
+            let worker =
+                thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
+
+            entered.wait();
+            thread::sleep(expires_at.saturating_duration_since(Instant::now()));
+            release.wait();
+
+            assert!(matches!(
+                worker.join().expect("worker joins"),
+                Err(ServiceError::RequestTimedOut)
+            ));
+            let (sentinel_entered, sentinel_receiver) = mpsc::sync_channel(0);
+            let (sentinel_release, sentinel_release_receiver) = mpsc::sync_channel(0);
+            handle
+                .try_send(
+                    JournalLane::Control,
+                    JournalCommand::Barrier {
+                        entered: sentinel_entered,
+                        release: sentinel_release_receiver,
+                    },
+                )
+                .expect("control sentinel queues");
+            sentinel_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("actor settles the real deadline");
+            sentinel_release
+                .send(())
+                .expect("control sentinel releases");
+
+            let interrupted = journal.status(operation).expect("status loads");
+            assert_eq!(interrupted.state, OperationState::Interrupted);
+            assert_eq!(interrupted.recovery_class, RecoveryClass::DeadlineElapsed);
+            assert_eq!(
+                cancellation.reason(),
+                Some(rootlight_operations::CancellationReason::DeadlineExceeded)
+            );
+            actor.join().expect("actor joins");
+        }
+    }
+
+    #[test]
+    fn committed_start_compensation_failure_stops_the_journal_actor() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(journal, 1, 2).expect("actor starts");
+        let handle = actor.handle();
+        let (barrier_entered, barrier_entered_receiver) = mpsc::sync_channel(0);
+        let (barrier_release, barrier_release_receiver) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered: barrier_entered,
+                    release: barrier_release_receiver,
+                },
+            )
+            .expect("barrier queues");
+        barrier_entered_receiver
+            .recv()
+            .expect("actor enters barrier");
+        let deadline =
+            WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT).expect("deadline is valid");
+        let (started, receiver) = mpsc::sync_channel(0);
+        let (_acknowledged, acknowledgement) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Normal,
+                JournalCommand::DeliverStart {
+                    operation: OperationId::from_bytes([64; 16]),
+                    deadline,
+                    started,
+                    acknowledged: acknowledgement,
+                    result: Box::new(Err(ServiceError::Operations(
+                        OperationError::CommittedStartCompensationFailed,
+                    ))),
+                },
+            )
+            .expect("faulting delivery queues");
+        let (sentinel_entered, sentinel_receiver) = mpsc::sync_channel(0);
+        let (_sentinel_release, sentinel_release_receiver) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Normal,
+                JournalCommand::Barrier {
+                    entered: sentinel_entered,
+                    release: sentinel_release_receiver,
+                },
+            )
+            .expect("sentinel queues behind the fault");
+
+        barrier_release.send(()).expect("barrier releases");
+
+        assert!(matches!(receiver.recv(), Err(mpsc::RecvError)));
+        assert!(matches!(sentinel_receiver.recv(), Err(mpsc::RecvError)));
+        actor.join().expect("faulted actor joins");
+    }
+
+    #[tokio::test]
+    async fn worker_admission_and_completion_release_owned_permits() {
+        let state = Arc::new(DaemonState::starting());
+        let client_admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
+        let closed_handle = JournalActorHandle {
+            state: Arc::new(Mutex::new(JournalActorState::Draining)),
+        };
+        let mut pool = SyntheticWorkerPool::start(1, 1).expect("worker pool starts");
+        let permit = SchedulerPermit::reserve(
+            Arc::clone(&state),
+            Arc::clone(&client_admissions),
+            ClientInstanceId::SYSTEM,
+            3,
+            3,
+        )
+        .expect("permit reserves");
+        let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
+        let (handshake_deadline, force_expired) =
+            WorkerDeadline::controlled(DEFAULT_REQUEST_TIMEOUT).expect("deadline is valid");
+        pool.submit(WorkerJob {
+            operation: OperationId::from_bytes([61; 16]),
+            admitted: admitted_rx,
+            handshake_deadline,
+            journal: closed_handle,
+            permit,
+            started: None,
+        })
+        .expect("job submits");
+        force_expired.store(true, Ordering::Release);
+        drop(admitted_tx);
+        pool.join_until(tokio::time::Instant::now() + Duration::from_secs(5))
+            .await
+            .expect("expired admission cannot stall join");
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
+
+        let (completion_tx, completions) = tokio::sync::mpsc::channel(1);
+        let first_permit = SchedulerPermit::reserve(
+            Arc::clone(&state),
+            Arc::clone(&client_admissions),
+            ClientInstanceId::SYSTEM,
+            3,
+            3,
+        )
+        .expect("first permit reserves");
+        assert!(deliver_worker_completion(
+            &completion_tx,
+            WorkerCompletion {
+                operation: OperationId::from_bytes([62; 16]),
+                start: Err(ServiceError::RequestTimedOut),
+                cancellation_reason: None,
+                permit: first_permit,
+            }
+        ));
+        let second_permit = SchedulerPermit::reserve(
+            Arc::clone(&state),
+            Arc::clone(&client_admissions),
+            ClientInstanceId::SYSTEM,
+            3,
+            3,
+        )
+        .expect("second permit reserves");
+        assert!(!deliver_worker_completion(
+            &completion_tx,
+            WorkerCompletion {
+                operation: OperationId::from_bytes([63; 16]),
+                start: Err(ServiceError::RequestTimedOut),
+                cancellation_reason: None,
+                permit: second_permit,
+            }
+        ));
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 1);
+        drop(completions);
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
+
+        let (closed_tx, closed_rx) = tokio::sync::mpsc::channel(1);
+        drop(closed_rx);
+        let closed_permit = SchedulerPermit::reserve(
+            Arc::clone(&state),
+            client_admissions,
+            ClientInstanceId::SYSTEM,
+            3,
+            3,
+        )
+        .expect("closed-channel permit reserves");
+        assert!(!deliver_worker_completion(
+            &closed_tx,
+            WorkerCompletion {
+                operation: OperationId::from_bytes([64; 16]),
+                start: Err(ServiceError::ChannelClosed),
+                cancellation_reason: None,
+                permit: closed_permit,
+            }
+        ));
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
     }
 
     #[test]
@@ -6993,12 +9471,13 @@ mod tests {
         ));
         let client_connections = Arc::new(ClientConnectionAdmissions::new(limits));
         let (submissions, _submission_rx) = tokio::sync::mpsc::channel(4);
+        let commands = OrchestratorSenders::new(submissions);
 
         let first_handler = spawn_connection_handler(
             Arc::clone(&listener),
             Arc::clone(&service),
             actor.handle(),
-            submissions.clone(),
+            commands.clone(),
             Arc::clone(&client_connections),
         );
         let mut first = connect_async(&endpoint)
@@ -7020,7 +9499,7 @@ mod tests {
             Arc::clone(&listener),
             Arc::clone(&service),
             actor.handle(),
-            submissions.clone(),
+            commands.clone(),
             Arc::clone(&client_connections),
         );
         let mut rejected = connect_async(&endpoint)
@@ -7050,7 +9529,7 @@ mod tests {
             Arc::clone(&listener),
             Arc::clone(&service),
             actor.handle(),
-            submissions.clone(),
+            commands.clone(),
             Arc::clone(&client_connections),
         );
         let mut other = connect_async(&endpoint)
@@ -7077,7 +9556,7 @@ mod tests {
             listener,
             Arc::clone(&service),
             actor.handle(),
-            submissions,
+            commands,
             Arc::clone(&client_connections),
         );
         let mut reconnected = connect_async(&endpoint)
@@ -7124,7 +9603,7 @@ mod tests {
         listener: Arc<AsyncLocalListener>,
         service: Arc<ControlService>,
         journal: JournalActorHandle,
-        submissions: tokio::sync::mpsc::Sender<OperationAdmission>,
+        commands: OrchestratorSenders,
         client_connections: Arc<ClientConnectionAdmissions>,
     ) -> tokio::task::JoinHandle<Result<(), ServiceError>> {
         tokio::spawn(async move {
@@ -7135,7 +9614,7 @@ mod tests {
             handle_connection_async(
                 service,
                 journal,
-                submissions,
+                commands,
                 client_connections,
                 FrameCodec::default(),
                 &mut stream,
@@ -7213,6 +9692,910 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn daemon_limits_enforce_hard_resource_caps() {
+        assert!(
+            DaemonLimits::new_with_client_limits(
+                MAX_CONNECTION_LIMIT,
+                MAX_CONNECTION_LIMIT,
+                MAX_CONTROL_QUEUE_LIMIT,
+                MAX_OPERATION_QUEUE_LIMIT,
+                MAX_OPERATION_QUEUE_LIMIT,
+                MAX_OPERATION_WORKERS,
+                MAX_REQUEST_TIMEOUT,
+                MAX_MAINTENANCE_INTERVAL,
+                MAX_SHUTDOWN_GRACE,
+            )
+            .is_ok()
+        );
+
+        for invalid in [
+            DaemonLimits::new(
+                u32::MAX,
+                1,
+                1,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            DaemonLimits::new(
+                1,
+                usize::MAX,
+                1,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            DaemonLimits::new(
+                1,
+                1,
+                u32::MAX,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            DaemonLimits::new(
+                1,
+                1,
+                1,
+                usize::MAX,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            DaemonLimits::new(
+                1,
+                1,
+                1,
+                1,
+                Duration::MAX,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+            DaemonLimits::new(
+                1,
+                1,
+                1,
+                1,
+                Duration::from_secs(1),
+                Duration::MAX,
+                Duration::from_secs(1),
+            ),
+            DaemonLimits::new(
+                1,
+                1,
+                1,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::MAX,
+            ),
+        ] {
+            assert!(matches!(invalid, Err(ServiceError::InvalidLimits)));
+        }
+    }
+
+    #[test]
+    fn shutdown_rounds_cover_the_hard_ceiling_and_empty_confirmation() {
+        for (maximum, expected) in [
+            (0, 1),
+            (1, 2),
+            (255, 2),
+            (256, 2),
+            (257, 3),
+            (rootlight_operations::MAX_NONTERMINAL_OPERATIONS, 257),
+        ] {
+            assert_eq!(
+                shutdown_interrupt_rounds(maximum).expect("hard ceiling is representable"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn actors_reject_hostile_capacities_without_allocating() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        assert!(matches!(
+            JournalActor::start(Arc::clone(&journal), usize::MAX, 1),
+            Err(ServiceError::InvalidLimits)
+        ));
+        assert!(matches!(
+            JournalActor::start(Arc::clone(&journal), 1, usize::MAX),
+            Err(ServiceError::InvalidLimits)
+        ));
+        assert!(matches!(
+            SyntheticWorkerPool::start(usize::MAX, 1),
+            Err(ServiceError::InvalidLimits)
+        ));
+        assert!(matches!(
+            SyntheticWorkerPool::start(1, usize::MAX),
+            Err(ServiceError::InvalidLimits)
+        ));
+    }
+
+    #[test]
+    fn paired_clock_preparation_preserves_relative_timeout_precision() {
+        let monotonic = tokio::time::Instant::now();
+        let prepared = PreparedOperationSubmission::new(
+            OperationSubmission::new(
+                OperationId::from_bytes([15; 16]),
+                OperationKind::ControlProbe,
+                PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
+                ClientInstanceId::SYSTEM,
+                true,
+                Some(1_250),
+                None,
+            )
+            .expect("submission is valid"),
+            Some(monotonic + Duration::from_millis(250)),
+            None,
+        )
+        .expect("prepared submission is valid");
+
+        assert_eq!(prepared.submission.deadline_unix_ms, Some(1_250));
+        assert_eq!(
+            prepared.deadline,
+            Some(monotonic + Duration::from_millis(250))
+        );
+    }
+
+    #[test]
+    fn paired_clock_sampling_spends_suspension_time_conservatively() {
+        let monotonic_before_wall = tokio::time::Instant::now();
+        let clock = admission_clock_sample(monotonic_before_wall, Duration::new(1, 250_500_000))
+            .expect("clock sample fits");
+        assert_eq!(clock.wall_unix_ms, 1_251);
+
+        let relative = PreparedOperationSubmission::control_probe_at(
+            OperationId::from_bytes([35; 16]),
+            ClientInstanceId::SYSTEM,
+            Duration::from_millis(100),
+            clock,
+        )
+        .expect("relative timeout prepares");
+        assert_eq!(relative.submission.deadline_unix_ms, Some(1_351));
+        assert_eq!(
+            relative.deadline,
+            Some(monotonic_before_wall + Duration::from_millis(100))
+        );
+        assert_eq!(
+            relative.deadline_retry,
+            DeadlineRetry::ReanchoredRelative { timeout_ms: 100 }
+        );
+
+        let absolute = monotonic_target(clock, 1_500).expect("absolute deadline fits");
+        assert_eq!(absolute, monotonic_before_wall + Duration::from_millis(249));
+    }
+
+    #[test]
+    fn lease_renewal_boundaries_are_explicitly_unsupported() {
+        let operation = OperationId::from_bytes([39; 16]);
+        let owner = ClientInstanceId::new([39; 16]).expect("owner is valid");
+        let decoded = request_from_wire(
+            Some(daemon::request_envelope::Request::OperationLeaseRenew(
+                daemon::OperationLeaseRenewRequest {
+                    operation: Some(common::OperationId {
+                        value: operation.as_bytes().to_vec(),
+                    }),
+                    lease_expires_unix_ms: 1,
+                },
+            )),
+            owner,
+            PROTOCOL_MINOR,
+        );
+        let Err(error) = decoded else {
+            panic!("wire renewal must remain unsupported");
+        };
+        assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+
+        let response = service().execute(ControlRequest::OperationLeaseRenew {
+            operation,
+            owner,
+            expiry_unix_ms: 1,
+        });
+        let ControlResponse::Error(error) = response else {
+            panic!("direct renewal must remain unsupported");
+        };
+        assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let actor_response = execute_journal_request(
+            &journal,
+            ControlRequest::OperationLeaseRenew {
+                operation,
+                owner,
+                expiry_unix_ms: 1,
+            },
+        )
+        .expect("actor returns a public compatibility error");
+        let ControlResponse::Error(error) = actor_response else {
+            panic!("journal actor renewal must remain unsupported");
+        };
+        assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+    }
+
+    #[test]
+    fn pending_admission_generations_cancel_and_cleanup_independently() {
+        let service = service();
+        let operation = OperationId::from_bytes([16; 16]);
+        let mut first = service
+            .register_pending_admission(operation)
+            .expect("first admission registers");
+        let second = service
+            .register_pending_admission(operation)
+            .expect("second admission registers");
+
+        assert!(
+            service
+                .cancel_pending_admission(operation)
+                .expect("pending cancellation succeeds")
+        );
+        assert!(first.cancelled().load(Ordering::Acquire));
+        assert!(second.cancelled().load(Ordering::Acquire));
+
+        assert!(
+            first
+                .handoff_to_durable()
+                .expect("pending handoff succeeds")
+        );
+        {
+            let registry = service
+                .pending_admissions
+                .lock()
+                .expect("registry is available");
+            assert_eq!(registry.by_operation[&operation].len(), 1);
+        }
+        drop(second);
+        assert!(
+            service
+                .pending_admissions
+                .lock()
+                .expect("registry is available")
+                .by_operation
+                .is_empty()
+        );
+
+        let mut handed_off = service
+            .register_pending_admission(operation)
+            .expect("third admission registers");
+        assert!(
+            !handed_off
+                .handoff_to_durable()
+                .expect("uncancelled handoff succeeds")
+        );
+        assert!(
+            !service
+                .cancel_pending_admission(operation)
+                .expect("post-handoff lookup succeeds")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_retries_durable_state_after_pending_handoff_wins() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let limits = DaemonLimits::default();
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let initial_not_found = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let mut control_service =
+            ControlService::with_state(Arc::clone(&journal), [7; 16], Arc::clone(&state), limits);
+        control_service.cancellation_handoff_hook = Some(CancellationHandoffTestHook {
+            initial_not_found: Arc::clone(&initial_not_found),
+            resume: Arc::clone(&resume),
+        });
+        let service = Arc::new(control_service);
+        let mut orchestrator = DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), limits)
+            .expect("orchestrator starts");
+        let (submissions, mut submission_rx) = tokio::sync::mpsc::channel(1);
+        let commands = OrchestratorSenders::new(submissions);
+        let operation = OperationId::from_bytes([44; 16]);
+        let owner = ClientInstanceId::new([44; 16]).expect("client identity is valid");
+
+        // Dropping either set aborts its dispatch if a bounded rendezvous fails.
+        let mut submission_dispatches = tokio::task::JoinSet::new();
+        {
+            let service = Arc::clone(&service);
+            let actor = actor.handle();
+            let commands = commands.clone();
+            submission_dispatches.spawn(async move {
+                let envelope = daemon::RequestEnvelope {
+                    request_id: 1,
+                    instance_nonce: vec![7; 16],
+                    timeout_ms: None,
+                    request: Some(daemon::request_envelope::Request::OperationSubmit(
+                        daemon::OperationSubmitRequest {
+                            operation: Some(common::OperationId {
+                                value: operation.as_bytes().to_vec(),
+                            }),
+                            kind: daemon::OperationKind::ControlProbe as i32,
+                            plan_hash: CONTROL_PROBE_PLAN_HASH.to_vec(),
+                            detached: true,
+                            timeout_ms: None,
+                            deadline_unix_ms: None,
+                            lease_expires_unix_ms: None,
+                        },
+                    )),
+                };
+                let context = test_dispatch_context(service.as_ref(), &envelope, owner);
+                dispatch_async(
+                    service.as_ref(),
+                    &actor,
+                    &commands,
+                    &UnavailableFirstSliceIpcHandler,
+                    envelope,
+                    context,
+                )
+                .await
+            });
+        }
+        let admission =
+            tokio::time::timeout(CANCELLATION_HANDOFF_TEST_TIMEOUT, submission_rx.recv())
+                .await
+                .expect("submission dispatch did not reach the pending lane")
+                .expect("submission lane closed before receiving the admission");
+        let mut cancellation_dispatches = tokio::task::JoinSet::new();
+        {
+            let service = Arc::clone(&service);
+            let actor = actor.handle();
+            let commands = commands.clone();
+            cancellation_dispatches.spawn(async move {
+                let envelope = daemon::RequestEnvelope {
+                    request_id: 2,
+                    instance_nonce: vec![7; 16],
+                    timeout_ms: None,
+                    request: Some(daemon::request_envelope::Request::OperationCancel(
+                        daemon::OperationCancelRequest {
+                            operation: Some(common::OperationId {
+                                value: operation.as_bytes().to_vec(),
+                            }),
+                        },
+                    )),
+                };
+                let context = test_dispatch_context(service.as_ref(), &envelope, owner);
+                dispatch_async(
+                    service.as_ref(),
+                    &actor,
+                    &commands,
+                    &UnavailableFirstSliceIpcHandler,
+                    envelope,
+                    context,
+                )
+                .await
+            });
+        }
+
+        tokio::time::timeout(CANCELLATION_HANDOFF_TEST_TIMEOUT, initial_not_found.wait())
+            .await
+            .expect("cancellation dispatch did not reach the initial durable NotFound");
+        orchestrator
+            .submit(admission)
+            .await
+            .expect("pending submission becomes durable");
+        assert!(
+            !service
+                .pending_admissions
+                .lock()
+                .expect("pending registry is available")
+                .by_operation
+                .contains_key(&operation)
+        );
+        tokio::time::timeout(CANCELLATION_HANDOFF_TEST_TIMEOUT, resume.wait())
+            .await
+            .expect("cancellation dispatch did not rendezvous after the durable handoff");
+
+        let cancellation = tokio::time::timeout(
+            CANCELLATION_HANDOFF_TEST_TIMEOUT,
+            cancellation_dispatches.join_next(),
+        )
+        .await
+        .expect("cancellation dispatch did not complete after the durable handoff")
+        .expect("cancellation dispatch task is present")
+        .expect("cancellation dispatch task joins");
+        let Some(daemon::response_envelope::Response::OperationCancel(cancellation)) =
+            cancellation.response
+        else {
+            panic!("durable retry must acknowledge cancellation");
+        };
+        assert!(cancellation.accepted);
+        assert!(
+            cancellation
+                .operation
+                .expect("cancelled operation is present")
+                .cancellation_requested
+        );
+        assert!(
+            journal
+                .status(operation)
+                .expect("durable operation loads")
+                .cancellation_requested
+        );
+        assert!(matches!(
+            tokio::time::timeout(
+                CANCELLATION_HANDOFF_TEST_TIMEOUT,
+                submission_dispatches.join_next(),
+            )
+            .await
+            .expect("submission dispatch did not complete after becoming durable")
+            .expect("submission dispatch task is present")
+            .expect("submission dispatch task joins")
+            .response,
+            Some(daemon::response_envelope::Response::OperationSubmit(_))
+        ));
+
+        orchestrator
+            .shutdown()
+            .await
+            .expect("orchestrator shuts down");
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_timeout_includes_the_journal_wait() {
+        let service = service();
+        let (control, control_rx) = mpsc::sync_channel(1);
+        let (normal, _normal_rx) = mpsc::sync_channel(1);
+        let journal = JournalActorHandle {
+            state: Arc::new(Mutex::new(JournalActorState::Accepting(JournalSenders {
+                control,
+                normal,
+            }))),
+        };
+        let (submissions, _submission_rx) = tokio::sync::mpsc::channel(1);
+        let commands = OrchestratorSenders::new(submissions);
+        let operation = OperationId::from_bytes([38; 16]);
+        let envelope = daemon::RequestEnvelope {
+            request_id: 1,
+            instance_nonce: vec![7; 16],
+            timeout_ms: Some(1),
+            request: Some(daemon::request_envelope::Request::OperationCancel(
+                daemon::OperationCancelRequest {
+                    operation: Some(common::OperationId {
+                        value: operation.as_bytes().to_vec(),
+                    }),
+                },
+            )),
+        };
+        let context = test_dispatch_context(
+            &service,
+            &envelope,
+            ClientInstanceId::new([9; 16]).expect("client identity is valid"),
+        );
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(100),
+            dispatch_async(
+                &service,
+                &journal,
+                &commands,
+                &UnavailableFirstSliceIpcHandler,
+                envelope,
+                context,
+            ),
+        )
+        .await
+        .expect("dispatch respects its shorter request timeout");
+        let Some(daemon::response_envelope::Response::Error(error)) = response.response else {
+            panic!("timeout must return a public error");
+        };
+        assert_eq!(error.code, common::ErrorCode::Busy as i32);
+        assert_eq!(error.message, "daemon request timed out");
+        assert!(matches!(
+            control_rx.try_recv(),
+            Ok(JournalCommand::Execute {
+                request: ControlRequest::OperationCancel(observed),
+                ..
+            }) if observed == operation
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_schedule_is_inclusive_and_serializes_every_due_timer() {
+        let now = tokio::time::Instant::now();
+        let mut timers = TimerSchedule::default();
+        for seed in 1..=20 {
+            timers
+                .register(
+                    ScheduledTimer {
+                        operation: OperationId::from_bytes([seed; 16]),
+                        reason: TimerReason::Deadline,
+                    },
+                    now + Duration::from_millis(100),
+                )
+                .expect("timer registers");
+        }
+
+        assert!(
+            timers
+                .take_next_due(now + Duration::from_millis(99))
+                .is_none()
+        );
+        let mut due = 0;
+        while timers
+            .take_next_due(now + Duration::from_millis(100))
+            .is_some()
+        {
+            due += 1;
+        }
+        assert_eq!(due, 20);
+        assert!(timers.by_timer.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn due_timer_queue_saturation_faults_without_dropping_the_timer() {
+        let (mut orchestrator, state, control_rx, _normal_rx) =
+            manual_orchestrator(1, Duration::from_millis(10));
+        let now = tokio::time::Instant::now();
+        let operation = OperationId::from_bytes([50; 16]);
+        orchestrator
+            .timers
+            .register(
+                ScheduledTimer {
+                    operation,
+                    reason: TimerReason::Deadline,
+                },
+                now,
+            )
+            .expect("timer registers");
+        let (reply, _receiver) = tokio::sync::oneshot::channel();
+        orchestrator
+            .journal
+            .try_send(JournalLane::Control, JournalCommand::Checkpoint { reply })
+            .expect("control lane fills");
+
+        let error = orchestrator
+            .process_event(OrchestratorEvent {
+                kind: OrchestratorEventKind::Timer,
+            })
+            .await
+            .expect_err("saturation faults instead of retrying forever");
+
+        assert!(matches!(error, ServiceError::QueueFull));
+        assert_eq!(orchestrator.timers.next_deadline(), Some(now));
+        assert!(orchestrator.pending_timer.is_none());
+        assert_eq!(state.lifecycle(), DaemonLifecycle::Faulted);
+        assert!(matches!(
+            control_rx.try_recv(),
+            Ok(JournalCommand::Checkpoint { .. })
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn due_timer_channel_failure_faults_without_dropping_the_timer() {
+        let (mut orchestrator, state, control_rx, _normal_rx) =
+            manual_orchestrator(1, Duration::from_millis(10));
+        drop(control_rx);
+        let now = tokio::time::Instant::now();
+        let operation = OperationId::from_bytes([51; 16]);
+        orchestrator
+            .timers
+            .register(
+                ScheduledTimer {
+                    operation,
+                    reason: TimerReason::Deadline,
+                },
+                now,
+            )
+            .expect("timer registers");
+
+        let error = orchestrator
+            .process_event(OrchestratorEvent {
+                kind: OrchestratorEventKind::Timer,
+            })
+            .await
+            .expect_err("closed actor lane faults immediately");
+
+        assert!(matches!(error, ServiceError::ChannelClosed));
+        assert_eq!(orchestrator.timers.next_deadline(), Some(now));
+        assert!(orchestrator.pending_timer.is_none());
+        assert_eq!(state.lifecycle(), DaemonLifecycle::Faulted);
+    }
+
+    #[tokio::test]
+    async fn timer_actor_failure_restores_the_due_timer_and_faults() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let actor = JournalActor::start(Arc::clone(&journal), 1, 1).expect("actor starts");
+        let mut orchestrator =
+            DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), DaemonLimits::default())
+                .expect("orchestrator starts");
+        let now = tokio::time::Instant::now();
+        orchestrator
+            .timers
+            .register(
+                ScheduledTimer {
+                    operation: OperationId::from_bytes([52; 16]),
+                    reason: TimerReason::Deadline,
+                },
+                now,
+            )
+            .expect("timer registers");
+
+        orchestrator
+            .process_event(OrchestratorEvent {
+                kind: OrchestratorEventKind::Timer,
+            })
+            .await
+            .expect("delivery enters the actor lane");
+        let event = orchestrator
+            .next_event()
+            .await
+            .expect("actor failure becomes ready");
+        let error = orchestrator
+            .process_event(event)
+            .await
+            .expect_err("missing durable operation faults delivery");
+
+        assert!(
+            matches!(&error, ServiceError::Operations(OperationError::NotFound)),
+            "unexpected timer actor failure: {error:?}"
+        );
+        assert_eq!(orchestrator.timers.next_deadline(), Some(now));
+        assert_eq!(state.lifecycle(), DaemonLifecycle::Faulted);
+        orchestrator
+            .shutdown()
+            .await
+            .expect("healthy actor still permits bounded shutdown");
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_bounds_an_unacknowledged_timer_without_losing_its_command() {
+        let (mut orchestrator, state, control_rx, _normal_rx) =
+            manual_orchestrator(1, Duration::from_millis(10));
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = OperationId::from_bytes([53; 16]);
+        journal.enqueue(operation).expect("operation enqueues");
+        orchestrator.active_operations.insert(
+            operation,
+            journal.status(operation).expect("operation is durable"),
+        );
+        state.set_operation_counts(1, 1, 0);
+        let deadline = tokio::time::Instant::now();
+        orchestrator
+            .timers
+            .register(
+                ScheduledTimer {
+                    operation,
+                    reason: TimerReason::Deadline,
+                },
+                deadline,
+            )
+            .expect("timer registers");
+        orchestrator
+            .process_event(OrchestratorEvent {
+                kind: OrchestratorEventKind::Timer,
+            })
+            .await
+            .expect("timer command enters the actor lane");
+
+        let started = tokio::time::Instant::now();
+        let error = orchestrator
+            .shutdown_until(started + Duration::from_millis(10))
+            .await
+            .expect_err("unresponsive actor faults bounded shutdown");
+
+        assert!(matches!(error, ServiceError::TimerDeliveryTimedOut));
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(started),
+            Duration::from_millis(10)
+        );
+        assert_eq!(state.lifecycle(), DaemonLifecycle::Faulted);
+        assert_eq!(orchestrator.timers.next_deadline(), Some(deadline));
+        assert!(orchestrator.active_operations.contains_key(&operation));
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 1);
+        assert_eq!(state.queued_operations.load(Ordering::Acquire), 1);
+        let command = control_rx
+            .try_recv()
+            .expect("accepted durable interruption remains in the actor lane");
+        assert!(matches!(
+            &command,
+            JournalCommand::InterruptDeadline {
+                operation: observed,
+                ..
+            } if *observed == operation
+        ));
+        execute_journal_command(&journal, command).expect("journal command executes");
+        assert_eq!(
+            journal.status(operation).expect("operation persists").state,
+            OperationState::Interrupted
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timer_storm_keeps_status_and_cancel_reachable_ahead_of_timer_two() {
+        let (mut orchestrator, state, control_rx, _normal_rx) =
+            manual_orchestrator(3, Duration::from_millis(10));
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let now = tokio::time::Instant::now();
+        for seed in 1..=20 {
+            let operation = OperationId::from_bytes([seed; 16]);
+            journal.enqueue(operation).expect("operation enqueues");
+            orchestrator
+                .timers
+                .register(
+                    ScheduledTimer {
+                        operation,
+                        reason: TimerReason::Deadline,
+                    },
+                    now,
+                )
+                .expect("timer registers");
+        }
+        let control_operation = OperationId::from_bytes([54; 16]);
+        journal
+            .enqueue(control_operation)
+            .expect("control operation enqueues");
+
+        orchestrator
+            .process_event(OrchestratorEvent {
+                kind: OrchestratorEventKind::Timer,
+            })
+            .await
+            .expect("only the first timer enters the control lane");
+        let (status_reply, status_receiver) = tokio::sync::oneshot::channel();
+        orchestrator
+            .journal
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Execute {
+                    request: ControlRequest::OperationStatus(control_operation),
+                    claim: None,
+                    reply: status_reply,
+                },
+            )
+            .expect("status remains admissible");
+        let (cancel_reply, cancel_receiver) = tokio::sync::oneshot::channel();
+        orchestrator
+            .journal
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Execute {
+                    request: ControlRequest::OperationCancel(control_operation),
+                    claim: None,
+                    reply: cancel_reply,
+                },
+            )
+            .expect("cancel remains admissible");
+
+        for expected in ["timer", "status", "cancel"] {
+            let command = control_rx.try_recv().expect("queued command is present");
+            match (expected, &command) {
+                ("timer", JournalCommand::InterruptDeadline { .. })
+                | (
+                    "status",
+                    JournalCommand::Execute {
+                        request: ControlRequest::OperationStatus(_),
+                        ..
+                    },
+                )
+                | (
+                    "cancel",
+                    JournalCommand::Execute {
+                        request: ControlRequest::OperationCancel(_),
+                        ..
+                    },
+                ) => {}
+                _ => panic!("unexpected control-lane ordering"),
+            }
+            execute_journal_command(&journal, command).expect("journal command executes");
+        }
+        assert!(matches!(
+            status_receiver
+                .await
+                .expect("status reply channel remains open")
+                .expect("status succeeds"),
+            ControlResponse::OperationStatus(operation)
+                if operation.operation == control_operation
+                    && !operation.cancellation_requested
+        ));
+        assert!(matches!(
+            cancel_receiver
+                .await
+                .expect("cancel reply channel remains open")
+                .expect("cancel succeeds"),
+            ControlResponse::OperationCancel {
+                accepted: true,
+                operation,
+            } if operation.operation == control_operation
+        ));
+
+        let event = orchestrator
+            .next_event()
+            .await
+            .expect("first timer acknowledgement becomes ready");
+        let interrupted = orchestrator
+            .process_event(event)
+            .await
+            .expect("first timer acknowledgement persists")
+            .expect("timer delivery returns durable state");
+        assert_eq!(interrupted.state, OperationState::Interrupted);
+        assert_eq!(orchestrator.timers.by_timer.len(), 19);
+        assert!(orchestrator.pending_timer.is_none());
+        assert_eq!(state.lifecycle(), DaemonLifecycle::Ready);
+    }
+
+    #[tokio::test]
+    async fn admission_delay_expires_before_worker_start() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let mut orchestrator =
+            DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), DaemonLimits::default())
+                .expect("orchestrator starts");
+        let now = tokio::time::Instant::now();
+        let operation = OperationId::from_bytes([25; 16]);
+        let submission = OperationSubmission::new(
+            operation,
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
+            ClientInstanceId::SYSTEM,
+            true,
+            Some(1_100),
+            None,
+        )
+        .expect("submission is valid");
+        let prepared = prepared_at(
+            submission,
+            AdmissionClockSample {
+                wall_unix_ms: 1_000,
+                monotonic: now
+                    .checked_sub(Duration::from_millis(100))
+                    .expect("test monotonic instant can represent admission delay"),
+            },
+        );
+
+        let observed = orchestrator
+            .schedule(prepared)
+            .await
+            .expect("expired admission persists");
+
+        assert_eq!(observed.state, OperationState::Interrupted);
+        assert_eq!(observed.recovery_class, RecoveryClass::DeadlineElapsed);
+        assert_eq!(state.running_operations.load(Ordering::Acquire), 0);
+        orchestrator
+            .shutdown()
+            .await
+            .expect("orchestrator shuts down");
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test]
+    async fn worker_admission_failure_does_not_persist_queued_work() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let mut orchestrator =
+            DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), DaemonLimits::default())
+                .expect("orchestrator starts");
+        orchestrator.workers.close();
+        let operation = OperationId::from_bytes([37; 16]);
+
+        assert!(matches!(
+            orchestrator
+                .schedule(prepared(OperationSubmission::control_probe(operation)))
+                .await,
+            Err(ServiceError::ChannelClosed)
+        ));
+        assert!(matches!(
+            journal.status(operation),
+            Err(OperationError::NotFound)
+        ));
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
+        orchestrator
+            .shutdown()
+            .await
+            .expect("orchestrator shuts down");
+        actor.join().expect("actor joins");
+    }
+
     #[tokio::test]
     async fn admission_saturation_preserves_retry_and_conflict_semantics() {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
@@ -7233,13 +10616,13 @@ mod tests {
             .expect("orchestrator starts");
         let first = OperationSubmission::control_probe(OperationId::from_bytes([17; 16]));
         let running = orchestrator
-            .schedule(first)
+            .schedule(prepared(first))
             .await
             .expect("first operation schedules");
-        assert_eq!(running.state, OperationState::Running);
+        assert_eq!(running.state, OperationState::Queued);
 
         let retried = orchestrator
-            .schedule(first)
+            .schedule(prepared(first))
             .await
             .expect("identical retry bypasses saturated admission");
         assert_eq!(retried, running);
@@ -7249,13 +10632,13 @@ mod tests {
             ..first
         };
         assert!(matches!(
-            orchestrator.schedule(conflict).await,
+            orchestrator.schedule(prepared(conflict)).await,
             Err(ServiceError::Operations(OperationError::SubmissionConflict))
         ));
         assert!(matches!(
             orchestrator
-                .schedule(OperationSubmission::control_probe(OperationId::from_bytes(
-                    [18; 16]
+                .schedule(prepared(OperationSubmission::control_probe(
+                    OperationId::from_bytes([18; 16]),
                 )))
                 .await,
             Err(ServiceError::QueueFull)
@@ -7306,12 +10689,12 @@ mod tests {
         )
         .expect("submission is valid");
         let running = orchestrator
-            .schedule(first)
+            .schedule(prepared(first))
             .await
             .expect("first client operation schedules");
 
         let retried = orchestrator
-            .schedule(first)
+            .schedule(prepared(first))
             .await
             .expect("identical retry bypasses client quota");
         assert_eq!(retried, running);
@@ -7320,7 +10703,7 @@ mod tests {
             ..first
         };
         assert!(matches!(
-            orchestrator.schedule(conflict).await,
+            orchestrator.schedule(prepared(conflict)).await,
             Err(ServiceError::Operations(OperationError::SubmissionConflict))
         ));
 
@@ -7335,7 +10718,7 @@ mod tests {
         )
         .expect("submission is valid");
         assert!(matches!(
-            orchestrator.schedule(owner_a_second).await,
+            orchestrator.schedule(prepared(owner_a_second)).await,
             Err(ServiceError::ClientOperationLimit { limit: 1 })
         ));
 
@@ -7350,7 +10733,7 @@ mod tests {
         )
         .expect("submission is valid");
         let owner_b_running = orchestrator
-            .schedule(owner_b_submission)
+            .schedule(prepared(owner_b_submission))
             .await
             .expect("another client remains admissible");
         assert_eq!(owner_b_running.owner, owner_b);
@@ -7374,7 +10757,7 @@ mod tests {
         );
 
         let owner_a_reused = orchestrator
-            .schedule(owner_a_second)
+            .schedule(prepared(owner_a_second))
             .await
             .expect("released owner quota admits new work");
         assert_eq!(owner_a_reused.owner, owner_a);
@@ -7397,17 +10780,17 @@ mod tests {
         let limits = DaemonLimits::default();
 
         assert_eq!(
-            limits.client_connection_limit,
+            limits.client_connection_limit(),
             DEFAULT_CLIENT_CONNECTION_LIMIT
         );
         assert_eq!(
-            limits.client_operation_limit,
+            limits.client_operation_limit(),
             DEFAULT_CLIENT_OPERATION_LIMIT
         );
-        assert_eq!(limits.operation_workers, DEFAULT_OPERATION_WORKERS);
-        assert_eq!(limits.operation_workers, 4);
-        assert!(limits.client_connection_limit <= limits.connection_limit);
-        assert!(limits.client_operation_limit <= limits.operation_queue_limit);
+        assert_eq!(limits.operation_workers(), DEFAULT_OPERATION_WORKERS);
+        assert_eq!(limits.operation_workers(), 4);
+        assert!(limits.client_connection_limit() <= limits.connection_limit());
+        assert!(limits.client_operation_limit() <= limits.operation_queue_limit());
     }
 
     #[test]
@@ -7425,6 +10808,10 @@ mod tests {
     async fn synthetic_worker_join_is_bounded_and_drop_does_not_rejoin() {
         let state = Arc::new(DaemonState::starting());
         let admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
+        let operation = OperationId::from_bytes([70; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let cancellation = journal.enqueue(operation).expect("operation enqueues");
+        let actor = JournalActor::start(journal, 2, 2).expect("actor starts");
         let permit = SchedulerPermit::reserve(
             Arc::clone(&state),
             admissions,
@@ -7433,17 +10820,21 @@ mod tests {
             1,
         )
         .expect("permit reserves");
-        let cancellation = rootlight_operations::Cancellation::new();
         let mut workers = SyntheticWorkerPool::start(1, 1).expect("worker pool starts");
+        let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
         let (started_tx, started_rx) = mpsc::sync_channel(0);
         workers
             .submit(WorkerJob {
-                operation: OperationId::from_bytes([70; 16]),
-                cancellation: cancellation.clone(),
+                operation,
+                admitted: admitted_rx,
+                handshake_deadline: WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT)
+                    .expect("deadline is valid"),
+                journal: actor.handle(),
                 permit,
                 started: Some(started_tx),
             })
             .expect("worker job submits");
+        admitted_tx.send(()).expect("worker admission is durable");
         started_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("worker starts");
@@ -7460,6 +10851,14 @@ mod tests {
         drop(workers);
         assert!(drop_started.elapsed() < Duration::from_millis(100));
         let _ = cancellation.cancel(rootlight_operations::CancellationReason::Shutdown);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.admitted_operations.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached worker releases its permit");
+        actor.join().expect("actor joins");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7467,15 +10866,23 @@ mod tests {
         let state = Arc::new(DaemonState::starting());
         let admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
         let mut workers = SyntheticWorkerPool::start(1, 1).expect("worker pool starts");
-        let first_cancellation = rootlight_operations::Cancellation::new();
-        let second_cancellation = rootlight_operations::Cancellation::new();
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let first = OperationId::from_bytes([80; 16]);
+        let second = OperationId::from_bytes([81; 16]);
+        let first_cancellation = journal.enqueue(first).expect("first operation enqueues");
+        let second_cancellation = journal.enqueue(second).expect("second operation enqueues");
         assert!(first_cancellation.cancel(rootlight_operations::CancellationReason::Shutdown));
         assert!(second_cancellation.cancel(rootlight_operations::CancellationReason::Shutdown));
+        let (first_admitted_tx, first_admitted_rx) = mpsc::sync_channel(1);
         let (first_started_tx, first_started_rx) = mpsc::sync_channel(0);
         workers
             .submit(WorkerJob {
-                operation: OperationId::from_bytes([80; 16]),
-                cancellation: first_cancellation,
+                operation: first,
+                admitted: first_admitted_rx,
+                handshake_deadline: WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT)
+                    .expect("deadline is valid"),
+                journal: actor.handle(),
                 permit: SchedulerPermit::reserve(
                     Arc::clone(&state),
                     Arc::clone(&admissions),
@@ -7487,15 +10894,22 @@ mod tests {
                 started: Some(first_started_tx),
             })
             .expect("first job submits");
+        first_admitted_tx
+            .send(())
+            .expect("first worker admission is durable");
         first_started_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("first job starts");
 
+        let (second_admitted_tx, second_admitted_rx) = mpsc::sync_channel(1);
         let (second_started_tx, second_started_rx) = mpsc::sync_channel(0);
         workers
             .submit(WorkerJob {
-                operation: OperationId::from_bytes([81; 16]),
-                cancellation: second_cancellation,
+                operation: second,
+                admitted: second_admitted_rx,
+                handshake_deadline: WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT)
+                    .expect("deadline is valid"),
+                journal: actor.handle(),
                 permit: SchedulerPermit::reserve(
                     Arc::clone(&state),
                     admissions,
@@ -7507,6 +10921,9 @@ mod tests {
                 started: Some(second_started_tx),
             })
             .expect("second job submits");
+        second_admitted_tx
+            .send(())
+            .expect("second worker admission is durable");
         second_started_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("second job reaches the full completion channel");
@@ -7519,6 +10936,7 @@ mod tests {
             completion.permit.finish();
         }
         assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
+        actor.join().expect("actor joins");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7541,8 +10959,8 @@ mod tests {
         let mut orchestrator = DaemonOrchestrator::new(handle.clone(), Arc::clone(&state), limits)
             .expect("orchestrator starts");
         orchestrator
-            .schedule(OperationSubmission::control_probe(OperationId::from_bytes(
-                [79; 16],
+            .schedule(prepared(OperationSubmission::control_probe(
+                OperationId::from_bytes([79; 16]),
             )))
             .await
             .expect("operation schedules");
@@ -7595,11 +11013,6 @@ mod tests {
         let completion = OperationId::from_bytes([74; 16]);
         let failure = OperationId::from_bytes([75; 16]);
         let cancellation = OperationId::from_bytes([76; 16]);
-        let lease = OperationId::from_bytes([82; 16]);
-        let lease_expiry = unix_time_ms()
-            .expect("wall clock reads")
-            .checked_add(60_000)
-            .expect("lease expiry is representable");
         for (operation, seed) in [
             (queued, 72),
             (publication, 73),
@@ -7627,21 +11040,6 @@ mod tests {
                 .start_execution(operation)
                 .expect("operation starts");
         }
-        journal
-            .submit(
-                OperationSubmission::new(
-                    lease,
-                    OperationKind::ControlProbe,
-                    PlanHash::from_bytes([82; 32]),
-                    owner,
-                    false,
-                    None,
-                    Some(lease_expiry),
-                )
-                .expect("lease submission is valid"),
-            )
-            .expect("lease operation submits");
-
         let actor = JournalActor::start(Arc::clone(&journal), 16, 16).expect("actor starts");
         let handle = actor.handle();
         let (started_tx, started_rx) = mpsc::sync_channel(0);
@@ -7706,13 +11104,6 @@ mod tests {
                 .await,
             Err(ServiceError::RequestTimedOut)
         ));
-        assert!(matches!(
-            handle
-                .renew_lease_until(lease, owner, lease_expiry + 60_000, timeout())
-                .await,
-            Err(ServiceError::RequestTimedOut)
-        ));
-
         release_tx.send(()).expect("actor resumes");
         handle
             .normal(ControlRequest::Health)
@@ -7725,13 +11116,6 @@ mod tests {
         assert_eq!(
             journal.status(queued).expect("queued state loads").state,
             OperationState::Queued
-        );
-        assert_eq!(
-            journal
-                .status(lease)
-                .expect("lease state loads")
-                .lease_expires_unix_ms,
-            Some(lease_expiry)
         );
         for operation in [publication, completion, failure, cancellation] {
             let record = journal.status(operation).expect("running state loads");
@@ -7807,26 +11191,6 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dropping_claimed_future_abandons_queued_mutation() {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-        let lease = OperationId::from_bytes([83; 16]);
-        let lease_owner = ClientInstanceId::new([83; 16]).expect("client identity is valid");
-        let lease_expiry = unix_time_ms()
-            .expect("wall clock reads")
-            .checked_add(60_000)
-            .expect("lease expiry is representable");
-        journal
-            .submit(
-                OperationSubmission::new(
-                    lease,
-                    OperationKind::ControlProbe,
-                    PlanHash::from_bytes([83; 32]),
-                    lease_owner,
-                    false,
-                    None,
-                    Some(lease_expiry),
-                )
-                .expect("lease submission is valid"),
-            )
-            .expect("lease operation submits");
         let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
         let handle = actor.handle();
         let (started_tx, started_rx) = mpsc::sync_channel(0);
@@ -7872,26 +11236,6 @@ mod tests {
                 .expect_err("mutation task is cancelled")
                 .is_cancelled()
         );
-        let lease_handle = handle.clone();
-        let lease_mutation = tokio::spawn(async move {
-            lease_handle
-                .renew_lease_until(
-                    lease,
-                    lease_owner,
-                    lease_expiry + 60_000,
-                    Instant::now() + Duration::from_secs(30),
-                )
-                .await
-        });
-        tokio::task::yield_now().await;
-        lease_mutation.abort();
-        assert!(
-            lease_mutation
-                .await
-                .expect_err("lease mutation task is cancelled")
-                .is_cancelled()
-        );
-
         release_tx.send(()).expect("actor resumes");
         handle
             .normal(ControlRequest::Health)
@@ -7901,13 +11245,6 @@ mod tests {
             journal.status(operation),
             Err(OperationError::NotFound)
         ));
-        assert_eq!(
-            journal
-                .status(lease)
-                .expect("lease state loads")
-                .lease_expires_unix_ms,
-            Some(lease_expiry)
-        );
         actor.join().expect("actor joins");
     }
 
@@ -8108,7 +11445,12 @@ mod tests {
         let client_admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
         let mut pool = SyntheticWorkerPool::start(1, 1).expect("worker pool starts");
         let operation = OperationId::from_bytes([15; 16]);
-        let cancellation = rootlight_operations::Cancellation::new();
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 1, 1).expect("actor starts");
+        journal.enqueue(operation).expect("operation enqueues");
+        let cancellation = journal
+            .cancellation_token(operation)
+            .expect("cancellation token exists");
         let permit = SchedulerPermit::reserve(
             Arc::clone(&state),
             client_admissions,
@@ -8117,15 +11459,24 @@ mod tests {
             1,
         )
         .expect("permit reserves");
+        let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
         let (started_tx, started_rx) = mpsc::sync_channel(0);
         pool.submit(WorkerJob {
             operation,
-            cancellation: cancellation.clone(),
+            admitted: admitted_rx,
+            handshake_deadline: WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT)
+                .expect("deadline is valid"),
+            journal: actor.handle(),
             permit,
             started: Some(started_tx),
         })
         .expect("job submits");
+        admitted_tx.send(()).expect("worker admission is durable");
         started_rx.recv().expect("worker starts");
+        assert_eq!(
+            journal.status(operation).expect("status loads").state,
+            OperationState::Running
+        );
 
         assert!(cancellation.cancel(rootlight_operations::CancellationReason::ClientRequest));
         let completion = pool.completion().await.expect("completion arrives");
@@ -8139,6 +11490,77 @@ mod tests {
         pool.join_until(tokio::time::Instant::now() + Duration::from_secs(5))
             .await
             .expect("worker joins");
+        actor.join().expect("actor joins");
+        assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn queued_worker_stays_durable_until_a_worker_dequeues_it() {
+        let state = Arc::new(DaemonState::starting());
+        let client_admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
+        let mut pool = SyntheticWorkerPool::start(1, 2).expect("worker pool starts");
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
+        let first = OperationId::from_bytes([40; 16]);
+        let second = OperationId::from_bytes([41; 16]);
+        let first_cancellation = journal.enqueue(first).expect("first operation enqueues");
+        let second_cancellation = journal.enqueue(second).expect("second operation enqueues");
+
+        let reserve = |operation, started| {
+            let permit = SchedulerPermit::reserve(
+                Arc::clone(&state),
+                Arc::clone(&client_admissions),
+                ClientInstanceId::SYSTEM,
+                2,
+                2,
+            )
+            .expect("permit reserves");
+            let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
+            pool.submit(WorkerJob {
+                operation,
+                admitted: admitted_rx,
+                handshake_deadline: WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT)
+                    .expect("deadline is valid"),
+                journal: actor.handle(),
+                permit,
+                started: Some(started),
+            })
+            .expect("job submits");
+            admitted_tx.send(()).expect("worker admission is durable");
+        };
+        let (first_started_tx, first_started_rx) = mpsc::sync_channel(0);
+        let (second_started_tx, second_started_rx) = mpsc::sync_channel(0);
+        reserve(first, first_started_tx);
+        reserve(second, second_started_tx);
+
+        first_started_rx.recv().expect("first worker starts");
+        assert_eq!(
+            journal.status(first).expect("first status loads").state,
+            OperationState::Running
+        );
+        assert_eq!(
+            journal.status(second).expect("second status loads").state,
+            OperationState::Queued
+        );
+
+        assert!(first_cancellation.cancel(rootlight_operations::CancellationReason::ClientRequest));
+        let first_completion = pool.completion().await.expect("first completion arrives");
+        first_completion.permit.finish();
+        second_started_rx.recv().expect("second worker starts");
+        assert_eq!(
+            journal.status(second).expect("second status loads").state,
+            OperationState::Running
+        );
+
+        assert!(
+            second_cancellation.cancel(rootlight_operations::CancellationReason::ClientRequest)
+        );
+        let second_completion = pool.completion().await.expect("second completion arrives");
+        second_completion.permit.finish();
+        pool.join_until(tokio::time::Instant::now() + Duration::from_secs(5))
+            .await
+            .expect("worker joins");
+        actor.join().expect("actor joins");
         assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
     }
 
@@ -8151,7 +11573,7 @@ mod tests {
             4,
             1,
             Duration::from_secs(1),
-            Duration::from_millis(10),
+            Duration::from_secs(1),
             Duration::from_secs(1),
         )
         .expect("limits are valid");
@@ -8160,7 +11582,7 @@ mod tests {
         let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
         let mut orchestrator = DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), limits)
             .expect("orchestrator starts");
-        let (admission, response) = OperationAdmission::new(OperationSubmission::control_probe(
+        let (admission, response) = admission(OperationSubmission::control_probe(
             OperationId::from_bytes([3; 16]),
         ));
 
@@ -8168,7 +11590,7 @@ mod tests {
             .submit(admission)
             .await
             .expect("operation schedules");
-        assert_eq!(running.state, OperationState::Running);
+        assert_eq!(running.state, OperationState::Queued);
         assert_eq!(
             response
                 .await
@@ -8199,7 +11621,7 @@ mod tests {
             2,
             1,
             Duration::from_secs(1),
-            Duration::from_millis(10),
+            Duration::from_secs(1),
             Duration::from_secs(1),
         )
         .expect("limits are valid");
@@ -8209,8 +11631,7 @@ mod tests {
         let mut orchestrator = DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), limits)
             .expect("orchestrator starts");
         let operation = OperationId::from_bytes([14; 16]);
-        let (admission, _response) =
-            OperationAdmission::new(OperationSubmission::control_probe(operation));
+        let (admission, _response) = admission(OperationSubmission::control_probe(operation));
         orchestrator
             .submit(admission)
             .await
@@ -8233,6 +11654,48 @@ mod tests {
         actor.join().expect("actor joins");
     }
 
+    #[tokio::test]
+    async fn shutdown_interrupts_multiple_full_journal_batches() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        for value in 1_u128..=300 {
+            journal
+                .enqueue(OperationId::from_bytes(value.to_le_bytes()))
+                .expect("operation enqueues");
+        }
+        let limits = DaemonLimits::new(
+            4,
+            4,
+            1,
+            1,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .expect("limits are valid");
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let mut orchestrator =
+            DaemonOrchestrator::new(actor.handle(), state, limits).expect("orchestrator starts");
+
+        orchestrator
+            .shutdown()
+            .await
+            .expect("all operation batches are interrupted");
+
+        assert_eq!(journal.active_count().expect("active count loads"), 0);
+        for value in [1_u128, 256, 257, 300] {
+            assert_eq!(
+                journal
+                    .status(OperationId::from_bytes(value.to_le_bytes()))
+                    .expect("operation persists")
+                    .state,
+                OperationState::Interrupted
+            );
+        }
+        actor.join().expect("actor joins");
+    }
+
     #[test]
     fn operation_submission_requires_minor_two_for_stable_timing_and_leases() {
         let owner = ClientInstanceId::new([9; 16]).expect("client identity is valid");
@@ -8251,9 +11714,9 @@ mod tests {
 
         let submission = operation_submission_from_wire(request, owner, 2)
             .expect("minor two accepts attached work");
-        assert!(!submission.detached);
-        assert_eq!(submission.deadline_unix_ms, Some(100));
-        assert_eq!(submission.lease_expires_unix_ms, Some(200));
+        assert!(!submission.submission.detached);
+        assert_eq!(submission.submission.deadline_unix_ms, Some(100));
+        assert_eq!(submission.submission.lease_expires_unix_ms, Some(200));
 
         let ambiguous = daemon::OperationSubmitRequest {
             operation: Some(common::OperationId { value: vec![8; 16] }),
@@ -8268,6 +11731,48 @@ mod tests {
             .expect_err("relative and absolute deadlines conflict");
         assert_eq!(error.code(), ErrorCode::InvalidArgument);
         assert_eq!(error.message(), "operation deadline is ambiguous");
+    }
+
+    #[test]
+    fn synchronous_mutation_rejection_preserves_envelope_validation_precedence() {
+        let service = service();
+        let request =
+            daemon::request_envelope::Request::OperationSubmit(daemon::OperationSubmitRequest {
+                operation: Some(common::OperationId { value: vec![8; 16] }),
+                kind: daemon::OperationKind::ControlProbe as i32,
+                plan_hash: CONTROL_PROBE_PLAN_HASH.to_vec(),
+                detached: true,
+                timeout_ms: None,
+                deadline_unix_ms: None,
+                lease_expires_unix_ms: None,
+            });
+        let timed_out = service.dispatch(daemon::RequestEnvelope {
+            request_id: 15,
+            instance_nonce: vec![7; 16],
+            timeout_ms: Some(0),
+            request: Some(request.clone()),
+        });
+        let stale = service.dispatch(daemon::RequestEnvelope {
+            request_id: 16,
+            instance_nonce: vec![6; 16],
+            timeout_ms: Some(1_000),
+            request: Some(request),
+        });
+
+        assert!(matches!(
+            timed_out.response,
+            Some(daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            })) if code == common::ErrorCode::InvalidArgument as i32
+        ));
+        assert!(matches!(
+            stale.response,
+            Some(daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            })) if code == common::ErrorCode::PermissionDenied as i32
+        ));
     }
 
     #[test]
@@ -8300,31 +11805,21 @@ mod tests {
     }
 
     #[test]
-    fn operation_submission_is_durable_and_rejects_reuse() {
+    fn synchronous_submission_requires_orchestration() {
         let service = service();
         let operation = OperationId::from_bytes([8; 16]);
-
-        let submission = OperationSubmission::control_probe(operation);
-        let submitted = service.execute(ControlRequest::OperationSubmit(submission));
-        assert!(matches!(
-            submitted,
-            ControlResponse::OperationSubmit(OperationRecord {
-                operation: observed,
-                state: OperationState::Queued,
-                revision: 1,
-                ..
-            }) if observed == operation
+        let submitted = service.execute(ControlRequest::OperationSubmit(
+            OperationSubmission::control_probe(operation),
         ));
-        let reused = service.execute(ControlRequest::OperationSubmit(submission));
-        assert!(matches!(reused, ControlResponse::OperationSubmit(_)));
-        assert_eq!(
-            service
-                .journal
-                .status(operation)
-                .expect("queued operation persists")
-                .state,
-            OperationState::Queued
-        );
+
+        let ControlResponse::Error(error) = submitted else {
+            panic!("synchronous submission must be rejected");
+        };
+        assert_eq!(error.code(), ErrorCode::InvalidArgument);
+        assert!(matches!(
+            service.journal.status(operation),
+            Err(OperationError::NotFound)
+        ));
     }
 
     #[test]
@@ -8337,7 +11832,7 @@ mod tests {
         let server_service = Arc::clone(&service);
         let server = thread::spawn(move || {
             ready_tx.send(()).expect("test synchronization succeeds");
-            for _ in 0..4 {
+            for _ in 0..3 {
                 let mut stream = listener
                     .accept_timeout(Duration::from_secs(1))
                     .expect("connection accepts");
@@ -8351,19 +11846,15 @@ mod tests {
         let health = client.health().expect("health succeeds");
         assert!(health.ready);
         let submitted = OperationId::from_bytes([4; 16]);
+        let submission = client
+            .operation_submit(submitted)
+            .expect_err("synchronous submission is rejected");
         assert_eq!(
-            client
-                .operation_submit(submitted)
-                .expect("operation submits")
-                .state,
-            rootlight_client::OperationState::Queued
-        );
-        assert_eq!(
-            client
-                .operation_status(submitted)
-                .expect("submitted operation loads")
-                .operation,
-            submitted
+            submission
+                .as_public_error()
+                .expect("public error is retained")
+                .code(),
+            ErrorCode::InvalidArgument
         );
         let missing = client
             .operation_status(OperationId::from_bytes([9; 16]))

@@ -154,7 +154,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "16bb2057e64844e6ddbc09d6d9eee24d582030bfc7ac1cb26c4a7f161839d5b0"
+      "blake3": "72867569e76013355142caaf48c27a95571d87334790d94db17a538ac409ed8e"
     }
   ],
   "artifacts": [
@@ -172,7 +172,7 @@
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.daemon.v1.rs",
-      "blake3": "8f7dce50d3b6cfbc9a8e8aab3f426c5f3d2e725d08633097cb4f65b3f31a50af"
+      "blake3": "e5dcff8df3d6cb00e5bacb5a9bd74759fdec3cf62184ce3fac1adef597221e74"
     },
     {
       "path": "schemas/generated/json/config-1.0.schema.json",

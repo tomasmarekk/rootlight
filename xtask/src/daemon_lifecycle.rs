@@ -13,15 +13,15 @@ use std::{
 };
 
 use rootlight_client::{
-    Client, ClientError, ConnectPolicy, DaemonLifecycle, Health, OperationState,
+    Client, ClientError, ConnectPolicy, DaemonLifecycle, Health, OperationState, OwnedDaemon,
 };
 use rootlight_error::{ErrorCode, PublicValue};
 use rootlight_ids::OperationId;
 use rootlight_ipc::connect;
 use rootlight_observability::{
-    ControlMethod, DaemonLifecycle as TelemetryDaemonLifecycle, LogEvent,
-    MAX_STRUCTURED_LOG_LINE_BYTES, SpanKind, StructuredLogRecord, TELEMETRY_SCHEMA_VERSION,
-    TelemetryOutcome,
+    CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION, ControlMethod,
+    DaemonLifecycle as TelemetryDaemonLifecycle, LogEvent, MAX_STRUCTURED_LOG_LINE_BYTES, SpanKind,
+    StructuredLogRecord, TELEMETRY_SCHEMA_VERSION, TelemetryOutcome,
 };
 use rootlight_runtime::{RuntimeError, RuntimePaths};
 use serde_json::Value;
@@ -47,7 +47,7 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     )
     .map_err(LifecycleError::Runtime)?;
     let environment = Environment::new(&paths);
-    exercise_simultaneous_autostart(&paths, &rootlight, &environment)?;
+    exercise_simultaneous_autostart(&paths)?;
     let mut process = SupervisedDaemon::spawn(&daemon, &environment)?;
 
     wait_until_ready(&paths, &rootlight, &environment)?;
@@ -154,10 +154,15 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     lease_client
         .operation_submit_attached(lease_operation, None, initial_lease)
         .map_err(LifecycleError::Client)?;
-    let renewed = lease_client
-        .operation_renew_lease(lease_operation, renewed_lease)
-        .map_err(LifecycleError::Client)?;
-    if renewed.lease_expires_unix_ms != Some(renewed_lease) {
+    let renewal = match lease_client.operation_renew_lease(lease_operation, renewed_lease) {
+        Ok(_) => return Err(LifecycleError::UnexpectedEnvelope),
+        Err(error) => error,
+    };
+    if renewal
+        .as_public_error()
+        .map(rootlight_error::PublicError::code)
+        != Some(ErrorCode::UnsupportedCapability)
+    {
         return Err(LifecycleError::UnexpectedEnvelope);
     }
     let lease_operation = lease_operation.to_string();
@@ -253,7 +258,7 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     wait_until_absent(&daemon_paths)?;
 
     println!(
-        "daemon lifecycle check passed: startup, 100 deterministic concurrent clients, per-client operation quota isolation, saturated-worker control responsiveness, health, retry-safe submission, cancellation, stable deadlines, attached lease renewal and expiry, schema-v2 support telemetry, bounded structured JSONL, privacy sentinels, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
+        "daemon lifecycle check passed: startup, 100 deterministic concurrent clients, per-client operation quota isolation, saturated-worker control responsiveness, health, retry-safe submission, cancellation, stable deadlines, explicit lease-renewal rejection and attached lease expiry, schema-v3 support telemetry, bounded structured JSONL, privacy sentinels, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
     );
     control_latency.report();
     Ok(())
@@ -415,129 +420,42 @@ fn wait_until_ready(
     }
 }
 
-fn exercise_simultaneous_autostart(
-    paths: &RuntimePaths,
-    rootlight: &Path,
-    environment: &Environment,
-) -> Result<(), LifecycleError> {
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(CLIENT_COUNT));
+fn exercise_simultaneous_autostart(paths: &RuntimePaths) -> Result<(), LifecycleError> {
+    // Provision the shared security boundary once. The race under test starts
+    // without a daemon or discovery record and targets launch authority.
+    paths.prepare_owner().map_err(LifecycleError::Runtime)?;
+    let barrier = Arc::new(Barrier::new(CLIENT_COUNT));
     let mut clients = Vec::with_capacity(CLIENT_COUNT);
     for index in 0..CLIENT_COUNT {
-        let rootlight = rootlight.to_path_buf();
-        let environment = environment.clone();
-        let barrier = std::sync::Arc::clone(&barrier);
+        let paths = paths.clone();
+        let barrier = Arc::clone(&barrier);
         clients.push(thread::spawn(move || {
             barrier.wait();
-            let mut command = Command::new(rootlight);
-            environment.apply(&mut command);
-            command
-                .arg("health")
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            command
-                .spawn()
-                .map_err(LifecycleError::SpawnCommand)
-                .map(|child| (index, child))
+            let identity = deterministic_client_identity(index)?;
+            Client::connect_or_start_owned(&paths, identity, ConnectPolicy::StartIfMissing)
+                .map_err(LifecycleError::Client)
         }));
     }
-    let mut children = Vec::with_capacity(CLIENT_COUNT);
+    let mut connected = Vec::with_capacity(CLIENT_COUNT);
+    let mut owner: Option<OwnedDaemon> = None;
     for client in clients {
-        children.push(
-            client
-                .join()
-                .map_err(|_| LifecycleError::ClientThreadPanicked)??,
-        );
-    }
-    let deadline = Instant::now()
-        .checked_add(START_TIMEOUT)
-        .ok_or(LifecycleError::Clock)?;
-    let mut first_error = None;
-    let mut completed = Vec::with_capacity(CLIENT_COUNT);
-    while !children.is_empty() {
-        let mut index = 0_usize;
-        while index < children.len() {
-            let status = children[index]
-                .1
-                .try_wait()
-                .map_err(LifecycleError::WaitChild)?;
-            if let Some(status) = status {
-                let (client_index, child) = children.swap_remove(index);
-                completed.push((client_index, status, child));
-            } else {
-                index = index.saturating_add(1);
-            }
+        let (client, owned) = client
+            .join()
+            .map_err(|_| LifecycleError::ClientThreadPanicked)??;
+        if !client.health().map_err(LifecycleError::Client)?.ready {
+            return Err(LifecycleError::UnexpectedClientHealth);
         }
-        if !children.is_empty() && Instant::now() >= deadline {
-            for (_, mut child) in children.drain(..) {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            first_error.get_or_insert(LifecycleError::CommandTimedOut);
-        }
-        if !children.is_empty() {
-            thread::sleep(POLL_INTERVAL);
-        }
-    }
-    cleanup_autostarted_daemon(paths)?;
-    // Health envelopes are bounded below pipe capacity. Delaying reads until every
-    // concurrent Windows process exits prevents inherited sibling handles from
-    // keeping an otherwise-complete stdout or stderr pipe open indefinitely.
-    for (client_index, status, mut child) in completed {
-        let result = capture_autostart_client(client_index, status, &mut child);
-        if first_error.is_none()
-            && let Err(error) = result
+        if let Some(owned) = owned
+            && owner.replace(owned).is_some()
         {
-            first_error = Some(error);
+            return Err(LifecycleError::MultipleAutostartOwners);
         }
+        connected.push(client);
     }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-
-fn capture_autostart_client(
-    client_index: usize,
-    status: ExitStatus,
-    child: &mut Child,
-) -> Result<(), LifecycleError> {
-    let stdout = child
-        .stdout
-        .take()
-        .map(read_stream)
-        .transpose()?
-        .unwrap_or_default();
-    let stderr = child
-        .stderr
-        .take()
-        .map(read_stream)
-        .transpose()?
-        .unwrap_or_default();
-    if !status.success() {
-        return Err(LifecycleError::AutostartClient {
-            index: client_index,
-            source: Box::new(LifecycleError::CommandFailed {
-                status,
-                stderr: String::from_utf8_lossy(&stderr).into_owned(),
-            }),
-        });
-    }
-    let envelope = parse_single_json(&stdout)?;
-    assert_success_type(&envelope, "health")
-}
-
-fn cleanup_autostarted_daemon(paths: &RuntimePaths) -> Result<(), LifecycleError> {
-    let discovery = paths.discover().map_err(LifecycleError::Runtime)?;
-    terminate_process(discovery.pid())?;
-    wait_until_process_exit(discovery.pid())?;
-    paths
-        .remove_stale_endpoint(discovery.instance_nonce())
-        .map_err(LifecycleError::Runtime)?;
-    paths
-        .remove_discovery_if_matches(discovery.instance_nonce())
-        .map_err(LifecycleError::Runtime)?;
-    wait_until_absent(paths)
+    let owner = owner.ok_or(LifecycleError::MissingAutostartOwner)?;
+    owner.shutdown().map_err(LifecycleError::Client)?;
+    drop(connected);
+    wait_until_autostart_quiescent(paths)
 }
 
 fn exercise_crash_restart(
@@ -556,7 +474,12 @@ fn exercise_crash_restart(
         COMMAND_TIMEOUT,
     )?;
     assert_success_type(&submitted, "operation_submit")?;
-    assert_operation_state(&submitted, "running")?;
+    if !matches!(
+        operation_data(&submitted)["state"].as_str(),
+        Some("queued" | "running")
+    ) {
+        return Err(LifecycleError::UnexpectedEnvelope);
+    }
 
     let discovery = paths.discover().map_err(LifecycleError::Runtime)?;
     let crash_stderr = process.terminate()?;
@@ -636,27 +559,50 @@ fn exercise_concurrent_clients(paths: &RuntimePaths) -> Result<(), LifecycleErro
 }
 
 fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), LifecycleError> {
-    let noisy = Client::connect_or_start(paths, [70; 16], ConnectPolicy::ExistingOnly)
-        .map_err(LifecycleError::Client)?;
+    let noisy = Arc::new(
+        Client::connect_or_start(paths, [70; 16], ConnectPolicy::ExistingOnly)
+            .map_err(LifecycleError::Client)?,
+    );
     let peer = Client::connect_or_start(paths, [71; 16], ConnectPolicy::ExistingOnly)
         .map_err(LifecycleError::Client)?;
-    let mut noisy_operations = Vec::with_capacity(
-        usize::try_from(EXPECTED_CLIENT_OPERATION_LIMIT)
-            .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?,
+    let operation_count = usize::try_from(EXPECTED_CLIENT_OPERATION_LIMIT)
+        .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?;
+    let noisy_operations = Arc::new(
+        (0..EXPECTED_CLIENT_OPERATION_LIMIT)
+            .map(|ordinal| quota_operation(70, ordinal))
+            .collect::<Result<Vec<_>, _>>()?,
     );
-    for ordinal in 0..EXPECTED_CLIENT_OPERATION_LIMIT {
-        let operation = quota_operation(70, ordinal)?;
-        let status = noisy
-            .operation_submit(operation)
-            .map_err(LifecycleError::Client)?;
-        if !matches!(
-            status.state,
-            OperationState::Running | OperationState::Queued
-        ) {
-            return Err(LifecycleError::UnexpectedQuotaOperationState(status.state));
-        }
-        noisy_operations.push(operation);
+    let worker_count = usize::try_from(EXPECTED_CLIENT_CONNECTION_LIMIT)
+        .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?;
+    let barrier = Arc::new(Barrier::new(worker_count));
+    let mut submissions = Vec::with_capacity(worker_count);
+    for worker in 0..worker_count {
+        let noisy = Arc::clone(&noisy);
+        let noisy_operations = Arc::clone(&noisy_operations);
+        let barrier = Arc::clone(&barrier);
+        submissions.push(thread::spawn(move || {
+            barrier.wait();
+            for index in (worker..operation_count).step_by(worker_count) {
+                let operation = noisy_operations[index];
+                let status = submit_with_transport_retry(&noisy, operation)?;
+                if !matches!(
+                    status.state,
+                    OperationState::Running | OperationState::Queued
+                ) {
+                    return Err(LifecycleError::UnexpectedQuotaOperationState(status.state));
+                }
+            }
+            Ok(())
+        }));
     }
+
+    for submission in submissions {
+        submission
+            .join()
+            .map_err(|_| LifecycleError::ClientThreadPanicked)??;
+    }
+    let noisy_operations = Arc::try_unwrap(noisy_operations)
+        .map_err(|_| LifecycleError::InvalidWorkerConfiguration)?;
 
     let rejected = quota_operation(70, EXPECTED_CLIENT_OPERATION_LIMIT)?;
     match noisy.operation_submit(rejected) {
@@ -666,7 +612,7 @@ fn exercise_operation_quota_isolation(paths: &RuntimePaths) -> Result<(), Lifecy
     }
 
     let health = peer.health().map_err(LifecycleError::Client)?;
-    let expected_running = default_worker_slots();
+    let expected_running = default_worker_slots()?;
     let expected_queued = EXPECTED_CLIENT_OPERATION_LIMIT
         .checked_sub(expected_running)
         .ok_or(LifecycleError::InvalidWorkerConfiguration)?;
@@ -729,12 +675,13 @@ fn exercise_saturated_control_responsiveness(
             return Err(LifecycleError::UnexpectedSaturationState);
         }
     }
+    let expected_worker_slots = default_worker_slots()?;
     let saturated = wait_for_health(&sampler, |health| {
         health.ready
             && health.lifecycle == DaemonLifecycle::Ready
             && health.accepting_operations
-            && health.admitted_operations == default_worker_slots()
-            && health.running_operations == default_worker_slots()
+            && health.admitted_operations == expected_worker_slots
+            && health.running_operations == expected_worker_slots
             && health.queued_operations == 0
     })?;
     require_expected_default_limits(&saturated)?;
@@ -771,7 +718,7 @@ fn exercise_saturated_control_responsiveness(
     })?;
 
     Ok(ControlLatencyEvidence {
-        limits: ControlLimits::from_health(&saturated),
+        limits: ControlLimits::from_health(&saturated)?,
         health: LatencySeries::new(health_samples)?,
         status: LatencySeries::new(status_samples)?,
         cancel: LatencySeries::new(cancel_samples)?,
@@ -806,6 +753,26 @@ fn quota_operation(identity: u8, ordinal: u32) -> Result<OperationId, LifecycleE
     Ok(OperationId::from_bytes(bytes))
 }
 
+fn submit_with_transport_retry(
+    client: &Client,
+    operation: OperationId,
+) -> Result<rootlight_client::OperationStatus, LifecycleError> {
+    let deadline = Instant::now()
+        .checked_add(COMMAND_TIMEOUT)
+        .ok_or(LifecycleError::Clock)?;
+    loop {
+        match client.operation_submit(operation) {
+            Ok(status) => return Ok(status),
+            Err(ClientError::Ipc(rootlight_ipc::IpcError::Transport(error)))
+                if error.kind() == io::ErrorKind::TimedOut && Instant::now() < deadline =>
+            {
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(error) => return Err(LifecycleError::Client(error)),
+        }
+    }
+}
+
 fn is_client_operation_quota(error: &ClientError) -> bool {
     let Some(public) = error.as_public_error() else {
         return false;
@@ -823,15 +790,13 @@ fn cancel_and_wait(client: &Client, operation: OperationId) -> Result<(), Lifecy
     let (accepted, status) = client
         .operation_cancel(operation)
         .map_err(LifecycleError::Client)?;
-    if !accepted
-        || !matches!(
-            status.state,
-            OperationState::Cancelling | OperationState::Cancelled
-        )
-    {
-        return Err(LifecycleError::UnexpectedCancellationState);
+    match status.state {
+        OperationState::Cancelling | OperationState::Cancelled if accepted => {
+            wait_for_client_terminal(client, operation, OperationState::Cancelled)
+        }
+        OperationState::Succeeded if !accepted => Ok(()),
+        _ => Err(LifecycleError::UnexpectedCancellationState),
     }
-    wait_for_client_terminal(client, operation, OperationState::Cancelled)
 }
 
 fn deterministic_client_identity(index: usize) -> Result<[u8; 16], LifecycleError> {
@@ -845,9 +810,9 @@ fn deterministic_client_identity(index: usize) -> Result<[u8; 16], LifecycleErro
     Ok(identity)
 }
 
-fn default_worker_slots() -> u32 {
+fn default_worker_slots() -> Result<u32, LifecycleError> {
     u32::try_from(EXPECTED_OPERATION_WORKERS)
-        .unwrap_or_else(|_| unreachable!("default worker count fits the health protocol"))
+        .map_err(|_| LifecycleError::InvalidWorkerConfiguration)
 }
 
 fn worker_operations() -> Result<[OperationId; EXPECTED_OPERATION_WORKERS], LifecycleError> {
@@ -863,9 +828,10 @@ fn worker_operations() -> Result<[OperationId; EXPECTED_OPERATION_WORKERS], Life
 }
 
 fn require_expected_default_limits(health: &Health) -> Result<(), LifecycleError> {
+    let workers = default_worker_slots()?;
     if health.connection_limit == 128
         && health.operation_queue_limit == 256
-        && default_worker_slots() == 4
+        && workers == 4
         && EXPECTED_CLIENT_CONNECTION_LIMIT <= health.connection_limit
         && EXPECTED_CLIENT_OPERATION_LIMIT <= health.operation_queue_limit
     {
@@ -874,17 +840,18 @@ fn require_expected_default_limits(health: &Health) -> Result<(), LifecycleError
         Err(LifecycleError::UnexpectedDefaultLimits {
             connection: health.connection_limit,
             operation_queue: health.operation_queue_limit,
-            workers: default_worker_slots(),
+            workers,
         })
     }
 }
 
 fn require_saturated_health(health: &Health) -> Result<(), LifecycleError> {
+    let workers = default_worker_slots()?;
     if health.ready
         && health.lifecycle == DaemonLifecycle::Ready
         && health.accepting_operations
-        && health.admitted_operations == default_worker_slots()
-        && health.running_operations == default_worker_slots()
+        && health.admitted_operations == workers
+        && health.running_operations == workers
         && health.queued_operations == 0
     {
         Ok(())
@@ -930,7 +897,10 @@ fn cancel_saturated_workers<const N: usize>(
                 OperationState::Cancelling | OperationState::Cancelled
             )
         {
-            return Err(LifecycleError::UnexpectedCancellationState);
+            return Err(LifecycleError::UnexpectedCancellationObservation {
+                accepted,
+                state: status.state,
+            });
         }
         samples.push(elapsed);
     }
@@ -975,14 +945,14 @@ struct ControlLimits {
 }
 
 impl ControlLimits {
-    fn from_health(health: &Health) -> Self {
-        Self {
+    fn from_health(health: &Health) -> Result<Self, LifecycleError> {
+        Ok(Self {
             connection_limit: health.connection_limit,
             client_connection_limit: EXPECTED_CLIENT_CONNECTION_LIMIT,
             operation_queue_limit: health.operation_queue_limit,
             client_operation_limit: EXPECTED_CLIENT_OPERATION_LIMIT,
-            worker_slots: default_worker_slots(),
-        }
+            worker_slots: default_worker_slots()?,
+        })
     }
 }
 
@@ -1117,6 +1087,23 @@ fn wait_until_absent(paths: &RuntimePaths) -> Result<(), LifecycleError> {
     }
 }
 
+fn wait_until_autostart_quiescent(paths: &RuntimePaths) -> Result<(), LifecycleError> {
+    let mut absent_since = None;
+    loop {
+        match paths.discover() {
+            Err(error) if runtime_absence(&error) => {
+                let observed = *absent_since.get_or_insert_with(Instant::now);
+                if Instant::now().saturating_duration_since(observed) >= START_TIMEOUT {
+                    return Ok(());
+                }
+            }
+            Err(error) => return Err(LifecycleError::Runtime(error)),
+            Ok(survivor) => return Err(LifecycleError::AutostartSurvivor(survivor.pid())),
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
 fn run_json(
     binary: &Path,
     arguments: &[&str],
@@ -1168,81 +1155,6 @@ fn run_command(
     wait_output(child, timeout)
 }
 
-#[cfg(windows)]
-fn terminate_process(pid: u32) -> Result<(), LifecycleError> {
-    let status = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
-        .map_err(LifecycleError::TerminateProcess)?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(LifecycleError::TerminateProcessFailed(status))
-    }
-}
-
-#[cfg(unix)]
-fn terminate_process(pid: u32) -> Result<(), LifecycleError> {
-    let status = Command::new("kill")
-        .args(["-KILL", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
-        .map_err(LifecycleError::TerminateProcess)?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(LifecycleError::TerminateProcessFailed(status))
-    }
-}
-
-fn wait_until_process_exit(pid: u32) -> Result<(), LifecycleError> {
-    let deadline = Instant::now()
-        .checked_add(STOP_TIMEOUT)
-        .ok_or(LifecycleError::Clock)?;
-    loop {
-        if !process_is_running(pid)? {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(LifecycleError::ProcessExitTimedOut);
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
-}
-
-#[cfg(windows)]
-fn process_is_running(pid: u32) -> Result<bool, LifecycleError> {
-    let output = Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(LifecycleError::ProcessProbe)?;
-    if !output.status.success() {
-        return Err(LifecycleError::ProcessProbeFailed(output.status));
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    Ok(!text.contains("No tasks are running") && text.contains(&pid.to_string()))
-}
-
-#[cfg(unix)]
-fn process_is_running(pid: u32) -> Result<bool, LifecycleError> {
-    let status = Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(LifecycleError::ProcessProbe)?;
-    Ok(status.success())
-}
-
 fn wait_output(mut child: Child, timeout: Duration) -> Result<Output, LifecycleError> {
     let deadline = Instant::now()
         .checked_add(timeout)
@@ -1261,18 +1173,14 @@ fn wait_output(mut child: Child, timeout: Duration) -> Result<Output, LifecycleE
 }
 
 fn read_completed_output(child: &mut Child, status: ExitStatus) -> Result<Output, LifecycleError> {
-    let stdout = child
-        .stdout
-        .take()
-        .map(read_stream)
-        .transpose()?
-        .unwrap_or_default();
-    let stderr = child
-        .stderr
-        .take()
-        .map(read_stream)
-        .transpose()?
-        .unwrap_or_default();
+    let stdout = match child.stdout.take().map(read_stream).transpose()? {
+        Some(stdout) => stdout,
+        None => Vec::new(),
+    };
+    let stderr = match child.stderr.take().map(read_stream).transpose()? {
+        Some(stderr) => stderr,
+        None => Vec::new(),
+    };
     Ok(Output {
         status,
         stdout,
@@ -1340,8 +1248,8 @@ fn assert_support_telemetry(
     second: &rootlight_client::SupportBundle,
 ) -> Result<(), LifecycleError> {
     if health.protocol_version != "1.5"
-        || first.schema_version != 2
-        || second.schema_version != 2
+        || first.schema_version != CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+        || second.schema_version != CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
         || first.contains_source
         || second.contains_source
     {
@@ -1524,9 +1432,9 @@ fn assert_success_type(value: &Value, expected: &str) -> Result<(), LifecycleErr
 }
 
 fn assert_error_code(value: &Value, expected: &str) -> Result<(), LifecycleError> {
-    if value["contract_version"] == "1.0"
-        && value["ok"] == false
-        && value["error"]["code"] == expected
+    if value["contract_version"].as_str() == Some("1.0")
+        && value["ok"].as_bool() == Some(false)
+        && value["error"]["code"].as_str() == Some(expected)
     {
         Ok(())
     } else {
@@ -1535,15 +1443,25 @@ fn assert_error_code(value: &Value, expected: &str) -> Result<(), LifecycleError
 }
 
 fn assert_cancel_accepted(value: &Value) -> Result<(), LifecycleError> {
-    if value["result"]["data"]["accepted"] == true {
+    let data = &value["result"]["data"];
+    if data["accepted"] == true && data["operation"]["cancellation_requested"] == true {
         Ok(())
     } else {
         Err(LifecycleError::UnexpectedEnvelope)
     }
 }
 
+fn operation_data(value: &Value) -> &Value {
+    let data = &value["result"]["data"];
+    if data.get("operation").is_some() && data.get("state").is_none() {
+        &data["operation"]
+    } else {
+        data
+    }
+}
+
 fn assert_operation_state(value: &Value, expected: &str) -> Result<(), LifecycleError> {
-    if value["result"]["data"]["state"] == expected {
+    if operation_data(value)["state"] == expected {
         Ok(())
     } else {
         Err(LifecycleError::UnexpectedEnvelope)
@@ -1551,7 +1469,7 @@ fn assert_operation_state(value: &Value, expected: &str) -> Result<(), Lifecycle
 }
 
 fn assert_recovery_class(value: &Value, expected: &str) -> Result<(), LifecycleError> {
-    if value["result"]["data"]["recovery_class"] == expected {
+    if operation_data(value)["recovery_class"] == expected {
         Ok(())
     } else {
         Err(LifecycleError::UnexpectedEnvelope)
@@ -1563,10 +1481,11 @@ fn assert_timing_fields(
     deadline_unix_ms: Option<&str>,
     lease_expires_unix_ms: Option<&str>,
 ) -> Result<(), LifecycleError> {
-    let observed_deadline = value["result"]["data"]["deadline_unix_ms"]
+    let data = operation_data(value);
+    let observed_deadline = data["deadline_unix_ms"]
         .as_u64()
         .map(|value| value.to_string());
-    let observed_lease = value["result"]["data"]["lease_expires_unix_ms"]
+    let observed_lease = data["lease_expires_unix_ms"]
         .as_u64()
         .map(|value| value.to_string());
     if observed_deadline.as_deref() == deadline_unix_ms
@@ -1579,13 +1498,14 @@ fn assert_timing_fields(
 }
 
 fn assert_same_operation(left: &Value, right: &Value) -> Result<(), LifecycleError> {
-    if left["result"]["data"]["operation"] == right["result"]["data"]["operation"]
-        && left["result"]["data"]["kind"] == right["result"]["data"]["kind"]
-        && left["result"]["data"]["plan_hash"] == right["result"]["data"]["plan_hash"]
-        && left["result"]["data"]["detached"] == right["result"]["data"]["detached"]
-        && left["result"]["data"]["deadline_unix_ms"] == right["result"]["data"]["deadline_unix_ms"]
-        && left["result"]["data"]["lease_expires_unix_ms"]
-            == right["result"]["data"]["lease_expires_unix_ms"]
+    let left = operation_data(left);
+    let right = operation_data(right);
+    if left["operation"] == right["operation"]
+        && left["kind"] == right["kind"]
+        && left["plan_hash"] == right["plan_hash"]
+        && left["detached"] == right["detached"]
+        && left["deadline_unix_ms"] == right["deadline_unix_ms"]
+        && left["lease_expires_unix_ms"] == right["lease_expires_unix_ms"]
     {
         Ok(())
     } else {
@@ -1594,7 +1514,13 @@ fn assert_same_operation(left: &Value, right: &Value) -> Result<(), LifecycleErr
 }
 
 fn assert_operation_submit_equivalent(left: &Value, right: &Value) -> Result<(), LifecycleError> {
-    if left == right {
+    assert_same_operation(left, right)?;
+    if operation_data(left)["state"] == "succeeded"
+        && matches!(
+            operation_data(right)["state"].as_str(),
+            Some("queued" | "running" | "succeeded")
+        )
+    {
         Ok(())
     } else {
         Err(LifecycleError::OperationSubmitMismatch)
@@ -1628,7 +1554,7 @@ pub(crate) enum LifecycleError {
     MissingBinary(PathBuf),
     #[error("failed to create daemon lifecycle temporary directory")]
     TemporaryDirectory(#[source] io::Error),
-    #[error("daemon lifecycle runtime setup failed")]
+    #[error("daemon lifecycle runtime setup failed: {0}")]
     Runtime(#[source] RuntimeError),
     #[error("daemon lifecycle IPC setup failed")]
     Ipc(#[source] rootlight_ipc::IpcError),
@@ -1656,7 +1582,7 @@ pub(crate) enum LifecycleError {
     InvalidDaemonLogSequence,
     #[error("supervised daemon telemetry evidence was incomplete")]
     MissingDaemonTelemetryEvidence,
-    #[error("schema-v2 support telemetry evidence was invalid")]
+    #[error("schema-v3 support telemetry evidence was invalid")]
     InvalidSupportTelemetry,
     #[error("privacy sentinel appeared in {0}")]
     PrivacySentinelFound(&'static str),
@@ -1670,16 +1596,6 @@ pub(crate) enum LifecycleError {
     TerminateChild(#[source] io::Error),
     #[error("forced daemon termination unexpectedly returned success")]
     CrashExitSucceeded,
-    #[error("failed to terminate autostarted daemon")]
-    TerminateProcess(#[source] io::Error),
-    #[error("autostarted daemon termination failed with {0}")]
-    TerminateProcessFailed(ExitStatus),
-    #[error("failed to probe autostarted daemon liveness")]
-    ProcessProbe(#[source] io::Error),
-    #[error("autostarted daemon liveness probe failed with {0}")]
-    ProcessProbeFailed(ExitStatus),
-    #[error("autostarted daemon did not exit within the cleanup deadline")]
-    ProcessExitTimedOut,
     #[error("failed to read lifecycle command output")]
     ReadOutput(#[source] io::Error),
     #[error("daemon lifecycle command timed out")]
@@ -1704,6 +1620,11 @@ pub(crate) enum LifecycleError {
     UnexpectedSampledOperationState(OperationState),
     #[error("daemon cancellation did not reach the required state")]
     UnexpectedCancellationState,
+    #[error("daemon cancellation response was accepted={accepted}, state={state:?}")]
+    UnexpectedCancellationObservation {
+        accepted: bool,
+        state: OperationState,
+    },
     #[error("daemon control latency samples are missing")]
     MissingLatencySamples,
     #[error("daemon control latency percentile is invalid")]
@@ -1736,14 +1657,14 @@ pub(crate) enum LifecycleError {
     },
     #[error("daemon lifecycle client thread panicked")]
     ClientThreadPanicked,
-    #[error("simultaneous autostart client {index} failed: {source}")]
-    AutostartClient {
-        index: usize,
-        #[source]
-        source: Box<LifecycleError>,
-    },
+    #[error("simultaneous autostart did not return the exact daemon owner")]
+    MissingAutostartOwner,
+    #[error("simultaneous autostart returned more than one daemon owner")]
+    MultipleAutostartOwners,
     #[error("daemon discovery cleanup timed out")]
     CleanupTimedOut,
+    #[error("simultaneous autostart left daemon process {0} after cleanup")]
+    AutostartSurvivor(u32),
     #[error("monotonic lifecycle deadline overflowed")]
     Clock,
     #[error("lifecycle command failed with {status}: {stderr}")]

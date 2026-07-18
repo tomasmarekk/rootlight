@@ -7,9 +7,9 @@
 
 use std::{
     collections::BTreeMap,
-    fs::{File, TryLockError},
+    fs::{self, File, TryLockError},
     io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -27,8 +27,18 @@ use sha2::{Digest as _, Sha256};
 
 /// Maximum terminal operation records retained after pruning.
 pub const MAX_OPERATION_HISTORY: usize = 10_000;
+/// Maximum nonterminal records admitted across one catalog.
+pub const MAX_NONTERMINAL_OPERATIONS: u32 = 65_536;
+/// Maximum total rows accepted from one operation catalog.
+pub const MAX_OPERATION_ROWS: usize = MAX_OPERATION_HISTORY + 65_536;
 /// Maximum serialized public error retained for one terminal operation.
 pub const MAX_PUBLIC_ERROR_BYTES: usize = 16 * 1024;
+/// Maximum accepted size of the main SQLite catalog before opening it.
+pub const MAX_CATALOG_BYTES: u64 = 256 * 1024 * 1024;
+/// Maximum accepted size of the SQLite write-ahead log before opening a catalog.
+pub const MAX_CATALOG_WAL_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum accepted size of SQLite's shared-memory sidecar before opening a catalog.
+pub const MAX_CATALOG_SHM_BYTES: u64 = 8 * 1024 * 1024;
 /// Minimum bundled SQLite version required by the P1 catalog.
 pub const MIN_SQLITE_VERSION_NUMBER: i32 = 3_051_003;
 /// Current operation-journal schema version.
@@ -50,8 +60,12 @@ const VERSION_TWO_MIGRATION_CHECKSUM: [u8; 32] = [
     0x38, 0x93, 0xf3, 0xf0, 0x33, 0x07, 0xb8, 0x8e, 0x9c, 0x15, 0x64, 0xa5, 0x53, 0x6f, 0x76, 0x92,
     0x55, 0xe3, 0xbd, 0xc9, 0x36, 0x57, 0x73, 0x57, 0x4e, 0xfd, 0xfc, 0x8a, 0x09, 0xe6, 0x66, 0xfe,
 ];
+// `application_meta` already belongs to schema two, so older schema-two binaries
+// safely ignore this namespaced retry intent without a rollback-breaking DDL change.
+const RELATIVE_TIMEOUT_META_PREFIX: &str = "operation_relative_timeout/";
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const SYSTEM_CLIENT_INSTANCE_ID: [u8; 16] = [0; 16];
+const CATALOG_MUTATION_BATCH: usize = 256;
 
 /// Checked client-declared identity carried over an OS-authorized local connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -211,6 +225,27 @@ pub struct OperationSubmission {
     pub deadline_unix_ms: Option<u64>,
     /// Required wall-clock lease expiry for attached work.
     pub lease_expires_unix_ms: Option<u64>,
+}
+
+/// Retry comparison for a newly prepared operation deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeadlineRetry {
+    /// Requires the submitted absolute deadline to match durable metadata exactly.
+    Exact,
+    /// Matches detached work whose identical relative timeout was re-anchored.
+    ReanchoredRelative {
+        /// Original relative timeout, before conversion to an audit wall-clock deadline.
+        timeout_ms: u64,
+    },
+}
+
+impl DeadlineRetry {
+    const fn relative_timeout_ms(self) -> Option<u64> {
+        match self {
+            Self::Exact => None,
+            Self::ReanchoredRelative { timeout_ms } => Some(timeout_ms),
+        }
+    }
 }
 
 impl OperationSubmission {
@@ -435,7 +470,6 @@ impl CatalogStorage {
 pub struct OperationJournal {
     connection: Mutex<Connection>,
     cancellations: Mutex<BTreeMap<OperationId, Cancellation>>,
-    lease_deadlines: Mutex<BTreeMap<OperationId, LeaseDeadline>>,
     errors: Mutex<BTreeMap<OperationId, PublicError>>,
     #[cfg(test)]
     cancellation_signal_hook: Mutex<Option<CancellationSignalHook>>,
@@ -455,6 +489,7 @@ impl OperationJournal {
     ///
     /// Returns [`OperationError`] for SQLite version, schema, integrity, or recovery failures.
     pub fn open(path: &Path) -> Result<Self, OperationError> {
+        validate_catalog_file_sizes(path)?;
         let connection = Connection::open(path).map_err(map_sqlite_error)?;
         Self::initialize(connection, CatalogStorage::Persistent, unix_time_ms()?)
     }
@@ -478,17 +513,21 @@ impl OperationJournal {
         configure_catalog_connection(&connection, storage)?;
         migrate_schema(&mut connection, storage)?;
         validate_catalog_identity(&connection)?;
+        validate_operation_row_limit(&connection)?;
         install_catalog_authorizer(&connection)?;
         let journal = Self {
             connection: Mutex::new(connection),
             cancellations: Mutex::new(BTreeMap::new()),
-            lease_deadlines: Mutex::new(BTreeMap::new()),
             errors: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             cancellation_signal_hook: Mutex::new(None),
         };
         journal.recover_nonterminal(now_unix_ms)?;
         journal.prune_to(MAX_OPERATION_HISTORY)?;
+        {
+            let connection = journal.lock_connection()?;
+            reconcile_relative_timeout_intents(&connection)?;
+        }
         Ok(journal)
     }
 
@@ -502,42 +541,30 @@ impl OperationJournal {
         &self,
         submission: OperationSubmission,
     ) -> Result<SubmissionOutcome, OperationError> {
-        self.submit_at(submission, unix_time_ms()?, Instant::now())
+        self.submit_with_deadline_retry(submission, DeadlineRetry::Exact)
     }
 
-    /// Returns an existing retry-compatible record without inserting new work.
+    /// Submits immutable operation metadata with an explicit deadline-retry policy.
+    ///
+    /// Re-anchored matching is reserved for detached relative timeouts. It preserves
+    /// the first durable absolute deadline while still rejecting timed/untimed reuse.
     ///
     /// # Errors
     ///
-    /// Returns [`OperationError::SubmissionConflict`] when immutable metadata differs,
-    /// or [`OperationError::NotFound`] when capacity is still required for a new record.
-    pub fn retry_status(
+    /// Returns [`OperationError::SubmissionConflict`] when immutable metadata is
+    /// incompatible, or a typed validation or storage error.
+    pub fn submit_with_deadline_retry(
         &self,
         submission: OperationSubmission,
-    ) -> Result<OperationRecord, OperationError> {
-        validate_submission(submission)?;
-        let connection = self.lock_connection()?;
-        let existing =
-            load_record(&connection, submission.operation)?.ok_or(OperationError::NotFound)?;
-        if submission_matches(&existing, submission) {
-            Ok(existing)
-        } else {
-            Err(OperationError::SubmissionConflict)
-        }
-    }
-
-    fn submit_at(
-        &self,
-        submission: OperationSubmission,
-        now_unix_ms: u64,
-        now: Instant,
+        deadline_retry: DeadlineRetry,
     ) -> Result<SubmissionOutcome, OperationError> {
-        validate_submission(submission)?;
-        let live_timers = live_timers_for_submission(submission, now_unix_ms, now)?;
+        validate_submission_with_retry(submission, deadline_retry)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
-        if let Some(existing) = load_record(&transaction, submission.operation)? {
-            if submission_matches(&existing, submission) {
+        if let Some((existing, stored_timeout_ms)) =
+            load_record_with_retry_intent(&transaction, submission.operation)?
+        {
+            if submission_matches(&existing, stored_timeout_ms, submission, deadline_retry) {
                 transaction.commit().map_err(map_sqlite_error)?;
                 return Ok(SubmissionOutcome {
                     inserted: false,
@@ -546,6 +573,7 @@ impl OperationJournal {
             }
             return Err(OperationError::SubmissionConflict);
         }
+        ensure_operation_row_capacity(&transaction)?;
         let sequence = next_sequence(&transaction)?;
         transaction
             .execute(
@@ -568,26 +596,56 @@ impl OperationJournal {
                 ],
             )
             .map_err(map_sqlite_error)?;
+        store_relative_timeout_intent(
+            &transaction,
+            submission.operation,
+            deadline_retry.relative_timeout_ms(),
+        )?;
         transaction.commit().map_err(map_sqlite_error)?;
         self.lock_cancellations()?
-            .insert(submission.operation, live_timers.cancellation);
-        if let Some(lease_deadline) = live_timers.lease_deadline {
-            self.lock_lease_deadlines()?.insert(
-                submission.operation,
-                LeaseDeadline {
-                    deadline: lease_deadline,
-                    expiry_unix_ms: submission
-                        .lease_expires_unix_ms
-                        .ok_or(OperationError::CorruptState)?,
-                },
-            );
-        }
+            .insert(submission.operation, Cancellation::new());
         drop(connection);
         self.prune_to(MAX_OPERATION_HISTORY)?;
         Ok(SubmissionOutcome {
             inserted: true,
             operation: self.status(submission.operation)?,
         })
+    }
+
+    /// Returns an existing retry-compatible record without inserting new work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::SubmissionConflict`] when immutable metadata differs,
+    /// or [`OperationError::NotFound`] when capacity is still required for a new record.
+    pub fn retry_status(
+        &self,
+        submission: OperationSubmission,
+    ) -> Result<OperationRecord, OperationError> {
+        self.retry_status_with_deadline_retry(submission, DeadlineRetry::Exact)
+    }
+
+    /// Returns retry-compatible work using an explicit deadline-retry policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationError::SubmissionConflict`] when immutable metadata is
+    /// incompatible, or [`OperationError::NotFound`] when no durable record exists.
+    pub fn retry_status_with_deadline_retry(
+        &self,
+        submission: OperationSubmission,
+        deadline_retry: DeadlineRetry,
+    ) -> Result<OperationRecord, OperationError> {
+        validate_submission_with_retry(submission, deadline_retry)?;
+        let connection = self.lock_connection()?;
+        let (existing, stored_timeout_ms) =
+            load_record_with_retry_intent(&connection, submission.operation)?
+                .ok_or(OperationError::NotFound)?;
+        if submission_matches(&existing, stored_timeout_ms, submission, deadline_retry) {
+            Ok(existing)
+        } else {
+            Err(OperationError::SubmissionConflict)
+        }
     }
 
     /// Inserts a legacy internal control probe and returns its cancellation token.
@@ -672,7 +730,6 @@ impl OperationJournal {
         }
         if next.is_terminal() {
             self.lock_cancellations()?.remove(&operation);
-            self.lock_lease_deadlines()?.remove(&operation);
             self.prune_to(MAX_OPERATION_HISTORY)?;
         }
         self.status(operation)
@@ -690,65 +747,52 @@ impl OperationJournal {
         &self,
         operation: OperationId,
     ) -> Result<OperationRecord, OperationError> {
-        let current = self.status(operation)?;
-        if current.state != OperationState::Queued || current.stage != OperationStage::Accepted {
-            return Err(OperationError::IllegalTransition {
-                from: current.state,
-                to: OperationState::Running,
-            });
-        }
-        let revision = next_revision(current.revision)?;
-        let connection = self.lock_connection()?;
-        let updated = connection
-            .execute(
-                "UPDATE operations
-                 SET state = 'running', stage = 'executing', revision = ?1
-                 WHERE operation = ?2 AND revision = ?3
-                   AND state = 'queued' AND stage = 'accepted'
-                   AND cancellation_requested = 0",
-                params![
-                    u64_to_i64(revision)?,
-                    operation.as_bytes().as_slice(),
-                    u64_to_i64(current.revision)?,
-                ],
-            )
-            .map_err(map_sqlite_error)?;
-        drop(connection);
-        if updated != 1 {
-            let observed = self.status(operation)?;
-            if observed.cancellation_requested {
-                return Err(OperationError::CancellationWon);
-            }
-            return Err(OperationError::ConcurrentUpdate);
-        }
-        self.status(operation)
+        self.start_execution_with(
+            operation,
+            || true,
+            || Ok(()),
+            |recovery, reason| self.interrupt_started(operation, recovery, reason),
+        )
     }
 
-    /// Atomically starts queued work only while its process-local deadline is live.
+    /// Atomically starts queued work before a monotonic deadline.
+    ///
+    /// The deadline remains authoritative while the journal writer is blocked.
+    /// A start that cannot commit in time is rolled back or durably interrupted
+    /// before this method reports the elapsed deadline.
     ///
     /// # Errors
     ///
-    /// Returns [`OperationError::CancellationWon`] after persisting an elapsed
-    /// deadline, or a typed state/storage failure.
-    pub fn start_execution_if_live(
+    /// Returns [`OperationError::StartDeadlineElapsed`] when durable worker
+    /// ownership cannot be established before `deadline`, or another typed
+    /// lifecycle or storage error.
+    pub fn start_execution_before(
         &self,
         operation: OperationId,
+        deadline: Instant,
     ) -> Result<OperationRecord, OperationError> {
-        self.start_execution_if_live_at(operation, Instant::now())
+        self.start_execution_with(
+            operation,
+            || Instant::now() < deadline,
+            || Ok(()),
+            |recovery, reason| self.interrupt_started(operation, recovery, reason),
+        )
     }
 
-    fn start_execution_if_live_at(
+    fn start_execution_with(
         &self,
         operation: OperationId,
-        now: Instant,
+        mut can_start: impl FnMut() -> bool,
+        mut after_commit: impl FnMut() -> Result<(), OperationError>,
+        mut compensate: impl FnMut(
+            RecoveryClass,
+            CancellationReason,
+        ) -> Result<OperationRecord, OperationError>,
     ) -> Result<OperationRecord, OperationError> {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
-        if matches!(
-            current.state,
-            OperationState::Cancelled | OperationState::Interrupted
-        ) {
+        if current.cancellation_requested {
             return Err(OperationError::CancellationWon);
         }
         if current.state != OperationState::Queued || current.stage != OperationStage::Accepted {
@@ -757,24 +801,8 @@ impl OperationJournal {
                 to: OperationState::Running,
             });
         }
-        let mut cancellations = self.lock_cancellations()?;
-        let cancellation = cancellations
-            .get(&operation)
-            .ok_or(OperationError::CorruptState)?;
-        if let Some(reason) = cancellation.reason_at(now) {
-            if reason != CancellationReason::DeadlineExceeded {
-                return Err(OperationError::CorruptState);
-            }
-            if update_interrupted(&transaction, operation, RecoveryClass::DeadlineElapsed)? != 1 {
-                return Err(OperationError::ConcurrentUpdate);
-            }
-            transaction.commit().map_err(map_sqlite_error)?;
-            cancellations.remove(&operation);
-            drop(cancellations);
-            self.lock_lease_deadlines()?.remove(&operation);
-            drop(connection);
-            self.prune_to(MAX_OPERATION_HISTORY)?;
-            return Err(OperationError::CancellationWon);
+        if !can_start() {
+            return Err(OperationError::StartDeadlineElapsed);
         }
         let revision = next_revision(current.revision)?;
         let updated = transaction
@@ -792,12 +820,70 @@ impl OperationJournal {
             )
             .map_err(map_sqlite_error)?;
         if updated != 1 {
+            let observed = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+            if observed.cancellation_requested {
+                return Err(OperationError::CancellationWon);
+            }
             return Err(OperationError::ConcurrentUpdate);
         }
+        if !can_start() {
+            return Err(OperationError::StartDeadlineElapsed);
+        }
+        let started = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if started.state != OperationState::Running
+            || started.stage != OperationStage::Executing
+            || started.revision != revision
+            || started.cancellation_requested
+        {
+            return Err(OperationError::CorruptState);
+        }
+        if !can_start() {
+            return Err(OperationError::StartDeadlineElapsed);
+        }
         transaction.commit().map_err(map_sqlite_error)?;
-        drop(cancellations);
         drop(connection);
-        self.status(operation)
+        if let Err(error) = after_commit() {
+            compensate(
+                RecoveryClass::InterruptedByRestart,
+                CancellationReason::Shutdown,
+            )
+            .map_err(|_| OperationError::CommittedStartCompensationFailed)?;
+            return Err(error);
+        }
+        if can_start() {
+            return Ok(started);
+        }
+        let compensated = compensate(
+            RecoveryClass::DeadlineElapsed,
+            CancellationReason::DeadlineExceeded,
+        )
+        .map_err(|_| OperationError::CommittedStartCompensationFailed)?;
+        if compensated.cancellation_requested {
+            Err(OperationError::CancellationWon)
+        } else {
+            Err(OperationError::StartDeadlineElapsed)
+        }
+    }
+
+    /// Interrupts a durable start whose worker acknowledgement was lost.
+    ///
+    /// This fail-closed transition is only valid after a successful start. It
+    /// prevents actor or worker teardown from leaving ownerless running work.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed lifecycle or storage error when the operation is neither
+    /// active nor already terminal.
+    pub fn interrupt_unacknowledged_start(
+        &self,
+        operation: OperationId,
+    ) -> Result<OperationRecord, OperationError> {
+        self.interrupt_started(
+            operation,
+            RecoveryClass::InterruptedByRestart,
+            CancellationReason::Shutdown,
+        )
+        .map_err(|_| OperationError::CommittedStartCompensationFailed)
     }
 
     /// Advances the monotonic operation stage.
@@ -905,6 +991,15 @@ impl OperationJournal {
         operation: OperationId,
         reason: CancellationReason,
     ) -> Result<CancellationOutcome, OperationError> {
+        self.request_cancellation_with(operation, reason, || {})
+    }
+
+    fn request_cancellation_with(
+        &self,
+        operation: OperationId,
+        reason: CancellationReason,
+        mut after_commit: impl FnMut(),
+    ) -> Result<CancellationOutcome, OperationError> {
         let reason_text = cancellation_reason_as_str(reason)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
@@ -915,6 +1010,14 @@ impl OperationJournal {
                 && current.stage == OperationStage::Cleanup
         {
             transaction.commit().map_err(map_sqlite_error)?;
+            drop(connection);
+            if let Some(durable_reason) = current.cancellation_reason {
+                // An idempotent caller waits behind an in-flight first writer
+                // and replays the durable reason before acknowledging it.
+                if let Some(token) = self.lock_cancellations()?.get(&operation) {
+                    let _ = token.cancel(durable_reason);
+                }
+            }
             return Ok(CancellationOutcome {
                 accepted: false,
                 operation: current,
@@ -927,7 +1030,7 @@ impl OperationJournal {
             OperationState::Succeeded
             | OperationState::Failed
             | OperationState::Cancelled
-            | OperationState::Interrupted => unreachable!("terminal states returned above"),
+            | OperationState::Interrupted => return Err(OperationError::CorruptState),
         };
         let revision = next_revision(current.revision)?;
         let updated = transaction
@@ -951,19 +1054,23 @@ impl OperationJournal {
         if updated != 1 {
             return Err(OperationError::ConcurrentUpdate);
         }
+        // The token-map guard spans COMMIT and signal so terminal compensation
+        // cannot remove the last process-local token in that gap.
+        let mut cancellations = self.lock_cancellations()?;
+        let token = cancellations
+            .get(&operation)
+            .cloned()
+            .ok_or(OperationError::NotFound)?;
         transaction.commit().map_err(map_sqlite_error)?;
-        // Commit durable intent before waking workers, but retain the writer
-        // lock through signalling so publication cannot observe a cancellation
-        // row whose process-local token does not yet carry the same reason.
         #[cfg(test)]
         self.pause_after_cancellation_commit()?;
-        let token = self.cancellation_token(operation)?;
+        drop(connection);
+        after_commit();
         let _ = token.cancel(reason);
         if next_state.is_terminal() {
-            self.lock_cancellations()?.remove(&operation);
-            self.lock_lease_deadlines()?.remove(&operation);
+            cancellations.remove(&operation);
         }
-        drop(connection);
+        drop(cancellations);
         if next_state.is_terminal() {
             self.prune_to(MAX_OPERATION_HISTORY)?;
         }
@@ -1021,14 +1128,6 @@ impl OperationJournal {
         &self,
         operation: OperationId,
     ) -> Result<OperationRecord, OperationError> {
-        self.complete_repository_publication_at(operation, Instant::now())
-    }
-
-    fn complete_repository_publication_at(
-        &self,
-        operation: OperationId,
-        now: Instant,
-    ) -> Result<OperationRecord, OperationError> {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
@@ -1052,7 +1151,7 @@ impl OperationJournal {
         let cancellation = cancellations
             .get(&operation)
             .ok_or(OperationError::CorruptState)?;
-        if let Some(reason) = cancellation.reason_at(now) {
+        if let Some(reason) = cancellation.reason() {
             match reason {
                 CancellationReason::DeadlineExceeded => {
                     if update_interrupted(&transaction, operation, RecoveryClass::DeadlineElapsed)?
@@ -1103,7 +1202,6 @@ impl OperationJournal {
             transaction.commit().map_err(map_sqlite_error)?;
             cancellations.remove(&operation);
             drop(cancellations);
-            self.lock_lease_deadlines()?.remove(&operation);
             drop(connection);
             self.prune_to(MAX_OPERATION_HISTORY)?;
             return Err(OperationError::CancellationWon);
@@ -1139,7 +1237,6 @@ impl OperationJournal {
         transaction.commit().map_err(map_sqlite_error)?;
         cancellations.remove(&operation);
         drop(cancellations);
-        self.lock_lease_deadlines()?.remove(&operation);
         drop(connection);
         self.prune_to(MAX_OPERATION_HISTORY)?;
         self.status(operation)
@@ -1173,33 +1270,33 @@ impl OperationJournal {
             .ok_or(OperationError::NotFound)
     }
 
-    /// Renews an attached operation lease for its authenticated owner.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed error for detached, terminal, stale, foreign-owner, or zero expiry.
-    pub fn renew_lease(
+    #[cfg(test)]
+    fn renew_lease(
         &self,
         operation: OperationId,
         owner: ClientInstanceId,
         expiry_unix_ms: u64,
     ) -> Result<OperationRecord, OperationError> {
-        if expiry_unix_ms == 0 {
-            return Err(OperationError::InvalidLease);
-        }
-        let now_unix_ms = unix_time_ms()?;
-        if expiry_unix_ms <= now_unix_ms {
-            return Err(OperationError::InvalidLease);
-        }
-        let deadline = monotonic_deadline(Instant::now(), now_unix_ms, expiry_unix_ms)?;
         let connection = self.lock_connection()?;
         let current = load_record(&connection, operation)?.ok_or(OperationError::NotFound)?;
-        if current.detached || current.state.is_terminal() || current.owner != owner {
+        if current.detached || current.owner != owner {
             return Err(OperationError::LeaseOwnerMismatch);
+        }
+        if current.cancellation_requested {
+            return Err(OperationError::CancellationWon);
+        }
+        if current.lease_expires_unix_ms == Some(expiry_unix_ms) {
+            return Ok(current);
+        }
+        if current.state.is_terminal() {
+            return Err(OperationError::LeaseOwnerMismatch);
+        }
+        if expiry_unix_ms == 0 || expiry_unix_ms <= unix_time_ms()? {
+            return Err(OperationError::InvalidLease);
         }
         if current
             .lease_expires_unix_ms
-            .is_some_and(|existing| expiry_unix_ms <= existing)
+            .is_some_and(|existing| expiry_unix_ms < existing)
         {
             return Err(OperationError::InvalidLease);
         }
@@ -1221,20 +1318,13 @@ impl OperationJournal {
             return Err(OperationError::ConcurrentUpdate);
         }
         drop(connection);
-        self.lock_lease_deadlines()?.insert(
-            operation,
-            LeaseDeadline {
-                deadline,
-                expiry_unix_ms,
-            },
-        );
         self.status(operation)
     }
 
     /// Interrupts active work after its process-local deadline elapses.
     ///
-    /// This is the authoritative live deadline transition; persisted wall-clock
-    /// timestamps remain for admission audit and restart classification only.
+    /// The process-local scheduler decides when the deadline is due. Persisted
+    /// wall-clock timestamps remain audit and restart-classification metadata.
     ///
     /// # Errors
     ///
@@ -1246,7 +1336,7 @@ impl OperationJournal {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
-        if current.state.is_terminal() {
+        if current.state.is_terminal() || current.cancellation_requested {
             transaction.commit().map_err(map_sqlite_error)?;
             return Ok(current);
         }
@@ -1255,98 +1345,36 @@ impl OperationJournal {
             return Err(OperationError::ConcurrentUpdate);
         }
         transaction.commit().map_err(map_sqlite_error)?;
-        self.lock_cancellations()?.remove(&operation);
-        self.lock_lease_deadlines()?.remove(&operation);
+        if let Some(token) = self.lock_cancellations()?.remove(&operation) {
+            let _ = token.cancel(CancellationReason::DeadlineExceeded);
+        }
         drop(connection);
         self.prune_to(MAX_OPERATION_HISTORY)?;
         self.status(operation)
     }
 
-    /// Expires at most `max_records` live deadlines or attached leases.
+    /// Interrupts an attached operation when the selected lease expiry wins.
     ///
-    /// Live expiry uses only process-local monotonic clocks. Persisted wall-clock
-    /// timestamps remain restart-recovery and audit metadata.
+    /// The expected persisted expiry prevents an already-selected stale timer from
+    /// interrupting a lease that was renewed before this transition committed.
     ///
     /// # Errors
     ///
-    /// Returns a typed storage or bound error.
-    pub fn expire_due(&self, now: Instant, max_records: usize) -> Result<u32, OperationError> {
-        if max_records == 0 {
-            return Ok(0);
-        }
-        let due = self.due_live_interruptions(now, max_records)?;
-        let mut changed = 0_u32;
-        for interruption in due {
-            let interrupted = match interruption.reason {
-                CancellationReason::DeadlineExceeded => {
-                    let before = self.status(interruption.operation)?;
-                    let observed = self.interrupt_deadline(interruption.operation)?;
-                    !before.state.is_terminal()
-                        && observed.state == OperationState::Interrupted
-                        && observed.revision > before.revision
-                }
-                CancellationReason::ParentCancelled => self.interrupt_lease(
-                    interruption.operation,
-                    interruption
-                        .lease_expires_unix_ms
-                        .ok_or(OperationError::CorruptState)?,
-                )?,
-                CancellationReason::ClientRequest
-                | CancellationReason::Shutdown
-                | CancellationReason::ResourceLimit => {
-                    return Err(OperationError::CorruptState);
-                }
-                _ => return Err(OperationError::UnsupportedCancellationReason),
-            };
-            if interrupted {
-                changed = changed.checked_add(1).ok_or(OperationError::CorruptState)?;
-            }
-        }
-        Ok(changed)
-    }
-
-    fn due_live_interruptions(
-        &self,
-        now: Instant,
-        max_records: usize,
-    ) -> Result<Vec<PendingInterruption>, OperationError> {
-        let mut due = Vec::new();
-        let cancellations = self.lock_cancellations()?;
-        let leases = self.lock_lease_deadlines()?;
-        for (operation, token) in cancellations.iter() {
-            if due.len() >= max_records {
-                break;
-            }
-            if token.reason_at(now) == Some(CancellationReason::DeadlineExceeded) {
-                due.push(PendingInterruption {
-                    operation: *operation,
-                    reason: CancellationReason::DeadlineExceeded,
-                    lease_expires_unix_ms: None,
-                });
-                continue;
-            }
-            if let Some(lease) = leases.get(operation).filter(|lease| now >= lease.deadline) {
-                due.push(PendingInterruption {
-                    operation: *operation,
-                    reason: CancellationReason::ParentCancelled,
-                    lease_expires_unix_ms: Some(lease.expiry_unix_ms),
-                });
-            }
-        }
-        Ok(due)
-    }
-
-    fn interrupt_lease(
+    /// Returns a typed storage or concurrency error.
+    pub fn interrupt_lease(
         &self,
         operation: OperationId,
         expected_expiry_unix_ms: u64,
-    ) -> Result<bool, OperationError> {
+    ) -> Result<OperationRecord, OperationError> {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
-        if current.state.is_terminal() {
+        if current.state.is_terminal()
+            || current.cancellation_requested
+            || current.lease_expires_unix_ms != Some(expected_expiry_unix_ms)
+        {
             transaction.commit().map_err(map_sqlite_error)?;
-            return Ok(false);
+            return Ok(current);
         }
         if current.detached {
             return Err(OperationError::CorruptState);
@@ -1358,6 +1386,7 @@ impl OperationJournal {
                      revision = revision + 1
                  WHERE operation = ?1
                    AND lease_expires_unix_ms = ?2
+                   AND cancellation_requested = 0
                    AND state IN ('queued', 'running', 'cancelling')",
                 params![
                     operation.as_bytes().as_slice(),
@@ -1365,37 +1394,22 @@ impl OperationJournal {
                 ],
             )
             .map_err(map_sqlite_error)?;
-        transaction.commit().map_err(map_sqlite_error)?;
-        if updated == 0 {
-            drop(connection);
-            let observed = self.status(operation)?;
-            if observed.state.is_terminal()
-                || observed.lease_expires_unix_ms != Some(expected_expiry_unix_ms)
-            {
-                return Ok(false);
-            }
+        if updated != 1 {
             return Err(OperationError::ConcurrentUpdate);
         }
-        if updated != 1 {
-            return Err(OperationError::CorruptState);
-        }
+        transaction.commit().map_err(map_sqlite_error)?;
         if let Some(token) = self.lock_cancellations()?.remove(&operation) {
             let _ = token.cancel(CancellationReason::ParentCancelled);
         }
-        let mut leases = self.lock_lease_deadlines()?;
-        if leases
-            .get(&operation)
-            .is_some_and(|lease| lease.expiry_unix_ms == expected_expiry_unix_ms)
-        {
-            leases.remove(&operation);
-        }
-        drop(leases);
         drop(connection);
         self.prune_to(MAX_OPERATION_HISTORY)?;
-        Ok(true)
+        self.status(operation)
     }
 
     /// Interrupts at most `max_records` remaining nonterminal operations.
+    ///
+    /// One call is additionally capped to the journal's fixed mutation batch so
+    /// a hostile caller cannot turn shutdown into an attacker-sized allocation.
     ///
     /// # Errors
     ///
@@ -1432,11 +1446,6 @@ impl OperationJournal {
             }
         }
         drop(cancellations);
-        let mut lease_deadlines = self.lock_lease_deadlines()?;
-        for interruption in &interruptions {
-            lease_deadlines.remove(&interruption.operation);
-        }
-        drop(lease_deadlines);
         drop(connection);
         self.prune_to(MAX_OPERATION_HISTORY)?;
         u32::try_from(interruptions.len()).map_err(|_| OperationError::CorruptState)
@@ -1542,7 +1551,9 @@ impl OperationJournal {
         let connection = self.lock_connection()?;
         let storage = catalog_storage(&connection)?;
         validate_catalog_identity(&connection)?;
-        validate_schema(&connection, storage)
+        validate_schema(&connection, storage)?;
+        validate_operation_row_limit(&connection)?;
+        validate_relative_timeout_intents(&connection)
     }
 
     /// Revalidates a persistent catalog through a separate read-only connection.
@@ -1587,12 +1598,94 @@ impl OperationJournal {
     }
 
     fn recover_nonterminal(&self, now_unix_ms: u64) -> Result<(), OperationError> {
+        let mut recovered = 0_usize;
         loop {
-            let changed = self.recover_nonterminal_batch(now_unix_ms, 256)?;
+            let changed = self.recover_nonterminal_batch(now_unix_ms, CATALOG_MUTATION_BATCH)?;
             if changed == 0 {
                 return Ok(());
             }
+            recovered = recovered
+                .checked_add(usize::try_from(changed).map_err(|_| OperationError::CorruptState)?)
+                .ok_or(OperationError::CorruptState)?;
+            if recovered > MAX_OPERATION_ROWS {
+                return Err(OperationError::CatalogRowLimitExceeded);
+            }
         }
+    }
+
+    fn interrupt_started(
+        &self,
+        operation: OperationId,
+        recovery: RecoveryClass,
+        reason: CancellationReason,
+    ) -> Result<OperationRecord, OperationError> {
+        self.interrupt_started_with(operation, recovery, reason, || {})
+    }
+
+    fn interrupt_started_with(
+        &self,
+        operation: OperationId,
+        recovery: RecoveryClass,
+        reason: CancellationReason,
+        mut after_commit: impl FnMut(),
+    ) -> Result<OperationRecord, OperationError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction().map_err(map_sqlite_error)?;
+        let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        if current.state.is_terminal() {
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(current);
+        }
+        if !matches!(
+            current.state,
+            OperationState::Running | OperationState::Cancelling
+        ) {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        let updated = if current.cancellation_requested {
+            transaction
+                .execute(
+                    "UPDATE operations
+                     SET state = 'cancelled', revision = ?1
+                     WHERE operation = ?2 AND revision = ?3
+                       AND state = 'cancelling' AND cancellation_requested = 1",
+                    params![
+                        u64_to_i64(next_revision(current.revision)?)?,
+                        operation.as_bytes().as_slice(),
+                        u64_to_i64(current.revision)?,
+                    ],
+                )
+                .map_err(map_sqlite_error)?
+        } else {
+            transaction
+                .execute(
+                    "UPDATE operations
+                     SET state = 'interrupted', recovery_class = ?1, revision = ?2
+                     WHERE operation = ?3 AND revision = ?4
+                       AND state = 'running' AND cancellation_requested = 0",
+                    params![
+                        recovery.as_str(),
+                        u64_to_i64(next_revision(current.revision)?)?,
+                        operation.as_bytes().as_slice(),
+                        u64_to_i64(current.revision)?,
+                    ],
+                )
+                .map_err(map_sqlite_error)?
+        };
+        if updated != 1 {
+            return Err(OperationError::ConcurrentUpdate);
+        }
+        let interrupted = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        drop(connection);
+        after_commit();
+        if let Some(token) = self.lock_cancellations()?.remove(&operation)
+            && !current.cancellation_requested
+        {
+            let _ = token.cancel(reason);
+        }
+        self.prune_to(MAX_OPERATION_HISTORY)?;
+        Ok(interrupted)
     }
 
     fn recover_nonterminal_batch(
@@ -1600,6 +1693,10 @@ impl OperationJournal {
         now_unix_ms: u64,
         max_records: usize,
     ) -> Result<u32, OperationError> {
+        let max_records = max_records.min(CATALOG_MUTATION_BATCH);
+        if max_records == 0 {
+            return Ok(0);
+        }
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let ids = select_operation_ids(
@@ -1609,53 +1706,78 @@ impl OperationJournal {
             &[],
         )?;
         let mut changed = 0_u32;
-        for operation in ids {
+        for operation in &ids {
             let record =
-                load_record(&transaction, operation)?.ok_or(OperationError::CorruptState)?;
+                load_record(&transaction, *operation)?.ok_or(OperationError::CorruptState)?;
             let recovery = recovery_for(&record, now_unix_ms);
             changed = changed
-                .checked_add(update_interrupted(&transaction, operation, recovery)?)
+                .checked_add(update_interrupted(&transaction, *operation, recovery)?)
                 .ok_or(OperationError::CorruptState)?;
+        }
+        if changed != u32::try_from(ids.len()).map_err(|_| OperationError::CorruptState)? {
+            return Err(OperationError::CorruptState);
         }
         transaction.commit().map_err(map_sqlite_error)?;
         Ok(changed)
     }
 
     fn prune_to(&self, limit: usize) -> Result<(), OperationError> {
-        let limit = i64::try_from(limit).map_err(|_| OperationError::CorruptState)?;
-        let connection = self.lock_connection()?;
-        let mut statement = connection
-            .prepare(
-                "SELECT operation FROM operations
-                 WHERE state IN ('succeeded', 'failed', 'cancelled', 'interrupted')
-                 ORDER BY sequence DESC LIMIT -1 OFFSET ?1",
-            )
-            .map_err(map_sqlite_error)?;
-        let pruned = statement
-            .query_map([limit], |row| row.get::<_, Vec<u8>>(0))
-            .map_err(map_sqlite_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(map_sqlite_error)?;
-        drop(statement);
-        connection
-            .execute(
-                "DELETE FROM operations
-                 WHERE operation IN (
-                    SELECT operation FROM operations
-                    WHERE state IN ('succeeded', 'failed', 'cancelled', 'interrupted')
-                    ORDER BY sequence DESC LIMIT -1 OFFSET ?1
-                 )",
-                [limit],
-            )
-            .map_err(map_sqlite_error)?;
-        drop(connection);
-        let mut errors = self.lock_errors()?;
-        for bytes in pruned {
-            if let Ok(array) = <[u8; 16]>::try_from(bytes) {
-                errors.remove(&OperationId::from_bytes(array));
+        if limit > MAX_OPERATION_ROWS {
+            return Err(OperationError::CorruptState);
+        }
+        let mut pruned_total = 0_usize;
+        loop {
+            let pruned = self.prune_batch(limit, CATALOG_MUTATION_BATCH)?;
+            if pruned == 0 {
+                return Ok(());
+            }
+            pruned_total = pruned_total
+                .checked_add(pruned)
+                .ok_or(OperationError::CorruptState)?;
+            if pruned_total > MAX_OPERATION_ROWS {
+                return Err(OperationError::CatalogRowLimitExceeded);
             }
         }
-        Ok(())
+    }
+
+    fn prune_batch(&self, limit: usize, batch: usize) -> Result<usize, OperationError> {
+        let batch = batch.min(CATALOG_MUTATION_BATCH);
+        if batch == 0 {
+            return Ok(0);
+        }
+        let pruned = {
+            let mut connection = self.lock_connection()?;
+            let transaction = connection.transaction().map_err(map_sqlite_error)?;
+            let pruned = select_prunable_operation_ids(&transaction, limit, batch)?;
+            for operation in &pruned {
+                transaction
+                    .execute(
+                        "DELETE FROM application_meta
+                         WHERE key = ?1 || lower(hex(?2))",
+                        params![
+                            RELATIVE_TIMEOUT_META_PREFIX,
+                            operation.as_bytes().as_slice()
+                        ],
+                    )
+                    .map_err(map_sqlite_error)?;
+                let deleted = transaction
+                    .execute(
+                        "DELETE FROM operations WHERE operation = ?1",
+                        [operation.as_bytes().as_slice()],
+                    )
+                    .map_err(map_sqlite_error)?;
+                if deleted != 1 {
+                    return Err(OperationError::CorruptState);
+                }
+            }
+            transaction.commit().map_err(map_sqlite_error)?;
+            pruned
+        };
+        let mut errors = self.lock_errors()?;
+        for operation in &pruned {
+            errors.remove(operation);
+        }
+        Ok(pruned.len())
     }
 
     fn lock_connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, OperationError> {
@@ -1673,21 +1795,71 @@ impl OperationJournal {
             .map_err(|_| OperationError::MutexPoisoned)
     }
 
-    fn lock_lease_deadlines(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, BTreeMap<OperationId, LeaseDeadline>>, OperationError>
-    {
-        self.lease_deadlines
-            .lock()
-            .map_err(|_| OperationError::MutexPoisoned)
-    }
-
     fn lock_errors(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, BTreeMap<OperationId, PublicError>>, OperationError> {
         self.errors
             .lock()
             .map_err(|_| OperationError::MutexPoisoned)
+    }
+}
+
+fn validate_catalog_file_sizes(path: &Path) -> Result<(), OperationError> {
+    for (candidate, maximum) in [
+        (path.to_path_buf(), MAX_CATALOG_BYTES),
+        (sqlite_sidecar_path(path, "-wal"), MAX_CATALOG_WAL_BYTES),
+        (sqlite_sidecar_path(path, "-shm"), MAX_CATALOG_SHM_BYTES),
+    ] {
+        match fs::metadata(candidate) {
+            Ok(metadata) if metadata.len() > maximum => {
+                return Err(OperationError::CatalogTooLarge);
+            }
+            Ok(_) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(OperationError::CatalogInspection(source)),
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
+}
+
+fn validate_operation_row_limit(connection: &Connection) -> Result<(), OperationError> {
+    let offset = i64::try_from(MAX_OPERATION_ROWS).map_err(|_| OperationError::CorruptState)?;
+    let excess = connection
+        .query_row(
+            "SELECT 1 FROM operations ORDER BY sequence ASC LIMIT 1 OFFSET ?1",
+            [offset],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    if excess.is_some() {
+        Err(OperationError::CatalogRowLimitExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_operation_row_capacity(connection: &Connection) -> Result<(), OperationError> {
+    let last_available =
+        i64::try_from(MAX_OPERATION_ROWS - 1).map_err(|_| OperationError::CorruptState)?;
+    let at_capacity = connection
+        .query_row(
+            "SELECT 1 FROM operations ORDER BY sequence ASC LIMIT 1 OFFSET ?1",
+            [last_available],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    if at_capacity.is_some() {
+        Err(OperationError::CatalogRowLimitExceeded)
+    } else {
+        Ok(())
     }
 }
 
@@ -1778,6 +1950,9 @@ fn open_validated_read_only_catalog(
     deadline: Instant,
 ) -> Result<Connection, OperationError> {
     check_diagnostic_deadline(deadline)?;
+    let file_sizes = validate_catalog_file_sizes(path);
+    check_diagnostic_deadline(deadline)?;
+    file_sizes?;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_URI;
@@ -1791,6 +1966,10 @@ fn open_validated_read_only_catalog(
     map_diagnostic_timeout(validate_catalog_identity(&connection))?;
     check_diagnostic_deadline(deadline)?;
     map_diagnostic_timeout(validate_schema(&connection, CatalogStorage::Persistent))?;
+    check_diagnostic_deadline(deadline)?;
+    map_diagnostic_timeout(validate_operation_row_limit(&connection))?;
+    check_diagnostic_deadline(deadline)?;
+    map_diagnostic_timeout(validate_relative_timeout_intents(&connection))?;
     check_diagnostic_deadline(deadline)?;
     Ok(connection)
 }
@@ -2562,10 +2741,136 @@ fn table_columns_named(
         .map_err(map_sqlite_error)
 }
 
+fn store_relative_timeout_intent(
+    connection: &Connection,
+    operation: OperationId,
+    timeout_ms: Option<u64>,
+) -> Result<(), OperationError> {
+    match timeout_ms {
+        Some(0) => Err(OperationError::InvalidSubmission),
+        Some(timeout_ms) => {
+            let encoded = timeout_ms.to_be_bytes();
+            connection
+                .execute(
+                    "INSERT INTO application_meta(key, value)
+                     VALUES (?1 || lower(hex(?2)), ?3)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![
+                        RELATIVE_TIMEOUT_META_PREFIX,
+                        operation.as_bytes().as_slice(),
+                        encoded.as_slice(),
+                    ],
+                )
+                .map_err(map_sqlite_error)?;
+            Ok(())
+        }
+        None => {
+            connection
+                .execute(
+                    "DELETE FROM application_meta
+                     WHERE key = ?1 || lower(hex(?2))",
+                    params![
+                        RELATIVE_TIMEOUT_META_PREFIX,
+                        operation.as_bytes().as_slice(),
+                    ],
+                )
+                .map_err(map_sqlite_error)?;
+            Ok(())
+        }
+    }
+}
+
+fn load_relative_timeout_intent(
+    connection: &Connection,
+    operation: OperationId,
+) -> Result<Option<u64>, OperationError> {
+    let encoded: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT value FROM application_meta
+             WHERE key = ?1 || lower(hex(?2))",
+            params![
+                RELATIVE_TIMEOUT_META_PREFIX,
+                operation.as_bytes().as_slice(),
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    encoded
+        .map(|encoded| {
+            let bytes: [u8; 8] = encoded
+                .try_into()
+                .map_err(|_| OperationError::CorruptState)?;
+            let timeout_ms = u64::from_be_bytes(bytes);
+            if timeout_ms == 0 {
+                return Err(OperationError::CorruptState);
+            }
+            Ok(timeout_ms)
+        })
+        .transpose()
+}
+
+fn reconcile_relative_timeout_intents(connection: &Connection) -> Result<(), OperationError> {
+    // A rollback binary can prune operations without knowing about the sidecar.
+    // Remove those orphans before validating the bounded live set.
+    let pattern = format!("{RELATIVE_TIMEOUT_META_PREFIX}*");
+    connection
+        .execute(
+            "DELETE FROM application_meta
+             WHERE key GLOB ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM operations
+                   WHERE application_meta.key =
+                         ?2 || lower(hex(operations.operation))
+               )",
+            params![pattern, RELATIVE_TIMEOUT_META_PREFIX],
+        )
+        .map_err(map_sqlite_error)?;
+    validate_relative_timeout_intents(connection)
+}
+
+fn validate_relative_timeout_intents(connection: &Connection) -> Result<(), OperationError> {
+    let pattern = format!("{RELATIVE_TIMEOUT_META_PREFIX}*");
+    let mut statement = connection
+        .prepare(
+            "SELECT application_meta.key
+             FROM application_meta
+             LEFT JOIN operations
+               ON application_meta.key =
+                  ?1 || lower(hex(operations.operation))
+             WHERE application_meta.key GLOB ?2
+               AND (
+                    operations.operation IS NULL
+                 OR operations.detached != 1
+                 OR operations.deadline_unix_ms IS NULL
+                 OR length(application_meta.value) != 8
+                 OR application_meta.value = zeroblob(8)
+               )
+             LIMIT 1",
+        )
+        .map_err(map_sqlite_error)?;
+    let invalid = statement
+        .query_row(params![RELATIVE_TIMEOUT_META_PREFIX, pattern], |_| Ok(()))
+        .optional()
+        .map_err(map_sqlite_error)?;
+    if invalid.is_some() {
+        return Err(OperationError::CorruptState);
+    }
+    Ok(())
+}
+
 fn load_record(
     connection: &Connection,
     operation: OperationId,
 ) -> Result<Option<OperationRecord>, OperationError> {
+    Ok(load_record_with_retry_intent(connection, operation)?
+        .map(|(record, _relative_timeout_ms)| record))
+}
+
+fn load_record_with_retry_intent(
+    connection: &Connection,
+    operation: OperationId,
+) -> Result<Option<(OperationRecord, Option<u64>)>, OperationError> {
     let raw = connection
         .query_row(
             "SELECT kind, plan_hash, owner, detached, deadline_unix_ms,
@@ -2596,7 +2901,17 @@ fn load_record(
         )
         .optional()
         .map_err(map_sqlite_error)?;
-    raw.map(|raw| decode_record(operation, raw)).transpose()
+    raw.map(|raw| {
+        let relative_timeout_ms = load_relative_timeout_intent(connection, operation)?;
+        if relative_timeout_ms == Some(0)
+            || relative_timeout_ms.is_some()
+                && (raw.detached != 1 || raw.deadline_unix_ms.is_none())
+        {
+            return Err(OperationError::CorruptState);
+        }
+        decode_record(operation, raw).map(|record| (record, relative_timeout_ms))
+    })
+    .transpose()
 }
 
 struct RawRecord {
@@ -2684,12 +2999,6 @@ fn decode_record(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LeaseDeadline {
-    deadline: Instant,
-    expiry_unix_ms: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PendingInterruption {
     operation: OperationId,
     reason: CancellationReason,
@@ -2702,6 +3011,7 @@ fn select_operation_ids(
     max_records: usize,
     values: &[i64],
 ) -> Result<Vec<OperationId>, OperationError> {
+    let max_records = max_records.min(CATALOG_MUTATION_BATCH);
     let limit = i64::try_from(max_records).map_err(|_| OperationError::CorruptState)?;
     let sql = format!(
         "SELECT operation FROM operations WHERE {predicate} ORDER BY sequence ASC LIMIT ?{}",
@@ -2716,6 +3026,34 @@ fn select_operation_ids(
         .prepare(&sql)
         .map_err(map_sqlite_error)?
         .query_map(parameters.as_slice(), |row| row.get::<_, Vec<u8>>(0))
+        .map_err(map_sqlite_error)?
+        .map(|value| {
+            value
+                .map_err(map_sqlite_error)
+                .and_then(|bytes| {
+                    <[u8; 16]>::try_from(bytes).map_err(|_| OperationError::CorruptState)
+                })
+                .map(OperationId::from_bytes)
+        })
+        .collect()
+}
+
+fn select_prunable_operation_ids(
+    connection: &Connection,
+    retained: usize,
+    maximum: usize,
+) -> Result<Vec<OperationId>, OperationError> {
+    let retained = i64::try_from(retained).map_err(|_| OperationError::CorruptState)?;
+    let maximum = i64::try_from(maximum.min(CATALOG_MUTATION_BATCH))
+        .map_err(|_| OperationError::CorruptState)?;
+    connection
+        .prepare(
+            "SELECT operation FROM operations
+             WHERE state IN ('succeeded', 'failed', 'cancelled', 'interrupted')
+             ORDER BY sequence DESC LIMIT ?2 OFFSET ?1",
+        )
+        .map_err(map_sqlite_error)?
+        .query_map(params![retained, maximum], |row| row.get::<_, Vec<u8>>(0))
         .map_err(map_sqlite_error)?
         .map(|value| {
             value
@@ -2761,52 +3099,55 @@ fn recovery_for(record: &OperationRecord, now_unix_ms: u64) -> RecoveryClass {
     }
 }
 
-fn submission_matches(record: &OperationRecord, submission: OperationSubmission) -> bool {
+fn submission_matches(
+    record: &OperationRecord,
+    stored_timeout_ms: Option<u64>,
+    submission: OperationSubmission,
+    deadline_retry: DeadlineRetry,
+) -> bool {
     let owner_matches = record.owner == submission.owner || record.detached && submission.detached;
     record.operation == submission.operation
         && record.kind == submission.kind
         && record.plan_hash == submission.plan_hash
         && owner_matches
         && record.detached == submission.detached
-        && record.deadline_unix_ms == submission.deadline_unix_ms
+        && deadline_matches(record, stored_timeout_ms, submission, deadline_retry)
         && record.lease_expires_unix_ms == submission.lease_expires_unix_ms
 }
 
-struct LiveTimers {
-    cancellation: Cancellation,
-    lease_deadline: Option<Instant>,
-}
-
-fn live_timers_for_submission(
+fn deadline_matches(
+    record: &OperationRecord,
+    stored_timeout_ms: Option<u64>,
     submission: OperationSubmission,
-    now_unix_ms: u64,
-    now: Instant,
-) -> Result<LiveTimers, OperationError> {
-    let cancellation = submission.deadline_unix_ms.map_or_else(
-        || Ok(Cancellation::new()),
-        |deadline_unix_ms| {
-            monotonic_deadline(now, now_unix_ms, deadline_unix_ms).map(Cancellation::with_deadline)
-        },
-    )?;
-    let lease_deadline = submission
-        .lease_expires_unix_ms
-        .map(|expiry| monotonic_deadline(now, now_unix_ms, expiry))
-        .transpose()?;
-    Ok(LiveTimers {
-        cancellation,
-        lease_deadline,
-    })
+    deadline_retry: DeadlineRetry,
+) -> bool {
+    match (stored_timeout_ms, deadline_retry) {
+        (None, DeadlineRetry::Exact) => record.deadline_unix_ms == submission.deadline_unix_ms,
+        (Some(stored_timeout_ms), DeadlineRetry::ReanchoredRelative { timeout_ms })
+            if record.detached && submission.detached =>
+        {
+            stored_timeout_ms == timeout_ms
+                && record.deadline_unix_ms.is_some()
+                && submission.deadline_unix_ms.is_some()
+        }
+        _ => false,
+    }
 }
 
-fn monotonic_deadline(
-    now: Instant,
-    now_unix_ms: u64,
-    target_unix_ms: u64,
-) -> Result<Instant, OperationError> {
-    now.checked_add(Duration::from_millis(
-        target_unix_ms.saturating_sub(now_unix_ms),
-    ))
-    .ok_or(OperationError::TimestampOverflow)
+fn validate_submission_with_retry(
+    submission: OperationSubmission,
+    deadline_retry: DeadlineRetry,
+) -> Result<(), OperationError> {
+    validate_submission(submission)?;
+    match deadline_retry {
+        DeadlineRetry::Exact => Ok(()),
+        DeadlineRetry::ReanchoredRelative { timeout_ms }
+            if timeout_ms > 0 && submission.detached && submission.deadline_unix_ms.is_some() =>
+        {
+            Ok(())
+        }
+        DeadlineRetry::ReanchoredRelative { .. } => Err(OperationError::InvalidSubmission),
+    }
 }
 
 fn validate_submission(submission: OperationSubmission) -> Result<(), OperationError> {
@@ -3172,6 +3513,21 @@ pub enum OperationError {
     /// A queued lifecycle mutation was abandoned before actor execution.
     #[error("operation journal lifecycle mutation timed out")]
     MutationTimedOut,
+    /// Durable worker ownership could not be established before its monotonic deadline.
+    #[error("operation start deadline elapsed")]
+    StartDeadlineElapsed,
+    /// A committed start could not be returned to a terminal fail-closed state.
+    #[error("committed operation start compensation failed")]
+    CommittedStartCompensationFailed,
+    /// A persistent catalog or SQLite sidecar exceeded its physical storage bound.
+    #[error("operation journal exceeds its storage limit")]
+    CatalogTooLarge,
+    /// A validated operation table exceeded its logical row bound.
+    #[error("operation journal exceeds its row limit")]
+    CatalogRowLimitExceeded,
+    /// Persistent catalog metadata could not be inspected before SQLite open.
+    #[error("operation journal file inspection failed")]
+    CatalogInspection(#[source] io::Error),
     /// Persisted operation state failed validation.
     #[error("operation journal contains invalid state")]
     CorruptState,
@@ -3249,6 +3605,7 @@ pub type SharedOperationJournal = Arc<OperationJournal>;
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::Cell,
         sync::{Arc, Barrier},
         thread,
     };
@@ -3277,6 +3634,54 @@ mod tests {
             Some(lease),
         )
         .expect("submission is valid")
+    }
+
+    fn insert_generated_operations(connection: &Connection, rows: usize, state: OperationState) {
+        let rows = i64::try_from(rows).expect("test row count fits SQLite");
+        connection
+            .execute(
+                "WITH digits(digit) AS (
+                    VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+                 ),
+                 numbered(value) AS (
+                    SELECT 1 + ones.digit
+                             + 10 * tens.digit
+                             + 100 * hundreds.digit
+                             + 1000 * thousands.digit
+                             + 10000 * ten_thousands.digit
+                    FROM digits AS ones
+                    CROSS JOIN digits AS tens
+                    CROSS JOIN digits AS hundreds
+                    CROSS JOIN digits AS thousands
+                    CROSS JOIN digits AS ten_thousands
+                    ORDER BY 1
+                    LIMIT ?1
+                 )
+                 INSERT INTO operations (
+                    operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                    lease_expires_unix_ms, state, stage, cancellation_requested,
+                    cancellation_reason, recovery_class, revision, completed, total,
+                    error_json, sequence
+                 )
+                 SELECT CAST(printf('%016x', value) AS BLOB), 'control_probe',
+                        zeroblob(32), zeroblob(16), 1, NULL, NULL, ?2, 'accepted',
+                        0, NULL,
+                        CASE WHEN ?2 = 'interrupted' THEN 'interrupted_by_restart'
+                             ELSE 'not_applicable' END,
+                        1, 0, 0, NULL, value
+                 FROM numbered",
+                params![rows, state.as_str()],
+            )
+            .expect("generated operation rows insert");
+    }
+
+    fn generated_operation(value: usize) -> OperationId {
+        let encoded = format!("{value:016x}");
+        let bytes: [u8; 16] = encoded
+            .as_bytes()
+            .try_into()
+            .expect("fixed-width hex operation ID");
+        OperationId::from_bytes(bytes)
     }
 
     #[test]
@@ -3320,6 +3725,238 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn start_deadline_rolls_back_or_interrupts_every_commit_boundary() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let before_commit = operation(70);
+        let after_commit = operation(71);
+        journal.enqueue(before_commit).expect("operation enqueues");
+        journal.enqueue(after_commit).expect("operation enqueues");
+
+        let checks = Cell::new(0_u32);
+        let before_commit_result = journal.start_execution_with(
+            before_commit,
+            || {
+                let check = checks.get();
+                checks.set(check + 1);
+                check == 0
+            },
+            || Ok(()),
+            |recovery, reason| journal.interrupt_started(before_commit, recovery, reason),
+        );
+        assert!(matches!(
+            before_commit_result,
+            Err(OperationError::StartDeadlineElapsed)
+        ));
+        assert_eq!(
+            journal.status(before_commit).expect("status loads").state,
+            OperationState::Queued
+        );
+
+        let checks = Cell::new(0_u32);
+        let after_commit_result = journal.start_execution_with(
+            after_commit,
+            || {
+                let check = checks.get();
+                checks.set(check + 1);
+                check < 3
+            },
+            || Ok(()),
+            |recovery, reason| journal.interrupt_started(after_commit, recovery, reason),
+        );
+        assert!(matches!(
+            after_commit_result,
+            Err(OperationError::StartDeadlineElapsed)
+        ));
+        let interrupted = journal.status(after_commit).expect("status loads");
+        assert_eq!(interrupted.state, OperationState::Interrupted);
+        assert_eq!(interrupted.recovery_class, RecoveryClass::DeadlineElapsed);
+    }
+
+    #[test]
+    fn cancellation_precedes_an_elapsed_start_deadline() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = operation(72);
+        journal.enqueue(operation).expect("operation enqueues");
+        journal
+            .request_cancellation(operation, CancellationReason::ClientRequest)
+            .expect("cancellation wins");
+
+        assert!(matches!(
+            journal.start_execution_with(
+                operation,
+                || false,
+                || Ok(()),
+                |recovery, reason| journal.interrupt_started(operation, recovery, reason),
+            ),
+            Err(OperationError::CancellationWon)
+        ));
+        assert_eq!(
+            journal.status(operation).expect("status loads").state,
+            OperationState::Cancelled
+        );
+    }
+
+    #[test]
+    fn post_commit_record_materialization_fault_is_compensated() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = operation(73);
+        journal.enqueue(operation).expect("operation enqueues");
+
+        let result = journal.start_execution_with(
+            operation,
+            || true,
+            || Err(OperationError::CorruptState),
+            |recovery, reason| journal.interrupt_started(operation, recovery, reason),
+        );
+
+        assert!(matches!(result, Err(OperationError::CorruptState)));
+        assert_eq!(
+            journal.status(operation).expect("status loads").state,
+            OperationState::Interrupted
+        );
+    }
+
+    #[test]
+    fn failed_committed_start_compensation_has_a_fatal_signal() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let operation = operation(74);
+        journal.enqueue(operation).expect("operation enqueues");
+
+        let result = journal.start_execution_with(
+            operation,
+            || true,
+            || Err(OperationError::CorruptState),
+            |_recovery, _reason| Err(OperationError::Busy),
+        );
+
+        assert!(matches!(
+            result,
+            Err(OperationError::CommittedStartCompensationFailed)
+        ));
+        assert_eq!(
+            journal.status(operation).expect("status loads").state,
+            OperationState::Running
+        );
+        journal
+            .interrupt_unacknowledged_start(operation)
+            .expect("test cleanup interrupts the committed start");
+    }
+
+    #[test]
+    fn cancellation_committed_after_start_wins_deadline_compensation() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = operation(75);
+        journal.enqueue(operation).expect("operation enqueues");
+        let committed = Arc::new(Barrier::new(2));
+        let cancellation_complete = Arc::new(Barrier::new(2));
+        let start_journal = Arc::clone(&journal);
+        let start_committed = Arc::clone(&committed);
+        let start_cancellation_complete = Arc::clone(&cancellation_complete);
+        let start = thread::spawn(move || {
+            let checks = Cell::new(0_u32);
+            let compensation_journal = Arc::clone(&start_journal);
+            start_journal.start_execution_with(
+                operation,
+                || {
+                    let check = checks.get();
+                    checks.set(check + 1);
+                    check < 3
+                },
+                || {
+                    start_committed.wait();
+                    start_cancellation_complete.wait();
+                    Ok(())
+                },
+                move |recovery, reason| {
+                    compensation_journal.interrupt_started(operation, recovery, reason)
+                },
+            )
+        });
+
+        committed.wait();
+        journal
+            .request_cancellation(operation, CancellationReason::ClientRequest)
+            .expect("cancellation commits in the post-commit gap");
+        cancellation_complete.wait();
+
+        assert!(matches!(
+            start.join().expect("start thread joins"),
+            Err(OperationError::CancellationWon)
+        ));
+        let cancelled = journal.status(operation).expect("status loads");
+        assert_eq!(cancelled.state, OperationState::Cancelled);
+        assert!(cancelled.cancellation_requested);
+        assert_eq!(
+            cancelled.cancellation_reason,
+            Some(CancellationReason::ClientRequest)
+        );
+        assert_eq!(cancelled.recovery_class, RecoveryClass::NotApplicable);
+    }
+
+    #[test]
+    fn post_commit_compensation_cannot_remove_an_unsignalled_cancellation() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = operation(76);
+        let worker_token = journal.enqueue(operation).expect("operation enqueues");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let cancellation_committed = Arc::new(Barrier::new(2));
+        let release_signal = Arc::new(Barrier::new(2));
+        let cancellation_journal = Arc::clone(&journal);
+        let cancellation_entered = Arc::clone(&cancellation_committed);
+        let cancellation_release = Arc::clone(&release_signal);
+        let cancellation = thread::spawn(move || {
+            cancellation_journal.request_cancellation_with(
+                operation,
+                CancellationReason::ClientRequest,
+                || {
+                    cancellation_entered.wait();
+                    cancellation_release.wait();
+                },
+            )
+        });
+
+        cancellation_committed.wait();
+        let compensation_committed = Arc::new(Barrier::new(2));
+        let compensation_journal = Arc::clone(&journal);
+        let compensation_entered = Arc::clone(&compensation_committed);
+        let compensation = thread::spawn(move || {
+            compensation_journal.interrupt_started_with(
+                operation,
+                RecoveryClass::InterruptedByRestart,
+                CancellationReason::Shutdown,
+                || {
+                    compensation_entered.wait();
+                },
+            )
+        });
+        compensation_committed.wait();
+        release_signal.wait();
+
+        let outcome = cancellation
+            .join()
+            .expect("cancellation thread joins")
+            .expect("durable cancellation returns its outcome");
+        let compensated = compensation
+            .join()
+            .expect("compensation thread joins")
+            .expect("committed start compensation completes");
+        assert!(outcome.accepted);
+        assert_eq!(
+            worker_token.reason(),
+            Some(CancellationReason::ClientRequest)
+        );
+        assert_eq!(compensated.state, OperationState::Cancelled);
+        assert!(compensated.cancellation_requested);
+        assert_eq!(
+            compensated.cancellation_reason,
+            Some(CancellationReason::ClientRequest)
+        );
+        assert_eq!(compensated.recovery_class, RecoveryClass::NotApplicable);
     }
 
     #[test]
@@ -3550,7 +4187,10 @@ mod tests {
             .join()
             .expect("cancellation worker joins")
             .expect("cancellation commits and signals");
-        assert_eq!(cancellation.operation.state, OperationState::Cancelling);
+        assert!(matches!(
+            cancellation.operation.state,
+            OperationState::Cancelling | OperationState::Cancelled
+        ));
         assert!(matches!(
             publication_rx
                 .recv_timeout(Duration::from_secs(1))
@@ -3622,14 +4262,13 @@ mod tests {
     }
 
     #[test]
-    fn publication_completion_linearizes_live_deadline() {
+    fn publication_completion_respects_serialized_deadline_winner() {
         let journal = OperationJournal::open_in_memory().expect("journal opens");
         let owner = ClientInstanceId::new([47; 16]).expect("client identity is valid");
         let deadline_unix_ms = unix_time_ms()
             .expect("wall clock reads")
             .checked_add(60_000)
             .expect("deadline is representable");
-        let after_deadline = Instant::now() + Duration::from_secs(120);
 
         let expired = operation(47);
         journal
@@ -3647,8 +4286,11 @@ mod tests {
             )
             .expect("operation submits");
         journal.start_execution(expired).expect("operation starts");
+        journal
+            .interrupt_deadline(expired)
+            .expect("deadline winner persists");
         assert!(matches!(
-            journal.complete_repository_publication_at(expired, after_deadline),
+            journal.complete_repository_publication(expired),
             Err(OperationError::CancellationWon)
         ));
         let terminal = journal.status(expired).expect("deadline state persists");
@@ -3674,7 +4316,7 @@ mod tests {
             .start_execution(authorized)
             .expect("operation starts");
         let publication = journal
-            .complete_repository_publication_at(authorized, Instant::now())
+            .complete_repository_publication(authorized)
             .expect("publication wins before deadline");
         assert_eq!(publication.stage, OperationStage::Cleanup);
         assert_eq!(publication.state, OperationState::Succeeded);
@@ -3684,9 +4326,9 @@ mod tests {
         );
         assert_eq!(
             journal
-                .expire_due(after_deadline, 8)
-                .expect("late expiry is idempotent"),
-            0
+                .interrupt_deadline(authorized)
+                .expect("late deadline delivery is idempotent"),
+            publication
         );
         let cancellation = journal
             .request_cancellation(authorized, CancellationReason::ClientRequest)
@@ -3720,10 +4362,17 @@ mod tests {
             .expect("operation submits");
 
         assert!(matches!(
-            journal
-                .start_execution_if_live_at(operation, Instant::now() + Duration::from_secs(120)),
-            Err(OperationError::CancellationWon)
+            journal.start_execution_before(
+                operation,
+                Instant::now()
+                    .checked_sub(Duration::from_millis(1))
+                    .expect("test instant subtracts"),
+            ),
+            Err(OperationError::StartDeadlineElapsed)
         ));
+        journal
+            .interrupt_deadline(operation)
+            .expect("elapsed start is terminalized");
         let terminal = journal.status(operation).expect("deadline state persists");
         assert_eq!(terminal.state, OperationState::Interrupted);
         assert_eq!(terminal.stage, OperationStage::Accepted);
@@ -3819,6 +4468,332 @@ mod tests {
     }
 
     #[test]
+    fn explicit_deadline_retry_requires_exact_metadata() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let first = OperationSubmission::new(
+            operation(30),
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes([3; 32]),
+            ClientInstanceId::new([1; 16]).expect("client identity is valid"),
+            true,
+            Some(100),
+            None,
+        )
+        .expect("submission is valid");
+        let submitted = journal.submit(first).expect("submission succeeds");
+
+        let retry = OperationSubmission {
+            owner: ClientInstanceId::new([2; 16]).expect("client identity is valid"),
+            deadline_unix_ms: Some(200),
+            ..first
+        };
+        assert!(matches!(
+            journal.submit(retry),
+            Err(OperationError::SubmissionConflict)
+        ));
+        assert_eq!(
+            journal
+                .submit(first)
+                .expect("exact retry succeeds")
+                .operation,
+            submitted.operation
+        );
+    }
+
+    #[test]
+    fn reanchored_relative_retry_requires_the_original_timeout_intent() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let journal = OperationJournal::open(&path).expect("journal opens");
+        let first = OperationSubmission::new(
+            operation(31),
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes([3; 32]),
+            ClientInstanceId::new([1; 16]).expect("client identity is valid"),
+            true,
+            Some(4_000_000_000_000),
+            None,
+        )
+        .expect("submission is valid");
+        let retry_intent = DeadlineRetry::ReanchoredRelative { timeout_ms: 100 };
+        let submitted = journal
+            .submit_with_deadline_retry(first, retry_intent)
+            .expect("submission succeeds");
+        drop(journal);
+        let journal = OperationJournal::open(&path).expect("journal reopens");
+        {
+            let connection = journal.lock_connection().expect("catalog lock is healthy");
+            assert_eq!(
+                load_relative_timeout_intent(&connection, first.operation)
+                    .expect("retry intent reads"),
+                Some(100)
+            );
+            assert_eq!(
+                pragma_u32(&connection, "user_version").expect("schema version reads"),
+                OPERATION_SCHEMA_VERSION
+            );
+            assert!(
+                !table_columns(&connection)
+                    .expect("operation columns read")
+                    .iter()
+                    .any(|column| column == "relative_timeout_ms")
+            );
+        }
+        let retry = OperationSubmission {
+            owner: ClientInstanceId::new([2; 16]).expect("client identity is valid"),
+            deadline_unix_ms: Some(4_000_000_000_100),
+            ..first
+        };
+        let observed = journal
+            .submit_with_deadline_retry(retry, retry_intent)
+            .expect("relative retry succeeds");
+
+        assert!(!observed.inserted);
+        assert_eq!(observed.operation.operation, submitted.operation.operation);
+        assert_eq!(observed.operation.plan_hash, submitted.operation.plan_hash);
+        assert_eq!(observed.operation.deadline_unix_ms, Some(4_000_000_000_000));
+        assert!(matches!(
+            journal.submit_with_deadline_retry(
+                retry,
+                DeadlineRetry::ReanchoredRelative { timeout_ms: 200 },
+            ),
+            Err(OperationError::SubmissionConflict)
+        ));
+        assert!(matches!(
+            journal.submit(OperationSubmission {
+                deadline_unix_ms: None,
+                ..retry
+            }),
+            Err(OperationError::SubmissionConflict)
+        ));
+        assert!(matches!(
+            journal.submit(OperationSubmission {
+                deadline_unix_ms: Some(4_000_000_000_000),
+                ..retry
+            }),
+            Err(OperationError::SubmissionConflict)
+        ));
+        assert!(matches!(
+            journal.submit_with_deadline_retry(
+                retry,
+                DeadlineRetry::ReanchoredRelative { timeout_ms: 0 },
+            ),
+            Err(OperationError::InvalidSubmission)
+        ));
+
+        drop(journal);
+        let rollback = Connection::open(&path).expect("independent reader opens current schema");
+        assert_eq!(
+            pragma_u32(&rollback, "user_version").expect("schema version reads"),
+            OPERATION_SCHEMA_VERSION
+        );
+        assert_eq!(
+            normalize_sql(&table_definition(&rollback, "operations").expect("schema reads")),
+            normalize_sql(OPERATIONS_SCHEMA_SQL)
+        );
+        assert_eq!(
+            rollback
+                .query_row(
+                    "SELECT checksum FROM migrations WHERE migration_id = ?1",
+                    [VERSION_TWO_MIGRATION_ID],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .expect("historical migration checksum reads"),
+            VERSION_TWO_MIGRATION_CHECKSUM
+        );
+        assert_eq!(
+            rollback
+                .query_row(
+                    "SELECT deadline_unix_ms FROM operations WHERE operation = ?1",
+                    [first.operation.as_bytes().as_slice()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("rollback operation query succeeds"),
+            4_000_000_000_000_i64
+        );
+        store_relative_timeout_intent(&rollback, operation(32), Some(50))
+            .expect("orphaned legacy sidecar inserts");
+        drop(rollback);
+
+        let reopened = OperationJournal::open(&path).expect("schema-two catalog reopens");
+        let connection = reopened.lock_connection().expect("catalog lock is healthy");
+        assert_eq!(
+            load_relative_timeout_intent(&connection, first.operation)
+                .expect("live retry intent reads"),
+            Some(100)
+        );
+        assert_eq!(
+            load_relative_timeout_intent(&connection, operation(32))
+                .expect("orphaned retry intent reads"),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_relative_retry_sidecar_fails_catalog_open() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let journal = OperationJournal::open(&path).expect("journal opens");
+        let submission = OperationSubmission::new(
+            operation(34),
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes([3; 32]),
+            ClientInstanceId::new([1; 16]).expect("client identity is valid"),
+            true,
+            Some(4_000_000_000_000),
+            None,
+        )
+        .expect("submission is valid");
+        journal
+            .submit_with_deadline_retry(
+                submission,
+                DeadlineRetry::ReanchoredRelative { timeout_ms: 100 },
+            )
+            .expect("relative-timeout operation submits");
+        journal
+            .transition(submission.operation, OperationState::Running, None)
+            .expect("operation starts");
+        journal
+            .transition(submission.operation, OperationState::Succeeded, None)
+            .expect("operation succeeds");
+        drop(journal);
+
+        let connection = Connection::open(&path).expect("catalog opens for corruption fixture");
+        connection
+            .execute(
+                "UPDATE application_meta SET value = ?3
+                 WHERE key = ?1 || lower(hex(?2))",
+                params![
+                    RELATIVE_TIMEOUT_META_PREFIX,
+                    submission.operation.as_bytes().as_slice(),
+                    [1_u8].as_slice(),
+                ],
+            )
+            .expect("retry sidecar is corrupted");
+        drop(connection);
+
+        assert!(matches!(
+            OperationJournal::open(&path),
+            Err(OperationError::CorruptState)
+        ));
+    }
+
+    #[test]
+    fn quick_checks_reject_post_open_relative_retry_sidecar_corruption() {
+        #[derive(Clone, Copy)]
+        enum Corruption {
+            InvalidLength,
+            ZeroTimeout,
+            AttachedAssociation,
+            Orphan,
+        }
+
+        for (seed, corruption) in [
+            (40, Corruption::InvalidLength),
+            (41, Corruption::ZeroTimeout),
+            (42, Corruption::AttachedAssociation),
+            (43, Corruption::Orphan),
+        ] {
+            let temporary = tempdir().expect("temporary directory is available");
+            let path = temporary.path().join("operations.sqlite");
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            let relative = OperationSubmission::new(
+                operation(seed),
+                OperationKind::ControlProbe,
+                PlanHash::from_bytes([3; 32]),
+                ClientInstanceId::new([1; 16]).expect("client identity is valid"),
+                true,
+                Some(4_000_000_000_000),
+                None,
+            )
+            .expect("relative submission is valid");
+            journal
+                .submit_with_deadline_retry(
+                    relative,
+                    DeadlineRetry::ReanchoredRelative { timeout_ms: 100 },
+                )
+                .expect("relative-timeout operation submits");
+            let attached = attached_submission(
+                operation(seed.saturating_add(20)),
+                ClientInstanceId::new([2; 16]).expect("client identity is valid"),
+                None,
+                4_000_000_000_000,
+            );
+            journal
+                .submit(attached)
+                .expect("attached operation submits");
+
+            let connection =
+                Connection::open(&path).expect("catalog opens for post-open corruption");
+            match corruption {
+                Corruption::InvalidLength => {
+                    connection
+                        .execute(
+                            "UPDATE application_meta SET value = ?3
+                             WHERE key = ?1 || lower(hex(?2))",
+                            params![
+                                RELATIVE_TIMEOUT_META_PREFIX,
+                                relative.operation.as_bytes().as_slice(),
+                                [1_u8].as_slice(),
+                            ],
+                        )
+                        .expect("retry sidecar length is corrupted");
+                }
+                Corruption::ZeroTimeout => {
+                    connection
+                        .execute(
+                            "UPDATE application_meta SET value = zeroblob(8)
+                             WHERE key = ?1 || lower(hex(?2))",
+                            params![
+                                RELATIVE_TIMEOUT_META_PREFIX,
+                                relative.operation.as_bytes().as_slice(),
+                            ],
+                        )
+                        .expect("retry sidecar timeout is corrupted");
+                }
+                Corruption::AttachedAssociation => {
+                    connection
+                        .execute(
+                            "UPDATE application_meta
+                             SET key = ?1 || lower(hex(?3))
+                             WHERE key = ?1 || lower(hex(?2))",
+                            params![
+                                RELATIVE_TIMEOUT_META_PREFIX,
+                                relative.operation.as_bytes().as_slice(),
+                                attached.operation.as_bytes().as_slice(),
+                            ],
+                        )
+                        .expect("retry sidecar is associated with attached work");
+                }
+                Corruption::Orphan => {
+                    connection
+                        .execute(
+                            "UPDATE application_meta
+                             SET key = ?1 || lower(hex(?3))
+                             WHERE key = ?1 || lower(hex(?2))",
+                            params![
+                                RELATIVE_TIMEOUT_META_PREFIX,
+                                relative.operation.as_bytes().as_slice(),
+                                operation(seed.saturating_add(40)).as_bytes().as_slice(),
+                            ],
+                        )
+                        .expect("retry sidecar is orphaned");
+                }
+            }
+            drop(connection);
+
+            assert!(matches!(
+                journal.quick_check(),
+                Err(OperationError::CorruptState)
+            ));
+            assert!(matches!(
+                OperationJournal::quick_check_path(&path),
+                Err(OperationError::CorruptState)
+            ));
+        }
+    }
+
+    #[test]
     fn attached_submission_requires_the_original_owner() {
         let journal = OperationJournal::open_in_memory().expect("journal opens");
         let first = attached_submission(
@@ -3840,7 +4815,7 @@ mod tests {
     }
 
     #[test]
-    fn submitted_deadline_uses_a_process_local_monotonic_token() {
+    fn submitted_deadline_is_audit_metadata_only() {
         let journal = OperationJournal::open_in_memory().expect("journal opens");
         let submission = OperationSubmission::new(
             operation(13),
@@ -3848,17 +4823,18 @@ mod tests {
             PlanHash::from_bytes([3; 32]),
             ClientInstanceId::new([1; 16]).expect("client identity is valid"),
             true,
-            Some(unix_time_ms().expect("clock is valid")),
+            Some(1),
             None,
         )
         .expect("submission is valid");
 
-        journal.submit(submission).expect("submission succeeds");
+        let record = journal.submit(submission).expect("submission succeeds");
         let token = journal
             .cancellation_token(submission.operation)
-            .expect("deadline token exists");
+            .expect("cancellation token exists");
 
-        assert_eq!(token.reason(), Some(CancellationReason::DeadlineExceeded));
+        assert_eq!(record.operation.deadline_unix_ms, Some(1));
+        assert_eq!(token.reason(), None);
     }
 
     #[test]
@@ -3960,57 +4936,84 @@ mod tests {
             journal.renew_lease(operation(5), owner, now),
             Err(OperationError::InvalidLease)
         ));
+        let renewed = journal
+            .renew_lease(operation(5), owner, renewed_expiry)
+            .expect("owner renews");
+        assert_eq!(renewed.lease_expires_unix_ms, Some(renewed_expiry));
         assert_eq!(
             journal
                 .renew_lease(operation(5), owner, renewed_expiry)
-                .expect("owner renews")
-                .lease_expires_unix_ms,
-            Some(renewed_expiry)
+                .expect("exact renewal retry is idempotent"),
+            renewed
         );
     }
 
     #[test]
     fn renewed_lease_invalidates_a_previously_selected_expiry() {
-        let connection = Connection::open_in_memory().expect("connection opens");
-        let journal = OperationJournal::initialize(connection, CatalogStorage::Memory, 100)
-            .expect("journal initializes");
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
         let owner = ClientInstanceId::new([6; 16]).expect("owner is valid");
-        let start = Instant::now();
-        journal
-            .submit_at(
-                attached_submission(operation(33), owner, None, 110),
-                100,
-                start,
-            )
-            .expect("lease submits");
-        let selected = journal
-            .due_live_interruptions(start + Duration::from_millis(10), 1)
-            .expect("due lease is selected")
-            .into_iter()
-            .next()
-            .expect("one lease is due");
-
-        let renewed_expiry = unix_time_ms()
+        let initial_expiry = unix_time_ms()
             .expect("clock is valid")
-            .checked_add(60_000)
+            .checked_add(30_000)
+            .expect("initial expiry fits");
+        journal
+            .submit(attached_submission(
+                operation(33),
+                owner,
+                None,
+                initial_expiry,
+            ))
+            .expect("lease submits");
+
+        let renewed_expiry = initial_expiry
+            .checked_add(30_000)
             .expect("renewed expiry fits");
         journal
             .renew_lease(operation(33), owner, renewed_expiry)
             .expect("lease renews");
 
-        assert!(
-            !journal
-                .interrupt_lease(
-                    selected.operation,
-                    selected
-                        .lease_expires_unix_ms
-                        .expect("selected lease retains its expiry"),
-                )
-                .expect("stale expiry is ignored")
-        );
-        let observed = journal.status(operation(33)).expect("operation loads");
+        let observed = journal
+            .interrupt_lease(operation(33), initial_expiry)
+            .expect("stale expiry is ignored");
         assert_eq!(observed.state, OperationState::Queued);
         assert_eq!(observed.lease_expires_unix_ms, Some(renewed_expiry));
+    }
+
+    #[test]
+    fn cancellation_winner_rejects_lease_renewal_without_mutation() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let owner = ClientInstanceId::new([9; 16]).expect("owner is valid");
+        let initial_expiry = unix_time_ms()
+            .expect("clock is valid")
+            .checked_add(30_000)
+            .expect("initial expiry fits");
+        journal
+            .submit(attached_submission(
+                operation(35),
+                owner,
+                None,
+                initial_expiry,
+            ))
+            .expect("lease submits");
+        journal
+            .start_execution(operation(35))
+            .expect("operation starts");
+        let cancelling = journal
+            .request_cancellation(operation(35), CancellationReason::ClientRequest)
+            .expect("cancellation wins")
+            .operation;
+        let renewed_expiry = initial_expiry
+            .checked_add(30_000)
+            .expect("renewed expiry fits");
+
+        assert!(matches!(
+            journal.renew_lease(operation(35), owner, renewed_expiry),
+            Err(OperationError::CancellationWon)
+        ));
+        assert_eq!(
+            journal.status(operation(35)).expect("status loads"),
+            cancelling
+        );
     }
 
     #[test]
@@ -4059,131 +5062,78 @@ mod tests {
     }
 
     #[test]
-    fn expiry_signals_tokens_with_deterministic_reason_and_precedence() {
-        let connection = Connection::open_in_memory().expect("connection opens");
-        let journal = OperationJournal::initialize(connection, CatalogStorage::Memory, 100)
-            .expect("journal initializes");
+    fn restart_interrupts_cancellation_requested_work() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let operation = operation(34);
+        {
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            journal.enqueue(operation).expect("operation enqueues");
+            journal
+                .start_execution(operation)
+                .expect("operation starts");
+            let cancelling = journal
+                .request_cancellation(operation, CancellationReason::ClientRequest)
+                .expect("cancellation is requested")
+                .operation;
+            assert_eq!(cancelling.state, OperationState::Cancelling);
+        }
+
+        let recovered = OperationJournal::open(&path).expect("journal reopens");
+        let operation = recovered.status(operation).expect("status loads");
+        assert_eq!(operation.state, OperationState::Interrupted);
+        assert_eq!(
+            operation.recovery_class,
+            RecoveryClass::InterruptedByRestart
+        );
+        assert!(operation.cancellation_requested);
+        assert_eq!(
+            operation.cancellation_reason,
+            Some(CancellationReason::ClientRequest)
+        );
+        assert_eq!(
+            recovered.counts().expect("counts load"),
+            OperationCounts {
+                queued: 0,
+                running: 0,
+                cancelling: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn direct_expiry_transitions_signal_after_durable_state() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
         let owner = ClientInstanceId::new([8; 16]).expect("owner is valid");
-        let start = Instant::now();
         let deadline = journal
-            .submit_at(
-                attached_submission(operation(30), owner, Some(110), 200),
-                100,
-                start,
-            )
+            .submit(attached_submission(operation(30), owner, Some(110), 200))
             .expect("deadline submits");
         let lease = journal
-            .submit_at(
-                attached_submission(operation(31), owner, None, 110),
-                100,
-                start,
-            )
+            .submit(attached_submission(operation(31), owner, None, 110))
             .expect("lease submits");
-        let both = journal
-            .submit_at(
-                attached_submission(operation(32), owner, Some(110), 110),
-                100,
-                start,
-            )
-            .expect("combined expiry submits");
         let deadline_token = journal
             .cancellation_token(deadline.operation.operation)
             .expect("deadline token exists");
         let lease_token = journal
             .cancellation_token(lease.operation.operation)
             .expect("lease token exists");
-        let both_token = journal
-            .cancellation_token(both.operation.operation)
-            .expect("combined token exists");
 
-        assert_eq!(
-            journal
-                .expire_due(start + Duration::from_millis(10), 10)
-                .expect("expiry succeeds"),
-            3
-        );
-
+        let deadline = journal
+            .interrupt_deadline(deadline.operation.operation)
+            .expect("deadline interruption succeeds");
+        assert_eq!(deadline.recovery_class, RecoveryClass::DeadlineElapsed);
         assert_eq!(
             deadline_token.reason(),
             Some(CancellationReason::DeadlineExceeded)
         );
+
+        let lease = journal
+            .interrupt_lease(lease.operation.operation, 110)
+            .expect("lease interruption succeeds");
+        assert_eq!(lease.recovery_class, RecoveryClass::LeaseExpired);
         assert_eq!(
             lease_token.reason(),
             Some(CancellationReason::ParentCancelled)
-        );
-        assert_eq!(
-            both_token.reason(),
-            Some(CancellationReason::DeadlineExceeded)
-        );
-        assert_eq!(
-            journal
-                .status(operation(30))
-                .expect("deadline loads")
-                .recovery_class,
-            RecoveryClass::DeadlineElapsed
-        );
-        assert_eq!(
-            journal
-                .status(operation(31))
-                .expect("lease loads")
-                .recovery_class,
-            RecoveryClass::LeaseExpired
-        );
-        assert_eq!(
-            journal
-                .status(operation(32))
-                .expect("combined loads")
-                .recovery_class,
-            RecoveryClass::DeadlineElapsed
-        );
-        for seed in 30..=32 {
-            assert!(matches!(
-                journal.cancellation_token(operation(seed)),
-                Err(OperationError::NotFound)
-            ));
-        }
-    }
-
-    #[test]
-    fn live_expiry_ignores_wall_clock_after_admission() {
-        let connection = Connection::open_in_memory().expect("connection opens");
-        let journal = OperationJournal::initialize(connection, CatalogStorage::Memory, 1_000)
-            .expect("journal initializes");
-        let owner = ClientInstanceId::new([9; 16]).expect("owner is valid");
-        let start = Instant::now();
-        journal
-            .submit_at(
-                attached_submission(operation(34), owner, Some(1_100), 1_200),
-                1_000,
-                start,
-            )
-            .expect("submission succeeds");
-
-        assert_eq!(
-            journal
-                .expire_due(start + Duration::from_millis(99), 10)
-                .expect("maintenance succeeds"),
-            0
-        );
-        assert_eq!(
-            journal
-                .status(operation(34))
-                .expect("operation remains active")
-                .state,
-            OperationState::Queued
-        );
-        assert_eq!(
-            journal
-                .expire_due(start + Duration::from_millis(100), 10)
-                .expect("deadline expires"),
-            1
-        );
-        assert_eq!(
-            journal
-                .status(operation(34))
-                .expect("operation is interrupted")
-                .recovery_class,
-            RecoveryClass::DeadlineElapsed
         );
     }
 
@@ -4273,6 +5223,118 @@ mod tests {
         assert_eq!(
             journal.status(operation(20)).expect("active remains").state,
             OperationState::Queued
+        );
+    }
+
+    #[test]
+    fn terminal_pruning_removes_relative_retry_intent_atomically() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        for seed in 10..14 {
+            let submission = OperationSubmission::new(
+                operation(seed),
+                OperationKind::ControlProbe,
+                PlanHash::from_bytes([3; 32]),
+                ClientInstanceId::new([1; 16]).expect("client identity is valid"),
+                true,
+                Some(1_000 + u64::from(seed)),
+                None,
+            )
+            .expect("submission is valid");
+            journal
+                .submit_with_deadline_retry(
+                    submission,
+                    DeadlineRetry::ReanchoredRelative { timeout_ms: 100 },
+                )
+                .expect("relative-timeout operation submits");
+            journal
+                .transition(operation(seed), OperationState::Running, None)
+                .expect("operation starts");
+            journal
+                .transition(operation(seed), OperationState::Succeeded, None)
+                .expect("operation succeeds");
+        }
+
+        journal.prune_to(2).expect("bounded pruning succeeds");
+
+        let connection = journal.lock_connection().expect("catalog lock is healthy");
+        for seed in 10..12 {
+            assert_eq!(
+                load_relative_timeout_intent(&connection, operation(seed))
+                    .expect("pruned retry intent reads"),
+                None
+            );
+        }
+        for seed in 12..14 {
+            assert_eq!(
+                load_relative_timeout_intent(&connection, operation(seed))
+                    .expect("retained retry intent reads"),
+                Some(100)
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_and_pruning_cap_each_mutation_batch() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        {
+            let connection = journal.lock_connection().expect("catalog lock is healthy");
+            insert_generated_operations(
+                &connection,
+                CATALOG_MUTATION_BATCH + 44,
+                OperationState::Queued,
+            );
+        }
+
+        assert_eq!(
+            journal
+                .recover_nonterminal_batch(100, usize::MAX)
+                .expect("first recovery batch succeeds"),
+            u32::try_from(CATALOG_MUTATION_BATCH).expect("batch fits u32")
+        );
+        assert_eq!(
+            journal
+                .recover_nonterminal_batch(100, usize::MAX)
+                .expect("second recovery batch succeeds"),
+            44
+        );
+        assert_eq!(
+            journal
+                .recover_nonterminal_batch(100, usize::MAX)
+                .expect("recovery reaches fixed point"),
+            0
+        );
+
+        assert_eq!(
+            journal
+                .prune_batch(2, usize::MAX)
+                .expect("first pruning batch succeeds"),
+            CATALOG_MUTATION_BATCH
+        );
+        assert_eq!(
+            journal
+                .prune_batch(2, usize::MAX)
+                .expect("second pruning batch succeeds"),
+            42
+        );
+        assert_eq!(
+            journal
+                .prune_batch(2, usize::MAX)
+                .expect("pruning reaches fixed point"),
+            0
+        );
+        assert!(matches!(
+            journal.status(generated_operation(1)),
+            Err(OperationError::NotFound)
+        ));
+        assert!(
+            journal
+                .status(generated_operation(CATALOG_MUTATION_BATCH + 43))
+                .is_ok()
+        );
+        assert!(
+            journal
+                .status(generated_operation(CATALOG_MUTATION_BATCH + 44))
+                .is_ok()
         );
     }
 
@@ -4653,6 +5715,126 @@ mod tests {
     }
 
     #[test]
+    fn version_two_migration_does_not_invent_retry_intent() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let submitted = OperationSubmission::new(
+            operation(23),
+            OperationKind::ControlProbe,
+            PlanHash::from_bytes([8; 32]),
+            ClientInstanceId::new([9; 16]).expect("client identity is valid"),
+            true,
+            Some(4_000_000_000_000),
+            None,
+        )
+        .expect("submission is valid");
+        {
+            let connection = Connection::open(&path).expect("database opens");
+            for statement in [
+                APPLICATION_META_SCHEMA_SQL,
+                MIGRATIONS_SCHEMA_SQL,
+                VERSION_TWO_OPERATIONS_SCHEMA_SQL,
+            ] {
+                connection
+                    .execute_batch(statement)
+                    .expect("version-two schema creates");
+            }
+            connection
+                .execute(
+                    "INSERT INTO application_meta(key, value) VALUES ('catalog_kind', ?1)",
+                    [b"rootlight".as_slice()],
+                )
+                .expect("catalog identity inserts");
+            connection
+                .execute(
+                    "INSERT INTO migrations(migration_id, checksum) VALUES (?1, ?2)",
+                    params![
+                        VERSION_TWO_MIGRATION_ID,
+                        VERSION_TWO_MIGRATION_CHECKSUM.as_slice(),
+                    ],
+                )
+                .expect("version-two ledger inserts");
+            connection
+                .execute(
+                    "INSERT INTO operations (
+                        operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                        lease_expires_unix_ms, state, stage, cancellation_requested,
+                        cancellation_reason, recovery_class, revision, completed, total,
+                        error_json, sequence
+                     ) VALUES (?1, 'control_probe', ?2, ?3, 1, ?4, NULL, 'succeeded',
+                               'cleanup', 0, NULL, 'not_applicable', 1, 1, 1, NULL, 1)",
+                    params![
+                        submitted.operation.as_bytes().as_slice(),
+                        submitted.plan_hash.as_bytes().as_slice(),
+                        submitted.owner.as_bytes().as_slice(),
+                        u64_to_i64(submitted.deadline_unix_ms.expect("deadline exists"))
+                            .expect("deadline fits SQLite"),
+                    ],
+                )
+                .expect("version-two row inserts");
+            connection
+                .pragma_update(None, "application_id", CATALOG_APPLICATION_ID)
+                .expect("application marker writes");
+            connection
+                .pragma_update(None, "user_version", VERSION_TWO_MIGRATION_ID)
+                .expect("version-two marker writes");
+        }
+
+        let journal = OperationJournal::open(&path).expect("version-two schema migrates");
+        assert_eq!(
+            journal
+                .submit(submitted)
+                .expect("exact retry remains compatible")
+                .operation,
+            journal
+                .status(submitted.operation)
+                .expect("existing row loads")
+        );
+        assert!(matches!(
+            journal.submit_with_deadline_retry(
+                OperationSubmission {
+                    deadline_unix_ms: Some(4_000_000_000_100),
+                    ..submitted
+                },
+                DeadlineRetry::ReanchoredRelative { timeout_ms: 100 },
+            ),
+            Err(OperationError::SubmissionConflict)
+        ));
+        let connection = journal.lock_connection().expect("catalog lock is healthy");
+        assert_eq!(
+            load_relative_timeout_intent(&connection, submitted.operation)
+                .expect("retry intent reads"),
+            None
+        );
+        assert_eq!(
+            table_columns(&connection).expect("operation columns read"),
+            [
+                "operation",
+                "kind",
+                "plan_hash",
+                "owner",
+                "detached",
+                "deadline_unix_ms",
+                "lease_expires_unix_ms",
+                "state",
+                "stage",
+                "cancellation_requested",
+                "cancellation_reason",
+                "recovery_class",
+                "revision",
+                "completed",
+                "total",
+                "error_json",
+                "sequence",
+            ]
+        );
+        assert_eq!(
+            pragma_u32(&connection, "user_version").expect("schema version reads"),
+            OPERATION_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
     fn prototype_schema_migrates_and_future_schema_is_rejected() {
         let temporary = tempdir().expect("temporary directory is available");
         let path = temporary.path().join("operations.sqlite");
@@ -4867,6 +6049,77 @@ mod tests {
     }
 
     #[test]
+    fn persistent_open_rejects_oversized_catalog_files_before_sqlite() {
+        let temporary = tempdir().expect("temporary directory is available");
+        for (name, suffix, maximum) in [
+            ("oversized-main.sqlite", None, MAX_CATALOG_BYTES),
+            ("oversized-wal.sqlite", Some("-wal"), MAX_CATALOG_WAL_BYTES),
+            ("oversized-shm.sqlite", Some("-shm"), MAX_CATALOG_SHM_BYTES),
+        ] {
+            let path = temporary.path().join(name);
+            let artifact =
+                suffix.map_or_else(|| path.clone(), |suffix| sqlite_sidecar_path(&path, suffix));
+            File::create(&artifact)
+                .and_then(|file| file.set_len(maximum + 1))
+                .expect("oversized sparse fixture creates");
+
+            let error = OperationJournal::open(&path).expect_err("oversized catalog is rejected");
+            assert!(matches!(error, OperationError::CatalogTooLarge));
+            assert!(!error.to_string().contains(name));
+            assert!(matches!(
+                OperationJournal::quick_check_path(&path),
+                Err(OperationError::CatalogTooLarge)
+            ));
+        }
+    }
+
+    #[test]
+    fn catalog_row_limit_bounds_reopen_and_new_submission() {
+        let temporary = tempdir().expect("temporary directory is available");
+        let path = temporary.path().join("operations.sqlite");
+        let journal = OperationJournal::open(&path).expect("catalog opens");
+        {
+            let connection = journal.lock_connection().expect("catalog lock is healthy");
+            insert_generated_operations(&connection, MAX_OPERATION_ROWS, OperationState::Succeeded);
+        }
+        assert!(matches!(
+            journal.submit(OperationSubmission::control_probe(OperationId::from_bytes(
+                [0xff; 16]
+            ))),
+            Err(OperationError::CatalogRowLimitExceeded)
+        ));
+        {
+            let connection = journal.lock_connection().expect("catalog lock is healthy");
+            connection
+                .execute(
+                    "INSERT INTO operations (
+                        operation, kind, plan_hash, owner, detached, deadline_unix_ms,
+                        lease_expires_unix_ms, state, stage, cancellation_requested,
+                        cancellation_reason, recovery_class, revision, completed, total,
+                        error_json, sequence
+                     ) VALUES (?1, 'control_probe', zeroblob(32), zeroblob(16), 1,
+                               NULL, NULL, 'succeeded', 'accepted', 0, NULL,
+                               'not_applicable', 1, 0, 0, NULL, ?2)",
+                    params![
+                        [0xff_u8; 16].as_slice(),
+                        i64::try_from(MAX_OPERATION_ROWS + 1).expect("row limit fits SQLite")
+                    ],
+                )
+                .expect("hostile overflow row inserts");
+        }
+        drop(journal);
+
+        assert!(matches!(
+            OperationJournal::open(&path),
+            Err(OperationError::CatalogRowLimitExceeded)
+        ));
+        assert!(matches!(
+            OperationJournal::quick_check_path(&path),
+            Err(OperationError::CatalogRowLimitExceeded)
+        ));
+    }
+
+    #[test]
     fn read_only_quick_check_honors_zero_timeout_before_opening() {
         let temporary = tempdir().expect("temporary directory is available");
         let path = temporary.path().join("operations.sqlite");
@@ -4882,7 +6135,9 @@ mod tests {
     fn read_only_quick_check_rejects_an_expired_absolute_deadline() {
         let temporary = tempdir().expect("temporary directory is available");
         let path = temporary.path().join("operations.sqlite");
-        OperationJournal::open(&path).expect("catalog opens");
+        File::create(&path)
+            .and_then(|file| file.set_len(MAX_CATALOG_BYTES + 1))
+            .expect("oversized sparse fixture creates");
 
         assert!(matches!(
             OperationJournal::quick_check_path_until(

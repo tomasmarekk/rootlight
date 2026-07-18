@@ -13,14 +13,12 @@ use first_slice::FirstSliceDaemon;
 use rootlight_daemon_core::{
     ClientConnectionAdmissions, ControlService, DaemonLifecycle, DaemonLimits, DaemonOrchestrator,
     DaemonState, DiagnosticActor, FirstSliceIpcHandler, HealthStatus, JournalActor,
-    handle_connection_async_with_first_slice,
+    OrchestratorSenders, handle_connection_async_with_first_slice,
 };
 use rootlight_ipc::{AsyncLocalListener, FrameCodec};
 use rootlight_observability::{Telemetry, TelemetryOutput};
 use rootlight_operations::{CatalogWriterLock, OperationJournal};
 use rootlight_runtime::{DiscoveryRecord, RuntimePaths};
-
-const EXPIRY_BATCH: usize = 64;
 
 fn main() -> ExitCode {
     match run() {
@@ -45,6 +43,7 @@ fn run() -> Result<(), DaemonError> {
 enum DaemonMode {
     Normal,
     Coordinated,
+    CoordinatedSupervised,
     Supervised,
 }
 
@@ -53,6 +52,9 @@ fn validate_arguments() -> Result<DaemonMode, DaemonError> {
     match (arguments.next(), arguments.next()) {
         (None, None) => Ok(DaemonMode::Normal),
         (Some(argument), None) if argument == "--coordinated-start" => Ok(DaemonMode::Coordinated),
+        (Some(argument), None) if argument == "--coordinated-stdio" => {
+            Ok(DaemonMode::CoordinatedSupervised)
+        }
         (Some(argument), None) if argument == "--supervised-stdio" => Ok(DaemonMode::Supervised),
         _ => Err(DaemonError::InvalidArguments),
     }
@@ -61,7 +63,10 @@ fn validate_arguments() -> Result<DaemonMode, DaemonError> {
 async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let paths = runtime_paths()?;
     paths.prepare_owner()?;
-    let _launch = if mode == DaemonMode::Coordinated {
+    let _launch = if matches!(
+        mode,
+        DaemonMode::Coordinated | DaemonMode::CoordinatedSupervised
+    ) {
         None
     } else {
         Some(paths.acquire_launch_lock()?)
@@ -80,8 +85,8 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     state.set_catalog_status(HealthStatus::Healthy);
     let actor = JournalActor::start(
         Arc::clone(&journal),
-        limits.control_queue_limit,
-        usize::try_from(limits.operation_queue_limit).map_err(|_| DaemonError::InvalidLimits)?,
+        limits.control_queue_limit(),
+        usize::try_from(limits.operation_queue_limit()).map_err(|_| DaemonError::InvalidLimits)?,
     )?;
     let actor_handle = actor.handle();
     let (first_slice, first_slice_workers) = FirstSliceDaemon::start(actor_handle.clone())?;
@@ -101,52 +106,54 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     state.set_lifecycle(DaemonLifecycle::Ready);
 
     let connection_slots = Arc::new(tokio::sync::Semaphore::new(
-        usize::try_from(limits.connection_limit).map_err(|_| DaemonError::InvalidLimits)?,
+        usize::try_from(limits.connection_limit()).map_err(|_| DaemonError::InvalidLimits)?,
     ));
     let client_connections = Arc::new(ClientConnectionAdmissions::new(limits));
     let mut connections = tokio::task::JoinSet::new();
-    let (submission_tx, mut submission_rx) = tokio::sync::mpsc::channel(
-        usize::try_from(limits.operation_queue_limit).map_err(|_| DaemonError::InvalidLimits)?,
-    );
-    let mut maintenance = tokio::time::interval(limits.maintenance_interval);
-    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let command_capacity =
+        usize::try_from(limits.operation_queue_limit()).map_err(|_| DaemonError::InvalidLimits)?;
+    let (submission_tx, mut submission_rx) = tokio::sync::mpsc::channel(command_capacity);
+    let command_senders = OrchestratorSenders::new(submission_tx);
     let shutdown = shutdown_signal(mode);
     tokio::pin!(shutdown);
 
-    loop {
+    let run_failure = loop {
         tokio::select! {
-            _ = &mut shutdown => break,
-            _ = maintenance.tick() => {
-                if let Err(error) = actor_handle.expire_due(std::time::Instant::now(), EXPIRY_BATCH).await {
+            _ = &mut shutdown => break None,
+            event = orchestrator.next_event(), if !orchestrator.is_idle() => {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(error) => {
+                        state.set_journal_healthy(false);
+                        break Some(error.into());
+                    }
+                };
+                if let Err(error) = orchestrator.process_event(event).await {
                     state.set_journal_healthy(false);
-                    return Err(error.into());
-                }
-                if let Err(error) = orchestrator.drain_ready_completions().await {
-                    state.set_journal_healthy(false);
-                    return Err(error.into());
-                }
-            }
-            completed = orchestrator.complete_next(), if !orchestrator.is_idle() => {
-                if let Err(error) = completed {
-                    state.set_journal_healthy(false);
-                    return Err(error.into());
+                    break Some(error.into());
                 }
             }
-            admission = submission_rx.recv() => {
-                let Some(admission) = admission else { break; };
+            submission = submission_rx.recv() => {
+                let Some(admission) = submission else { continue; };
                 if let Err(error) = orchestrator.submit(admission).await
-                    && !matches!(
-                        error,
-                        rootlight_daemon_core::ServiceError::QueueFull
-                            | rootlight_daemon_core::ServiceError::ClientOperationLimit { .. }
-                            | rootlight_daemon_core::ServiceError::NotAccepting
-                    )
+                    && error.is_fatal_submission_failure()
                 {
                     state.set_journal_healthy(false);
+                    break Some(error.into());
+                }
+            }
+            // Reap before accepting: completed handlers release connection permits
+            // before JoinSet removes their retained task output.
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(_)) = joined {
+                    state.telemetry().record_connection_task_failed();
                 }
             }
             accepted = listener.accept() => {
-                let stream = accepted?;
+                let stream = match accepted {
+                    Ok(stream) => stream,
+                    Err(error) => break Some(error.into()),
+                };
                 let permit = match Arc::clone(&connection_slots).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
@@ -157,7 +164,7 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                 state.connection_started();
                 let service = Arc::clone(&service);
                 let actor = actor_handle.clone();
-                let submissions = submission_tx.clone();
+                let commands = command_senders.clone();
                 let client_connections = Arc::clone(&client_connections);
                 let first_slice = Arc::clone(&first_slice);
                 let state = Arc::clone(&state);
@@ -167,7 +174,7 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                     let result = handle_connection_async_with_first_slice(
                         service,
                         actor,
-                        submissions,
+                        commands,
                         client_connections,
                         first_slice,
                         FrameCodec::default(),
@@ -178,35 +185,30 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                     result
                 });
             }
-            joined = connections.join_next(), if !connections.is_empty() => {
-                if let Some(Err(_)) = joined {
-                    state.telemetry().record_connection_task_failed();
-                }
-            }
         }
-    }
+    };
 
-    let shutdown_deadline = tokio::time::Instant::now() + limits.shutdown_grace;
+    let shutdown_deadline = tokio::time::Instant::now() + limits.shutdown_grace();
     state.set_lifecycle(DaemonLifecycle::Draining);
     diagnostic_actor.stop();
     drop(discovery);
     drop(listener);
-    drop(submission_tx);
+    drop(command_senders);
     drop(first_slice);
     let drain = async {
-        let mut admissions_closed = false;
+        let mut submissions_closed = false;
         loop {
             let handlers_done = state.active_connections() == 0 && connections.is_empty();
-            if handlers_done && admissions_closed {
+            if handlers_done && submissions_closed {
                 break;
             }
             tokio::select! {
-                admission = submission_rx.recv(), if !admissions_closed => {
-                    match admission {
+                submission = submission_rx.recv(), if !submissions_closed => {
+                    match submission {
                         Some(admission) => {
                             let _ = orchestrator.submit(admission).await;
                         }
-                        None => admissions_closed = true,
+                        None => submissions_closed = true,
                     }
                 }
                 joined = connections.join_next(), if !connections.is_empty() => {
@@ -214,8 +216,9 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
                         state.telemetry().record_connection_task_failed();
                     }
                 }
-                completed = orchestrator.complete_next(), if !orchestrator.is_idle() => {
-                    completed?;
+                event = orchestrator.next_event(), if !orchestrator.is_idle() => {
+                    let event = event?;
+                    orchestrator.process_event(event).await?;
                 }
             }
         }
@@ -241,14 +244,18 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
         }
         result => result.map_err(DaemonError::from),
     };
-    match drain_result {
-        Err(error) => Err(error),
-        Ok(()) => actor_result,
+    actor_result?;
+    if let Some(error) = run_failure {
+        return Err(error);
     }
+    drain_result
 }
 
 async fn shutdown_signal(mode: DaemonMode) {
-    if mode == DaemonMode::Supervised {
+    if matches!(
+        mode,
+        DaemonMode::CoordinatedSupervised | DaemonMode::Supervised
+    ) {
         supervised_shutdown().await;
         return;
     }
@@ -374,5 +381,6 @@ mod tests {
     fn daemon_arguments_select_explicit_modes() {
         assert_ne!(DaemonMode::Normal, DaemonMode::Supervised);
         assert_ne!(DaemonMode::Coordinated, DaemonMode::Supervised);
+        assert_ne!(DaemonMode::Coordinated, DaemonMode::CoordinatedSupervised);
     }
 }

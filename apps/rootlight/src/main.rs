@@ -24,13 +24,14 @@ use rootlight_daemon_core::{
     ControlRequest, ControlResponse, ControlService, DaemonLifecycle, DaemonLimits,
     DaemonOrchestrator, DaemonState, DiagnosticOutcome as DomainDiagnosticOutcome,
     DiagnosticsQuick as DomainDiagnosticsQuick, HealthStatus as DomainHealthStatus, JournalActor,
+    OperationPreparationError, PreparedOperationSubmission,
     ResourcePressure as DomainResourcePressure, ServiceError, SupportBundle as DomainSupportBundle,
 };
 use rootlight_error::{ErrorCode, PublicError};
 use rootlight_ids::OperationId;
 use rootlight_operations::{
     CatalogWriterLock, ClientInstanceId, OperationJournal, OperationRecord,
-    OperationStage as JournalStage, OperationState as JournalState, OperationSubmission, PlanHash,
+    OperationStage as JournalStage, OperationState as JournalState,
     RecoveryClass as JournalRecoveryClass,
 };
 use rootlight_runtime::RuntimePaths;
@@ -45,7 +46,6 @@ use serde::Serialize;
 const CLI_CONTRACT_VERSION: &str = "1.0";
 const FIRST_SLICE_DEMO_CONTRACT_VERSION: &str = "1.0";
 const HARD_MAX_CLI_JSON_BYTES: usize = 4 * 1024 * 1024;
-const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const FIRST_SLICE_SOURCE_BEFORE: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 const FIRST_SLICE_SOURCE_AFTER: &str = "pub fn answer() -> u32 {\n    43\n}\n";
 
@@ -63,7 +63,14 @@ fn main() -> ExitCode {
         },
         Err(error) => {
             let exit = error.exit_family();
-            let envelope = CliEnvelope::failure(exit, error.public_error());
+            let public_error = match error.public_error() {
+                Ok(public_error) => public_error,
+                Err(_) => {
+                    eprintln!("rootlight: public error construction failed");
+                    return ExitCode::from(ExitFamily::Internal.code());
+                }
+            };
+            let envelope = CliEnvelope::failure(exit, public_error);
             match render_json(&envelope) {
                 Ok(json) => eprintln!("{json}"),
                 Err(()) => eprintln!("rootlight: output serialization failed"),
@@ -255,7 +262,7 @@ fn execute_client(
         ("support-bundle", [output, path]) if output == "--output" => {
             let bundle = client.support_bundle()?;
             write_support_bundle(Path::new(path), &bundle.archive)?;
-            Ok(CommandResult::SupportBundle(support_receipt(&bundle)))
+            Ok(CommandResult::SupportBundle(support_receipt(&bundle)?))
         }
         ("operation-submit", [operation]) => Ok(CommandResult::OperationSubmit(
             client.operation_submit(parse_operation(operation)?)?,
@@ -334,10 +341,12 @@ fn execute_standalone(
     let state = Arc::new(DaemonState::starting());
     let actor = JournalActor::start(
         Arc::clone(&journal),
-        limits.control_queue_limit,
-        usize::try_from(limits.operation_queue_limit).map_err(|_| CliError::InvalidLimits)?,
+        limits.control_queue_limit(),
+        usize::try_from(limits.operation_queue_limit()).map_err(|_| CliError::InvalidLimits)?,
     )?;
-    let mut orchestrator = DaemonOrchestrator::new(actor.handle(), Arc::clone(&state), limits)?;
+    let actor_handle = actor.handle();
+    let mut orchestrator =
+        DaemonOrchestrator::new(actor_handle.clone(), Arc::clone(&state), limits)?;
     let service = ControlService::with_state(journal, nonce, Arc::clone(&state), limits)
         .with_catalog_path(catalog_path);
     state.set_catalog_status(DomainHealthStatus::Healthy);
@@ -350,6 +359,7 @@ fn execute_standalone(
         .map_err(CliError::AsyncRuntime)?;
     let result = runtime.block_on(execute_standalone_command(
         &service,
+        &actor_handle,
         &mut orchestrator,
         command,
         arguments,
@@ -365,6 +375,7 @@ fn execute_standalone(
 
 async fn execute_standalone_command(
     service: &ControlService,
+    actor: &rootlight_daemon_core::JournalActorHandle,
     orchestrator: &mut DaemonOrchestrator,
     command: &str,
     arguments: &[std::ffi::OsString],
@@ -386,39 +397,101 @@ async fn execute_standalone_command(
             };
             let bundle = support_bundle_from_domain(bundle);
             write_support_bundle(Path::new(path), &bundle.archive)?;
-            Ok(CommandResult::SupportBundle(support_receipt(&bundle)))
+            Ok(CommandResult::SupportBundle(support_receipt(&bundle)?))
         }
         ("operation-submit", [operation]) => {
-            let submission = standalone_submission(parse_operation(operation)?, None)?;
-            let admission = orchestrator.schedule(submission).await?;
-            await_standalone_terminal(service, orchestrator, admission.clone()).await?;
-            Ok(CommandResult::OperationSubmit(operation_from_domain(
-                admission,
-            )))
+            submit_standalone(
+                standalone_submission(parse_operation(operation)?, None)?,
+                actor,
+                orchestrator,
+            )
+            .await
         }
         ("operation-submit", [operation, flag, timeout_ms]) if flag == "--timeout-ms" => {
-            let submission = standalone_submission(
+            submit_standalone(
+                standalone_submission(
+                    parse_operation(operation)?,
+                    Some(parse_timeout_ms(timeout_ms)?),
+                )?,
+                actor,
+                orchestrator,
+            )
+            .await
+        }
+        ("operation-submit", [operation, flag, deadline_unix_ms])
+            if flag == "--deadline-unix-ms" =>
+        {
+            let submission = PreparedOperationSubmission::control_probe_timing(
                 parse_operation(operation)?,
-                Some(parse_timeout_ms(timeout_ms)?),
-            )?;
-            let admission = orchestrator.schedule(submission).await?;
-            await_standalone_terminal(service, orchestrator, admission.clone()).await?;
-            Ok(CommandResult::OperationSubmit(operation_from_domain(
-                admission,
-            )))
+                ClientInstanceId::SYSTEM,
+                true,
+                Some(parse_timestamp_ms(deadline_unix_ms)?),
+                None,
+            )
+            .map_err(operation_preparation_error)?;
+            submit_standalone(submission, actor, orchestrator).await
+        }
+        (
+            "operation-submit",
+            [
+                operation,
+                deadline_flag,
+                deadline_unix_ms,
+                lease_flag,
+                lease_expires_unix_ms,
+            ],
+        ) if deadline_flag == "--deadline-unix-ms" && lease_flag == "--lease-expires-unix-ms" => {
+            let submission = PreparedOperationSubmission::control_probe_timing(
+                parse_operation(operation)?,
+                ClientInstanceId::SYSTEM,
+                false,
+                Some(parse_timestamp_ms(deadline_unix_ms)?),
+                Some(parse_timestamp_ms(lease_expires_unix_ms)?),
+            )
+            .map_err(operation_preparation_error)?;
+            submit_standalone(submission, actor, orchestrator).await
+        }
+        ("operation-submit", [operation, lease_flag, lease_expires_unix_ms])
+            if lease_flag == "--lease-expires-unix-ms" =>
+        {
+            let submission = PreparedOperationSubmission::control_probe_timing(
+                parse_operation(operation)?,
+                ClientInstanceId::SYSTEM,
+                false,
+                None,
+                Some(parse_timestamp_ms(lease_expires_unix_ms)?),
+            )
+            .map_err(operation_preparation_error)?;
+            submit_standalone(submission, actor, orchestrator).await
         }
         ("operation-status", [operation]) => response_to_result(
-            service.execute(ControlRequest::OperationStatus(parse_operation(operation)?)),
+            actor
+                .control(ControlRequest::OperationStatus(parse_operation(operation)?))
+                .await?,
         ),
         ("operation-cancel", [operation]) => response_to_result(
-            service.execute(ControlRequest::OperationCancel(parse_operation(operation)?)),
+            actor
+                .control(ControlRequest::OperationCancel(parse_operation(operation)?))
+                .await?,
         ),
         _ => Err(CliError::Usage),
     }
 }
 
+async fn submit_standalone(
+    submission: PreparedOperationSubmission,
+    actor: &rootlight_daemon_core::JournalActorHandle,
+    orchestrator: &mut DaemonOrchestrator,
+) -> Result<CommandResult, CliError> {
+    let admission = orchestrator.schedule(submission).await?;
+    let terminal = await_standalone_terminal(actor, orchestrator, admission).await?;
+    Ok(CommandResult::OperationSubmit(operation_from_domain(
+        terminal,
+    )))
+}
+
 async fn await_standalone_terminal(
-    service: &ControlService,
+    actor: &rootlight_daemon_core::JournalActorHandle,
     orchestrator: &mut DaemonOrchestrator,
     running: OperationRecord,
 ) -> Result<OperationRecord, CliError> {
@@ -426,24 +499,21 @@ async fn await_standalone_terminal(
         return Ok(running);
     }
     loop {
-        let maintenance = tokio::time::sleep(service.limits().maintenance_interval);
-        tokio::pin!(maintenance);
-        tokio::select! {
-            completion = orchestrator.complete_next() => {
-                return completion?.ok_or(CliError::MissingCompletion);
-            }
-            () = &mut maintenance => {
-                orchestrator.maintain().await?;
-                let status = control_response(service.execute(
-                    ControlRequest::OperationStatus(running.operation),
-                ))?;
-                let ControlResponse::OperationStatus(status) = status else {
-                    return Err(CliError::UnexpectedResponse);
-                };
-                if status.state.is_terminal() {
-                    return Ok(status);
-                }
-            }
+        let event = orchestrator.next_event().await?;
+        if let Some(completed) = orchestrator.process_event(event).await?
+            && completed.operation == running.operation
+            && completed.state.is_terminal()
+        {
+            return Ok(completed);
+        }
+        let ControlResponse::OperationStatus(status) = actor
+            .control(ControlRequest::OperationStatus(running.operation))
+            .await?
+        else {
+            return Err(CliError::UnexpectedResponse);
+        };
+        if status.state.is_terminal() {
+            return Ok(status);
         }
     }
 }
@@ -451,27 +521,30 @@ async fn await_standalone_terminal(
 fn standalone_submission(
     operation: OperationId,
     timeout_ms: Option<u64>,
-) -> Result<OperationSubmission, CliError> {
-    OperationSubmission::new(
+) -> Result<PreparedOperationSubmission, CliError> {
+    PreparedOperationSubmission::control_probe(
         operation,
-        rootlight_operations::OperationKind::ControlProbe,
-        PlanHash::from_bytes(CONTROL_PROBE_PLAN_HASH),
         ClientInstanceId::SYSTEM,
-        true,
-        timeout_ms.map(operation_deadline).transpose()?,
-        None,
+        timeout_ms.map(Duration::from_millis),
     )
-    .map_err(|_| CliError::InvalidTimeout)
+    .map_err(operation_preparation_error)
+}
+
+fn operation_preparation_error(error: OperationPreparationError) -> CliError {
+    match error {
+        OperationPreparationError::InvalidTimeout => CliError::InvalidTimeout,
+        OperationPreparationError::Clock => CliError::Clock,
+    }
 }
 
 fn response_to_result(response: ControlResponse) -> Result<CommandResult, CliError> {
-    match control_response(response)? {
+    match response {
         ControlResponse::Health(health) => Ok(CommandResult::Health(health_from_domain(health))),
         ControlResponse::DiagnosticsQuick(diagnostics) => Ok(CommandResult::DiagnosticsQuick(
             diagnostics_from_domain(diagnostics),
         )),
         ControlResponse::SupportBundle(bundle) => Ok(CommandResult::SupportBundle(
-            support_receipt(&support_bundle_from_domain(bundle)),
+            support_receipt(&support_bundle_from_domain(bundle))?,
         )),
         ControlResponse::OperationSubmit(operation) => Ok(CommandResult::OperationSubmit(
             operation_from_domain(operation),
@@ -487,7 +560,7 @@ fn response_to_result(response: ControlResponse) -> Result<CommandResult, CliErr
             accepted,
             operation: operation_from_domain(operation),
         }),
-        ControlResponse::Error(_) => unreachable!("control_response rejects public errors"),
+        ControlResponse::Error(error) => Err(CliError::Public(Box::new(error))),
     }
 }
 
@@ -575,24 +648,23 @@ fn support_bundle_from_domain(bundle: DomainSupportBundle) -> ClientSupportBundl
     }
 }
 
-fn support_receipt(bundle: &ClientSupportBundle) -> SupportBundleReceipt {
-    SupportBundleReceipt {
+fn support_receipt(bundle: &ClientSupportBundle) -> Result<SupportBundleReceipt, CliError> {
+    Ok(SupportBundleReceipt {
         schema_version: bundle.schema_version,
         archive_bytes: bundle.archive_bytes,
-        sha256: hex_digest(bundle.sha256),
+        sha256: hex_digest(bundle.sha256)?,
         contains_source: bundle.contains_source,
-    }
+    })
 }
 
-fn hex_digest(digest: [u8; 32]) -> String {
+fn hex_digest(digest: [u8; 32]) -> Result<String, CliError> {
     use std::fmt::Write as _;
 
     let mut encoded = String::with_capacity(64);
     for byte in digest {
-        write!(&mut encoded, "{byte:02x}")
-            .unwrap_or_else(|_| unreachable!("formatting into String cannot fail"));
+        write!(&mut encoded, "{byte:02x}").map_err(|_| CliError::DigestEncoding)?;
     }
-    encoded
+    Ok(encoded)
 }
 
 fn write_support_bundle(path: &Path, archive: &[u8]) -> Result<(), CliError> {
@@ -628,10 +700,13 @@ fn write_support_bundle_with_writer(
     write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
 ) -> Result<(), CliError> {
     ensure_secure_support_output_available()?;
-    let parent = path
+    let parent = match path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    {
+        Some(parent) => parent,
+        None => Path::new("."),
+    };
     if !parent.is_dir() || path.file_name().is_none() {
         return Err(CliError::InvalidSupportPath);
     }
@@ -688,6 +763,7 @@ fn operation_from_domain(operation: OperationRecord) -> OperationStatus {
         error: operation.error,
         kind: match operation.kind {
             rootlight_operations::OperationKind::ControlProbe => OperationKind::ControlProbe,
+            rootlight_operations::OperationKind::RepositoryIndex => OperationKind::RepositoryIndex,
         },
         stage: match operation.stage {
             JournalStage::Accepted => OperationStage::Accepted,
@@ -736,21 +812,11 @@ fn parse_timestamp_ms(value: &std::ffi::OsString) -> Result<u64, CliError> {
     Ok(milliseconds)
 }
 
-fn operation_deadline(timeout_ms: u64) -> Result<u64, CliError> {
-    unix_time_ms()?
-        .checked_add(timeout_ms)
-        .ok_or(CliError::InvalidTimeout)
-}
-
-fn unix_time_ms() -> Result<u64, CliError> {
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| CliError::Clock)?;
-    u64::try_from(elapsed.as_millis()).map_err(|_| CliError::Clock)
-}
-
 fn elapsed_micros(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+    match u64::try_from(started.elapsed().as_micros()) {
+        Ok(elapsed) => elapsed,
+        Err(_) => u64::MAX,
+    }
 }
 
 fn runtime_paths() -> Result<RuntimePaths, CliError> {
@@ -918,6 +984,8 @@ enum CliError {
     SupportOutputExists,
     #[error("support bundle output failed")]
     SupportWrite(#[source] std::io::Error),
+    #[error("support bundle digest encoding failed")]
+    DigestEncoding,
     #[error("secure random source is unavailable")]
     RandomUnavailable,
     #[error("daemon runtime setup failed")]
@@ -928,8 +996,6 @@ enum CliError {
     InvalidTimeout,
     #[error("daemon resource limits are invalid")]
     InvalidLimits,
-    #[error("standalone operation completion is missing")]
-    MissingCompletion,
     #[error("standalone service returned an unexpected response")]
     UnexpectedResponse,
     #[error("system clock is before the supported epoch")]
@@ -1006,16 +1072,12 @@ impl CliError {
         }
     }
 
-    fn public_error(&self) -> PublicError {
+    fn public_error(&self) -> Result<PublicError, rootlight_error::PublicErrorBuildError> {
         if let Some(error) = self.embedded_public_error() {
-            return error.clone();
+            return Ok(error.clone());
         }
         if matches!(self, Self::FirstSlice(FirstSliceError::Cancelled(_))) {
-            return PublicError::builder(ErrorCode::Cancelled, "operation was cancelled")
-                .build()
-                .unwrap_or_else(|_| {
-                    unreachable!("closed CLI cancellation template is statically bounded")
-                });
+            return PublicError::builder(ErrorCode::Cancelled, "operation was cancelled").build();
         }
         let (code, message, retryable) = match self.exit_family() {
             ExitFamily::Success => (ErrorCode::Internal, "internal operation failed", false),
@@ -1044,9 +1106,7 @@ impl CliError {
         } else {
             builder
         };
-        builder
-            .build()
-            .unwrap_or_else(|_| unreachable!("closed CLI error templates are statically bounded"))
+        builder.build()
     }
 
     fn embedded_public_error(&self) -> Option<&PublicError> {
@@ -1203,13 +1263,24 @@ mod tests {
         assert!(matches!(error, CliError::MacOsSupportOutputUnsupported));
         assert!(!output.exists());
         assert_eq!(error.exit_family(), ExitFamily::SecurityPolicy);
-        assert_eq!(error.public_error().code(), ErrorCode::PermissionDenied);
+        assert_eq!(
+            error
+                .public_error()
+                .expect("closed public error template is valid")
+                .code(),
+            ErrorCode::PermissionDenied
+        );
     }
 
     #[test]
     fn public_failures_use_the_versioned_error_envelope() {
         let error = CliError::InvalidOperation;
-        let envelope = CliEnvelope::failure(error.exit_family(), error.public_error());
+        let envelope = CliEnvelope::failure(
+            error.exit_family(),
+            error
+                .public_error()
+                .expect("closed public error template is valid"),
+        );
         let json = serde_json::to_value(envelope).expect("CLI envelope serializes");
 
         assert_eq!(json["contract_version"], "1.0");
@@ -1225,7 +1296,13 @@ mod tests {
             CancellationReason::DeadlineExceeded,
         ));
 
-        assert_eq!(error.public_error().code(), ErrorCode::Cancelled);
+        assert_eq!(
+            error
+                .public_error()
+                .expect("closed cancellation template is valid")
+                .code(),
+            ErrorCode::Cancelled
+        );
     }
 
     #[test]
