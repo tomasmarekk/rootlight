@@ -260,7 +260,16 @@ fn every_accepted_json_number_round_trips_as_a_request_identity() {
     let mut session = Session::rootlight();
     initialize(&mut session);
 
-    for raw_id in ["1.5", "1e3", "18446744073709551616", "-9223372036854775809"] {
+    for raw_id in [
+        "0",
+        "-1",
+        "-0.0",
+        "1.5",
+        "1e3",
+        "1E-3",
+        "18446744073709551616",
+        "-9223372036854775809",
+    ] {
         let request = format!(r#"{{"jsonrpc":"2.0","id":{raw_id},"method":"ping"}}"#);
         let response = response(&mut session, &request, StdioLimits::default())
             .expect("numeric identity is handled")
@@ -268,6 +277,122 @@ fn every_accepted_json_number_round_trips_as_a_request_identity() {
         let expected: Value =
             serde_json::from_str(raw_id).expect("numeric identity fixture is valid JSON");
         assert_eq!(response["id"], expected);
+    }
+
+    let long_decimal = format!("0.{}", "1234567890".repeat(4 * 1024));
+    let request = format!(r#"{{"jsonrpc":"2.0","id":{long_decimal},"method":"ping"}}"#);
+    let response = response(&mut session, &request, StdioLimits::default())
+        .expect("long numeric identity is handled")
+        .expect("ping has a response");
+    let expected: Value =
+        serde_json::from_str(&long_decimal).expect("long numeric identity fixture is valid JSON");
+    assert_eq!(response["id"], expected);
+}
+
+#[test]
+fn arbitrary_number_transport_cannot_be_spoofed_by_an_object() {
+    let lookalike = r#"{"$serde_json::private::Number":"1.5"}"#;
+    let limits = JsonLimits {
+        max_depth: 1,
+        max_string_bytes: 64,
+        max_object_properties: 1,
+        max_array_items: 1,
+        max_nodes: 2,
+    };
+    let parsed = parse_bounded(lookalike.as_bytes(), limits).expect("lookalike remains valid JSON");
+    assert_eq!(parsed, json!({"$serde_json::private::Number": "1.5"}));
+
+    for constrained in [
+        JsonLimits {
+            max_object_properties: 0,
+            ..limits
+        },
+        JsonLimits {
+            max_string_bytes: 8,
+            ..limits
+        },
+    ] {
+        let failure = parse_bounded(lookalike.as_bytes(), constrained)
+            .expect_err("lookalike object remains subject to object and string limits");
+        assert_eq!(failure, ParseFailure::Rejected(JsonIssue::Limits));
+    }
+
+    let mut session = Session::rootlight();
+    initialize(&mut session);
+    let request = format!(r#"{{"jsonrpc":"2.0","id":{lookalike},"method":"ping"}}"#);
+    let rejected = response(&mut session, &request, StdioLimits::default())
+        .expect("object identity is handled")
+        .expect("object identity has an error");
+    assert_explicit_null_id(&rejected);
+    assert_eq!(rejected["error"]["code"], INVALID_REQUEST);
+}
+
+#[test]
+fn arbitrary_numbers_obey_value_budgets_without_internal_string_accounting() {
+    let limits = JsonLimits {
+        max_depth: 0,
+        max_string_bytes: 1,
+        max_object_properties: 1,
+        max_array_items: 1,
+        max_nodes: 1,
+    };
+    assert_eq!(
+        parse_bounded(b"1.5", limits)
+            .expect("one decimal is one node")
+            .as_number()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("1.5")
+    );
+    for (input, constrained) in [
+        (
+            b"[1.5]".as_slice(),
+            JsonLimits {
+                max_depth: 1,
+                max_nodes: 1,
+                ..limits
+            },
+        ),
+        (
+            b"[1.5]".as_slice(),
+            JsonLimits {
+                max_depth: 1,
+                max_array_items: 0,
+                max_nodes: 2,
+                ..limits
+            },
+        ),
+        (
+            b"[1.5]".as_slice(),
+            JsonLimits {
+                max_depth: 0,
+                max_array_items: 1,
+                max_nodes: 2,
+                ..limits
+            },
+        ),
+    ] {
+        let failure =
+            parse_bounded(input, constrained).expect_err("numeric child cannot bypass limits");
+        assert_eq!(failure, ParseFailure::Rejected(JsonIssue::Limits));
+    }
+}
+
+#[test]
+fn malformed_number_forms_remain_rejected() {
+    let limits = JsonLimits {
+        max_depth: 2,
+        max_string_bytes: 8,
+        max_object_properties: 2,
+        max_array_items: 2,
+        max_nodes: 4,
+    };
+    for malformed in ["01", "-", "1.", "1e", "1e+", "+1", "--1", "[1.5,]"] {
+        assert_eq!(
+            parse_bounded(malformed.as_bytes(), limits),
+            Err(ParseFailure::Malformed),
+            "fixture must remain malformed: {malformed}"
+        );
     }
 }
 

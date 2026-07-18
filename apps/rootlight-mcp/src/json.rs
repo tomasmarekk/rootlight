@@ -1,3 +1,9 @@
+//! Bounded JSON decoding for untrusted MCP standard-stream frames.
+//!
+//! The allocation-free raw string preflight must remain before serde because
+//! serde may allocate decoded escaped keys and values before visitor callbacks.
+//! Visitor limit checks remain as defense in depth for every decoded value.
+
 use std::{cell::Cell, fmt, rc::Rc};
 
 use serde::{
@@ -6,7 +12,7 @@ use serde::{
 };
 use serde_json::{Map, Number, Value};
 
-use crate::{BoundedReserveError, try_reserve_bounded};
+use crate::{BoundedReserveError, MAX_SUPPORTED_JSON_DEPTH, try_reserve_bounded};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct JsonLimits {
@@ -46,7 +52,8 @@ fn parse_bounded_with_state(
         Err(StringScanFailure::Malformed) => return Err(ParseFailure::Malformed),
     }
 
-    let state = Rc::new(ParseState::new(limits));
+    let node_kinds = RawKindScanner::new(input, limits).scan()?;
+    let state = Rc::new(ParseState::new(limits, node_kinds));
     let mut deserializer = serde_json::Deserializer::from_slice(input);
     let value = NodeSeed {
         state: Rc::clone(&state),
@@ -64,6 +71,9 @@ fn parse_bounded_with_state(
         }
     })?;
     deserializer.end().map_err(|_| ParseFailure::Malformed)?;
+    if state.nodes.get() != state.node_kinds.len() {
+        return Err(ParseFailure::Malformed);
+    }
     Ok((value, state))
 }
 
@@ -202,8 +212,249 @@ fn count_decoded_bytes(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawNodeKind {
+    Number,
+    Other,
+}
+
+// Lexical provenance keeps real number tokens distinct from serde_json's
+// map-shaped arbitrary-precision transport without trusting its private key.
+struct RawKindScanner<'a> {
+    input: &'a [u8],
+    limits: JsonLimits,
+    index: usize,
+    kinds: Vec<RawNodeKind>,
+}
+
+impl<'a> RawKindScanner<'a> {
+    const fn new(input: &'a [u8], limits: JsonLimits) -> Self {
+        Self {
+            input,
+            limits,
+            index: 0,
+            kinds: Vec::new(),
+        }
+    }
+
+    fn scan(mut self) -> Result<Vec<RawNodeKind>, ParseFailure> {
+        self.scan_value(0)?;
+        self.skip_whitespace();
+        if self.index != self.input.len() {
+            return Err(ParseFailure::Malformed);
+        }
+        Ok(self.kinds)
+    }
+
+    fn scan_value(&mut self, depth: usize) -> Result<(), ParseFailure> {
+        self.skip_whitespace();
+        if depth > self.limits.max_depth || depth > MAX_SUPPORTED_JSON_DEPTH {
+            return Err(ParseFailure::Rejected(JsonIssue::Limits));
+        }
+        let byte = *self.input.get(self.index).ok_or(ParseFailure::Malformed)?;
+        match byte {
+            b'{' => {
+                self.push_kind(RawNodeKind::Other)?;
+                self.scan_object(depth)
+            }
+            b'[' => {
+                self.push_kind(RawNodeKind::Other)?;
+                self.scan_array(depth)
+            }
+            b'"' => {
+                self.push_kind(RawNodeKind::Other)?;
+                self.index = scan_string(self.input, self.index.saturating_add(1), usize::MAX)
+                    .map_err(string_scan_failure)?;
+                Ok(())
+            }
+            b't' => {
+                self.push_kind(RawNodeKind::Other)?;
+                self.scan_literal(b"true")
+            }
+            b'f' => {
+                self.push_kind(RawNodeKind::Other)?;
+                self.scan_literal(b"false")
+            }
+            b'n' => {
+                self.push_kind(RawNodeKind::Other)?;
+                self.scan_literal(b"null")
+            }
+            b'-' | b'0'..=b'9' => {
+                self.push_kind(RawNodeKind::Number)?;
+                self.scan_number()
+            }
+            _ => Err(ParseFailure::Malformed),
+        }
+    }
+
+    fn scan_object(&mut self, depth: usize) -> Result<(), ParseFailure> {
+        self.index = self.index.saturating_add(1);
+        self.skip_whitespace();
+        if self.input.get(self.index) == Some(&b'}') {
+            self.index = self.index.saturating_add(1);
+            return Ok(());
+        }
+
+        let mut properties = 0usize;
+        loop {
+            if properties >= self.limits.max_object_properties
+                || self.input.get(self.index) != Some(&b'"')
+            {
+                return if properties >= self.limits.max_object_properties {
+                    Err(ParseFailure::Rejected(JsonIssue::Limits))
+                } else {
+                    Err(ParseFailure::Malformed)
+                };
+            }
+            self.index = scan_string(self.input, self.index.saturating_add(1), usize::MAX)
+                .map_err(string_scan_failure)?;
+            self.skip_whitespace();
+            if self.input.get(self.index) != Some(&b':') {
+                return Err(ParseFailure::Malformed);
+            }
+            self.index = self.index.saturating_add(1);
+            properties = properties
+                .checked_add(1)
+                .ok_or(ParseFailure::Rejected(JsonIssue::Limits))?;
+            self.scan_value(depth.saturating_add(1))?;
+            self.skip_whitespace();
+            match self.input.get(self.index) {
+                Some(b',') => {
+                    self.index = self.index.saturating_add(1);
+                    self.skip_whitespace();
+                }
+                Some(b'}') => {
+                    self.index = self.index.saturating_add(1);
+                    return Ok(());
+                }
+                _ => return Err(ParseFailure::Malformed),
+            }
+        }
+    }
+
+    fn scan_array(&mut self, depth: usize) -> Result<(), ParseFailure> {
+        self.index = self.index.saturating_add(1);
+        self.skip_whitespace();
+        if self.input.get(self.index) == Some(&b']') {
+            self.index = self.index.saturating_add(1);
+            return Ok(());
+        }
+
+        let mut items = 0usize;
+        loop {
+            if items >= self.limits.max_array_items {
+                return Err(ParseFailure::Rejected(JsonIssue::Limits));
+            }
+            items = items
+                .checked_add(1)
+                .ok_or(ParseFailure::Rejected(JsonIssue::Limits))?;
+            self.scan_value(depth.saturating_add(1))?;
+            self.skip_whitespace();
+            match self.input.get(self.index) {
+                Some(b',') => {
+                    self.index = self.index.saturating_add(1);
+                    self.skip_whitespace();
+                }
+                Some(b']') => {
+                    self.index = self.index.saturating_add(1);
+                    return Ok(());
+                }
+                _ => return Err(ParseFailure::Malformed),
+            }
+        }
+    }
+
+    fn scan_literal(&mut self, literal: &[u8]) -> Result<(), ParseFailure> {
+        let end = self
+            .index
+            .checked_add(literal.len())
+            .ok_or(ParseFailure::Malformed)?;
+        if self.input.get(self.index..end) != Some(literal) {
+            return Err(ParseFailure::Malformed);
+        }
+        self.index = end;
+        Ok(())
+    }
+
+    fn scan_number(&mut self) -> Result<(), ParseFailure> {
+        if self.input.get(self.index) == Some(&b'-') {
+            self.index = self.index.saturating_add(1);
+        }
+
+        match self.input.get(self.index) {
+            Some(b'0') => {
+                self.index = self.index.saturating_add(1);
+                if self.input.get(self.index).is_some_and(u8::is_ascii_digit) {
+                    return Err(ParseFailure::Malformed);
+                }
+            }
+            Some(b'1'..=b'9') => {
+                self.index = self.index.saturating_add(1);
+                while self.input.get(self.index).is_some_and(u8::is_ascii_digit) {
+                    self.index = self.index.saturating_add(1);
+                }
+            }
+            _ => return Err(ParseFailure::Malformed),
+        }
+
+        if self.input.get(self.index) == Some(&b'.') {
+            self.index = self.index.saturating_add(1);
+            let fraction_start = self.index;
+            while self.input.get(self.index).is_some_and(u8::is_ascii_digit) {
+                self.index = self.index.saturating_add(1);
+            }
+            if self.index == fraction_start {
+                return Err(ParseFailure::Malformed);
+            }
+        }
+
+        if matches!(self.input.get(self.index), Some(b'e' | b'E')) {
+            self.index = self.index.saturating_add(1);
+            if matches!(self.input.get(self.index), Some(b'+' | b'-')) {
+                self.index = self.index.saturating_add(1);
+            }
+            let exponent_start = self.index;
+            while self.input.get(self.index).is_some_and(u8::is_ascii_digit) {
+                self.index = self.index.saturating_add(1);
+            }
+            if self.index == exponent_start {
+                return Err(ParseFailure::Malformed);
+            }
+        }
+        Ok(())
+    }
+
+    fn push_kind(&mut self, kind: RawNodeKind) -> Result<(), ParseFailure> {
+        match try_reserve_bounded(&mut self.kinds, 1, self.limits.max_nodes) {
+            Ok(_) => {
+                self.kinds.push(kind);
+                Ok(())
+            }
+            Err(BoundedReserveError::Limit) => Err(ParseFailure::Rejected(JsonIssue::Limits)),
+            Err(BoundedReserveError::Memory) => Err(ParseFailure::MemoryUnavailable),
+        }
+    }
+
+    fn skip_whitespace(&mut self) {
+        while matches!(
+            self.input.get(self.index),
+            Some(b' ' | b'\n' | b'\r' | b'\t')
+        ) {
+            self.index = self.index.saturating_add(1);
+        }
+    }
+}
+
+const fn string_scan_failure(failure: StringScanFailure) -> ParseFailure {
+    match failure {
+        StringScanFailure::Limits => ParseFailure::Rejected(JsonIssue::Limits),
+        StringScanFailure::Malformed => ParseFailure::Malformed,
+    }
+}
+
 struct ParseState {
     limits: JsonLimits,
+    node_kinds: Vec<RawNodeKind>,
     nodes: Cell<usize>,
     issue: Cell<Option<JsonIssue>>,
     memory_unavailable: Cell<bool>,
@@ -212,9 +463,10 @@ struct ParseState {
 }
 
 impl ParseState {
-    const fn new(limits: JsonLimits) -> Self {
+    const fn new(limits: JsonLimits, node_kinds: Vec<RawNodeKind>) -> Self {
         Self {
             limits,
+            node_kinds,
             nodes: Cell::new(0),
             issue: Cell::new(None),
             memory_unavailable: Cell::new(false),
@@ -223,15 +475,20 @@ impl ParseState {
         }
     }
 
-    fn count_node<E: serde::de::Error>(&self, depth: usize) -> Result<(), E> {
+    fn enter_node<E: serde::de::Error>(&self, depth: usize) -> Result<RawNodeKind, E> {
         let Some(nodes) = self.nodes.get().checked_add(1) else {
             return Err(self.rejection(JsonIssue::Limits));
         };
         if nodes > self.limits.max_nodes || depth > self.limits.max_depth {
             return Err(self.rejection(JsonIssue::Limits));
         }
+        let kind = self
+            .node_kinds
+            .get(nodes.saturating_sub(1))
+            .copied()
+            .ok_or_else(|| E::custom("raw JSON node classification is inconsistent"))?;
         self.nodes.set(nodes);
-        Ok(())
+        Ok(kind)
     }
 
     fn check_string<E: serde::de::Error>(&self, value: &str) -> Result<(), E> {
@@ -294,11 +551,15 @@ impl<'de> DeserializeSeed<'de> for NodeSeed {
         if !self.allowed {
             return Err(self.state.rejection(JsonIssue::Limits));
         }
-        self.state.count_node::<D::Error>(self.depth)?;
-        deserializer.deserialize_any(NodeVisitor {
-            state: self.state,
-            depth: self.depth,
-        })
+        match self.state.enter_node::<D::Error>(self.depth)? {
+            // Number's public Deserialize implementation understands
+            // serde_json's arbitrary-precision transport representation.
+            RawNodeKind::Number => Number::deserialize(deserializer).map(Value::Number),
+            RawNodeKind::Other => deserializer.deserialize_any(NodeVisitor {
+                state: self.state,
+                depth: self.depth,
+            }),
+        }
     }
 }
 
