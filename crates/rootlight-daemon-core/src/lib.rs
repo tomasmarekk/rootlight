@@ -3399,6 +3399,7 @@ fn operation_record_to_wire(record: &OperationRecord) -> daemon::OperationStatus
 const fn operation_kind_to_wire(kind: OperationKind) -> daemon::OperationKind {
     match kind {
         OperationKind::ControlProbe => daemon::OperationKind::ControlProbe,
+        OperationKind::RepositoryIndex => daemon::OperationKind::RepositoryIndex,
     }
 }
 

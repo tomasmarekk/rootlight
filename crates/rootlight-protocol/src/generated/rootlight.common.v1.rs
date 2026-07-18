@@ -40,6 +40,27 @@ pub struct OperationId {
     #[allow(missing_docs)]
     pub value: ::prost::alloc::vec::Vec<u8>,
 }
+/// Binary semantic symbol identity using canonical Rootlight ID bytes.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SymbolId {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+}
+/// Binary repository-scoped file identity using canonical Rootlight ID bytes.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FileId {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+}
+/// Binary immutable content digest using canonical Rootlight hash bytes.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ContentHash {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+}
 /// Bounded typed value permitted in a public error detail.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PublicValue {

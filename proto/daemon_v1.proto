@@ -33,6 +33,11 @@ message RequestEnvelope {
     OperationLeaseRenewRequest operation_lease_renew = 14;
     DiagnosticsQuickRequest diagnostics_quick = 15;
     SupportBundleRequest support_bundle = 16;
+    RepositoryIndexRequest repository_index = 30;
+    RepositoryOperationStatusRequest repository_operation_status = 31;
+    CodeLocateRequest code_locate = 32;
+    SymbolExplainRequest symbol_explain = 33;
+    SourceReadRequest source_read = 34;
   }
 }
 
@@ -47,6 +52,11 @@ message ResponseEnvelope {
     OperationLeaseRenewResponse operation_lease_renew = 14;
     DiagnosticsQuickResponse diagnostics_quick = 15;
     SupportBundleResponse support_bundle = 16;
+    RepositoryIndexResponse repository_index = 30;
+    RepositoryOperationStatusResponse repository_operation_status = 31;
+    CodeLocateResponse code_locate = 32;
+    SymbolExplainResponse symbol_explain = 33;
+    SourceReadResponse source_read = 34;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -169,6 +179,7 @@ enum OperationState {
 enum OperationKind {
   OPERATION_KIND_UNSPECIFIED = 0;
   CONTROL_PROBE = 1;
+  REPOSITORY_INDEX = 2;
 }
 
 // Monotonic infrastructure stages for the bounded control probe.
@@ -252,4 +263,225 @@ message OperationLeaseRenewRequest {
 // Returns the durable operation after lease renewal.
 message OperationLeaseRenewResponse {
   OperationStatus operation = 1;
+}
+
+// Selects the active or one explicit immutable repository generation.
+message GenerationSelector {
+  oneof selector {
+    bool active = 1;
+    rootlight.common.v1.GenerationId generation = 2;
+  }
+}
+
+// One generation-bound immutable source reference.
+message FirstSliceSourceRef {
+  rootlight.common.v1.RepositoryId repository = 1;
+  rootlight.common.v1.GenerationId generation = 2;
+  rootlight.common.v1.FileId file = 3;
+  uint64 start_byte = 4;
+  uint64 end_byte = 5;
+  rootlight.common.v1.ContentHash content_hash = 6;
+  optional uint64 start_line = 7;
+  optional uint64 end_line = 8;
+}
+
+// Requests admission of the supported whole-root Rust fixture index plan.
+message RepositoryIndexRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  string root = 2;
+  rootlight.common.v1.OperationId operation = 3;
+  bool detached = 4;
+}
+
+// Reports the admitted first-slice indexing operation.
+message RepositoryIndexResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  rootlight.common.v1.OperationId operation = 3;
+  OperationState state = 4;
+  uint64 revision = 5;
+  optional rootlight.common.v1.GenerationId parent_generation = 6;
+  optional rootlight.common.v1.GenerationId published_generation = 7;
+  uint64 discovered_inputs = 8;
+  uint64 indexed_files = 9;
+  uint64 entities = 10;
+  uint64 elapsed_micros = 11;
+}
+
+// Action accepted by the first-slice operation status request.
+enum RepositoryOperationAction {
+  REPOSITORY_OPERATION_ACTION_UNSPECIFIED = 0;
+  REPOSITORY_OPERATION_GET = 1;
+  REPOSITORY_OPERATION_CANCEL = 2;
+}
+
+// Reads or cooperatively cancels one operation created by repository indexing.
+message RepositoryOperationStatusRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.OperationId operation = 2;
+  RepositoryOperationAction action = 3;
+  optional uint32 wait_ms = 4;
+  optional uint64 after_revision = 5;
+}
+
+// Returns journal state plus same-process first-slice publication metadata.
+message RepositoryOperationStatusResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  OperationStatus operation = 2;
+  optional rootlight.common.v1.GenerationId published_generation = 3;
+  uint64 started_unix_ms = 4;
+  uint64 peak_rss_bytes = 5;
+  uint64 written_bytes = 6;
+  uint64 files_examined = 7;
+  optional uint32 retry_after_ms = 8;
+}
+
+// First-slice lexical locate mode.
+enum FirstSliceLocateMode {
+  FIRST_SLICE_LOCATE_MODE_UNSPECIFIED = 0;
+  FIRST_SLICE_LOCATE_EXACT = 1;
+  FIRST_SLICE_LOCATE_PREFIX = 2;
+  FIRST_SLICE_LOCATE_TEXT = 3;
+  FIRST_SLICE_LOCATE_SAFE_REGEX = 4;
+  FIRST_SLICE_LOCATE_GLOB = 5;
+}
+
+// Aggregate support tier for one first-slice response.
+enum FirstSliceAnalysisTier {
+  FIRST_SLICE_ANALYSIS_TIER_UNSPECIFIED = 0;
+  FIRST_SLICE_TIER_A = 1;
+  FIRST_SLICE_TIER_B = 2;
+  FIRST_SLICE_TIER_C = 3;
+  FIRST_SLICE_TIER_D = 4;
+}
+
+// Aggregate completeness for one first-slice response.
+enum FirstSliceCoverageStatus {
+  FIRST_SLICE_COVERAGE_STATUS_UNSPECIFIED = 0;
+  FIRST_SLICE_COVERAGE_COMPLETE = 1;
+  FIRST_SLICE_COVERAGE_BOUNDED = 2;
+  FIRST_SLICE_COVERAGE_SAMPLED = 3;
+  FIRST_SLICE_COVERAGE_UNKNOWN = 4;
+}
+
+// Bounded measured usage for one first-slice query.
+message FirstSliceQueryUsage {
+  uint64 rows = 1;
+  uint64 edges = 2;
+  uint64 results = 3;
+  uint64 source_bytes = 4;
+  uint64 json_bytes = 5;
+  uint64 estimated_tokens = 6;
+  uint64 elapsed_micros = 7;
+}
+
+// Common repository, generation, coverage, and usage correlation.
+message FirstSliceQueryContext {
+  rootlight.common.v1.RepositoryId repository = 1;
+  rootlight.common.v1.GenerationId generation = 2;
+  optional rootlight.common.v1.GenerationId parent_generation = 3;
+  bool active_generation = 4;
+  FirstSliceAnalysisTier tier = 5;
+  FirstSliceCoverageStatus coverage_status = 6;
+  uint64 skipped_inputs = 7;
+  FirstSliceQueryUsage usage = 8;
+}
+
+// Requests one bounded generation-pinned lexical lookup.
+message CodeLocateRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  string query = 4;
+  FirstSliceLocateMode mode = 5;
+  uint32 maximum_results = 6;
+}
+
+// One typed lexical lookup result.
+message FirstSliceLocateHit {
+  rootlight.common.v1.SymbolId symbol = 1;
+  rootlight.common.v1.FileId file = 2;
+  string identifier = 3;
+  string qualified_name = 4;
+  string path = 5;
+  string kind = 6;
+  string language = 7;
+  FirstSliceAnalysisTier tier = 8;
+  bool generated = 9;
+  uint32 score = 10;
+  optional FirstSliceSourceRef source = 11;
+}
+
+// Returns bounded typed lexical results and generation correlation.
+message CodeLocateResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  repeated FirstSliceLocateHit hits = 3;
+  uint64 matched_candidates = 4;
+  bool truncated = 5;
+}
+
+// Requests bounded explanations for stable symbols.
+message SymbolExplainRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  repeated rootlight.common.v1.SymbolId symbols = 4;
+}
+
+// One typed, compact symbol explanation.
+message FirstSliceSymbolExplanation {
+  rootlight.common.v1.SymbolId symbol = 1;
+  string kind = 2;
+  string display_name = 3;
+  optional string signature = 4;
+  FirstSliceSourceRef definition = 5;
+  uint64 outbound_exact = 6;
+  uint64 outbound_candidates = 7;
+  uint64 inbound_exact = 8;
+  uint64 inbound_candidates = 9;
+  uint64 references_exact = 10;
+  string provider = 11;
+  string evidence = 12;
+  uint32 confidence = 13;
+}
+
+// Returns explanations in request order and unresolved stable identities.
+message SymbolExplainResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  repeated FirstSliceSymbolExplanation symbols = 3;
+  repeated rootlight.common.v1.SymbolId unresolved_symbols = 4;
+  bool truncated = 5;
+}
+
+// Requests exact generation-bound source references.
+message SourceReadRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  repeated FirstSliceSourceRef references = 4;
+}
+
+// One verified UTF-8 source chunk.
+message FirstSliceSourceChunk {
+  FirstSliceSourceRef source = 1;
+  string path = 2;
+  uint64 start_byte = 3;
+  uint64 end_byte = 4;
+  uint64 start_line = 5;
+  uint64 end_line = 6;
+  string content = 7;
+  rootlight.common.v1.ContentHash content_hash = 8;
+  string language = 9;
+  bool generated = 10;
+}
+
+// Returns exact verified UTF-8 source chunks.
+message SourceReadResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  repeated FirstSliceSourceChunk chunks = 3;
+  uint64 total_source_bytes = 4;
+  bool truncated = 5;
 }

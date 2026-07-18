@@ -24,6 +24,7 @@ use rootlight_mcp_contract::{
     RepoIndexInput, RepoIndexOutput, ResponseMetadata, SourceReadInput, SourceReadOutput,
     SymbolExplainInput, SymbolExplainOutput,
 };
+use rootlight_protocol::CURRENT_PROTOCOL_MINOR;
 use rootlight_protocol::generated::common::v1::ContractVersion as ProtocolContractVersion;
 use rootlight_storage::GENERATION_CONTRACT_VERSION;
 use schemars::{JsonSchema, generate::SchemaSettings};
@@ -66,10 +67,11 @@ const COMPATIBILITY_BASELINES: [&str; 9] = [
     STORAGE_COMPATIBILITY_BASELINES[1],
     STORAGE_COMPATIBILITY_BASELINES[2],
 ];
-const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 3] = [
+const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 4] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
     ("1.2", "protobuf/1.2/rootlight.desc"),
     ("1.3", "protobuf/1.3/rootlight.desc"),
+    ("1.4", "protobuf/1.4/rootlight.desc"),
 ];
 const SCHEMA_PROVENANCE_INPUTS: [&str; 15] = [
     "Cargo.lock",
@@ -115,6 +117,28 @@ pub(crate) fn generate(mode: GenerateMode) -> Result<(), SchemaError> {
         GenerateMode::Check => "verified",
     };
     println!("schema artifacts {action}");
+    Ok(())
+}
+
+/// Freezes the checked-in current daemon descriptor before an additive minor bump.
+///
+/// # Errors
+///
+/// Returns [`SchemaError`] when the current generated descriptor is missing or
+/// the target baseline already exists.
+pub(crate) fn freeze_daemon_protocol() -> Result<(), SchemaError> {
+    let workspace_root = workspace_root()?;
+    let source = workspace_root
+        .join(SCHEMA_ROOT)
+        .join("protobuf/rootlight.desc");
+    let destination = workspace_root.join(COMPATIBILITY_ROOT).join(format!(
+        "protobuf/1.{CURRENT_PROTOCOL_MINOR}/rootlight.desc"
+    ));
+    if destination.exists() {
+        return Err(SchemaError::ProtocolBaselineAlreadyExists(destination));
+    }
+    write_bytes(&destination, &read_bytes(&source)?)?;
+    println!("daemon protocol 1.{CURRENT_PROTOCOL_MINOR} descriptor frozen");
     Ok(())
 }
 
@@ -226,7 +250,7 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
     validate_storage_compatibility(&workspace_root)?;
     println!("compatibility: frozen configuration 1.0 and current 1.1 fixtures verified");
     println!("compatibility: frozen protobuf descriptor is a compatible subset");
-    println!("compatibility: daemon protocol 1.1, 1.2, and 1.3 descriptors verified");
+    println!("compatibility: daemon protocol 1.1 through 1.4 descriptors verified");
     println!("compatibility: frozen protobuf wire semantics verified");
     println!("compatibility: frozen IR 1.0 and normalized IR 1.1 documents verified");
     println!("compatibility: frozen rootlight.lexical extension version 1 verified");
@@ -2005,6 +2029,8 @@ struct ArtifactRecord {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SchemaError {
+    #[error("COMPAT_PROTOBUF_BASELINE_EXISTS: daemon protocol baseline already exists: {0}")]
+    ProtocolBaselineAlreadyExists(PathBuf),
     #[error("failed to read Cargo metadata for schema generation")]
     Metadata(#[source] cargo_metadata::Error),
     #[error("schema generator package is missing from Cargo metadata: {0}")]

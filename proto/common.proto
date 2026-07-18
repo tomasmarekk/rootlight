@@ -29,6 +29,21 @@ message OperationId {
   bytes value = 1;
 }
 
+// Binary semantic symbol identity using canonical Rootlight ID bytes.
+message SymbolId {
+  bytes value = 1;
+}
+
+// Binary repository-scoped file identity using canonical Rootlight ID bytes.
+message FileId {
+  bytes value = 1;
+}
+
+// Binary immutable content digest using canonical Rootlight hash bytes.
+message ContentHash {
+  bytes value = 1;
+}
+
 // Closed stable error families shared by all public boundaries.
 enum ErrorCode {
   ERROR_CODE_UNSPECIFIED = 0;

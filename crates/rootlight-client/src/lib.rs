@@ -205,6 +205,8 @@ pub struct SupportBundle {
 pub enum OperationKind {
     /// Deterministic infrastructure work used to prove control-plane lifecycle.
     ControlProbe,
+    /// Repository indexing that may publish an immutable generation.
+    RepositoryIndex,
 }
 
 /// Monotonic stage within the current operation kind.
@@ -876,6 +878,11 @@ fn ensure_request_supported(
     selected_protocol_minor: u32,
 ) -> Result<(), ClientError> {
     let required_minor = match request {
+        daemon::request_envelope::Request::RepositoryIndex(_)
+        | daemon::request_envelope::Request::RepositoryOperationStatus(_)
+        | daemon::request_envelope::Request::CodeLocate(_)
+        | daemon::request_envelope::Request::SymbolExplain(_)
+        | daemon::request_envelope::Request::SourceRead(_) => 5,
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
         daemon::request_envelope::Request::OperationLeaseRenew(_) => 2,
@@ -1324,6 +1331,7 @@ fn parse_operation_status(
         .map_err(|_| ClientError::InvalidOperationKind)?
     {
         daemon::OperationKind::ControlProbe => OperationKind::ControlProbe,
+        daemon::OperationKind::RepositoryIndex => OperationKind::RepositoryIndex,
         daemon::OperationKind::Unspecified => return Err(ClientError::InvalidOperationKind),
     };
     let stage = match daemon::OperationStage::try_from(status.stage)

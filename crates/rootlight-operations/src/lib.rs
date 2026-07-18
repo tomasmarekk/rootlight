@@ -104,18 +104,22 @@ impl PlanHash {
 pub enum OperationKind {
     /// Deterministic infrastructure work used to prove lifecycle behavior.
     ControlProbe,
+    /// Bounded repository indexing that may publish one immutable generation.
+    RepositoryIndex,
 }
 
 impl OperationKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::ControlProbe => "control_probe",
+            Self::RepositoryIndex => "repository_index",
         }
     }
 
     fn parse(value: &str) -> Result<Self, OperationError> {
         match value {
             "control_probe" => Ok(Self::ControlProbe),
+            "repository_index" => Ok(Self::RepositoryIndex),
             _ => Err(OperationError::CorruptState),
         }
     }

@@ -36,7 +36,7 @@ pub struct ServerHello {
     pub instance_nonce: ::prost::alloc::vec::Vec<u8>,
 }
 /// Bounded request envelope for one local daemon operation.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RequestEnvelope {
     #[prost(uint64, tag = "1")]
     #[allow(missing_docs)]
@@ -47,14 +47,17 @@ pub struct RequestEnvelope {
     #[prost(uint32, optional, tag = "3")]
     #[allow(missing_docs)]
     pub timeout_ms: ::core::option::Option<u32>,
-    #[prost(oneof = "request_envelope::Request", tags = "10, 11, 12, 13, 14, 15, 16")]
+    #[prost(
+        oneof = "request_envelope::Request",
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34"
+    )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
 }
 /// Nested message and enum types in `RequestEnvelope`.
 pub mod request_envelope {
     #[allow(missing_docs)]
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Request {
         #[prost(message, tag = "10")]
         #[allow(missing_docs)]
@@ -77,6 +80,21 @@ pub mod request_envelope {
         #[prost(message, tag = "16")]
         #[allow(missing_docs)]
         SupportBundle(super::SupportBundleRequest),
+        #[prost(message, tag = "30")]
+        #[allow(missing_docs)]
+        RepositoryIndex(super::RepositoryIndexRequest),
+        #[prost(message, tag = "31")]
+        #[allow(missing_docs)]
+        RepositoryOperationStatus(super::RepositoryOperationStatusRequest),
+        #[prost(message, tag = "32")]
+        #[allow(missing_docs)]
+        CodeLocate(super::CodeLocateRequest),
+        #[prost(message, tag = "33")]
+        #[allow(missing_docs)]
+        SymbolExplain(super::SymbolExplainRequest),
+        #[prost(message, tag = "34")]
+        #[allow(missing_docs)]
+        SourceRead(super::SourceReadRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -87,7 +105,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -118,6 +136,21 @@ pub mod response_envelope {
         #[prost(message, tag = "16")]
         #[allow(missing_docs)]
         SupportBundle(super::SupportBundleResponse),
+        #[prost(message, tag = "30")]
+        #[allow(missing_docs)]
+        RepositoryIndex(super::RepositoryIndexResponse),
+        #[prost(message, tag = "31")]
+        #[allow(missing_docs)]
+        RepositoryOperationStatus(super::RepositoryOperationStatusResponse),
+        #[prost(message, tag = "32")]
+        #[allow(missing_docs)]
+        CodeLocate(super::CodeLocateResponse),
+        #[prost(message, tag = "33")]
+        #[allow(missing_docs)]
+        SymbolExplain(super::SymbolExplainResponse),
+        #[prost(message, tag = "34")]
+        #[allow(missing_docs)]
+        SourceRead(super::SourceReadResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -369,6 +402,460 @@ pub struct OperationLeaseRenewResponse {
     #[prost(message, optional, tag = "1")]
     #[allow(missing_docs)]
     pub operation: ::core::option::Option<OperationStatus>,
+}
+/// Selects the active or one explicit immutable repository generation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GenerationSelector {
+    #[prost(oneof = "generation_selector::Selector", tags = "1, 2")]
+    #[allow(missing_docs)]
+    pub selector: ::core::option::Option<generation_selector::Selector>,
+}
+/// Nested message and enum types in `GenerationSelector`.
+pub mod generation_selector {
+    #[allow(missing_docs)]
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Selector {
+        #[prost(bool, tag = "1")]
+        #[allow(missing_docs)]
+        Active(bool),
+        #[prost(message, tag = "2")]
+        #[allow(missing_docs)]
+        Generation(super::super::super::common::v1::GenerationId),
+    }
+}
+/// One generation-bound immutable source reference.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceSourceRef {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<super::super::common::v1::GenerationId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub file: ::core::option::Option<super::super::common::v1::FileId>,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub start_byte: u64,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub end_byte: u64,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub content_hash: ::core::option::Option<super::super::common::v1::ContentHash>,
+    #[prost(uint64, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub start_line: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub end_line: ::core::option::Option<u64>,
+}
+/// Requests admission of the supported whole-root Rust fixture index plan.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryIndexRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub root: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub operation: ::core::option::Option<super::super::common::v1::OperationId>,
+    #[prost(bool, tag = "4")]
+    #[allow(missing_docs)]
+    pub detached: bool,
+}
+/// Reports the admitted first-slice indexing operation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryIndexResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub operation: ::core::option::Option<super::super::common::v1::OperationId>,
+    #[prost(enumeration = "OperationState", tag = "4")]
+    #[allow(missing_docs)]
+    pub state: i32,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub revision: u64,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub parent_generation: ::core::option::Option<
+        super::super::common::v1::GenerationId,
+    >,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub published_generation: ::core::option::Option<
+        super::super::common::v1::GenerationId,
+    >,
+    #[prost(uint64, tag = "8")]
+    #[allow(missing_docs)]
+    pub discovered_inputs: u64,
+    #[prost(uint64, tag = "9")]
+    #[allow(missing_docs)]
+    pub indexed_files: u64,
+    #[prost(uint64, tag = "10")]
+    #[allow(missing_docs)]
+    pub entities: u64,
+    #[prost(uint64, tag = "11")]
+    #[allow(missing_docs)]
+    pub elapsed_micros: u64,
+}
+/// Reads or cooperatively cancels one operation created by repository indexing.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryOperationStatusRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub operation: ::core::option::Option<super::super::common::v1::OperationId>,
+    #[prost(enumeration = "RepositoryOperationAction", tag = "3")]
+    #[allow(missing_docs)]
+    pub action: i32,
+    #[prost(uint32, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub wait_ms: ::core::option::Option<u32>,
+    #[prost(uint64, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub after_revision: ::core::option::Option<u64>,
+}
+/// Returns journal state plus same-process first-slice publication metadata.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryOperationStatusResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub operation: ::core::option::Option<OperationStatus>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub published_generation: ::core::option::Option<
+        super::super::common::v1::GenerationId,
+    >,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub started_unix_ms: u64,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub peak_rss_bytes: u64,
+    #[prost(uint64, tag = "6")]
+    #[allow(missing_docs)]
+    pub written_bytes: u64,
+    #[prost(uint64, tag = "7")]
+    #[allow(missing_docs)]
+    pub files_examined: u64,
+    #[prost(uint32, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub retry_after_ms: ::core::option::Option<u32>,
+}
+/// Bounded measured usage for one first-slice query.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceQueryUsage {
+    #[prost(uint64, tag = "1")]
+    #[allow(missing_docs)]
+    pub rows: u64,
+    #[prost(uint64, tag = "2")]
+    #[allow(missing_docs)]
+    pub edges: u64,
+    #[prost(uint64, tag = "3")]
+    #[allow(missing_docs)]
+    pub results: u64,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub source_bytes: u64,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub json_bytes: u64,
+    #[prost(uint64, tag = "6")]
+    #[allow(missing_docs)]
+    pub estimated_tokens: u64,
+    #[prost(uint64, tag = "7")]
+    #[allow(missing_docs)]
+    pub elapsed_micros: u64,
+}
+/// Common repository, generation, coverage, and usage correlation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceQueryContext {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<super::super::common::v1::GenerationId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub parent_generation: ::core::option::Option<
+        super::super::common::v1::GenerationId,
+    >,
+    #[prost(bool, tag = "4")]
+    #[allow(missing_docs)]
+    pub active_generation: bool,
+    #[prost(enumeration = "FirstSliceAnalysisTier", tag = "5")]
+    #[allow(missing_docs)]
+    pub tier: i32,
+    #[prost(enumeration = "FirstSliceCoverageStatus", tag = "6")]
+    #[allow(missing_docs)]
+    pub coverage_status: i32,
+    #[prost(uint64, tag = "7")]
+    #[allow(missing_docs)]
+    pub skipped_inputs: u64,
+    #[prost(message, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub usage: ::core::option::Option<FirstSliceQueryUsage>,
+}
+/// Requests one bounded generation-pinned lexical lookup.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CodeLocateRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(string, tag = "4")]
+    #[allow(missing_docs)]
+    pub query: ::prost::alloc::string::String,
+    #[prost(enumeration = "FirstSliceLocateMode", tag = "5")]
+    #[allow(missing_docs)]
+    pub mode: i32,
+    #[prost(uint32, tag = "6")]
+    #[allow(missing_docs)]
+    pub maximum_results: u32,
+}
+/// One typed lexical lookup result.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceLocateHit {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub symbol: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub file: ::core::option::Option<super::super::common::v1::FileId>,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub identifier: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    #[allow(missing_docs)]
+    pub qualified_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    #[allow(missing_docs)]
+    pub path: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    #[allow(missing_docs)]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    #[allow(missing_docs)]
+    pub language: ::prost::alloc::string::String,
+    #[prost(enumeration = "FirstSliceAnalysisTier", tag = "8")]
+    #[allow(missing_docs)]
+    pub tier: i32,
+    #[prost(bool, tag = "9")]
+    #[allow(missing_docs)]
+    pub generated: bool,
+    #[prost(uint32, tag = "10")]
+    #[allow(missing_docs)]
+    pub score: u32,
+    #[prost(message, optional, tag = "11")]
+    #[allow(missing_docs)]
+    pub source: ::core::option::Option<FirstSliceSourceRef>,
+}
+/// Returns bounded typed lexical results and generation correlation.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CodeLocateResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub hits: ::prost::alloc::vec::Vec<FirstSliceLocateHit>,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub matched_candidates: u64,
+    #[prost(bool, tag = "5")]
+    #[allow(missing_docs)]
+    pub truncated: bool,
+}
+/// Requests bounded explanations for stable symbols.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SymbolExplainRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub symbols: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+}
+/// One typed, compact symbol explanation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceSymbolExplanation {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub symbol: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub display_name: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub signature: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub definition: ::core::option::Option<FirstSliceSourceRef>,
+    #[prost(uint64, tag = "6")]
+    #[allow(missing_docs)]
+    pub outbound_exact: u64,
+    #[prost(uint64, tag = "7")]
+    #[allow(missing_docs)]
+    pub outbound_candidates: u64,
+    #[prost(uint64, tag = "8")]
+    #[allow(missing_docs)]
+    pub inbound_exact: u64,
+    #[prost(uint64, tag = "9")]
+    #[allow(missing_docs)]
+    pub inbound_candidates: u64,
+    #[prost(uint64, tag = "10")]
+    #[allow(missing_docs)]
+    pub references_exact: u64,
+    #[prost(string, tag = "11")]
+    #[allow(missing_docs)]
+    pub provider: ::prost::alloc::string::String,
+    #[prost(string, tag = "12")]
+    #[allow(missing_docs)]
+    pub evidence: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "13")]
+    #[allow(missing_docs)]
+    pub confidence: u32,
+}
+/// Returns explanations in request order and unresolved stable identities.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SymbolExplainResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub symbols: ::prost::alloc::vec::Vec<FirstSliceSymbolExplanation>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub unresolved_symbols: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+    #[prost(bool, tag = "5")]
+    #[allow(missing_docs)]
+    pub truncated: bool,
+}
+/// Requests exact generation-bound source references.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SourceReadRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub references: ::prost::alloc::vec::Vec<FirstSliceSourceRef>,
+}
+/// One verified UTF-8 source chunk.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceSourceChunk {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub source: ::core::option::Option<FirstSliceSourceRef>,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub path: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "3")]
+    #[allow(missing_docs)]
+    pub start_byte: u64,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub end_byte: u64,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub start_line: u64,
+    #[prost(uint64, tag = "6")]
+    #[allow(missing_docs)]
+    pub end_line: u64,
+    #[prost(string, tag = "7")]
+    #[allow(missing_docs)]
+    pub content: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub content_hash: ::core::option::Option<super::super::common::v1::ContentHash>,
+    #[prost(string, tag = "9")]
+    #[allow(missing_docs)]
+    pub language: ::prost::alloc::string::String,
+    #[prost(bool, tag = "10")]
+    #[allow(missing_docs)]
+    pub generated: bool,
+}
+/// Returns exact verified UTF-8 source chunks.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SourceReadResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub chunks: ::prost::alloc::vec::Vec<FirstSliceSourceChunk>,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub total_source_bytes: u64,
+    #[prost(bool, tag = "5")]
+    #[allow(missing_docs)]
+    pub truncated: bool,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]
@@ -643,6 +1130,8 @@ pub enum OperationKind {
     Unspecified = 0,
     #[allow(missing_docs)]
     ControlProbe = 1,
+    #[allow(missing_docs)]
+    RepositoryIndex = 2,
 }
 impl OperationKind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -653,6 +1142,7 @@ impl OperationKind {
         match self {
             Self::Unspecified => "OPERATION_KIND_UNSPECIFIED",
             Self::ControlProbe => "CONTROL_PROBE",
+            Self::RepositoryIndex => "REPOSITORY_INDEX",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -660,6 +1150,7 @@ impl OperationKind {
         match value {
             "OPERATION_KIND_UNSPECIFIED" => Some(Self::Unspecified),
             "CONTROL_PROBE" => Some(Self::ControlProbe),
+            "REPOSITORY_INDEX" => Some(Self::RepositoryIndex),
             _ => None,
         }
     }
@@ -740,6 +1231,170 @@ impl RecoveryClass {
             "INTERRUPTED_BY_RESTART" => Some(Self::InterruptedByRestart),
             "DEADLINE_ELAPSED" => Some(Self::DeadlineElapsed),
             "LEASE_EXPIRED" => Some(Self::LeaseExpired),
+            _ => None,
+        }
+    }
+}
+/// Action accepted by the first-slice operation status request.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RepositoryOperationAction {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    RepositoryOperationGet = 1,
+    #[allow(missing_docs)]
+    RepositoryOperationCancel = 2,
+}
+impl RepositoryOperationAction {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REPOSITORY_OPERATION_ACTION_UNSPECIFIED",
+            Self::RepositoryOperationGet => "REPOSITORY_OPERATION_GET",
+            Self::RepositoryOperationCancel => "REPOSITORY_OPERATION_CANCEL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REPOSITORY_OPERATION_ACTION_UNSPECIFIED" => Some(Self::Unspecified),
+            "REPOSITORY_OPERATION_GET" => Some(Self::RepositoryOperationGet),
+            "REPOSITORY_OPERATION_CANCEL" => Some(Self::RepositoryOperationCancel),
+            _ => None,
+        }
+    }
+}
+/// First-slice lexical locate mode.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FirstSliceLocateMode {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    FirstSliceLocateExact = 1,
+    #[allow(missing_docs)]
+    FirstSliceLocatePrefix = 2,
+    #[allow(missing_docs)]
+    FirstSliceLocateText = 3,
+    #[allow(missing_docs)]
+    FirstSliceLocateSafeRegex = 4,
+    #[allow(missing_docs)]
+    FirstSliceLocateGlob = 5,
+}
+impl FirstSliceLocateMode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FIRST_SLICE_LOCATE_MODE_UNSPECIFIED",
+            Self::FirstSliceLocateExact => "FIRST_SLICE_LOCATE_EXACT",
+            Self::FirstSliceLocatePrefix => "FIRST_SLICE_LOCATE_PREFIX",
+            Self::FirstSliceLocateText => "FIRST_SLICE_LOCATE_TEXT",
+            Self::FirstSliceLocateSafeRegex => "FIRST_SLICE_LOCATE_SAFE_REGEX",
+            Self::FirstSliceLocateGlob => "FIRST_SLICE_LOCATE_GLOB",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FIRST_SLICE_LOCATE_MODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "FIRST_SLICE_LOCATE_EXACT" => Some(Self::FirstSliceLocateExact),
+            "FIRST_SLICE_LOCATE_PREFIX" => Some(Self::FirstSliceLocatePrefix),
+            "FIRST_SLICE_LOCATE_TEXT" => Some(Self::FirstSliceLocateText),
+            "FIRST_SLICE_LOCATE_SAFE_REGEX" => Some(Self::FirstSliceLocateSafeRegex),
+            "FIRST_SLICE_LOCATE_GLOB" => Some(Self::FirstSliceLocateGlob),
+            _ => None,
+        }
+    }
+}
+/// Aggregate support tier for one first-slice response.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FirstSliceAnalysisTier {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    FirstSliceTierA = 1,
+    #[allow(missing_docs)]
+    FirstSliceTierB = 2,
+    #[allow(missing_docs)]
+    FirstSliceTierC = 3,
+    #[allow(missing_docs)]
+    FirstSliceTierD = 4,
+}
+impl FirstSliceAnalysisTier {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FIRST_SLICE_ANALYSIS_TIER_UNSPECIFIED",
+            Self::FirstSliceTierA => "FIRST_SLICE_TIER_A",
+            Self::FirstSliceTierB => "FIRST_SLICE_TIER_B",
+            Self::FirstSliceTierC => "FIRST_SLICE_TIER_C",
+            Self::FirstSliceTierD => "FIRST_SLICE_TIER_D",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FIRST_SLICE_ANALYSIS_TIER_UNSPECIFIED" => Some(Self::Unspecified),
+            "FIRST_SLICE_TIER_A" => Some(Self::FirstSliceTierA),
+            "FIRST_SLICE_TIER_B" => Some(Self::FirstSliceTierB),
+            "FIRST_SLICE_TIER_C" => Some(Self::FirstSliceTierC),
+            "FIRST_SLICE_TIER_D" => Some(Self::FirstSliceTierD),
+            _ => None,
+        }
+    }
+}
+/// Aggregate completeness for one first-slice response.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FirstSliceCoverageStatus {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    FirstSliceCoverageComplete = 1,
+    #[allow(missing_docs)]
+    FirstSliceCoverageBounded = 2,
+    #[allow(missing_docs)]
+    FirstSliceCoverageSampled = 3,
+    #[allow(missing_docs)]
+    FirstSliceCoverageUnknown = 4,
+}
+impl FirstSliceCoverageStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FIRST_SLICE_COVERAGE_STATUS_UNSPECIFIED",
+            Self::FirstSliceCoverageComplete => "FIRST_SLICE_COVERAGE_COMPLETE",
+            Self::FirstSliceCoverageBounded => "FIRST_SLICE_COVERAGE_BOUNDED",
+            Self::FirstSliceCoverageSampled => "FIRST_SLICE_COVERAGE_SAMPLED",
+            Self::FirstSliceCoverageUnknown => "FIRST_SLICE_COVERAGE_UNKNOWN",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FIRST_SLICE_COVERAGE_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "FIRST_SLICE_COVERAGE_COMPLETE" => Some(Self::FirstSliceCoverageComplete),
+            "FIRST_SLICE_COVERAGE_BOUNDED" => Some(Self::FirstSliceCoverageBounded),
+            "FIRST_SLICE_COVERAGE_SAMPLED" => Some(Self::FirstSliceCoverageSampled),
+            "FIRST_SLICE_COVERAGE_UNKNOWN" => Some(Self::FirstSliceCoverageUnknown),
             _ => None,
         }
     }

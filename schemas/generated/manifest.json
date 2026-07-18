@@ -62,11 +62,11 @@
     },
     {
       "path": "proto/common.proto",
-      "blake3": "ca9d392fb3f77c8b08243a6b884b06240c3bd4c2b77d4d8fd6a641218a4070b9"
+      "blake3": "797719375ebc8b7549003176903cb987a8d53abb3b6e7f84660d015f43549a48"
     },
     {
       "path": "proto/daemon_v1.proto",
-      "blake3": "806ec7ea0e6962d754c5bbd24f6f51447f2289bb9e9071bab0efac9ad97e1815"
+      "blake3": "6e708b619261998980b9daa7f4f570e8bb3483a214ff856040dc6e25430c51e8"
     },
     {
       "path": "tests/fixtures/compatibility/contract-0.1.json",
@@ -121,6 +121,10 @@
       "blake3": "d611cb9904e1087d06b18b9c62441e912609274ae8f9bac5f647c2cab4b454d0"
     },
     {
+      "path": "tests/fixtures/compatibility/protobuf/1.4/rootlight.desc",
+      "blake3": "d611cb9904e1087d06b18b9c62441e912609274ae8f9bac5f647c2cab4b454d0"
+    },
+    {
       "path": "tests/fixtures/compatibility/storage/1.0/schema-fingerprints.json",
       "blake3": "37aae71b93acea8d49bece736d17d8b8c39646328394edd75c68f4e86c1d2ef1"
     },
@@ -146,11 +150,11 @@
     },
     {
       "path": "xtask/src/main.rs",
-      "blake3": "bf23fa9894f861c79bfd696a59dde6b8a13215e37fa48cb71f307063b98e2305"
+      "blake3": "70dfff0e6b8a4989dd47ad2aa257d0e6df629dcace8e37fde6827bee3a908531"
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "604ffeae4ec4dfe5addf1a9cdc818309f3fb8b06a7aac2616ac737a5fb83063b"
+      "blake3": "873348c469065b75b2ead00999fce6506dbfccc1fa669e769e7237dfb78e7e28"
     }
   ],
   "artifacts": [
@@ -164,11 +168,11 @@
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.common.v1.rs",
-      "blake3": "d2fb5b91ebd72addd442e3b714b274cccbad412d4d3f96e6257a5e3831426c68"
+      "blake3": "7612ee275867f04a59ced6dbc7a71ce7f1077535df9bc8ca44e19822dc7aa560"
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.daemon.v1.rs",
-      "blake3": "2e25f062d211c5acfe74cb7ed74fd1b831c71daec69579c5c1c25bdad6c28ec2"
+      "blake3": "8f7dce50d3b6cfbc9a8e8aab3f426c5f3d2e725d08633097cb4f65b3f31a50af"
     },
     {
       "path": "schemas/generated/json/config-1.0.schema.json",
@@ -240,7 +244,7 @@
     },
     {
       "path": "schemas/generated/protobuf/rootlight.desc",
-      "blake3": "d611cb9904e1087d06b18b9c62441e912609274ae8f9bac5f647c2cab4b454d0"
+      "blake3": "68a5c378e67d2916b7a351ad5068a753ff6338abb5c17040208e491788aaa5f0"
     }
   ]
 }

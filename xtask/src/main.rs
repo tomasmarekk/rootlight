@@ -37,6 +37,7 @@ fn run() -> Result<(), XtaskError> {
             let mode = parse_generate_mode(&mut args)?;
             schemas::generate(mode)?;
         }
+        Some("freeze-daemon-protocol") => schemas::freeze_daemon_protocol()?,
         Some("compatibility-check") | Some("compatibility") => schemas::check_compatibility()?,
         Some("daemon-lifecycle-check") => {
             let bin_dir = parse_required_bin_dir(&mut args)?;
@@ -101,7 +102,7 @@ fn parse_required_bin_dir(
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|compatibility-check|daemon-lifecycle-check --bin-dir PATH|id-vectors|generate [--check]|policy-check|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|compatibility-check|daemon-lifecycle-check --bin-dir PATH|freeze-daemon-protocol|id-vectors|generate [--check]|policy-check|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
