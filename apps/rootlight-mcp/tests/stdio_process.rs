@@ -23,7 +23,7 @@ fn stdio_process_initializes_pings_and_exits_on_eof() {
     assert_eq!(responses[0]["result"]["protocolVersion"], "2025-11-25");
     assert_eq!(
         responses[0]["result"]["capabilities"],
-        serde_json::json!({})
+        serde_json::json!({"tools": {"listChanged": false}})
     );
     assert_eq!(responses[1]["id"], "ping");
     assert_eq!(responses[1]["result"], serde_json::json!({}));
@@ -77,7 +77,11 @@ fn invalid_message_limit_exits_with_only_a_static_stderr_category() {
 }
 
 fn run_process(input: &[u8]) -> Output {
+    let isolated = tempfile::tempdir().expect("isolated MCP runtime root is available");
     let mut child = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"))
+        .arg("--transport-only")
+        .env("ROOTLIGHT_STATE_DIR", isolated.path().join("state"))
+        .env("ROOTLIGHT_RUNTIME_DIR", isolated.path().join("runtime"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

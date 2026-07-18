@@ -54,6 +54,7 @@ allowed_internal_dependencies = [
   "rootlight-ids",
   "rootlight-ir",
   "rootlight-mcp-contract",
+  "rootlight-runtime",
 ]
 allow_build_script = false
 
