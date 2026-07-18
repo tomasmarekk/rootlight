@@ -1,6 +1,7 @@
 schema_version = "1.0"
 workspace_members = [
   "rootlight",
+  "rootlight-mcp",
   "rootlight-adapter-sdk",
   "rootlight-adapter-treesitter",
   "rootlight-bench",
@@ -37,6 +38,11 @@ allowed_internal_dependencies = [
   "rootlight-protocol",
   "rootlight-runtime",
 ]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-mcp"
+allowed_internal_dependencies = ["rootlight-mcp-contract"]
 allow_build_script = false
 
 [[crates]]
