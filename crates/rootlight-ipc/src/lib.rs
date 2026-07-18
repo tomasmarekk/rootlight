@@ -343,7 +343,7 @@ impl LocalListener {
             ensure_before_deadline(deadline)?;
             match self.listener.accept() {
                 Ok(stream) => return Ok(stream),
-                Err(source) if source.kind() == io::ErrorKind::Interrupted => {}
+                Err(source) if is_retryable_listener_accept(&source) => {}
                 Err(source) if source.kind() == io::ErrorKind::WouldBlock => wait_for_io(deadline)?,
                 Err(source) => return Err(IpcError::Transport(source)),
             }
@@ -391,10 +391,9 @@ impl AsyncLocalListener {
         if duration.is_zero() {
             return Err(IpcError::InvalidLimit);
         }
-        timeout(duration, self.listener.accept())
+        timeout(duration, self.accept())
             .await
             .map_err(|_| IpcError::TimedOut)?
-            .map_err(IpcError::Transport)
     }
 
     /// Accepts one client stream without adding a transport deadline.
@@ -403,7 +402,17 @@ impl AsyncLocalListener {
     ///
     /// Returns [`IpcError::Transport`] when the listener cannot accept a client.
     pub async fn accept(&self) -> Result<AsyncLocalStream, IpcError> {
-        self.listener.accept().await.map_err(IpcError::Transport)
+        loop {
+            match self.listener.accept().await {
+                Ok(stream) => return Ok(stream),
+                // A client can close after readiness but before accept completes;
+                // that connection is lost, not the listener.
+                Err(source) if is_retryable_listener_accept(&source) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(source) => return Err(IpcError::Transport(source)),
+            }
+        }
     }
 
     /// Returns the bound endpoint.
@@ -411,6 +420,13 @@ impl AsyncLocalListener {
     pub const fn endpoint(&self) -> &Endpoint {
         &self.endpoint
     }
+}
+
+fn is_retryable_listener_accept(source: &io::Error) -> bool {
+    matches!(
+        source.kind(),
+        io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
+    )
 }
 
 /// Verifies that an accepted local peer belongs to the current user.
@@ -1233,6 +1249,25 @@ mod tests {
             client.expect("client connects"),
             server.expect("connection accepts"),
         )
+    }
+
+    #[test]
+    fn listener_accept_retries_only_transient_connection_loss() {
+        assert!(is_retryable_listener_accept(&io::Error::from(
+            io::ErrorKind::Interrupted
+        )));
+        assert!(is_retryable_listener_accept(&io::Error::from(
+            io::ErrorKind::ConnectionAborted
+        )));
+        assert!(!is_retryable_listener_accept(&io::Error::from(
+            io::ErrorKind::NotFound
+        )));
+        assert!(!is_retryable_listener_accept(&io::Error::from(
+            io::ErrorKind::ConnectionReset
+        )));
+        assert!(!is_retryable_listener_accept(&io::Error::from(
+            io::ErrorKind::WouldBlock
+        )));
     }
 
     #[test]
