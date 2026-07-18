@@ -1192,6 +1192,13 @@ pub enum RuntimeError {
 mod tests {
     use super::*;
     fn private_tempdir() -> tempfile::TempDir {
+        // Keep generated socket paths below macOS's fixed AF_UNIX ceiling.
+        #[cfg(target_os = "macos")]
+        let temporary = tempfile::Builder::new()
+            .prefix("rootlight-")
+            .tempdir_in("/tmp")
+            .expect("short private temporary directory is available");
+        #[cfg(not(target_os = "macos"))]
         let temporary = tempfile::tempdir().expect("temporary directory is available");
         #[cfg(unix)]
         {
@@ -1467,6 +1474,14 @@ mod tests {
             r#"{"schema_version":2,"pid":1,"endpoint_id":"invalid","instance_nonce":"00000000000000000000000000000000","protocol_major":1,"protocol_minor":1,"extra":true}"#,
         )
         .expect("fixture writes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            // Reach decoder validation without weakening the discovery metadata policy.
+            fs::set_permissions(paths.discovery_path(), fs::Permissions::from_mode(0o600))
+                .expect("fixture becomes private");
+        }
         assert!(matches!(
             paths.discover(),
             Err(RuntimeError::DeserializeDiscovery(_))
