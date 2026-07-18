@@ -20,6 +20,7 @@ members = [
     "crates/rootlight-operations",
     "crates/rootlight-protocol",
     "crates/rootlight-runtime",
+    "crates/rootlight-source",
     "crates/rootlight-storage",
     "crates/rootlight-vfs",
     "xtask",
