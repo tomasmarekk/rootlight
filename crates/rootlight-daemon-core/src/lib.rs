@@ -23,8 +23,9 @@ use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue
 use rootlight_ids::{GenerationId, OperationId, RepositoryId};
 use rootlight_ipc::{
     AsyncLocalStream, FrameCodec, IpcError, LocalStream, read_client_hello,
-    read_client_hello_async, read_request, read_request_async, verify_peer, write_response,
-    write_response_async, write_server_hello, write_server_hello_async,
+    read_client_hello_async, read_request, read_request_async, verify_peer,
+    wait_for_peer_close_async, write_response, write_response_async, write_server_hello,
+    write_server_hello_async,
 };
 use rootlight_observability::{
     Architecture as ObservabilityArchitecture, ControlMethod,
@@ -35,9 +36,9 @@ use rootlight_observability::{
     build_support_bundle_for_schema,
 };
 use rootlight_operations::{
-    ClientInstanceId, OperationError, OperationJournal, OperationKind, OperationRecord,
-    OperationStage, OperationState, OperationSubmission, PlanHash, Progress, RecoveryClass,
-    SubmissionOutcome,
+    Cancellation, CancellationReason, ClientInstanceId, OperationError, OperationJournal,
+    OperationKind, OperationRecord, OperationStage, OperationState, OperationSubmission, PlanHash,
+    Progress, RecoveryClass, SubmissionOutcome,
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR, PROTOCOL_VERSION,
@@ -3248,18 +3249,155 @@ pub async fn handle_connection_async_with_first_slice(
     write_server_hello_async(codec, stream, &response).await?;
     negotiation.finish(TelemetryOutcome::Succeeded, None);
     let envelope = read_request_async(codec, stream).await?;
-    let response = dispatch_async(
-        &service,
-        &journal,
-        &submissions,
-        first_slice.as_ref(),
-        envelope,
-        client_instance_id,
-        selected_protocol_minor,
+    let survives_disconnect = request_survives_client_disconnect(&envelope);
+    let disconnect_cancel = attached_index_cancel_request(&envelope);
+    let timing = RequestTiming::start(&service, &envelope);
+    let cancellation = timing
+        .deadline
+        .map_or_else(Cancellation::new, Cancellation::with_deadline);
+    let dispatch_result = dispatch_while_peer_connected(
+        dispatch_async(
+            &service,
+            &journal,
+            &submissions,
+            first_slice.as_ref(),
+            envelope,
+            AsyncDispatchContext {
+                client_instance_id,
+                selected_protocol_minor,
+                cancellation: cancellation.clone(),
+                timing,
+            },
+        ),
+        stream,
+        &cancellation,
+        survives_disconnect,
     )
     .await;
-    write_response_async(codec, stream, &response).await?;
+    if !matches!(dispatch_result, Ok(Some(_))) {
+        cancel_disconnected_attached_index(
+            first_slice.as_ref(),
+            disconnect_cancel,
+            client_instance_id,
+            selected_protocol_minor,
+            timing.deadline,
+        )
+        .await;
+    }
+    let response = dispatch_result?;
+    if let Some(response) = response {
+        write_response_async(codec, stream, &response).await?;
+    }
     Ok(())
+}
+
+fn request_survives_client_disconnect(envelope: &daemon::RequestEnvelope) -> bool {
+    matches!(
+        envelope.request.as_ref(),
+        Some(daemon::request_envelope::Request::RepositoryIndex(request)) if request.detached
+    )
+}
+
+fn attached_index_cancel_request(
+    envelope: &daemon::RequestEnvelope,
+) -> Option<FirstSliceIpcRequest> {
+    let Some(daemon::request_envelope::Request::RepositoryIndex(request)) =
+        envelope.request.as_ref()
+    else {
+        return None;
+    };
+    if request.detached {
+        return None;
+    }
+    Some(FirstSliceIpcRequest::RepositoryOperationStatus(
+        daemon::RepositoryOperationStatusRequest {
+            schema_version: request.schema_version,
+            operation: request.operation.clone(),
+            action: daemon::RepositoryOperationAction::RepositoryOperationCancel as i32,
+            wait_ms: None,
+            after_revision: None,
+        },
+    ))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RequestTiming {
+    started: Instant,
+    deadline: Option<Instant>,
+}
+
+struct AsyncDispatchContext {
+    client_instance_id: ClientInstanceId,
+    selected_protocol_minor: u32,
+    cancellation: Cancellation,
+    timing: RequestTiming,
+}
+
+impl RequestTiming {
+    fn start(service: &ControlService, envelope: &daemon::RequestEnvelope) -> Self {
+        let started = Instant::now();
+        let timeout = envelope
+            .timeout_ms
+            .map_or(service.limits.request_timeout, |milliseconds| {
+                Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout)
+            });
+        Self {
+            started,
+            deadline: started.checked_add(timeout),
+        }
+    }
+}
+
+async fn cancel_disconnected_attached_index(
+    handler: &dyn FirstSliceIpcHandler,
+    request: Option<FirstSliceIpcRequest>,
+    client_instance_id: ClientInstanceId,
+    selected_protocol_minor: u32,
+    deadline: Option<Instant>,
+) {
+    let (Some(request), Some(deadline)) = (request, deadline) else {
+        return;
+    };
+    let context = FirstSliceIpcContext {
+        client_instance_id,
+        selected_protocol_minor,
+        cancellation: Cancellation::with_deadline(deadline),
+        deadline,
+    };
+    // The first-slice host routes status control to an independent lane. A
+    // NotFound race is harmless because the work lane observes the connection
+    // token before and after durable admission.
+    let _ = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        handler.dispatch(request, context),
+    )
+    .await;
+}
+
+async fn dispatch_while_peer_connected<F>(
+    dispatch: F,
+    stream: &mut AsyncLocalStream,
+    cancellation: &Cancellation,
+    survives_disconnect: bool,
+) -> Result<Option<daemon::ResponseEnvelope>, IpcError>
+where
+    F: Future<Output = daemon::ResponseEnvelope>,
+{
+    tokio::pin!(dispatch);
+    let peer_close = wait_for_peer_close_async(stream);
+    tokio::pin!(peer_close);
+    tokio::select! {
+        // A simultaneously elapsed request deadline must establish its more
+        // specific reason before a peer close can record client cancellation.
+        biased;
+        response = &mut dispatch => Ok(Some(response)),
+        peer = &mut peer_close => {
+            if !survives_disconnect {
+                let _ = cancellation.cancel(CancellationReason::ClientRequest);
+            }
+            peer.map(|()| None)
+        }
+    }
 }
 
 async fn dispatch_async(
@@ -3268,19 +3406,12 @@ async fn dispatch_async(
     submissions: &tokio::sync::mpsc::Sender<OperationAdmission>,
     first_slice: &dyn FirstSliceIpcHandler,
     envelope: daemon::RequestEnvelope,
-    client_instance_id: ClientInstanceId,
-    selected_protocol_minor: u32,
+    context: AsyncDispatchContext,
 ) -> daemon::ResponseEnvelope {
     let request_id = envelope.request_id;
     let method = control_method_from_wire(envelope.request.as_ref());
-    let started = Instant::now();
-    let request_timeout =
-        envelope
-            .timeout_ms
-            .map_or(service.limits.request_timeout, |milliseconds| {
-                Duration::from_millis(u64::from(milliseconds)).min(service.limits.request_timeout)
-            });
-    let request_deadline = started.checked_add(request_timeout);
+    let started = context.timing.started;
+    let request_deadline = context.timing.deadline;
     let span = service
         .state
         .telemetry
@@ -3303,9 +3434,10 @@ async fn dispatch_async(
                 dispatch_first_slice(
                     first_slice,
                     request,
-                    client_instance_id,
-                    selected_protocol_minor,
+                    context.client_instance_id,
+                    context.selected_protocol_minor,
                     request_deadline,
+                    context.cancellation,
                 )
                 .await
             }
@@ -3313,8 +3445,11 @@ async fn dispatch_async(
                 &invalid_argument("daemon request is missing"),
             )),
             Err(request) => {
-                match request_from_wire(Some(request), client_instance_id, selected_protocol_minor)
-                {
+                match request_from_wire(
+                    Some(request),
+                    context.client_instance_id,
+                    context.selected_protocol_minor,
+                ) {
                     Ok(ControlRequest::Health) => {
                         response_to_wire(ControlResponse::Health(service.health()))
                     }
@@ -3463,6 +3598,7 @@ async fn dispatch_first_slice(
     client_instance_id: ClientInstanceId,
     selected_protocol_minor: u32,
     deadline: Instant,
+    cancellation: Cancellation,
 ) -> daemon::response_envelope::Response {
     if selected_protocol_minor < 5 {
         return daemon::response_envelope::Response::Error(public_error_to_wire(
@@ -3472,11 +3608,16 @@ async fn dispatch_first_slice(
     if let Err(error) = validate_first_slice_request(&request) {
         return daemon::response_envelope::Response::Error(public_error_to_wire(error.as_ref()));
     }
-    let cancellation = rootlight_operations::Cancellation::with_deadline(deadline);
+    if !cancellation.has_deadline()
+        && cancellation.extend_deadline(deadline).is_err()
+        && cancellation.reason().is_none()
+    {
+        return daemon::response_envelope::Response::Error(public_error_to_wire(&internal_error()));
+    }
     let context = FirstSliceIpcContext {
         client_instance_id,
         selected_protocol_minor,
-        cancellation,
+        cancellation: cancellation.clone(),
         deadline,
     };
     // Retain the already-bounded request so the daemon can reject an internal
@@ -3491,6 +3632,7 @@ async fn dispatch_first_slice(
         Ok(Ok(response)) => correlated_first_slice_response(&correlation_request, response),
         Ok(Err(error)) => daemon::response_envelope::Response::Error(public_error_to_wire(&error)),
         Err(_) => {
+            let _ = cancellation.cancel(CancellationReason::DeadlineExceeded);
             daemon::response_envelope::Response::Error(public_error_to_wire(&request_timed_out()))
         }
     }
@@ -5305,11 +5447,12 @@ mod tests {
     use rootlight_client::Client;
     use rootlight_ipc::{
         AsyncLocalListener, Endpoint, LocalListener, connect_async, read_server_hello_async,
-        write_client_hello_async,
+        write_client_hello_async, write_request_async,
     };
     use rootlight_operations::Progress;
     use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
     use tempfile::{TempDir, tempdir};
+    use tokio::io::AsyncWriteExt as _;
 
     fn service() -> ControlService {
         ControlService::new(
@@ -5367,6 +5510,35 @@ mod tests {
         Endpoint::new(path).expect("endpoint is valid")
     }
 
+    async fn connected_async_streams(label: &str) -> (TempDir, AsyncLocalStream, AsyncLocalStream) {
+        let temporary = private_tempdir();
+        let endpoint = endpoint_named(&temporary, label);
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("async listener binds");
+        let (client, server) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(connect_async(&endpoint), listener.accept())
+        })
+        .await
+        .expect("connection setup completes");
+        (
+            temporary,
+            client.expect("client connects"),
+            server.expect("connection accepts"),
+        )
+    }
+
+    fn test_dispatch_context(
+        service: &ControlService,
+        envelope: &daemon::RequestEnvelope,
+        client_instance_id: ClientInstanceId,
+    ) -> AsyncDispatchContext {
+        AsyncDispatchContext {
+            client_instance_id,
+            selected_protocol_minor: PROTOCOL_MINOR,
+            cancellation: Cancellation::new(),
+            timing: RequestTiming::start(service, envelope),
+        }
+    }
+
     #[derive(Debug, Default)]
     struct DeadlineCapturingFirstSlice {
         observed: Mutex<Option<Instant>>,
@@ -5384,6 +5556,235 @@ mod tests {
                 .expect("deadline capture lock is healthy") = Some(context.deadline);
             Box::pin(async { Err(first_slice_unavailable()) })
         }
+    }
+
+    #[derive(Debug, Default)]
+    struct DisconnectRecordingFirstSlice {
+        requests: Mutex<Vec<FirstSliceIpcRequest>>,
+    }
+
+    impl FirstSliceIpcHandler for DisconnectRecordingFirstSlice {
+        fn dispatch(
+            &self,
+            request: FirstSliceIpcRequest,
+            _context: FirstSliceIpcContext,
+        ) -> FirstSliceIpcFuture {
+            let is_index = matches!(request, FirstSliceIpcRequest::RepositoryIndex(_));
+            self.requests
+                .lock()
+                .expect("request capture lock is healthy")
+                .push(request);
+            if is_index {
+                Box::pin(std::future::pending())
+            } else {
+                Box::pin(async { Err(first_slice_unavailable()) })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_disconnect_cancels_attached_dispatch() {
+        let (_temporary, client, mut server) = connected_async_streams("attached-disconnect").await;
+        let cancellation = Cancellation::new();
+        drop(client);
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatch_while_peer_connected(
+                std::future::pending::<daemon::ResponseEnvelope>(),
+                &mut server,
+                &cancellation,
+                false,
+            ),
+        )
+        .await
+        .expect("peer disconnect is observed")
+        .expect("peer EOF is accepted");
+
+        assert!(response.is_none());
+        assert_eq!(
+            cancellation.reason(),
+            Some(CancellationReason::ClientRequest)
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_dispatch_survives_peer_disconnect() {
+        let (_temporary, client, mut server) = connected_async_streams("detached-disconnect").await;
+        let cancellation = Cancellation::new();
+        drop(client);
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatch_while_peer_connected(
+                std::future::pending::<daemon::ResponseEnvelope>(),
+                &mut server,
+                &cancellation,
+                true,
+            ),
+        )
+        .await
+        .expect("peer disconnect is observed")
+        .expect("peer EOF is accepted");
+
+        assert!(response.is_none());
+        assert_eq!(cancellation.reason(), None);
+    }
+
+    #[tokio::test]
+    async fn unexpected_peer_data_cancels_attached_dispatch() {
+        let (_temporary, mut client, mut server) =
+            connected_async_streams("unexpected-peer-data").await;
+        let cancellation = Cancellation::new();
+        client
+            .write_all(&[0x5a])
+            .await
+            .expect("unexpected byte writes");
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatch_while_peer_connected(
+                std::future::pending::<daemon::ResponseEnvelope>(),
+                &mut server,
+                &cancellation,
+                false,
+            ),
+        )
+        .await
+        .expect("peer data is observed")
+        .expect_err("trailing data is rejected");
+
+        assert!(matches!(error, IpcError::UnexpectedPeerData));
+        assert_eq!(
+            cancellation.reason(),
+            Some(CancellationReason::ClientRequest)
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_deadline_reason_wins_over_simultaneous_peer_close() {
+        let (_temporary, client, mut server) =
+            connected_async_streams("deadline-before-disconnect").await;
+        let cancellation = Cancellation::new();
+        let dispatch_cancellation = cancellation.clone();
+        drop(client);
+        let expected = daemon::ResponseEnvelope {
+            request_id: 81,
+            response: None,
+        };
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatch_while_peer_connected(
+                async move {
+                    let _ = dispatch_cancellation.cancel(CancellationReason::DeadlineExceeded);
+                    expected
+                },
+                &mut server,
+                &cancellation,
+                false,
+            ),
+        )
+        .await
+        .expect("ready dispatch wins")
+        .expect("dispatch succeeds")
+        .expect("response is retained");
+
+        assert_eq!(response.request_id, 81);
+        assert_eq!(
+            cancellation.reason(),
+            Some(CancellationReason::DeadlineExceeded)
+        );
+    }
+
+    #[tokio::test]
+    async fn attached_index_disconnect_uses_independent_cancel_lane() {
+        let temporary = private_tempdir();
+        let endpoint = endpoint_named(&temporary, "attached-index-cancel");
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("async listener binds");
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let limits = DaemonLimits::default();
+        let service = Arc::new(ControlService::new(journal, [7; 16]));
+        let client_connections = Arc::new(ClientConnectionAdmissions::new(limits));
+        let (submissions, _receiver) = tokio::sync::mpsc::channel(4);
+        let handler = Arc::new(DisconnectRecordingFirstSlice::default());
+        let server_handler = Arc::clone(&handler);
+        let server_service = Arc::clone(&service);
+        let server_connections = Arc::clone(&client_connections);
+        let server_journal = actor.handle();
+        let server = tokio::spawn(async move {
+            let mut stream = listener.accept().await.expect("connection accepts");
+            handle_connection_async_with_first_slice(
+                server_service,
+                server_journal,
+                submissions,
+                server_connections,
+                server_handler,
+                FrameCodec::default(),
+                &mut stream,
+            )
+            .await
+        });
+        let mut client = connect_async(&endpoint).await.expect("client connects");
+        write_client_hello_async(
+            FrameCodec::default(),
+            &mut client,
+            &supported_hello(vec![7; 16]),
+        )
+        .await
+        .expect("client hello writes");
+        let hello = read_server_hello_async(FrameCodec::default(), &mut client)
+            .await
+            .expect("server hello reads");
+        assert!(hello.error.is_none());
+        let operation = vec![83; 16];
+        write_request_async(
+            FrameCodec::default(),
+            &mut client,
+            &daemon::RequestEnvelope {
+                request_id: 83,
+                instance_nonce: vec![7; 16],
+                timeout_ms: Some(1_000),
+                request: Some(daemon::request_envelope::Request::RepositoryIndex(
+                    daemon::RepositoryIndexRequest {
+                        schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+                        root: "fixture".to_owned(),
+                        operation: Some(common::OperationId {
+                            value: operation.clone(),
+                        }),
+                        detached: false,
+                    },
+                )),
+            },
+        )
+        .await
+        .expect("index request writes");
+        drop(client);
+
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("disconnected handler completes")
+            .expect("server task joins")
+            .expect("peer EOF is accepted");
+        let requests = handler
+            .requests
+            .lock()
+            .expect("request capture lock is healthy");
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(
+            &requests[0],
+            FirstSliceIpcRequest::RepositoryIndex(request) if !request.detached
+        ));
+        assert!(matches!(
+            &requests[1],
+            FirstSliceIpcRequest::RepositoryOperationStatus(request)
+                if request.action
+                    == daemon::RepositoryOperationAction::RepositoryOperationCancel as i32
+                    && request.operation.as_ref().map(|id| &id.value) == Some(&operation)
+        ));
+        drop(requests);
+        actor.join().expect("actor joins");
     }
 
     #[test]
@@ -5598,22 +5999,23 @@ mod tests {
             DaemonLimits::default(),
         );
         let (submissions, _receiver) = tokio::sync::mpsc::channel(4);
+        let envelope = daemon::RequestEnvelope {
+            request_id: 1,
+            instance_nonce: vec![7; 16],
+            timeout_ms: Some(100),
+            request: Some(daemon::request_envelope::Request::Health(
+                daemon::HealthRequest {},
+            )),
+        };
+        let context = test_dispatch_context(&service, &envelope, ClientInstanceId::SYSTEM);
 
         let response = dispatch_async(
             &service,
             &actor.handle(),
             &submissions,
             &UnavailableFirstSliceIpcHandler,
-            daemon::RequestEnvelope {
-                request_id: 1,
-                instance_nonce: vec![7; 16],
-                timeout_ms: Some(100),
-                request: Some(daemon::request_envelope::Request::Health(
-                    daemon::HealthRequest {},
-                )),
-            },
-            ClientInstanceId::SYSTEM,
-            PROTOCOL_MINOR,
+            envelope,
+            context,
         )
         .await;
         assert!(matches!(
@@ -5661,6 +6063,7 @@ mod tests {
             ClientInstanceId::from_bytes([92; 16]),
             PROTOCOL_MINOR,
             deadline,
+            Cancellation::new(),
         )
         .await;
 
@@ -5735,25 +6138,26 @@ mod tests {
             DaemonLimits::default(),
         );
         let (submissions, _receiver) = tokio::sync::mpsc::channel(4);
+        let cancel_envelope = daemon::RequestEnvelope {
+            request_id: 90,
+            instance_nonce: vec![7; 16],
+            timeout_ms: Some(20),
+            request: Some(daemon::request_envelope::Request::OperationCancel(
+                daemon::OperationCancelRequest {
+                    operation: Some(common::OperationId {
+                        value: cancelled.as_bytes().to_vec(),
+                    }),
+                },
+            )),
+        };
+        let cancel_context = test_dispatch_context(&service, &cancel_envelope, owner);
         let cancel_response = dispatch_async(
             &service,
             &handle,
             &submissions,
             &UnavailableFirstSliceIpcHandler,
-            daemon::RequestEnvelope {
-                request_id: 90,
-                instance_nonce: vec![7; 16],
-                timeout_ms: Some(20),
-                request: Some(daemon::request_envelope::Request::OperationCancel(
-                    daemon::OperationCancelRequest {
-                        operation: Some(common::OperationId {
-                            value: cancelled.as_bytes().to_vec(),
-                        }),
-                    },
-                )),
-            },
-            owner,
-            PROTOCOL_MINOR,
+            cancel_envelope,
+            cancel_context,
         )
         .await;
         assert!(matches!(
@@ -5762,26 +6166,27 @@ mod tests {
                 if error.code == common::ErrorCode::Busy as i32
         ));
 
+        let renew_envelope = daemon::RequestEnvelope {
+            request_id: 91,
+            instance_nonce: vec![7; 16],
+            timeout_ms: Some(20),
+            request: Some(daemon::request_envelope::Request::OperationLeaseRenew(
+                daemon::OperationLeaseRenewRequest {
+                    operation: Some(common::OperationId {
+                        value: leased.as_bytes().to_vec(),
+                    }),
+                    lease_expires_unix_ms: lease_expiry + 60_000,
+                },
+            )),
+        };
+        let renew_context = test_dispatch_context(&service, &renew_envelope, owner);
         let renew_response = dispatch_async(
             &service,
             &handle,
             &submissions,
             &UnavailableFirstSliceIpcHandler,
-            daemon::RequestEnvelope {
-                request_id: 91,
-                instance_nonce: vec![7; 16],
-                timeout_ms: Some(20),
-                request: Some(daemon::request_envelope::Request::OperationLeaseRenew(
-                    daemon::OperationLeaseRenewRequest {
-                        operation: Some(common::OperationId {
-                            value: leased.as_bytes().to_vec(),
-                        }),
-                        lease_expires_unix_ms: lease_expiry + 60_000,
-                    },
-                )),
-            },
-            owner,
-            PROTOCOL_MINOR,
+            renew_envelope,
+            renew_context,
         )
         .await;
         assert!(matches!(
