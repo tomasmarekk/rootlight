@@ -19,8 +19,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rootlight_error::{ErrorCode, NextAction, PublicError, PublicValue};
-use rootlight_ids::OperationId;
+use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
+use rootlight_ids::{GenerationId, OperationId, RepositoryId};
 use rootlight_ipc::{
     AsyncLocalStream, FrameCodec, IpcError, LocalStream, read_client_hello,
     read_client_hello_async, read_request, read_request_async, verify_peer, write_response,
@@ -106,6 +106,9 @@ const RESOURCE_ELEVATED: u8 = 2;
 const RESOURCE_HIGH: u8 = 3;
 const RESOURCE_CRITICAL: u8 = 4;
 const RESOURCE_UNKNOWN: u8 = 5;
+const MAX_WIRE_PUBLIC_ERROR_MESSAGE_BYTES: usize = 1_024;
+const MAX_WIRE_PUBLIC_ERROR_DETAILS: usize = 32;
+const MAX_WIRE_PUBLIC_ERROR_ACTIONS: usize = 8;
 
 /// Boxed future returned by the daemon-owned first-slice IPC implementation.
 pub type FirstSliceIpcFuture =
@@ -3528,6 +3531,10 @@ fn first_slice_response_correlates(
                     response.published_generation.as_ref().map(|id| &id.value),
                     20,
                 )
+                && !wire_id_equals(
+                    response.parent_generation.as_ref().map(|id| &id.value),
+                    response.published_generation.as_ref().map(|id| &id.value),
+                )
                 && response.indexed_files <= response.discovered_inputs
         }
         (
@@ -3580,8 +3587,14 @@ fn first_slice_response_correlates(
                 )
                 && response.hits.len()
                     <= usize::try_from(request.maximum_results).unwrap_or(usize::MAX)
-                && response.matched_candidates
-                    >= u64::try_from(response.hits.len()).unwrap_or(u64::MAX)
+                && u64::try_from(response.hits.len()).is_ok_and(|returned_results| {
+                    response.matched_candidates >= returned_results
+                        && (response.truncated || response.matched_candidates == returned_results)
+                        && context
+                            .usage
+                            .as_ref()
+                            .is_some_and(|usage| usage.results >= returned_results)
+                })
                 && response.hits.iter().all(|hit| {
                     wire_id_has_len(hit.symbol.as_ref().map(|id| &id.value), 20)
                         && wire_id_has_len(hit.file.as_ref().map(|id| &id.value), 20)
@@ -3735,33 +3748,172 @@ fn wire_id_equals(left: Option<&Vec<u8>>, right: Option<&Vec<u8>>) -> bool {
 }
 
 fn valid_repository_operation_status(operation: &daemon::OperationStatus) -> bool {
+    let Ok(state) = daemon::OperationState::try_from(operation.state) else {
+        return false;
+    };
+    let Ok(stage) = daemon::OperationStage::try_from(operation.stage) else {
+        return false;
+    };
+    let Ok(recovery) = daemon::RecoveryClass::try_from(operation.recovery_class) else {
+        return false;
+    };
+    let error_is_valid = operation
+        .error
+        .as_ref()
+        .is_none_or(|error| checked_public_error_from_wire(error).is_some());
+
     wire_id_has_len(operation.operation.as_ref().map(|id| &id.value), 16)
         && matches!(
-            daemon::OperationState::try_from(operation.state),
-            Ok(daemon::OperationState::Queued
+            state,
+            daemon::OperationState::Queued
                 | daemon::OperationState::Running
                 | daemon::OperationState::Cancelling
                 | daemon::OperationState::Succeeded
                 | daemon::OperationState::Failed
                 | daemon::OperationState::Interrupted
-                | daemon::OperationState::Cancelled)
+                | daemon::OperationState::Cancelled
         )
         && operation.kind == daemon::OperationKind::RepositoryIndex as i32
         && matches!(
-            daemon::OperationStage::try_from(operation.stage),
-            Ok(daemon::OperationStage::Accepted
+            stage,
+            daemon::OperationStage::Accepted
                 | daemon::OperationStage::Executing
-                | daemon::OperationStage::Cleanup)
+                | daemon::OperationStage::Cleanup
         )
         && operation.plan_hash.len() == 32
         && matches!(
-            daemon::RecoveryClass::try_from(operation.recovery_class),
-            Ok(daemon::RecoveryClass::NotApplicable
+            recovery,
+            daemon::RecoveryClass::NotApplicable
                 | daemon::RecoveryClass::InterruptedByRestart
                 | daemon::RecoveryClass::DeadlineElapsed
-                | daemon::RecoveryClass::LeaseExpired)
+                | daemon::RecoveryClass::LeaseExpired
         )
+        && error_is_valid
+        && (state == daemon::OperationState::Failed) == operation.error.is_some()
+        && operation.error.as_ref().is_none_or(|error| {
+            error.operation.as_ref().is_none_or(|error_operation| {
+                wire_id_equals(
+                    Some(&error_operation.value),
+                    operation
+                        .operation
+                        .as_ref()
+                        .map(|operation| &operation.value),
+                )
+            })
+        })
+        && (state == daemon::OperationState::Interrupted)
+            != (recovery == daemon::RecoveryClass::NotApplicable)
+        && operation.deadline_unix_ms != Some(0)
+        && operation.lease_expires_unix_ms != Some(0)
+        && operation.detached == operation.lease_expires_unix_ms.is_none()
         && (operation.total_units == 0 || operation.completed_units <= operation.total_units)
+}
+
+fn checked_public_error_from_wire(error: &common::PublicError) -> Option<PublicError> {
+    if error.message.len() > MAX_WIRE_PUBLIC_ERROR_MESSAGE_BYTES
+        || error.details.len() > MAX_WIRE_PUBLIC_ERROR_DETAILS
+        || error.next_actions.len() > MAX_WIRE_PUBLIC_ERROR_ACTIONS
+        || error.retry_after_ms.is_some() && !error.retryable
+    {
+        return None;
+    }
+    let code = match common::ErrorCode::try_from(error.code).ok()? {
+        common::ErrorCode::InvalidArgument => ErrorCode::InvalidArgument,
+        common::ErrorCode::NotFound => ErrorCode::NotFound,
+        common::ErrorCode::Conflict => ErrorCode::Conflict,
+        common::ErrorCode::StaleGeneration => ErrorCode::StaleGeneration,
+        common::ErrorCode::UnsupportedCapability => ErrorCode::UnsupportedCapability,
+        common::ErrorCode::IncompleteCoverage => ErrorCode::IncompleteCoverage,
+        common::ErrorCode::BudgetExceeded => ErrorCode::BudgetExceeded,
+        common::ErrorCode::ResourceExhausted => ErrorCode::ResourceExhausted,
+        common::ErrorCode::Cancelled => ErrorCode::Cancelled,
+        common::ErrorCode::AdapterFailed => ErrorCode::AdapterFailed,
+        common::ErrorCode::IndexCorrupt => ErrorCode::IndexCorrupt,
+        common::ErrorCode::MigrationRequired => ErrorCode::MigrationRequired,
+        common::ErrorCode::PermissionDenied => ErrorCode::PermissionDenied,
+        common::ErrorCode::ProtocolMismatch => ErrorCode::ProtocolMismatch,
+        common::ErrorCode::Busy => ErrorCode::Busy,
+        common::ErrorCode::Internal => ErrorCode::Internal,
+        common::ErrorCode::Unspecified => return None,
+    };
+    let mut builder = PublicError::builder_with_message(code, error.message.clone());
+    if let Some(delay) = error.retry_after_ms {
+        builder = builder.retry_after(Duration::from_millis(delay));
+    } else if error.retryable {
+        builder = builder.retryable();
+    }
+    if let Some(repository) = error.repository.as_ref() {
+        builder = builder.repository(RepositoryId::from_bytes(
+            repository.value.as_slice().try_into().ok()?,
+        ));
+    }
+    if let Some(operation) = error.operation.as_ref() {
+        builder = builder.operation(OperationId::from_bytes(
+            operation.value.as_slice().try_into().ok()?,
+        ));
+    }
+    if let Some(generation) = error.generation.as_ref() {
+        builder = builder.generation(GenerationId::from_bytes(
+            generation.value.as_slice().try_into().ok()?,
+        ));
+    }
+    for (key, value) in &error.details {
+        builder = builder.detail(
+            DetailKey::parse(key).ok()?,
+            checked_public_value_from_wire(value)?,
+        );
+    }
+    for action in &error.next_actions {
+        builder = builder.next_action(checked_next_action_from_wire(action)?);
+    }
+    builder.build().ok()
+}
+
+fn checked_public_value_from_wire(value: &common::PublicValue) -> Option<PublicValue> {
+    use common::public_value::Value;
+
+    match value.value.as_ref()? {
+        Value::Boolean(value) => Some(PublicValue::Boolean(*value)),
+        Value::Integer(value) => Some(PublicValue::Integer(*value)),
+        Value::Unsigned(value) => Some(PublicValue::Unsigned(*value)),
+        Value::Repository(value) => Some(PublicValue::Repository(RepositoryId::from_bytes(
+            value.value.as_slice().try_into().ok()?,
+        ))),
+        Value::Generation(value) => Some(PublicValue::Generation(GenerationId::from_bytes(
+            value.value.as_slice().try_into().ok()?,
+        ))),
+        Value::Operation(value) => Some(PublicValue::Operation(OperationId::from_bytes(
+            value.value.as_slice().try_into().ok()?,
+        ))),
+        Value::Label(value) => Some(PublicValue::Label(SafeLabel::parse(value).ok()?)),
+    }
+}
+
+fn checked_next_action_from_wire(action: &common::NextAction) -> Option<NextAction> {
+    match common::next_action::Kind::try_from(action.kind).ok()? {
+        common::next_action::Kind::CorrectField => Some(NextAction::CorrectField {
+            field: DetailKey::parse(action.field.as_deref()?).ok()?,
+        }),
+        common::next_action::Kind::Retry if action.field.is_none() => Some(NextAction::Retry),
+        common::next_action::Kind::SelectSupportedVersion if action.field.is_none() => {
+            Some(NextAction::SelectSupportedVersion)
+        }
+        common::next_action::Kind::InspectOperation if action.field.is_none() => {
+            Some(NextAction::InspectOperation)
+        }
+        common::next_action::Kind::RebuildRepository if action.field.is_none() => {
+            Some(NextAction::RebuildRepository)
+        }
+        common::next_action::Kind::CollectSupportBundle if action.field.is_none() => {
+            Some(NextAction::CollectSupportBundle)
+        }
+        common::next_action::Kind::Unspecified
+        | common::next_action::Kind::Retry
+        | common::next_action::Kind::SelectSupportedVersion
+        | common::next_action::Kind::InspectOperation
+        | common::next_action::Kind::RebuildRepository
+        | common::next_action::Kind::CollectSupportBundle => None,
+    }
 }
 
 fn query_context_correlates(
@@ -7665,6 +7817,12 @@ mod tests {
             &index_request,
             &FirstSliceIpcResponse::RepositoryIndex(index_response.clone())
         ));
+        let mut self_parent = index_response.clone();
+        self_parent.parent_generation = self_parent.published_generation.clone();
+        assert!(!first_slice_response_correlates(
+            &index_request,
+            &FirstSliceIpcResponse::RepositoryIndex(self_parent)
+        ));
         let mut foreign_index = index_response;
         foreign_index.operation = Some(common::OperationId { value: vec![9; 16] });
         assert!(!first_slice_response_correlates(
@@ -7711,7 +7869,122 @@ mod tests {
         status_response.retry_after_ms = Some(0);
         assert!(first_slice_response_correlates(
             &status_request,
-            &FirstSliceIpcResponse::RepositoryOperationStatus(status_response)
+            &FirstSliceIpcResponse::RepositoryOperationStatus(status_response.clone())
+        ));
+        let wire_failure = |message: &str| common::PublicError {
+            code: common::ErrorCode::Internal as i32,
+            message: message.to_owned(),
+            retryable: false,
+            retry_after_ms: None,
+            repository: None,
+            operation: None,
+            generation: None,
+            details: Default::default(),
+            next_actions: Vec::new(),
+        };
+        let mut failed_without_error = status_response.clone();
+        let failed_without_error_operation = failed_without_error
+            .operation
+            .as_mut()
+            .expect("operation exists");
+        failed_without_error_operation.state = daemon::OperationState::Failed as i32;
+        failed_without_error.retry_after_ms = None;
+        assert!(!first_slice_response_correlates(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(failed_without_error)
+        ));
+        let mut queued_with_error = status_response.clone();
+        queued_with_error
+            .operation
+            .as_mut()
+            .expect("operation exists")
+            .error = Some(wire_failure("checked failure"));
+        assert!(!first_slice_response_correlates(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(queued_with_error)
+        ));
+        let mut checked_failure = status_response.clone();
+        let checked_failure_operation = checked_failure
+            .operation
+            .as_mut()
+            .expect("operation exists");
+        checked_failure_operation.state = daemon::OperationState::Failed as i32;
+        checked_failure_operation.error = Some(wire_failure("checked failure"));
+        checked_failure.retry_after_ms = None;
+        assert!(first_slice_response_correlates(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(checked_failure.clone())
+        ));
+        let mut foreign_nested_error = checked_failure.clone();
+        foreign_nested_error
+            .operation
+            .as_mut()
+            .expect("operation exists")
+            .error
+            .as_mut()
+            .expect("error exists")
+            .operation = Some(common::OperationId { value: vec![9; 16] });
+        assert!(!first_slice_response_correlates(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(foreign_nested_error)
+        ));
+        let mut contradictory_retry = checked_failure;
+        let contradictory_retry_error = contradictory_retry
+            .operation
+            .as_mut()
+            .expect("operation exists")
+            .error
+            .as_mut()
+            .expect("error exists");
+        contradictory_retry_error.retry_after_ms = Some(1);
+        contradictory_retry_error.retryable = false;
+        assert!(!first_slice_response_correlates(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(contradictory_retry)
+        ));
+        let mut oversized_message = status_response.clone();
+        let oversized_message_operation = oversized_message
+            .operation
+            .as_mut()
+            .expect("operation exists");
+        oversized_message_operation.state = daemon::OperationState::Failed as i32;
+        oversized_message_operation.error = Some(wire_failure(
+            &"x".repeat(MAX_WIRE_PUBLIC_ERROR_MESSAGE_BYTES + 1),
+        ));
+        oversized_message.retry_after_ms = None;
+        assert!(!first_slice_response_correlates(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(oversized_message)
+        ));
+        let mut oversized_details = status_response.clone();
+        let oversized_details_operation = oversized_details
+            .operation
+            .as_mut()
+            .expect("operation exists");
+        oversized_details_operation.state = daemon::OperationState::Failed as i32;
+        let mut too_many_details = wire_failure("checked failure");
+        for index in 0..=MAX_WIRE_PUBLIC_ERROR_DETAILS {
+            too_many_details.details.insert(
+                format!("detail_{index}"),
+                common::PublicValue {
+                    value: Some(common::public_value::Value::Boolean(true)),
+                },
+            );
+        }
+        oversized_details_operation.error = Some(too_many_details);
+        oversized_details.retry_after_ms = None;
+        assert!(!first_slice_response_correlates(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(oversized_details)
+        ));
+        let mut unsafe_failure = status_response;
+        let unsafe_failure_operation = unsafe_failure.operation.as_mut().expect("operation exists");
+        unsafe_failure_operation.state = daemon::OperationState::Failed as i32;
+        unsafe_failure_operation.error = Some(wire_failure(r"C:\secret\src\lib.rs"));
+        unsafe_failure.retry_after_ms = None;
+        assert!(!first_slice_response_correlates(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(unsafe_failure)
         ));
 
         let first_source = correlation_source(&repository, &generation, 4, 1, 2);
@@ -7744,7 +8017,7 @@ mod tests {
             };
         let locate_response = daemon::CodeLocateResponse {
             schema_version: schema,
-            context: Some(correlation_context(&repository, &generation, 2, 0)),
+            context: Some(correlation_context(&repository, &generation, 3, 0)),
             hits: vec![locate_hit(6, &first_source), locate_hit(7, &second_source)],
             matched_candidates: 2,
             truncated: false,
@@ -7752,6 +8025,30 @@ mod tests {
         assert!(first_slice_response_correlates(
             &locate_request,
             &FirstSliceIpcResponse::CodeLocate(locate_response.clone())
+        ));
+        let mut incomplete_without_truncation = locate_response.clone();
+        incomplete_without_truncation.matched_candidates = 3;
+        assert!(!first_slice_response_correlates(
+            &locate_request,
+            &FirstSliceIpcResponse::CodeLocate(incomplete_without_truncation.clone())
+        ));
+        incomplete_without_truncation.truncated = true;
+        assert!(first_slice_response_correlates(
+            &locate_request,
+            &FirstSliceIpcResponse::CodeLocate(incomplete_without_truncation)
+        ));
+        let mut wrong_result_usage = locate_response.clone();
+        wrong_result_usage
+            .context
+            .as_mut()
+            .expect("context exists")
+            .usage
+            .as_mut()
+            .expect("usage exists")
+            .results = 1;
+        assert!(!first_slice_response_correlates(
+            &locate_request,
+            &FirstSliceIpcResponse::CodeLocate(wrong_result_usage)
         ));
         let pinned_locate_request = FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
             schema_version: schema,
