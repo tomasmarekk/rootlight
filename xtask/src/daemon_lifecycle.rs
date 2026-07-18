@@ -573,6 +573,15 @@ fn exercise_concurrent_clients(paths: &RuntimePaths) -> Result<(), LifecycleErro
             return Err(LifecycleError::UnexpectedClientHealth);
         }
     }
+    let observer = Client::connect_or_start(paths, [59; 16], ConnectPolicy::ExistingOnly)
+        .map_err(LifecycleError::Client)?;
+    // The observer itself is the only connection allowed across the scenario boundary.
+    wait_for_health(&observer, |health| health.active_connections == 1).map_err(
+        |error| match error {
+            LifecycleError::HealthStateTimedOut => LifecycleError::ConcurrentClientDrainTimedOut,
+            other => other,
+        },
+    )?;
     Ok(())
 }
 
@@ -1802,6 +1811,8 @@ pub(crate) enum LifecycleError {
     },
     #[error("one deterministic client returned unhealthy daemon state")]
     UnexpectedClientHealth,
+    #[error("concurrent client connections did not drain before quota isolation")]
+    ConcurrentClientDrainTimedOut,
     #[error("daemon did not enforce the per-client operation quota")]
     ClientOperationQuotaNotEnforced,
     #[error("daemon quota guard did not establish the required bounded backlog")]
