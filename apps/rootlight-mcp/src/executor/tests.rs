@@ -274,6 +274,18 @@ fn source_reference(
     .expect("test source reference is valid")
 }
 
+fn source_reference_without_lines(start: u64, end: u64) -> client::SourceReference {
+    client::SourceReference::new(
+        repository(),
+        generation(),
+        file(),
+        start..end,
+        content_hash(),
+        None,
+    )
+    .expect("test source reference is valid")
+}
+
 fn wire_source_reference(start: u64, end: u64, start_line: u64, end_line: u64) -> SourceRef {
     wire_source_reference_for(repository(), generation(), start, end, start_line, end_line)
 }
@@ -450,6 +462,99 @@ fn locate_response() -> CodeLocatePortResponse {
         metadata("trace-locate-1"),
         vec!["publish".to_owned()],
     )
+}
+
+fn explain_response(definition: client::SourceReference) -> SymbolExplainPortResponse {
+    SymbolExplainPortResponse::new(
+        client::SymbolExplain {
+            context: context(2, 0),
+            symbols: vec![ClientExplanation {
+                symbol: symbol(),
+                kind: "function".to_owned(),
+                display_name: "publish".to_owned(),
+                signature: Some("fn publish()".to_owned()),
+                definition,
+                outbound_exact: 1,
+                outbound_candidates: 2,
+                inbound_exact: 3,
+                inbound_candidates: 4,
+                references_exact: 5,
+                provider: "treesitter-rust".to_owned(),
+                evidence: "syntax".to_owned(),
+                confidence: 950,
+            }],
+            unresolved_symbols: vec![missing_symbol()],
+            truncated: false,
+        },
+        metadata("trace-explain-1"),
+    )
+}
+
+fn source_read_response(source: client::SourceReference) -> SourceReadPortResponse {
+    assert_eq!(source.byte_range(), 4..12);
+    SourceReadPortResponse::new(
+        client::SourceRead {
+            context: context(1, 8),
+            chunks: vec![ClientSourceChunk {
+                source,
+                path: "src/lib.rs".to_owned(),
+                start_byte: 4,
+                end_byte: 12,
+                start_line: 2,
+                end_line: 2,
+                content: "xxxxxxxx".to_owned(),
+                content_hash: content_hash(),
+                language: "rust".to_owned(),
+                generated: false,
+            }],
+            total_source_bytes: 8,
+            truncated: false,
+        },
+        metadata("trace-source-compose"),
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+async fn assert_source_reference_composes_with_read(
+    source_ref: Value,
+    expected: client::SourceReference,
+) {
+    let harness = Harness::new(FakeOutcome::SourceRead(Ok(source_read_response(
+        expected.clone(),
+    ))));
+    let calls = Arc::clone(&harness.calls);
+    let router = ToolRouter::new(harness.executor).expect("tool catalog compiles");
+    let response = router
+        .handle(
+            operating_request(json!({
+                "name": "source.read",
+                "arguments": {
+                    "repository": {"repository_id": repository()},
+                    "generation": generation(),
+                    "references": [{"source_ref": source_ref.clone()}]
+                }
+            })),
+            cancellation(),
+        )
+        .await;
+    let HandlerResponse::Success(result) = response else {
+        panic!("source.read returns an MCP tool result");
+    };
+
+    assert_eq!(
+        result["isError"], false,
+        "source.read accepts the exact returned source_ref"
+    );
+    assert!(
+        source_ref.get("line_hint").is_none(),
+        "an unavailable line hint is omitted"
+    );
+    let calls = calls.lock().expect("fake call recorder is not poisoned");
+    let [ObservedCall::SourceRead(request)] = calls.as_slice() else {
+        panic!("source.read reaches the daemon port exactly once");
+    };
+    assert_eq!(request.references, [expected]);
 }
 
 #[tokio::test]
@@ -725,6 +830,32 @@ async fn maps_code_locate_with_trust_generation_and_deterministic_output() {
 }
 
 #[tokio::test]
+async fn locate_source_reference_without_line_hint_composes_with_source_read() {
+    let source = source_reference_without_lines(4, 12);
+    let mut response = locate_response();
+    response.result.hits[0].source = Some(source.clone());
+    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(response)));
+    let output = Value::Object(
+        execute(
+            &harness.executor,
+            VerticalTool::CodeLocate,
+            json!({
+                "repository": {"repository_id": repository()},
+                "query": "publish"
+            }),
+        )
+        .await
+        .expect("locate source reference maps"),
+    );
+    let source_ref = output
+        .pointer("/data/matches/0/source_ref")
+        .expect("locate returns exact source evidence")
+        .clone();
+
+    assert_source_reference_composes_with_read(source_ref, source).await;
+}
+
+#[tokio::test]
 async fn active_generation_preserves_independently_observed_stale_freshness() {
     let mut response = locate_response();
     response.metadata.structural_freshness = Freshness::Stale;
@@ -753,29 +884,7 @@ async fn active_generation_preserves_independently_observed_stale_freshness() {
 
 #[tokio::test]
 async fn maps_symbol_explain_with_compact_provenance_and_unresolved_ids() {
-    let response = SymbolExplainPortResponse::new(
-        client::SymbolExplain {
-            context: context(2, 0),
-            symbols: vec![ClientExplanation {
-                symbol: symbol(),
-                kind: "function".to_owned(),
-                display_name: "publish".to_owned(),
-                signature: Some("fn publish()".to_owned()),
-                definition: source_reference(4, 12, 2, 2),
-                outbound_exact: 1,
-                outbound_candidates: 2,
-                inbound_exact: 3,
-                inbound_candidates: 4,
-                references_exact: 5,
-                provider: "treesitter-rust".to_owned(),
-                evidence: "syntax".to_owned(),
-                confidence: 950,
-            }],
-            unresolved_symbols: vec![missing_symbol()],
-            truncated: false,
-        },
-        metadata("trace-explain-1"),
-    );
+    let response = explain_response(source_reference(4, 12, 2, 2));
     let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
     let output: SymbolExplainOutput = decode(
         execute(
@@ -812,6 +921,32 @@ async fn maps_symbol_explain_with_compact_provenance_and_unresolved_ids() {
     };
     assert!(request.include_provenance);
     assert_eq!(request.symbols, [symbol(), missing_symbol()]);
+}
+
+#[tokio::test]
+async fn explain_source_reference_without_line_hint_composes_with_source_read() {
+    let source = source_reference_without_lines(4, 12);
+    let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(explain_response(
+        source.clone(),
+    ))));
+    let output = Value::Object(
+        execute(
+            &harness.executor,
+            VerticalTool::SymbolExplain,
+            json!({
+                "repository": {"repository_id": repository()},
+                "symbol_ids": [symbol()]
+            }),
+        )
+        .await
+        .expect("symbol definition maps"),
+    );
+    let source_ref = output
+        .pointer("/data/symbols/0/definition")
+        .expect("symbol explanation returns exact definition evidence")
+        .clone();
+
+    assert_source_reference_composes_with_read(source_ref, source).await;
 }
 
 #[tokio::test]
