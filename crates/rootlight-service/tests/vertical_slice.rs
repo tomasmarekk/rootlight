@@ -6,6 +6,7 @@ use std::{
 };
 
 use rootlight_cancel::{Cancellation, CancellationReason};
+use rootlight_ids::{GenerationId, RepositoryId};
 use rootlight_query::{LocateMode, RepositoryDataTrust};
 use rootlight_service::{FirstSliceError, FirstSliceService};
 use tempfile::TempDir;
@@ -121,6 +122,33 @@ fn repository_lineage_survives_interleaved_indexing() {
         .index_rust_fixture(second_fixture.path(), &cancellation)
         .expect("second repository indexes");
     assert_ne!(first.repository, second.repository);
+    assert_eq!(
+        service.active_generation_for(first.repository),
+        Some(first.generation)
+    );
+    assert_eq!(
+        service.active_generation_for(second.repository),
+        Some(second.generation)
+    );
+    assert_eq!(
+        service
+            .resolve_generation(first.repository, Some(first.generation))
+            .expect("owned generation resolves")
+            .receipt,
+        first
+    );
+    assert_eq!(
+        service.resolve_generation(first.repository, Some(second.generation)),
+        Err(FirstSliceError::GenerationMismatch)
+    );
+    assert_eq!(
+        service.resolve_generation(first.repository, Some(GenerationId::from_bytes([0x55; 20]))),
+        Err(FirstSliceError::GenerationNotFound)
+    );
+    assert_eq!(
+        service.resolve_generation(RepositoryId::from_bytes([0x44; 16]), None),
+        Err(FirstSliceError::RepositoryNotFound)
+    );
 
     let repeated_first = service
         .index_rust_fixture(first_fixture.path(), &cancellation)
@@ -135,6 +163,17 @@ fn repository_lineage_survives_interleaved_indexing() {
         .expect("changed first repository indexes");
     assert_eq!(changed_first.parent, Some(first.generation));
     assert_ne!(changed_first.generation, first.generation);
+    let superseded = service
+        .resolve_generation(first.repository, Some(first.generation))
+        .expect("prior generation remains owned and retained");
+    assert!(!superseded.active);
+    assert_eq!(
+        service
+            .resolve_generation(first.repository, None)
+            .expect("active generation resolves")
+            .generation,
+        changed_first.generation
+    );
 }
 
 #[test]

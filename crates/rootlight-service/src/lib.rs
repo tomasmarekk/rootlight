@@ -81,6 +81,21 @@ pub struct FirstSliceIndexReceipt {
     pub elapsed_micros: u64,
 }
 
+/// Checked repository and generation correlation for one first-slice query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstSliceGenerationContext {
+    /// Repository owning the immutable generation.
+    pub repository: RepositoryId,
+    /// Selected immutable generation.
+    pub generation: GenerationId,
+    /// Optional predecessor generation.
+    pub parent: Option<GenerationId>,
+    /// Whether this generation is currently active for its repository.
+    pub active: bool,
+    /// Publication receipt retained with the generation.
+    pub receipt: FirstSliceIndexReceipt,
+}
+
 /// Transport-independent owner of bounded ephemeral fixture generations.
 ///
 /// The service intentionally retains at most the caller-selected hard-bounded
@@ -368,10 +383,58 @@ impl FirstSliceService {
         Ok(receipt)
     }
 
-    /// Returns the active generation selected by the last successful index.
+    /// Returns the most recently activated generation across all repositories.
+    ///
+    /// Callers that already know a repository should use
+    /// [`Self::active_generation_for`] to avoid cross-repository ambiguity.
     #[must_use]
     pub const fn active_generation(&self) -> Option<GenerationId> {
         self.generations.active_generation()
+    }
+
+    /// Returns the active immutable generation for one repository.
+    #[must_use]
+    pub fn active_generation_for(&self, repository: RepositoryId) -> Option<GenerationId> {
+        self.active_by_repository.get(&repository).copied()
+    }
+
+    /// Resolves and verifies one repository-owned immutable generation.
+    ///
+    /// Passing `None` selects the repository's active generation. Explicit
+    /// generations remain queryable while retained, including superseded ones.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::RepositoryNotFound`] when the repository is
+    /// unknown, [`FirstSliceError::GenerationNotFound`] when the generation is
+    /// not retained, or [`FirstSliceError::GenerationMismatch`] when it belongs
+    /// to another repository.
+    pub fn resolve_generation(
+        &self,
+        repository: RepositoryId,
+        generation: Option<GenerationId>,
+    ) -> Result<FirstSliceGenerationContext, FirstSliceError> {
+        let active = self
+            .active_by_repository
+            .get(&repository)
+            .copied()
+            .ok_or(FirstSliceError::RepositoryNotFound)?;
+        let generation = generation.unwrap_or(active);
+        let receipt = self
+            .receipts
+            .get(&generation)
+            .copied()
+            .ok_or(FirstSliceError::GenerationNotFound)?;
+        if receipt.repository != repository {
+            return Err(FirstSliceError::GenerationMismatch);
+        }
+        Ok(FirstSliceGenerationContext {
+            repository,
+            generation,
+            parent: receipt.parent,
+            active: generation == active,
+            receipt,
+        })
     }
 
     /// Executes a generation-pinned bounded `code.locate` query.
@@ -526,6 +589,15 @@ pub enum FirstSliceError {
     /// A query plan or execution failed.
     #[error("first-slice query failed")]
     Query,
+    /// The process-local repository registration is unavailable.
+    #[error("first-slice repository was not found")]
+    RepositoryNotFound,
+    /// The immutable generation is not retained by this daemon process.
+    #[error("first-slice generation was not found")]
+    GenerationNotFound,
+    /// The immutable generation belongs to another repository.
+    #[error("first-slice generation does not belong to the repository")]
+    GenerationMismatch,
     /// The retained generation set cannot admit another generation.
     #[error("first-slice generation retention is exhausted")]
     Retention,
