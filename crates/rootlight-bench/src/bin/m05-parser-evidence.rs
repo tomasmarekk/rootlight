@@ -1,8 +1,8 @@
 //! Offline BENCH-PARSE-001 micro-evidence executable.
 //!
-//! The dataset is embedded in this binary and materialized only into an
-//! operation-owned temporary directory beside the result destination. Neither
-//! that host path nor fixture source text enters the evidence bundle.
+//! Emit mode projects a real parser run into one canonical source-free JSON
+//! envelope on stdout. Verify mode strictly validates one envelope from stdin.
+//! The embedded fixture path and fixture source never enter the envelope.
 
 #![forbid(unsafe_code)]
 
@@ -12,7 +12,7 @@ use std::{
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, Read as _, Write as _},
-    path::{Path, PathBuf},
+    path::Path,
     process::ExitCode,
     time::Duration,
 };
@@ -24,9 +24,10 @@ use rootlight_adapter_treesitter::{
 };
 use rootlight_bench::{
     Availability, BenchmarkCommand, BuildProvenance, BundleLimits, DatasetEntry, DatasetManifest,
-    EnvironmentEvidence, EvidenceValue, ParserBenchmarkConfig, ParserDatasetInput,
-    RESULT_BUNDLE_SCHEMA_VERSION, ResultBundle, UnavailableProcessTreeSampler,
-    UnavailableSemanticFacts, publish_bundle, run_parser_benchmark, verify_bundle,
+    EnvironmentEvidence, EvidenceValue, M05_CI_MAX_ENVELOPE_BYTES, ParserBenchmarkConfig,
+    ParserDatasetInput, RESULT_BUNDLE_SCHEMA_VERSION, UnavailableProcessTreeSampler,
+    UnavailableSemanticFacts, build_m05_ci_evidence, encode_m05_ci_evidence, run_parser_benchmark,
+    verify_m05_ci_evidence,
 };
 use rootlight_ids::{GenerationId, derive_repository};
 use rootlight_ir::{IrLimits, SourceRef, SourceSpan};
@@ -40,7 +41,7 @@ const WARMUP_ROUNDS: u32 = 1;
 const TRIAL_ROUNDS: u32 = 10;
 const SAMPLE_TIMEOUT_MS: u64 = 2_000;
 const SAMPLE_TIMEOUT: Duration = Duration::from_millis(SAMPLE_TIMEOUT_MS);
-const MAX_ARGUMENTS: usize = 5;
+const MAX_ARGUMENTS: usize = 3;
 const MAX_ARGUMENT_BYTES: usize = 16 * 1024;
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -87,9 +88,16 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), EvidenceError> {
     let arguments = Arguments::parse(env::args_os())?;
+    match arguments {
+        Arguments::Emit { source_revision } => emit(&source_revision),
+        Arguments::Verify => verify_stdin(),
+    }
+}
+
+fn emit(source_revision: &str) -> Result<(), EvidenceError> {
     let manifest = embedded_manifest()?;
     let command = benchmark_command();
-    let fixture_directory = create_fixture_directory(&arguments.output)?;
+    let fixture_directory = create_fixture_directory()?;
     materialize_fixtures(fixture_directory.path())?;
 
     let limits = BundleLimits::default();
@@ -143,21 +151,47 @@ fn run() -> Result<(), EvidenceError> {
         source,
     })?;
     let binary_sha256 = hash_file(&executable, MAX_BINARY_BYTES)?;
-    let bundle = ResultBundle {
-        environment: environment(&binary_sha256)?,
-        dataset_manifest: manifest,
-        build_provenance: build_provenance(&arguments.source_revision, &binary_sha256),
-        command,
-        raw_samples: benchmark.raw_samples,
-        summary: benchmark.summary,
-        coverage: benchmark.coverage,
-        quality: benchmark.quality,
-        agent_trajectories: Vec::new(),
-        profiles: BTreeMap::new(),
-        logs: BTreeMap::new(),
-    };
-    publish_bundle(&bundle, &arguments.output)?;
-    verify_bundle(&arguments.output)?;
+    let environment = environment(&binary_sha256)?;
+    let provenance = build_provenance(source_revision, &binary_sha256);
+    let envelope = build_m05_ci_evidence(
+        source_revision,
+        &environment,
+        &manifest,
+        &provenance,
+        &command,
+        &benchmark,
+    )?;
+    let encoded = encode_m05_ci_evidence(&envelope)?;
+    verify_m05_ci_evidence(&encoded)?;
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(&encoded)
+        .and_then(|()| stdout.flush())
+        .map_err(|source| EvidenceError::Io {
+            operation: "write CI evidence stdout",
+            source,
+        })?;
+    Ok(())
+}
+
+fn verify_stdin() -> Result<(), EvidenceError> {
+    let read_limit = u64::try_from(M05_CI_MAX_ENVELOPE_BYTES)
+        .map_err(|_| EvidenceError::LimitConversion)?
+        .checked_add(1)
+        .ok_or(EvidenceError::LimitConversion)?;
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(M05_CI_MAX_ENVELOPE_BYTES)
+        .map_err(|_| EvidenceError::LimitConversion)?;
+    io::stdin()
+        .lock()
+        .take(read_limit)
+        .read_to_end(&mut encoded)
+        .map_err(|source| EvidenceError::Io {
+            operation: "read CI evidence stdin",
+            source,
+        })?;
+    verify_m05_ci_evidence(&encoded)?;
     Ok(())
 }
 
@@ -344,11 +378,10 @@ fn analysis_limits() -> Result<AnalysisLimits, rootlight_adapter_sdk::LimitError
     )
 }
 
-fn create_fixture_directory(destination: &Path) -> Result<TempDir, EvidenceError> {
-    let parent = destination_parent(destination)?;
+fn create_fixture_directory() -> Result<TempDir, EvidenceError> {
     tempfile::Builder::new()
         .prefix(".rootlight-m05-fixtures-")
-        .tempdir_in(parent)
+        .tempdir()
         .map_err(|source| EvidenceError::Io {
             operation: "create fixture directory",
             source,
@@ -360,23 +393,6 @@ fn cleanup_fixture_directory(directory: TempDir) -> Result<(), EvidenceError> {
         operation: "remove fixture directory",
         source,
     })
-}
-
-fn destination_parent(destination: &Path) -> Result<PathBuf, EvidenceError> {
-    if destination.file_name().is_none() {
-        return Err(EvidenceError::InvalidDestination);
-    }
-    let parent = destination
-        .parent()
-        .ok_or(EvidenceError::InvalidDestination)?;
-    if parent.as_os_str().is_empty() {
-        env::current_dir().map_err(|source| EvidenceError::Io {
-            operation: "resolve current directory",
-            source,
-        })
-    } else {
-        Ok(parent.to_owned())
-    }
 }
 
 fn materialize_fixtures(directory: &Path) -> Result<(), EvidenceError> {
@@ -475,9 +491,9 @@ fn hex_digest(digest: impl AsRef<[u8]>) -> String {
 }
 
 #[derive(Debug)]
-struct Arguments {
-    output: PathBuf,
-    source_revision: String,
+enum Arguments {
+    Emit { source_revision: String },
+    Verify,
 }
 
 impl Arguments {
@@ -486,42 +502,35 @@ impl Arguments {
         let mut argument_count = 0_usize;
         let _program =
             next_argument(&mut arguments, &mut argument_count)?.ok_or(EvidenceError::Usage)?;
-        let mut values = BTreeMap::<String, OsString>::new();
-        while let Some(flag) = next_argument(&mut arguments, &mut argument_count)? {
-            let flag = flag.into_string().map_err(|_| EvidenceError::Usage)?;
-            if !matches!(flag.as_str(), "--output" | "--source-revision")
-                || values.contains_key(&flag)
-            {
-                return Err(EvidenceError::Usage);
-            }
-            let value =
-                next_argument(&mut arguments, &mut argument_count)?.ok_or(EvidenceError::Usage)?;
-            values.insert(flag, value);
-        }
-        if argument_count != MAX_ARGUMENTS {
-            return Err(EvidenceError::Usage);
-        }
-        let output = values
-            .remove("--output")
-            .map(PathBuf::from)
-            .ok_or(EvidenceError::Usage)?;
-        let source_revision = values
-            .remove("--source-revision")
+        let mode = next_argument(&mut arguments, &mut argument_count)?
             .ok_or(EvidenceError::Usage)?
             .into_string()
             .map_err(|_| EvidenceError::Usage)?;
-        if !values.is_empty()
-            || !matches!(source_revision.len(), 40 | 64)
+        if mode == "--verify" {
+            if next_argument(&mut arguments, &mut argument_count)?.is_some() {
+                return Err(EvidenceError::Usage);
+            }
+            return Ok(Self::Verify);
+        }
+        if mode != "--source-revision" {
+            return Err(EvidenceError::Usage);
+        }
+        let source_revision =
+            next_argument(&mut arguments, &mut argument_count)?.ok_or(EvidenceError::Usage)?;
+        if next_argument(&mut arguments, &mut argument_count)?.is_some() {
+            return Err(EvidenceError::Usage);
+        }
+        let source_revision = source_revision
+            .into_string()
+            .map_err(|_| EvidenceError::Usage)?;
+        if !matches!(source_revision.len(), 40 | 64)
             || !source_revision
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
         {
             return Err(EvidenceError::Usage);
         }
-        Ok(Self {
-            output,
-            source_revision,
-        })
+        Ok(Self::Emit { source_revision })
     }
 }
 
@@ -544,10 +553,10 @@ where
 
 #[derive(Debug, thiserror::Error)]
 enum EvidenceError {
-    #[error("usage: m05-parser-evidence --output PATH --source-revision LOWERCASE_SHA")]
+    #[error(
+        "usage: m05-parser-evidence --source-revision LOWERCASE_SHA | m05-parser-evidence --verify"
+    )]
     Usage,
-    #[error("result destination is invalid")]
-    InvalidDestination,
     #[error("evidence executable is invalid")]
     InvalidExecutable,
     #[error("resource limit is not representable")]
@@ -571,7 +580,7 @@ enum EvidenceError {
     #[error(transparent)]
     Benchmark(#[from] rootlight_bench::ParserRunError),
     #[error(transparent)]
-    Bundle(#[from] rootlight_bench::BundleError),
+    Ci(#[from] rootlight_bench::M05CiEvidenceError),
 }
 
 #[cfg(test)]
@@ -618,22 +627,27 @@ mod tests {
     fn arguments_reject_missing_extra_and_noncanonical_values() {
         let valid = [
             "m05-parser-evidence",
-            "--output",
-            "result",
             "--source-revision",
             "0123456789abcdef0123456789abcdef01234567",
         ];
-        Arguments::parse(valid.into_iter().map(OsString::from))
-            .expect("complete source-free arguments parse");
+        assert!(matches!(
+            Arguments::parse(valid.into_iter().map(OsString::from)),
+            Ok(Arguments::Emit { .. })
+        ));
+        assert!(matches!(
+            Arguments::parse(
+                ["m05-parser-evidence", "--verify"]
+                    .into_iter()
+                    .map(OsString::from)
+            ),
+            Ok(Arguments::Verify)
+        ));
 
         let extra = [
             "m05-parser-evidence",
-            "--output",
-            "result",
             "--source-revision",
             "0123456789abcdef0123456789abcdef01234567",
             "--extra",
-            "value",
         ];
         assert!(matches!(
             Arguments::parse(extra.into_iter().map(OsString::from)),
@@ -642,8 +656,6 @@ mod tests {
 
         let uppercase = [
             "m05-parser-evidence",
-            "--output",
-            "result",
             "--source-revision",
             "0123456789ABCDEF0123456789ABCDEF01234567",
         ];
@@ -654,23 +666,13 @@ mod tests {
 
         let oversized = vec![
             OsString::from("m05-parser-evidence"),
-            OsString::from("--output"),
-            OsString::from("x".repeat(MAX_ARGUMENT_BYTES + 1)),
             OsString::from("--source-revision"),
-            OsString::from("0123456789abcdef0123456789abcdef01234567"),
+            OsString::from("x".repeat(MAX_ARGUMENT_BYTES + 1)),
         ];
         assert!(matches!(
             Arguments::parse(oversized),
             Err(EvidenceError::Usage)
         ));
-    }
-
-    #[test]
-    fn relative_destination_uses_current_directory() {
-        let expected = env::current_dir().expect("current directory is available");
-        let observed =
-            destination_parent(Path::new("relative-result")).expect("relative parent resolves");
-        assert_eq!(observed, expected);
     }
 
     #[test]
@@ -748,10 +750,7 @@ mod tests {
 
     #[test]
     fn fixture_directory_cleanup_is_verified() {
-        let parent = tempfile::tempdir().expect("test parent is available");
-        let destination = parent.path().join("result");
-        let fixtures =
-            create_fixture_directory(&destination).expect("secure fixture directory is created");
+        let fixtures = create_fixture_directory().expect("temporary fixture directory is created");
         let fixture_path = fixtures.path().to_owned();
         materialize_fixtures(&fixture_path).expect("embedded fixtures materialize");
         cleanup_fixture_directory(fixtures).expect("fixture cleanup succeeds");

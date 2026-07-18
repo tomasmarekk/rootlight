@@ -208,15 +208,107 @@ jobs:
           sudo RUNNER_HOME="$HOME" RUNNER_PATH="$PATH" \
             bash scripts/run-in-network-namespace.sh scripts/run-offline-tests.sh
 
+  m05-evidence:
+    name: parser fallback evidence / linux
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Generate deterministic BENCH-PARSE-001 fallback envelope
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          cargo build --locked --release --package rootlight-bench --bin m05-parser-evidence
+          target/release/m05-parser-evidence \
+            --source-revision "$SOURCE_REVISION" > target/BENCH-PARSE-001.json
+          target/release/m05-parser-evidence \
+            --source-revision "$SOURCE_REVISION" > target/BENCH-PARSE-001.second.json
+          cmp target/BENCH-PARSE-001.json target/BENCH-PARSE-001.second.json
+          target/release/m05-parser-evidence \
+            --verify < target/BENCH-PARSE-001.json
+          if grep --fixed-strings --binary-files=without-match "$PWD" \
+            target/BENCH-PARSE-001.json; then
+            echo "parser evidence contains the checkout path" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          path = Path("target/BENCH-PARSE-001.json")
+          encoded = path.read_bytes()
+          envelope = json.loads(encoded)
+          expected = {
+              "schema_version": "rootlight.m05-ci-evidence/1",
+              "evidence_status": "deterministic_fallback",
+              "record_set_count": 2,
+              "dataset_record_count": 4,
+              "dataset_record_bytes": 825,
+              "dataset_record_sha256": (
+                  "990f996b75507cd26bef61dbaeace897"
+                  "5bb7e5b81113de74a623448f926dc074"
+              ),
+              "sample_record_count": 44,
+              "sample_record_bytes": 7200,
+              "sample_record_sha256": (
+                  "eb98d07b2bd81e2918fe465424060768"
+                  "b49f72b31133d6434d25f29aa25127cc"
+              ),
+          }
+          observed = {key: envelope.get(key) for key in expected}
+          if observed != expected:
+              raise SystemExit(
+                  f"parser evidence fixed contract mismatch: {observed!r}"
+              )
+          if len(encoded) > 256 * 1024:
+              raise SystemExit("parser evidence exceeds its single-file ceiling")
+          print(
+              "verified parser fallback envelope "
+              f"bytes={len(encoded)} sha256={hashlib.sha256(encoded).hexdigest()}"
+          )
+          PY
+      - name: Upload immutable BENCH-PARSE-001 envelope
+        id: evidence-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: BENCH-PARSE-001-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/BENCH-PARSE-001.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+      - name: Record immutable artifact identity
+        env:
+          ARTIFACT_ID: ${{ steps.evidence-upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence-upload.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.evidence-upload.outputs.artifact-digest }}
+        run: |
+          {
+            echo "### BENCH-PARSE-001 fallback evidence"
+            echo
+            echo "- artifact id: \`$ARTIFACT_ID\`"
+            echo "- artifact url: $ARTIFACT_URL"
+            echo "- artifact digest: \`$ARTIFACT_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, supply-chain, offline]
+    needs: [fast, msrv, current-stable, platform, supply-chain, offline, m05-evidence]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every foundation and daemon gate
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           python - <<'PY'
@@ -225,13 +317,23 @@ jobs:
           import sys
 
           needs = json.loads(os.environ["NEEDS_JSON"])
-          failures = {
-              name: result.get("result")
-              for name, result in needs.items()
-              if result.get("result") != "success"
-          }
+          expected = {name: "success" for name in needs}
+          expected["m05-evidence"] = (
+              "success"
+              if os.environ["EVENT_NAME"] == "push"
+              and os.environ["EVENT_REF"] == "refs/heads/main"
+              else "skipped"
+          )
+          failures = {}
+          for name, result in needs.items():
+              observed = result.get("result")
+              if observed != expected[name]:
+                  failures[name] = {
+                      "expected": expected[name],
+                      "observed": observed,
+                  }
           if failures:
               print(f"required CI jobs did not succeed: {failures}", file=sys.stderr)
               raise SystemExit(1)
-          print("all required foundation and daemon CI jobs succeeded")
+          print("all required foundation, daemon, and evidence CI jobs satisfied their gates")
           PY

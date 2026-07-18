@@ -1,11 +1,13 @@
 //! Deterministic benchmark evidence contracts and bounded M05 parser harnesses.
 //!
 //! The crate is development-only: shipping binaries must not depend on it.
-//! Result publication is immutable and keeps targets separate from observations.
+//! Directory publication remains fail-closed until the VFS private-tree
+//! boundary is accepted; CI uses the canonical single-file fallback envelope.
 
 #![forbid(unsafe_code)]
 
 mod bundle;
+mod ci;
 mod decode;
 mod integrity;
 mod model;
@@ -16,6 +18,11 @@ pub use bundle::{
     BundleError, BundleLimits, OperationalEvent, OperationalLog, OperationalLogRecord,
     OperationalStatus, ResultBundle, publish_bundle, publish_bundle_with_limits, verify_bundle,
     verify_bundle_with_limits,
+};
+pub use ci::{
+    M05_CI_ENVELOPE_SCHEMA_VERSION, M05_CI_MAX_ENVELOPE_BYTES, M05CiEvidenceEnvelope,
+    M05CiEvidenceError, build_m05_ci_evidence, decode_m05_ci_evidence, encode_m05_ci_evidence,
+    verify_m05_ci_evidence,
 };
 pub use decode::{DecodeError, decode_benchmark_command, decode_dataset_manifest};
 pub use model::{
