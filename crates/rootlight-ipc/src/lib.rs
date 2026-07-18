@@ -6,19 +6,30 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(windows)]
+use std::{
+    fs::OpenOptions,
+    os::windows::{fs::OpenOptionsExt as _, io::OwnedHandle},
+};
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
-use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};
+use interprocess::local_socket::traits::tokio::Listener as _;
+#[cfg(unix)]
+use interprocess::local_socket::traits::tokio::Stream as _;
 #[cfg(windows)]
 use interprocess::local_socket::{GenericNamespaced, ToNsName as _};
 use interprocess::local_socket::{
     Listener, ListenerNonblockingMode, ListenerOptions, Stream,
     tokio::{Listener as TokioListener, Stream as TokioStream},
     traits::{Listener as _, Stream as _},
+};
+#[cfg(windows)]
+use interprocess::os::windows::named_pipe::local_socket::{
+    Stream as WindowsLocalStream, tokio::Stream as WindowsAsyncLocalStream,
 };
 #[cfg(unix)]
 use interprocess::{local_socket::ToFsName as _, os::unix::local_socket::FilesystemUdSocket};
@@ -44,6 +55,10 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const FRAME_HEADER_BYTES: usize = 4;
 const RETRY_PAUSE: Duration = Duration::from_millis(1);
+#[cfg(windows)]
+const ERROR_PIPE_BUSY: i32 = 231;
+#[cfg(windows)]
+const WINDOWS_CONNECT_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Platform endpoint selected for the current Rootlight user instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,27 +441,164 @@ pub fn verify_peer_async(stream: &AsyncLocalStream) -> Result<(), IpcError> {
     verify_async_platform_peer(stream)
 }
 
-/// Connects to a local daemon endpoint with bounded nonblocking I/O.
+/// Connects to a local daemon endpoint with platform-bounded acquisition.
+///
+/// Unix uses one platform connection attempt. On Windows, a busy pipe is
+/// retried through a fixed admission deadline. Windows does not expose
+/// cancellation for one synchronous open attempt, so a late successful attempt
+/// is closed instead of being returned after the deadline.
 ///
 /// # Errors
 ///
-/// Returns [`IpcError::Transport`] when the endpoint cannot be reached or the
-/// connected stream cannot be configured.
+/// Returns [`IpcError::ConnectTimedOut`] when a busy Windows pipe remains
+/// unavailable, or [`IpcError::Transport`] when the endpoint cannot be reached
+/// or the connected stream cannot be configured.
 pub fn connect(endpoint: &Endpoint) -> Result<Stream, IpcError> {
-    let stream = Stream::connect(endpoint.name()?).map_err(IpcError::Transport)?;
+    #[cfg(unix)]
+    {
+        let stream = Stream::connect(endpoint.name()?).map_err(IpcError::Transport)?;
+        stream.set_nonblocking(true).map_err(IpcError::Transport)?;
+        Ok(stream)
+    }
+    #[cfg(windows)]
+    {
+        connect_windows(endpoint, WINDOWS_CONNECT_RETRY_TIMEOUT)
+    }
+}
+
+/// Connects to a local daemon endpoint through Tokio with platform-bounded acquisition.
+///
+/// Unix uses one platform connection attempt. On Windows, a blocking worker
+/// retries a busy pipe through a fixed admission deadline. Dropping the future
+/// cannot cancel an already-started acquisition worker, but that bounded task
+/// retains ownership and closes any late handle with its result.
+///
+/// # Errors
+///
+/// Returns [`IpcError::ConnectTimedOut`] when a busy Windows pipe remains
+/// unavailable, or [`IpcError::Transport`] when the endpoint cannot be reached.
+pub async fn connect_async(endpoint: &Endpoint) -> Result<AsyncLocalStream, IpcError> {
+    #[cfg(unix)]
+    {
+        TokioStream::connect(endpoint.name()?)
+            .await
+            .map_err(IpcError::Transport)
+    }
+    #[cfg(windows)]
+    {
+        connect_windows_async(endpoint, WINDOWS_CONNECT_RETRY_TIMEOUT).await
+    }
+}
+
+#[cfg(windows)]
+fn connect_windows(endpoint: &Endpoint, duration: Duration) -> Result<Stream, IpcError> {
+    let deadline = connect_deadline(duration)?;
+    let handle = acquire_windows_pipe_until(endpoint, false, deadline)?;
+    ensure_before_connect_deadline(deadline)?;
+    let stream = WindowsLocalStream::try_from(handle)
+        .map_err(io::Error::from)
+        .map_err(IpcError::Transport)?;
+    ensure_before_connect_deadline(deadline)?;
+    let stream = Stream::NamedPipe(stream);
     stream.set_nonblocking(true).map_err(IpcError::Transport)?;
+    ensure_before_connect_deadline(deadline)?;
     Ok(stream)
 }
 
-/// Connects to a local daemon endpoint through Tokio.
-///
-/// # Errors
-///
-/// Returns [`IpcError::Transport`] when the endpoint cannot be reached.
-pub async fn connect_async(endpoint: &Endpoint) -> Result<AsyncLocalStream, IpcError> {
-    TokioStream::connect(endpoint.name()?)
-        .await
-        .map_err(IpcError::Transport)
+#[cfg(windows)]
+async fn connect_windows_async(
+    endpoint: &Endpoint,
+    duration: Duration,
+) -> Result<AsyncLocalStream, IpcError> {
+    let deadline = connect_deadline(duration)?;
+    let endpoint = endpoint.clone();
+    // The bounded task owns any opened handle, keeping synchronous Windows
+    // acquisition off Tokio workers without detaching normal completion.
+    let handle =
+        tokio::task::spawn_blocking(move || acquire_windows_pipe_until(&endpoint, true, deadline))
+            .await
+            .map_err(|source| IpcError::Transport(io::Error::other(source)))??;
+    ensure_before_connect_deadline(deadline)?;
+    let stream = WindowsAsyncLocalStream::try_from(handle)
+        .map_err(io::Error::from)
+        .map_err(IpcError::Transport)?;
+    ensure_before_connect_deadline(deadline)?;
+    Ok(TokioStream::NamedPipe(stream))
+}
+
+#[cfg(windows)]
+fn connect_deadline(duration: Duration) -> Result<Instant, IpcError> {
+    if duration.is_zero() {
+        return Err(IpcError::InvalidLimit);
+    }
+    Instant::now()
+        .checked_add(duration)
+        .ok_or(IpcError::InvalidLimit)
+}
+
+#[cfg(windows)]
+fn acquire_windows_pipe_until(
+    endpoint: &Endpoint,
+    overlapped: bool,
+    deadline: Instant,
+) -> Result<OwnedHandle, IpcError> {
+    loop {
+        ensure_before_connect_deadline(deadline)?;
+        match open_windows_pipe(endpoint, overlapped) {
+            Ok(handle) => {
+                ensure_before_connect_deadline(deadline)?;
+                return Ok(handle);
+            }
+            Err(source) if is_windows_pipe_busy(&source) => wait_for_connect(deadline)?,
+            Err(source) => return Err(IpcError::Transport(source)),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn open_windows_pipe(endpoint: &Endpoint, overlapped: bool) -> io::Result<OwnedHandle> {
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, SECURITY_IDENTIFICATION,
+    };
+
+    // A single CreateFile attempt is immediately retryable, unlike the
+    // transport's server-selected WaitNamedPipe loop.
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+        .security_qos_flags(SECURITY_IDENTIFICATION.0);
+    if overlapped {
+        options.custom_flags(FILE_FLAG_OVERLAPPED.0);
+    }
+    options.open(endpoint.as_path()).map(Into::into)
+}
+
+#[cfg(windows)]
+fn is_windows_pipe_busy(source: &io::Error) -> bool {
+    source.raw_os_error() == Some(ERROR_PIPE_BUSY)
+}
+
+#[cfg(windows)]
+fn ensure_before_connect_deadline(deadline: Instant) -> Result<(), IpcError> {
+    connect_remaining(deadline).map(|_| ())
+}
+
+#[cfg(windows)]
+fn connect_remaining(deadline: Instant) -> Result<Duration, IpcError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(IpcError::ConnectTimedOut);
+    }
+    Ok(remaining)
+}
+
+#[cfg(windows)]
+fn wait_for_connect(deadline: Instant) -> Result<(), IpcError> {
+    let remaining = connect_remaining(deadline)?;
+    std::thread::sleep(RETRY_PAUSE.min(remaining));
+    Ok(())
 }
 
 /// Writes the client negotiation frame.
@@ -984,6 +1136,9 @@ pub enum IpcError {
     /// The frame exceeded its elapsed I/O deadline.
     #[error("local IPC frame timed out")]
     TimedOut,
+    /// A busy local endpoint remained unavailable through the connection deadline.
+    #[error("local IPC connection timed out")]
+    ConnectTimedOut,
     /// Decoding left bytes outside the protobuf message.
     #[error("local IPC frame has trailing bytes")]
     TrailingBytes,
@@ -1086,6 +1241,55 @@ mod tests {
             Endpoint::new(PathBuf::from("rootlight.sock")),
             Err(IpcError::InvalidEndpoint)
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_busy_pipe_connect_is_exact_and_bounded() {
+        let temporary = private_tempdir();
+        let endpoint = async_test_endpoint(&temporary, "busy-connect");
+        let listener = LocalListener::bind(endpoint.clone()).expect("listener binds");
+        let first =
+            connect_windows(&endpoint, Duration::from_secs(1)).expect("first client connects");
+
+        let error = connect_windows(&endpoint, Duration::from_millis(20))
+            .expect_err("busy pipe reaches the connection deadline");
+
+        assert!(matches!(error, IpcError::ConnectTimedOut));
+        assert!(std::error::Error::source(&error).is_none());
+        assert!(is_windows_pipe_busy(&io::Error::from_raw_os_error(
+            ERROR_PIPE_BUSY
+        )));
+        assert!(!is_windows_pipe_busy(&io::Error::from_raw_os_error(121)));
+
+        let accepted = listener
+            .accept_timeout(Duration::from_secs(1))
+            .expect("first client accepts");
+        drop((accepted, first));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_busy_async_pipe_connect_is_bounded() {
+        let temporary = private_tempdir();
+        let endpoint = async_test_endpoint(&temporary, "busy-async-connect");
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("listener binds");
+        let first = connect_windows_async(&endpoint, Duration::from_secs(1))
+            .await
+            .expect("first client connects");
+
+        let error = connect_windows_async(&endpoint, Duration::from_millis(20))
+            .await
+            .expect_err("busy pipe reaches the connection deadline");
+
+        assert!(matches!(error, IpcError::ConnectTimedOut));
+        assert!(std::error::Error::source(&error).is_none());
+
+        let accepted = listener
+            .accept_timeout(Duration::from_secs(1))
+            .await
+            .expect("first client accepts");
+        drop((accepted, first));
     }
 
     #[cfg(unix)]

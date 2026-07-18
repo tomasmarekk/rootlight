@@ -602,8 +602,9 @@ fn exercise_concurrent_clients(paths: &RuntimePaths) -> Result<(), LifecycleErro
         clients.push(thread::spawn(move || {
             let identity = deterministic_client_identity(index)?;
             let client = Client::connect_or_start(&paths, identity, ConnectPolicy::ExistingOnly)
-                .map_err(LifecycleError::Client)?;
+                .map_err(LifecycleError::Client);
             barrier.wait();
+            let client = client?;
             client.health().map_err(LifecycleError::Client)
         }));
     }
@@ -969,7 +970,7 @@ fn submit_quota_operation_until(
 
 fn is_retryable_quota_transport(error: &ClientError) -> bool {
     match error {
-        ClientError::Ipc(IpcError::TimedOut) => true,
+        ClientError::Ipc(IpcError::TimedOut | IpcError::ConnectTimedOut) => true,
         ClientError::Ipc(IpcError::Transport(error)) => error.kind() == io::ErrorKind::TimedOut,
         _ => false,
     }
@@ -1969,6 +1970,9 @@ mod tests {
     fn quota_retry_accepts_only_bounded_transport_timeouts() {
         assert!(is_retryable_quota_transport(&ClientError::Ipc(
             IpcError::TimedOut
+        )));
+        assert!(is_retryable_quota_transport(&ClientError::Ipc(
+            IpcError::ConnectTimedOut
         )));
         assert!(is_retryable_quota_transport(&ClientError::Ipc(
             IpcError::Transport(io::Error::new(io::ErrorKind::TimedOut, "fixture"))
