@@ -334,22 +334,21 @@ impl Session {
                     .map(ProcessedFrame::invalid)
                     .map(Dispatch::Immediate);
             }
+            Err(ParseFailure::Rejected(issue)) => {
+                let message = match issue {
+                    JsonIssue::Limits => "JSON limits exceeded",
+                    JsonIssue::DuplicateName => "duplicate JSON object name",
+                };
+                return static_error(None, INVALID_REQUEST, message, limits)
+                    .map(ProcessedFrame::invalid)
+                    .map(Dispatch::Immediate);
+            }
             Err(ParseFailure::MemoryUnavailable) => {
                 return Err(SessionError::MemoryUnavailable);
             }
         };
-        let readable_id = readable_id(&parsed.value);
-        if let Some(issue) = parsed.issue {
-            let message = match issue {
-                JsonIssue::Limits => "JSON limits exceeded",
-                JsonIssue::DuplicateName => "duplicate JSON object name",
-            };
-            return static_error(readable_id.as_ref(), INVALID_REQUEST, message, limits)
-                .map(ProcessedFrame::invalid)
-                .map(Dispatch::Immediate);
-        }
 
-        let message = match decode_inbound(parsed.value) {
+        let message = match decode_inbound(parsed) {
             Ok(message) => message,
             Err(issue) => {
                 return static_error(

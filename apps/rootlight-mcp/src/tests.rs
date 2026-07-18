@@ -92,9 +92,15 @@ fn initialize_rejects_invalid_known_capability_shapes() {
 
 #[test]
 fn initialize_rejects_unknown_critical_and_duplicate_fields() {
-    for params in [
-        r#"{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1","secret":"value"}}"#,
-        r#"{"protocolVersion":"2025-11-25","protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}"#,
+    for (params, id_is_readable) in [
+        (
+            r#"{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1","secret":"value"}}"#,
+            true,
+        ),
+        (
+            r#"{"protocolVersion":"2025-11-25","protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}"#,
+            false,
+        ),
     ] {
         let mut session = Session::rootlight();
         let request =
@@ -102,7 +108,11 @@ fn initialize_rejects_unknown_critical_and_duplicate_fields() {
         let error = response(&mut session, &request, StdioLimits::default())
             .expect("invalid initialize is handled")
             .expect("invalid initialize has an error");
-        assert_eq!(error["id"], "strict");
+        if id_is_readable {
+            assert_eq!(error["id"], "strict");
+        } else {
+            assert!(error.get("id").is_none());
+        }
         assert!(matches!(
             error["error"]["code"].as_i64(),
             Some(value) if value == i64::from(INVALID_PARAMS) || value == i64::from(INVALID_REQUEST)
@@ -210,7 +220,7 @@ fn duplicate_names_are_rejected_before_member_accounting_collapses_them() {
     let error = response(&mut session, duplicate, StdioLimits::default())
         .expect("duplicate input is handled")
         .expect("duplicate input has an error");
-    assert_eq!(error["id"], "first");
+    assert!(error.get("id").is_none());
     assert_eq!(error["error"]["code"], INVALID_REQUEST);
 
     let nested =
@@ -218,7 +228,7 @@ fn duplicate_names_are_rejected_before_member_accounting_collapses_them() {
     let error = response(&mut session, nested, StdioLimits::default())
         .expect("nested duplicate input is handled")
         .expect("nested duplicate input has an error");
-    assert_eq!(error["id"], "nested");
+    assert!(error.get("id").is_none());
     assert_eq!(error["error"]["code"], INVALID_REQUEST);
 }
 
@@ -264,7 +274,7 @@ fn json_depth_string_object_array_and_node_limits_are_inclusive() {
     )
     .expect("long string is handled")
     .expect("long string has an error");
-    assert_eq!(rejected["id"], "string");
+    assert!(rejected.get("id").is_none());
     assert_eq!(rejected["error"]["code"], INVALID_REQUEST);
 
     let array = r#"{"jsonrpc":"2.0","id":"array","method":"ping","params":{"_meta":{"x":[1,2]}}}"#;
@@ -307,6 +317,42 @@ fn json_depth_string_object_array_and_node_limits_are_inclusive() {
             .expect("limit violation is handled")
             .expect("limit violation has an error");
         assert_eq!(rejected["error"]["code"], INVALID_REQUEST);
+    }
+}
+
+#[test]
+fn configured_collection_limits_win_before_hostile_near_frame_tails_are_parsed() {
+    let base_limits = JsonLimits {
+        max_depth: DEFAULT_MAX_JSON_DEPTH,
+        max_string_bytes: DEFAULT_MAX_STRING_BYTES,
+        max_object_properties: DEFAULT_MAX_OBJECT_PROPERTIES,
+        max_array_items: DEFAULT_MAX_ARRAY_ITEMS,
+        max_nodes: DEFAULT_MAX_JSON_NODES,
+    };
+    let fixtures = [
+        (
+            "[0,\"",
+            JsonLimits {
+                max_array_items: 1,
+                ..base_limits
+            },
+        ),
+        (
+            "{\"safe\":0,\"",
+            JsonLimits {
+                max_object_properties: 1,
+                ..base_limits
+            },
+        ),
+    ];
+
+    for (prefix, limits) in fixtures {
+        let mut hostile = String::with_capacity(DEFAULT_MAX_FRAME_BYTES);
+        hostile.push_str(prefix);
+        hostile.push_str(&"x".repeat(DEFAULT_MAX_FRAME_BYTES - hostile.len()));
+        let failure =
+            parse_bounded(hostile.as_bytes(), limits).expect_err("collection limit is enforced");
+        assert_eq!(failure, ParseFailure::Rejected(JsonIssue::Limits));
     }
 }
 

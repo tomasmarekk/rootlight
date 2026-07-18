@@ -1,10 +1,9 @@
-use std::{
-    cell::{Cell, RefCell},
-    fmt,
-    rc::Rc,
-};
+use std::{cell::Cell, fmt, rc::Rc};
 
-use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use serde::{
+    Deserialize,
+    de::{DeserializeSeed, MapAccess, SeqAccess, Visitor},
+};
 use serde_json::{Map, Number, Value};
 
 #[derive(Debug, Clone, Copy)]
@@ -22,41 +21,39 @@ pub(crate) enum JsonIssue {
     DuplicateName,
 }
 
-pub(crate) struct ParsedJson {
-    pub(crate) value: Value,
-    pub(crate) issue: Option<JsonIssue>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParseFailure {
     Malformed,
+    Rejected(JsonIssue),
     MemoryUnavailable,
 }
 
-pub(crate) fn parse_bounded(input: &[u8], limits: JsonLimits) -> Result<ParsedJson, ParseFailure> {
+pub(crate) fn parse_bounded(input: &[u8], limits: JsonLimits) -> Result<Value, ParseFailure> {
     let state = Rc::new(ParseState::new(limits));
     let mut deserializer = serde_json::Deserializer::from_slice(input);
     let value = NodeSeed {
         state: Rc::clone(&state),
         depth: 0,
+        allowed: true,
     }
     .deserialize(&mut deserializer)
     .map_err(|_| {
         if state.memory_unavailable.get() {
             ParseFailure::MemoryUnavailable
+        } else if let Some(issue) = state.issue.get() {
+            ParseFailure::Rejected(issue)
         } else {
             ParseFailure::Malformed
         }
     })?;
     deserializer.end().map_err(|_| ParseFailure::Malformed)?;
-    let issue = *state.issue.borrow();
-    Ok(ParsedJson { value, issue })
+    Ok(value)
 }
 
 struct ParseState {
     limits: JsonLimits,
     nodes: Cell<usize>,
-    issue: RefCell<Option<JsonIssue>>,
+    issue: Cell<Option<JsonIssue>>,
     memory_unavailable: Cell<bool>,
 }
 
@@ -65,33 +62,36 @@ impl ParseState {
         Self {
             limits,
             nodes: Cell::new(0),
-            issue: RefCell::new(None),
+            issue: Cell::new(None),
             memory_unavailable: Cell::new(false),
         }
     }
 
-    fn count_node(&self, depth: usize) {
+    fn count_node<E: serde::de::Error>(&self, depth: usize) -> Result<(), E> {
         let Some(nodes) = self.nodes.get().checked_add(1) else {
-            self.mark(JsonIssue::Limits);
-            return;
+            return Err(self.rejection(JsonIssue::Limits));
         };
-        self.nodes.set(nodes);
         if nodes > self.limits.max_nodes || depth > self.limits.max_depth {
-            self.mark(JsonIssue::Limits);
+            return Err(self.rejection(JsonIssue::Limits));
         }
+        self.nodes.set(nodes);
+        Ok(())
     }
 
-    fn check_string(&self, value: &str) {
+    fn check_string<E: serde::de::Error>(&self, value: &str) -> Result<(), E> {
         if value.len() > self.limits.max_string_bytes {
-            self.mark(JsonIssue::Limits);
+            return Err(self.rejection(JsonIssue::Limits));
         }
+        Ok(())
     }
 
-    fn mark(&self, issue: JsonIssue) {
-        let mut current = self.issue.borrow_mut();
-        if current.is_none() || matches!(issue, JsonIssue::DuplicateName) {
-            *current = Some(issue);
-        }
+    fn rejection<E: serde::de::Error>(&self, issue: JsonIssue) -> E {
+        self.issue.set(Some(issue));
+        let message = match issue {
+            JsonIssue::Limits => "JSON limits exceeded",
+            JsonIssue::DuplicateName => "duplicate JSON object name",
+        };
+        E::custom(message)
     }
 
     fn mark_memory_unavailable(&self) {
@@ -102,6 +102,7 @@ impl ParseState {
 struct NodeSeed {
     state: Rc<ParseState>,
     depth: usize,
+    allowed: bool,
 }
 
 impl<'de> DeserializeSeed<'de> for NodeSeed {
@@ -111,7 +112,10 @@ impl<'de> DeserializeSeed<'de> for NodeSeed {
     where
         D: serde::Deserializer<'de>,
     {
-        self.state.count_node(self.depth);
+        if !self.allowed {
+            return Err(self.state.rejection(JsonIssue::Limits));
+        }
+        self.state.count_node::<D::Error>(self.depth)?;
         deserializer.deserialize_any(NodeVisitor {
             state: self.state,
             depth: self.depth,
@@ -125,11 +129,33 @@ struct NodeVisitor {
 }
 
 impl NodeVisitor {
-    fn child_seed(&self) -> NodeSeed {
+    fn child_seed(&self, allowed: bool) -> NodeSeed {
         NodeSeed {
             state: Rc::clone(&self.state),
             depth: self.depth.saturating_add(1),
+            allowed,
         }
+    }
+}
+
+struct ObjectKeySeed {
+    state: Rc<ParseState>,
+    allowed: bool,
+}
+
+impl<'de> DeserializeSeed<'de> for ObjectKeySeed {
+    type Value = String;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if !self.allowed {
+            return Err(self.state.rejection(JsonIssue::Limits));
+        }
+        let value = String::deserialize(deserializer)?;
+        self.state.check_string::<D::Error>(&value)?;
+        Ok(value)
     }
 }
 
@@ -161,8 +187,11 @@ impl<'de> Visitor<'de> for NodeVisitor {
             .ok_or_else(|| E::custom("non-finite JSON number"))
     }
 
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        self.state.check_string(value);
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.state.check_string::<E>(value)?;
         Ok(Value::String(value.to_owned()))
     }
 
@@ -173,8 +202,11 @@ impl<'de> Visitor<'de> for NodeVisitor {
         self.visit_str(value)
     }
 
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        self.state.check_string(&value);
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.state.check_string::<E>(&value)?;
         Ok(Value::String(value))
     }
 
@@ -192,7 +224,7 @@ impl<'de> Visitor<'de> for NodeVisitor {
     {
         let mut values = Vec::new();
         if let Some(size) = sequence.size_hint() {
-            let bounded = size.min(self.state.limits.max_array_items.saturating_add(1));
+            let bounded = size.min(self.state.limits.max_array_items);
             values.try_reserve_exact(bounded).map_err(|_| {
                 self.state.mark_memory_unavailable();
                 serde::de::Error::custom("JSON memory is unavailable")
@@ -200,11 +232,10 @@ impl<'de> Visitor<'de> for NodeVisitor {
         }
 
         let mut item_count = 0usize;
-        while let Some(value) = sequence.next_element_seed(self.child_seed())? {
-            item_count = item_count.saturating_add(1);
-            if item_count > self.state.limits.max_array_items {
-                self.state.mark(JsonIssue::Limits);
-            }
+        while let Some(value) = sequence
+            .next_element_seed(self.child_seed(item_count < self.state.limits.max_array_items))?
+        {
+            item_count += 1;
             if values.len() == values.capacity() {
                 values.try_reserve_exact(1).map_err(|_| {
                     self.state.mark_memory_unavailable();
@@ -220,40 +251,17 @@ impl<'de> Visitor<'de> for NodeVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut fields = Vec::<(String, Value)>::new();
-        if let Some(size) = object.size_hint() {
-            let bounded = size.min(self.state.limits.max_object_properties.saturating_add(1));
-            fields.try_reserve_exact(bounded).map_err(|_| {
-                self.state.mark_memory_unavailable();
-                serde::de::Error::custom("JSON memory is unavailable")
-            })?;
-        }
-
-        let mut property_count = 0usize;
-        while let Some(key) = object.next_key::<String>()? {
-            property_count = property_count.saturating_add(1);
-            self.state.check_string(&key);
-            if property_count > self.state.limits.max_object_properties {
-                self.state.mark(JsonIssue::Limits);
-            }
-            let duplicate = fields.iter().any(|(existing, _)| existing == &key);
-            if duplicate {
-                self.state.mark(JsonIssue::DuplicateName);
-            }
-            let value = object.next_value_seed(self.child_seed())?;
-            if !duplicate {
-                if fields.len() == fields.capacity() {
-                    fields.try_reserve_exact(1).map_err(|_| {
-                        self.state.mark_memory_unavailable();
-                        serde::de::Error::custom("JSON memory is unavailable")
-                    })?;
-                }
-                fields.push((key, value));
-            }
-        }
-
         let mut values = Map::new();
-        for (key, value) in fields {
+        let mut property_count = 0usize;
+        while let Some(key) = object.next_key_seed(ObjectKeySeed {
+            state: Rc::clone(&self.state),
+            allowed: property_count < self.state.limits.max_object_properties,
+        })? {
+            property_count += 1;
+            if values.contains_key(&key) {
+                return Err(self.state.rejection(JsonIssue::DuplicateName));
+            }
+            let value = object.next_value_seed(self.child_seed(true))?;
             values.insert(key, value);
         }
         Ok(Value::Object(values))
