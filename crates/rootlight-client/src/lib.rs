@@ -1,4 +1,4 @@
-//! Thin synchronous client for Rootlight's private daemon control protocol.
+//! Thin synchronous and asynchronous client for Rootlight's private daemon control protocol.
 //!
 //! The client validates negotiation, request identifiers, instance nonces, and
 //! stable protocol errors before exposing typed control results to applications.
@@ -15,8 +15,9 @@ use std::{
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ipc::{
-    Endpoint, FrameCodec, IpcError, connect, read_response, read_server_hello, write_client_hello,
-    write_request,
+    Endpoint, FrameCodec, IpcError, connect, connect_async, read_response, read_response_async,
+    read_server_hello, read_server_hello_async, write_client_hello, write_client_hello_async,
+    write_request, write_request_async,
 };
 use rootlight_observability::{
     CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION, ControlMethod, DURATION_BUCKET_UPPER_US,
@@ -713,6 +714,46 @@ impl std::fmt::Debug for SourceRead {
     }
 }
 
+/// Validated total deadline budget for one asynchronous daemon request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RequestTimeout(Duration);
+
+impl RequestTimeout {
+    /// Smallest caller-level asynchronous request budget.
+    pub const MINIMUM: Duration = Duration::from_millis(10);
+    /// Largest caller-level asynchronous request budget.
+    pub const MAXIMUM: Duration = Duration::from_secs(30);
+
+    /// Validates a caller-level request budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::InvalidRequestTimeout`] when `duration` is outside
+    /// the inclusive 10 millisecond through 30 second protocol range.
+    pub fn new(duration: Duration) -> Result<Self, ClientError> {
+        if !(Self::MINIMUM..=Self::MAXIMUM).contains(&duration)
+            || u32::try_from(duration.as_millis()).is_err()
+        {
+            return Err(ClientError::InvalidRequestTimeout);
+        }
+        Ok(Self(duration))
+    }
+
+    /// Returns the validated relative request budget.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+}
+
+impl TryFrom<Duration> for RequestTimeout {
+    type Error = ClientError;
+
+    fn try_from(duration: Duration) -> Result<Self, Self::Error> {
+        Self::new(duration)
+    }
+}
+
 /// Policy for resolving a daemon control client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectPolicy {
@@ -1013,16 +1054,37 @@ impl Client {
         operation: OperationId,
         detached: bool,
     ) -> Result<RepositoryIndex, ClientError> {
-        if root.is_empty() || root.len() > 4096 || root.as_bytes().contains(&0) {
-            return Err(ClientError::InvalidFirstSliceRequest);
+        match self.request(build_repository_index_request(root, operation, detached)?)? {
+            daemon::response_envelope::Response::RepositoryIndex(response) => {
+                parse_repository_index(response, operation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
         }
-        let request = daemon::RepositoryIndexRequest {
-            schema_version: Some(first_slice_schema()),
-            root: root.to_owned(),
-            operation: Some(operation_to_wire(operation)),
-            detached,
-        };
-        match self.request(daemon::request_envelope::Request::RepositoryIndex(request))? {
+    }
+
+    /// Asynchronously indexes one bounded repository root within a total request budget.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel work attached to that connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid request bounds, unavailable protocol
+    /// support, transport failure, timeout, or a malformed or uncorrelated response.
+    pub async fn repository_index_async(
+        &self,
+        root: &str,
+        operation: OperationId,
+        detached: bool,
+        timeout: RequestTimeout,
+    ) -> Result<RepositoryIndex, ClientError> {
+        match self
+            .request_async(
+                build_repository_index_request(root, operation, detached)?,
+                timeout,
+            )
+            .await?
+        {
             daemon::response_envelope::Response::RepositoryIndex(response) => {
                 parse_repository_index(response, operation)
             }
@@ -1043,24 +1105,49 @@ impl Client {
         wait_ms: Option<u32>,
         after_revision: Option<u64>,
     ) -> Result<RepositoryOperationStatus, ClientError> {
-        if wait_ms.is_some_and(|wait| wait > 30_000) {
-            return Err(ClientError::InvalidFirstSliceRequest);
-        }
-        let request = daemon::RepositoryOperationStatusRequest {
-            schema_version: Some(first_slice_schema()),
-            operation: Some(operation_to_wire(operation)),
-            action: match action {
-                RepositoryOperationAction::Get => {
-                    daemon::RepositoryOperationAction::RepositoryOperationGet as i32
-                }
-                RepositoryOperationAction::Cancel => {
-                    daemon::RepositoryOperationAction::RepositoryOperationCancel as i32
-                }
-            },
+        match self.request(build_repository_operation_status_request(
+            operation,
+            action,
             wait_ms,
             after_revision,
-        };
-        match self.request(daemon::request_envelope::Request::RepositoryOperationStatus(request))? {
+        )?)? {
+            daemon::response_envelope::Response::RepositoryOperationStatus(response) => {
+                parse_repository_operation_status(response, operation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously reads or cancels one repository-index operation.
+    ///
+    /// Dropping the returned future closes its one-request stream. The independent
+    /// `wait_ms` long-poll bound remains part of the daemon request, while `timeout`
+    /// bounds the complete client exchange.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid wait bounds, unavailable protocol
+    /// support, transport failure, timeout, or a malformed or uncorrelated response.
+    pub async fn repository_operation_status_async(
+        &self,
+        operation: OperationId,
+        action: RepositoryOperationAction,
+        wait_ms: Option<u32>,
+        after_revision: Option<u64>,
+        timeout: RequestTimeout,
+    ) -> Result<RepositoryOperationStatus, ClientError> {
+        match self
+            .request_async(
+                build_repository_operation_status_request(
+                    operation,
+                    action,
+                    wait_ms,
+                    after_revision,
+                )?,
+                timeout,
+            )
+            .await?
+        {
             daemon::response_envelope::Response::RepositoryOperationStatus(response) => {
                 parse_repository_operation_status(response, operation)
             }
@@ -1082,18 +1169,45 @@ impl Client {
         mode: LocateMode,
         maximum_results: u32,
     ) -> Result<CodeLocate, ClientError> {
-        if query.is_empty() || query.len() > 2048 || !(1..=200).contains(&maximum_results) {
-            return Err(ClientError::InvalidFirstSliceRequest);
-        }
-        let request = daemon::CodeLocateRequest {
-            schema_version: Some(first_slice_schema()),
-            repository: Some(repository_to_wire(repository)),
-            generation: Some(generation_selector_to_wire(generation)),
-            query: query.to_owned(),
-            mode: locate_mode_to_wire(mode) as i32,
+        match self.request(build_code_locate_request(
+            repository,
+            generation,
+            query,
+            mode,
             maximum_results,
-        };
-        match self.request(daemon::request_envelope::Request::CodeLocate(request))? {
+        )?)? {
+            daemon::response_envelope::Response::CodeLocate(response) => {
+                parse_code_locate(response, repository, generation, maximum_results)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously executes one bounded generation-pinned lexical lookup.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query bounds, unavailable protocol
+    /// support, transport failure, timeout, or a malformed or uncorrelated response.
+    pub async fn code_locate_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query: &str,
+        mode: LocateMode,
+        maximum_results: u32,
+        timeout: RequestTimeout,
+    ) -> Result<CodeLocate, ClientError> {
+        match self
+            .request_async(
+                build_code_locate_request(repository, generation, query, mode, maximum_results)?,
+                timeout,
+            )
+            .await?
+        {
             daemon::response_envelope::Response::CodeLocate(response) => {
                 parse_code_locate(response, repository, generation, maximum_results)
             }
@@ -1113,22 +1227,39 @@ impl Client {
         generation: GenerationSelector,
         symbols: &[SymbolId],
     ) -> Result<SymbolExplain, ClientError> {
-        if symbols.is_empty()
-            || symbols.len() > 16
-            || symbols
-                .iter()
-                .enumerate()
-                .any(|(index, symbol)| symbols[..index].contains(symbol))
-        {
-            return Err(ClientError::InvalidFirstSliceRequest);
+        match self.request(build_symbol_explain_request(
+            repository, generation, symbols,
+        )?)? {
+            daemon::response_envelope::Response::SymbolExplain(response) => {
+                parse_symbol_explain(response, repository, generation, symbols)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
         }
-        let request = daemon::SymbolExplainRequest {
-            schema_version: Some(first_slice_schema()),
-            repository: Some(repository_to_wire(repository)),
-            generation: Some(generation_selector_to_wire(generation)),
-            symbols: symbols.iter().copied().map(symbol_to_wire).collect(),
-        };
-        match self.request(daemon::request_envelope::Request::SymbolExplain(request))? {
+    }
+
+    /// Asynchronously explains a bounded set of generation-pinned symbols.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached explanation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid symbol bounds, unavailable protocol
+    /// support, transport failure, timeout, or a malformed or uncorrelated response.
+    pub async fn symbol_explain_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        symbols: &[SymbolId],
+        timeout: RequestTimeout,
+    ) -> Result<SymbolExplain, ClientError> {
+        match self
+            .request_async(
+                build_symbol_explain_request(repository, generation, symbols)?,
+                timeout,
+            )
+            .await?
+        {
             daemon::response_envelope::Response::SymbolExplain(response) => {
                 parse_symbol_explain(response, repository, generation, symbols)
             }
@@ -1148,30 +1279,39 @@ impl Client {
         generation: GenerationSelector,
         references: &[SourceReference],
     ) -> Result<SourceRead, ClientError> {
-        if references.is_empty()
-            || references.len() > 32
-            || references.iter().enumerate().any(|(index, reference)| {
-                reference.repository != repository
-                    || matches!(
-                        generation,
-                        GenerationSelector::Generation(selected)
-                            if reference.generation != selected
-                    )
-                    || references[..index].contains(reference)
-            })
-            || references
-                .windows(2)
-                .any(|pair| pair[0].generation != pair[1].generation)
-        {
-            return Err(ClientError::InvalidFirstSliceRequest);
+        match self.request(build_source_read_request(
+            repository, generation, references,
+        )?)? {
+            daemon::response_envelope::Response::SourceRead(response) => {
+                parse_source_read(response, repository, generation, references)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
         }
-        let request = daemon::SourceReadRequest {
-            schema_version: Some(first_slice_schema()),
-            repository: Some(repository_to_wire(repository)),
-            generation: Some(generation_selector_to_wire(generation)),
-            references: references.iter().map(source_reference_to_wire).collect(),
-        };
-        match self.request(daemon::request_envelope::Request::SourceRead(request))? {
+    }
+
+    /// Asynchronously reads a bounded ordered set of immutable source selections.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached source read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid reference bounds or correlation,
+    /// unavailable protocol support, transport failure, timeout, or a malformed response.
+    pub async fn source_read_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        references: &[SourceReference],
+        timeout: RequestTimeout,
+    ) -> Result<SourceRead, ClientError> {
+        match self
+            .request_async(
+                build_source_read_request(repository, generation, references)?,
+                timeout,
+            )
+            .await?
+        {
             daemon::response_envelope::Response::SourceRead(response) => {
                 parse_source_read(response, repository, generation, references)
             }
@@ -1223,6 +1363,71 @@ impl Client {
                 Err(ClientError::Public(Box::new(parse_public_error(error)?)))
             }
             response => Ok((response, selected_protocol_minor)),
+        }
+    }
+
+    async fn request_async(
+        &self,
+        request: daemon::request_envelope::Request,
+        timeout: RequestTimeout,
+    ) -> Result<daemon::response_envelope::Response, ClientError> {
+        let deadline = Instant::now()
+            .checked_add(timeout.duration())
+            .ok_or(ClientError::InvalidRequestTimeout)?;
+        let codec = FrameCodec::new(rootlight_ipc::MAX_FRAME_BYTES, timeout.duration())
+            .unwrap_or_else(|_| unreachable!("validated async client frame limits are valid"));
+        match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.request_async_until(request, deadline, codec),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => Err(ClientError::RequestTimedOut),
+        }
+    }
+
+    async fn request_async_until(
+        &self,
+        request: daemon::request_envelope::Request,
+        deadline: Instant,
+        codec: FrameCodec,
+    ) -> Result<daemon::response_envelope::Response, ClientError> {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        if request_id == 0 {
+            return Err(ClientError::RequestIdExhausted);
+        }
+
+        // The unsplit stream stays owned by this future so cancellation by drop
+        // closes the daemon peer instead of leaving detached transport work.
+        let mut stream = connect_async(&self.endpoint).await?;
+        write_client_hello_async(
+            codec,
+            &mut stream,
+            &client_hello(self.instance_nonce, self.client_instance_id),
+        )
+        .await?;
+        let hello = read_server_hello_async(codec, &mut stream).await?;
+        let selected_protocol_minor = validate_server_hello(&hello, self.instance_nonce)?;
+        ensure_request_supported(&request, selected_protocol_minor)?;
+        let timeout_ms = remaining_timeout_ms(deadline)?;
+        write_request_async(
+            codec,
+            &mut stream,
+            &daemon::RequestEnvelope {
+                request_id,
+                instance_nonce: self.instance_nonce.to_vec(),
+                timeout_ms: Some(timeout_ms),
+                request: Some(request),
+            },
+        )
+        .await?;
+        let response = read_response_async(codec, &mut stream).await?;
+        match correlated_response(response, request_id)? {
+            daemon::response_envelope::Response::Error(error) => {
+                Err(ClientError::Public(Box::new(parse_public_error(error)?)))
+            }
+            response => Ok(response),
         }
     }
 }
@@ -2069,6 +2274,131 @@ fn require_first_slice_response_schema(
     }
 }
 
+fn build_repository_index_request(
+    root: &str,
+    operation: OperationId,
+    detached: bool,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if root.is_empty() || root.len() > 4096 || root.as_bytes().contains(&0) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::RepositoryIndex(
+        daemon::RepositoryIndexRequest {
+            schema_version: Some(first_slice_schema()),
+            root: root.to_owned(),
+            operation: Some(operation_to_wire(operation)),
+            detached,
+        },
+    ))
+}
+
+fn build_repository_operation_status_request(
+    operation: OperationId,
+    action: RepositoryOperationAction,
+    wait_ms: Option<u32>,
+    after_revision: Option<u64>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if wait_ms.is_some_and(|wait| wait > 30_000) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(
+        daemon::request_envelope::Request::RepositoryOperationStatus(
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: Some(first_slice_schema()),
+                operation: Some(operation_to_wire(operation)),
+                action: match action {
+                    RepositoryOperationAction::Get => {
+                        daemon::RepositoryOperationAction::RepositoryOperationGet as i32
+                    }
+                    RepositoryOperationAction::Cancel => {
+                        daemon::RepositoryOperationAction::RepositoryOperationCancel as i32
+                    }
+                },
+                wait_ms,
+                after_revision,
+            },
+        ),
+    )
+}
+
+fn build_code_locate_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    query: &str,
+    mode: LocateMode,
+    maximum_results: u32,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if query.is_empty() || query.len() > 2048 || !(1..=200).contains(&maximum_results) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::CodeLocate(
+        daemon::CodeLocateRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            query: query.to_owned(),
+            mode: locate_mode_to_wire(mode) as i32,
+            maximum_results,
+        },
+    ))
+}
+
+fn build_symbol_explain_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    symbols: &[SymbolId],
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if symbols.is_empty()
+        || symbols.len() > 16
+        || symbols
+            .iter()
+            .enumerate()
+            .any(|(index, symbol)| symbols[..index].contains(symbol))
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::SymbolExplain(
+        daemon::SymbolExplainRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            symbols: symbols.iter().copied().map(symbol_to_wire).collect(),
+        },
+    ))
+}
+
+fn build_source_read_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    references: &[SourceReference],
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if references.is_empty()
+        || references.len() > 32
+        || references.iter().enumerate().any(|(index, reference)| {
+            reference.repository != repository
+                || matches!(
+                    generation,
+                    GenerationSelector::Generation(selected)
+                        if reference.generation != selected
+                )
+                || references[..index].contains(reference)
+        })
+        || references
+            .windows(2)
+            .any(|pair| pair[0].generation != pair[1].generation)
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::SourceRead(
+        daemon::SourceReadRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            references: references.iter().map(source_reference_to_wire).collect(),
+        },
+    ))
+}
+
 fn repository_to_wire(repository: RepositoryId) -> common::RepositoryId {
     common::RepositoryId {
         value: repository.as_bytes().to_vec(),
@@ -2638,6 +2968,22 @@ fn operation_deadline(timeout: Duration) -> Result<u64, ClientError> {
         .ok_or(ClientError::InvalidRequestTimeout)
 }
 
+fn remaining_timeout_ms(deadline: Instant) -> Result<u32, ClientError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(ClientError::RequestTimedOut)?;
+    let rounded_milliseconds = remaining
+        .as_millis()
+        .checked_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+        .ok_or(ClientError::InvalidRequestTimeout)?;
+    let milliseconds =
+        u32::try_from(rounded_milliseconds).map_err(|_| ClientError::InvalidRequestTimeout)?;
+    if milliseconds == 0 {
+        return Err(ClientError::RequestTimedOut);
+    }
+    Ok(milliseconds)
+}
+
 fn unix_time_ms() -> Result<u64, ClientError> {
     let elapsed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2855,6 +3201,9 @@ pub enum ClientError {
     /// Relative request timeout could not be represented.
     #[error("daemon request timeout is invalid")]
     InvalidRequestTimeout,
+    /// An asynchronous daemon request exceeded its total caller-level budget.
+    #[error("daemon request timed out")]
+    RequestTimedOut,
     /// Absolute operation deadline and lease fields were inconsistent.
     #[error("daemon operation timing is invalid")]
     InvalidOperationTiming,
@@ -2907,6 +3256,11 @@ impl ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rootlight_ipc::{
+        AsyncLocalListener, AsyncLocalStream, read_client_hello_async, read_request_async,
+        write_response_async, write_server_hello_async,
+    };
+    use tokio::io::AsyncReadExt as _;
 
     fn test_endpoint(label: &str) -> Endpoint {
         #[cfg(unix)]
@@ -2914,6 +3268,91 @@ mod tests {
         #[cfg(windows)]
         let path = std::path::PathBuf::from(format!(r"\\.\pipe\rootlight-client-{label}"));
         Endpoint::new(path).expect("test endpoint validates")
+    }
+
+    fn async_test_endpoint(label: &str) -> (tempfile::TempDir, Endpoint) {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        #[cfg(unix)]
+        let path = {
+            let _ = label;
+            temporary.path().join("daemon.sock")
+        };
+        #[cfg(windows)]
+        let path = std::path::PathBuf::from(format!(
+            r"\\.\pipe\rootlight-client-{label}-{}",
+            temporary
+                .path()
+                .file_name()
+                .expect("temporary directory has a name")
+                .to_string_lossy()
+        ));
+        (
+            temporary,
+            Endpoint::new(path).expect("async test endpoint validates"),
+        )
+    }
+
+    fn async_server_hello(instance_nonce: [u8; 16]) -> daemon::ServerHello {
+        daemon::ServerHello {
+            selected_protocol: Some(common::ContractVersion {
+                major: 1,
+                minor: CURRENT_PROTOCOL_MINOR,
+            }),
+            capabilities: CLIENT_CAPABILITIES
+                .iter()
+                .map(|capability| (*capability).to_owned())
+                .collect(),
+            error: None,
+            instance_nonce: instance_nonce.to_vec(),
+        }
+    }
+
+    async fn receive_async_request(
+        listener: &AsyncLocalListener,
+        instance_nonce: [u8; 16],
+    ) -> (AsyncLocalStream, daemon::RequestEnvelope) {
+        let mut stream = listener
+            .accept_timeout(Duration::from_secs(2))
+            .await
+            .expect("async client connects");
+        let hello = read_client_hello_async(FrameCodec::default(), &mut stream)
+            .await
+            .expect("client hello decodes");
+        assert_eq!(hello.expected_instance_nonce, instance_nonce);
+        write_server_hello_async(
+            FrameCodec::default(),
+            &mut stream,
+            &async_server_hello(instance_nonce),
+        )
+        .await
+        .expect("server hello writes");
+        let request = read_request_async(FrameCodec::default(), &mut stream)
+            .await
+            .expect("client request decodes");
+        (stream, request)
+    }
+
+    async fn serve_async_responses(
+        listener: AsyncLocalListener,
+        instance_nonce: [u8; 16],
+        responses: Vec<daemon::response_envelope::Response>,
+    ) -> Vec<daemon::RequestEnvelope> {
+        let mut requests = Vec::with_capacity(responses.len());
+        for response in responses {
+            let (mut stream, request) = receive_async_request(&listener, instance_nonce).await;
+            write_response_async(
+                FrameCodec::default(),
+                &mut stream,
+                &daemon::ResponseEnvelope {
+                    request_id: request.request_id,
+                    response: Some(response),
+                },
+            )
+            .await
+            .expect("server response writes");
+            requests.push(request);
+        }
+        requests
     }
 
     fn test_repository() -> RepositoryId {
@@ -2992,6 +3431,425 @@ mod tests {
             details: Default::default(),
             next_actions: Vec::new(),
         }
+    }
+
+    fn wire_repository_index(operation: OperationId) -> daemon::RepositoryIndexResponse {
+        daemon::RepositoryIndexResponse {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(test_repository())),
+            operation: Some(operation_to_wire(operation)),
+            state: daemon::OperationState::Succeeded as i32,
+            revision: 1,
+            parent_generation: None,
+            published_generation: Some(generation_to_wire(test_generation())),
+            discovered_inputs: 1,
+            indexed_files: 1,
+            entities: 1,
+            elapsed_micros: 10,
+        }
+    }
+
+    fn wire_repository_status(operation: OperationId) -> daemon::RepositoryOperationStatusResponse {
+        daemon::RepositoryOperationStatusResponse {
+            schema_version: Some(first_slice_schema()),
+            operation: Some(wire_operation(operation)),
+            published_generation: Some(generation_to_wire(test_generation())),
+            started_unix_ms: 1,
+            peak_rss_bytes: 0,
+            written_bytes: 0,
+            files_examined: 1,
+            retry_after_ms: None,
+        }
+    }
+
+    fn wire_code_locate(symbol: SymbolId, source: &SourceReference) -> daemon::CodeLocateResponse {
+        daemon::CodeLocateResponse {
+            schema_version: Some(first_slice_schema()),
+            context: Some(wire_query_context(1, 0)),
+            hits: vec![daemon::FirstSliceLocateHit {
+                symbol: Some(symbol_to_wire(symbol)),
+                file: Some(file_to_wire(source.file)),
+                identifier: "answer".to_owned(),
+                qualified_name: "answer".to_owned(),
+                path: "src/lib.rs".to_owned(),
+                kind: "function".to_owned(),
+                language: "rust".to_owned(),
+                tier: daemon::FirstSliceAnalysisTier::FirstSliceTierC as i32,
+                generated: false,
+                score: 1_000,
+                source: Some(wire_source(source)),
+            }],
+            matched_candidates: 1,
+            truncated: false,
+        }
+    }
+
+    fn wire_symbol_explain(
+        symbol: SymbolId,
+        source: &SourceReference,
+    ) -> daemon::SymbolExplainResponse {
+        daemon::SymbolExplainResponse {
+            schema_version: Some(first_slice_schema()),
+            context: Some(wire_query_context(1, 0)),
+            symbols: vec![daemon::FirstSliceSymbolExplanation {
+                symbol: Some(symbol_to_wire(symbol)),
+                kind: "function".to_owned(),
+                display_name: "answer".to_owned(),
+                signature: None,
+                definition: Some(wire_source(source)),
+                outbound_exact: 0,
+                outbound_candidates: 0,
+                inbound_exact: 0,
+                inbound_candidates: 0,
+                references_exact: 0,
+                provider: "tree-sitter".to_owned(),
+                evidence: "parser".to_owned(),
+                confidence: 1_000,
+            }],
+            unresolved_symbols: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    fn wire_source_read(source: &SourceReference) -> daemon::SourceReadResponse {
+        daemon::SourceReadResponse {
+            schema_version: Some(first_slice_schema()),
+            context: Some(wire_query_context(1, 3)),
+            chunks: vec![daemon::FirstSliceSourceChunk {
+                source: Some(wire_source(source)),
+                path: "src/lib.rs".to_owned(),
+                start_byte: source.start_byte,
+                end_byte: source.end_byte,
+                start_line: 1,
+                end_line: 1,
+                content: "abc".to_owned(),
+                content_hash: Some(content_hash_to_wire(source.content_hash)),
+                language: "rust".to_owned(),
+                generated: false,
+            }],
+            total_source_bytes: 3,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn async_request_timeout_bounds_and_errors_are_source_free() {
+        assert!(matches!(
+            RequestTimeout::new(Duration::from_millis(9)),
+            Err(ClientError::InvalidRequestTimeout)
+        ));
+        assert_eq!(
+            RequestTimeout::new(Duration::from_millis(10))
+                .expect("minimum request timeout validates")
+                .duration(),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            RequestTimeout::new(Duration::from_secs(30))
+                .expect("maximum request timeout validates")
+                .duration(),
+            Duration::from_secs(30)
+        );
+        assert!(matches!(
+            RequestTimeout::new(Duration::from_millis(30_001)),
+            Err(ClientError::InvalidRequestTimeout)
+        ));
+
+        for error in [
+            ClientError::InvalidRequestTimeout,
+            ClientError::RequestTimedOut,
+            ClientError::InvalidFirstSliceRequest,
+            ClientError::MismatchedRequestId,
+        ] {
+            assert!(std::error::Error::source(&error).is_none());
+            assert!(!error.to_string().contains("secret.rs"));
+        }
+    }
+
+    #[tokio::test]
+    async fn async_first_slice_calls_match_checked_sync_decoders() {
+        let (_temporary, endpoint) = async_test_endpoint("parity");
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("listener binds");
+        let instance_nonce = [7; 16];
+        let client_instance_id = [8; 16];
+        let client = Client::new(endpoint, instance_nonce, client_instance_id);
+        let timeout =
+            RequestTimeout::new(Duration::from_secs(5)).expect("request timeout validates");
+        let operation = OperationId::from_bytes([9; 16]);
+        let symbol = SymbolId::from_bytes([5; 20]);
+        let source = test_source(4, 0, 3);
+
+        let index_wire = wire_repository_index(operation);
+        let status_wire = wire_repository_status(operation);
+        let locate_wire = wire_code_locate(symbol, &source);
+        let explain_wire = wire_symbol_explain(symbol, &source);
+        let source_wire = wire_source_read(&source);
+        let expected_index =
+            parse_repository_index(index_wire.clone(), operation).expect("index fixture parses");
+        let expected_status = parse_repository_operation_status(status_wire.clone(), operation)
+            .expect("status fixture parses");
+        let expected_locate = parse_code_locate(
+            locate_wire.clone(),
+            test_repository(),
+            GenerationSelector::Active,
+            1,
+        )
+        .expect("locate fixture parses");
+        let expected_explain = parse_symbol_explain(
+            explain_wire.clone(),
+            test_repository(),
+            GenerationSelector::Active,
+            &[symbol],
+        )
+        .expect("explain fixture parses");
+        let expected_source = parse_source_read(
+            source_wire.clone(),
+            test_repository(),
+            GenerationSelector::Active,
+            std::slice::from_ref(&source),
+        )
+        .expect("source fixture parses");
+
+        let server = tokio::spawn(serve_async_responses(
+            listener,
+            instance_nonce,
+            vec![
+                daemon::response_envelope::Response::RepositoryIndex(index_wire),
+                daemon::response_envelope::Response::RepositoryOperationStatus(status_wire),
+                daemon::response_envelope::Response::CodeLocate(locate_wire),
+                daemon::response_envelope::Response::SymbolExplain(explain_wire),
+                daemon::response_envelope::Response::SourceRead(source_wire),
+            ],
+        ));
+
+        assert_eq!(
+            client
+                .repository_index_async("C:/fixture", operation, true, timeout)
+                .await
+                .expect("async repository index succeeds"),
+            expected_index
+        );
+        assert_eq!(
+            client
+                .repository_operation_status_async(
+                    operation,
+                    RepositoryOperationAction::Get,
+                    None,
+                    None,
+                    timeout,
+                )
+                .await
+                .expect("async operation status succeeds"),
+            expected_status
+        );
+        assert_eq!(
+            client
+                .code_locate_async(
+                    test_repository(),
+                    GenerationSelector::Active,
+                    "answer",
+                    LocateMode::Exact,
+                    1,
+                    timeout,
+                )
+                .await
+                .expect("async code locate succeeds"),
+            expected_locate
+        );
+        assert_eq!(
+            client
+                .symbol_explain_async(
+                    test_repository(),
+                    GenerationSelector::Active,
+                    &[symbol],
+                    timeout,
+                )
+                .await
+                .expect("async symbol explain succeeds"),
+            expected_explain
+        );
+        assert_eq!(
+            client
+                .source_read_async(
+                    test_repository(),
+                    GenerationSelector::Active,
+                    std::slice::from_ref(&source),
+                    timeout,
+                )
+                .await
+                .expect("async source read succeeds"),
+            expected_source
+        );
+
+        let requests = server.await.expect("server task joins");
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.request_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert!(requests.iter().all(|request| {
+            request.instance_nonce == instance_nonce
+                && request
+                    .timeout_ms
+                    .is_some_and(|milliseconds| (1..=5_000).contains(&milliseconds))
+        }));
+        assert!(matches!(
+            requests[0].request.as_ref(),
+            Some(daemon::request_envelope::Request::RepositoryIndex(request))
+                if request.operation == Some(operation_to_wire(operation))
+                    && request.root == "C:/fixture"
+        ));
+        assert!(matches!(
+            requests[1].request.as_ref(),
+            Some(daemon::request_envelope::Request::RepositoryOperationStatus(request))
+                if request.operation == Some(operation_to_wire(operation))
+        ));
+        assert!(matches!(
+            requests[2].request.as_ref(),
+            Some(daemon::request_envelope::Request::CodeLocate(request))
+                if request.query == "answer"
+        ));
+        assert!(matches!(
+            requests[3].request.as_ref(),
+            Some(daemon::request_envelope::Request::SymbolExplain(request))
+                if request.symbols == vec![symbol_to_wire(symbol)]
+        ));
+        assert!(matches!(
+            requests[4].request.as_ref(),
+            Some(daemon::request_envelope::Request::SourceRead(request))
+                if request.references == vec![wire_source(&source)]
+        ));
+    }
+
+    #[tokio::test]
+    async fn async_request_and_operation_correlation_fail_closed() {
+        let (_temporary, endpoint) = async_test_endpoint("correlation");
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("listener binds");
+        let instance_nonce = [3; 16];
+        let client = Client::new(endpoint, instance_nonce, [4; 16]);
+        let operation = OperationId::from_bytes([5; 16]);
+        let foreign_operation = OperationId::from_bytes([6; 16]);
+        let timeout =
+            RequestTimeout::new(Duration::from_secs(5)).expect("request timeout validates");
+
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            let (mut stream, first) = receive_async_request(&listener, instance_nonce).await;
+            write_response_async(
+                FrameCodec::default(),
+                &mut stream,
+                &daemon::ResponseEnvelope {
+                    request_id: first.request_id + 1,
+                    response: Some(daemon::response_envelope::Response::RepositoryIndex(
+                        wire_repository_index(operation),
+                    )),
+                },
+            )
+            .await
+            .expect("mismatched response writes");
+            requests.push(first);
+
+            let (mut stream, second) = receive_async_request(&listener, instance_nonce).await;
+            write_response_async(
+                FrameCodec::default(),
+                &mut stream,
+                &daemon::ResponseEnvelope {
+                    request_id: second.request_id,
+                    response: Some(daemon::response_envelope::Response::RepositoryIndex(
+                        wire_repository_index(foreign_operation),
+                    )),
+                },
+            )
+            .await
+            .expect("foreign operation response writes");
+            requests.push(second);
+            requests
+        });
+
+        assert!(matches!(
+            client
+                .repository_index_async("C:/fixture", operation, true, timeout)
+                .await,
+            Err(ClientError::MismatchedRequestId)
+        ));
+        assert!(matches!(
+            client
+                .repository_index_async("C:/fixture", operation, true, timeout)
+                .await,
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+
+        let requests = server.await.expect("server task joins");
+        assert_eq!(requests[0].request_id, 1);
+        assert_eq!(requests[1].request_id, 2);
+        assert!(requests.iter().all(|request| matches!(
+            request.request.as_ref(),
+            Some(daemon::request_envelope::Request::RepositoryIndex(index))
+                if index.operation == Some(operation_to_wire(operation))
+        )));
+    }
+
+    #[tokio::test]
+    async fn dropping_async_request_closes_the_unsplit_peer_stream() {
+        let (_temporary, endpoint) = async_test_endpoint("drop");
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("listener binds");
+        let instance_nonce = [10; 16];
+        let client = Client::new(endpoint, instance_nonce, [11; 16]);
+        let timeout =
+            RequestTimeout::new(Duration::from_secs(30)).expect("request timeout validates");
+        let (received_sender, received_receiver) = tokio::sync::oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, request) = receive_async_request(&listener, instance_nonce).await;
+            received_sender
+                .send(request)
+                .expect("client request observation is delivered");
+            let mut unexpected = [0_u8; 1];
+            match stream.read(&mut unexpected).await {
+                Ok(0) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::BrokenPipe
+                            | io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::NotConnected
+                            | io::ErrorKind::UnexpectedEof
+                    ) => {}
+                Ok(_) => panic!("client sent bytes after its one request"),
+                Err(error) => panic!("peer close returned unexpected error: {error}"),
+            }
+        });
+
+        let request = tokio::spawn(async move {
+            client
+                .code_locate_async(
+                    test_repository(),
+                    GenerationSelector::Active,
+                    "answer",
+                    LocateMode::Exact,
+                    1,
+                    timeout,
+                )
+                .await
+        });
+        let observed = received_receiver
+            .await
+            .expect("server observes the complete request");
+        assert_eq!(observed.request_id, 1);
+        request.abort();
+        assert!(
+            request
+                .await
+                .expect_err("request task is cancelled")
+                .is_cancelled()
+        );
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("peer close observation stays bounded")
+            .expect("server observes peer close");
     }
 
     #[test]
