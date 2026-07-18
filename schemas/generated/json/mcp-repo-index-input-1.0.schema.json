@@ -1,0 +1,246 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/repo.index/input/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RepoIndexInput",
+  "description": "Strict input for `repo.index`.",
+  "type": "object",
+  "properties": {
+    "configuration_patch": {
+      "description": "Validated operation-scoped configuration override.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "detached": {
+      "description": "Whether the operation may continue after client disconnect.",
+      "type": "boolean"
+    },
+    "mode": {
+      "description": "Requested indexing mode.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IndexMode"
+        }
+      ]
+    },
+    "repository_id": {
+      "description": "Existing repository identity to update.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RepositoryId"
+        }
+      ]
+    },
+    "requested_tiers": {
+      "description": "Per-language maximum requested tier.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/AnalysisTier"
+      }
+    },
+    "root": {
+      "description": "Canonicalizable local root for first registration.",
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1
+    },
+    "scope": {
+      "description": "Optional indexing scope.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IndexScope"
+        }
+      ]
+    },
+    "wait_ms": {
+      "description": "Maximum time to wait for publication or a terminal state.",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 30000,
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "not": {
+        "required": [
+          "repository_id"
+        ]
+      },
+      "required": [
+        "root"
+      ]
+    },
+    {
+      "not": {
+        "required": [
+          "root"
+        ]
+      },
+      "required": [
+        "repository_id"
+      ]
+    }
+  ],
+  "$defs": {
+    "AnalysisTier": {
+      "description": "Requested or observed language support tier.",
+      "oneOf": [
+        {
+          "description": "Compiler-quality or equivalent semantic evidence.",
+          "type": "string",
+          "const": "A"
+        },
+        {
+          "description": "High-confidence partial semantic evidence.",
+          "type": "string",
+          "const": "B"
+        },
+        {
+          "description": "Generic structural extraction.",
+          "type": "string",
+          "const": "C"
+        },
+        {
+          "description": "Lexical-only support.",
+          "type": "string",
+          "const": "D"
+        }
+      ]
+    },
+    "BuildTargetScope": {
+      "description": "Build-target scope.",
+      "type": "object",
+      "properties": {
+        "build_targets": {
+          "description": "Distinct build-target identities.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "build_targets"
+      ]
+    },
+    "IndexMode": {
+      "description": "Indexing mode requested by `repo.index`.",
+      "oneOf": [
+        {
+          "description": "Select the strongest available safe mode.",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "Build the structural tier only.",
+          "type": "string",
+          "const": "structural"
+        },
+        {
+          "description": "Request available deep tiers.",
+          "type": "string",
+          "const": "deep"
+        },
+        {
+          "description": "Rebuild from a clean generation.",
+          "type": "string",
+          "const": "rebuild"
+        }
+      ]
+    },
+    "IndexScope": {
+      "description": "Scope accepted by repository indexing.",
+      "anyOf": [
+        {
+          "description": "Index the complete repository policy scope.",
+          "$ref": "#/$defs/RepositoryScope"
+        },
+        {
+          "description": "Index selected repository-relative paths.",
+          "$ref": "#/$defs/PathScope"
+        },
+        {
+          "description": "Index selected package identities.",
+          "$ref": "#/$defs/PackageScope"
+        },
+        {
+          "description": "Index selected build-target identities without executing builds.",
+          "$ref": "#/$defs/BuildTargetScope"
+        }
+      ]
+    },
+    "PackageScope": {
+      "description": "Package scope.",
+      "type": "object",
+      "properties": {
+        "packages": {
+          "description": "Distinct package identities.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "packages"
+      ]
+    },
+    "PathScope": {
+      "description": "Repository-relative path scope.",
+      "type": "object",
+      "properties": {
+        "paths": {
+          "description": "Distinct repository-relative paths.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "paths"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RepositoryScope": {
+      "description": "Whole-repository scope marker.",
+      "type": "object",
+      "properties": {
+        "repository": {
+          "description": "Must be the repository scope keyword.",
+          "$ref": "#/$defs/RepositoryScopeValue"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository"
+      ]
+    },
+    "RepositoryScopeValue": {
+      "description": "Whole-repository scope keyword.",
+      "oneOf": [
+        {
+          "description": "Complete repository policy scope.",
+          "type": "string",
+          "const": "whole"
+        }
+      ]
+    }
+  }
+}

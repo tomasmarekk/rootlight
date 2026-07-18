@@ -1,0 +1,59 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/operation.status/input/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OperationStatusInput",
+  "description": "Strict input for `operation.status`.",
+  "type": "object",
+  "properties": {
+    "action": {
+      "description": "Read or request cancellation.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OperationAction"
+        }
+      ]
+    },
+    "after_revision": {
+      "description": "Return immediately only after this journal revision.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "operation_id": {
+      "description": "Operation handle returned by the creating tool.",
+      "$ref": "#/$defs/OperationId"
+    },
+    "wait_ms": {
+      "description": "Maximum long-poll duration.",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 30000,
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "operation_id"
+  ],
+  "$defs": {
+    "OperationAction": {
+      "description": "Action accepted by `operation.status`.",
+      "oneOf": [
+        {
+          "description": "Read current state.",
+          "type": "string",
+          "const": "get"
+        },
+        {
+          "description": "Request cooperative cancellation.",
+          "type": "string",
+          "const": "cancel"
+        }
+      ]
+    },
+    "OperationId": {
+      "type": "string",
+      "pattern": "^op1_[a-z2-7]{32}$"
+    }
+  }
+}
