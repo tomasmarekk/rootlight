@@ -35,7 +35,6 @@ const CLIENT_CAPABILITIES: &[&str] = &[
     "diagnostics.quick",
     "health",
     "operation.cancel",
-    "operation.lease.renew",
     "operation.lifecycle.v1",
     "operation.status",
     "operation.submit",
@@ -488,11 +487,15 @@ impl Client {
         self.submit_operation_request(request)
     }
 
-    /// Extends one attached operation lease owned by this validated client-declared identity.
+    /// Legacy compatibility stub for the unsupported P1 lease-renewal operation.
+    ///
+    /// This method never contacts the daemon. A nonzero expiry deterministically
+    /// returns an `UnsupportedCapability` public error.
     ///
     /// # Errors
     ///
-    /// Returns [`ClientError`] for a zero expiry, foreign ownership, stale renewal, or invalid response.
+    /// Returns [`ClientError::InvalidOperationLease`] for a zero expiry and
+    /// [`ClientError::Public`] with `UnsupportedCapability` otherwise.
     pub fn operation_renew_lease(
         &self,
         operation: OperationId,
@@ -501,17 +504,7 @@ impl Client {
         if lease_expires_unix_ms == 0 {
             return Err(ClientError::InvalidOperationLease);
         }
-        match self.request(daemon::request_envelope::Request::OperationLeaseRenew(
-            daemon::OperationLeaseRenewRequest {
-                operation: Some(operation_to_wire(operation)),
-                lease_expires_unix_ms,
-            },
-        ))? {
-            daemon::response_envelope::Response::OperationLeaseRenew(response) => {
-                parse_operation_status(response.operation)
-            }
-            _ => Err(ClientError::UnexpectedResponse),
-        }
+        Err(lease_renewal_unsupported(operation))
     }
 
     fn submit_operation_request(
@@ -871,7 +864,9 @@ fn ensure_request_supported(
     let required_minor = match request {
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
-        daemon::request_envelope::Request::OperationLeaseRenew(_) => 2,
+        daemon::request_envelope::Request::OperationLeaseRenew(_) => {
+            return Err(ClientError::ProtocolFeatureUnavailable);
+        }
         daemon::request_envelope::Request::OperationSubmit(request)
             if request.deadline_unix_ms.is_some()
                 || request.lease_expires_unix_ms.is_some()
@@ -1260,6 +1255,17 @@ fn operation_to_wire(operation: OperationId) -> common::OperationId {
     }
 }
 
+fn lease_renewal_unsupported(operation: OperationId) -> ClientError {
+    let error = PublicError::builder(
+        ErrorCode::UnsupportedCapability,
+        "operation lease renewal is unsupported",
+    )
+    .operation(operation)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"));
+    ClientError::Public(Box::new(error))
+}
+
 fn operation_submit_request(
     operation: OperationId,
     detached: bool,
@@ -1601,6 +1607,61 @@ mod tests {
             operation_submit_request(OperationId::from_bytes([9; 16]), false, None, None),
             Err(ClientError::InvalidOperationTiming)
         ));
+    }
+
+    #[test]
+    fn client_capabilities_and_request_gate_exclude_lease_renewal() {
+        let hello = client_hello([7; 16], [9; 16]);
+        assert_eq!(
+            hello.capabilities,
+            vec![
+                "diagnostics.quick",
+                "health",
+                "operation.cancel",
+                "operation.lifecycle.v1",
+                "operation.status",
+                "operation.submit",
+                "support.bundle.v1",
+            ]
+        );
+        assert!(
+            !hello
+                .capabilities
+                .iter()
+                .any(|capability| capability == "operation.lease.renew")
+        );
+
+        let renewal = daemon::request_envelope::Request::OperationLeaseRenew(
+            daemon::OperationLeaseRenewRequest {
+                operation: Some(operation_to_wire(OperationId::from_bytes([10; 16]))),
+                lease_expires_unix_ms: 1,
+            },
+        );
+        for minor in MINIMUM_PROTOCOL_MINOR..=CURRENT_PROTOCOL_MINOR {
+            assert!(matches!(
+                ensure_request_supported(&renewal, minor),
+                Err(ClientError::ProtocolFeatureUnavailable)
+            ));
+        }
+    }
+
+    #[test]
+    fn lease_renewal_client_api_is_a_local_unsupported_stub() {
+        let operation = OperationId::from_bytes([11; 16]);
+        let client = Client::new(test_endpoint("lease-renewal-stub"), [7; 16], [9; 16]);
+        assert!(matches!(
+            client.operation_renew_lease(operation, 0),
+            Err(ClientError::InvalidOperationLease)
+        ));
+
+        let error = client
+            .operation_renew_lease(operation, 1)
+            .expect_err("nonzero lease renewal remains unsupported");
+        let public = error
+            .as_public_error()
+            .expect("unsupported compatibility stub returns a public error");
+        assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+        assert_eq!(public.operation(), Some(operation));
     }
 
     #[test]

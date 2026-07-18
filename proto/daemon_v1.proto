@@ -243,13 +243,15 @@ message OperationSubmitResponse {
   OperationStatus operation = 1;
 }
 
-// Extends one attached operation lease for its authenticated owner.
+// Legacy compatibility request. P1 lease renewal is unsupported, and current
+// peers never negotiate or execute this operation.
 message OperationLeaseRenewRequest {
   rootlight.common.v1.OperationId operation = 1;
   uint64 lease_expires_unix_ms = 2;
 }
 
-// Returns the durable operation after lease renewal.
+// Legacy compatibility response retained for wire decoding. Current services
+// never produce this response.
 message OperationLeaseRenewResponse {
   OperationStatus operation = 1;
 }

@@ -353,7 +353,8 @@ pub struct OperationSubmitResponse {
     #[allow(missing_docs)]
     pub operation: ::core::option::Option<OperationStatus>,
 }
-/// Extends one attached operation lease for its authenticated owner.
+/// Legacy compatibility request. P1 lease renewal is unsupported, and current
+/// peers never negotiate or execute this operation.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct OperationLeaseRenewRequest {
     #[prost(message, optional, tag = "1")]
@@ -363,7 +364,8 @@ pub struct OperationLeaseRenewRequest {
     #[allow(missing_docs)]
     pub lease_expires_unix_ms: u64,
 }
-/// Returns the durable operation after lease renewal.
+/// Legacy compatibility response retained for wire decoding. Current services
+/// never produce this response.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OperationLeaseRenewResponse {
     #[prost(message, optional, tag = "1")]

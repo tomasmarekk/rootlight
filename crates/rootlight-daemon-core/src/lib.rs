@@ -53,7 +53,6 @@ const CAPABILITIES: &[&str] = &[
     "diagnostics.quick",
     "health",
     "operation.cancel",
-    "operation.lease.renew",
     "operation.lifecycle.v1",
     "operation.status",
     "operation.submit",
@@ -1223,13 +1222,16 @@ pub enum ControlRequest {
     OperationSubmit(OperationSubmission),
     /// Read one durable operation status.
     OperationStatus(OperationId),
-    /// Extend one attached operation lease for its authenticated owner.
+    /// Legacy lease-renewal request retained only for source compatibility.
+    ///
+    /// P1 does not support lease renewal. Every daemon and standalone execution
+    /// path returns an `UnsupportedCapability` public error for this variant.
     OperationLeaseRenew {
-        /// Stable operation identifier.
+        /// Stable operation identifier from the legacy request payload.
         operation: OperationId,
-        /// Authenticated owner from the negotiated client hello.
+        /// Authenticated owner retained for legacy payload compatibility.
         owner: ClientInstanceId,
-        /// New absolute lease expiry.
+        /// Requested expiry retained for legacy payload compatibility.
         expiry_unix_ms: u64,
     },
     /// Request cooperative cancellation.
@@ -1249,7 +1251,10 @@ pub enum ControlResponse {
     OperationSubmit(OperationRecord),
     /// Durable operation status.
     OperationStatus(OperationRecord),
-    /// Durable operation after attached lease renewal.
+    /// Legacy response shape retained for source and wire compatibility.
+    ///
+    /// Current services never produce this variant because P1 lease renewal is
+    /// unsupported.
     OperationLeaseRenew(OperationRecord),
     /// Cancellation acknowledgement and resulting state.
     OperationCancel {
@@ -4862,6 +4867,58 @@ mod tests {
     }
 
     #[test]
+    fn negotiated_capabilities_never_advertise_lease_renewal() {
+        let service = service();
+        for minor in MINIMUM_PROTOCOL_MINOR..=PROTOCOL_MINOR {
+            let hello = daemon::ClientHello {
+                supported_protocols: Some(common::VersionRange {
+                    minimum: Some(common::ContractVersion { major: 1, minor }),
+                    maximum: Some(common::ContractVersion { major: 1, minor }),
+                }),
+                capabilities: vec!["operation.lease.renew".to_owned()],
+                expected_instance_nonce: vec![7; 16],
+                client_instance_id: vec![9; 16],
+            };
+
+            let negotiated = service.negotiate(&hello);
+
+            assert!(negotiated.error.is_none());
+            assert_eq!(
+                negotiated
+                    .selected_protocol
+                    .expect("supported minor negotiates"),
+                common::ContractVersion { major: 1, minor }
+            );
+            let expected = if minor >= 3 {
+                vec![
+                    "diagnostics.quick",
+                    "health",
+                    "operation.cancel",
+                    "operation.lifecycle.v1",
+                    "operation.status",
+                    "operation.submit",
+                    "support.bundle.v1",
+                ]
+            } else {
+                vec![
+                    "health",
+                    "operation.cancel",
+                    "operation.lifecycle.v1",
+                    "operation.status",
+                    "operation.submit",
+                ]
+            };
+            assert_eq!(negotiated.capabilities, expected);
+            assert!(
+                !negotiated
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "operation.lease.renew")
+            );
+        }
+    }
+
+    #[test]
     fn diagnostics_and_support_bundle_are_source_free_and_wire_stable() {
         let service = service();
         service.state().set_catalog_status(HealthStatus::Healthy);
@@ -5742,6 +5799,21 @@ mod tests {
         });
         let ControlResponse::Error(error) = response else {
             panic!("direct renewal must remain unsupported");
+        };
+        assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let actor_response = execute_journal_request(
+            &journal,
+            ControlRequest::OperationLeaseRenew {
+                operation,
+                owner,
+                expiry_unix_ms: 1,
+            },
+        )
+        .expect("actor returns a public compatibility error");
+        let ControlResponse::Error(error) = actor_response else {
+            panic!("journal actor renewal must remain unsupported");
         };
         assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
     }
