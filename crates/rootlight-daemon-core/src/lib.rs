@@ -67,6 +67,7 @@ const CAPABILITIES: &[&str] = &[
     "symbol.explain.v1",
     "support.bundle.v1",
     "support.bundle.v2",
+    "support.bundle.v3",
 ];
 /// Default simultaneous negotiated connection limit.
 pub const DEFAULT_CONNECTION_LIMIT: u32 = 128;
@@ -111,7 +112,7 @@ pub type FirstSliceIpcFuture =
     Pin<Box<dyn Future<Output = Result<FirstSliceIpcResponse, PublicError>> + Send + 'static>>;
 
 /// Validated protocol request delegated to the daemon application.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FirstSliceIpcRequest {
     /// Admit and execute the supported bounded repository index plan.
     RepositoryIndex(daemon::RepositoryIndexRequest),
@@ -123,27 +124,6 @@ pub enum FirstSliceIpcRequest {
     SymbolExplain(daemon::SymbolExplainRequest),
     /// Read exact immutable source references.
     SourceRead(daemon::SourceReadRequest),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FirstSliceIpcKind {
-    RepositoryIndex,
-    RepositoryOperationStatus,
-    CodeLocate,
-    SymbolExplain,
-    SourceRead,
-}
-
-impl FirstSliceIpcRequest {
-    const fn kind(&self) -> FirstSliceIpcKind {
-        match self {
-            Self::RepositoryIndex(_) => FirstSliceIpcKind::RepositoryIndex,
-            Self::RepositoryOperationStatus(_) => FirstSliceIpcKind::RepositoryOperationStatus,
-            Self::CodeLocate(_) => FirstSliceIpcKind::CodeLocate,
-            Self::SymbolExplain(_) => FirstSliceIpcKind::SymbolExplain,
-            Self::SourceRead(_) => FirstSliceIpcKind::SourceRead,
-        }
-    }
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -162,16 +142,6 @@ pub enum FirstSliceIpcResponse {
 }
 
 impl FirstSliceIpcResponse {
-    const fn kind(&self) -> FirstSliceIpcKind {
-        match self {
-            Self::RepositoryIndex(_) => FirstSliceIpcKind::RepositoryIndex,
-            Self::RepositoryOperationStatus(_) => FirstSliceIpcKind::RepositoryOperationStatus,
-            Self::CodeLocate(_) => FirstSliceIpcKind::CodeLocate,
-            Self::SymbolExplain(_) => FirstSliceIpcKind::SymbolExplain,
-            Self::SourceRead(_) => FirstSliceIpcKind::SourceRead,
-        }
-    }
-
     fn into_wire(self) -> daemon::response_envelope::Response {
         match self {
             Self::RepositoryIndex(response) => {
@@ -2856,6 +2826,7 @@ impl ControlService {
                     .filter(|value| match **value {
                         "diagnostics.quick" | "support.bundle.v1" => selected_minor >= 3,
                         "support.bundle.v2" => selected_minor >= 4,
+                        "support.bundle.v3" => selected_minor >= 5,
                         "code.locate.v1"
                         | "repository.index.v1"
                         | "source.read.v1"
@@ -3036,6 +3007,9 @@ impl ControlService {
         let schema_version = match schema {
             SupportBundleSchema::V1 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION,
             SupportBundleSchema::V2 => {
+                rootlight_observability::PREVIOUS_SUPPORT_BUNDLE_SCHEMA_VERSION
+            }
+            SupportBundleSchema::V3 => {
                 rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
             }
         };
@@ -3043,13 +3017,14 @@ impl ControlService {
             protocol_version: match schema {
                 SupportBundleSchema::V1 => ObservabilityProtocolVersion::V1_3,
                 SupportBundleSchema::V2 => ObservabilityProtocolVersion::V1_4,
+                SupportBundleSchema::V3 => ObservabilityProtocolVersion::V1_5,
             },
             operating_system: observability_operating_system(),
             architecture: observability_architecture(),
             health: health_snapshot(&health),
             diagnostics: diagnostics_snapshot(&diagnostics),
             operations: self.state.operation_counts(),
-            telemetry: (schema == SupportBundleSchema::V2).then(|| self.state.telemetry.snapshot()),
+            telemetry: (schema != SupportBundleSchema::V1).then(|| self.state.telemetry.snapshot()),
         };
         match build_support_bundle_for_schema(&input, schema) {
             Ok(bundle) if Instant::now() < deadline => {
@@ -3501,14 +3476,16 @@ async fn dispatch_first_slice(
         cancellation,
         deadline,
     };
-    let request_kind = request.kind();
+    // Retain the already-bounded request so the daemon can reject an internal
+    // handler response that is well typed but belongs to another identity.
+    let correlation_request = request.clone();
     match tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         handler.dispatch(request, context),
     )
     .await
     {
-        Ok(Ok(response)) => correlated_first_slice_response(request_kind, response),
+        Ok(Ok(response)) => correlated_first_slice_response(&correlation_request, response),
         Ok(Err(error)) => daemon::response_envelope::Response::Error(public_error_to_wire(&error)),
         Err(_) => {
             daemon::response_envelope::Response::Error(public_error_to_wire(&request_timed_out()))
@@ -3517,14 +3494,349 @@ async fn dispatch_first_slice(
 }
 
 fn correlated_first_slice_response(
-    request_kind: FirstSliceIpcKind,
+    request: &FirstSliceIpcRequest,
     response: FirstSliceIpcResponse,
 ) -> daemon::response_envelope::Response {
-    if response.kind() == request_kind {
+    if first_slice_response_correlates(request, &response) {
         response.into_wire()
     } else {
         daemon::response_envelope::Response::Error(public_error_to_wire(&internal_error()))
     }
+}
+
+fn first_slice_response_correlates(
+    request: &FirstSliceIpcRequest,
+    response: &FirstSliceIpcResponse,
+) -> bool {
+    match (request, response) {
+        (
+            FirstSliceIpcRequest::RepositoryIndex(request),
+            FirstSliceIpcResponse::RepositoryIndex(response),
+        ) => {
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && wire_id_has_len(response.repository.as_ref().map(|id| &id.value), 16)
+                && wire_id_equals(
+                    response.operation.as_ref().map(|id| &id.value),
+                    request.operation.as_ref().map(|id| &id.value),
+                )
+                && response.state == daemon::OperationState::Succeeded as i32
+                && optional_wire_id_has_len(
+                    response.parent_generation.as_ref().map(|id| &id.value),
+                    20,
+                )
+                && wire_id_has_len(
+                    response.published_generation.as_ref().map(|id| &id.value),
+                    20,
+                )
+                && response.indexed_files <= response.discovered_inputs
+        }
+        (
+            FirstSliceIpcRequest::RepositoryOperationStatus(request),
+            FirstSliceIpcResponse::RepositoryOperationStatus(response),
+        ) => {
+            let Some(operation) = response.operation.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && wire_id_equals(
+                    operation.operation.as_ref().map(|id| &id.value),
+                    request.operation.as_ref().map(|id| &id.value),
+                )
+                && valid_repository_operation_status(operation)
+                && match daemon::OperationState::try_from(operation.state) {
+                    Ok(daemon::OperationState::Succeeded) => {
+                        wire_id_has_len(
+                            response.published_generation.as_ref().map(|id| &id.value),
+                            20,
+                        ) && response.retry_after_ms.is_none()
+                    }
+                    Ok(
+                        daemon::OperationState::Queued
+                        | daemon::OperationState::Running
+                        | daemon::OperationState::Cancelling,
+                    ) => response.published_generation.is_none(),
+                    Ok(
+                        daemon::OperationState::Failed
+                        | daemon::OperationState::Interrupted
+                        | daemon::OperationState::Cancelled,
+                    ) => {
+                        response.published_generation.is_none() && response.retry_after_ms.is_none()
+                    }
+                    Ok(daemon::OperationState::Unspecified) | Err(_) => false,
+                }
+        }
+        (
+            FirstSliceIpcRequest::CodeLocate(request),
+            FirstSliceIpcResponse::CodeLocate(response),
+        ) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    request.generation.as_ref(),
+                )
+                && response.hits.len()
+                    <= usize::try_from(request.maximum_results).unwrap_or(usize::MAX)
+                && response.matched_candidates
+                    >= u64::try_from(response.hits.len()).unwrap_or(u64::MAX)
+                && response.hits.iter().all(|hit| {
+                    wire_id_has_len(hit.symbol.as_ref().map(|id| &id.value), 20)
+                        && wire_id_has_len(hit.file.as_ref().map(|id| &id.value), 20)
+                        && valid_analysis_tier(hit.tier)
+                        && hit.score <= 1_000
+                        && hit.source.as_ref().is_none_or(|source| {
+                            source_ref_correlates(source, context)
+                                && wire_id_equals(
+                                    source.file.as_ref().map(|id| &id.value),
+                                    hit.file.as_ref().map(|id| &id.value),
+                                )
+                        })
+                })
+        }
+        (
+            FirstSliceIpcRequest::SymbolExplain(request),
+            FirstSliceIpcResponse::SymbolExplain(response),
+        ) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    request.generation.as_ref(),
+                )
+                && response.symbols.len() + response.unresolved_symbols.len()
+                    <= request.symbols.len()
+                && (response.truncated
+                    || response.symbols.len() + response.unresolved_symbols.len()
+                        == request.symbols.len())
+                && wire_ids_form_subsequence(
+                    response
+                        .symbols
+                        .iter()
+                        .filter_map(|explanation| explanation.symbol.as_ref()),
+                    &request.symbols,
+                )
+                && wire_ids_form_subsequence(response.unresolved_symbols.iter(), &request.symbols)
+                && response
+                    .symbols
+                    .iter()
+                    .enumerate()
+                    .all(|(index, explanation)| {
+                        explanation.confidence <= 1_000
+                            && wire_id_has_len(explanation.symbol.as_ref().map(|id| &id.value), 20)
+                            && explanation.definition.as_ref().is_some_and(|definition| {
+                                source_ref_correlates(definition, context)
+                            })
+                            && response.symbols[..index].iter().all(|prior| {
+                                !wire_id_equals(
+                                    prior.symbol.as_ref().map(|id| &id.value),
+                                    explanation.symbol.as_ref().map(|id| &id.value),
+                                )
+                            })
+                            && request.symbols.iter().any(|requested| {
+                                wire_id_equals(
+                                    explanation.symbol.as_ref().map(|id| &id.value),
+                                    Some(&requested.value),
+                                )
+                            })
+                    })
+                && response
+                    .unresolved_symbols
+                    .iter()
+                    .enumerate()
+                    .all(|(index, unresolved)| {
+                        wire_id_has_len(Some(&unresolved.value), 20)
+                            && response.unresolved_symbols[..index]
+                                .iter()
+                                .all(|prior| prior.value != unresolved.value)
+                            && response.symbols.iter().all(|resolved| {
+                                !wire_id_equals(
+                                    resolved.symbol.as_ref().map(|id| &id.value),
+                                    Some(&unresolved.value),
+                                )
+                            })
+                            && request
+                                .symbols
+                                .iter()
+                                .any(|requested| requested.value == unresolved.value)
+                    })
+        }
+        (
+            FirstSliceIpcRequest::SourceRead(request),
+            FirstSliceIpcResponse::SourceRead(response),
+        ) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    request.generation.as_ref(),
+                )
+                && response.chunks.len() <= request.references.len()
+                && (response.truncated || response.chunks.len() == request.references.len())
+                && response
+                    .chunks
+                    .iter()
+                    .zip(&request.references)
+                    .all(|(chunk, requested)| {
+                        let Some(source) = chunk.source.as_ref() else {
+                            return false;
+                        };
+                        source_ref_correlates(source, context)
+                            && source == requested
+                            && chunk.start_byte <= source.start_byte
+                            && chunk.end_byte >= source.end_byte
+                            && chunk.start_line > 0
+                            && chunk.start_line <= chunk.end_line
+                            && source
+                                .start_line
+                                .is_none_or(|line| chunk.start_line <= line)
+                            && source.end_line.is_none_or(|line| chunk.end_line >= line)
+                            && wire_id_equals(
+                                chunk.content_hash.as_ref().map(|hash| &hash.value),
+                                source.content_hash.as_ref().map(|hash| &hash.value),
+                            )
+                            && u64::try_from(chunk.content.len()).ok()
+                                == chunk.end_byte.checked_sub(chunk.start_byte)
+                    })
+                && response.chunks.iter().try_fold(0_u64, |total, chunk| {
+                    total.checked_add(u64::try_from(chunk.content.len()).ok()?)
+                }) == Some(response.total_source_bytes)
+                && context.usage.as_ref().is_some_and(|usage| {
+                    usage.source_bytes == response.total_source_bytes
+                        && Some(usage.results) == u64::try_from(response.chunks.len()).ok()
+                })
+        }
+        _ => false,
+    }
+}
+
+fn first_slice_schema_matches(version: Option<&common::ContractVersion>) -> bool {
+    version.is_some_and(|version| version.major == 1 && version.minor == 0)
+}
+
+fn wire_id_has_len(value: Option<&Vec<u8>>, expected: usize) -> bool {
+    value.is_some_and(|value| value.len() == expected)
+}
+
+fn optional_wire_id_has_len(value: Option<&Vec<u8>>, expected: usize) -> bool {
+    value.is_none_or(|value| value.len() == expected)
+}
+
+fn wire_id_equals(left: Option<&Vec<u8>>, right: Option<&Vec<u8>>) -> bool {
+    left.is_some() && left == right
+}
+
+fn valid_repository_operation_status(operation: &daemon::OperationStatus) -> bool {
+    wire_id_has_len(operation.operation.as_ref().map(|id| &id.value), 16)
+        && matches!(
+            daemon::OperationState::try_from(operation.state),
+            Ok(daemon::OperationState::Queued
+                | daemon::OperationState::Running
+                | daemon::OperationState::Cancelling
+                | daemon::OperationState::Succeeded
+                | daemon::OperationState::Failed
+                | daemon::OperationState::Interrupted
+                | daemon::OperationState::Cancelled)
+        )
+        && operation.kind == daemon::OperationKind::RepositoryIndex as i32
+        && matches!(
+            daemon::OperationStage::try_from(operation.stage),
+            Ok(daemon::OperationStage::Accepted
+                | daemon::OperationStage::Executing
+                | daemon::OperationStage::Cleanup)
+        )
+        && operation.plan_hash.len() == 32
+        && matches!(
+            daemon::RecoveryClass::try_from(operation.recovery_class),
+            Ok(daemon::RecoveryClass::NotApplicable
+                | daemon::RecoveryClass::InterruptedByRestart
+                | daemon::RecoveryClass::DeadlineElapsed
+                | daemon::RecoveryClass::LeaseExpired)
+        )
+        && (operation.total_units == 0 || operation.completed_units <= operation.total_units)
+}
+
+fn query_context_correlates(
+    context: &daemon::FirstSliceQueryContext,
+    repository: Option<&common::RepositoryId>,
+    selector: Option<&daemon::GenerationSelector>,
+) -> bool {
+    wire_id_equals(
+        context.repository.as_ref().map(|id| &id.value),
+        repository.map(|id| &id.value),
+    ) && wire_id_has_len(context.generation.as_ref().map(|id| &id.value), 20)
+        && optional_wire_id_has_len(context.parent_generation.as_ref().map(|id| &id.value), 20)
+        && !wire_id_equals(
+            context.parent_generation.as_ref().map(|id| &id.value),
+            context.generation.as_ref().map(|id| &id.value),
+        )
+        && match selector.and_then(|selector| selector.selector.as_ref()) {
+            Some(daemon::generation_selector::Selector::Active(true)) => context.active_generation,
+            Some(daemon::generation_selector::Selector::Generation(generation)) => wire_id_equals(
+                context.generation.as_ref().map(|id| &id.value),
+                Some(&generation.value),
+            ),
+            _ => false,
+        }
+        && valid_analysis_tier(context.tier)
+        && matches!(
+            daemon::FirstSliceCoverageStatus::try_from(context.coverage_status),
+            Ok(daemon::FirstSliceCoverageStatus::FirstSliceCoverageComplete
+                | daemon::FirstSliceCoverageStatus::FirstSliceCoverageBounded
+                | daemon::FirstSliceCoverageStatus::FirstSliceCoverageSampled
+                | daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown)
+        )
+        && context.usage.is_some()
+}
+
+fn valid_analysis_tier(tier: i32) -> bool {
+    matches!(
+        daemon::FirstSliceAnalysisTier::try_from(tier),
+        Ok(daemon::FirstSliceAnalysisTier::FirstSliceTierA
+            | daemon::FirstSliceAnalysisTier::FirstSliceTierB
+            | daemon::FirstSliceAnalysisTier::FirstSliceTierC
+            | daemon::FirstSliceAnalysisTier::FirstSliceTierD)
+    )
+}
+
+fn source_ref_correlates(
+    source: &daemon::FirstSliceSourceRef,
+    context: &daemon::FirstSliceQueryContext,
+) -> bool {
+    validate_source_reference(source).is_ok()
+        && wire_id_equals(
+            source.repository.as_ref().map(|id| &id.value),
+            context.repository.as_ref().map(|id| &id.value),
+        )
+        && wire_id_equals(
+            source.generation.as_ref().map(|id| &id.value),
+            context.generation.as_ref().map(|id| &id.value),
+        )
+}
+
+fn wire_ids_form_subsequence<'a>(
+    candidates: impl Iterator<Item = &'a common::SymbolId>,
+    requested: &[common::SymbolId],
+) -> bool {
+    let mut start = 0;
+    for candidate in candidates {
+        let Some(offset) = requested[start..]
+            .iter()
+            .position(|item| item.value == candidate.value)
+        else {
+            return false;
+        };
+        start += offset + 1;
+    }
+    true
 }
 
 fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Box<PublicError>> {
@@ -4136,7 +4448,9 @@ fn request_from_wire(
                 )));
             }
             Ok(ControlRequest::SupportBundle(
-                if selected_protocol_minor >= 4 {
+                if selected_protocol_minor >= 5 {
+                    SupportBundleSchema::V3
+                } else if selected_protocol_minor >= 4 {
                     SupportBundleSchema::V2
                 } else {
                     SupportBundleSchema::V1
@@ -7259,12 +7573,344 @@ mod tests {
 
     #[test]
     fn first_slice_response_variant_mismatch_is_a_bounded_internal_error() {
+        let request = FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest::default());
         let wire = correlated_first_slice_response(
-            FirstSliceIpcKind::CodeLocate,
+            &request,
             FirstSliceIpcResponse::SourceRead(daemon::SourceReadResponse::default()),
         );
         let daemon::response_envelope::Response::Error(error) = wire else {
             panic!("mismatched first-slice response must fail closed");
+        };
+        assert_eq!(error.code, common::ErrorCode::Internal as i32);
+        assert_eq!(error.message, "internal operation failed");
+        assert!(error.details.is_empty());
+    }
+
+    fn correlation_context(
+        repository: &common::RepositoryId,
+        generation: &common::GenerationId,
+        results: u64,
+        source_bytes: u64,
+    ) -> daemon::FirstSliceQueryContext {
+        daemon::FirstSliceQueryContext {
+            repository: Some(repository.clone()),
+            generation: Some(generation.clone()),
+            parent_generation: Some(common::GenerationId { value: vec![7; 20] }),
+            active_generation: true,
+            tier: daemon::FirstSliceAnalysisTier::FirstSliceTierC as i32,
+            coverage_status: daemon::FirstSliceCoverageStatus::FirstSliceCoverageComplete as i32,
+            skipped_inputs: 0,
+            usage: Some(daemon::FirstSliceQueryUsage {
+                rows: results,
+                edges: 0,
+                results,
+                source_bytes,
+                json_bytes: 0,
+                estimated_tokens: 0,
+                elapsed_micros: 1,
+            }),
+        }
+    }
+
+    fn correlation_source(
+        repository: &common::RepositoryId,
+        generation: &common::GenerationId,
+        file_byte: u8,
+        start_byte: u64,
+        end_byte: u64,
+    ) -> daemon::FirstSliceSourceRef {
+        daemon::FirstSliceSourceRef {
+            repository: Some(repository.clone()),
+            generation: Some(generation.clone()),
+            file: Some(common::FileId {
+                value: vec![file_byte; 20],
+            }),
+            start_byte,
+            end_byte,
+            content_hash: Some(common::ContentHash {
+                value: vec![file_byte; 32],
+            }),
+            start_line: Some(1),
+            end_line: Some(1),
+        }
+    }
+
+    #[test]
+    fn first_slice_response_correlation_rejects_identity_substitution() {
+        let schema = Some(common::ContractVersion { major: 1, minor: 0 });
+        let repository = common::RepositoryId { value: vec![1; 16] };
+        let generation = common::GenerationId { value: vec![2; 20] };
+        let operation = common::OperationId { value: vec![3; 16] };
+
+        let index_request = FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+            schema_version: schema,
+            root: "C:\\bounded".to_owned(),
+            operation: Some(operation.clone()),
+            detached: true,
+        });
+        let index_response = daemon::RepositoryIndexResponse {
+            schema_version: schema,
+            repository: Some(repository.clone()),
+            operation: Some(operation.clone()),
+            state: daemon::OperationState::Succeeded as i32,
+            revision: 1,
+            parent_generation: None,
+            published_generation: Some(generation.clone()),
+            discovered_inputs: 2,
+            indexed_files: 2,
+            entities: 2,
+            elapsed_micros: 1,
+        };
+        assert!(first_slice_response_correlates(
+            &index_request,
+            &FirstSliceIpcResponse::RepositoryIndex(index_response.clone())
+        ));
+        let mut foreign_index = index_response;
+        foreign_index.operation = Some(common::OperationId { value: vec![9; 16] });
+        assert!(!first_slice_response_correlates(
+            &index_request,
+            &FirstSliceIpcResponse::RepositoryIndex(foreign_index)
+        ));
+
+        let status_request = FirstSliceIpcRequest::RepositoryOperationStatus(
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: schema,
+                operation: Some(operation.clone()),
+                ..Default::default()
+            },
+        );
+        let mut status_response = daemon::RepositoryOperationStatusResponse {
+            schema_version: schema,
+            operation: Some(daemon::OperationStatus {
+                operation: Some(operation.clone()),
+                state: daemon::OperationState::Queued as i32,
+                revision: 1,
+                completed_units: 0,
+                total_units: 1,
+                error: None,
+                kind: daemon::OperationKind::RepositoryIndex as i32,
+                stage: daemon::OperationStage::Accepted as i32,
+                plan_hash: vec![4; 32],
+                detached: true,
+                cancellation_requested: false,
+                deadline_unix_ms: None,
+                lease_expires_unix_ms: None,
+                recovery_class: daemon::RecoveryClass::NotApplicable as i32,
+            }),
+            published_generation: None,
+            started_unix_ms: 1,
+            peak_rss_bytes: 0,
+            written_bytes: 0,
+            files_examined: 0,
+            retry_after_ms: None,
+        };
+        assert!(first_slice_response_correlates(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(status_response.clone())
+        ));
+        status_response.retry_after_ms = Some(0);
+        assert!(first_slice_response_correlates(
+            &status_request,
+            &FirstSliceIpcResponse::RepositoryOperationStatus(status_response)
+        ));
+
+        let first_source = correlation_source(&repository, &generation, 4, 1, 2);
+        let second_source = correlation_source(&repository, &generation, 5, 4, 5);
+        let locate_request = FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+            schema_version: schema,
+            repository: Some(repository.clone()),
+            generation: Some(daemon::GenerationSelector {
+                selector: Some(daemon::generation_selector::Selector::Active(true)),
+            }),
+            query: "answer".to_owned(),
+            mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+            maximum_results: 2,
+        });
+        let locate_hit =
+            |symbol_byte: u8, source: &daemon::FirstSliceSourceRef| daemon::FirstSliceLocateHit {
+                symbol: Some(common::SymbolId {
+                    value: vec![symbol_byte; 20],
+                }),
+                file: source.file.clone(),
+                identifier: "answer".to_owned(),
+                qualified_name: "answer".to_owned(),
+                path: "src/lib.rs".to_owned(),
+                kind: "function".to_owned(),
+                language: "rust".to_owned(),
+                tier: daemon::FirstSliceAnalysisTier::FirstSliceTierC as i32,
+                generated: false,
+                score: 1_000,
+                source: Some(source.clone()),
+            };
+        let locate_response = daemon::CodeLocateResponse {
+            schema_version: schema,
+            context: Some(correlation_context(&repository, &generation, 2, 0)),
+            hits: vec![locate_hit(6, &first_source), locate_hit(7, &second_source)],
+            matched_candidates: 2,
+            truncated: false,
+        };
+        assert!(first_slice_response_correlates(
+            &locate_request,
+            &FirstSliceIpcResponse::CodeLocate(locate_response.clone())
+        ));
+        let pinned_locate_request = FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+            schema_version: schema,
+            repository: Some(repository.clone()),
+            generation: Some(daemon::GenerationSelector {
+                selector: Some(daemon::generation_selector::Selector::Generation(
+                    generation.clone(),
+                )),
+            }),
+            query: "answer".to_owned(),
+            mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+            maximum_results: 2,
+        });
+        assert!(first_slice_response_correlates(
+            &pinned_locate_request,
+            &FirstSliceIpcResponse::CodeLocate(locate_response.clone())
+        ));
+        let mut foreign_context = locate_response.clone();
+        foreign_context
+            .context
+            .as_mut()
+            .expect("context exists")
+            .repository = Some(common::RepositoryId { value: vec![9; 16] });
+        assert!(!first_slice_response_correlates(
+            &locate_request,
+            &FirstSliceIpcResponse::CodeLocate(foreign_context)
+        ));
+        let mut foreign_source = locate_response;
+        foreign_source.hits[0]
+            .source
+            .as_mut()
+            .expect("source exists")
+            .generation = Some(common::GenerationId { value: vec![9; 20] });
+        assert!(!first_slice_response_correlates(
+            &locate_request,
+            &FirstSliceIpcResponse::CodeLocate(foreign_source)
+        ));
+
+        let symbols = [
+            common::SymbolId { value: vec![6; 20] },
+            common::SymbolId { value: vec![7; 20] },
+        ];
+        let explain_request = FirstSliceIpcRequest::SymbolExplain(daemon::SymbolExplainRequest {
+            schema_version: schema,
+            repository: Some(repository.clone()),
+            generation: Some(daemon::GenerationSelector {
+                selector: Some(daemon::generation_selector::Selector::Active(true)),
+            }),
+            symbols: symbols.to_vec(),
+        });
+        let explain_response = daemon::SymbolExplainResponse {
+            schema_version: schema,
+            context: Some(correlation_context(&repository, &generation, 2, 0)),
+            symbols: vec![daemon::FirstSliceSymbolExplanation {
+                symbol: Some(symbols[0].clone()),
+                kind: "function".to_owned(),
+                display_name: "answer".to_owned(),
+                signature: None,
+                definition: Some(first_source.clone()),
+                outbound_exact: 0,
+                outbound_candidates: 0,
+                inbound_exact: 0,
+                inbound_candidates: 0,
+                references_exact: 0,
+                provider: "tree-sitter".to_owned(),
+                evidence: "parser".to_owned(),
+                confidence: 1_000,
+            }],
+            unresolved_symbols: vec![symbols[1].clone()],
+            truncated: false,
+        };
+        assert!(first_slice_response_correlates(
+            &explain_request,
+            &FirstSliceIpcResponse::SymbolExplain(explain_response.clone())
+        ));
+        let mut duplicate = explain_response;
+        duplicate.unresolved_symbols[0] = symbols[0].clone();
+        assert!(!first_slice_response_correlates(
+            &explain_request,
+            &FirstSliceIpcResponse::SymbolExplain(duplicate)
+        ));
+
+        let source_request = FirstSliceIpcRequest::SourceRead(daemon::SourceReadRequest {
+            schema_version: schema,
+            repository: Some(repository.clone()),
+            generation: Some(daemon::GenerationSelector {
+                selector: Some(daemon::generation_selector::Selector::Active(true)),
+            }),
+            references: vec![first_source.clone(), second_source.clone()],
+        });
+        let source_chunk =
+            |source: &daemon::FirstSliceSourceRef,
+             start_byte: u64,
+             end_byte: u64,
+             content: &str| daemon::FirstSliceSourceChunk {
+                source: Some(source.clone()),
+                path: "src/lib.rs".to_owned(),
+                start_byte,
+                end_byte,
+                start_line: 1,
+                end_line: 1,
+                content: content.to_owned(),
+                content_hash: source.content_hash.clone(),
+                language: "rust".to_owned(),
+                generated: false,
+            };
+        let source_response = daemon::SourceReadResponse {
+            schema_version: schema,
+            context: Some(correlation_context(&repository, &generation, 2, 6)),
+            chunks: vec![
+                source_chunk(&first_source, 0, 3, "aaa"),
+                source_chunk(&second_source, 3, 6, "bbb"),
+            ],
+            total_source_bytes: 6,
+            truncated: false,
+        };
+        assert!(first_slice_response_correlates(
+            &source_request,
+            &FirstSliceIpcResponse::SourceRead(source_response.clone())
+        ));
+        let mut wrong_usage = source_response.clone();
+        wrong_usage
+            .context
+            .as_mut()
+            .expect("context exists")
+            .usage
+            .as_mut()
+            .expect("usage exists")
+            .source_bytes = 5;
+        assert!(!first_slice_response_correlates(
+            &source_request,
+            &FirstSliceIpcResponse::SourceRead(wrong_usage)
+        ));
+        let mut wrong_results = source_response.clone();
+        wrong_results
+            .context
+            .as_mut()
+            .expect("context exists")
+            .usage
+            .as_mut()
+            .expect("usage exists")
+            .results = 1;
+        assert!(!first_slice_response_correlates(
+            &source_request,
+            &FirstSliceIpcResponse::SourceRead(wrong_results)
+        ));
+        let mut reordered = source_response;
+        reordered.chunks.swap(0, 1);
+        assert!(!first_slice_response_correlates(
+            &source_request,
+            &FirstSliceIpcResponse::SourceRead(reordered)
+        ));
+
+        let rejected = correlated_first_slice_response(
+            &source_request,
+            FirstSliceIpcResponse::SourceRead(daemon::SourceReadResponse::default()),
+        );
+        let daemon::response_envelope::Response::Error(error) = rejected else {
+            panic!("malformed handler response must fail closed");
         };
         assert_eq!(error.code, common::ErrorCode::Internal as i32);
         assert_eq!(error.message, "internal operation failed");
