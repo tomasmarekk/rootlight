@@ -1233,13 +1233,23 @@ fn elapsed_micros(started: Instant) -> u64 {
 mod tests {
     use std::{
         fs,
+        path::Path,
         time::{Duration, Instant},
     };
 
+    use rootlight_ids::GenerationId;
     use rootlight_ir::{CoverageScope, CoverageStatus};
     use tempfile::TempDir;
 
     use super::*;
+
+    const GATE_FIXTURE_ROOT: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/gate-1/first-slice/v1"
+    );
+    const GATE_V2_PATCH: &str =
+        include_str!("../../../tests/fixtures/gate-1/first-slice/v1-to-v2.patch");
+    const IGNORED_SENTINEL: &str = "ROOTLIGHT_IGNORED_SENTINEL";
 
     #[test]
     fn malformed_file_retains_unknown_coverage_and_recovery_diagnostic() {
@@ -1302,5 +1312,272 @@ mod tests {
             checked_combined_length(usize::MAX, 1, usize::MAX),
             Err(FirstSliceError::Limits)
         );
+    }
+
+    #[test]
+    fn gate_fixture_preserves_nested_policy_recovery_and_generation_lineage() {
+        let fixture = materialize_gate_fixture();
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+
+        let first = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("Gate-1 v1 indexes");
+        assert_eq!(first.discovered_inputs, 5);
+        assert_eq!(first.indexed_files, 3);
+        assert_indexed_gate_paths(&service, first.generation);
+        assert_malformed_recovery(&service, first.generation);
+
+        let answer = service
+            .code_locate(
+                first.generation,
+                "answer".to_owned(),
+                LocateMode::Exact,
+                8,
+                &cancellation,
+            )
+            .expect("v1 answer locate succeeds");
+        assert_eq!(answer.data.hits.len(), 1);
+        assert_eq!(answer.data.hits[0].path, "src/lib.rs");
+        let first_symbol = answer.data.hits[0].symbol;
+        let first_answer = answer.data.hits[0]
+            .source
+            .clone()
+            .expect("v1 answer retains exact source evidence");
+        let cached_v1_source = service
+            .source_read(first.generation, vec![first_answer], &cancellation)
+            .expect("v1 answer source reads");
+        assert_eq!(cached_v1_source.data.chunks.len(), 1);
+        let cached_v1_text = &cached_v1_source.data.chunks[0].text;
+        assert!(cached_v1_text.contains("ROOTLIGHT_PROMPT_SENTINEL"));
+        assert!(cached_v1_text.contains("42"));
+        assert!(!cached_v1_text.contains("43"));
+        assert!(!cached_v1_text.contains(IGNORED_SENTINEL));
+
+        let kept = service
+            .code_locate(
+                first.generation,
+                "kept_after_negation".to_owned(),
+                LocateMode::Exact,
+                8,
+                &cancellation,
+            )
+            .expect("negated nested source locate succeeds");
+        assert_eq!(kept.data.hits.len(), 1);
+        assert_eq!(kept.data.hits[0].path, "nested/ignored/kept.rs");
+        let kept_source = service
+            .source_read(
+                first.generation,
+                vec![
+                    kept.data.hits[0]
+                        .source
+                        .clone()
+                        .expect("kept source retains exact evidence"),
+                ],
+                &cancellation,
+            )
+            .expect("kept source reads");
+        assert!(
+            kept_source.data.chunks[0]
+                .text
+                .contains("kept_after_negation")
+        );
+        assert!(!kept_source.data.chunks[0].text.contains(IGNORED_SENTINEL));
+
+        assert_no_exact_hits(
+            &service,
+            first.generation,
+            &["ignored_by_nested_rule", IGNORED_SENTINEL, "broken"],
+            &cancellation,
+        );
+        let repeated = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("unchanged Gate-1 v1 is idempotent");
+        assert_eq!(repeated, first);
+
+        apply_gate_v2_patch(fixture.path());
+        let second = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("Gate-1 v2 indexes");
+        assert_eq!(second.parent, Some(first.generation));
+        assert_ne!(second.generation, first.generation);
+        assert_eq!(
+            service.active_generation_for(second.repository),
+            Some(second.generation)
+        );
+        assert_indexed_gate_paths(&service, second.generation);
+        assert_malformed_recovery(&service, second.generation);
+
+        let active_answer = service
+            .code_locate(
+                second.generation,
+                "answer".to_owned(),
+                LocateMode::Exact,
+                8,
+                &cancellation,
+            )
+            .expect("v2 answer locate succeeds");
+        assert_eq!(active_answer.data.hits.len(), 1);
+        assert_eq!(active_answer.data.hits[0].path, "src/lib.rs");
+        assert_eq!(active_answer.data.hits[0].symbol, first_symbol);
+        let active_source = service
+            .source_read(
+                second.generation,
+                vec![
+                    active_answer.data.hits[0]
+                        .source
+                        .clone()
+                        .expect("v2 answer retains exact source evidence"),
+                ],
+                &cancellation,
+            )
+            .expect("v2 answer source reads");
+        assert_eq!(active_source.data.chunks.len(), 1);
+        let active_text = &active_source.data.chunks[0].text;
+        assert!(active_text.contains("43"));
+        assert!(!active_text.contains("42"));
+        assert!(!active_text.contains(IGNORED_SENTINEL));
+
+        let prior_answer = service
+            .code_locate(
+                first.generation,
+                "answer".to_owned(),
+                LocateMode::Exact,
+                8,
+                &cancellation,
+            )
+            .expect("prior generation remains queryable");
+        assert_eq!(prior_answer.data.hits.len(), 1);
+        assert_eq!(prior_answer.data.hits[0].symbol, first_symbol);
+        assert_eq!(prior_answer.data.hits[0].path, "src/lib.rs");
+        assert!(
+            !service
+                .resolve_generation(first.repository, Some(first.generation))
+                .expect("prior generation remains retained")
+                .active
+        );
+        assert_no_exact_hits(
+            &service,
+            second.generation,
+            &["ignored_by_nested_rule", IGNORED_SENTINEL, "broken"],
+            &cancellation,
+        );
+    }
+
+    fn materialize_gate_fixture() -> TempDir {
+        let fixture = TempDir::new().expect("materialized fixture root exists");
+        copy_fixture_tree(Path::new(GATE_FIXTURE_ROOT), fixture.path());
+        fixture
+    }
+
+    fn copy_fixture_tree(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).expect("fixture directory materializes");
+        for entry in fs::read_dir(source).expect("fixture directory reads") {
+            let entry = entry.expect("fixture entry reads");
+            let file_type = entry.file_type().expect("fixture entry type reads");
+            let target = destination.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_fixture_tree(&entry.path(), &target);
+            } else {
+                assert!(file_type.is_file(), "fixture entries must be regular files");
+                fs::copy(entry.path(), target).expect("fixture file materializes");
+            }
+        }
+    }
+
+    fn apply_gate_v2_patch(root: &Path) {
+        let target = GATE_V2_PATCH
+            .lines()
+            .find_map(|line| line.strip_prefix("+++ b/"))
+            .expect("Gate-1 patch names a target");
+        let removed = GATE_V2_PATCH
+            .lines()
+            .find(|line| line.starts_with('-') && !line.starts_with("---"))
+            .and_then(|line| line.strip_prefix('-'))
+            .expect("Gate-1 patch removes one line");
+        let added = GATE_V2_PATCH
+            .lines()
+            .find(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .and_then(|line| line.strip_prefix('+'))
+            .expect("Gate-1 patch adds one line");
+        let path = root.join(target);
+        let source = fs::read_to_string(&path).expect("materialized v1 source reads");
+        let removed = format!("{removed}\n");
+        let added = format!("{added}\n");
+        assert_eq!(
+            source.matches(&removed).count(),
+            1,
+            "Gate-1 patch context must match exactly once"
+        );
+        fs::write(path, source.replacen(&removed, &added, 1))
+            .expect("Gate-1 v2 source materializes");
+    }
+
+    fn assert_indexed_gate_paths(service: &FirstSliceService, generation: GenerationId) {
+        let snapshot = service
+            .generations
+            .generation(generation)
+            .expect("Gate-1 generation remains retained");
+        let mut paths = snapshot
+            .document()
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            ["nested/ignored/kept.rs", "src/lib.rs", "src/malformed.rs"]
+        );
+    }
+
+    fn assert_malformed_recovery(service: &FirstSliceService, generation: GenerationId) {
+        let snapshot = service
+            .generations
+            .generation(generation)
+            .expect("Gate-1 generation remains retained");
+        let document = snapshot.document();
+        let malformed = document
+            .files
+            .iter()
+            .find(|file| file.path == "src/malformed.rs")
+            .expect("malformed Gate-1 file remains represented")
+            .id;
+        assert!(document.coverage_records.iter().any(|coverage| {
+            coverage.scope == CoverageScope::File(malformed)
+                && coverage.status == CoverageStatus::Unknown
+        }));
+        assert!(document.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "syntax-error-recovery"
+                && diagnostic.coverage_effect == CoverageStatus::Unknown
+                && diagnostic
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == malformed)
+        }));
+    }
+
+    fn assert_no_exact_hits(
+        service: &FirstSliceService,
+        generation: GenerationId,
+        queries: &[&str],
+        cancellation: &Cancellation,
+    ) {
+        for query in queries {
+            let located = service
+                .code_locate(
+                    generation,
+                    (*query).to_owned(),
+                    LocateMode::Exact,
+                    8,
+                    cancellation,
+                )
+                .expect("excluded Gate-1 query succeeds");
+            assert!(located.data.hits.is_empty(), "{query} must not be exposed");
+        }
     }
 }
