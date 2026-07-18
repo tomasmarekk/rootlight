@@ -777,16 +777,27 @@ fn session_and_error_debug_output_redacts_peer_and_source_details() {
 #[test]
 fn invalid_local_limits_fail_before_peer_processing() {
     let mut session = Session::rootlight();
+    let excessive_tokio_capacity = Semaphore::MAX_PERMITS
+        .checked_add(1)
+        .expect("Tokio's permit ceiling leaves room for an invalid value");
     for limits in [
         StdioLimits::default().with_max_response_bytes(0),
         StdioLimits::default().with_max_json_depth(MAX_SUPPORTED_JSON_DEPTH + 1),
         StdioLimits::default().with_max_in_flight_requests(0),
         StdioLimits::default().with_response_channel_capacity(0),
+        StdioLimits::default().with_response_channel_capacity(excessive_tokio_capacity),
         StdioLimits::default().with_max_blocking_workers(0),
+        StdioLimits::default().with_max_blocking_workers(excessive_tokio_capacity),
     ] {
         let error = session
             .handle_frame(PING_TWO.as_bytes(), limits)
             .expect_err("invalid limits are rejected");
         assert!(matches!(error, SessionError::InvalidLimits));
     }
+
+    let error = StdioLimits::default()
+        .with_max_blocking_workers(excessive_tokio_capacity)
+        .blocking_pool()
+        .expect_err("oversized blocking pool is rejected before semaphore construction");
+    assert!(matches!(error, SessionError::InvalidLimits));
 }

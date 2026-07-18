@@ -207,7 +207,9 @@ impl StdioLimits {
             || self.max_invalid_messages == 0
             || self.max_in_flight_requests == 0
             || self.response_channel_capacity == 0
+            || self.response_channel_capacity > Semaphore::MAX_PERMITS
             || self.max_blocking_workers == 0
+            || self.max_blocking_workers > Semaphore::MAX_PERMITS
         {
             return Err(SessionError::InvalidLimits);
         }
