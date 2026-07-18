@@ -96,6 +96,7 @@ pub const MAX_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 pub const MAX_SHUTDOWN_GRACE: Duration = Duration::from_secs(60);
 const WORKER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_millis(1);
 const WORKER_HANDSHAKE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const SHUTDOWN_INTERRUPT_BATCH: usize = 256;
 
 const CONTROL_PROBE_PLAN_HASH: [u8; 32] = [0; 32];
 const LIFECYCLE_STARTING: u8 = 1;
@@ -374,6 +375,21 @@ impl DaemonLimits {
 const fn duration_exceeds(value: Duration, maximum: Duration) -> bool {
     value.as_secs() > maximum.as_secs()
         || value.as_secs() == maximum.as_secs() && value.subsec_nanos() > maximum.subsec_nanos()
+}
+
+fn shutdown_interrupt_rounds(maximum_nonterminal: u32) -> Result<usize, ServiceError> {
+    let maximum = usize::try_from(maximum_nonterminal).map_err(|_| ServiceError::InvalidLimits)?;
+    let rounded = maximum
+        .checked_add(
+            SHUTDOWN_INTERRUPT_BATCH
+                .checked_sub(1)
+                .ok_or(ServiceError::InvalidLimits)?,
+        )
+        .ok_or(ServiceError::InvalidLimits)?;
+    let mutation_rounds = rounded / SHUTDOWN_INTERRUPT_BATCH;
+    mutation_rounds
+        .checked_add(1)
+        .ok_or(ServiceError::InvalidLimits)
 }
 
 impl Default for DaemonLimits {
@@ -2924,6 +2940,8 @@ impl DaemonOrchestrator {
     ///
     /// Returns a typed actor, journal, or worker join failure.
     pub async fn shutdown(&mut self) -> Result<(), ServiceError> {
+        let maximum_rounds =
+            shutdown_interrupt_rounds(rootlight_operations::MAX_NONTERMINAL_OPERATIONS)?;
         self.state.set_lifecycle(DaemonLifecycle::Draining);
         self.workers.close();
         let mut failure = None;
@@ -2934,12 +2952,13 @@ impl DaemonOrchestrator {
                 failure = Some(error);
             }
         }
-        let maximum_rounds = rootlight_operations::MAX_OPERATION_HISTORY.div_ceil(256) + 1;
         let mut interruption_complete = false;
         for _ in 0..maximum_rounds {
-            let interrupt =
-                tokio::time::timeout(self.limits.request_timeout, self.journal.interrupt(256))
-                    .await;
+            let interrupt = tokio::time::timeout(
+                self.limits.request_timeout,
+                self.journal.interrupt(SHUTDOWN_INTERRUPT_BATCH),
+            )
+            .await;
             match interrupt {
                 Ok(Ok(0)) => {
                     interruption_complete = true;
@@ -6280,6 +6299,23 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_rounds_cover_the_hard_ceiling_and_empty_confirmation() {
+        for (maximum, expected) in [
+            (0, 1),
+            (1, 2),
+            (255, 2),
+            (256, 2),
+            (257, 3),
+            (rootlight_operations::MAX_NONTERMINAL_OPERATIONS, 257),
+        ] {
+            assert_eq!(
+                shutdown_interrupt_rounds(maximum).expect("hard ceiling is representable"),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn actors_reject_hostile_capacities_without_allocating() {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
         assert!(matches!(
@@ -7547,6 +7583,48 @@ mod tests {
             journal.status(operation).expect("operation persists").state,
             OperationState::Interrupted
         );
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_multiple_full_journal_batches() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        for value in 1_u128..=300 {
+            journal
+                .enqueue(OperationId::from_bytes(value.to_le_bytes()))
+                .expect("operation enqueues");
+        }
+        let limits = DaemonLimits::new(
+            4,
+            4,
+            1,
+            1,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .expect("limits are valid");
+        let state = Arc::new(DaemonState::starting());
+        state.set_lifecycle(DaemonLifecycle::Ready);
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let mut orchestrator =
+            DaemonOrchestrator::new(actor.handle(), state, limits).expect("orchestrator starts");
+
+        orchestrator
+            .shutdown()
+            .await
+            .expect("all operation batches are interrupted");
+
+        assert_eq!(journal.active_count().expect("active count loads"), 0);
+        for value in [1_u128, 256, 257, 300] {
+            assert_eq!(
+                journal
+                    .status(OperationId::from_bytes(value.to_le_bytes()))
+                    .expect("operation persists")
+                    .state,
+                OperationState::Interrupted
+            );
+        }
         actor.join().expect("actor joins");
     }
 
