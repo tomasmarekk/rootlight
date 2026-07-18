@@ -3,18 +3,21 @@
 //! Values crossing this boundary own their records. Backend implementations
 //! must enforce the supplied row, source-reference, text, and cancellation caps.
 
-use std::{collections::BTreeMap, error::Error};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    io::{self, Write},
+};
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{
-    ContentHash, FactId, GenerationId, GenerationIdentity, RepositoryId, content_hash,
-    derive_generation,
+    ContentHash, GenerationId, GenerationIdentity, RepositoryId, derive_generation,
 };
 use rootlight_ir::{
     ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim,
     IdentityClaimError, IrDocumentValidationError, IrLimits, IrVersion,
     LEXICAL_EXTENSION_NAMESPACE, NORMALIZED_IR_VERSION, NormalizedIrDocument, OccurrenceTarget,
-    SYMBOL_IDENTITY_CLAIM_NAMESPACE, canonicalize_ir_document,
+    SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, canonicalize_ir_document,
     decode_file_identity_claim_envelope_with_checkpoint,
     decode_symbol_identity_claim_envelope_with_checkpoint, derive_coverage_record_id,
     derive_diagnostic_record_id, derive_occurrence_record_id, derive_provenance_record_id,
@@ -44,6 +47,7 @@ pub const HARD_MAX_GENERATION_TEXT_BYTES: u64 = 128 * 1024 * 1024;
 const DEFAULT_MAX_GENERATION_ROWS: u64 = 250_000;
 const DEFAULT_MAX_GENERATION_SOURCE_REFS: u64 = 100_000;
 const DEFAULT_MAX_GENERATION_TEXT_BYTES: u64 = 32 * 1024 * 1024;
+const IDENTITY_RECIPE_CHECKPOINT_BYTES: usize = 4 * 1024;
 
 /// Major/minor compatibility version for logical generation storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -259,10 +263,18 @@ impl GenerationSnapshot {
         extensions: &ExtensionSupport,
         context: &GenerationContext<'_>,
     ) -> Result<Self, GenerationSnapshotError> {
-        checkpoint_document(&document, context).map_err(GenerationSnapshotError::Control)?;
+        require_document_budget(metadata.contract_version(), &document, context)
+            .map_err(GenerationSnapshotError::Control)?;
+        context.check().map_err(GenerationSnapshotError::Control)?;
         let snapshot = Self::new(metadata, document, limits, extensions)
             .map_err(GenerationSnapshotError::Validation)?;
         context.check().map_err(GenerationSnapshotError::Control)?;
+        require_document_budget(
+            snapshot.metadata().contract_version(),
+            snapshot.document(),
+            context,
+        )
+        .map_err(GenerationSnapshotError::Control)?;
         Ok(snapshot)
     }
 
@@ -285,78 +297,256 @@ impl GenerationSnapshot {
     }
 }
 
-fn checkpoint_document(
+fn require_document_budget(
+    contract_version: GenerationContractVersion,
     document: &NormalizedIrDocument,
     context: &GenerationContext<'_>,
 ) -> Result<(), GenerationControlError> {
+    context.check()?;
+    let logical_rows = [
+        document.files.len(),
+        document.entities.len(),
+        document.occurrences.len(),
+        document.relations.len(),
+        document.provenance.len(),
+        document.source_mappings.len(),
+        document.coverage_records.len(),
+        document.skipped_regions.len(),
+        document.diagnostics.len(),
+        document.extensions.len(),
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, length| {
+        checked_add_resource(
+            total,
+            usize_to_budget_u64(length, GenerationResource::Rows, context)?,
+            GenerationResource::Rows,
+            context,
+        )
+    })?;
+    let schema_rows = if contract_version == LEGACY_GENERATION_CONTRACT_VERSION {
+        1
+    } else {
+        2
+    };
+    let mut rows = checked_add_resource(schema_rows, 1, GenerationResource::Rows, context)?;
+    rows = checked_add_resource(rows, logical_rows, GenerationResource::Rows, context)?;
+    rows = checked_add_resource(rows, logical_rows, GenerationResource::Rows, context)?;
+    let mut text_bytes = 0_u64;
+    let mut sources = BTreeSet::new();
+
     for file in &document.files {
         context.check()?;
-        checkpoint_evidence(&file.evidence, context)?;
+        observe_evidence(&file.evidence, &mut sources, &mut rows, context)?;
+        observe_text(&file.path, &mut text_bytes, context)?;
+        observe_text(&file.language, &mut text_bytes, context)?;
+        observe_text(&file.encoding, &mut text_bytes, context)?;
+        context.check()?;
     }
     for entity in &document.entities {
         context.check()?;
         for _ in &entity.flags {
-            context.check()?;
+            rows = checked_add_resource(rows, 1, GenerationResource::Rows, context)?;
         }
-        checkpoint_evidence(&entity.evidence, context)?;
+        observe_evidence(&entity.evidence, &mut sources, &mut rows, context)?;
+        observe_text(&entity.language, &mut text_bytes, context)?;
+        observe_text(&entity.canonical_name, &mut text_bytes, context)?;
+        observe_text(&entity.display_name, &mut text_bytes, context)?;
+        observe_text(&entity.qualified_name, &mut text_bytes, context)?;
+        context.check()?;
     }
     for occurrence in &document.occurrences {
         context.check()?;
+        observe_source(&occurrence.source, &mut sources, &mut rows, context)?;
         if let OccurrenceTarget::Candidates { symbols, .. } = &occurrence.target {
             for _ in symbols {
-                context.check()?;
+                rows = checked_add_resource(rows, 1, GenerationResource::Rows, context)?;
             }
         }
-        checkpoint_evidence(&occurrence.evidence, context)?;
+        observe_evidence(&occurrence.evidence, &mut sources, &mut rows, context)?;
+        observe_text(&occurrence.syntax_kind, &mut text_bytes, context)?;
+        context.check()?;
     }
     for relation in &document.relations {
         context.check()?;
-        checkpoint_evidence(&relation.evidence, context)?;
+        observe_evidence(&relation.evidence, &mut sources, &mut rows, context)?;
+        context.check()?;
     }
     for provenance in &document.provenance {
         context.check()?;
-        for _ in provenance
+        for source in provenance
             .input_sources
             .iter()
             .chain(&provenance.evidence_sources)
         {
-            context.check()?;
+            rows = checked_add_resource(rows, 1, GenerationResource::Rows, context)?;
+            observe_source(source, &mut sources, &mut rows, context)?;
         }
         for _ in &provenance.derivation_parents {
-            context.check()?;
+            rows = checked_add_resource(rows, 1, GenerationResource::Rows, context)?;
         }
+        observe_text(provenance.producer.name(), &mut text_bytes, context)?;
+        observe_text(provenance.producer.version(), &mut text_bytes, context)?;
+        observe_optional_text(
+            provenance.frontend_version.as_deref(),
+            &mut text_bytes,
+            context,
+        )?;
+        observe_text(&provenance.language, &mut text_bytes, context)?;
+        observe_optional_text(provenance.rule.as_deref(), &mut text_bytes, context)?;
+        context.check()?;
     }
     for mapping in &document.source_mappings {
         context.check()?;
-        checkpoint_evidence(&mapping.evidence, context)?;
+        observe_source(&mapping.from, &mut sources, &mut rows, context)?;
+        observe_source(&mapping.to, &mut sources, &mut rows, context)?;
+        observe_opaque_evidence(&mapping.evidence, &mut sources, &mut rows, context)?;
+        context.check()?;
     }
     for coverage in &document.coverage_records {
         context.check()?;
-        checkpoint_evidence(&coverage.evidence, context)?;
+        observe_evidence(&coverage.evidence, &mut sources, &mut rows, context)?;
+        context.check()?;
     }
     for region in &document.skipped_regions {
         context.check()?;
-        checkpoint_evidence(&region.evidence, context)?;
+        observe_source(&region.source, &mut sources, &mut rows, context)?;
+        observe_opaque_evidence(&region.evidence, &mut sources, &mut rows, context)?;
+        observe_text(&region.detail, &mut text_bytes, context)?;
+        context.check()?;
     }
     for diagnostic in &document.diagnostics {
         context.check()?;
-        checkpoint_evidence(&diagnostic.evidence, context)?;
+        if let Some(source) = &diagnostic.source {
+            observe_source(source, &mut sources, &mut rows, context)?;
+        }
+        observe_opaque_evidence(&diagnostic.evidence, &mut sources, &mut rows, context)?;
+        observe_text(&diagnostic.code, &mut text_bytes, context)?;
+        observe_text(&diagnostic.message, &mut text_bytes, context)?;
+        context.check()?;
     }
     for extension in &document.extensions {
         context.check()?;
-        checkpoint_evidence(&extension.evidence, context)?;
+        observe_opaque_evidence(&extension.evidence, &mut sources, &mut rows, context)?;
+        observe_text(&extension.namespace, &mut text_bytes, context)?;
+        observe_text(&extension.version, &mut text_bytes, context)?;
+        observe_text(&extension.payload, &mut text_bytes, context)?;
+        context.check()?;
+    }
+    context.require(GenerationResource::Rows, rows)?;
+    context.require(
+        GenerationResource::SourceReferences,
+        usize_to_budget_u64(sources.len(), GenerationResource::SourceReferences, context)?,
+    )?;
+    context.require(GenerationResource::TextBytes, text_bytes)?;
+    context.check()
+}
+
+fn observe_evidence<'document>(
+    evidence: &'document FactEvidence,
+    sources: &mut BTreeSet<&'document SourceRef>,
+    rows: &mut u64,
+    context: &GenerationContext<'_>,
+) -> Result<(), GenerationControlError> {
+    if let Some(source) = &evidence.source {
+        observe_source(source, sources, rows, context)?;
+    }
+    for _ in &evidence.derivation {
+        *rows = checked_add_resource(*rows, 1, GenerationResource::Rows, context)?;
     }
     Ok(())
 }
 
-fn checkpoint_evidence(
-    evidence: &FactEvidence,
+fn observe_opaque_evidence<'document>(
+    evidence: &'document FactEvidence,
+    sources: &mut BTreeSet<&'document SourceRef>,
+    rows: &mut u64,
     context: &GenerationContext<'_>,
 ) -> Result<(), GenerationControlError> {
+    if let Some(source) = &evidence.source {
+        observe_source(source, sources, rows, context)?;
+    }
+    // Opaque facts serialize derivations into one payload. Counting each item
+    // as materialized work keeps canonicalization inside the same row cap.
     for _ in &evidence.derivation {
-        context.check()?;
+        *rows = checked_add_resource(*rows, 1, GenerationResource::Rows, context)?;
     }
     Ok(())
+}
+
+fn observe_source<'document>(
+    source: &'document SourceRef,
+    sources: &mut BTreeSet<&'document SourceRef>,
+    rows: &mut u64,
+    context: &GenerationContext<'_>,
+) -> Result<(), GenerationControlError> {
+    context.check()?;
+    if sources.insert(source) {
+        context.require(
+            GenerationResource::SourceReferences,
+            usize_to_budget_u64(sources.len(), GenerationResource::SourceReferences, context)?,
+        )?;
+        *rows = checked_add_resource(*rows, 1, GenerationResource::Rows, context)?;
+    }
+    context.check()
+}
+
+fn observe_text(
+    value: &str,
+    text_bytes: &mut u64,
+    context: &GenerationContext<'_>,
+) -> Result<(), GenerationControlError> {
+    context.check()?;
+    *text_bytes = checked_add_resource(
+        *text_bytes,
+        usize_to_budget_u64(value.len(), GenerationResource::TextBytes, context)?,
+        GenerationResource::TextBytes,
+        context,
+    )?;
+    context.check()
+}
+
+fn observe_optional_text(
+    value: Option<&str>,
+    text_bytes: &mut u64,
+    context: &GenerationContext<'_>,
+) -> Result<(), GenerationControlError> {
+    if let Some(value) = value {
+        observe_text(value, text_bytes, context)?;
+    }
+    Ok(())
+}
+
+fn checked_add_resource(
+    current: u64,
+    increment: u64,
+    resource: GenerationResource,
+    context: &GenerationContext<'_>,
+) -> Result<u64, GenerationControlError> {
+    context.check()?;
+    let next = current
+        .checked_add(increment)
+        .ok_or_else(|| budget_exceeded(resource, context))?;
+    context.require(resource, next)?;
+    Ok(next)
+}
+
+fn usize_to_budget_u64(
+    value: usize,
+    resource: GenerationResource,
+    context: &GenerationContext<'_>,
+) -> Result<u64, GenerationControlError> {
+    u64::try_from(value).map_err(|_| budget_exceeded(resource, context))
+}
+
+fn budget_exceeded(
+    resource: GenerationResource,
+    context: &GenerationContext<'_>,
+) -> GenerationControlError {
+    GenerationControlError::BudgetExceeded {
+        resource,
+        limit: context.budget().limit(resource),
+    }
 }
 
 /// Canonical versioned input-manifest recipe used by generation identity.
@@ -412,15 +602,89 @@ impl GenerationManifestRecipe {
     /// Returns [`IdentityVerificationError::RecipeEncoding`] if the fixed
     /// canonical representation cannot be encoded.
     pub fn canonical_hash(&self) -> Result<ContentHash, IdentityVerificationError> {
-        let bytes =
-            serde_json::to_vec(self).map_err(|_| IdentityVerificationError::RecipeEncoding)?;
-        Ok(content_hash(&bytes))
+        let mut writer = IdentityRecipeHashWriter::new(None)?;
+        serde_json::to_writer(&mut writer, self)
+            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        writer.finish()
+    }
+
+    fn canonical_hash_with_context(
+        &self,
+        context: &GenerationContext<'_>,
+    ) -> Result<ContentHash, IdentityVerificationError> {
+        let mut writer = IdentityRecipeHashWriter::new(Some(*context))?;
+        if serde_json::to_writer(&mut writer, self).is_err() {
+            return writer
+                .control
+                .map_or(Err(IdentityVerificationError::RecipeEncoding), |error| {
+                    Err(IdentityVerificationError::Control(error))
+                });
+        }
+        writer.finish()
     }
 
     /// Returns the canonical file claims in stable ID order.
     #[must_use]
     pub fn files(&self) -> &[FileIdentityClaim] {
         &self.files
+    }
+}
+
+struct IdentityRecipeHashWriter<'context> {
+    hasher: blake3::Hasher,
+    context: Option<GenerationContext<'context>>,
+    control: Option<GenerationControlError>,
+}
+
+impl<'context> IdentityRecipeHashWriter<'context> {
+    fn new(
+        context: Option<GenerationContext<'context>>,
+    ) -> Result<Self, IdentityVerificationError> {
+        if let Some(context) = context {
+            context
+                .check()
+                .map_err(IdentityVerificationError::Control)?;
+        }
+        Ok(Self {
+            hasher: blake3::Hasher::new(),
+            context,
+            control: None,
+        })
+    }
+
+    fn finish(self) -> Result<ContentHash, IdentityVerificationError> {
+        if let Some(error) = self.control {
+            return Err(IdentityVerificationError::Control(error));
+        }
+        if let Some(context) = self.context {
+            context
+                .check()
+                .map_err(IdentityVerificationError::Control)?;
+        }
+        Ok(ContentHash::from_bytes(*self.hasher.finalize().as_bytes()))
+    }
+
+    fn stop(&mut self, error: GenerationControlError) -> io::Error {
+        self.control = Some(error);
+        io::Error::other("identity recipe hashing stopped")
+    }
+}
+
+impl Write for IdentityRecipeHashWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        for chunk in buffer.chunks(IDENTITY_RECIPE_CHECKPOINT_BYTES) {
+            if let Some(context) = self.context
+                && let Err(error) = context.check()
+            {
+                return Err(self.stop(error));
+            }
+            self.hasher.update(chunk);
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -469,10 +733,22 @@ impl IdentityVerifiedGeneration {
         snapshot: GenerationSnapshot,
         context: &GenerationContext<'_>,
     ) -> Result<Self, IdentityVerificationError> {
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
         if snapshot.metadata().contract_version() != GENERATION_CONTRACT_VERSION {
             return Err(IdentityVerificationError::LegacyContract);
         }
+        require_document_budget(
+            snapshot.metadata().contract_version(),
+            snapshot.document(),
+            context,
+        )
+        .map_err(IdentityVerificationError::Control)?;
         verify_snapshot_identities(&snapshot, context)?;
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
         Ok(Self { snapshot })
     }
 
@@ -521,6 +797,9 @@ fn verify_snapshot_identities(
                 if file_claims.insert(claim.file, (claim, source)).is_some() {
                     return Err(IdentityVerificationError::DuplicateClaim);
                 }
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
             }
             SYMBOL_IDENTITY_CLAIM_NAMESPACE => {
                 let claim = decode_symbol_identity_claim_envelope_with_checkpoint(envelope, || {
@@ -538,6 +817,9 @@ fn verify_snapshot_identities(
                 {
                     return Err(IdentityVerificationError::DuplicateClaim);
                 }
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
             }
             LEXICAL_EXTENSION_NAMESPACE => {
                 let subject = envelope
@@ -554,6 +836,9 @@ fn verify_snapshot_identities(
                     .ok_or(IdentityVerificationError::IdentityMismatch)?;
                 validate_lexical_evidence_envelope(envelope, subject, source, envelope.provenance)
                     .map_err(|_| IdentityVerificationError::IdentityMismatch)?;
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
             }
             _ => has_unsupported_extension = true,
         }
@@ -581,27 +866,51 @@ fn verify_snapshot_identities(
         {
             return Err(IdentityVerificationError::IdentityMismatch);
         }
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
     }
+    context
+        .check()
+        .map_err(IdentityVerificationError::Control)?;
+    let mut manifest_claims = Vec::with_capacity(file_claims.len());
+    for (claim, _source) in file_claims.into_values() {
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        manifest_claims.push(claim);
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+    }
+    context
+        .check()
+        .map_err(IdentityVerificationError::Control)?;
     let manifest = GenerationManifestRecipe::new(
         document.repository,
         snapshot.metadata().configuration_hash(),
-        file_claims
-            .into_values()
-            .map(|(claim, _source)| claim)
-            .collect(),
+        manifest_claims,
     )?;
     context
         .check()
         .map_err(IdentityVerificationError::Control)?;
-    if manifest.canonical_hash()? != snapshot.metadata().manifest_hash() {
+    if manifest.canonical_hash_with_context(context)? != snapshot.metadata().manifest_hash() {
         return Err(IdentityVerificationError::ManifestMismatch);
     }
 
-    let provenance_by_id: BTreeMap<FactId, _> = document
-        .provenance
-        .iter()
-        .map(|record| (record.id, record))
-        .collect();
+    context
+        .check()
+        .map_err(IdentityVerificationError::Control)?;
+    let mut provenance_by_id = BTreeMap::new();
+    for record in &document.provenance {
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        provenance_by_id.insert(record.id, record);
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+    }
     for entity in &document.entities {
         context
             .check()
@@ -624,6 +933,9 @@ fn verify_snapshot_identities(
         {
             return Err(IdentityVerificationError::IdentityMismatch);
         }
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
     }
 
     verify_fact_ids(document, context)
@@ -651,10 +963,12 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        if derive_provenance_record_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?
-            != record.id
-        {
+        let derived = derive_provenance_record_id(record)
+            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        if derived != record.id {
             return Err(IdentityVerificationError::IdentityMismatch);
         }
     }
@@ -662,10 +976,12 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        if derive_occurrence_record_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?
-            != record.id
-        {
+        let derived = derive_occurrence_record_id(record)
+            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        if derived != record.id {
             return Err(IdentityVerificationError::IdentityMismatch);
         }
     }
@@ -673,10 +989,12 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        if derive_relation_record_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?
-            != record.id
-        {
+        let derived = derive_relation_record_id(record)
+            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        if derived != record.id {
             return Err(IdentityVerificationError::IdentityMismatch);
         }
     }
@@ -684,10 +1002,12 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        if derive_source_mapping_record_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?
-            != record.id
-        {
+        let derived = derive_source_mapping_record_id(record)
+            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        if derived != record.id {
             return Err(IdentityVerificationError::IdentityMismatch);
         }
     }
@@ -695,10 +1015,12 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        if derive_coverage_record_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?
-            != record.id
-        {
+        let derived = derive_coverage_record_id(record)
+            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        if derived != record.id {
             return Err(IdentityVerificationError::IdentityMismatch);
         }
     }
@@ -706,10 +1028,12 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        if derive_skipped_region_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?
-            != record.id
-        {
+        let derived = derive_skipped_region_id(record)
+            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        if derived != record.id {
             return Err(IdentityVerificationError::IdentityMismatch);
         }
     }
@@ -717,10 +1041,12 @@ fn verify_fact_ids(
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
-        if derive_diagnostic_record_id(record)
-            .map_err(|_| IdentityVerificationError::RecipeEncoding)?
-            != record.id
-        {
+        let derived = derive_diagnostic_record_id(record)
+            .map_err(|_| IdentityVerificationError::RecipeEncoding)?;
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        if derived != record.id {
             return Err(IdentityVerificationError::IdentityMismatch);
         }
     }
@@ -1195,6 +1521,7 @@ mod tests {
     use rootlight_ids::{
         GenerationId, GenerationIdentity, RepositoryId, content_hash, derive_generation,
     };
+    use serde::ser::SerializeSeq;
 
     fn metadata(repository: RepositoryId) -> GenerationMetadata {
         let manifest_hash = content_hash(b"manifest");
@@ -1218,6 +1545,51 @@ mod tests {
             provider_set_hash,
         )
         .expect("fixture metadata is valid")
+    }
+
+    fn verified_empty_metadata(repository: RepositoryId) -> GenerationMetadata {
+        let configuration_hash = content_hash(b"configuration");
+        let manifest_hash =
+            GenerationManifestRecipe::new(repository, configuration_hash, Vec::new())
+                .expect("empty manifest recipe is valid")
+                .canonical_hash()
+                .expect("empty manifest recipe is encodable");
+        let provider_set_hash = content_hash(b"providers");
+        let generation = derive_generation(GenerationIdentity {
+            repository,
+            parent: None,
+            manifest_hash,
+            config_hash: configuration_hash,
+            provider_set_hash,
+            format_version: generation_format_version(GENERATION_CONTRACT_VERSION),
+        })
+        .id();
+        GenerationMetadata::new(
+            repository,
+            generation,
+            None,
+            manifest_hash,
+            configuration_hash,
+            provider_set_hash,
+        )
+        .expect("verified fixture metadata is valid")
+    }
+
+    struct CancelDuringSerialization<'a> {
+        cancellation: &'a Cancellation,
+    }
+
+    impl Serialize for CancelDuringSerialization<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let mut sequence = serializer.serialize_seq(Some(2))?;
+            sequence.serialize_element(&"x".repeat(2 * IDENTITY_RECIPE_CHECKPOINT_BYTES))?;
+            self.cancellation.cancel(CancellationReason::ClientRequest);
+            sequence.serialize_element("unreachable after the next writer checkpoint")?;
+            sequence.end()
+        }
     }
 
     #[test]
@@ -1292,6 +1664,85 @@ mod tests {
         assert_eq!(
             context.check(),
             Err(GenerationControlError::Cancelled {
+                reason: CancellationReason::ClientRequest,
+            })
+        );
+    }
+
+    #[test]
+    fn identity_verification_enforces_budget_before_canonicalization() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let metadata = verified_empty_metadata(repository);
+        let document = NormalizedIrDocument::empty(repository, metadata.generation());
+        let cancellation = Cancellation::new();
+        let budget = GenerationBudget::new(2, 1, 1).expect("fixture budget is valid");
+        let context = GenerationContext::new(&cancellation, budget);
+
+        let result = IdentityVerifiedGeneration::verify(
+            metadata,
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        );
+
+        assert_eq!(
+            result,
+            Err(IdentityVerificationError::Control(
+                GenerationControlError::BudgetExceeded {
+                    resource: GenerationResource::Rows,
+                    limit: 2,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn snapshot_verification_rechecks_operation_budget() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let metadata = verified_empty_metadata(repository);
+        let snapshot = GenerationSnapshot::new(
+            metadata,
+            NormalizedIrDocument::empty(repository, metadata.generation()),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .expect("empty normalized fixture is valid");
+        let cancellation = Cancellation::new();
+        let budget = GenerationBudget::new(2, 1, 1).expect("fixture budget is valid");
+        let context = GenerationContext::new(&cancellation, budget);
+
+        let result = IdentityVerifiedGeneration::verify_snapshot(snapshot, &context);
+
+        assert_eq!(
+            result,
+            Err(IdentityVerificationError::Control(
+                GenerationControlError::BudgetExceeded {
+                    resource: GenerationResource::Rows,
+                    limit: 2,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn identity_recipe_hashing_observes_mid_stream_cancellation() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let mut writer =
+            IdentityRecipeHashWriter::new(Some(context)).expect("active context is accepted");
+
+        let result = serde_json::to_writer(
+            &mut writer,
+            &CancelDuringSerialization {
+                cancellation: &cancellation,
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            writer.control,
+            Some(GenerationControlError::Cancelled {
                 reason: CancellationReason::ClientRequest,
             })
         );
