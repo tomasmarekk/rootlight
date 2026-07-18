@@ -3,7 +3,7 @@
 //! This module validates both sides of the generic daemon executor boundary
 //! and keeps MCP structured content identical to its JSON text mirror.
 
-use std::{fmt, future::Future, pin::Pin, sync::Arc};
+use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 
 use jsonschema::Validator;
 use rootlight_mcp_contract::{
@@ -22,6 +22,9 @@ use super::{
 
 const INTERNAL_ERROR: i32 = -32_603;
 const MAX_TOOL_NAME_BYTES: usize = 128;
+const MAX_REPOSITORY_ROOT_BYTES: usize = 4_096;
+const MAX_CONFIGURATION_PATCH_BYTES: usize = 64 * 1_024;
+const MAX_LOCATE_QUERY_BYTES: usize = 2_048;
 const INVALID_ARGUMENT_CODE: &str = "INVALID_ARGUMENT";
 const INVALID_ARGUMENT_MESSAGE: &str = "tool arguments do not match the input schema";
 
@@ -143,6 +146,7 @@ where
         };
         let arguments_value = Value::Object(arguments);
         if !contract.input_validator.is_valid(&arguments_value)
+            || !tool_specific_input_limits_are_valid(contract.tool, &arguments_value)
             || !typed_input_is_valid(contract.tool, &arguments_value)
         {
             return tool_error(INVALID_ARGUMENT_CODE, INVALID_ARGUMENT_MESSAGE);
@@ -317,6 +321,52 @@ fn typed_input_is_valid(tool: VerticalTool, input: &Value) -> bool {
         VerticalTool::SourceRead => {
             serde_json::from_value::<SourceReadInput>(input.clone()).is_ok()
         }
+    }
+}
+
+fn tool_specific_input_limits_are_valid(tool: VerticalTool, input: &Value) -> bool {
+    // JSON Schema maxLength counts characters, while these public contracts
+    // bound serialized UTF-8 bytes. The configuration patch is counted without
+    // materializing a second attacker-controlled buffer.
+    match tool {
+        VerticalTool::RepoIndex => {
+            input
+                .get("root")
+                .and_then(Value::as_str)
+                .is_none_or(|root| root.len() <= MAX_REPOSITORY_ROOT_BYTES)
+                && input
+                    .get("configuration_patch")
+                    .is_none_or(|patch| serialized_json_fits(patch, MAX_CONFIGURATION_PATCH_BYTES))
+        }
+        VerticalTool::CodeLocate => input
+            .get("query")
+            .and_then(Value::as_str)
+            .is_some_and(|query| query.len() <= MAX_LOCATE_QUERY_BYTES),
+        VerticalTool::OperationStatus | VerticalTool::SymbolExplain | VerticalTool::SourceRead => {
+            true
+        }
+    }
+}
+
+fn serialized_json_fits(value: &Value, maximum: usize) -> bool {
+    serde_json::to_writer(ByteLimitWriter { remaining: maximum }, value).is_ok()
+}
+
+struct ByteLimitWriter {
+    remaining: usize,
+}
+
+impl io::Write for ByteLimitWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.remaining {
+            return Err(io::Error::other("serialized JSON exceeds its byte limit"));
+        }
+        self.remaining -= bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -632,6 +682,91 @@ mod tests {
         let result = success(response);
         assert_eq!(result["isError"], true);
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn utf8_byte_limit_failures_do_not_reach_the_executor() {
+        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let oversized_root = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "repo.index",
+                        "arguments": {"root": "é".repeat(2_049)}
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+        let oversized_query = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "code.locate",
+                        "arguments": {
+                            "repository": {
+                                "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                            },
+                            "query": "é".repeat(1_025)
+                        }
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+
+        assert_eq!(success(oversized_root)["isError"], true);
+        assert_eq!(success(oversized_query)["isError"], true);
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_configuration_patch_does_not_reach_the_executor() {
+        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "repo.index",
+                        "arguments": {
+                            "root": "C:/fixture",
+                            "configuration_patch": {
+                                "entry": "a".repeat(MAX_CONFIGURATION_PATCH_BYTES)
+                            }
+                        }
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+
+        assert_eq!(success(response)["isError"], true);
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn exact_configuration_patch_byte_limit_is_valid() {
+        let framing_bytes = br#"{"entry":""}"#.len();
+        let input = json!({
+            "root": "C:/fixture",
+            "configuration_patch": {
+                "entry": "a".repeat(MAX_CONFIGURATION_PATCH_BYTES - framing_bytes)
+            }
+        });
+
+        assert!(tool_specific_input_limits_are_valid(
+            VerticalTool::RepoIndex,
+            &input
+        ));
+        assert_eq!(
+            serde_json::to_vec(&input["configuration_patch"])
+                .expect("configuration patch serializes")
+                .len(),
+            MAX_CONFIGURATION_PATCH_BYTES
+        );
     }
 
     #[tokio::test]
