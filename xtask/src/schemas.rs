@@ -678,6 +678,7 @@ fn write_mcp_tool_schema<T: JsonSchema>(
             enforce_exact_repo_index_target(object);
         }
     }
+    close_mcp_object_schemas(&mut schema);
     schema.insert(
         "$id".to_owned(),
         format!("https://rootlight.local/schema/mcp/{tool}/{direction}/1.0").into(),
@@ -709,6 +710,43 @@ fn enforce_exact_repo_index_target(object: &mut serde_json::Map<String, serde_js
             }
         ]),
     );
+}
+
+fn close_mcp_object_schemas(schema: &mut schemars::Schema) {
+    if let Some(object) = schema.as_object_mut() {
+        close_mcp_object_map(object);
+    }
+}
+
+fn close_mcp_object_value(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                close_mcp_object_value(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            close_mcp_object_map(object);
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+fn close_mcp_object_map(object: &mut serde_json::Map<String, serde_json::Value>) {
+    if object.get("type").and_then(serde_json::Value::as_str) == Some("object")
+        && !object.contains_key("additionalProperties")
+    {
+        object.insert(
+            "additionalProperties".to_owned(),
+            serde_json::Value::Bool(false),
+        );
+    }
+    for value in object.values_mut() {
+        close_mcp_object_value(value);
+    }
 }
 
 fn reject_explicit_null_for_optional_properties(

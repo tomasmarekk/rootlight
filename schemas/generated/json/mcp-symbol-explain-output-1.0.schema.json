@@ -334,6 +334,7 @@
           "minimum": 1
         }
       },
+      "additionalProperties": false,
       "required": [
         "start_line",
         "end_line"
@@ -510,6 +511,7 @@
           "$ref": "#/$defs/SourceSpan"
         }
       },
+      "additionalProperties": false,
       "required": [
         "repository",
         "generation",
@@ -535,6 +537,7 @@
           "minimum": 0
         }
       },
+      "additionalProperties": false,
       "required": [
         "file",
         "start_byte",

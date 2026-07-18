@@ -116,7 +116,7 @@
     },
     {
       "path": "schemas/generated/json/mcp-code-locate-output-1.0.schema.json",
-      "blake3": "0e809277555a31e2356a3b9cb30034ef74ab247b58dcb9cfae58ae5db6a9c05e"
+      "blake3": "4d64730a362f33c927ed6bde35c6cd5e8aba8fa21035245583daf6d119b45b95"
     },
     {
       "path": "schemas/generated/json/mcp-error-response-1.0.schema.json",
@@ -144,11 +144,11 @@
     },
     {
       "path": "schemas/generated/json/mcp-source-read-input-1.0.schema.json",
-      "blake3": "4bfe83976fc071e3983ffa070dfeed4c908d61a06c114cb5f2b5d546d6db81ca"
+      "blake3": "7916928954b0627bccc4dd6d52c1187abf074fc7826293ed28a87f089c0c6ed0"
     },
     {
       "path": "schemas/generated/json/mcp-source-read-output-1.0.schema.json",
-      "blake3": "d5fcc384b32d4f643441f5968967b8cd054344704235b31b6f890c1bd52f3cc2"
+      "blake3": "73c4d94b5eabee54ff06c3f0f91d55d3eb286a4faabb3d119112a3ce11fc537b"
     },
     {
       "path": "schemas/generated/json/mcp-symbol-explain-input-1.0.schema.json",
@@ -156,7 +156,7 @@
     },
     {
       "path": "schemas/generated/json/mcp-symbol-explain-output-1.0.schema.json",
-      "blake3": "e14b4d7a75096de53b05377adda06bc91a8717335f9ae02f904da6b7fbc5bbb9"
+      "blake3": "63b7839d10e90dac92ae9fc082cc25dfed89dd72a4fd9f8dfc1e8fca712e2370"
     },
     {
       "path": "schemas/generated/protobuf/rootlight.desc",

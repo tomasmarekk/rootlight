@@ -1254,12 +1254,35 @@ mod tests {
                 );
                 assert_eq!(schema["type"], "object");
                 assert_eq!(schema["additionalProperties"], false);
+                assert_every_object_declares_additional_properties(&schema);
                 let identifier = schema["$id"]
                     .as_str()
                     .expect("tool schema has a stable identifier")
                     .to_owned();
                 assert!(identifiers.insert(identifier));
             }
+        }
+    }
+
+    fn assert_every_object_declares_additional_properties(value: &Value) {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    assert_every_object_declares_additional_properties(value);
+                }
+            }
+            Value::Object(object) => {
+                if object.get("type").and_then(Value::as_str) == Some("object") {
+                    assert!(
+                        object.contains_key("additionalProperties"),
+                        "object schema is missing an additionalProperties contract: {object:?}"
+                    );
+                }
+                for value in object.values() {
+                    assert_every_object_declares_additional_properties(value);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
     }
 
