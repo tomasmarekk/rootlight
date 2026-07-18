@@ -192,13 +192,18 @@ impl FirstSliceService {
         let file_claim = FileIdentityClaim {
             file: input.file,
             repository,
-            path: input.path.clone(),
-            path_identity: relative.identity_bytes().to_vec(),
+            path: fallible_copy_string(&input.path)?,
+            path_identity: fallible_copy_bytes(relative.identity_bytes())?,
             content_hash: input.content_hash,
             byte_length: input.bytes,
         };
+        let mut file_claims = Vec::new();
+        file_claims
+            .try_reserve_exact(1)
+            .map_err(|_| FirstSliceError::Limits)?;
+        file_claims.push(file_claim);
         let manifest_hash =
-            GenerationManifestRecipe::new(repository, self.config.hash(), vec![file_claim])
+            GenerationManifestRecipe::new(repository, self.config.hash(), file_claims)
                 .map_err(|_| FirstSliceError::Identity)?
                 .canonical_hash()
                 .map_err(|_| FirstSliceError::Identity)?;
@@ -536,6 +541,22 @@ fn parser_config() -> Result<RuntimeConfig, FirstSliceError> {
     .map_err(|_| FirstSliceError::Limits)
 }
 
+fn fallible_copy_bytes(value: &[u8]) -> Result<Vec<u8>, FirstSliceError> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(value.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    copy.extend_from_slice(value);
+    Ok(copy)
+}
+
+fn fallible_copy_string(value: &str) -> Result<String, FirstSliceError> {
+    let mut copy = String::new();
+    copy.try_reserve_exact(value.len())
+        .map_err(|_| FirstSliceError::Limits)?;
+    copy.push_str(value);
+    Ok(copy)
+}
+
 fn repository_path_hash(path: &Path) -> Result<ContentHash, FirstSliceError> {
     #[cfg(unix)]
     {
@@ -551,9 +572,8 @@ fn repository_path_hash(path: &Path) -> Result<ContentHash, FirstSliceError> {
     {
         use std::os::windows::ffi::OsStrExt as _;
 
-        let encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        let byte_length = encoded
-            .len()
+        let units = path.as_os_str().encode_wide().count();
+        let byte_length = units
             .checked_mul(std::mem::size_of::<u16>())
             .ok_or(FirstSliceError::Repository)?;
         if byte_length > MAX_REPOSITORY_PATH_IDENTITY_BYTES {
@@ -563,7 +583,7 @@ fn repository_path_hash(path: &Path) -> Result<ContentHash, FirstSliceError> {
         bytes
             .try_reserve_exact(byte_length)
             .map_err(|_| FirstSliceError::Limits)?;
-        for unit in encoded {
+        for unit in path.as_os_str().encode_wide() {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
         Ok(content_hash(&bytes))
