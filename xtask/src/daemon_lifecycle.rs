@@ -813,19 +813,16 @@ fn submit_guard_operations(
     guards: &[(Arc<Client>, Vec<OperationId>)],
     deadline: Instant,
 ) -> Result<(), LifecycleError> {
-    let operation_count = guards
-        .iter()
-        .try_fold(0_usize, |count, (_, operations)| {
-            count.checked_add(operations.len())
-        })
-        .ok_or(LifecycleError::InvalidWorkerConfiguration)?;
-    if operation_count == 0 {
+    if guards.is_empty() {
         return Err(LifecycleError::InvalidWorkerConfiguration);
     }
 
-    let barrier = Arc::new(Barrier::new(operation_count));
-    let mut submissions = Vec::with_capacity(operation_count);
     for (client, operations) in guards {
+        if operations.is_empty() {
+            return Err(LifecycleError::InvalidWorkerConfiguration);
+        }
+        let barrier = Arc::new(Barrier::new(operations.len()));
+        let mut submissions = Vec::with_capacity(operations.len());
         for operation in operations {
             let client = Arc::clone(client);
             let barrier = Arc::clone(&barrier);
@@ -842,12 +839,12 @@ fn submit_guard_operations(
                 Ok(())
             }));
         }
-    }
 
-    for submission in submissions {
-        submission
-            .join()
-            .map_err(|_| LifecycleError::ClientThreadPanicked)??;
+        for submission in submissions {
+            submission
+                .join()
+                .map_err(|_| LifecycleError::ClientThreadPanicked)??;
+        }
     }
     Ok(())
 }
