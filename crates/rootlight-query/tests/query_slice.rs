@@ -17,7 +17,8 @@ use rootlight_query::{
     QueryService, RepositoryDataTrust, TokenAccountingProfile, project_lexical_documents,
 };
 use rootlight_search::{
-    BuildBudget, LexicalSearch, SearchBudget, SearchError, SearchHit, SearchOutcome, SearchRequest,
+    BuildBudget, LexicalSearch, QueryViolation, SearchBudget, SearchError, SearchHit,
+    SearchOutcome, SearchRequest,
 };
 use rootlight_source::{SourceBudget, SourceReadOptions, SourceService};
 use rootlight_storage::{
@@ -318,7 +319,7 @@ fn execution_enforces_cancellation_and_exact_output_bounds() {
     assert!(cancelled.cancel(CancellationReason::ClientRequest));
     let plan = service
         .plan_code_locate(
-            "fixture",
+            "fixture".to_owned(),
             LocateMode::Text,
             1,
             SearchBudget::default(),
@@ -335,7 +336,7 @@ fn execution_enforces_cancellation_and_exact_output_bounds() {
         QueryService::new(&snapshot, &backend_cancelled).expect("generation inputs agree");
     let backend_plan = backend_service
         .plan_code_locate(
-            "fixture",
+            "fixture".to_owned(),
             LocateMode::Text,
             1,
             SearchBudget::default(),
@@ -355,7 +356,7 @@ fn execution_enforces_cancellation_and_exact_output_bounds() {
 
     let tiny_output = service
         .plan_code_locate(
-            "fixture",
+            "fixture".to_owned(),
             LocateMode::Text,
             1,
             SearchBudget::default(),
@@ -375,7 +376,7 @@ fn execution_enforces_cancellation_and_exact_output_bounds() {
         QueryService::new(&snapshot, &underreported).expect("generation inputs agree");
     let drift_plan = drift_service
         .plan_code_locate(
-            "fixture",
+            "fixture".to_owned(),
             LocateMode::Text,
             1,
             SearchBudget::default(),
@@ -385,6 +386,69 @@ fn execution_enforces_cancellation_and_exact_output_bounds() {
     assert!(matches!(
         drift_service.execute_code_locate(&drift_plan, &Cancellation::new()),
         Err(QueryError::IndexDrift)
+    ));
+}
+
+#[test]
+fn locate_planning_enforces_configured_and_hard_query_byte_boundaries() {
+    let snapshot = fixture_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
+    let configured_edge = format!("{}é", "a ".repeat(255));
+    let configured_overflow = format!("{configured_edge}a");
+    assert_eq!(configured_edge.len(), 512);
+    assert_eq!(configured_overflow.len(), 513);
+
+    service
+        .plan_code_locate(
+            configured_edge,
+            LocateMode::Exact,
+            1,
+            SearchBudget::default(),
+            QueryBudget::new(),
+        )
+        .expect("configured query-byte boundary is admitted");
+    assert!(matches!(
+        service.plan_code_locate(
+            configured_overflow,
+            LocateMode::Exact,
+            1,
+            SearchBudget::default(),
+            QueryBudget::new(),
+        ),
+        Err(QueryError::Search(SearchError::InvalidQuery(
+            QueryViolation::TooLong
+        )))
+    ));
+
+    let hard_budget = SearchBudget {
+        max_query_bytes: 4_096,
+        ..SearchBudget::default()
+    };
+    let hard_edge = format!("{}é", "a ".repeat(2_047));
+    let hard_overflow = format!("{hard_edge}a");
+    assert_eq!(hard_edge.len(), 4_096);
+    assert_eq!(hard_overflow.len(), 4_097);
+    service
+        .plan_code_locate(
+            hard_edge,
+            LocateMode::Exact,
+            1,
+            hard_budget,
+            QueryBudget::new(),
+        )
+        .expect("hard query-byte boundary is admitted");
+    assert!(matches!(
+        service.plan_code_locate(
+            hard_overflow,
+            LocateMode::Exact,
+            1,
+            hard_budget,
+            QueryBudget::new(),
+        ),
+        Err(QueryError::Search(SearchError::InvalidQuery(
+            QueryViolation::TooLong
+        )))
     ));
 }
 
@@ -442,7 +506,7 @@ fn plans_and_execution_enforce_all_query_resource_families() {
 
     assert!(matches!(
         service.plan_code_locate(
-            "fixture",
+            "fixture".to_owned(),
             LocateMode::Text,
             1,
             SearchBudget::default(),
@@ -487,7 +551,7 @@ fn plans_and_execution_enforce_all_query_resource_families() {
     ));
     assert!(matches!(
         service.plan_code_locate(
-            "fixture",
+            "fixture".to_owned(),
             LocateMode::Text,
             1,
             SearchBudget::default(),
@@ -526,7 +590,7 @@ fn plans_and_execution_enforce_all_query_resource_families() {
 
     let token_limited = service
         .plan_code_locate(
-            "fixture",
+            "fixture".to_owned(),
             LocateMode::Text,
             1,
             SearchBudget::default(),
@@ -543,7 +607,7 @@ fn plans_and_execution_enforce_all_query_resource_families() {
 
     let deadline_limited = service
         .plan_code_locate(
-            "fixture",
+            "fixture".to_owned(),
             LocateMode::Text,
             1,
             SearchBudget::default(),
@@ -736,7 +800,7 @@ fn retained_old_generation_remains_addressable_after_activation() {
         .expect("old pinned generation remains queryable");
     let plan = old
         .plan_code_locate(
-            "absent",
+            "absent".to_owned(),
             LocateMode::Exact,
             1,
             SearchBudget::default(),

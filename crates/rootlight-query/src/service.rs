@@ -57,14 +57,13 @@ where
     /// overflow, or a conservative estimate that cannot be admitted.
     pub fn plan_code_locate(
         &self,
-        query: impl Into<String>,
+        query: String,
         mode: LocateMode,
         max_results: usize,
         mut search_budget: SearchBudget,
         budget: QueryBudget,
     ) -> Result<CodeLocatePlan, QueryError> {
         budget.validate()?;
-        let query = query.into();
         if max_results == 0
             || max_results > search_budget.max_results
             || checked_usize_to_u64(max_results)? > budget.max_results
