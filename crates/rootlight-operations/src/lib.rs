@@ -1181,7 +1181,8 @@ impl OperationJournal {
         let connection = self.lock_connection()?;
         let storage = catalog_storage(&connection)?;
         validate_catalog_identity(&connection)?;
-        validate_schema(&connection, storage)
+        validate_schema(&connection, storage)?;
+        validate_relative_timeout_intents(&connection)
     }
 
     /// Revalidates a persistent catalog through a separate read-only connection.
@@ -1236,6 +1237,8 @@ impl OperationJournal {
         map_diagnostic_timeout(validate_catalog_identity(&connection))?;
         check_diagnostic_deadline(deadline)?;
         map_diagnostic_timeout(validate_schema(&connection, CatalogStorage::Persistent))?;
+        check_diagnostic_deadline(deadline)?;
+        map_diagnostic_timeout(validate_relative_timeout_intents(&connection))?;
         check_diagnostic_deadline(deadline)
     }
 
@@ -2099,22 +2102,31 @@ fn reconcile_relative_timeout_intents(connection: &Connection) -> Result<(), Ope
             params![pattern, RELATIVE_TIMEOUT_META_PREFIX],
         )
         .map_err(map_sqlite_error)?;
+    validate_relative_timeout_intents(connection)
+}
+
+fn validate_relative_timeout_intents(connection: &Connection) -> Result<(), OperationError> {
+    let pattern = format!("{RELATIVE_TIMEOUT_META_PREFIX}*");
     let mut statement = connection
         .prepare(
-            "SELECT operations.operation
-             FROM operations
-             JOIN application_meta
+            "SELECT application_meta.key
+             FROM application_meta
+             LEFT JOIN operations
                ON application_meta.key =
                   ?1 || lower(hex(operations.operation))
-             WHERE operations.detached != 1
-                OR operations.deadline_unix_ms IS NULL
-                OR length(application_meta.value) != 8
-                OR application_meta.value = zeroblob(8)
+             WHERE application_meta.key GLOB ?2
+               AND (
+                    operations.operation IS NULL
+                 OR operations.detached != 1
+                 OR operations.deadline_unix_ms IS NULL
+                 OR length(application_meta.value) != 8
+                 OR application_meta.value = zeroblob(8)
+               )
              LIMIT 1",
         )
         .map_err(map_sqlite_error)?;
     let invalid = statement
-        .query_row([RELATIVE_TIMEOUT_META_PREFIX], |_| Ok(()))
+        .query_row(params![RELATIVE_TIMEOUT_META_PREFIX, pattern], |_| Ok(()))
         .optional()
         .map_err(map_sqlite_error)?;
     if invalid.is_some() {
@@ -3324,6 +3336,121 @@ mod tests {
             OperationJournal::open(&path),
             Err(OperationError::CorruptState)
         ));
+    }
+
+    #[test]
+    fn quick_checks_reject_post_open_relative_retry_sidecar_corruption() {
+        #[derive(Clone, Copy)]
+        enum Corruption {
+            InvalidLength,
+            ZeroTimeout,
+            AttachedAssociation,
+            Orphan,
+        }
+
+        for (seed, corruption) in [
+            (40, Corruption::InvalidLength),
+            (41, Corruption::ZeroTimeout),
+            (42, Corruption::AttachedAssociation),
+            (43, Corruption::Orphan),
+        ] {
+            let temporary = tempdir().expect("temporary directory is available");
+            let path = temporary.path().join("operations.sqlite");
+            let journal = OperationJournal::open(&path).expect("journal opens");
+            let relative = OperationSubmission::new(
+                operation(seed),
+                OperationKind::ControlProbe,
+                PlanHash::from_bytes([3; 32]),
+                ClientInstanceId::new([1; 16]).expect("client identity is valid"),
+                true,
+                Some(4_000_000_000_000),
+                None,
+            )
+            .expect("relative submission is valid");
+            journal
+                .submit_with_deadline_retry(
+                    relative,
+                    DeadlineRetry::ReanchoredRelative { timeout_ms: 100 },
+                )
+                .expect("relative-timeout operation submits");
+            let attached = attached_submission(
+                operation(seed.saturating_add(20)),
+                ClientInstanceId::new([2; 16]).expect("client identity is valid"),
+                None,
+                4_000_000_000_000,
+            );
+            journal
+                .submit(attached)
+                .expect("attached operation submits");
+
+            let connection =
+                Connection::open(&path).expect("catalog opens for post-open corruption");
+            match corruption {
+                Corruption::InvalidLength => {
+                    connection
+                        .execute(
+                            "UPDATE application_meta SET value = ?3
+                             WHERE key = ?1 || lower(hex(?2))",
+                            params![
+                                RELATIVE_TIMEOUT_META_PREFIX,
+                                relative.operation.as_bytes().as_slice(),
+                                [1_u8].as_slice(),
+                            ],
+                        )
+                        .expect("retry sidecar length is corrupted");
+                }
+                Corruption::ZeroTimeout => {
+                    connection
+                        .execute(
+                            "UPDATE application_meta SET value = zeroblob(8)
+                             WHERE key = ?1 || lower(hex(?2))",
+                            params![
+                                RELATIVE_TIMEOUT_META_PREFIX,
+                                relative.operation.as_bytes().as_slice(),
+                            ],
+                        )
+                        .expect("retry sidecar timeout is corrupted");
+                }
+                Corruption::AttachedAssociation => {
+                    connection
+                        .execute(
+                            "UPDATE application_meta
+                             SET key = ?1 || lower(hex(?3))
+                             WHERE key = ?1 || lower(hex(?2))",
+                            params![
+                                RELATIVE_TIMEOUT_META_PREFIX,
+                                relative.operation.as_bytes().as_slice(),
+                                attached.operation.as_bytes().as_slice(),
+                            ],
+                        )
+                        .expect("retry sidecar is associated with attached work");
+                }
+                Corruption::Orphan => {
+                    connection
+                        .execute(
+                            "UPDATE application_meta
+                             SET key = ?1 || lower(hex(?3))
+                             WHERE key = ?1 || lower(hex(?2))",
+                            params![
+                                RELATIVE_TIMEOUT_META_PREFIX,
+                                relative.operation.as_bytes().as_slice(),
+                                operation(seed.saturating_add(40)).as_bytes().as_slice(),
+                            ],
+                        )
+                        .expect("retry sidecar is orphaned");
+                }
+            }
+            drop(connection);
+
+            assert!(matches!(
+                journal.quick_check(),
+                Err(OperationError::CorruptState)
+            ));
+            assert!(matches!(
+                OperationJournal::quick_check_path(&path),
+                Err(OperationError::CorruptState)
+            ));
+        }
     }
 
     #[test]
