@@ -915,6 +915,23 @@ impl RequestHandler for WaitingHandler {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ToolsCapabilityHandler;
+
+impl RequestHandler for ToolsCapabilityHandler {
+    fn capabilities(&self) -> HandlerCapabilities {
+        HandlerCapabilities::tools()
+    }
+
+    fn handle(
+        &self,
+        _request: OperatingRequest,
+        _cancellation: RequestCancellation,
+    ) -> HandlerFuture {
+        Box::pin(async { HandlerResponse::error(METHOD_NOT_FOUND, "method is not available") })
+    }
+}
+
 async fn write_message(writer: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>, message: &str) {
     writer
         .write_all(message.as_bytes())
@@ -983,6 +1000,37 @@ async fn initialize_duplex(
     let initialized = read_message(reader).await;
     assert_eq!(initialized["id"], 1);
     write_message(writer, INITIALIZED).await;
+}
+
+#[tokio::test]
+async fn initialize_advertises_only_handler_backed_tool_capability() {
+    let (client, server) = tokio::io::duplex(32 * 1024);
+    let (server_read, server_write) = tokio::io::split(server);
+    let (client_read, mut client_write) = tokio::io::split(client);
+    let mut client_read = BufReader::new(client_read);
+    let task = tokio::spawn(async move {
+        let mut session = Session::rootlight();
+        serve(
+            BufReader::new(server_read),
+            server_write,
+            &mut session,
+            Arc::new(ToolsCapabilityHandler),
+            StdioLimits::default(),
+        )
+        .await
+    });
+
+    write_message(&mut client_write, INITIALIZE).await;
+    let initialized = read_message(&mut client_read).await;
+    assert_eq!(
+        initialized["result"]["capabilities"],
+        json!({"tools": {"listChanged": false}})
+    );
+    write_message(&mut client_write, INITIALIZED).await;
+    client_write.shutdown().await.expect("fixture input closes");
+    task.await
+        .expect("server task joins")
+        .expect("server exits cleanly");
 }
 
 #[tokio::test]
@@ -1112,4 +1160,21 @@ fn invalid_local_limits_fail_before_peer_processing() {
         .blocking_pool()
         .expect_err("oversized blocking pool is rejected before semaphore construction");
     assert!(matches!(error, SessionError::InvalidLimits));
+}
+
+#[tokio::test]
+async fn serve_rejects_a_session_after_manual_lifecycle_processing() {
+    let mut session = Session::rootlight();
+    response(&mut session, INITIALIZE, StdioLimits::default())
+        .expect("manual initialization is handled");
+    let error = serve(
+        BufReader::new(tokio::io::empty()),
+        tokio::io::sink(),
+        &mut session,
+        Arc::new(NoopRequestHandler),
+        StdioLimits::default(),
+    )
+    .await
+    .expect_err("a started session cannot be rebound to a handler");
+    assert!(matches!(error, SessionError::SessionAlreadyStarted));
 }
