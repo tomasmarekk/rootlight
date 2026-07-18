@@ -440,6 +440,10 @@ fn client_errors_map_to_source_free_port_classes() {
         crate::ClientPortError::InvalidResponse
     );
     assert_eq!(
+        map_client_error(ClientError::ResponseAllocationFailed),
+        crate::ClientPortError::Executor
+    );
+    assert_eq!(
         map_client_error(ClientError::RequestTimedOut),
         crate::ClientPortError::Transport
     );
