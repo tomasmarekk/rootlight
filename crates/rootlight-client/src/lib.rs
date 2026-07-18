@@ -2,6 +2,7 @@
 //!
 //! The client validates negotiation, request identifiers, instance nonces, and
 //! stable protocol errors before exposing typed control results to applications.
+//! Asynchronous calls require a Tokio runtime with time and I/O enabled.
 
 #![forbid(unsafe_code)]
 
@@ -34,6 +35,7 @@ use rootlight_protocol::{
 };
 use rootlight_runtime::RuntimePaths;
 use sha2::{Digest as _, Sha256};
+use tokio::time::Instant as TokioInstant;
 use zip::CompressionMethod;
 
 const CLIENT_CAPABILITIES: &[&str] = &[
@@ -1067,6 +1069,10 @@ impl Client {
     /// Dropping the returned future closes its one-request stream, allowing the
     /// daemon to cancel work attached to that connection.
     ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
     /// # Errors
     ///
     /// Returns [`ClientError`] for invalid request bounds, unavailable protocol
@@ -1123,6 +1129,10 @@ impl Client {
     /// Dropping the returned future closes its one-request stream. The independent
     /// `wait_ms` long-poll bound remains part of the daemon request, while `timeout`
     /// bounds the complete client exchange.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
     ///
     /// # Errors
     ///
@@ -1188,6 +1198,10 @@ impl Client {
     /// Dropping the returned future closes its one-request stream, allowing the
     /// daemon to cancel the attached lookup.
     ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
     /// # Errors
     ///
     /// Returns [`ClientError`] for invalid query bounds, unavailable protocol
@@ -1242,6 +1256,10 @@ impl Client {
     /// Dropping the returned future closes its one-request stream, allowing the
     /// daemon to cancel the attached explanation.
     ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
     /// # Errors
     ///
     /// Returns [`ClientError`] for invalid symbol bounds, unavailable protocol
@@ -1293,6 +1311,10 @@ impl Client {
     ///
     /// Dropping the returned future closes its one-request stream, allowing the
     /// daemon to cancel the attached source read.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
     ///
     /// # Errors
     ///
@@ -1371,18 +1393,15 @@ impl Client {
         request: daemon::request_envelope::Request,
         timeout: RequestTimeout,
     ) -> Result<daemon::response_envelope::Response, ClientError> {
-        let deadline = Instant::now()
+        let deadline = TokioInstant::now()
             .checked_add(timeout.duration())
             .ok_or(ClientError::InvalidRequestTimeout)?;
         let codec = FrameCodec::new(rootlight_ipc::MAX_FRAME_BYTES, timeout.duration())
             .unwrap_or_else(|_| unreachable!("validated async client frame limits are valid"));
-        match tokio::time::timeout_at(
-            tokio::time::Instant::from_std(deadline),
-            self.request_async_until(request, deadline, codec),
-        )
-        .await
+        match tokio::time::timeout_at(deadline, self.request_async_until(request, deadline, codec))
+            .await
         {
-            Ok(response) => response,
+            Ok(response) => finish_async_request(deadline, TokioInstant::now(), response),
             Err(_) => Err(ClientError::RequestTimedOut),
         }
     }
@@ -1390,7 +1409,7 @@ impl Client {
     async fn request_async_until(
         &self,
         request: daemon::request_envelope::Request,
-        deadline: Instant,
+        deadline: TokioInstant,
         codec: FrameCodec,
     ) -> Result<daemon::response_envelope::Response, ClientError> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
@@ -1410,7 +1429,7 @@ impl Client {
         let hello = read_server_hello_async(codec, &mut stream).await?;
         let selected_protocol_minor = validate_server_hello(&hello, self.instance_nonce)?;
         ensure_request_supported(&request, selected_protocol_minor)?;
-        let timeout_ms = remaining_timeout_ms(deadline)?;
+        let timeout_ms = remaining_timeout_ms(deadline, TokioInstant::now())?;
         write_request_async(
             codec,
             &mut stream,
@@ -2968,9 +2987,23 @@ fn operation_deadline(timeout: Duration) -> Result<u64, ClientError> {
         .ok_or(ClientError::InvalidRequestTimeout)
 }
 
-fn remaining_timeout_ms(deadline: Instant) -> Result<u32, ClientError> {
+fn finish_async_request<T>(
+    deadline: TokioInstant,
+    observed_at: TokioInstant,
+    response: Result<T, ClientError>,
+) -> Result<T, ClientError> {
+    if observed_at >= deadline {
+        return Err(ClientError::RequestTimedOut);
+    }
+    response
+}
+
+fn remaining_timeout_ms(
+    deadline: TokioInstant,
+    observed_at: TokioInstant,
+) -> Result<u32, ClientError> {
     let remaining = deadline
-        .checked_duration_since(Instant::now())
+        .checked_duration_since(observed_at)
         .ok_or(ClientError::RequestTimedOut)?;
     let rounded_milliseconds = remaining
         .as_millis()
@@ -3564,6 +3597,68 @@ mod tests {
             assert!(std::error::Error::source(&error).is_none());
             assert!(!error.to_string().contains("secret.rs"));
         }
+    }
+
+    #[test]
+    fn async_deadline_is_fail_closed_and_wire_timeout_rounds_up() {
+        let observed_at = TokioInstant::from_std(Instant::now());
+        let exact_deadline = observed_at
+            .checked_add(Duration::from_millis(10))
+            .expect("test deadline is representable");
+        let fractional_deadline = observed_at
+            .checked_add(Duration::from_nanos(10_000_001))
+            .expect("test deadline is representable");
+        let submillisecond_deadline = observed_at
+            .checked_add(Duration::from_nanos(1))
+            .expect("test deadline is representable");
+
+        assert_eq!(
+            remaining_timeout_ms(exact_deadline, observed_at)
+                .expect("exact milliseconds remain valid"),
+            10
+        );
+        assert_eq!(
+            remaining_timeout_ms(fractional_deadline, observed_at)
+                .expect("fractional milliseconds remain valid"),
+            11
+        );
+        assert_eq!(
+            remaining_timeout_ms(submillisecond_deadline, observed_at)
+                .expect("a positive submillisecond budget remains valid"),
+            1
+        );
+        assert!(matches!(
+            remaining_timeout_ms(observed_at, observed_at),
+            Err(ClientError::RequestTimedOut)
+        ));
+
+        assert_eq!(
+            finish_async_request(fractional_deadline, observed_at, Ok(7_u8))
+                .expect("a result observed before the deadline is accepted"),
+            7
+        );
+        assert!(matches!(
+            finish_async_request(
+                fractional_deadline,
+                observed_at,
+                Err::<u8, _>(ClientError::Ipc(IpcError::TimedOut)),
+            ),
+            Err(ClientError::Ipc(IpcError::TimedOut))
+        ));
+        assert!(matches!(
+            finish_async_request(fractional_deadline, fractional_deadline, Ok(7_u8)),
+            Err(ClientError::RequestTimedOut)
+        ));
+        assert!(matches!(
+            finish_async_request(
+                fractional_deadline,
+                fractional_deadline
+                    .checked_add(Duration::from_nanos(1))
+                    .expect("test observation is representable"),
+                Err::<u8, _>(ClientError::Ipc(IpcError::TimedOut)),
+            ),
+            Err(ClientError::RequestTimedOut)
+        ));
     }
 
     #[tokio::test]
