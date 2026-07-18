@@ -969,12 +969,29 @@ impl OperationJournal {
         operation: OperationId,
         reason: CancellationReason,
     ) -> Result<CancellationOutcome, OperationError> {
+        self.request_cancellation_with(operation, reason, || {})
+    }
+
+    fn request_cancellation_with(
+        &self,
+        operation: OperationId,
+        reason: CancellationReason,
+        mut after_commit: impl FnMut(),
+    ) -> Result<CancellationOutcome, OperationError> {
         let reason_text = cancellation_reason_as_str(reason)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
         if current.state.is_terminal() || current.cancellation_requested {
             transaction.commit().map_err(map_sqlite_error)?;
+            drop(connection);
+            if let Some(durable_reason) = current.cancellation_reason {
+                // An idempotent caller waits behind an in-flight first writer
+                // and replays the durable reason before acknowledging it.
+                if let Some(token) = self.lock_cancellations()?.get(&operation) {
+                    let _ = token.cancel(durable_reason);
+                }
+            }
             return Ok(CancellationOutcome {
                 accepted: false,
                 operation: current,
@@ -1010,12 +1027,22 @@ impl OperationJournal {
         if updated != 1 {
             return Err(OperationError::ConcurrentUpdate);
         }
+        // The token-map guard spans COMMIT and signal so terminal compensation
+        // cannot remove the last process-local token in that gap.
+        let mut cancellations = self.lock_cancellations()?;
+        let token = cancellations
+            .get(&operation)
+            .cloned()
+            .ok_or(OperationError::NotFound)?;
         transaction.commit().map_err(map_sqlite_error)?;
         drop(connection);
-        let token = self.cancellation_token(operation)?;
+        after_commit();
         let _ = token.cancel(reason);
         if next_state.is_terminal() {
-            self.lock_cancellations()?.remove(&operation);
+            cancellations.remove(&operation);
+        }
+        drop(cancellations);
+        if next_state.is_terminal() {
             self.prune_to(MAX_OPERATION_HISTORY)?;
         }
         Ok(CancellationOutcome {
@@ -1392,6 +1419,16 @@ impl OperationJournal {
         recovery: RecoveryClass,
         reason: CancellationReason,
     ) -> Result<OperationRecord, OperationError> {
+        self.interrupt_started_with(operation, recovery, reason, || {})
+    }
+
+    fn interrupt_started_with(
+        &self,
+        operation: OperationId,
+        recovery: RecoveryClass,
+        reason: CancellationReason,
+        mut after_commit: impl FnMut(),
+    ) -> Result<OperationRecord, OperationError> {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
@@ -1440,12 +1477,13 @@ impl OperationJournal {
         }
         let interrupted = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
         transaction.commit().map_err(map_sqlite_error)?;
+        drop(connection);
+        after_commit();
         if let Some(token) = self.lock_cancellations()?.remove(&operation)
             && !current.cancellation_requested
         {
             let _ = token.cancel(reason);
         }
-        drop(connection);
         self.prune_to(MAX_OPERATION_HISTORY)?;
         Ok(interrupted)
     }
@@ -3441,6 +3479,69 @@ mod tests {
             Some(CancellationReason::ClientRequest)
         );
         assert_eq!(cancelled.recovery_class, RecoveryClass::NotApplicable);
+    }
+
+    #[test]
+    fn post_commit_compensation_cannot_remove_an_unsignalled_cancellation() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let operation = operation(76);
+        let worker_token = journal.enqueue(operation).expect("operation enqueues");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let cancellation_committed = Arc::new(Barrier::new(2));
+        let release_signal = Arc::new(Barrier::new(2));
+        let cancellation_journal = Arc::clone(&journal);
+        let cancellation_entered = Arc::clone(&cancellation_committed);
+        let cancellation_release = Arc::clone(&release_signal);
+        let cancellation = thread::spawn(move || {
+            cancellation_journal.request_cancellation_with(
+                operation,
+                CancellationReason::ClientRequest,
+                || {
+                    cancellation_entered.wait();
+                    cancellation_release.wait();
+                },
+            )
+        });
+
+        cancellation_committed.wait();
+        let compensation_committed = Arc::new(Barrier::new(2));
+        let compensation_journal = Arc::clone(&journal);
+        let compensation_entered = Arc::clone(&compensation_committed);
+        let compensation = thread::spawn(move || {
+            compensation_journal.interrupt_started_with(
+                operation,
+                RecoveryClass::InterruptedByRestart,
+                CancellationReason::Shutdown,
+                || {
+                    compensation_entered.wait();
+                },
+            )
+        });
+        compensation_committed.wait();
+        release_signal.wait();
+
+        let outcome = cancellation
+            .join()
+            .expect("cancellation thread joins")
+            .expect("durable cancellation returns its outcome");
+        let compensated = compensation
+            .join()
+            .expect("compensation thread joins")
+            .expect("committed start compensation completes");
+        assert!(outcome.accepted);
+        assert_eq!(
+            worker_token.reason(),
+            Some(CancellationReason::ClientRequest)
+        );
+        assert_eq!(compensated.state, OperationState::Cancelled);
+        assert!(compensated.cancellation_requested);
+        assert_eq!(
+            compensated.cancellation_reason,
+            Some(CancellationReason::ClientRequest)
+        );
+        assert_eq!(compensated.recovery_class, RecoveryClass::NotApplicable);
     }
 
     #[test]
