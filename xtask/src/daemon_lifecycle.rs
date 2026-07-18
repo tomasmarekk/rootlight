@@ -15,7 +15,7 @@ use std::{
 use rootlight_client::{
     Client, ClientError, ConnectPolicy, DaemonLifecycle, Health, OperationState, OwnedDaemon,
 };
-use rootlight_error::{ErrorCode, PublicValue};
+use rootlight_error::{ErrorCode, NextAction, PublicValue};
 use rootlight_ids::OperationId;
 use rootlight_ipc::{IpcError, connect};
 use rootlight_observability::{
@@ -1026,13 +1026,24 @@ fn is_retryable_control_failure(error: &ClientError) -> bool {
         ClientError::Public(error) => {
             error.code() == ErrorCode::Busy
                 && error.retryable()
-                && matches!(
-                    error.message(),
-                    "daemon request timed out" | "operation admission is still pending"
-                )
+                && error.message() == "daemon request timed out"
         }
         _ => false,
     }
+}
+
+fn is_retryable_cancellation_failure(error: &ClientError, operation: OperationId) -> bool {
+    if is_retryable_control_failure(error) {
+        return true;
+    }
+    let Some(error) = error.as_public_error() else {
+        return false;
+    };
+    error.code() == ErrorCode::Busy
+        && error.retryable()
+        && error.message() == "operation admission is still pending"
+        && error.operation() == Some(operation)
+        && error.next_actions() == [NextAction::InspectOperation]
 }
 
 fn quota_deadline(timeout: Duration) -> Result<Instant, LifecycleError> {
@@ -1095,7 +1106,7 @@ fn cancel_and_wait(client: &Client, operation: OperationId) -> Result<(), Lifecy
                 return Ok(());
             }
             Ok(_) => return Err(LifecycleError::UnexpectedCancellationState),
-            Err(error) if is_retryable_control_failure(&error) => {
+            Err(error) if is_retryable_cancellation_failure(&error, operation) => {
                 require_operation_window(deadline)?;
                 thread::sleep(POLL_INTERVAL);
             }
@@ -2063,12 +2074,13 @@ mod tests {
     use std::io;
 
     use rootlight_client::ClientError;
-    use rootlight_error::{ErrorCode, PublicError};
+    use rootlight_error::{ErrorCode, NextAction, PublicError};
+    use rootlight_ids::OperationId;
     use rootlight_ipc::IpcError;
 
     use super::{
-        QuotaDaemonStderr, is_retryable_control_failure, privacy_checked_quota_stderr,
-        sequences_are_strictly_increasing,
+        QuotaDaemonStderr, is_retryable_cancellation_failure, is_retryable_control_failure,
+        privacy_checked_quota_stderr, sequences_are_strictly_increasing,
     };
 
     #[test]
@@ -2091,18 +2103,32 @@ mod tests {
         assert!(is_retryable_control_failure(&ClientError::Ipc(
             IpcError::Transport(io::Error::new(io::ErrorKind::TimedOut, "fixture"))
         )));
-        for message in [
-            "daemon request timed out",
-            "operation admission is still pending",
-        ] {
-            let error = PublicError::builder(ErrorCode::Busy, message)
+        let request_timeout = PublicError::builder(ErrorCode::Busy, "daemon request timed out")
+            .retryable()
+            .build()
+            .expect("closed timeout fixture builds");
+        assert!(is_retryable_control_failure(&ClientError::Public(
+            Box::new(request_timeout)
+        )));
+        let operation = OperationId::from_bytes([1; 16]);
+        let admission_pending =
+            PublicError::builder(ErrorCode::Busy, "operation admission is still pending")
                 .retryable()
+                .operation(operation)
+                .next_action(NextAction::InspectOperation)
                 .build()
-                .expect("closed timeout fixture builds");
-            assert!(is_retryable_control_failure(&ClientError::Public(
-                Box::new(error)
-            )));
-        }
+                .expect("closed admission fixture builds");
+        assert!(!is_retryable_control_failure(&ClientError::Public(
+            Box::new(admission_pending.clone())
+        )));
+        assert!(is_retryable_cancellation_failure(
+            &ClientError::Public(Box::new(admission_pending.clone())),
+            operation
+        ));
+        assert!(!is_retryable_cancellation_failure(
+            &ClientError::Public(Box::new(admission_pending)),
+            OperationId::from_bytes([2; 16])
+        ));
         let semantic_busy =
             PublicError::builder(ErrorCode::Busy, "daemon is not accepting operations")
                 .retryable()
