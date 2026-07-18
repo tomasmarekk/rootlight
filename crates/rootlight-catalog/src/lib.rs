@@ -403,6 +403,20 @@ pub struct EphemeralOracleReader {
 }
 
 impl EphemeralOracleReader {
+    /// Returns SQLite pages allocated by the sealed in-memory database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when page accounting is unavailable or
+    /// internally inconsistent.
+    pub fn allocated_bytes(&self) -> Result<u64, CatalogError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
+        schema::oracle_allocated_bytes(&connection)
+    }
+
     /// Materializes the canonical generation from the in-memory oracle.
     ///
     /// # Errors

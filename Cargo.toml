@@ -22,6 +22,7 @@ members = [
     "crates/rootlight-query",
     "crates/rootlight-runtime",
     "crates/rootlight-search",
+    "crates/rootlight-service",
     "crates/rootlight-source",
     "crates/rootlight-storage",
     "crates/rootlight-vfs",

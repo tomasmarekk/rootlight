@@ -51,6 +51,7 @@ fn ephemeral_oracle_round_trips_an_identity_verified_generation() {
         .expect("ephemeral oracle initializes")
         .seal(verified, &context)
         .expect("verified generation seals");
+    assert!(reader.allocated_bytes().expect("page allocation reads") > 0);
     let reopened = reader
         .read_generation(&context)
         .expect("sealed generation reads and verifies");

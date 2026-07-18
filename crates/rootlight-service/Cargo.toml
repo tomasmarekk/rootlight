@@ -1,0 +1,30 @@
+[package]
+name = "rootlight-service"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
+rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
+rootlight-cancel = { path = "../rootlight-cancel" }
+rootlight-catalog = { path = "../rootlight-catalog" }
+rootlight-config = { path = "../rootlight-config" }
+rootlight-discovery = { path = "../rootlight-discovery" }
+rootlight-ids = { path = "../rootlight-ids" }
+rootlight-ir = { path = "../rootlight-ir" }
+rootlight-query = { path = "../rootlight-query" }
+rootlight-search = { path = "../rootlight-search" }
+rootlight-source = { path = "../rootlight-source" }
+rootlight-storage = { path = "../rootlight-storage" }
+rootlight-vfs = { path = "../rootlight-vfs" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

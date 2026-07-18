@@ -2101,6 +2101,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootlight-service"
+version = "0.1.0"
+dependencies = [
+ "rootlight-adapter-sdk",
+ "rootlight-adapter-treesitter",
+ "rootlight-cancel",
+ "rootlight-catalog",
+ "rootlight-config",
+ "rootlight-discovery",
+ "rootlight-ids",
+ "rootlight-ir",
+ "rootlight-query",
+ "rootlight-search",
+ "rootlight-source",
+ "rootlight-storage",
+ "rootlight-vfs",
+ "serde",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "rootlight-source"
 version = "0.1.0"
 dependencies = [

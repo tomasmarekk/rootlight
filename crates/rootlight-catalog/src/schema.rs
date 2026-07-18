@@ -638,6 +638,17 @@ pub(crate) fn validate_oracle(
     validate_integrity(connection, Some(context))
 }
 
+pub(crate) fn oracle_allocated_bytes(connection: &Connection) -> Result<u64, CatalogError> {
+    let page_count = pragma_nonnegative_u64(connection, "page_count")?;
+    let page_size = pragma_nonnegative_u64(connection, "page_size")?;
+    if page_size == 0 {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    page_count
+        .checked_mul(page_size)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))
+}
+
 fn control_definition() -> SchemaDefinition<'static> {
     SchemaDefinition {
         application_id: CONTROL_APPLICATION_ID,

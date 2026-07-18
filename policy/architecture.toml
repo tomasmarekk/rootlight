@@ -22,6 +22,7 @@ workspace_members = [
   "rootlight-query",
   "rootlight-runtime",
   "rootlight-search",
+  "rootlight-service",
   "rootlight-source",
   "rootlight-storage",
   "rootlight-vfs",
@@ -41,6 +42,7 @@ allowed_internal_dependencies = [
   "rootlight-operations",
   "rootlight-protocol",
   "rootlight-runtime",
+  "rootlight-service",
 ]
 allow_build_script = false
 
@@ -207,6 +209,25 @@ name = "rootlight-search"
 allowed_internal_dependencies = [
   "rootlight-cancel",
   "rootlight-ids",
+]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-service"
+allowed_internal_dependencies = [
+  "rootlight-adapter-sdk",
+  "rootlight-adapter-treesitter",
+  "rootlight-cancel",
+  "rootlight-catalog",
+  "rootlight-config",
+  "rootlight-discovery",
+  "rootlight-ids",
+  "rootlight-ir",
+  "rootlight-query",
+  "rootlight-search",
+  "rootlight-source",
+  "rootlight-storage",
+  "rootlight-vfs",
 ]
 allow_build_script = false
 
