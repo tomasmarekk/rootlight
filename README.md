@@ -6,33 +6,6 @@
 
 This repository is currently in the development phase.
 
-## Platform capability status
-
-### macOS support-bundle file output
-
-Rootlight does not currently support writing support-bundle archives on macOS. A
-valid `rootlight support-bundle --output <file>` request fails closed before
-runtime-directory resolution, daemon discovery or startup, bundle generation,
-output-path inspection, or filesystem mutation.
-
-The versioned CLI error reports:
-
-- exit family `degraded`;
-- error code `UNSUPPORTED_CAPABILITY`;
-- capability detail `support_bundle_output`;
-- platform detail `macos`.
-
-The error never includes the requested path. Do not work around this boundary by
-weakening file permissions or redirecting sensitive output through an
-unprotected temporary path. macOS support-bundle file output remains unavailable
-unless the primary user explicitly accepts the Proposed ADR-026 decision and
-separately approves its tightly scoped `rootlight-vfs` unsafe boundary, with
-compiler-expanded inventory, cargo-geiger, and native hostile APFS evidence
-gates all passing before the capability is enabled.
-
-This limitation is specific to support-bundle file publication and is not a
-claim that the complete Rootlight product is supported on macOS.
-
 ## License
 
 Rootlight is open source under the [GNU Affero General Public License v3.0 only](./LICENSE)
