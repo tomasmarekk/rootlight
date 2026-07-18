@@ -117,6 +117,10 @@
       "blake3": "01c3ba18b570b879388d51436e8959dd2fcc7e31fe6f04848adaf3ebc193e2ee"
     },
     {
+      "path": "tests/fixtures/mcp/1.0/tool-transcript.jsonl",
+      "blake3": "f62d33ac6fc5e13b0e433fa95fdbe200c2f5a368dcf1f65b0304d43d8f264201"
+    },
+    {
       "path": "xtask/Cargo.toml",
       "blake3": "d85a0b93a25af7c19cda6b815d0e4edecedfd719e1521dbd2e1e5e854efa1cf8"
     },
@@ -126,7 +130,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "f79d54e1cc72c25bd96efe57750aa0d1f45bcf8ea04985260b7b3537e0b897a4"
+      "blake3": "16c5a5c21195dab72b6c8d00bde4d16d946ac964f6462c0d96460e24ebe4e154"
     }
   ],
   "artifacts": [

@@ -1,0 +1,8 @@
+{"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1.0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":"list","method":"tools/list","params":{"_meta":{"progressToken":"catalog","vendor.example/trace":true}}}
+{"jsonrpc":"2.0","id":"index","method":"tools/call","params":{"_meta":{"progressToken":1},"name":"repo.index","arguments":{"root":"C:/fixture"}}}
+{"jsonrpc":"2.0","id":"invalid-input","method":"tools/call","params":{"name":"repo.index","arguments":{"root":"C:/fixture","repository_id":"repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"}}}
+{"jsonrpc":"2.0","id":"domain-error","method":"tools/call","params":{"name":"operation.status","arguments":{"operation_id":"op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv"}}}
+{"jsonrpc":"2.0","id":"invalid-meta","method":"tools/call","params":{"_meta":{"progressToken":{}},"name":"repo.index","arguments":{"root":"C:/fixture"}}}
+{"jsonrpc":"2.0","id":"unsupported-task","method":"tools/call","params":{"name":"repo.index","arguments":{"root":"C:/fixture"},"task":{"ttl":60000}}}

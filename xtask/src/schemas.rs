@@ -57,7 +57,7 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 3] = [
     ("1.2", "protobuf/1.2/rootlight.desc"),
     ("1.3", "protobuf/1.3/rootlight.desc"),
 ];
-const SCHEMA_PROVENANCE_INPUTS: [&str; 14] = [
+const SCHEMA_PROVENANCE_INPUTS: [&str; 15] = [
     "Cargo.lock",
     "crates/rootlight-config/src/lib.rs",
     "crates/rootlight-error/src/lib.rs",
@@ -69,6 +69,7 @@ const SCHEMA_PROVENANCE_INPUTS: [&str; 14] = [
     "crates/rootlight-mcp-contract/src/lib.rs",
     "crates/rootlight-mcp-contract/src/vertical.rs",
     "tests/fixtures/mcp/1.0/tool-contracts.json",
+    "tests/fixtures/mcp/1.0/tool-transcript.jsonl",
     "xtask/Cargo.toml",
     "xtask/src/main.rs",
     "xtask/src/schemas.rs",
