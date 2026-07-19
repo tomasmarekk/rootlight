@@ -10,23 +10,26 @@ use std::{
 };
 
 use rootlight_adapter_sdk::{
-    AdapterDiagnostic, AdapterError, AnalysisReport, AnalysisRequest, CoverageReport,
-    DiagnosticCode, DomainCoverage, IrBatch, IrBatchSink, IrRecord, LanguageAnalyzer,
-    MemoryAdmissionPolicy, MemoryEnforcement, ParseOutput, ParseProvider, ProducerDescriptor,
-    RequestError, ResourceKind, ResourceUsage, SinkError, StreamEnd, StreamUsage, SyntaxFact,
-    SyntaxFactKind, execute_parse,
+    AdapterDiagnostic, AdapterError, AnalysisLimits, AnalysisOutput, AnalysisReport,
+    AnalysisRequest, CoverageReport, DiagnosticCode, DomainCoverage, IrBatch, IrBatchSink,
+    IrRecord, LanguageAnalyzer, MemoryAdmissionPolicy, MemoryEnforcement, ParseOutput,
+    ParseProvider, ProducerDescriptor, RequestError, ResourceKind, ResourceUsage, SinkError,
+    StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, execute_analysis, execute_parse,
 };
 use rootlight_cancel::Cancellation;
-use rootlight_ids::{ContentHash, FactId, SymbolId, SymbolIdentity, content_hash, derive_symbol};
+use rootlight_ids::{
+    ContentHash, FactId, FileId, RepositoryId, SymbolId, SymbolIdentity, content_hash,
+    derive_symbol,
+};
 use rootlight_ir::{
     AnalysisTier, Confidence, ContainerRef, CoverageRecord, CoverageScope, CoverageStatus,
     DiagnosticRecord, EntityFlag, EntityKind, EntityRecord, EntityVisibility, EvidenceKind,
-    ExtensionEnvelope, FactDomain, FactEvidence, FactRef, FileIdentityClaim, FileRecord, IrLimits,
-    LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION, LexicalEvidenceFormat,
-    LexicalEvidenceKind, LexicalEvidenceV1, MAX_LEXICAL_SIGNATURE_BYTES, OccurrenceRecord,
-    OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord,
-    RelationEndpoint, RelationPredicate, RelationRecord, SkippedRegion, SkippedRegionReason,
-    SourceRef, SourceSpan, SymbolIdentityClaim, derive_coverage_record_id,
+    ExtensionEnvelope, ExtensionSupport, FactDomain, FactEvidence, FactRef, FileIdentityClaim,
+    FileRecord, IrLimits, LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION,
+    LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1, MAX_LEXICAL_SIGNATURE_BYTES,
+    OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind,
+    ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SkippedRegion,
+    SkippedRegionReason, SourceRef, SourceSpan, SymbolIdentityClaim, derive_coverage_record_id,
     derive_diagnostic_record_id, derive_occurrence_record_id, derive_provenance_record_id,
     derive_relation_record_id, derive_skipped_region_id, entity_kind_identity_label,
     new_file_identity_claim_envelope, new_lexical_evidence_envelope,
@@ -49,9 +52,60 @@ const STABLE_SCOPE_IDENTITY_UNAVAILABLE: &str = "stable-scope-identity-unavailab
 #[derive(Clone)]
 pub struct TreeSitterAnalyzer {
     parser: Arc<dyn ParseProvider>,
+    instance: Arc<()>,
     descriptor: ProducerDescriptor,
     frontend_version: String,
     binary_digest: ContentHash,
+}
+
+/// Reusable, source-free Tree-sitter parse output for one immutable file.
+///
+/// The artifact retains parser-local syntax facts and stable diagnostics, not
+/// source bytes. Its identity intentionally excludes the generation so an
+/// exact dependency match can reuse parsing while lowering fresh generation-
+/// bound IR and fact identities.
+pub struct TreeSitterStructuralArtifact {
+    analyzer_instance: Arc<()>,
+    repository: RepositoryId,
+    file: FileId,
+    content_hash: ContentHash,
+    parse_context_hash: ContentHash,
+    limits: AnalysisLimits,
+    parse_output: ParseOutput,
+    accounted_bytes: usize,
+}
+
+impl TreeSitterStructuralArtifact {
+    /// Returns the stable repository-scoped file identity.
+    #[must_use]
+    pub const fn file(&self) -> FileId {
+        self.file
+    }
+
+    /// Returns the immutable source-content digest.
+    #[must_use]
+    pub const fn content_hash(&self) -> ContentHash {
+        self.content_hash
+    }
+
+    /// Returns the deterministic logical retained-byte charge for admission.
+    #[must_use]
+    pub const fn accounted_bytes(&self) -> usize {
+        self.accounted_bytes
+    }
+}
+
+impl fmt::Debug for TreeSitterStructuralArtifact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TreeSitterStructuralArtifact")
+            .field("file", &self.file)
+            .field("content_hash", &self.content_hash)
+            .field("syntax_facts", &self.parse_output.facts().len())
+            .field("diagnostics", &self.parse_output.diagnostics().len())
+            .field("accounted_bytes", &self.accounted_bytes)
+            .finish()
+    }
 }
 
 /// Invalid immutable configuration for [`TreeSitterAnalyzer`].
@@ -101,52 +155,113 @@ impl TreeSitterAnalyzer {
         );
         Ok(Self {
             parser,
+            instance: Arc::new(()),
             descriptor,
             frontend_version: frontend_version.to_owned(),
             binary_digest,
         })
     }
-}
 
-impl fmt::Debug for TreeSitterAnalyzer {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("TreeSitterAnalyzer")
-            .field("descriptor", &self.descriptor)
-            .field("frontend_version", &self.frontend_version)
-            .field("binary_digest", &self.binary_digest)
-            .finish_non_exhaustive()
-    }
-}
-
-impl LanguageAnalyzer for TreeSitterAnalyzer {
-    fn descriptor(&self) -> &ProducerDescriptor {
-        &self.descriptor
-    }
-
-    fn analyze(
+    /// Parses and lowers one file while returning reusable structural work.
+    ///
+    /// The returned artifact is safe to retain only under a bounded caller-
+    /// owned policy. A later reuse still performs full generation-bound
+    /// lowering, validation, and transactional IR admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] for the same request, parser, analyzer,
+    /// resource, report, cancellation, or sink failures as the standard SDK
+    /// execution path.
+    pub fn analyze_and_capture(
         &self,
         request: &AnalysisRequest<'_>,
-        sink: &mut dyn IrBatchSink,
+        extensions: ExtensionSupport,
+        memory_policy: MemoryAdmissionPolicy,
         cancellation: &Cancellation,
-    ) -> Result<AnalysisReport, AdapterError> {
+    ) -> Result<(AnalysisOutput, TreeSitterStructuralArtifact), AdapterError> {
         cancellation.check()?;
+        self.validate_request_identity(request)?;
+        let parse_output = self.parse_request(request, cancellation)?;
+        let prepared = PreparsedTreeSitterAnalyzer {
+            analyzer: self,
+            parse_output: &parse_output,
+        };
+        let output = execute_analysis(&prepared, request, extensions, memory_policy, cancellation)?;
+        let artifact = TreeSitterStructuralArtifact::capture(self, request, parse_output)?;
+        Ok((output, artifact))
+    }
+
+    /// Lowers one exact-match structural artifact into a new generation.
+    ///
+    /// Repository, file, content, path, parse context, limits, producer,
+    /// frontend, and binary identity must all match. Only the generation may
+    /// differ.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] when the artifact is stale or belongs to
+    /// another analysis context, or for the same bounded lowering failures as
+    /// [`Self::analyze_and_capture`].
+    pub fn analyze_from_artifact(
+        &self,
+        request: &AnalysisRequest<'_>,
+        artifact: &TreeSitterStructuralArtifact,
+        extensions: ExtensionSupport,
+        memory_policy: MemoryAdmissionPolicy,
+        cancellation: &Cancellation,
+    ) -> Result<AnalysisOutput, AdapterError> {
+        cancellation.check()?;
+        self.validate_request_identity(request)?;
+        if !artifact.matches(self, request) {
+            return Err(provider_failure("treesitter-structural-artifact-mismatch"));
+        }
+        let prepared = PreparsedTreeSitterAnalyzer {
+            analyzer: self,
+            parse_output: &artifact.parse_output,
+        };
+        execute_analysis(&prepared, request, extensions, memory_policy, cancellation)
+    }
+
+    fn validate_request_identity(&self, request: &AnalysisRequest<'_>) -> Result<(), AdapterError> {
+        if self.descriptor.language() != request.language() {
+            return Err(RequestError::UnsupportedLanguage.into());
+        }
+        if self.descriptor.tier() != request.tier() {
+            return Err(RequestError::UnsupportedTier.into());
+        }
         if request.encoding().as_str() != "utf-8" {
             return Err(RequestError::UnsupportedEncoding.into());
         }
         if request.generated_status().is_none() {
             return Err(RequestError::GeneratedStatusRequired.into());
         }
+        Ok(())
+    }
+
+    fn parse_request(
+        &self,
+        request: &AnalysisRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<ParseOutput, AdapterError> {
+        cancellation.check()?;
         let parse_request = request.to_parse_request();
-        let parser_memory_policy =
-            memory_policy_for(self.parser.capabilities().memory_enforcement());
-        let parse_output = execute_parse(
+        execute_parse(
             self.parser.as_ref(),
             &parse_request,
-            parser_memory_policy,
+            memory_policy_for(self.parser.capabilities().memory_enforcement()),
             cancellation,
-        )?;
-        let lowered = Lowering::new(self, request, &parse_output)?.lower(cancellation)?;
+        )
+    }
+
+    fn lower_parse_output(
+        &self,
+        request: &AnalysisRequest<'_>,
+        parse_output: &ParseOutput,
+        sink: &mut dyn IrBatchSink,
+        cancellation: &Cancellation,
+    ) -> Result<AnalysisReport, AdapterError> {
+        let lowered = Lowering::new(self, request, parse_output)?.lower(cancellation)?;
         emit_records(lowered.records, request, sink, cancellation)?;
         cancellation.check()?;
 
@@ -176,6 +291,136 @@ impl LanguageAnalyzer for TreeSitterAnalyzer {
         )
         .map_err(AdapterError::from)
     }
+}
+
+impl TreeSitterStructuralArtifact {
+    fn capture(
+        analyzer: &TreeSitterAnalyzer,
+        request: &AnalysisRequest<'_>,
+        parse_output: ParseOutput,
+    ) -> Result<Self, AdapterError> {
+        let parse_context_hash = structural_parse_context_hash(request)?;
+        let accounted_bytes = structural_artifact_bytes(&parse_output)?;
+        Ok(Self {
+            analyzer_instance: Arc::clone(&analyzer.instance),
+            repository: request.source().source_ref().repository(),
+            file: request.source().source_ref().span().file(),
+            content_hash: request.source().source_ref().content_hash(),
+            parse_context_hash,
+            limits: request.limits().clone(),
+            parse_output,
+            accounted_bytes,
+        })
+    }
+
+    fn matches(&self, analyzer: &TreeSitterAnalyzer, request: &AnalysisRequest<'_>) -> bool {
+        let source = request.source().source_ref();
+        Arc::ptr_eq(&self.analyzer_instance, &analyzer.instance)
+            && self.repository == source.repository()
+            && self.file == source.span().file()
+            && self.content_hash == source.content_hash()
+            && structural_parse_context_hash(request)
+                .is_ok_and(|context| context == self.parse_context_hash)
+            && self.limits == *request.limits()
+    }
+}
+
+struct PreparsedTreeSitterAnalyzer<'a> {
+    analyzer: &'a TreeSitterAnalyzer,
+    parse_output: &'a ParseOutput,
+}
+
+impl LanguageAnalyzer for PreparsedTreeSitterAnalyzer<'_> {
+    fn descriptor(&self) -> &ProducerDescriptor {
+        &self.analyzer.descriptor
+    }
+
+    fn analyze(
+        &self,
+        request: &AnalysisRequest<'_>,
+        sink: &mut dyn IrBatchSink,
+        cancellation: &Cancellation,
+    ) -> Result<AnalysisReport, AdapterError> {
+        self.analyzer
+            .lower_parse_output(request, self.parse_output, sink, cancellation)
+    }
+}
+
+impl fmt::Debug for TreeSitterAnalyzer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TreeSitterAnalyzer")
+            .field("descriptor", &self.descriptor)
+            .field("frontend_version", &self.frontend_version)
+            .field("binary_digest", &self.binary_digest)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LanguageAnalyzer for TreeSitterAnalyzer {
+    fn descriptor(&self) -> &ProducerDescriptor {
+        &self.descriptor
+    }
+
+    fn analyze(
+        &self,
+        request: &AnalysisRequest<'_>,
+        sink: &mut dyn IrBatchSink,
+        cancellation: &Cancellation,
+    ) -> Result<AnalysisReport, AdapterError> {
+        self.validate_request_identity(request)?;
+        let parse_output = self.parse_request(request, cancellation)?;
+        self.lower_parse_output(request, &parse_output, sink, cancellation)
+    }
+}
+
+fn structural_parse_context_hash(
+    request: &AnalysisRequest<'_>,
+) -> Result<ContentHash, AdapterError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.treesitter.structural-artifact-context/1\0");
+    hash_sized_bytes(&mut hasher, request.source().path().identity_bytes())?;
+    hash_sized_bytes(&mut hasher, request.language().as_str().as_bytes())?;
+    hash_sized_bytes(&mut hasher, request.encoding().as_str().as_bytes())?;
+    let range_count = u64::try_from(request.included_ranges().len())
+        .map_err(|_| provider_failure("treesitter-structural-artifact-accounting"))?;
+    hasher.update(&range_count.to_be_bytes());
+    for range in request.included_ranges() {
+        hasher.update(range.span().file().as_bytes());
+        hasher.update(&range.span().start_byte().to_be_bytes());
+        hasher.update(&range.span().end_byte().to_be_bytes());
+        hash_sized_bytes(&mut hasher, range.language().as_str().as_bytes())?;
+    }
+    Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
+}
+
+fn hash_sized_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) -> Result<(), AdapterError> {
+    let length = u64::try_from(bytes.len())
+        .map_err(|_| provider_failure("treesitter-structural-artifact-accounting"))?;
+    hasher.update(&length.to_be_bytes());
+    hasher.update(bytes);
+    Ok(())
+}
+
+fn structural_artifact_bytes(output: &ParseOutput) -> Result<usize, AdapterError> {
+    let stream = output.report().resources().stream();
+    std::mem::size_of::<TreeSitterStructuralArtifact>()
+        .checked_add(stream.output_bytes())
+        .and_then(|bytes| {
+            output
+                .facts()
+                .len()
+                .checked_mul(std::mem::size_of::<SyntaxFact>())
+                .and_then(|fact_bytes| bytes.checked_add(fact_bytes))
+        })
+        .and_then(|bytes| {
+            output
+                .diagnostics()
+                .len()
+                .checked_mul(std::mem::size_of::<AdapterDiagnostic>())
+                .and_then(|diagnostic_bytes| bytes.checked_add(diagnostic_bytes))
+        })
+        .ok_or_else(|| provider_failure("treesitter-structural-artifact-accounting"))
 }
 
 fn memory_policy_for(enforcement: MemoryEnforcement) -> MemoryAdmissionPolicy {
@@ -1620,7 +1865,9 @@ fn diagnostic_record(
     diagnostic: &AdapterDiagnostic,
     provenance: FactId,
 ) -> Result<DiagnosticRecord, AdapterError> {
-    let source = diagnostic.source().cloned();
+    let source = diagnostic
+        .source()
+        .map(|diagnostic_source| source_for_span(full_source, diagnostic_source.span()));
     let mut record = DiagnosticRecord {
         id: FactId::from_bytes([0; 20]),
         repository: full_source.repository(),

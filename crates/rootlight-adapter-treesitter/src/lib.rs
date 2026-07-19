@@ -18,7 +18,9 @@ pub use incremental::{
     ParseReuseKey, ParseWithPrevious, PreviousParse, ReuseInvalidation, ReuseStatus, SourceEdit,
     SourceEditError, SourceEditIdentity,
 };
-pub use lowering::{TreeSitterAnalyzer, TreeSitterAnalyzerConfigError};
+pub use lowering::{
+    TreeSitterAnalyzer, TreeSitterAnalyzerConfigError, TreeSitterStructuralArtifact,
+};
 pub use registry::{GrammarDescriptor, GrammarFamily, GrammarRegistry, RegistryError};
 pub use runtime::{CacheStats, RuntimeStats, TreeSitterProvider};
 

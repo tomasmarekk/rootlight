@@ -181,6 +181,70 @@ fn real_analyzer_produces_valid_deterministic_ir_for_all_grammars() {
 }
 
 #[test]
+fn structural_artifact_reuse_matches_a_clean_generation_analysis() {
+    let case = CASES[0];
+    let primary_provider = Arc::new(provider());
+    let primary_analyzer = analyzer(&primary_provider, case);
+    let limits = limits();
+    let extensions = ExtensionSupport::default();
+    let fixture = Fixture::new(case, b"fn broken(");
+    let initial_request = request(&fixture.snapshot, &fixture.source, case, &limits);
+    let (_, artifact) = primary_analyzer
+        .analyze_and_capture(
+            &initial_request,
+            extensions.clone(),
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            &deadline(),
+        )
+        .expect("initial structural artifact is captured");
+    let successor = fixture.next_generation();
+    let successor_request = request(&successor.snapshot, &successor.source, case, &limits);
+
+    let reused = primary_analyzer
+        .analyze_from_artifact(
+            &successor_request,
+            &artifact,
+            extensions.clone(),
+            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            &deadline(),
+        )
+        .expect("exact structural artifact is reusable");
+    let clean = analyze(&primary_analyzer, &successor_request, &extensions);
+
+    assert_eq!(reused.document(), clean.document());
+    assert_eq!(reused.report(), clean.report());
+    assert!(
+        !reused.document().diagnostics.is_empty(),
+        "malformed fixture must exercise diagnostic rebinding"
+    );
+    assert!(reused.document().diagnostics.iter().all(|diagnostic| {
+        diagnostic.generation == successor.source.generation()
+            && diagnostic
+                .source
+                .as_ref()
+                .is_none_or(|source| source.generation() == successor.source.generation())
+    }));
+    assert_eq!(artifact.file(), successor.snapshot.file());
+    assert_eq!(artifact.content_hash(), successor.snapshot.content_hash());
+    assert!(artifact.accounted_bytes() > 0);
+
+    let other_provider = Arc::new(provider());
+    let other_analyzer = analyzer(&other_provider, case);
+    assert!(
+        other_analyzer
+            .analyze_from_artifact(
+                &successor_request,
+                &artifact,
+                extensions,
+                MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+                &deadline(),
+            )
+            .is_err(),
+        "identical public metadata must not authorize cross-provider reuse"
+    );
+}
+
+#[test]
 fn reviewed_queries_preserve_explicit_call_sites() {
     let provider = Arc::new(provider());
     let limits = limits();
@@ -834,6 +898,22 @@ impl Fixture {
             &self.temporary,
             self.repository,
             GenerationId::from_bytes([18; 20]),
+            &self.relative,
+        );
+        Self {
+            temporary: Arc::clone(&self.temporary),
+            relative: self.relative.clone(),
+            repository: self.repository,
+            snapshot,
+            source,
+        }
+    }
+
+    fn next_generation(&self) -> Self {
+        let (snapshot, source) = capture(
+            &self.temporary,
+            self.repository,
+            GenerationId::from_bytes([19; 20]),
             &self.relative,
         );
         Self {
