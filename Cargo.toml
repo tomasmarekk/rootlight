@@ -13,6 +13,7 @@ members = [
     "crates/rootlight-config",
     "crates/rootlight-daemon-core",
     "crates/rootlight-error",
+    "crates/rootlight-git",
     "crates/rootlight-ids",
     "crates/rootlight-ipc",
     "crates/rootlight-ir",

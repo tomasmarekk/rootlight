@@ -1986,6 +1986,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootlight-git"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "rootlight-cancel",
+ "rootlight-ids",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "rootlight-ids"
 version = "0.1.0"
 dependencies = [

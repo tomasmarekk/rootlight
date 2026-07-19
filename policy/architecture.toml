@@ -14,6 +14,7 @@ workspace_members = [
   "rootlight-daemon-core",
   "rootlight-discovery",
   "rootlight-error",
+  "rootlight-git",
   "rootlight-ids",
   "rootlight-ipc",
   "rootlight-ir",
@@ -179,6 +180,14 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-error"
 allowed_internal_dependencies = ["rootlight-ids"]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-git"
+allowed_internal_dependencies = [
+  "rootlight-cancel",
+  "rootlight-ids",
+]
 allow_build_script = false
 
 [[crates]]
