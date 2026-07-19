@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod generation;
+mod lifecycle;
 mod publication;
 mod reader;
 
@@ -16,6 +17,12 @@ pub use generation::{
     GenerationStats, GenerationValidationError, GenerationWriter, HARD_MAX_GENERATION_ROWS,
     HARD_MAX_GENERATION_SOURCE_REFS, HARD_MAX_GENERATION_TEXT_BYTES, IdentityVerificationError,
     IdentityVerifiedGeneration, PROPOSED_IDENTITY_CLAIM_VERSION,
+};
+pub use lifecycle::{
+    DiskReservation, GenerationFootprint, GenerationLease, GenerationLifecycle, GenerationSequence,
+    HARD_MAX_GENERATION_LEASES, HARD_MAX_LIFECYCLE_BYTES, HARD_MAX_LIFECYCLE_GENERATIONS,
+    HARD_MAX_RECLAIM_GENERATIONS, LeaseTick, LifecycleError, LifecycleLimits,
+    PublicationSpaceEstimate, ReclaimPlan, ReclaimReceipt, ReclaimTransaction, RetentionPolicy,
 };
 pub use publication::{
     GenerationArtifact, GenerationArtifactKind, HARD_MAX_PUBLICATION_ARTIFACT_BYTES,
