@@ -21,6 +21,7 @@ members = [
     "crates/rootlight-operations",
     "crates/rootlight-protocol",
     "crates/rootlight-query",
+    "crates/rootlight-resolve",
     "crates/rootlight-runtime",
     "crates/rootlight-search",
     "crates/rootlight-service",
