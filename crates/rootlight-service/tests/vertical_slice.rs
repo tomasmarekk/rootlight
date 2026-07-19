@@ -7,10 +7,10 @@ use std::{
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, RepositoryId};
-use rootlight_incremental::FactDomainSet;
+use rootlight_incremental::{FactDomain, FactDomainSet};
 use rootlight_query::{LocateMode, RepositoryDataTrust};
 use rootlight_service::{
-    ChangeClass, FallbackReason, FileChangeKind, FirstSliceBuildStrategy, FirstSliceError,
+    ChangeClass, FileChangeKind, FirstSliceBuildStrategy, FirstSliceError,
     FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence, FirstSliceObservedFreshness,
     FirstSlicePublicationMode, FirstSliceService, FirstSliceTwoStageAvailability,
 };
@@ -47,6 +47,10 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
         FirstSliceBuildStrategy::Initial
     );
     assert_eq!(initial_evidence.fallback_reason(), None);
+    assert_eq!(initial_evidence.parsed_files(), 1);
+    assert_eq!(initial_evidence.reused_parser_artifacts(), 0);
+    assert_eq!(initial_evidence.lowered_files(), 1);
+    assert!(initial_evidence.structural_cache_retained());
     assert_eq!(
         service
             .generation_freshness(first.repository, first.generation)
@@ -120,7 +124,7 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
     let incremental_evidence = service
         .incremental_evidence(second.generation)
         .expect("successor incremental evidence is retained");
-    assert_conservative_rebuild(incremental_evidence);
+    assert_dependency_directed_rebuild(incremental_evidence);
     assert_eq!(
         input_change_count(incremental_evidence, ChangeClass::Surface),
         1
@@ -526,18 +530,22 @@ fn current_process_local_freshness() -> FirstSliceFreshnessStatus {
     }
 }
 
-fn assert_conservative_rebuild(evidence: &FirstSliceIncrementalEvidence) {
+fn assert_dependency_directed_rebuild(evidence: &FirstSliceIncrementalEvidence) {
     assert_eq!(
         evidence.strategy(),
-        FirstSliceBuildStrategy::ConservativeRepositoryRebuild
+        FirstSliceBuildStrategy::DependencyDirected
     );
-    assert_eq!(
-        evidence.fallback_reason(),
-        Some(FallbackReason::MissingDependencyDeclaration)
-    );
-    let all_domains = FactDomainSet::all().iter().collect::<Vec<_>>();
-    assert_eq!(evidence.invalidated_domains(), all_domains.as_slice());
-    assert_eq!(evidence.invalidated_units(), 1);
+    assert_eq!(evidence.fallback_reason(), None);
+    let expected_domains = FactDomainSet::all()
+        .iter()
+        .filter(|domain| *domain != FactDomain::History)
+        .collect::<Vec<_>>();
+    assert_eq!(evidence.invalidated_domains(), expected_domains.as_slice());
+    assert_eq!(evidence.invalidated_units(), 2);
+    assert_eq!(evidence.parsed_files(), 1);
+    assert_eq!(evidence.reused_parser_artifacts(), 0);
+    assert_eq!(evidence.lowered_files(), 1);
+    assert!(evidence.structural_cache_retained());
     assert!(evidence.trace_entries() > 0);
 }
 

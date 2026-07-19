@@ -6,7 +6,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
@@ -15,10 +15,11 @@ use std::{
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId,
     GenerationBoundSnapshot, LanguageId, MemoryAdmissionPolicy, ParseProvider, StreamLimits,
-    execute_analysis,
 };
 use rootlight_adapter_treesitter::{
-    ParserSettings, RuntimeConfig, TreeSitterAnalyzer, TreeSitterProvider,
+    ADAPTER_VERSION as TREE_SITTER_ADAPTER_VERSION, ParserSettings, RuntimeConfig,
+    TREE_SITTER_RUNTIME_VERSION, TreeSitterAnalyzer, TreeSitterProvider,
+    TreeSitterStructuralArtifact,
 };
 pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::{CatalogError, CatalogErrorKind, EphemeralOracleWriter};
@@ -33,8 +34,10 @@ use rootlight_ids::{
     derive_fact, derive_generation, derive_repository,
 };
 use rootlight_incremental::{
-    AnalysisUnitId, DependencyGraph, DependencyRegistry, FactDomainSet, FactNode,
-    GenerationSummary, GraphLimits, IncrementalError, InputSnapshot, InvalidationPlan,
+    AnalysisUnitId, ArtifactDecisionKind, ArtifactId, ArtifactSummary, DependencyEdge,
+    DependencyGraph, DependencyRegistry, DependencySource, FactDomainSet, FactNode,
+    GenerationSummary, GraphLimits, INCREMENTAL_SCHEMA_VERSION, IncrementalError, InputFingerprint,
+    InputKey, InputKind, InputSnapshot, InvalidationPlan, PassDeclaration, PassId, PassObservation,
     PlanningLimits, ReconcileMode, plan_invalidation,
 };
 pub use rootlight_incremental::{ChangeClass, FactDomain, FallbackReason, FileChangeKind};
@@ -46,7 +49,9 @@ pub use rootlight_query::{
     CodeLocateResult, LocateMode, QueryResponse, SourceReadQueryResult, SymbolExplainResult,
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
-use rootlight_resolve::{ResolutionEngine, ResolutionError, ResolverFactContext};
+use rootlight_resolve::{
+    RESOLVER_PROVIDER_VERSION, ResolutionEngine, ResolutionError, ResolverFactContext,
+};
 use rootlight_search::{BuildBudget, LexicalIndex, SearchBudget, SearchError};
 use rootlight_source::{SourceBudget, SourceError, SourceReadOptions, SourceService};
 use rootlight_storage::{
@@ -59,16 +64,31 @@ use serde::Serialize;
 
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_RETAINED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SYNTAX_NODES: usize = 16_384;
 const MAX_SYNTAX_DEPTH: usize = 128;
 const MAX_REPOSITORY_PATH_IDENTITY_BYTES: usize = 64 * 1024;
 const MAX_RANDOM_ID_ATTEMPTS: usize = 8;
-const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/2";
+const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/3";
+const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-rust/1";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
+const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
+const PARSER_ARTIFACT_SEED: &str = "rootlight.first-slice.parser-artifact";
+const PARSER_PASS_ID: &str = "first-slice.parser";
+const LOWERING_PASS_ID: &str = "first-slice.lowering";
+const RESOLVER_PASS_ID: &str = "first-slice.resolver";
+const DERIVED_PASS_ID: &str = "first-slice.derived";
+const SEARCH_PASS_ID: &str = "first-slice.search";
+const GRAMMAR_REVISION_SEED: &[u8] =
+    b"rootlight.first-slice.grammar/tree-sitter-rust-0.24.2/runtime-0.26.11/query-pack-1";
+const COMPILER_CONTEXT_INPUT_SEED: &[u8] = b"rootlight.first-slice.compiler-context/1";
+const SEARCH_REVISION_SEED: &[u8] = b"rootlight.first-slice.search-schema/1";
+const DERIVED_PLAN_REVISION_SEED: &[u8] =
+    b"rootlight.first-slice.incremental-plan/schema-1.0/graph-1";
 
 /// Bounded receipt for one ephemeral first-slice generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -103,7 +123,9 @@ pub struct FirstSliceIndexReceipt {
 pub enum FirstSliceBuildStrategy {
     /// No committed parent baseline existed.
     Initial,
-    /// Declared dependencies selected a bounded partial rebuild.
+    /// Declared dependencies selected bounded parser-artifact reuse.
+    ///
+    /// Generation-bound lowering, resolution, storage, and search still rebuild.
     DependencyDirected,
     /// Missing fine-grained declarations required a complete repository rebuild.
     ConservativeRepositoryRebuild,
@@ -153,8 +175,9 @@ impl FirstSliceFileChangeCount {
 
 /// Source-free incremental planning evidence retained with one generation.
 ///
-/// The evidence records what the process-local planner observed. It does not
-/// claim durable publication or fine-grained artifact reuse.
+/// The evidence records exact process-local parser-artifact actions separately
+/// from fresh lowering. It does not claim semantic artifact reuse, durable
+/// publication, or restart persistence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FirstSliceIncrementalEvidence {
     strategy: FirstSliceBuildStrategy,
@@ -165,6 +188,10 @@ pub struct FirstSliceIncrementalEvidence {
     invalidated_units: u64,
     fallback_reason: Option<FallbackReason>,
     trace_entries: u64,
+    parsed_files: u64,
+    reused_parser_artifacts: u64,
+    lowered_files: u64,
+    structural_cache_retained: bool,
 }
 
 impl FirstSliceIncrementalEvidence {
@@ -214,6 +241,32 @@ impl FirstSliceIncrementalEvidence {
     #[must_use]
     pub const fn trace_entries(&self) -> u64 {
         self.trace_entries
+    }
+
+    /// Returns files whose concrete syntax was parsed in this generation.
+    #[must_use]
+    pub const fn parsed_files(&self) -> u64 {
+        self.parsed_files
+    }
+
+    /// Returns exact-match parser artifacts reused from the parent generation.
+    #[must_use]
+    pub const fn reused_parser_artifacts(&self) -> u64 {
+        self.reused_parser_artifacts
+    }
+
+    /// Returns files lowered into fresh generation-bound normalized IR.
+    ///
+    /// Parser artifact reuse does not imply normalized-IR or resolver reuse.
+    #[must_use]
+    pub const fn lowered_files(&self) -> u64 {
+        self.lowered_files
+    }
+
+    /// Reports whether this generation retained parser artifacts for a successor.
+    #[must_use]
+    pub const fn structural_cache_retained(&self) -> bool {
+        self.structural_cache_retained
     }
 }
 
@@ -303,6 +356,7 @@ pub struct PreparedFirstSliceIndex {
     verified: IdentityVerifiedGeneration,
     search: LexicalIndex,
     sources: Vec<RustSourceInput>,
+    structural_artifacts: StructuralGenerationArtifacts,
     incremental: PreparedIncrementalState,
     receipt: FirstSliceIndexReceipt,
     root_identity: ContentHash,
@@ -327,6 +381,9 @@ impl FirstSliceStagedIndex {
     }
 }
 
+// Keeping staged state inline avoids a new allocation after retention sets
+// have already changed and would otherwise require transactional rollback.
+#[allow(clippy::large_enum_variant)]
 enum FirstSlicePublication {
     Retained,
     Pending {
@@ -338,12 +395,216 @@ enum FirstSlicePublication {
 
 struct PreparedIncrementalState {
     baseline: IncrementalDiscoveryBaseline,
+    inputs: InputSnapshot,
     evidence: FirstSliceIncrementalEvidence,
+}
+
+struct PreparedIncrementalPlan {
+    state: PreparedIncrementalState,
+    reusable_parser_artifacts: BTreeSet<ArtifactId>,
 }
 
 struct RustSourceInput {
     snapshot: SourceSnapshot,
     generated: bool,
+}
+
+struct StructuralArtifactEntry {
+    id: ArtifactId,
+    artifact: Arc<TreeSitterStructuralArtifact>,
+}
+
+struct StructuralGenerationArtifacts {
+    by_file: BTreeMap<FileId, StructuralArtifactEntry>,
+    accounted_bytes: usize,
+}
+
+impl StructuralGenerationArtifacts {
+    fn empty() -> Self {
+        Self {
+            by_file: BTreeMap::new(),
+            accounted_bytes: 0,
+        }
+    }
+
+    fn new(
+        entries: impl IntoIterator<Item = StructuralArtifactEntry>,
+        cancellation: &Cancellation,
+    ) -> Result<Self, FirstSliceError> {
+        let mut by_file = BTreeMap::new();
+        let mut accounted_bytes = 0usize;
+        for entry in entries {
+            check_cancellation(cancellation)?;
+            let file = entry.artifact.file();
+            if entry.id != parser_artifact_id(file) || by_file.contains_key(&file) {
+                return Err(FirstSliceError::Incremental);
+            }
+            accounted_bytes = accounted_bytes
+                .checked_add(entry.artifact.accounted_bytes())
+                .ok_or(FirstSliceError::Retention)?;
+            by_file.insert(file, entry);
+        }
+        check_cancellation(cancellation)?;
+        Ok(Self {
+            by_file,
+            accounted_bytes,
+        })
+    }
+
+    fn get(&self, file: FileId) -> Option<&StructuralArtifactEntry> {
+        self.by_file.get(&file)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&FileId, &StructuralArtifactEntry)> {
+        self.by_file.iter()
+    }
+
+    fn len(&self) -> usize {
+        self.by_file.len()
+    }
+}
+
+struct StructuralArtifactRelease {
+    generation: GenerationId,
+    artifacts: StructuralGenerationArtifacts,
+    retained_bytes_after: usize,
+}
+
+/// Bounded process-local parser-artifact retention aligned with publication.
+///
+/// Charges are deterministic logical bytes. Exact artifacts can share their
+/// allocation through `Arc`, while every generation is conservatively charged
+/// in full so logical retention never exceeds the configured ceiling.
+struct StructuralArtifactRetention {
+    maximum_generations: usize,
+    maximum_bytes: usize,
+    retained_bytes: usize,
+    committed: BTreeMap<GenerationId, StructuralGenerationArtifacts>,
+    staged: BTreeMap<GenerationId, StructuralGenerationArtifacts>,
+}
+
+impl StructuralArtifactRetention {
+    fn new(maximum_generations: usize, maximum_bytes: usize) -> Result<Self, FirstSliceError> {
+        if maximum_generations == 0 || maximum_bytes == 0 {
+            return Err(FirstSliceError::Retention);
+        }
+        Ok(Self {
+            maximum_generations,
+            maximum_bytes,
+            retained_bytes: 0,
+            committed: BTreeMap::new(),
+            staged: BTreeMap::new(),
+        })
+    }
+
+    fn generation(&self, generation: GenerationId) -> Option<&StructuralGenerationArtifacts> {
+        self.committed.get(&generation)
+    }
+
+    fn stage(
+        &mut self,
+        generation: GenerationId,
+        artifacts: StructuralGenerationArtifacts,
+        cancellation: &Cancellation,
+    ) -> Result<bool, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        if self.committed.contains_key(&generation) || self.staged.contains_key(&generation) {
+            return Err(FirstSliceError::Retention);
+        }
+        let retained_generations = self
+            .committed
+            .len()
+            .checked_add(self.staged.len())
+            .ok_or(FirstSliceError::Retention)?;
+        if retained_generations >= self.maximum_generations {
+            return Err(FirstSliceError::Retention);
+        }
+        let admitted_bytes = self
+            .retained_bytes
+            .checked_add(artifacts.accounted_bytes)
+            .ok_or(FirstSliceError::Retention)?;
+        let (artifacts, retained, admitted_bytes) = if admitted_bytes <= self.maximum_bytes {
+            (artifacts, true, admitted_bytes)
+        } else {
+            (
+                StructuralGenerationArtifacts::empty(),
+                false,
+                self.retained_bytes,
+            )
+        };
+        check_cancellation(cancellation)?;
+        self.staged.insert(generation, artifacts);
+        self.retained_bytes = admitted_bytes;
+        Ok(retained)
+    }
+
+    fn commit_staged(&mut self, generation: GenerationId) -> Result<(), FirstSliceError> {
+        let std::collections::btree_map::Entry::Vacant(committed) =
+            self.committed.entry(generation)
+        else {
+            return Err(FirstSliceError::Retention);
+        };
+        let artifacts = self
+            .staged
+            .remove(&generation)
+            .ok_or(FirstSliceError::Retention)?;
+        committed.insert(artifacts);
+        Ok(())
+    }
+
+    fn rollback_commit(&mut self, generation: GenerationId) -> Result<(), FirstSliceError> {
+        let std::collections::btree_map::Entry::Vacant(staged) = self.staged.entry(generation)
+        else {
+            return Err(FirstSliceError::Retention);
+        };
+        let artifacts = self
+            .committed
+            .remove(&generation)
+            .ok_or(FirstSliceError::Retention)?;
+        staged.insert(artifacts);
+        Ok(())
+    }
+
+    fn begin_discard(
+        &mut self,
+        generation: GenerationId,
+    ) -> Result<StructuralArtifactRelease, FirstSliceError> {
+        let accounted_bytes = self
+            .staged
+            .get(&generation)
+            .map(|artifacts| artifacts.accounted_bytes)
+            .ok_or(FirstSliceError::Retention)?;
+        let retained_bytes_after = self
+            .retained_bytes
+            .checked_sub(accounted_bytes)
+            .ok_or(FirstSliceError::Retention)?;
+        let artifacts = self
+            .staged
+            .remove(&generation)
+            .ok_or(FirstSliceError::Retention)?;
+        Ok(StructuralArtifactRelease {
+            generation,
+            artifacts,
+            retained_bytes_after,
+        })
+    }
+
+    fn finish_discard(&mut self, release: StructuralArtifactRelease) {
+        self.retained_bytes = release.retained_bytes_after;
+    }
+
+    fn rollback_discard(
+        &mut self,
+        release: StructuralArtifactRelease,
+    ) -> Result<(), FirstSliceError> {
+        let std::collections::btree_map::Entry::Vacant(staged) =
+            self.staged.entry(release.generation)
+        else {
+            return Err(FirstSliceError::Retention);
+        };
+        staged.insert(release.artifacts);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -695,10 +956,11 @@ impl SourceSnapshotRetention {
 /// Transport-independent owner of bounded ephemeral fixture generations.
 ///
 /// The service retains at most the caller-selected hard-bounded generation
-/// count and 64 MiB of deduplicated source content bytes. SQLite, lexical, and
-/// source state are process-local because ADR-026 has not authorized durable
-/// private-file creation. Full crash recovery, leases, and filesystem
-/// publication remain M12 work.
+/// count, 64 MiB of deduplicated source content, and 64 MiB of logically
+/// accounted parser artifacts. SQLite, lexical, and source state are
+/// process-local because ADR-026 has not authorized durable private-file
+/// creation. Full crash recovery, leases, and filesystem publication remain
+/// M12 work.
 pub struct FirstSliceService {
     config: ConfigSnapshot,
     analysis_limits: AnalysisLimits,
@@ -712,8 +974,10 @@ pub struct FirstSliceService {
     active_by_repository: BTreeMap<RepositoryId, GenerationId>,
     generations: GenerationSet<LexicalIndex>,
     source_snapshots: SourceSnapshotRetention,
+    structural_artifacts: StructuralArtifactRetention,
     receipts: BTreeMap<GenerationId, FirstSliceIndexReceipt>,
     incremental_baselines: BTreeMap<GenerationId, IncrementalDiscoveryBaseline>,
+    incremental_inputs: BTreeMap<GenerationId, InputSnapshot>,
     incremental_evidence: BTreeMap<GenerationId, FirstSliceIncrementalEvidence>,
 }
 
@@ -759,6 +1023,10 @@ impl FirstSliceService {
             GenerationSet::new(maximum_generations).map_err(|_| FirstSliceError::Retention)?;
         let source_snapshots =
             SourceSnapshotRetention::new(maximum_generations, maximum_source_bytes)?;
+        let structural_artifacts = StructuralArtifactRetention::new(
+            maximum_generations,
+            MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES,
+        )?;
         Ok(Self {
             config,
             analysis_limits,
@@ -769,8 +1037,10 @@ impl FirstSliceService {
             active_by_repository: BTreeMap::new(),
             generations,
             source_snapshots,
+            structural_artifacts,
             receipts: BTreeMap::new(),
             incremental_baselines: BTreeMap::new(),
+            incremental_inputs: BTreeMap::new(),
             incremental_evidence: BTreeMap::new(),
         })
     }
@@ -831,7 +1101,8 @@ impl FirstSliceService {
         let policy =
             DiscoveryPolicy::build(Vec::new(), false).map_err(|_| FirstSliceError::Discovery)?;
         let discovery_limits = DiscoveryLimits::from_config(&self.config);
-        let provider_set_hash = content_hash(PROVIDER_SET_SEED);
+        let parser_provider_hash = first_slice_parser_provider_hash()?;
+        let provider_set_hash = first_slice_provider_set_hash()?;
         let active = self.active_by_repository.get(&repository).copied();
         let parent_baseline = active
             .map(|generation| {
@@ -843,7 +1114,7 @@ impl FirstSliceService {
         let incremental_context = IncrementalDiscoveryContext::new(
             self.config.hash(),
             derive_fact("incremental-provider", INCREMENTAL_PROVIDER_SEED).id(),
-            provider_set_hash,
+            parser_provider_hash,
         );
         let incremental = discover_incremental(
             &root,
@@ -941,14 +1212,30 @@ impl FirstSliceService {
             check_cancellation(cancellation)?;
             return Ok(FirstSliceIndexPreparation::Retained(receipt));
         }
-        let incremental = prepare_incremental_state(
+        let parent_structural_artifacts =
+            active.and_then(|generation| self.structural_artifacts.generation(generation));
+        let parent_incremental_inputs =
+            active.and_then(|generation| self.incremental_inputs.get(&generation));
+        let rust_files = rust_sources
+            .iter()
+            .map(|source| source.snapshot.file())
+            .collect::<BTreeSet<_>>();
+        let mut incremental_plan = prepare_incremental_state(
             repository,
-            parent_baseline,
+            active.is_some(),
+            parent_incremental_inputs,
+            parent_structural_artifacts,
             &incremental,
-            discovery_limits,
+            &rust_files,
             cancellation,
         )?;
         let mut document = NormalizedIrDocument::empty(repository, generation);
+        let mut structural_entries = Vec::new();
+        structural_entries
+            .try_reserve_exact(rust_sources.len())
+            .map_err(|_| FirstSliceError::Retention)?;
+        let mut parsed_files = 0usize;
+        let mut reused_parser_artifacts = 0usize;
         for input in &rust_sources {
             check_cancellation(cancellation)?;
             let snapshot = &input.snapshot;
@@ -972,20 +1259,61 @@ impl FirstSliceService {
             )
             .map_err(|_| FirstSliceError::Adapter)?
             .with_generated_status(input.generated);
-            let output = execute_analysis(
-                &self.analyzer,
-                &request,
-                self.extensions.clone(),
-                MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
-                cancellation,
-            )
-            .map_err(|error| map_adapter_error(error, cancellation))?;
+            let artifact_id = parser_artifact_id(snapshot.file());
+            let (output, artifact) = if incremental_plan
+                .reusable_parser_artifacts
+                .contains(&artifact_id)
+            {
+                let entry = parent_structural_artifacts
+                    .and_then(|artifacts| artifacts.get(snapshot.file()))
+                    .filter(|entry| entry.id == artifact_id)
+                    .ok_or(FirstSliceError::Incremental)?;
+                let output = self
+                    .analyzer
+                    .analyze_from_artifact(
+                        &request,
+                        &entry.artifact,
+                        self.extensions.clone(),
+                        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+                        cancellation,
+                    )
+                    .map_err(|error| map_adapter_error(error, cancellation))?;
+                reused_parser_artifacts = reused_parser_artifacts
+                    .checked_add(1)
+                    .ok_or(FirstSliceError::Limits)?;
+                (output, Arc::clone(&entry.artifact))
+            } else {
+                let (output, artifact) = self
+                    .analyzer
+                    .analyze_and_capture(
+                        &request,
+                        self.extensions.clone(),
+                        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+                        cancellation,
+                    )
+                    .map_err(|error| map_adapter_error(error, cancellation))?;
+                parsed_files = parsed_files.checked_add(1).ok_or(FirstSliceError::Limits)?;
+                (output, Arc::new(artifact))
+            };
             append_normalized_document(
                 &mut document,
                 output.document().clone(),
                 self.analysis_limits.ir(),
             )?;
+            structural_entries.push(StructuralArtifactEntry {
+                id: artifact_id,
+                artifact,
+            });
         }
+        incremental_plan.state.evidence.parsed_files =
+            u64::try_from(parsed_files).map_err(|_| FirstSliceError::Limits)?;
+        incremental_plan.state.evidence.reused_parser_artifacts =
+            u64::try_from(reused_parser_artifacts).map_err(|_| FirstSliceError::Limits)?;
+        incremental_plan.state.evidence.lowered_files =
+            u64::try_from(rust_sources.len()).map_err(|_| FirstSliceError::Limits)?;
+        let structural_artifacts =
+            StructuralGenerationArtifacts::new(structural_entries, cancellation)?;
+        let incremental = incremental_plan.state;
         let document = self
             .resolver
             .apply(
@@ -1058,6 +1386,7 @@ impl FirstSliceService {
                 verified,
                 search,
                 sources: rust_sources,
+                structural_artifacts,
                 incremental,
                 receipt,
                 root_identity,
@@ -1116,7 +1445,8 @@ impl FirstSliceService {
                     verified,
                     search,
                     sources,
-                    incremental,
+                    structural_artifacts,
+                    mut incremental,
                     receipt,
                     root_identity,
                     register_repository,
@@ -1133,6 +1463,23 @@ impl FirstSliceService {
                         .map_err(|_| FirstSliceError::Retention)?;
                     return Err(error);
                 }
+                let structural_retained = match self.structural_artifacts.stage(
+                    receipt.generation,
+                    structural_artifacts,
+                    cancellation,
+                ) {
+                    Ok(retained) => retained,
+                    Err(error) => {
+                        let source_release =
+                            self.source_snapshots.begin_discard(receipt.generation)?;
+                        self.generations
+                            .discard_staged(receipt.generation)
+                            .map_err(|_| FirstSliceError::Retention)?;
+                        self.source_snapshots.finish_discard(source_release);
+                        return Err(error);
+                    }
+                };
+                incremental.evidence.structural_cache_retained = structural_retained;
                 Ok(FirstSliceStagedIndex {
                     receipt,
                     publication: FirstSlicePublication::Pending {
@@ -1176,10 +1523,23 @@ impl FirstSliceService {
                     .commit_staged(receipt.generation)
                     .map_err(|_| FirstSliceError::Retention)?;
                 if self
+                    .structural_artifacts
+                    .commit_staged(receipt.generation)
+                    .is_err()
+                {
+                    self.source_snapshots
+                        .rollback_commit(receipt.generation)
+                        .map_err(|_| FirstSliceError::Retention)?;
+                    return Err(FirstSliceError::Retention);
+                }
+                if self
                     .generations
                     .commit_staged(receipt.generation, true)
                     .is_err()
                 {
+                    self.structural_artifacts
+                        .rollback_commit(receipt.generation)
+                        .map_err(|_| FirstSliceError::Retention)?;
                     self.source_snapshots
                         .rollback_commit(receipt.generation)
                         .map_err(|_| FirstSliceError::Retention)?;
@@ -1188,6 +1548,8 @@ impl FirstSliceService {
                 self.receipts.insert(receipt.generation, receipt);
                 self.incremental_baselines
                     .insert(receipt.generation, incremental.baseline);
+                self.incremental_inputs
+                    .insert(receipt.generation, incremental.inputs);
                 self.incremental_evidence
                     .insert(receipt.generation, incremental.evidence);
                 if register_repository {
@@ -1211,17 +1573,33 @@ impl FirstSliceService {
             let source_release = self
                 .source_snapshots
                 .begin_discard(staged.receipt.generation)?;
+            let structural_release = match self
+                .structural_artifacts
+                .begin_discard(staged.receipt.generation)
+            {
+                Ok(release) => release,
+                Err(error) => {
+                    self.source_snapshots
+                        .rollback_discard(source_release)
+                        .map_err(|_| FirstSliceError::Retention)?;
+                    return Err(error);
+                }
+            };
             if self
                 .generations
                 .discard_staged(staged.receipt.generation)
                 .is_err()
             {
+                self.structural_artifacts
+                    .rollback_discard(structural_release)
+                    .map_err(|_| FirstSliceError::Retention)?;
                 self.source_snapshots
                     .rollback_discard(source_release)
                     .map_err(|_| FirstSliceError::Retention)?;
                 return Err(FirstSliceError::Retention);
             }
             self.source_snapshots.finish_discard(source_release);
+            self.structural_artifacts.finish_discard(structural_release);
         }
         Ok(())
     }
@@ -1504,67 +1882,655 @@ pub enum FirstSliceError {
 
 fn prepare_incremental_state(
     repository: RepositoryId,
-    parent: Option<&IncrementalDiscoveryBaseline>,
+    has_parent: bool,
+    parent: Option<&InputSnapshot>,
+    parent_artifacts: Option<&StructuralGenerationArtifacts>,
     discovery: &IncrementalDiscovery,
-    discovery_limits: DiscoveryLimits,
+    rust_files: &BTreeSet<FileId>,
     cancellation: &Cancellation,
-) -> Result<PreparedIncrementalState, FirstSliceError> {
+) -> Result<PreparedIncrementalPlan, FirstSliceError> {
     check_cancellation(cancellation)?;
-    let planning_limits = incremental_planning_limits(discovery_limits)?;
     let parent_inputs = match parent {
-        Some(parent) => parent.inputs().clone(),
-        None => InputSnapshot::new([], planning_limits, cancellation)
+        Some(parent) => parent.clone(),
+        None => InputSnapshot::new([], PlanningLimits::default(), cancellation)
             .map_err(|error| map_incremental_error(error, cancellation))?,
     };
-    let parent_summary = GenerationSummary::new(parent_inputs, [], planning_limits, cancellation)
+    let current_inputs = first_slice_input_snapshot(discovery, rust_files, cancellation)?;
+    let input_keys = incremental_input_keys(&parent_inputs, &current_inputs, cancellation)?;
+    let files = incremental_file_ids(&input_keys, cancellation)?;
+    let passes = first_slice_passes()?;
+    let (nodes, edges) =
+        first_slice_dependency_parts(repository, &files, &input_keys, &passes, cancellation)?;
+    let graph_limits = GraphLimits::new(5, nodes.len().max(1), edges.len().max(1))
         .map_err(|error| map_incremental_error(error, cancellation))?;
-
-    let domains = FactDomainSet::all();
-    let graph_limits = GraphLimits::new(1, domains.iter().count(), 1)
+    let registry = DependencyRegistry::new(passes.declarations()?, graph_limits, cancellation)
         .map_err(|error| map_incremental_error(error, cancellation))?;
-    let registry = DependencyRegistry::new([], graph_limits, cancellation)
+    verify_first_slice_observations(&registry, &passes)
         .map_err(|error| map_incremental_error(error, cancellation))?;
-    let unit = AnalysisUnitId::new(derive_fact(INCREMENTAL_UNIT_SEED, repository.as_bytes()).id());
-    let graph = DependencyGraph::new(
-        domains.iter().map(|domain| FactNode::new(unit, domain)),
-        [],
-        &registry,
-        graph_limits,
+    let graph = DependencyGraph::new(nodes, edges, &registry, graph_limits, cancellation)
+        .map_err(|error| map_incremental_error(error, cancellation))?;
+    let artifact_count = parent_artifacts.map_or(0, StructuralGenerationArtifacts::len);
+    let planning_limits = incremental_planning_limits(
+        input_keys.len(),
+        artifact_count,
+        graph.nodes().count(),
+        graph.edges().count(),
+    )?;
+    let artifact_summaries = parent_artifact_summaries(
+        &parent_inputs,
+        parent_artifacts,
+        planning_limits,
+        cancellation,
+    )?;
+    let parent_summary = GenerationSummary::new(
+        parent_inputs,
+        artifact_summaries,
+        planning_limits,
         cancellation,
     )
     .map_err(|error| map_incremental_error(error, cancellation))?;
     let plan = plan_invalidation(
         &parent_summary,
-        discovery.baseline().inputs(),
+        &current_inputs,
         &graph,
         planning_limits,
         cancellation,
     )
     .map_err(|error| map_incremental_error(error, cancellation))?;
-    if plan.changes() != discovery.changes() {
-        return Err(FirstSliceError::Incremental);
-    }
-
-    let evidence = summarize_incremental_evidence(parent.is_some(), discovery, &plan)?;
-    Ok(PreparedIncrementalState {
-        baseline: discovery.baseline().clone(),
-        evidence,
+    let evidence = summarize_incremental_evidence(has_parent, discovery, &plan)?;
+    let reusable_parser_artifacts = plan
+        .artifact_decisions()
+        .iter()
+        .filter(|decision| decision.kind() == ArtifactDecisionKind::Reuse)
+        .map(|decision| decision.artifact())
+        .collect();
+    Ok(PreparedIncrementalPlan {
+        state: PreparedIncrementalState {
+            baseline: discovery.baseline().clone(),
+            inputs: current_inputs,
+            evidence,
+        },
+        reusable_parser_artifacts,
     })
 }
 
 fn incremental_planning_limits(
-    discovery_limits: DiscoveryLimits,
+    input_count: usize,
+    artifact_count: usize,
+    node_count: usize,
+    edge_count: usize,
 ) -> Result<PlanningLimits, FirstSliceError> {
-    let max_inputs = discovery_limits
-        .max_entries
-        .checked_mul(2)
-        .and_then(|inputs| inputs.checked_add(2))
-        .ok_or(FirstSliceError::Limits)?;
-    let max_trace_entries = max_inputs
-        .checked_add(FactDomainSet::all().iter().count())
+    let max_trace_entries = input_count
+        .checked_add(node_count)
+        .and_then(|entries| entries.checked_add(artifact_count))
         .and_then(|entries| entries.checked_add(1))
         .ok_or(FirstSliceError::Limits)?;
-    PlanningLimits::new(max_inputs, 1, 1, max_trace_entries).map_err(|_| FirstSliceError::Limits)
+    PlanningLimits::new(
+        input_count.max(1),
+        artifact_count.max(1),
+        edge_count.max(1),
+        max_trace_entries.max(1),
+    )
+    .map_err(|_| FirstSliceError::Limits)
+}
+
+struct FirstSlicePasses {
+    parser: PassId,
+    lowering: PassId,
+    resolver: PassId,
+    derived: PassId,
+    search: PassId,
+}
+
+impl FirstSlicePasses {
+    fn declarations(&self) -> Result<Vec<PassDeclaration>, FirstSliceError> {
+        Ok(vec![
+            PassDeclaration::new(
+                self.parser.clone(),
+                [
+                    InputKind::FileContent,
+                    InputKind::FilePath,
+                    InputKind::GrammarVersion,
+                    InputKind::AdapterVersion,
+                    InputKind::ConfigurationRevision,
+                ],
+                FactDomainSet::default(),
+                FactDomainSet::new([FactDomain::Syntax]),
+            )
+            .map_err(|_| FirstSliceError::Incremental)?,
+            PassDeclaration::new(
+                self.lowering.clone(),
+                [
+                    InputKind::FileContent,
+                    InputKind::FilePath,
+                    InputKind::AdapterVersion,
+                    InputKind::CompilerOptions,
+                    InputKind::ConfigurationRevision,
+                ],
+                FactDomainSet::new([FactDomain::Syntax]),
+                local_semantic_domains(),
+            )
+            .map_err(|_| FirstSliceError::Incremental)?,
+            PassDeclaration::new(
+                self.resolver.clone(),
+                [
+                    InputKind::PublicSurface,
+                    InputKind::BodySummary,
+                    InputKind::ImportSet,
+                    InputKind::BuildTarget,
+                    InputKind::CompilerOptions,
+                    InputKind::DependencyVersion,
+                    InputKind::ResolverVersion,
+                    InputKind::ConfigurationRevision,
+                ],
+                local_semantic_domains(),
+                FactDomainSet::new([FactDomain::Resolution]),
+            )
+            .map_err(|_| FirstSliceError::Incremental)?,
+            PassDeclaration::new(
+                self.derived.clone(),
+                [InputKind::DerivedPlan, InputKind::ConfigurationRevision],
+                FactDomainSet::new([FactDomain::Resolution]),
+                FactDomainSet::new([FactDomain::DerivedGraph]),
+            )
+            .map_err(|_| FirstSliceError::Incremental)?,
+            PassDeclaration::new(
+                self.search.clone(),
+                [InputKind::SearchRevision, InputKind::ConfigurationRevision],
+                FactDomainSet::new([
+                    FactDomain::PublicSurface,
+                    FactDomain::Body,
+                    FactDomain::Resolution,
+                ]),
+                FactDomainSet::new([FactDomain::Search]),
+            )
+            .map_err(|_| FirstSliceError::Incremental)?,
+        ])
+    }
+}
+
+fn first_slice_passes() -> Result<FirstSlicePasses, FirstSliceError> {
+    Ok(FirstSlicePasses {
+        parser: PassId::parse(PARSER_PASS_ID).map_err(|_| FirstSliceError::Incremental)?,
+        lowering: PassId::parse(LOWERING_PASS_ID).map_err(|_| FirstSliceError::Incremental)?,
+        resolver: PassId::parse(RESOLVER_PASS_ID).map_err(|_| FirstSliceError::Incremental)?,
+        derived: PassId::parse(DERIVED_PASS_ID).map_err(|_| FirstSliceError::Incremental)?,
+        search: PassId::parse(SEARCH_PASS_ID).map_err(|_| FirstSliceError::Incremental)?,
+    })
+}
+
+fn local_semantic_domains() -> FactDomainSet {
+    FactDomainSet::new([
+        FactDomain::PublicSurface,
+        FactDomain::Body,
+        FactDomain::Tests,
+        FactDomain::Services,
+    ])
+}
+
+fn verify_first_slice_observations(
+    registry: &DependencyRegistry,
+    passes: &FirstSlicePasses,
+) -> Result<(), IncrementalError> {
+    let observations = [
+        (
+            &passes.parser,
+            PassObservation::new(
+                [
+                    InputKind::FileContent,
+                    InputKind::FilePath,
+                    InputKind::GrammarVersion,
+                    InputKind::AdapterVersion,
+                    InputKind::ConfigurationRevision,
+                ],
+                FactDomainSet::default(),
+                FactDomainSet::new([FactDomain::Syntax]),
+            ),
+        ),
+        (
+            &passes.lowering,
+            PassObservation::new(
+                [
+                    InputKind::FileContent,
+                    InputKind::FilePath,
+                    InputKind::AdapterVersion,
+                    InputKind::CompilerOptions,
+                    InputKind::ConfigurationRevision,
+                ],
+                FactDomainSet::new([FactDomain::Syntax]),
+                local_semantic_domains(),
+            ),
+        ),
+        (
+            &passes.resolver,
+            PassObservation::new(
+                [
+                    InputKind::PublicSurface,
+                    InputKind::BodySummary,
+                    InputKind::ImportSet,
+                    InputKind::BuildTarget,
+                    InputKind::CompilerOptions,
+                    InputKind::DependencyVersion,
+                    InputKind::ResolverVersion,
+                    InputKind::ConfigurationRevision,
+                ],
+                local_semantic_domains(),
+                FactDomainSet::new([FactDomain::Resolution]),
+            ),
+        ),
+        (
+            &passes.derived,
+            PassObservation::new(
+                [InputKind::DerivedPlan, InputKind::ConfigurationRevision],
+                FactDomainSet::new([FactDomain::Resolution]),
+                FactDomainSet::new([FactDomain::DerivedGraph]),
+            ),
+        ),
+        (
+            &passes.search,
+            PassObservation::new(
+                [InputKind::SearchRevision, InputKind::ConfigurationRevision],
+                FactDomainSet::new([
+                    FactDomain::PublicSurface,
+                    FactDomain::Body,
+                    FactDomain::Resolution,
+                ]),
+                FactDomainSet::new([FactDomain::Search]),
+            ),
+        ),
+    ];
+    for (pass, observation) in observations {
+        registry.verify_observation(pass, &observation)?;
+    }
+    Ok(())
+}
+
+fn first_slice_input_snapshot(
+    discovery: &IncrementalDiscovery,
+    rust_files: &BTreeSet<FileId>,
+    cancellation: &Cancellation,
+) -> Result<InputSnapshot, FirstSliceError> {
+    let mut inputs = Vec::new();
+    let expected = rust_files
+        .len()
+        .checked_mul(2)
+        .and_then(|count| count.checked_add(7))
+        .ok_or(FirstSliceError::Limits)?;
+    inputs
+        .try_reserve_exact(expected)
+        .map_err(|_| FirstSliceError::Limits)?;
+    let mut configuration_present = false;
+    let mut adapter_present = false;
+    for input in discovery.baseline().inputs().iter() {
+        check_cancellation(cancellation)?;
+        let include = match input.key() {
+            InputKey::FileContent(file) | InputKey::FilePath(file) => rust_files.contains(&file),
+            InputKey::ConfigurationRevision => {
+                configuration_present = true;
+                true
+            }
+            InputKey::AdapterVersion(_) => {
+                adapter_present = true;
+                true
+            }
+            _ => false,
+        };
+        if include {
+            inputs.push(input);
+        }
+    }
+    if !configuration_present || !adapter_present {
+        return Err(FirstSliceError::Incremental);
+    }
+
+    inputs.extend([
+        InputFingerprint::new(
+            InputKey::GrammarVersion(
+                derive_fact("rootlight.first-slice.grammar-input", GRAMMAR_REVISION_SEED).id(),
+            ),
+            content_hash(GRAMMAR_REVISION_SEED),
+        ),
+        InputFingerprint::new(
+            InputKey::CompilerOptions(
+                derive_fact(
+                    "rootlight.first-slice.compiler-input",
+                    COMPILER_CONTEXT_INPUT_SEED,
+                )
+                .id(),
+            ),
+            content_hash(BUILD_CONTEXT_SEED),
+        ),
+        InputFingerprint::new(
+            InputKey::ResolverVersion,
+            content_hash(RESOLVER_BINARY_SEED),
+        ),
+        InputFingerprint::new(InputKey::SearchRevision, content_hash(SEARCH_REVISION_SEED)),
+        InputFingerprint::new(
+            InputKey::DerivedPlan(
+                derive_fact(
+                    "rootlight.first-slice.derived-plan-input",
+                    DERIVED_PLAN_REVISION_SEED,
+                )
+                .id(),
+            ),
+            first_slice_incremental_plan_hash()?,
+        ),
+    ]);
+    let snapshot = InputSnapshot::new(inputs, PlanningLimits::default(), cancellation)
+        .map_err(|error| map_incremental_error(error, cancellation))?;
+    for file in rust_files {
+        check_cancellation(cancellation)?;
+        if snapshot.value(InputKey::FileContent(*file)).is_none()
+            || snapshot.value(InputKey::FilePath(*file)).is_none()
+        {
+            return Err(FirstSliceError::Incremental);
+        }
+    }
+    Ok(snapshot)
+}
+
+fn incremental_input_keys(
+    parent: &InputSnapshot,
+    current: &InputSnapshot,
+    cancellation: &Cancellation,
+) -> Result<BTreeSet<InputKey>, FirstSliceError> {
+    let mut keys = BTreeSet::new();
+    for input in parent.iter().chain(current.iter()) {
+        check_cancellation(cancellation)?;
+        keys.insert(input.key());
+    }
+    Ok(keys)
+}
+
+fn incremental_file_ids(
+    inputs: &BTreeSet<InputKey>,
+    cancellation: &Cancellation,
+) -> Result<BTreeSet<FileId>, FirstSliceError> {
+    let mut files = BTreeSet::new();
+    for input in inputs {
+        check_cancellation(cancellation)?;
+        match input {
+            InputKey::FileContent(file) | InputKey::FilePath(file) => {
+                files.insert(*file);
+            }
+            _ => {}
+        }
+    }
+    Ok(files)
+}
+
+fn first_slice_dependency_parts(
+    repository: RepositoryId,
+    files: &BTreeSet<FileId>,
+    inputs: &BTreeSet<InputKey>,
+    passes: &FirstSlicePasses,
+    cancellation: &Cancellation,
+) -> Result<(Vec<FactNode>, Vec<DependencyEdge>), FirstSliceError> {
+    let repository_unit =
+        AnalysisUnitId::new(derive_fact(INCREMENTAL_UNIT_SEED, repository.as_bytes()).id());
+    let resolution = FactNode::new(repository_unit, FactDomain::Resolution);
+    let derived = FactNode::new(repository_unit, FactDomain::DerivedGraph);
+    let search = FactNode::new(repository_unit, FactDomain::Search);
+    let mut nodes = vec![resolution, derived, search];
+    let mut edges = Vec::new();
+    for file in files {
+        check_cancellation(cancellation)?;
+        let unit = file_analysis_unit(*file);
+        let syntax = FactNode::new(unit, FactDomain::Syntax);
+        nodes.push(syntax);
+        for domain in local_semantic_domains().iter() {
+            let target = FactNode::new(unit, domain);
+            nodes.push(target);
+            edges.push(DependencyEdge::new(
+                DependencySource::Fact(syntax),
+                target,
+                passes.lowering.clone(),
+            ));
+            edges.push(DependencyEdge::new(
+                DependencySource::Fact(target),
+                resolution,
+                passes.resolver.clone(),
+            ));
+            if matches!(domain, FactDomain::PublicSurface | FactDomain::Body) {
+                edges.push(DependencyEdge::new(
+                    DependencySource::Fact(target),
+                    search,
+                    passes.search.clone(),
+                ));
+            }
+        }
+    }
+    edges.push(DependencyEdge::new(
+        DependencySource::Fact(resolution),
+        derived,
+        passes.derived.clone(),
+    ));
+    edges.push(DependencyEdge::new(
+        DependencySource::Fact(resolution),
+        search,
+        passes.search.clone(),
+    ));
+
+    for input in inputs {
+        check_cancellation(cancellation)?;
+        match *input {
+            InputKey::FileContent(file) | InputKey::FilePath(file) => {
+                add_file_input_edges(*input, file, passes, &mut edges);
+            }
+            InputKey::GrammarVersion(_) | InputKey::AdapterVersion(_) => {
+                add_all_file_parser_edges(*input, files, passes, &mut edges);
+                if matches!(input, InputKey::AdapterVersion(_)) {
+                    add_all_file_lowering_edges(*input, files, passes, &mut edges);
+                }
+            }
+            InputKey::CompilerOptions(_) => {
+                add_all_file_lowering_edges(*input, files, passes, &mut edges);
+                edges.push(DependencyEdge::new(
+                    DependencySource::Input(*input),
+                    resolution,
+                    passes.resolver.clone(),
+                ));
+            }
+            InputKey::ConfigurationRevision => {
+                add_all_file_parser_edges(*input, files, passes, &mut edges);
+                add_all_file_lowering_edges(*input, files, passes, &mut edges);
+                for (target, pass) in [
+                    (resolution, passes.resolver.clone()),
+                    (derived, passes.derived.clone()),
+                    (search, passes.search.clone()),
+                ] {
+                    edges.push(DependencyEdge::new(
+                        DependencySource::Input(*input),
+                        target,
+                        pass,
+                    ));
+                }
+            }
+            InputKey::PublicSurface(_)
+            | InputKey::BodySummary(_)
+            | InputKey::ImportSet(_)
+            | InputKey::BuildTarget(_)
+            | InputKey::DependencyVersion(_)
+            | InputKey::ResolverVersion => {
+                edges.push(DependencyEdge::new(
+                    DependencySource::Input(*input),
+                    resolution,
+                    passes.resolver.clone(),
+                ));
+            }
+            InputKey::SearchRevision => {
+                edges.push(DependencyEdge::new(
+                    DependencySource::Input(*input),
+                    search,
+                    passes.search.clone(),
+                ));
+            }
+            InputKey::DerivedPlan(_) => {
+                edges.push(DependencyEdge::new(
+                    DependencySource::Input(*input),
+                    derived,
+                    passes.derived.clone(),
+                ));
+            }
+        }
+    }
+    Ok((nodes, edges))
+}
+
+fn add_file_input_edges(
+    input: InputKey,
+    file: FileId,
+    passes: &FirstSlicePasses,
+    edges: &mut Vec<DependencyEdge>,
+) {
+    let unit = file_analysis_unit(file);
+    edges.push(DependencyEdge::new(
+        DependencySource::Input(input),
+        FactNode::new(unit, FactDomain::Syntax),
+        passes.parser.clone(),
+    ));
+    for domain in local_semantic_domains().iter() {
+        edges.push(DependencyEdge::new(
+            DependencySource::Input(input),
+            FactNode::new(unit, domain),
+            passes.lowering.clone(),
+        ));
+    }
+}
+
+fn add_all_file_parser_edges(
+    input: InputKey,
+    files: &BTreeSet<FileId>,
+    passes: &FirstSlicePasses,
+    edges: &mut Vec<DependencyEdge>,
+) {
+    for file in files {
+        edges.push(DependencyEdge::new(
+            DependencySource::Input(input),
+            FactNode::new(file_analysis_unit(*file), FactDomain::Syntax),
+            passes.parser.clone(),
+        ));
+    }
+}
+
+fn add_all_file_lowering_edges(
+    input: InputKey,
+    files: &BTreeSet<FileId>,
+    passes: &FirstSlicePasses,
+    edges: &mut Vec<DependencyEdge>,
+) {
+    for file in files {
+        let unit = file_analysis_unit(*file);
+        for domain in local_semantic_domains().iter() {
+            edges.push(DependencyEdge::new(
+                DependencySource::Input(input),
+                FactNode::new(unit, domain),
+                passes.lowering.clone(),
+            ));
+        }
+    }
+}
+
+fn parent_artifact_summaries(
+    inputs: &InputSnapshot,
+    artifacts: Option<&StructuralGenerationArtifacts>,
+    limits: PlanningLimits,
+    cancellation: &Cancellation,
+) -> Result<Vec<ArtifactSummary>, FirstSliceError> {
+    let Some(artifacts) = artifacts else {
+        return Ok(Vec::new());
+    };
+    let mut summaries = Vec::new();
+    summaries
+        .try_reserve_exact(artifacts.len())
+        .map_err(|_| FirstSliceError::Retention)?;
+    for (file, entry) in artifacts.iter() {
+        check_cancellation(cancellation)?;
+        let dependencies: Vec<_> = inputs
+            .iter()
+            .filter(|input| parser_artifact_depends_on(input.key(), *file))
+            .collect();
+        if !dependencies
+            .iter()
+            .any(|input| input.key() == InputKey::FileContent(*file))
+            || !dependencies
+                .iter()
+                .any(|input| input.key() == InputKey::FilePath(*file))
+        {
+            return Err(FirstSliceError::Incremental);
+        }
+        summaries.push(
+            ArtifactSummary::new(
+                entry.id,
+                [FactNode::new(file_analysis_unit(*file), FactDomain::Syntax)],
+                dependencies,
+                limits,
+                cancellation,
+            )
+            .map_err(|error| map_incremental_error(error, cancellation))?,
+        );
+    }
+    Ok(summaries)
+}
+
+fn parser_artifact_depends_on(key: InputKey, file: FileId) -> bool {
+    match key {
+        InputKey::FileContent(candidate) | InputKey::FilePath(candidate) => candidate == file,
+        InputKey::GrammarVersion(_)
+        | InputKey::AdapterVersion(_)
+        | InputKey::ConfigurationRevision => true,
+        _ => false,
+    }
+}
+
+fn file_analysis_unit(file: FileId) -> AnalysisUnitId {
+    AnalysisUnitId::new(derive_fact(INCREMENTAL_FILE_UNIT_SEED, file.as_bytes()).id())
+}
+
+fn parser_artifact_id(file: FileId) -> ArtifactId {
+    ArtifactId::new(derive_fact(PARSER_ARTIFACT_SEED, file.as_bytes()).id())
+}
+
+fn first_slice_parser_provider_hash() -> Result<ContentHash, FirstSliceError> {
+    hash_static_components(&[
+        PARSER_PROVIDER_SET_SEED,
+        TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+        TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+        b"tree-sitter-rust-0.24.2",
+        ANALYZER_BINARY_SEED,
+        GRAMMAR_REVISION_SEED,
+    ])
+}
+
+fn first_slice_provider_set_hash() -> Result<ContentHash, FirstSliceError> {
+    let parser = first_slice_parser_provider_hash()?;
+    hash_static_components(&[
+        PROVIDER_SET_SEED,
+        parser.as_bytes(),
+        RESOLVER_PROVIDER_VERSION.as_bytes(),
+        RESOLVER_BINARY_SEED,
+        SEARCH_REVISION_SEED,
+        INCREMENTAL_SCHEMA_VERSION.as_bytes(),
+        DERIVED_PLAN_REVISION_SEED,
+    ])
+}
+
+fn first_slice_incremental_plan_hash() -> Result<ContentHash, FirstSliceError> {
+    hash_static_components(&[
+        DERIVED_PLAN_REVISION_SEED,
+        INCREMENTAL_SCHEMA_VERSION.as_bytes(),
+    ])
+}
+
+fn hash_static_components(components: &[&[u8]]) -> Result<ContentHash, FirstSliceError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.first-slice.static-components/1\0");
+    for component in components {
+        let length = u64::try_from(component.len()).map_err(|_| FirstSliceError::Limits)?;
+        hasher.update(&length.to_be_bytes());
+        hasher.update(component);
+    }
+    Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
 }
 
 fn summarize_incremental_evidence(
@@ -1612,6 +2578,10 @@ fn summarize_incremental_evidence(
         fallback_reason,
         trace_entries: u64::try_from(plan.trace().entries().len())
             .map_err(|_| FirstSliceError::Limits)?,
+        parsed_files: 0,
+        reused_parser_artifacts: 0,
+        lowered_files: 0,
+        structural_cache_retained: false,
     })
 }
 
@@ -2212,7 +3182,7 @@ mod tests {
     }
 
     #[test]
-    fn conservative_successors_match_fresh_logical_rebuilds() {
+    fn dependency_directed_successors_match_fresh_logical_rebuilds() {
         let fixture = TempDir::new().expect("fixture root exists");
         fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
         let primary = fixture.path().join("src/lib.rs");
@@ -2287,6 +3257,130 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_file_reuses_parser_artifact_with_fresh_diagnostics() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let changed = fixture.path().join("src/changed.rs");
+        fs::write(&changed, "pub fn changed() -> u32 { 1 }\n").expect("changed source writes");
+        fs::write(
+            fixture.path().join("src/malformed.rs"),
+            "pub fn malformed( {\n",
+        )
+        .expect("malformed source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(3).expect("service initializes");
+        let first = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("initial generation publishes");
+
+        fs::write(&changed, "pub fn changed() -> u32 { 2 }\n").expect("body edit writes");
+        let second = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("successor generation publishes");
+        let evidence = service
+            .incremental_evidence(second.generation)
+            .expect("successor evidence remains retained");
+
+        assert_eq!(
+            evidence.strategy(),
+            FirstSliceBuildStrategy::DependencyDirected
+        );
+        assert_eq!(evidence.fallback_reason(), None);
+        assert_eq!(evidence.parsed_files(), 1);
+        assert_eq!(evidence.reused_parser_artifacts(), 1);
+        assert_eq!(evidence.lowered_files(), 2);
+        assert!(evidence.structural_cache_retained());
+
+        let snapshot = service
+            .generations
+            .generation(second.generation)
+            .expect("successor remains retained");
+        let document = snapshot.document();
+        let malformed = document
+            .files
+            .iter()
+            .find(|file| file.path == "src/malformed.rs")
+            .expect("malformed file remains represented")
+            .id;
+        assert!(document.diagnostics.iter().any(|diagnostic| {
+            diagnostic.generation == second.generation
+                && diagnostic.source.as_ref().is_some_and(|source| {
+                    source.generation() == second.generation && source.span().file() == malformed
+                })
+        }));
+        assert_ne!(first.generation, second.generation);
+    }
+
+    #[test]
+    fn non_rust_change_does_not_publish_a_semantic_generation() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn stable() -> u32 { 1 }\n",
+        )
+        .expect("Rust source writes");
+        let readme = fixture.path().join("README.md");
+        fs::write(&readme, "first\n").expect("non-Rust input writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(3).expect("service initializes");
+        let first = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("initial generation publishes");
+
+        fs::write(&readme, "second\n").expect("non-Rust input changes");
+        let second = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("unchanged semantic generation remains active");
+        let evidence = service
+            .incremental_evidence(second.generation)
+            .expect("active generation evidence remains retained");
+
+        assert_eq!(second, first);
+        assert_eq!(evidence.strategy(), FirstSliceBuildStrategy::Initial);
+        assert_eq!(evidence.parsed_files(), 1);
+        assert_eq!(evidence.reused_parser_artifacts(), 0);
+        assert_eq!(evidence.lowered_files(), 1);
+        assert!(evidence.structural_cache_retained());
+        assert_eq!(service.receipts.len(), 1);
+        assert_eq!(service.incremental_inputs.len(), 1);
+    }
+
+    #[test]
+    fn structural_cache_exhaustion_falls_back_to_fresh_parsing() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let source = fixture.path().join("src/lib.rs");
+        fs::write(&source, "pub fn value() -> u32 { 1 }\n").expect("Rust source writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(3).expect("service initializes");
+        service.structural_artifacts.maximum_bytes = 1;
+
+        let first = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("initial generation publishes without structural retention");
+        let initial = service
+            .incremental_evidence(first.generation)
+            .expect("initial evidence remains retained");
+        assert!(!initial.structural_cache_retained());
+        assert_eq!(service.structural_artifacts.retained_bytes, 0);
+
+        fs::write(&source, "pub fn value() -> u32 { 2 }\n").expect("Rust source changes");
+        let second = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("successor generation performs a fresh parse");
+        let successor = service
+            .incremental_evidence(second.generation)
+            .expect("successor evidence remains retained");
+
+        assert_eq!(successor.parsed_files(), 1);
+        assert_eq!(successor.reused_parser_artifacts(), 0);
+        assert_eq!(successor.lowered_files(), 1);
+        assert!(!successor.structural_cache_retained());
+        assert_eq!(service.structural_artifacts.retained_bytes, 0);
+    }
+
+    #[test]
     fn aggregate_length_checks_bounds_and_overflow() {
         assert_eq!(
             checked_combined_length(2, 2, 3),
@@ -2323,6 +3417,9 @@ mod tests {
         assert!(service.source_snapshots.committed.is_empty());
         assert_eq!(service.source_snapshots.retained_bytes(), 0);
         assert_eq!(service.source_snapshots.staged_generations(), 0);
+        assert!(service.structural_artifacts.committed.is_empty());
+        assert!(service.structural_artifacts.staged.is_empty());
+        assert_eq!(service.structural_artifacts.retained_bytes, 0);
     }
 
     #[test]
@@ -2354,16 +3451,28 @@ mod tests {
             first_generation_bytes
         );
         assert_eq!(service.source_snapshots.staged_generations(), 1);
+        assert_eq!(service.structural_artifacts.staged.len(), 1);
+        assert!(service.structural_artifacts.retained_bytes > 0);
+        assert!(service.structural_artifacts.committed.is_empty());
         assert!(cancelled.cancel(CancellationReason::ClientRequest));
         service
             .discard_staged(staged)
             .expect("cancelled staging releases source retention");
         assert_eq!(service.source_snapshots.retained_bytes(), 0);
         assert_eq!(service.source_snapshots.staged_generations(), 0);
+        assert!(service.structural_artifacts.staged.is_empty());
+        assert_eq!(service.structural_artifacts.retained_bytes, 0);
 
         let first = service
             .index_rust_fixture(fixture.path(), &deadline())
             .expect("first generation publishes after cleanup");
+        assert!(
+            service
+                .structural_artifacts
+                .committed
+                .contains_key(&first.generation)
+        );
+        assert!(service.structural_artifacts.staged.is_empty());
         let first_locate = service
             .code_locate(
                 first.generation,
@@ -2385,6 +3494,12 @@ mod tests {
         assert_eq!(
             service.source_snapshots.retained_bytes(),
             exact_retention_bytes
+        );
+        assert!(
+            service
+                .structural_artifacts
+                .committed
+                .contains_key(&second.generation)
         );
         let second_locate = service
             .code_locate(
@@ -2414,6 +3529,7 @@ mod tests {
             exact_retention_bytes
         );
         assert_eq!(service.source_snapshots.staged_generations(), 0);
+        assert!(service.structural_artifacts.staged.is_empty());
         assert_eq!(
             service.active_generation_for(first.repository),
             Some(second.generation)
@@ -2678,12 +3794,16 @@ mod tests {
             .expect("successor evidence remains retained");
         assert_eq!(
             evidence.strategy(),
-            FirstSliceBuildStrategy::ConservativeRepositoryRebuild
+            FirstSliceBuildStrategy::DependencyDirected
         );
+        assert_eq!(evidence.fallback_reason(), None);
         assert_eq!(
-            evidence.fallback_reason(),
-            Some(FallbackReason::MissingDependencyDeclaration)
+            evidence
+                .parsed_files()
+                .checked_add(evidence.reused_parser_artifacts()),
+            Some(evidence.lowered_files())
         );
+        assert!(evidence.structural_cache_retained());
 
         let mut fresh = FirstSliceService::new(2).expect("fresh comparison service initializes");
         fresh.repositories = incremental.repositories.clone();
