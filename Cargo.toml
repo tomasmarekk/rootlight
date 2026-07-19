@@ -5,6 +5,7 @@ members = [
     "apps/rootlight-mcp",
     "crates/rootlight-adapter-sdk",
     "crates/rootlight-adapter-treesitter",
+    "crates/rootlight-adapters",
     "crates/rootlight-bench",
     "crates/rootlight-cancel",
     "crates/rootlight-catalog",

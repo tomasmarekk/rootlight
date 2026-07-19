@@ -1824,6 +1824,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootlight-adapters"
+version = "0.1.0"
+dependencies = [
+ "rootlight-adapter-sdk",
+ "rootlight-cancel",
+ "rootlight-ids",
+ "rootlight-ir",
+ "rootlight-vfs",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "rootlight-bench"
 version = "0.1.0"
 dependencies = [

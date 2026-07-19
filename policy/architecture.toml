@@ -4,6 +4,7 @@ workspace_members = [
   "rootlight-mcp",
   "rootlight-adapter-sdk",
   "rootlight-adapter-treesitter",
+  "rootlight-adapters",
   "rootlight-bench",
   "rootlight-cancel",
   "rootlight-catalog",
@@ -76,6 +77,15 @@ allowed_internal_dependencies = [
   "rootlight-ids",
   "rootlight-ir",
   "rootlight-vfs",
+]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-adapters"
+allowed_internal_dependencies = [
+  "rootlight-adapter-sdk",
+  "rootlight-cancel",
+  "rootlight-ir",
 ]
 allow_build_script = false
 

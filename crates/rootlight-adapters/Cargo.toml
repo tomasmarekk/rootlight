@@ -1,0 +1,21 @@
+[package]
+name = "rootlight-adapters"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
+rootlight-cancel = { path = "../rootlight-cancel" }
+rootlight-ir = { path = "../rootlight-ir" }
+thiserror.workspace = true
+
+[dev-dependencies]
+rootlight-ids = { path = "../rootlight-ids" }
+rootlight-vfs = { path = "../rootlight-vfs" }
+tempfile.workspace = true
+
+[lints]
+workspace = true
