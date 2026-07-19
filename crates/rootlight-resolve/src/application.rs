@@ -105,6 +105,7 @@ struct PendingRelation {
     repository: rootlight_ids::RepositoryId,
     generation: rootlight_ids::GenerationId,
     occurrence: FactId,
+    subject: RelationEndpoint,
     target: SymbolId,
     predicate: RelationPredicate,
     confidence: Confidence,
@@ -114,11 +115,17 @@ struct PendingRelation {
 
 impl PendingRelation {
     fn into_record(self) -> Result<RelationRecord, ResolutionError> {
+        let mut derivation = vec![FactRef::Fact(self.occurrence), FactRef::Entity(self.target)];
+        if let RelationEndpoint::Entity(subject) = self.subject {
+            derivation.push(FactRef::Entity(subject));
+        }
+        derivation.sort_unstable();
+        derivation.dedup();
         let mut record = RelationRecord {
             id: FactId::from_bytes([0; 20]),
             repository: self.repository,
             generation: self.generation,
-            subject: RelationEndpoint::Occurrence(self.occurrence),
+            subject: self.subject,
             predicate: self.predicate,
             object: RelationEndpoint::Entity(self.target),
             confidence: self.confidence,
@@ -126,7 +133,7 @@ impl PendingRelation {
             provenance: self.provenance,
             evidence: FactEvidence {
                 source: Some(self.source),
-                derivation: vec![FactRef::Fact(self.occurrence), FactRef::Entity(self.target)],
+                derivation,
             },
         };
         record.id = derive_relation_record_id(&record).map_err(ResolutionError::FactIdentity)?;
@@ -308,11 +315,32 @@ fn pending_relation(
         repository: occurrence.repository,
         generation: occurrence.generation,
         occurrence: occurrence.id,
+        subject: relation_subject(occurrence, predicate),
         target,
         predicate,
         confidence,
         provenance: occurrence.provenance,
         source: occurrence.source.clone(),
+    }
+}
+
+fn relation_subject(
+    occurrence: &OccurrenceRecord,
+    predicate: RelationPredicate,
+) -> RelationEndpoint {
+    if matches!(
+        predicate,
+        RelationPredicate::Extends
+            | RelationPredicate::Implements
+            | RelationPredicate::Satisfies
+            | RelationPredicate::Embeds
+            | RelationPredicate::MixesIn
+            | RelationPredicate::Overrides
+    ) && let Some(enclosing) = occurrence.enclosing
+    {
+        RelationEndpoint::Entity(enclosing)
+    } else {
+        RelationEndpoint::Occurrence(occurrence.id)
     }
 }
 

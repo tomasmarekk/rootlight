@@ -543,6 +543,120 @@ fn applies_ambiguous_calls_only_as_dispatch_candidates() {
     assert_eq!(dispatch_targets, expected_targets);
 }
 
+#[test]
+fn resolves_aliases_and_type_parameters_as_type_candidates() {
+    let mut fixture = Fixture::new();
+    let alias = fixture.add_entity(
+        120,
+        "Alias",
+        fixture.primary_file,
+        EntityKind::TypeAlias,
+        None,
+    );
+    let parameter = fixture.add_entity(
+        121,
+        "T",
+        fixture.primary_file,
+        EntityKind::TypeParameter,
+        None,
+    );
+    fixture.add_occurrence(
+        122,
+        "Alias",
+        fixture.primary_file,
+        OccurrenceRole::TypeUse,
+        None,
+    );
+    fixture.add_occurrence(
+        123,
+        "T",
+        fixture.primary_file,
+        OccurrenceRole::TypeUse,
+        None,
+    );
+    fixture.validate();
+
+    let applied = ResolutionEngine::default()
+        .apply(
+            fixture.document,
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        )
+        .expect("type candidates apply");
+    let resolved_targets = applied
+        .document
+        .occurrences
+        .iter()
+        .filter_map(|occurrence| {
+            if let OccurrenceTarget::Resolved { symbol } = occurrence.target {
+                Some(symbol)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    assert!(resolved_targets.contains(&alias));
+    assert!(resolved_targets.contains(&parameter));
+    assert_eq!(
+        applied
+            .document
+            .relations
+            .iter()
+            .filter(|relation| relation.predicate == RelationPredicate::UsesType)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn anchors_hierarchy_relations_on_the_enclosing_type() {
+    let mut fixture = Fixture::new();
+    let child = fixture.add_entity(130, "Child", fixture.primary_file, EntityKind::Class, None);
+    let base = fixture.add_entity(131, "Base", fixture.primary_file, EntityKind::Class, None);
+    let interface = fixture.add_entity(
+        132,
+        "Contract",
+        fixture.primary_file,
+        EntityKind::Interface,
+        None,
+    );
+    fixture.add_occurrence(
+        133,
+        "Base",
+        fixture.primary_file,
+        OccurrenceRole::InheritanceUse,
+        Some(child),
+    );
+    fixture.add_occurrence(
+        134,
+        "Contract",
+        fixture.primary_file,
+        OccurrenceRole::ImplementationUse,
+        Some(child),
+    );
+    fixture.validate();
+
+    let applied = ResolutionEngine::default()
+        .apply(
+            fixture.document,
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        )
+        .expect("hierarchy candidates apply");
+
+    assert!(applied.document.relations.iter().any(|relation| {
+        relation.subject == RelationEndpoint::Entity(child)
+            && relation.predicate == RelationPredicate::Extends
+            && relation.object == RelationEndpoint::Entity(base)
+    }));
+    assert!(applied.document.relations.iter().any(|relation| {
+        relation.subject == RelationEndpoint::Entity(child)
+            && relation.predicate == RelationPredicate::Implements
+            && relation.object == RelationEndpoint::Entity(interface)
+    }));
+}
+
 struct Fixture {
     document: NormalizedIrDocument,
     primary_file: FileId,
