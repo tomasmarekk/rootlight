@@ -8,6 +8,7 @@
 mod application;
 mod engine;
 mod model;
+mod quality;
 
 pub use engine::ResolutionEngine;
 pub use model::{
@@ -16,4 +17,8 @@ pub use model::{
     RejectionReason, ResolutionBatch, ResolutionDecision, ResolutionError, ResolutionExplanation,
     ResolutionLimitError, ResolutionLimits, ResolutionOutcome, ResolutionPenalty, ResolutionRule,
     ResolutionSignal, ResolverFactContext, UnresolvedReason,
+};
+pub use quality::{
+    CalibrationBin, CalibrationReport, ExpectedResolution, QualityError, QualityRatio,
+    ResolutionExpectation, ResolutionQualityReport, evaluate_resolution_quality,
 };

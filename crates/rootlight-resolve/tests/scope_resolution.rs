@@ -15,8 +15,9 @@ use rootlight_ir::{
     RelationPredicate, RelationRecord, SourceRef, SourceSpan, validate_ir_document,
 };
 use rootlight_resolve::{
-    CompletenessAssumption, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionError,
-    ResolutionSignal, ResolverFactContext, UnresolvedReason,
+    CompletenessAssumption, ExpectedResolution, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION,
+    ResolutionError, ResolutionExpectation, ResolutionSignal, ResolverFactContext,
+    UnresolvedReason, evaluate_resolution_quality,
 };
 use rootlight_resolve::{ResolutionEngine, ResolutionLimits, ResolutionOutcome};
 
@@ -702,6 +703,99 @@ fn resolves_import_aliases_and_qualified_names() {
             ResolutionOutcome::Resolved { symbol, .. } if symbol == module
         )
     }));
+}
+
+#[test]
+fn scores_direct_ambiguous_and_unresolved_call_outcomes() {
+    let mut fixture = Fixture::new();
+    let exact_target = fixture.add_entity(
+        150,
+        "direct",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    let first_candidate = fixture.add_entity(
+        151,
+        "dynamic",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    fixture.add_entity(
+        152,
+        "dynamic",
+        fixture.primary_file,
+        EntityKind::Method,
+        None,
+    );
+    let direct_call = fixture.add_occurrence(
+        153,
+        "direct",
+        fixture.primary_file,
+        OccurrenceRole::CallSite,
+        None,
+    );
+    let ambiguous_call = fixture.add_occurrence(
+        154,
+        "dynamic",
+        fixture.primary_file,
+        OccurrenceRole::CallSite,
+        None,
+    );
+    let unresolved_call = fixture.add_occurrence(
+        155,
+        "reflective",
+        fixture.primary_file,
+        OccurrenceRole::CallSite,
+        None,
+    );
+    fixture.validate();
+    let engine = ResolutionEngine::default();
+    let batch = engine
+        .resolve(&fixture.document, &Cancellation::new())
+        .expect("call fixture resolves");
+    let report = evaluate_resolution_quality(
+        &batch,
+        &[
+            ResolutionExpectation {
+                occurrence: direct_call,
+                expected: ExpectedResolution::Exact(exact_target),
+            },
+            ResolutionExpectation {
+                occurrence: ambiguous_call,
+                expected: ExpectedResolution::CandidateContains(first_candidate),
+            },
+            ResolutionExpectation {
+                occurrence: unresolved_call,
+                expected: ExpectedResolution::Unresolved,
+            },
+        ],
+    )
+    .expect("quality corpus is valid");
+
+    assert_eq!(report.exact_precision.basis_points(), Some(10_000));
+    assert_eq!(report.exact_recall.basis_points(), Some(10_000));
+    assert_eq!(report.candidate_recall.basis_points(), Some(10_000));
+    assert_eq!(report.ambiguous_hidden_exact, 0);
+    assert_eq!(report.unresolved_correct, 1);
+
+    let applied = engine
+        .apply(
+            fixture.document,
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        )
+        .expect("call fixture applies");
+    assert_eq!(
+        applied
+            .document
+            .relations
+            .iter()
+            .filter(|relation| relation.predicate == RelationPredicate::Calls)
+            .count(),
+        1
+    );
 }
 
 struct Fixture {
