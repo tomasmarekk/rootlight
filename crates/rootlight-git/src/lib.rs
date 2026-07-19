@@ -1,13 +1,17 @@
-//! Bounded declarative contracts for read-only Git and worktree evidence.
+//! Bounded collection and declarative contracts for read-only Git evidence.
 //!
-//! Validates future audited-importer facts without repository I/O, hooks,
-//! network, source bodies, or a decoder that could allocate before limits.
+//! The command collector permits only fixed read operations with hooks,
+//! helpers, prompts, lazy fetches, and optional repository writes disabled.
 
 #![forbid(unsafe_code)]
 
+mod collect;
 mod model;
 mod normalize;
 
+pub use collect::{
+    GitCollectError, GitCollectErrorCode, GitCollectLimits, GitCollectOperation, collect_repository,
+};
 pub use model::{
     ByteSpan, CandidateGroupId, CanonicalGitSnapshot, ChangeSet, ChangedSpan, CommitRecord,
     FileChange, FileChangeKind, GIT_CONTRACT_VERSION, GitCollection, GitContractError,

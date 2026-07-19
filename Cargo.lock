@@ -2008,6 +2008,7 @@ dependencies = [
  "rootlight-ids",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
