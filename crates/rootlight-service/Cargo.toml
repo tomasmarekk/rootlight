@@ -17,6 +17,7 @@ rootlight-discovery = { path = "../rootlight-discovery" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 rootlight-query = { path = "../rootlight-query" }
+rootlight-resolve = { path = "../rootlight-resolve" }
 rootlight-search = { path = "../rootlight-search" }
 rootlight-source = { path = "../rootlight-source" }
 rootlight-storage = { path = "../rootlight-storage" }

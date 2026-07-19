@@ -39,6 +39,7 @@ pub use rootlight_query::{
     CodeLocateResult, LocateMode, QueryResponse, SourceReadQueryResult, SymbolExplainResult,
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
+use rootlight_resolve::{ResolutionEngine, ResolutionError, ResolverFactContext};
 use rootlight_search::{BuildBudget, LexicalIndex, SearchBudget, SearchError};
 use rootlight_source::{SourceBudget, SourceError, SourceReadOptions, SourceService};
 use rootlight_storage::{
@@ -55,9 +56,10 @@ const MAX_SYNTAX_NODES: usize = 16_384;
 const MAX_SYNTAX_DEPTH: usize = 128;
 const MAX_REPOSITORY_PATH_IDENTITY_BYTES: usize = 64 * 1024;
 const MAX_RANDOM_ID_ATTEMPTS: usize = 8;
-const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/1";
+const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/2";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-rust/1";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
 
 /// Bounded receipt for one ephemeral first-slice generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -523,6 +525,7 @@ pub struct FirstSliceService {
     analysis_limits: AnalysisLimits,
     extensions: ExtensionSupport,
     analyzer: TreeSitterAnalyzer,
+    resolver: ResolutionEngine,
     // The canonical-root digest is only a process-local lookup key. The
     // nondurable fallback uses a random local UUID rather than path-derived
     // public identity; durable UUID persistence remains outside this service.
@@ -580,6 +583,7 @@ impl FirstSliceService {
             analysis_limits,
             extensions: ExtensionSupport::default(),
             analyzer,
+            resolver: ResolutionEngine::default(),
             repositories: BTreeMap::new(),
             active_by_repository: BTreeMap::new(),
             generations,
@@ -766,6 +770,15 @@ impl FirstSliceService {
                 self.analysis_limits.ir(),
             )?;
         }
+        let document = self
+            .resolver
+            .apply(
+                document,
+                ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
+                cancellation,
+            )
+            .map_err(|error| map_resolution_error(error, cancellation))?
+            .document;
         let metadata = GenerationMetadata::new(
             repository,
             generation,
@@ -1183,6 +1196,9 @@ pub enum FirstSliceError {
     /// Parser or normalized adapter output failed.
     #[error("first-slice analysis failed")]
     Adapter,
+    /// Bounded semantic resolution failed.
+    #[error("first-slice semantic resolution failed")]
+    Resolution,
     /// Stable identity verification failed.
     #[error("first-slice identity verification failed")]
     Identity,
@@ -1433,6 +1449,16 @@ fn map_adapter_error(error: AdapterError, cancellation: &Cancellation) -> FirstS
     }
 }
 
+fn map_resolution_error(error: ResolutionError, cancellation: &Cancellation) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    match error {
+        ResolutionError::Cancelled(cancelled) => FirstSliceError::Cancelled(cancelled.reason()),
+        _ => FirstSliceError::Resolution,
+    }
+}
+
 fn map_identity_error(
     error: IdentityVerificationError,
     cancellation: &Cancellation,
@@ -1655,7 +1681,9 @@ mod tests {
     };
 
     use rootlight_ids::GenerationId;
-    use rootlight_ir::{CoverageScope, CoverageStatus};
+    use rootlight_ir::{
+        CoverageScope, CoverageStatus, OccurrenceRole, OccurrenceTarget, RelationPredicate,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -1716,6 +1744,54 @@ mod tests {
                     .source
                     .as_ref()
                     .is_some_and(|source| source.span().file() == malformed)
+        }));
+    }
+
+    #[test]
+    fn published_generation_contains_resolver_owned_call_facts() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn target() -> u32 { 42 }\npub fn caller() -> u32 { target() }\n",
+        )
+        .expect("call fixture writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("call fixture publishes");
+        let snapshot = service
+            .generations
+            .generation(receipt.generation)
+            .expect("published generation remains retained");
+        let document = snapshot.document();
+        let call = document
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+            .expect("adapter emits the explicit call occurrence");
+        let target = match &call.target {
+            OccurrenceTarget::Candidates {
+                symbols,
+                total_count,
+                ..
+            } => {
+                assert_eq!(*total_count, 1);
+                symbols[0]
+            }
+            _ => panic!("Tier D call retains its unique target as a candidate"),
+        };
+
+        assert!(document.relations.iter().any(|relation| {
+            relation.predicate == RelationPredicate::DispatchCandidate
+                && relation.object == rootlight_ir::RelationEndpoint::Entity(target)
+                && relation.subject == rootlight_ir::RelationEndpoint::Occurrence(call.id)
+        }));
+        assert!(document.provenance.iter().any(|provenance| {
+            provenance.id == call.provenance
+                && provenance.producer.name() == rootlight_resolve::RESOLVER_PROVIDER_NAME
         }));
     }
 

@@ -195,6 +195,8 @@ fn build_provenance(
             .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
         context_digests.push(entity_provenance.build_context.digest());
     }
+    sources.sort_unstable();
+    sources.dedup();
     derivation_parents.sort_unstable();
     derivation_parents.dedup();
     context_digests.sort_unstable();

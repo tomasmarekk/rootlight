@@ -262,6 +262,7 @@ allowed_internal_dependencies = [
   "rootlight-ids",
   "rootlight-ir",
   "rootlight-query",
+  "rootlight-resolve",
   "rootlight-search",
   "rootlight-source",
   "rootlight-storage",
