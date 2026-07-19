@@ -332,6 +332,142 @@ jobs:
             echo "- artifact digest: \`$ARTIFACT_DIGEST\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  semantic-evidence:
+    name: semantic fallback evidence / linux
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Generate deterministic semantic fallback envelope
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          cargo build --locked --release --package rootlight-bench --bin semantic-evidence
+          target/release/semantic-evidence \
+            --source-revision "$SOURCE_REVISION" > target/rootlight-semantic-evidence-v1.json
+          target/release/semantic-evidence \
+            --source-revision "$SOURCE_REVISION" > target/rootlight-semantic-evidence-v1.second.json
+          cmp target/rootlight-semantic-evidence-v1.json target/rootlight-semantic-evidence-v1.second.json
+          if grep --fixed-strings --binary-files=without-match "$PWD" \
+            target/rootlight-semantic-evidence-v1.json; then
+            echo "semantic evidence contains the checkout path" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("target/rootlight-semantic-evidence-v1.json")
+          encoded = path.read_bytes()
+          envelope = json.loads(encoded)
+          expected_envelope = {
+              "schema": "rootlight.semantic-evidence-envelope/1",
+              "source_revision": os.environ["SOURCE_REVISION"],
+          }
+          observed_envelope = {
+              key: envelope.get(key) for key in expected_envelope
+          }
+          if observed_envelope != expected_envelope:
+              raise SystemExit(
+                  f"semantic evidence envelope mismatch: {observed_envelope!r}"
+              )
+
+          evidence = envelope.get("evidence")
+          if not isinstance(evidence, dict):
+              raise SystemExit("semantic evidence payload is missing")
+          expected_evidence = {
+              "schema_version": "1.1",
+              "corpus_id": "rootlight-semantic-contract-fixture-v1",
+              "adapter_crate": "rootlight-adapters",
+              "disposition": "contract_fixture_only",
+              "production_acceptance_eligible": False,
+          }
+          observed_evidence = {
+              key: evidence.get(key) for key in expected_evidence
+          }
+          if observed_evidence != expected_evidence:
+              raise SystemExit(
+                  f"semantic evidence payload mismatch: {observed_evidence!r}"
+              )
+
+          languages = evidence.get("languages")
+          expected_languages = ["go", "python", "rust", "typescript"]
+          if not isinstance(languages, list):
+              raise SystemExit("semantic language evidence is missing")
+          if [item.get("language") for item in languages] != expected_languages:
+              raise SystemExit("semantic language evidence differs")
+          if any(
+              item.get("observed_context_imports") != 0
+              or item.get("tier_promotion_eligible") is not False
+              for item in languages
+          ):
+              raise SystemExit("semantic language evidence overstates capability")
+
+          quality = evidence.get("resolver_quality")
+          if not isinstance(quality, dict):
+              raise SystemExit("semantic resolver evidence is missing")
+          expected_quality = {
+              "corpus_scope": "caller_supplied_contract_fixture",
+              "language_breakdown_available": False,
+              "holdout_available": False,
+              "promotion_eligible": False,
+          }
+          observed_quality = {
+              key: quality.get(key) for key in expected_quality
+          }
+          if observed_quality != expected_quality:
+              raise SystemExit(
+                  f"semantic resolver evidence overstates capability: {observed_quality!r}"
+              )
+
+          execution = evidence.get("repository_execution")
+          if not isinstance(execution, dict):
+              raise SystemExit("repository execution evidence is missing")
+          if (
+              execution.get("command_surface_available") is not False
+              or execution.get("observed_command_attempts") != 0
+              or execution.get("network_egress_available") is not False
+          ):
+              raise SystemExit("repository execution evidence differs")
+          if len(encoded) > 128 * 1024:
+              raise SystemExit("semantic evidence exceeds its single-file ceiling")
+          print(
+              "verified semantic fallback envelope "
+              f"bytes={len(encoded)} sha256={hashlib.sha256(encoded).hexdigest()}"
+          )
+          PY
+      - name: Upload immutable semantic fallback envelope
+        id: evidence-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-semantic-evidence-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rootlight-semantic-evidence-v1.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+      - name: Record immutable artifact identity
+        env:
+          ARTIFACT_ID: ${{ steps.evidence-upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence-upload.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.evidence-upload.outputs.artifact-digest }}
+        run: |
+          {
+            echo "### Semantic fallback evidence"
+            echo
+            echo "- artifact id: \`$ARTIFACT_ID\`"
+            echo "- artifact url: $ARTIFACT_URL"
+            echo "- artifact digest: \`$ARTIFACT_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   adapter-isolation:
     name: adapter isolation evidence / ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
@@ -442,7 +578,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, parser-evidence, adapter-isolation]
+    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, parser-evidence, semantic-evidence, adapter-isolation]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -460,6 +596,12 @@ jobs:
           needs = json.loads(os.environ["NEEDS_JSON"])
           expected = {name: "success" for name in needs}
           expected["parser-evidence"] = (
+              "success"
+              if os.environ["EVENT_NAME"] == "push"
+              and os.environ["EVENT_REF"] == "refs/heads/main"
+              else "skipped"
+          )
+          expected["semantic-evidence"] = (
               "success"
               if os.environ["EVENT_NAME"] == "push"
               and os.environ["EVENT_REF"] == "refs/heads/main"

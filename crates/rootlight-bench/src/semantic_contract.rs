@@ -25,8 +25,12 @@ const MILLI_SCALE: u64 = 1_000;
 
 /// Version of the machine-readable semantic contract evidence schema.
 pub const SEMANTIC_EVIDENCE_SCHEMA_VERSION: &str = "1.1";
+/// Version of the source-revision-bound semantic evidence envelope.
+pub const SEMANTIC_EVIDENCE_ENVELOPE_SCHEMA: &str = "rootlight.semantic-evidence-envelope/1";
 /// Maximum canonical byte size emitted for one semantic contract report.
 pub const SEMANTIC_EVIDENCE_MAX_BYTES: usize = 64 * 1024;
+/// Maximum canonical byte size emitted for one source-bound envelope.
+pub const SEMANTIC_EVIDENCE_ENVELOPE_MAX_BYTES: usize = 128 * 1024;
 /// Maximum reviewed expectations accepted by one semantic contract corpus.
 pub const SEMANTIC_EVIDENCE_MAX_EXPECTATIONS: usize = 65_536;
 
@@ -169,6 +173,9 @@ pub enum SemanticEvidenceError {
     /// Canonical JSON serialization failed.
     #[error("Semantic contract evidence encoding failed")]
     Encode,
+    /// Source revision was not a canonical full Git object name.
+    #[error("Semantic contract evidence source revision is invalid")]
+    InvalidSourceRevision,
 }
 
 /// Builds contract evidence from the shared registry and caller-supplied decisions.
@@ -248,6 +255,44 @@ pub fn encode_semantic_evidence(
         });
     }
     Ok(encoded)
+}
+
+/// Encodes one report with the exact source revision that produced it.
+///
+/// # Errors
+///
+/// Returns [`SemanticEvidenceError`] for a non-canonical lowercase 40-digit Git
+/// object name, serialization failure, or an envelope above its hard ceiling.
+pub fn encode_semantic_evidence_envelope(
+    evidence: &SemanticEvidence,
+    source_revision: &str,
+) -> Result<Vec<u8>, SemanticEvidenceError> {
+    if source_revision.len() != 40
+        || source_revision
+            .bytes()
+            .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
+    {
+        return Err(SemanticEvidenceError::InvalidSourceRevision);
+    }
+    let envelope = SemanticEvidenceEnvelope {
+        schema: SEMANTIC_EVIDENCE_ENVELOPE_SCHEMA,
+        source_revision,
+        evidence,
+    };
+    let encoded = serde_json::to_vec(&envelope).map_err(|_| SemanticEvidenceError::Encode)?;
+    if encoded.len() > SEMANTIC_EVIDENCE_ENVELOPE_MAX_BYTES {
+        return Err(SemanticEvidenceError::LimitExceeded {
+            resource: "envelope_bytes",
+        });
+    }
+    Ok(encoded)
+}
+
+#[derive(Debug, Serialize)]
+struct SemanticEvidenceEnvelope<'a> {
+    schema: &'static str,
+    source_revision: &'a str,
+    evidence: &'a SemanticEvidence,
 }
 
 fn language_evidence(
@@ -615,6 +660,30 @@ mod tests {
             Err(SemanticEvidenceError::LimitExceeded {
                 resource: "candidate_count"
             })
+        ));
+    }
+
+    #[test]
+    fn source_bound_envelope_is_deterministic_and_rejects_invalid_revisions() {
+        let registry = initial_semantic_registry().expect("shared registry is valid");
+        let (batch, expectations) = corpus();
+        let evidence = build_semantic_evidence(&registry, &batch, &expectations)
+            .expect("fixture evidence builds");
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let first = encode_semantic_evidence_envelope(&evidence, revision)
+            .expect("source-bound evidence encodes");
+        let second = encode_semantic_evidence_envelope(&evidence, revision)
+            .expect("source-bound evidence re-encodes");
+        assert_eq!(first, second);
+        assert!(first.len() <= SEMANTIC_EVIDENCE_ENVELOPE_MAX_BYTES);
+        let value: serde_json::Value =
+            serde_json::from_slice(&first).expect("envelope JSON decodes");
+        assert_eq!(value["schema"], SEMANTIC_EVIDENCE_ENVELOPE_SCHEMA);
+        assert_eq!(value["source_revision"], revision);
+        assert_eq!(value["evidence"]["production_acceptance_eligible"], false);
+        assert!(matches!(
+            encode_semantic_evidence_envelope(&evidence, "not-a-revision"),
+            Err(SemanticEvidenceError::InvalidSourceRevision)
         ));
     }
 

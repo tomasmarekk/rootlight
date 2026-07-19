@@ -42,9 +42,10 @@ pub use sampler::{
     UnavailableProcessTreeSampler,
 };
 pub use semantic_contract::{
+    SEMANTIC_EVIDENCE_ENVELOPE_MAX_BYTES, SEMANTIC_EVIDENCE_ENVELOPE_SCHEMA,
     SEMANTIC_EVIDENCE_MAX_BYTES, SEMANTIC_EVIDENCE_MAX_EXPECTATIONS,
     SEMANTIC_EVIDENCE_SCHEMA_VERSION, SemanticEvidence, SemanticEvidenceError,
-    build_semantic_evidence, encode_semantic_evidence,
+    build_semantic_evidence, encode_semantic_evidence, encode_semantic_evidence_envelope,
 };
 
 /// Result-bundle schema version written and verified by this crate.
