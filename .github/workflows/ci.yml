@@ -468,6 +468,170 @@ jobs:
             echo "- artifact digest: \`$ARTIFACT_DIGEST\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  capability-evidence:
+    name: capability fallback evidence / linux
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Verify bounded fallback contracts
+        run: |
+          cargo test --locked --package rootlight-service --lib \
+            tests::dependency_directed_successors_match_fresh_logical_rebuilds \
+            -- --exact
+          cargo test --locked --package rootlight-storage --lib
+          cargo test --locked --package rootlight-segment --test differential
+      - name: Generate deterministic capability verdict
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          cargo build --locked --release --package rootlight-bench --bin capability-evidence
+          target/release/capability-evidence \
+            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-evidence-v1.json
+          target/release/capability-evidence \
+            --source-revision "$SOURCE_REVISION" > target/rootlight-capability-evidence-v1.second.json
+          cmp target/rootlight-capability-evidence-v1.json target/rootlight-capability-evidence-v1.second.json
+          if grep --fixed-strings --binary-files=without-match "$PWD" \
+            target/rootlight-capability-evidence-v1.json; then
+            echo "capability evidence contains the checkout path" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("target/rootlight-capability-evidence-v1.json")
+          encoded = path.read_bytes()
+          evidence = json.loads(encoded)
+          expected_root = {
+              "schema": "rootlight.capability-evidence/1",
+              "source_revision": os.environ["SOURCE_REVISION"],
+              "decision": "fallback",
+              "safe_operating_mode": "process_local_structural",
+              "semantic_expansion_eligible": False,
+          }
+          observed_root = {
+              key: evidence.get(key) for key in expected_root
+          }
+          if observed_root != expected_root:
+              raise SystemExit(
+                  f"capability evidence root mismatch: {observed_root!r}"
+              )
+
+          semantic = evidence.get("semantic")
+          expected_semantic = {
+              "status": "contract_fixture_only",
+              "declared_languages": ["go", "python", "rust", "typescript"],
+              "observed_language_reports": 0,
+              "holdout_available": False,
+              "language_breakdown_available": False,
+              "production_acceptance_eligible": False,
+              "tier_promotion_eligible": False,
+          }
+          if semantic != expected_semantic:
+              raise SystemExit(
+                  f"semantic capability evidence differs: {semantic!r}"
+              )
+
+          incremental = evidence.get("incremental")
+          if not isinstance(incremental, dict):
+              raise SystemExit("incremental capability evidence is missing")
+          expected_incremental = {
+              "status": "process_local_parser_artifact_reuse",
+              "authoritative_reconcile_contract_available": True,
+              "parser_artifact_reuse_contract_available": True,
+              "fresh_generation_lowering_required": True,
+              "fixture_equivalence_ci_required": True,
+              "production_mutation_corpus_available": False,
+              "medium_suite_measurements_available": False,
+              "body_edit_p95_available": False,
+              "durable_artifact_cache_available": False,
+          }
+          if incremental != expected_incremental:
+              raise SystemExit(
+                  f"incremental capability evidence differs: {incremental!r}"
+              )
+
+          storage = evidence.get("storage")
+          if not isinstance(storage, dict):
+              raise SystemExit("storage capability evidence is missing")
+          if (
+              storage.get("selected_backend") != "sqlite"
+              or storage.get("segment_status") != "in_memory_research_only"
+              or storage.get("durable_filesystem_publication_active") is not False
+              or storage.get("restart_recovery_measurements_available") is not False
+              or storage.get("two_stage_publication_active") is not False
+          ):
+              raise SystemExit(
+                  f"storage capability evidence overstates support: {storage!r}"
+              )
+
+          isolation = evidence.get("isolation")
+          expected_isolation = {
+              "activation": "structural_fallback",
+              "required_platforms": ["linux", "mac_os", "windows"],
+              "cross_platform_reports_required": True,
+              "native_controls_enforced": False,
+              "deep_adapter_permitted": False,
+          }
+          if isolation != expected_isolation:
+              raise SystemExit(
+                  f"isolation capability evidence differs: {isolation!r}"
+              )
+
+          blocked = evidence.get("blocked_activations")
+          if (
+              not isinstance(blocked, dict)
+              or set(blocked) != {
+                  "language_tier_promotion",
+                  "durable_publication",
+                  "deep_adapter_execution",
+                  "semantic_product_expansion",
+              }
+              or any(value is not True for value in blocked.values())
+          ):
+              raise SystemExit(
+                  f"capability activation blockers differ: {blocked!r}"
+              )
+          if len(encoded) > 32 * 1024:
+              raise SystemExit("capability evidence exceeds its single-file ceiling")
+          print(
+              "verified capability fallback evidence "
+              f"bytes={len(encoded)} sha256={hashlib.sha256(encoded).hexdigest()}"
+          )
+          PY
+      - name: Upload immutable capability verdict
+        id: evidence-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-capability-evidence-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/rootlight-capability-evidence-v1.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+      - name: Record immutable artifact identity
+        env:
+          ARTIFACT_ID: ${{ steps.evidence-upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence-upload.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.evidence-upload.outputs.artifact-digest }}
+        run: |
+          {
+            echo "### Capability fallback evidence"
+            echo
+            echo "- artifact id: \`$ARTIFACT_ID\`"
+            echo "- artifact url: $ARTIFACT_URL"
+            echo "- artifact digest: \`$ARTIFACT_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   adapter-isolation:
     name: adapter isolation evidence / ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
@@ -578,7 +742,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, parser-evidence, semantic-evidence, adapter-isolation]
+    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, parser-evidence, semantic-evidence, capability-evidence, adapter-isolation]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -602,6 +766,12 @@ jobs:
               else "skipped"
           )
           expected["semantic-evidence"] = (
+              "success"
+              if os.environ["EVENT_NAME"] == "push"
+              and os.environ["EVENT_REF"] == "refs/heads/main"
+              else "skipped"
+          )
+          expected["capability-evidence"] = (
               "success"
               if os.environ["EVENT_NAME"] == "push"
               and os.environ["EVENT_REF"] == "refs/heads/main"
