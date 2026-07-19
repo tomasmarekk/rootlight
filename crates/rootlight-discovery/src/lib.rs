@@ -1139,7 +1139,7 @@ max_source_file_bytes = 2097152
             .exclusions
             .iter()
             .find(|exclusion| exclusion.path == "nested/ignored/ignored.rs")
-            .expect("ignored Gate-1 input is audited");
+            .expect("ignored Vertical slice input is audited");
         assert_eq!(
             ignored.decisive_rule,
             Some(DecisiveRule {
@@ -1151,7 +1151,7 @@ max_source_file_bytes = 2097152
             .inputs
             .iter()
             .find(|input| input.path == "nested/ignored/kept.rs")
-            .expect("negated Gate-1 input is included");
+            .expect("negated Vertical slice input is included");
         assert_eq!(
             kept.decisive_rule,
             Some(DecisiveRule {

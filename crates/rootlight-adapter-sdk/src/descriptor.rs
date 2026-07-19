@@ -21,7 +21,7 @@ pub enum MemoryEnforcement {
     /// The adapter runs behind a hard operating-system process boundary.
     ///
     /// Process-tree ownership and hostile-provider termination are supplied by
-    /// the M13 runtime, not by this synchronous in-process SDK.
+    /// the isolated adapter host, not by this synchronous in-process SDK.
     HardProcess,
     /// The cooperative in-process adapter reports its own memory accounting.
     ///
@@ -39,8 +39,8 @@ pub enum MemoryAdmissionPolicy {
     /// Reject adapters without hard or reported in-process enforcement.
     #[default]
     RequireHardOrAccounted,
-    /// Intentionally admit the bounded M05 fallback without memory enforcement.
-    AllowUnavailableM05Fallback,
+    /// Intentionally admit the bounded fallback without memory enforcement.
+    AllowUnavailableEnforcementFallback,
 }
 
 /// Memory-bound status attached by the SDK to committed adapter output.
@@ -51,8 +51,8 @@ pub enum MemoryAdmissionStatus {
     HardProcess,
     /// The trusted in-process provider supplied its required reported counter.
     AccountedInProcess,
-    /// The caller explicitly admitted the M05 unavailable-enforcement fallback.
-    UnavailableM05Fallback,
+    /// The caller explicitly admitted the unavailable-enforcement fallback.
+    UnavailableEnforcementFallback,
 }
 
 /// A bounded normalized language identity.

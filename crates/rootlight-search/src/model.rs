@@ -306,7 +306,7 @@ pub enum SearchError {
     /// The staging directory was not empty and private to this build.
     #[error("lexical staging directory is not empty")]
     NonEmptyStaging,
-    /// The proposed private-file boundary has no approved implementation.
+    /// The private-file boundary is disabled.
     #[error("lexical private-file boundary is unsupported")]
     UnsupportedPrivateFileBoundary,
     /// A redacted storage or indexing operation failed.

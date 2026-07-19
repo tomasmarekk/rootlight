@@ -12,7 +12,7 @@ const HARD_MAX_RETAINED_GENERATIONS: usize = 64;
 ///
 /// This registry proves pinned old-generation reads without claiming the
 /// durable publication, lease, recovery, or reclamation semantics scheduled
-/// for later milestones.
+/// for later storage integrations.
 pub struct GenerationSet<Search> {
     maximum: usize,
     active: Option<GenerationId>,

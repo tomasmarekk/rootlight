@@ -3,7 +3,7 @@
 //! Rust-owned scans, copies, sorts, staging, and commits use bounded cooperative
 //! checkpoints, while Tree-sitter parsing uses its native progress callback.
 //! `changed_ranges` performs eager native work before Rust iterator checkpoints;
-//! hard preemption and native-allocation isolation remain M13 responsibilities.
+//! hard preemption and native-allocation isolation remain responsibilities of the isolated adapter supervisor.
 
 use std::{
     collections::VecDeque,

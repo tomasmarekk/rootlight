@@ -269,7 +269,7 @@ impl EquivalenceReport {
         &self.mismatches
     }
 
-    /// Converts any inequality into the milestone's hard-stop error.
+    /// Converts any inequality into the contract's hard-stop error.
     ///
     /// # Errors
     ///

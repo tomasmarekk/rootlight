@@ -13,6 +13,7 @@ mod mcp_vertical;
 mod policy;
 mod protobuf_compatibility;
 mod schemas;
+mod source_hygiene;
 
 use std::{env, error::Error as _, process::ExitCode};
 

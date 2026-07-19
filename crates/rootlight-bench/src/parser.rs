@@ -1,4 +1,4 @@
-//! Seeded M05 parser benchmark scheduling, execution, and aggregation.
+//! Seeded parser benchmark scheduling, execution, and aggregation.
 //!
 //! All parser work uses `ParseProvider` through `execute_parse`; syntax-only
 //! runs remain semantically ineligible until a later extraction probe supplies facts.
@@ -75,7 +75,7 @@ pub trait SemanticFactProbe: Send + Sync {
     }
 }
 
-/// Syntax-only probe that keeps M05 performance evidence ineligible.
+/// Syntax-only probe that keeps parser performance evidence ineligible.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UnavailableSemanticFacts;
 
@@ -659,7 +659,7 @@ pub(crate) fn summarize(
         .collect::<Result<BTreeMap<_, _>, ParserRunError>>()?;
     Ok(ResultSummary {
         schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
-        benchmark_id: "BENCH-PARSE-001".to_owned(),
+        benchmark_id: "rootlight-parser-benchmark-v1".to_owned(),
         semantic_eligibility,
         families,
         failed_samples,

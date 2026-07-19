@@ -416,8 +416,8 @@ pub fn publish_bundle(bundle: &ResultBundle, destination: &Path) -> Result<(), B
 
 /// Publishes one immutable result bundle with checked caller-selected limits.
 ///
-/// Production publication is intentionally blocked until the proposed VFS
-/// account-private tree boundary is accepted. The availability check is the
+/// Production publication is intentionally blocked while the native VFS
+/// account-private tree boundary is disabled. The availability check is the
 /// first operation: invalid paths, caller limits, and bundle contents cannot
 /// trigger path parsing, randomness, serialization, or filesystem effects.
 ///
@@ -1706,7 +1706,7 @@ mod tests {
             },
             command: BenchmarkCommand {
                 schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
-                subcommand: "m05-parser-evidence".to_owned(),
+                subcommand: "parser-evidence".to_owned(),
                 arguments: Vec::new(),
                 seed: 7,
                 warmup_rounds: 1,
@@ -1716,7 +1716,7 @@ mod tests {
             raw_samples: Vec::new(),
             summary: ResultSummary {
                 schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
-                benchmark_id: "BENCH-PARSE-001".to_owned(),
+                benchmark_id: "rootlight-parser-benchmark-v1".to_owned(),
                 semantic_eligibility: Availability::Failed {
                     reason_code: "no_measured_samples".to_owned(),
                 },
@@ -2584,7 +2584,7 @@ mod tests {
     fn version_two_bundle_rejects_the_version_one_quality_rubric() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let mut bundle = fixture();
-        bundle.quality.rubric_id = "m05-parser-semantic-eligibility-1.0".to_owned();
+        bundle.quality.rubric_id = "parser-semantic-eligibility-1.0".to_owned();
 
         let error = materialize_bundle(&bundle, &temporary.path().join("result"))
             .expect_err("legacy rubric is incompatible with schema version two");
@@ -2792,7 +2792,7 @@ mod tests {
         ));
 
         let mut subcommand_bundle = fixture();
-        subcommand_bundle.command.subcommand = "m05-parser".to_owned();
+        subcommand_bundle.command.subcommand = "parser".to_owned();
         assert!(matches!(
             materialize_bundle(&subcommand_bundle, &temporary.path().join("subcommand")),
             Err(BundleError::InvalidArtifactEncoding)

@@ -233,7 +233,7 @@ impl RuntimePaths {
     /// Windows the handle must deny read, write, and delete sharing from creation onward so
     /// inherited directory permissions cannot expose or replace the object before its protected
     /// DACL is installed. On macOS, sensitive new content must use [`PrivateOutputFile`], which
-    /// fails closed until an accepted boundary can remove and verify inherited ACLs through
+    /// fails closed until an enabled native boundary can remove and verify inherited ACLs through
     /// retained descriptors and publish the same verified identity without replacement. Mode
     /// hardening alone cannot revoke a descriptor opened through an ACL inherited at creation.
     ///
@@ -415,10 +415,9 @@ impl RuntimePaths {
 /// On supported implementation platforms, the final path is created exclusively and is visible
 /// immediately; a write or commit failure can leave a partial owner-private file at that path.
 /// macOS construction fails closed before creating an object. Apple platforms expose
-/// directory-relative `RENAME_EXCL`, but Rootlight has no accepted boundary that first removes and
-/// verifies inherited ACLs through retained descriptors and then publishes the same verified
-/// identity without replacement. Implementing that boundary requires acceptance of the proposed
-/// native private-tree architecture decision.
+/// directory-relative `RENAME_EXCL`, but Rootlight has no enabled native boundary that first
+/// removes and verifies inherited ACLs through retained descriptors and then publishes the same
+/// verified identity without replacement. The native private-tree boundary remains disabled.
 #[derive(Debug)]
 pub struct PrivateOutputFile {
     file: File,

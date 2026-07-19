@@ -1,4 +1,4 @@
-//! Fail-closed mechanics for the Proposed ADR-026 boundary.
+//! Fail-closed mechanics for the disabled native platform boundary.
 //!
 //! No target receives a native implementation before the decision is accepted.
 

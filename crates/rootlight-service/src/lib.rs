@@ -652,7 +652,7 @@ enum SourceSnapshotReleaseUpdate {
 /// Bounded process-local source fallback mirroring generation publication.
 ///
 /// Source bodies remain outside the core index and are never persisted. The
-/// byte ceiling and content-identity sharing keep this Gate-1 fallback bounded
+/// byte ceiling and content-identity sharing keep this Vertical slice fallback bounded
 /// until the later durable source-retention architecture is authorized.
 struct SourceSnapshotRetention {
     maximum_generations: usize,
@@ -958,9 +958,9 @@ impl SourceSnapshotRetention {
 /// The service retains at most the caller-selected hard-bounded generation
 /// count, 64 MiB of deduplicated source content, and 64 MiB of logically
 /// accounted parser artifacts. SQLite, lexical, and source state are
-/// process-local because ADR-026 has not authorized durable private-file
+/// process-local because the native boundary does not enable durable private-file
 /// creation. Full crash recovery, leases, and filesystem publication remain
-/// M12 work.
+/// durable publication work.
 pub struct FirstSliceService {
     config: ConfigSnapshot,
     analysis_limits: AnalysisLimits,
@@ -1274,7 +1274,7 @@ impl FirstSliceService {
                         &request,
                         &entry.artifact,
                         self.extensions.clone(),
-                        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+                        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
                         cancellation,
                     )
                     .map_err(|error| map_adapter_error(error, cancellation))?;
@@ -1288,7 +1288,7 @@ impl FirstSliceService {
                     .analyze_and_capture(
                         &request,
                         self.extensions.clone(),
-                        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+                        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
                         cancellation,
                     )
                     .map_err(|error| map_adapter_error(error, cancellation))?;
@@ -3069,10 +3069,10 @@ mod tests {
 
     const GATE_FIXTURE_ROOT: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/fixtures/gate-1/first-slice/v1"
+        "/../../tests/fixtures/vertical-slice/first-slice/v1"
     );
     const GATE_V2_PATCH: &str =
-        include_str!("../../../tests/fixtures/gate-1/first-slice/v1-to-v2.patch");
+        include_str!("../../../tests/fixtures/vertical-slice/first-slice/v1-to-v2.patch");
     const IGNORED_SENTINEL: &str = "ROOTLIGHT_IGNORED_SENTINEL";
     const EQUIVALENCE_COMPONENT_BYTES: usize = 4 * 1024 * 1024;
     const EQUIVALENCE_INITIAL: &str =
@@ -3577,7 +3577,7 @@ mod tests {
 
         let first = service
             .index_rust_fixture(fixture.path(), &cancellation)
-            .expect("Gate-1 v1 indexes");
+            .expect("Vertical slice v1 indexes");
         assert_eq!(first.discovered_inputs, 5);
         assert_eq!(first.indexed_files, 3);
         assert_indexed_gate_paths(&service, first.generation);
@@ -3647,13 +3647,13 @@ mod tests {
         );
         let repeated = service
             .index_rust_fixture(fixture.path(), &cancellation)
-            .expect("unchanged Gate-1 v1 is idempotent");
+            .expect("unchanged Vertical slice v1 is idempotent");
         assert_eq!(repeated, first);
 
         apply_gate_v2_patch(fixture.path());
         let second = service
             .index_rust_fixture(fixture.path(), &cancellation)
-            .expect("Gate-1 v2 indexes");
+            .expect("Vertical slice v2 indexes");
         assert_eq!(second.parent, Some(first.generation));
         assert_ne!(second.generation, first.generation);
         assert_eq!(
@@ -3758,17 +3758,17 @@ mod tests {
         let target = GATE_V2_PATCH
             .lines()
             .find_map(|line| line.strip_prefix("+++ b/"))
-            .expect("Gate-1 patch names a target");
+            .expect("Vertical slice patch names a target");
         let removed = GATE_V2_PATCH
             .lines()
             .find(|line| line.starts_with('-') && !line.starts_with("---"))
             .and_then(|line| line.strip_prefix('-'))
-            .expect("Gate-1 patch removes one line");
+            .expect("Vertical slice patch removes one line");
         let added = GATE_V2_PATCH
             .lines()
             .find(|line| line.starts_with('+') && !line.starts_with("+++"))
             .and_then(|line| line.strip_prefix('+'))
-            .expect("Gate-1 patch adds one line");
+            .expect("Vertical slice patch adds one line");
         let path = root.join(target);
         let source = fs::read_to_string(&path).expect("materialized v1 source reads");
         let removed = format!("{removed}\n");
@@ -3776,10 +3776,10 @@ mod tests {
         assert_eq!(
             source.matches(&removed).count(),
             1,
-            "Gate-1 patch context must match exactly once"
+            "Vertical slice patch context must match exactly once"
         );
         fs::write(path, source.replacen(&removed, &added, 1))
-            .expect("Gate-1 v2 source materializes");
+            .expect("Vertical slice v2 source materializes");
     }
 
     fn assert_fresh_equivalent(
@@ -3991,7 +3991,7 @@ mod tests {
         let snapshot = service
             .generations
             .generation(generation)
-            .expect("Gate-1 generation remains retained");
+            .expect("Vertical slice generation remains retained");
         let mut paths = snapshot
             .document()
             .files
@@ -4009,13 +4009,13 @@ mod tests {
         let snapshot = service
             .generations
             .generation(generation)
-            .expect("Gate-1 generation remains retained");
+            .expect("Vertical slice generation remains retained");
         let document = snapshot.document();
         let malformed = document
             .files
             .iter()
             .find(|file| file.path == "src/malformed.rs")
-            .expect("malformed Gate-1 file remains represented")
+            .expect("malformed Vertical slice file remains represented")
             .id;
         assert!(document.coverage_records.iter().any(|coverage| {
             coverage.scope == CoverageScope::File(malformed)
@@ -4046,7 +4046,7 @@ mod tests {
                     8,
                     cancellation,
                 )
-                .expect("excluded Gate-1 query succeeds");
+                .expect("excluded Vertical slice query succeeds");
             assert!(located.data.hits.is_empty(), "{query} must not be exposed");
         }
     }

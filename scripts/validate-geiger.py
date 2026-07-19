@@ -24,10 +24,11 @@ from typing import Any, Sequence
 
 
 SCHEMA_VERSION = "1.0"
+UNSAFE_POLICY_SCHEMA_VERSION = "2.0"
 SUPPORTED_CARGO_GEIGER_VERSION = "cargo-geiger 0.13.0"
 SUPPORTED_CARGO_GEIGER_POLICY_VERSION = "0.13.0"
-ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED = (
-    "Accepted unsafe boundary evidence requires compiler-derived expanded input "
+ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED = (
+    "Enabled unsafe boundary evidence requires compiler-derived expanded input "
     "inventory and the full cargo-geiger SafetyReport; this evidence is not implemented"
 )
 SOURCE_INPUT_MODE = "workspace-rust-source-placeholder-v1"
@@ -53,7 +54,6 @@ UNSAFE_BOUNDARY_KEYS = {
     "module",
     "source",
     "status",
-    "adr",
     "owner",
     "reason",
     "expected_source_tokens",
@@ -108,14 +108,14 @@ EVIDENCE_MANIFEST_KEYS = {"path", "sha256"}
 EVIDENCE_SOURCE_KEYS = {
     "mode",
     "compiler_expanded",
-    "authoritative_for_accepted",
+    "authoritative_for_enabled_boundary",
     "file_count",
     "sha256",
 }
 EVIDENCE_RUST_TOOLCHAIN_KEYS = {"cargo_verbose_version", "rustc_verbose_version"}
 EVIDENCE_REPORT_KEYS = {
     "format",
-    "authoritative_for_accepted",
+    "authoritative_for_enabled_boundary",
     "required_workspace_package_id",
     "sha256",
 }
@@ -333,7 +333,7 @@ def load_approved_counts(
         "unsafe inventory policy",
     )
     require_exact_keys(policy, UNSAFE_POLICY_ROOT_KEYS, "unsafe inventory policy")
-    if policy["schema_version"] != SCHEMA_VERSION:
+    if policy["schema_version"] != UNSAFE_POLICY_SCHEMA_VERSION:
         raise fail("unsafe inventory policy has an unsupported version")
     boundaries = require_array(
         policy["boundaries"], "unsafe inventory policy boundaries"
@@ -343,8 +343,8 @@ def load_approved_counts(
         boundary = require_object(boundary_value, "unsafe boundary")
         require_exact_keys(boundary, UNSAFE_BOUNDARY_KEYS, "unsafe boundary")
         normalized_boundaries.append(boundary)
-        if boundary["status"] == "accepted":
-            raise fail(ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
+        if boundary["status"] == "enabled":
+            raise fail(ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
 
     policy_root = workspace_root_from_unsafe_policy(policy_path)
     by_identity = {
@@ -375,12 +375,8 @@ def load_approved_counts(
             ("reason", "boundary reason"),
         ):
             require_string(boundary[key], description)
-        for key, description in (
-            ("source", "boundary source"),
-            ("adr", "boundary ADR"),
-        ):
-            require_safe_relative_path(boundary[key], description)
-        if boundary["status"] != "proposed":
+        require_safe_relative_path(boundary["source"], "boundary source")
+        if boundary["status"] != "disabled":
             raise fail("unsafe inventory policy contains an invalid boundary status")
         if (
             require_nonnegative_integer(
@@ -392,9 +388,9 @@ def load_approved_counts(
             )
             != 0
         ):
-            raise fail("proposed unsafe boundaries must retain zero evidence counts")
+            raise fail("disabled unsafe boundaries must retain zero evidence counts")
 
-    # QuickSafetyReport is deliberately non-authoritative for accepted boundaries.
+    # QuickSafetyReport is deliberately non-authoritative for enabled boundaries.
     return {}
 
 
@@ -475,7 +471,7 @@ def validate_report(
 ) -> int:
     validate_tool_version(cargo_geiger_version)
     if approved_counts:
-        raise fail(ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
+        raise fail(ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
     require_exact_keys(report, QUICK_REPORT_KEYS, "cargo-geiger QuickSafetyReport")
     packages_without_metrics = require_array(
         report["packages_without_metrics"], "packages_without_metrics"
@@ -1056,7 +1052,7 @@ def workspace_source_evidence(
     return {
         "mode": SOURCE_INPUT_MODE,
         "compiler_expanded": False,
-        "authoritative_for_accepted": False,
+        "authoritative_for_enabled_boundary": False,
         "file_count": len(source_files),
         "sha256": digest.hexdigest(),
     }
@@ -1153,7 +1149,7 @@ def build_evidence_envelope(
         },
         "report": {
             "format": REPORT_FORMAT,
-            "authoritative_for_accepted": False,
+            "authoritative_for_enabled_boundary": False,
             "required_workspace_package_id": required_id,
             "sha256": sha256_file(report_file, "cargo-geiger report"),
         },
@@ -1208,10 +1204,10 @@ def validate_evidence_envelope(document: dict[str, Any]) -> None:
     ):
         raise fail("compiler-expanded input evidence is not implemented")
     if require_bool(
-        source_inputs["authoritative_for_accepted"],
-        "accepted source evidence authority",
+        source_inputs["authoritative_for_enabled_boundary"],
+        "enabled source evidence authority",
     ):
-        raise fail(ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
+        raise fail(ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
     require_nonnegative_integer(source_inputs["file_count"], "source input file count")
     require_sha256(source_inputs["sha256"], "source input SHA-256")
 
@@ -1259,9 +1255,9 @@ def validate_evidence_envelope(document: dict[str, Any]) -> None:
     if report["format"] != REPORT_FORMAT:
         raise fail("cargo-geiger report evidence uses an unsupported format")
     if require_bool(
-        report["authoritative_for_accepted"], "accepted report evidence authority"
+        report["authoritative_for_enabled_boundary"], "enabled report evidence authority"
     ):
-        raise fail(ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
+        raise fail(ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED)
     require_string(report["required_workspace_package_id"], "required Cargo package ID")
     require_sha256(report["sha256"], "cargo-geiger report SHA-256")
 

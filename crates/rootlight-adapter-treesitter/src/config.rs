@@ -64,7 +64,7 @@ impl RuntimeConfig {
     /// The cache ceiling accounts retained source bytes and a conservative
     /// logical tree weight. Tree-sitter's safe API cannot hard-cap its native
     /// allocator, so the provider still advertises unavailable memory
-    /// enforcement until M13 process isolation.
+    /// enforcement until out-of-process adapter isolation is available.
     ///
     /// # Errors
     ///

@@ -83,7 +83,7 @@ fn six_language_crlf_unicode_fixtures_match_structural_goldens() {
         let output = execute_parse(
             &provider,
             &request,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         )
         .expect("reviewed structural fixture parses");
@@ -126,7 +126,7 @@ fn rust_impl_scopes_parent_same_named_methods() {
     let output = execute_parse(
         &provider,
         &request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("impl-scope fixture parses");
@@ -183,7 +183,7 @@ fn clean_and_incremental_extraction_are_logically_identical_for_every_family() {
                 None,
                 &[],
                 settings,
-                MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
                 &deadline(),
             )
             .expect("initial parse succeeds");
@@ -210,7 +210,7 @@ fn clean_and_incremental_extraction_are_logically_identical_for_every_family() {
                 Some(&previous),
                 &[edit],
                 settings,
-                MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
                 &deadline(),
             )
             .expect("incremental extraction succeeds");
@@ -218,7 +218,7 @@ fn clean_and_incremental_extraction_are_logically_identical_for_every_family() {
         let clean = execute_parse(
             &clean_provider,
             &updated_request,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         )
         .expect("clean extraction succeeds");
@@ -248,7 +248,7 @@ fn malformed_input_preserves_facts_outside_recovery() {
     let output = execute_parse(
         &provider,
         &request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("recovery output commits");
@@ -289,7 +289,7 @@ fn disjoint_included_ranges_never_emit_gap_facts() {
     let output = execute_parse(
         &provider,
         &request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("multi-range extraction succeeds");
@@ -331,7 +331,7 @@ fn sink_fact_pressure_is_explicit_and_bounded() {
     let output = execute_parse(
         &provider,
         &request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("fact-limited extraction commits a diagnostic");
@@ -377,7 +377,7 @@ fn java_package_and_named_module_have_bounded_name_evidence() {
         let output = execute_parse(
             &provider,
             &request,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         )
         .expect("named Java module syntax parses");
@@ -417,7 +417,7 @@ fn deep_and_wide_inputs_stop_at_bounds_and_leave_the_provider_reusable() {
     let wide_output = execute_parse(
         &provider,
         &wide_request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("wide node-limited input commits");
@@ -450,7 +450,7 @@ fn deep_and_wide_inputs_stop_at_bounds_and_leave_the_provider_reusable() {
     let deep_output = execute_parse(
         &provider,
         &deep_request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("deep depth-limited input commits");
@@ -478,7 +478,7 @@ fn deep_and_wide_inputs_stop_at_bounds_and_leave_the_provider_reusable() {
     execute_parse(
         &provider,
         &cleanup_request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("provider remains reusable after bounded stress");

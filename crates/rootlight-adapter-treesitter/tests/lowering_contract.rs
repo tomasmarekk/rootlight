@@ -491,7 +491,7 @@ fn included_ranges_and_parser_recovery_remain_explicit_coverage_gaps() {
         &analyzer,
         &request,
         ExtensionSupport::default(),
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("partial lowering commits");
@@ -595,7 +595,7 @@ fn cancellation_and_ir_limits_abort_without_committed_output() {
             &analyzer,
             &request,
             ExtensionSupport::default(),
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         ),
         Err(AdapterError::Cancelled {
@@ -652,7 +652,7 @@ fn malformed_fact_errors_and_analyzer_debug_are_source_free() {
         &analyzer,
         &request,
         ExtensionSupport::default(),
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect_err("missing parent is rejected");
@@ -685,7 +685,7 @@ fn non_utf8_analysis_identity_is_rejected_before_parser_execution() {
             &analyzer,
             &request,
             ExtensionSupport::default(),
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         ),
         Err(AdapterError::RejectedRequest(
@@ -718,7 +718,7 @@ fn analyzer_requires_source_classification_and_records_exact_frontend() {
             &analyzer,
             &unclassified,
             ExtensionSupport::default(),
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         ),
         Err(AdapterError::RejectedRequest(
@@ -731,7 +731,7 @@ fn analyzer_requires_source_classification_and_records_exact_frontend() {
         &analyzer,
         &classified,
         ExtensionSupport::default(),
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("classified request lowers");
@@ -1170,7 +1170,7 @@ fn analyze(
         &analyzer,
         &request(snapshot, source, limits),
         ExtensionSupport::default(),
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
 }
@@ -1465,7 +1465,7 @@ fn analyze_custom(
         &analyzer,
         &request,
         ExtensionSupport::default(),
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
 }

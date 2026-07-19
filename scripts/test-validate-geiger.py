@@ -62,7 +62,7 @@ class GeigerValidationTests(unittest.TestCase):
         self.policy_path.write_text(
             "\n".join(
                 (
-                    'schema_version = "1.0"',
+                    'schema_version = "2.0"',
                     "",
                     "[[boundaries]]",
                     'package = "rootlight-vfs"',
@@ -70,8 +70,7 @@ class GeigerValidationTests(unittest.TestCase):
                     'manifest = "crates/rootlight-vfs/Cargo.toml"',
                     'module = "rootlight_vfs::platform::os"',
                     'source = "crates/rootlight-vfs/src/lib.rs"',
-                    'status = "proposed"',
-                    'adr = "policy/adr/ADR-026.md"',
+                    'status = "disabled"',
                     'owner = "@tomasmarekk"',
                     'reason = "native handle APIs require a reviewed boundary"',
                     "expected_source_tokens = 0",
@@ -81,11 +80,6 @@ class GeigerValidationTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        (self.root / "policy" / "adr").mkdir()
-        (self.root / "policy" / "adr" / "ADR-026.md").write_text(
-            "# Test boundary\n", encoding="utf-8"
-        )
-
         self.geiger_lock = self.root / "scripts" / "cargo-geiger-0.13.0.lock"
         self.geiger_lock.parent.mkdir()
         self.geiger_lock.write_text("version = 4\n", encoding="utf-8")
@@ -258,18 +252,18 @@ class GeigerValidationTests(unittest.TestCase):
     def test_exact_workspace_identity_passes(self) -> None:
         self.assertEqual(self.validate(), 1)
 
-    def test_accepted_boundary_requires_unimplemented_authoritative_evidence(
+    def test_enabled_boundary_requires_unimplemented_authoritative_evidence(
         self,
     ) -> None:
         self.policy_path.write_text(
             self.policy_path.read_text(encoding="utf-8")
-            .replace('status = "proposed"', 'status = "accepted"')
+            .replace('status = "disabled"', 'status = "enabled"')
             .replace("expected_geiger_count = 0", "expected_geiger_count = 1"),
             encoding="utf-8",
         )
         with self.assertRaisesRegex(
             ValueError,
-            "^" + re.escape(VALIDATOR.ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED) + "$",
+            "^" + re.escape(VALIDATOR.ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED) + "$",
         ):
             VALIDATOR.load_approved_counts(self.policy_path, self.inventory)
 
@@ -412,8 +406,8 @@ class GeigerValidationTests(unittest.TestCase):
     def test_policy_root_rejects_unknown_fields(self) -> None:
         self.policy_path.write_text(
             self.policy_path.read_text(encoding="utf-8").replace(
-                'schema_version = "1.0"\n',
-                'schema_version = "1.0"\nunexpected = true\n',
+                'schema_version = "2.0"\n',
+                'schema_version = "2.0"\nunexpected = true\n',
                 1,
             ),
             encoding="utf-8",
@@ -447,10 +441,10 @@ class GeigerValidationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "missing or unknown fields"):
                     VALIDATOR.validate_evidence_envelope(candidate)
 
-    def test_quick_report_evidence_is_never_authoritative_for_accepted(self) -> None:
+    def test_quick_report_evidence_is_never_authoritative_for_enabled_boundary(self) -> None:
         envelope = self.build_envelope()
-        self.assertFalse(envelope["report"]["authoritative_for_accepted"])
-        self.assertFalse(envelope["source_inputs"]["authoritative_for_accepted"])
+        self.assertFalse(envelope["report"]["authoritative_for_enabled_boundary"])
+        self.assertFalse(envelope["source_inputs"]["authoritative_for_enabled_boundary"])
         self.assertFalse(envelope["source_inputs"]["compiler_expanded"])
 
     def test_repository_cargo_alias_is_rejected_before_any_tool_executes(self) -> None:

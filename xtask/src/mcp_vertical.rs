@@ -622,7 +622,7 @@ fn open_session(
             "protocolVersion": MCP_SPECIFICATION_DATE,
             "capabilities": {},
             "clientInfo": {
-                "name": "rootlight-gate-1-harness",
+                "name": "rootlight-vertical-slice-harness",
                 "version": "1.0.0"
             }
         }),
@@ -773,7 +773,7 @@ fn exercise_attached_cancellation(
         "notifications/cancelled",
         json!({
             "requestId": request_id,
-            "reason": "gate-1-attached-cleanup"
+            "reason": "vertical-slice-attached-cleanup"
         }),
     )?;
     wait_until_journal_idle(operation_journal)?;
@@ -1725,7 +1725,7 @@ impl FrozenFixture {
         let fixture_directory = workspace
             .join("tests")
             .join("fixtures")
-            .join("gate-1")
+            .join("vertical-slice")
             .join("first-slice");
         let manifest_path = fixture_directory.join("manifest-v1.json");
         let bytes = fs::read(&manifest_path).map_err(|source| VerticalError::Io {

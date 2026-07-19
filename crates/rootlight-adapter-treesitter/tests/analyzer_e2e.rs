@@ -193,7 +193,7 @@ fn structural_artifact_reuse_matches_a_clean_generation_analysis() {
         .analyze_and_capture(
             &initial_request,
             extensions.clone(),
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         )
         .expect("initial structural artifact is captured");
@@ -205,7 +205,7 @@ fn structural_artifact_reuse_matches_a_clean_generation_analysis() {
             &successor_request,
             &artifact,
             extensions.clone(),
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         )
         .expect("exact structural artifact is reusable");
@@ -236,7 +236,7 @@ fn structural_artifact_reuse_matches_a_clean_generation_analysis() {
                 &successor_request,
                 &artifact,
                 extensions,
-                MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
                 &deadline(),
             )
             .is_err(),
@@ -289,7 +289,7 @@ fn real_analyzer_reports_invalid_utf8_without_source_material() {
         &analyzer,
         &request,
         ExtensionSupport::default(),
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect_err("invalid UTF-8 must fail before lowering");
@@ -492,7 +492,7 @@ fn real_analyzer_rejects_ambiguous_anonymous_scope_identity_without_source_mater
             &analyzer,
             &analysis_request,
             extensions.clone(),
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         )
         .expect_err("ambiguous anonymous scope identity must fail conservatively");
@@ -537,7 +537,7 @@ fn assert_contract(
 
     assert_eq!(
         output.memory_admission(),
-        MemoryAdmissionStatus::UnavailableM05Fallback
+        MemoryAdmissionStatus::UnavailableEnforcementFallback
     );
     assert_eq!(document.repository, fixture.source.repository());
     assert_eq!(document.generation, fixture.source.generation());
@@ -757,7 +757,7 @@ fn analyze(
         analyzer,
         request,
         extensions.clone(),
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("real analyzer commits canonical IR")

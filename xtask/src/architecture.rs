@@ -34,6 +34,9 @@ pub(crate) fn check(fixture_root: Option<&Path>) -> Result<(), ArchitectureError
     }
 
     validate(&metadata, &policy)?;
+    if fixture_root.is_none() {
+        crate::source_hygiene::check(metadata.workspace_root.as_std_path())?;
+    }
     println!(
         "architecture check passed for {} workspace members",
         policy.workspace_members.len()
@@ -283,6 +286,8 @@ pub(crate) enum ArchitectureError {
     Cycle(Vec<String>),
     #[error("ARCH_UNKNOWN_PACKAGE: policy references missing workspace package {0}")]
     UnknownWorkspacePackage(String),
+    #[error(transparent)]
+    SourceHygiene(#[from] crate::source_hygiene::SourceHygieneError),
 }
 
 #[cfg(test)]

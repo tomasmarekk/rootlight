@@ -46,7 +46,7 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
             None,
             &[],
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &Cancellation::new(),
         ),
         Err(AdapterError::RejectedRequest(
@@ -74,13 +74,13 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
             None,
             &[],
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(Duration::from_secs(30)),
         )
-        .expect("explicit M05 fallback admits incremental parsing");
+        .expect("explicit unavailable-enforcement fallback admits incremental parsing");
     assert_eq!(
         output.output().memory_admission(),
-        MemoryAdmissionStatus::UnavailableM05Fallback
+        MemoryAdmissionStatus::UnavailableEnforcementFallback
     );
     assert!(output.previous().is_some());
 }
@@ -118,7 +118,7 @@ fn every_audited_grammar_parses_a_clean_representative_file() {
         let output = execute_parse(
             &provider,
             &request,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(Duration::from_secs(30)),
         )
         .expect("audited representative syntax parses");
@@ -141,7 +141,7 @@ fn clean_malformed_and_invalid_utf8_are_error_tolerant_and_source_free() {
     let output = execute_parse(
         &provider,
         &clean_request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(Duration::from_secs(30)),
     )
     .expect("clean syntax commits");
@@ -162,7 +162,7 @@ fn clean_malformed_and_invalid_utf8_are_error_tolerant_and_source_free() {
     let output = execute_parse(
         &provider,
         &malformed_request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(Duration::from_secs(30)),
     )
     .expect("malformed syntax preserves a partial result");
@@ -185,7 +185,7 @@ fn clean_malformed_and_invalid_utf8_are_error_tolerant_and_source_free() {
         execute_parse(
             &provider,
             &invalid_request,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(Duration::from_secs(30))
         ),
         Err(AdapterError::ProviderFailed { code }) if code.as_str() == "invalid-utf8"
@@ -216,7 +216,7 @@ fn included_ranges_report_the_unparsed_file_gap() {
     let output = execute_parse(
         &provider,
         &request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(Duration::from_secs(30)),
     )
     .expect("included range parses");
@@ -255,7 +255,7 @@ fn partial_traversal_does_not_count_absolute_included_range_offsets_as_coverage(
         let output = execute_parse(
             &provider,
             &request,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(Duration::from_secs(30)),
         )
         .expect("bounded included range commits");
@@ -286,7 +286,7 @@ fn incremental_edit_reuses_only_an_exact_previous_identity() {
             None,
             &[],
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         )
         .expect("initial parse succeeds");
@@ -310,7 +310,7 @@ fn incremental_edit_reuses_only_an_exact_previous_identity() {
             Some(&previous),
             &[edit],
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         )
         .expect("incremental parse succeeds");
@@ -354,7 +354,7 @@ fn provider_and_parser_settings_mismatches_invalidate_reuse() {
             None,
             &[],
             initial_settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         )
         .expect("initial parse succeeds");
@@ -366,7 +366,7 @@ fn provider_and_parser_settings_mismatches_invalidate_reuse() {
             Some(&previous),
             &[],
             initial_settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         )
         .expect("provider mismatch falls back");
@@ -381,7 +381,7 @@ fn provider_and_parser_settings_mismatches_invalidate_reuse() {
             Some(&previous),
             &[],
             ParserSettings::new(128).expect("alternate settings are bounded"),
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         )
         .expect("settings mismatch falls back");
@@ -411,7 +411,7 @@ fn incremental_edit_work_is_bounded_before_cloning_or_intermediate_growth() {
             None,
             &[],
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         )
         .expect("initial bounded source parses");
@@ -424,7 +424,7 @@ fn incremental_edit_work_is_bounded_before_cloning_or_intermediate_growth() {
             None,
             std::slice::from_ref(&insertion),
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         ),
         Err(AdapterError::ProviderFailed { code })
@@ -439,7 +439,7 @@ fn incremental_edit_work_is_bounded_before_cloning_or_intermediate_growth() {
             Some(&previous),
             &too_many,
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         ),
         Err(AdapterError::ProviderFailed { code }) if code.as_str() == "incremental-edit-limit"
@@ -453,7 +453,7 @@ fn incremental_edit_work_is_bounded_before_cloning_or_intermediate_growth() {
             Some(&previous),
             &[oversized_replacement],
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         ),
         Err(AdapterError::ProviderFailed { code })
@@ -467,7 +467,7 @@ fn incremental_edit_work_is_bounded_before_cloning_or_intermediate_growth() {
             Some(&previous),
             &[insertion, remove_insertion],
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         ),
         Err(AdapterError::ProviderFailed { code })
@@ -494,7 +494,7 @@ fn node_and_depth_limits_commit_explicit_partial_coverage() {
     let output = execute_parse(
         &node_provider,
         &node_request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(Duration::from_secs(30)),
     )
     .expect("node-limited parse commits");
@@ -520,7 +520,7 @@ fn node_and_depth_limits_commit_explicit_partial_coverage() {
     let output = execute_parse(
         &depth_provider,
         &depth_request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(Duration::from_secs(30)),
     )
     .expect("depth-limited parse commits");
@@ -559,7 +559,7 @@ fn cache_byte_eviction_invalidates_an_old_handle() {
             None,
             &[],
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         )
         .expect("first cache parse succeeds");
@@ -582,7 +582,7 @@ fn cache_byte_eviction_invalidates_an_old_handle() {
             Some(&old_handle),
             &[edit],
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         )
         .expect("second cache parse succeeds");
@@ -594,7 +594,7 @@ fn cache_byte_eviction_invalidates_an_old_handle() {
             Some(&old_handle),
             &[],
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation,
         )
         .expect("evicted handle falls back");
@@ -626,7 +626,7 @@ fn deadline_aborts_a_parser_bomb_and_releases_the_permit() {
         execute_parse(
             &provider,
             &request,
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &cancellation
         ),
         Err(AdapterError::Cancelled {

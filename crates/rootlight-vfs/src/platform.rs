@@ -1,6 +1,6 @@
-//! Proposed account-private filesystem tree types.
+//! Fail-closed account-private filesystem tree types.
 //!
-//! ADR-026 is not accepted, so the platform boundary remains a zero-mutation
+//! The native platform boundary is disabled, so it remains a zero-mutation
 //! scaffold. Every creation, publication, synchronization, and removal
 //! operation fails closed on every target.
 
@@ -21,7 +21,7 @@ pub const MAX_PRIVATE_NAME_UNITS: usize = 255;
 
 /// Reserved representation for a future exact platform object identity.
 ///
-/// No value is returned while ADR-026 remains proposed.
+/// No value is returned while the native platform boundary is disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PlatformFileIdentity {
     volume: u64,
@@ -42,12 +42,12 @@ impl PlatformFileIdentity {
     }
 }
 
-/// An unpublished private-directory owner reserved by ADR-026.
+/// An unpublished private-directory owner reserved for the disabled native platform boundary.
 ///
-/// The proposed implementation is unavailable on every platform. Dropping a
+/// The native implementation is disabled on every platform. Dropping a
 /// value only drops retained Rust owners; it never attempts filesystem cleanup.
 ///
-/// Correctly scoped callers will continue to compile when an accepted
+/// Correctly scoped callers will continue to compile when an enabled
 /// implementation replaces the scaffold:
 ///
 /// ```no_run
@@ -75,7 +75,7 @@ pub struct PrivateDirectory<'parent> {
 }
 
 impl PrivateDirectory<'static> {
-    /// Requires an accepted account-private tree implementation.
+    /// Requires an enabled account-private tree implementation.
     ///
     /// This preflight does not inspect a path, acquire randomness, or perform
     /// a filesystem operation. It lets callers fail closed before they touch
@@ -83,8 +83,8 @@ impl PrivateDirectory<'static> {
     ///
     /// # Errors
     ///
-    /// Returns [`PlatformError::UnsupportedPlatform`] while ADR-026 remains
-    /// unaccepted.
+    /// Returns [`PlatformError::UnsupportedPlatform`] while the native
+    /// platform boundary is disabled.
     pub fn require_supported() -> Result<(), PlatformError> {
         os::require_support()
     }
@@ -95,7 +95,7 @@ impl PrivateDirectory<'static> {
     ///
     /// Returns [`PlatformError::InvalidName`] for a non-component name.
     /// Every valid name returns [`PlatformError::UnsupportedPlatform`] until
-    /// ADR-026 is accepted and implemented.
+    /// the native platform boundary is enabled and implemented.
     pub fn create(parent: &Dir, name: &OsStr) -> Result<Self, PlatformError> {
         let name = PrivateName::parse(name)?;
         os::create_directory(parent, &name).map(|inner| Self {
@@ -216,7 +216,7 @@ impl Drop for PrivateDirectory<'_> {
     }
 }
 
-/// A private-file owner reserved by ADR-026.
+/// A private-file owner reserved for the disabled native platform boundary.
 ///
 /// The explicit destructor keeps the parent borrow live until the file owner is
 /// dropped. Publication or removal while a writer remains in scope therefore
@@ -278,7 +278,7 @@ impl Drop for PrivateFile<'_> {
     }
 }
 
-/// A published-directory owner reserved by ADR-026.
+/// A published-directory owner reserved for the disabled native platform boundary.
 ///
 /// No value can be produced while publication remains unsupported.
 #[must_use = "retain the published directory owner while its exact identity is needed"]
@@ -319,7 +319,7 @@ impl fmt::Debug for PublishedPrivateDirectory {
     }
 }
 
-/// Failures returned by the proposed private-tree boundary.
+/// Failures returned by the disabled private-tree boundary.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PlatformError {
@@ -329,10 +329,10 @@ pub enum PlatformError {
     /// The supplied staging parent did not enforce the account-private policy.
     #[error("private-tree parent is not account-private")]
     InsecureParent,
-    /// Scaffold state was missing or did not satisfy the proposed policy.
+    /// Scaffold state was missing or did not satisfy the active policy.
     #[error("private-tree object failed account-private verification")]
     SecurityPolicy,
-    /// ADR-026 has no accepted platform implementation.
+    /// the native platform boundary has no enabled implementation.
     #[error("private-tree platform boundary is unsupported")]
     UnsupportedPlatform,
     /// A future handle-relative filesystem operation failed.
@@ -370,7 +370,7 @@ pub enum PublishError {
     },
     /// Publication committed, but destination-directory durability is unknown.
     ///
-    /// The Proposed scaffold never returns this variant.
+    /// The disabled scaffold never returns this variant.
     #[error("private tree was published but destination durability is unknown")]
     CommittedButDurabilityUnknown {
         /// Owner for the already-published exact directory.

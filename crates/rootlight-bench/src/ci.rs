@@ -1,4 +1,4 @@
-//! Canonical single-file CI evidence for the M05 parser fallback.
+//! Canonical single-file CI evidence for the bounded parser fallback.
 //!
 //! The envelope intentionally excludes wall-clock and process-tree metrics.
 //! Those measurements are not reproducible on shared CI hosts and remain
@@ -17,13 +17,13 @@ use crate::{
     EvidenceValue, ParserBenchmarkEvidence, RawSample, SampleOutcome,
 };
 
-/// Schema written by the deterministic M05 CI evidence executable.
-pub const M05_CI_ENVELOPE_SCHEMA_VERSION: &str = "rootlight.m05-ci-evidence/1";
-/// Hard ceiling for one encoded M05 CI evidence envelope.
-pub const M05_CI_MAX_ENVELOPE_BYTES: usize = 256 * 1024;
+/// Schema written by the deterministic parser CI evidence executable.
+pub const PARSER_CI_ENVELOPE_SCHEMA_VERSION: &str = "rootlight.parser-ci-evidence/1";
+/// Hard ceiling for one encoded parser CI evidence envelope.
+pub const PARSER_CI_MAX_ENVELOPE_BYTES: usize = 256 * 1024;
 
-const BENCHMARK_ID: &str = "BENCH-PARSE-001";
-const DATASET_ID: &str = "rootlight-m05-parser-micro-v1";
+const BENCHMARK_ID: &str = "rootlight-parser-benchmark-v1";
+const DATASET_ID: &str = "rootlight-parser-micro-v1";
 const EXPECTED_DATASET_RECORDS: usize = 4;
 const EXPECTED_SEED: u64 = 0x524f_4f54_4c49_4748;
 const EXPECTED_WARMUP_ROUNDS: u32 = 1;
@@ -92,13 +92,13 @@ struct ExpectedDatasetRecord {
     physical_lines: u64,
 }
 
-/// One canonical, source-free M05 CI evidence document.
+/// One canonical, source-free parser CI evidence document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct M05CiEvidenceEnvelope {
+pub struct ParserCiEvidenceEnvelope {
     schema_version: String,
     benchmark_id: String,
-    evidence_status: M05CiEvidenceStatus,
+    evidence_status: ParserCiEvidenceStatus,
     source_revision: String,
     binary_sha256: String,
     compiler: String,
@@ -122,12 +122,12 @@ pub struct M05CiEvidenceEnvelope {
     total_syntax_nodes: u64,
     total_syntax_facts: u64,
     #[serde(deserialize_with = "deserialize_dataset_records")]
-    dataset_records: Vec<M05CiDatasetRecord>,
+    dataset_records: Vec<ParserCiDatasetRecord>,
     #[serde(deserialize_with = "deserialize_sample_records")]
-    sample_records: Vec<M05CiSampleRecord>,
+    sample_records: Vec<ParserCiSampleRecord>,
 }
 
-impl M05CiEvidenceEnvelope {
+impl ParserCiEvidenceEnvelope {
     /// Returns the fixed number of retained parser samples.
     #[must_use]
     pub const fn sample_record_count(&self) -> u64 {
@@ -143,13 +143,13 @@ impl M05CiEvidenceEnvelope {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum M05CiEvidenceStatus {
+enum ParserCiEvidenceStatus {
     DeterministicFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct M05CiDatasetRecord {
+struct ParserCiDatasetRecord {
     id: String,
     grammar_family: String,
     language: String,
@@ -161,7 +161,7 @@ struct M05CiDatasetRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct M05CiSampleRecord {
+struct ParserCiSampleRecord {
     ordinal: u64,
     phase: String,
     dataset_entry_id: String,
@@ -172,7 +172,7 @@ struct M05CiSampleRecord {
     syntax_facts: u64,
 }
 
-/// Builds the deterministic projection of one successful M05 parser run.
+/// Builds the deterministic projection of one successful bounded parser run.
 ///
 /// The projection retains schedule, input identity, syntax counts, and output
 /// counts. It rejects failed samples and records timing, process accounting,
@@ -180,16 +180,16 @@ struct M05CiSampleRecord {
 ///
 /// # Errors
 ///
-/// Returns [`M05CiEvidenceError`] when inputs are inconsistent, unbounded,
-/// ineligible, or not the closed M05 evidence contract.
-pub fn build_m05_ci_evidence(
+/// Returns [`ParserCiEvidenceError`] when inputs are inconsistent, unbounded,
+/// ineligible, or not the closed parser evidence contract.
+pub fn build_parser_ci_evidence(
     source_revision: &str,
     environment: &EnvironmentEvidence,
     dataset: &DatasetManifest,
     provenance: &BuildProvenance,
     command: &BenchmarkCommand,
     evidence: &ParserBenchmarkEvidence,
-) -> Result<M05CiEvidenceEnvelope, M05CiEvidenceError> {
+) -> Result<ParserCiEvidenceEnvelope, ParserCiEvidenceError> {
     let binary_sha256 = require_observed_string(&environment.binary_sha256)?;
     let compiler = require_observed_string(&environment.compiler)?;
     require_build_inputs(
@@ -208,10 +208,10 @@ pub fn build_m05_ci_evidence(
     let (sample_record_bytes, sample_record_sha256) = record_set_identity(&sample_records)?;
     let totals = sample_totals(&sample_records)?;
 
-    let envelope = M05CiEvidenceEnvelope {
-        schema_version: M05_CI_ENVELOPE_SCHEMA_VERSION.to_owned(),
+    let envelope = ParserCiEvidenceEnvelope {
+        schema_version: PARSER_CI_ENVELOPE_SCHEMA_VERSION.to_owned(),
         benchmark_id: BENCHMARK_ID.to_owned(),
-        evidence_status: M05CiEvidenceStatus::DeterministicFallback,
+        evidence_status: ParserCiEvidenceStatus::DeterministicFallback,
         source_revision: source_revision.to_owned(),
         binary_sha256: binary_sha256.to_owned(),
         compiler: compiler.to_owned(),
@@ -245,13 +245,13 @@ pub fn build_m05_ci_evidence(
 ///
 /// # Errors
 ///
-/// Returns [`M05CiEvidenceError`] if the envelope is invalid or exceeds the
+/// Returns [`ParserCiEvidenceError`] if the envelope is invalid or exceeds the
 /// fixed single-file ceiling.
-pub fn encode_m05_ci_evidence(
-    envelope: &M05CiEvidenceEnvelope,
-) -> Result<Vec<u8>, M05CiEvidenceError> {
+pub fn encode_parser_ci_evidence(
+    envelope: &ParserCiEvidenceEnvelope,
+) -> Result<Vec<u8>, ParserCiEvidenceError> {
     validate_envelope(envelope)?;
-    bounded_json(envelope, M05_CI_MAX_ENVELOPE_BYTES)
+    bounded_json(envelope, PARSER_CI_MAX_ENVELOPE_BYTES)
 }
 
 /// Strictly decodes and verifies one canonical bounded JSON envelope.
@@ -262,21 +262,25 @@ pub fn encode_m05_ci_evidence(
 ///
 /// # Errors
 ///
-/// Returns [`M05CiEvidenceError`] for every malformed or inconsistent input.
-pub fn decode_m05_ci_evidence(encoded: &[u8]) -> Result<M05CiEvidenceEnvelope, M05CiEvidenceError> {
-    if encoded.is_empty() || encoded.len() > M05_CI_MAX_ENVELOPE_BYTES {
-        return Err(M05CiEvidenceError::LimitExceeded {
+/// Returns [`ParserCiEvidenceError`] for every malformed or inconsistent input.
+pub fn decode_parser_ci_evidence(
+    encoded: &[u8],
+) -> Result<ParserCiEvidenceEnvelope, ParserCiEvidenceError> {
+    if encoded.is_empty() || encoded.len() > PARSER_CI_MAX_ENVELOPE_BYTES {
+        return Err(ParserCiEvidenceError::LimitExceeded {
             resource: "envelope_bytes",
         });
     }
     let mut deserializer = serde_json::Deserializer::from_slice(encoded);
-    let envelope = M05CiEvidenceEnvelope::deserialize(&mut deserializer)
-        .map_err(|_| M05CiEvidenceError::Decode)?;
-    deserializer.end().map_err(|_| M05CiEvidenceError::Decode)?;
+    let envelope = ParserCiEvidenceEnvelope::deserialize(&mut deserializer)
+        .map_err(|_| ParserCiEvidenceError::Decode)?;
+    deserializer
+        .end()
+        .map_err(|_| ParserCiEvidenceError::Decode)?;
     validate_envelope(&envelope)?;
-    let canonical = bounded_json(&envelope, M05_CI_MAX_ENVELOPE_BYTES)?;
+    let canonical = bounded_json(&envelope, PARSER_CI_MAX_ENVELOPE_BYTES)?;
     if canonical != encoded {
-        return Err(M05CiEvidenceError::Noncanonical);
+        return Err(ParserCiEvidenceError::Noncanonical);
     }
     Ok(envelope)
 }
@@ -285,9 +289,9 @@ pub fn decode_m05_ci_evidence(encoded: &[u8]) -> Result<M05CiEvidenceEnvelope, M
 ///
 /// # Errors
 ///
-/// Returns the same failures as [`decode_m05_ci_evidence`].
-pub fn verify_m05_ci_evidence(encoded: &[u8]) -> Result<(), M05CiEvidenceError> {
-    decode_m05_ci_evidence(encoded).map(|_| ())
+/// Returns the same failures as [`decode_parser_ci_evidence`].
+pub fn verify_parser_ci_evidence(encoded: &[u8]) -> Result<(), ParserCiEvidenceError> {
+    decode_parser_ci_evidence(encoded).map(|_| ())
 }
 
 fn require_build_inputs(
@@ -297,7 +301,7 @@ fn require_build_inputs(
     environment: &EnvironmentEvidence,
     provenance: &BuildProvenance,
     command: &BenchmarkCommand,
-) -> Result<(), M05CiEvidenceError> {
+) -> Result<(), ParserCiEvidenceError> {
     if !is_lower_hex_revision(source_revision)
         || environment.schema_version != crate::RESULT_BUNDLE_SCHEMA_VERSION
         || provenance.schema_version != crate::RESULT_BUNDLE_SCHEMA_VERSION
@@ -306,7 +310,7 @@ fn require_build_inputs(
         || environment.feature_profile != provenance.build_profile
         || !provenance.features.is_empty()
         || command.schema_version != crate::RESULT_BUNDLE_SCHEMA_VERSION
-        || command.subcommand != "m05-parser-evidence"
+        || command.subcommand != "parser-evidence"
         || !command.arguments.is_empty()
         || command.seed != EXPECTED_SEED
         || command.warmup_rounds != EXPECTED_WARMUP_ROUNDS
@@ -317,12 +321,14 @@ fn require_build_inputs(
         || !is_build_token(&provenance.target)
         || !is_build_token(&provenance.build_profile)
     {
-        return Err(M05CiEvidenceError::InvalidEnvelope);
+        return Err(ParserCiEvidenceError::InvalidEnvelope);
     }
     Ok(())
 }
 
-fn require_evidence_status(evidence: &ParserBenchmarkEvidence) -> Result<(), M05CiEvidenceError> {
+fn require_evidence_status(
+    evidence: &ParserBenchmarkEvidence,
+) -> Result<(), ParserCiEvidenceError> {
     let semantic_unavailable = |status: &Availability| {
         matches!(
             status,
@@ -350,26 +356,26 @@ fn require_evidence_status(evidence: &ParserBenchmarkEvidence) -> Result<(), M05
         || evidence.quality.schema_version != crate::RESULT_BUNDLE_SCHEMA_VERSION
         || !semantic_unavailable(&evidence.quality.semantic_eligibility)
     {
-        return Err(M05CiEvidenceError::InvalidEnvelope);
+        return Err(ParserCiEvidenceError::InvalidEnvelope);
     }
     Ok(())
 }
 
 fn dataset_records(
     dataset: &DatasetManifest,
-) -> Result<Vec<M05CiDatasetRecord>, M05CiEvidenceError> {
+) -> Result<Vec<ParserCiDatasetRecord>, ParserCiEvidenceError> {
     if dataset.schema_version != crate::RESULT_BUNDLE_SCHEMA_VERSION
         || dataset.dataset_id != DATASET_ID
         || dataset.entries.len() != EXPECTED_DATASET_RECORDS
         || dataset.scope_rule != "embedded_fixture_set_v1"
         || dataset.loc_counting_rule != "physical_lines_newline_terminated_v1"
     {
-        return Err(M05CiEvidenceError::InvalidEnvelope);
+        return Err(ParserCiEvidenceError::InvalidEnvelope);
     }
     let mut records = Vec::new();
     records
         .try_reserve_exact(EXPECTED_DATASET_RECORDS)
-        .map_err(|_| M05CiEvidenceError::AllocationFailed)?;
+        .map_err(|_| ParserCiEvidenceError::AllocationFailed)?;
     for (entry, expected) in dataset.entries.iter().zip(EXPECTED_DATASET) {
         if entry.id != expected.id
             || entry.grammar_family != expected.grammar_family
@@ -380,9 +386,9 @@ fn dataset_records(
             || !is_sha256(&entry.source_sha256)
             || entry.generated
         {
-            return Err(M05CiEvidenceError::InvalidEnvelope);
+            return Err(ParserCiEvidenceError::InvalidEnvelope);
         }
-        records.push(M05CiDatasetRecord {
+        records.push(ParserCiDatasetRecord {
             id: entry.id.clone(),
             grammar_family: entry.grammar_family.clone(),
             language: entry.language.clone(),
@@ -393,19 +399,19 @@ fn dataset_records(
         });
     }
     if dataset.revision != dataset_revision(&records)? {
-        return Err(M05CiEvidenceError::InvalidEnvelope);
+        return Err(ParserCiEvidenceError::InvalidEnvelope);
     }
     Ok(records)
 }
 
 fn sample_records(
-    dataset_records: &[M05CiDatasetRecord],
+    dataset_records: &[ParserCiDatasetRecord],
     samples: &[RawSample],
-) -> Result<Vec<M05CiSampleRecord>, M05CiEvidenceError> {
+) -> Result<Vec<ParserCiSampleRecord>, ParserCiEvidenceError> {
     if samples.len() != EXPECTED_SAMPLE_RECORDS {
-        return Err(M05CiEvidenceError::InvalidEnvelope);
+        return Err(ParserCiEvidenceError::InvalidEnvelope);
     }
-    let by_id: BTreeMap<&str, &M05CiDatasetRecord> = dataset_records
+    let by_id: BTreeMap<&str, &ParserCiDatasetRecord> = dataset_records
         .iter()
         .map(|record| (record.id.as_str(), record))
         .collect();
@@ -414,21 +420,21 @@ fn sample_records(
     let mut records = Vec::new();
     records
         .try_reserve_exact(EXPECTED_SAMPLE_RECORDS)
-        .map_err(|_| M05CiEvidenceError::AllocationFailed)?;
+        .map_err(|_| ParserCiEvidenceError::AllocationFailed)?;
     for (ordinal, sample) in samples.iter().enumerate() {
         let dataset = by_id
             .get(sample.dataset_entry_id.as_str())
             .copied()
-            .ok_or(M05CiEvidenceError::InvalidEnvelope)?;
+            .ok_or(ParserCiEvidenceError::InvalidEnvelope)?;
         let phase_counts = match sample.phase.as_str() {
             "warmup" => &mut warmups,
             "trial" => &mut trials,
-            _ => return Err(M05CiEvidenceError::InvalidEnvelope),
+            _ => return Err(ParserCiEvidenceError::InvalidEnvelope),
         };
         let count = phase_counts.entry(dataset.id.as_str()).or_default();
         *count = count
             .checked_add(1)
-            .ok_or(M05CiEvidenceError::InvalidEnvelope)?;
+            .ok_or(ParserCiEvidenceError::InvalidEnvelope)?;
         if sample.schema_version != crate::RESULT_BUNDLE_SCHEMA_VERSION
             || sample.ordinal != usize_to_u64(ordinal)?
             || sample.grammar_family != dataset.grammar_family
@@ -455,9 +461,9 @@ fn sample_records(
             )
             || sample.outcome != SampleOutcome::Succeeded
         {
-            return Err(M05CiEvidenceError::InvalidEnvelope);
+            return Err(ParserCiEvidenceError::InvalidEnvelope);
         }
-        records.push(M05CiSampleRecord {
+        records.push(ParserCiSampleRecord {
             ordinal: sample.ordinal,
             phase: sample.phase.clone(),
             dataset_entry_id: sample.dataset_entry_id.clone(),
@@ -472,16 +478,16 @@ fn sample_records(
         if warmups.get(dataset.id.as_str()) != Some(&EXPECTED_WARMUP_ROUNDS)
             || trials.get(dataset.id.as_str()) != Some(&EXPECTED_TRIAL_ROUNDS)
         {
-            return Err(M05CiEvidenceError::InvalidEnvelope);
+            return Err(ParserCiEvidenceError::InvalidEnvelope);
         }
     }
     Ok(records)
 }
 
-fn validate_envelope(envelope: &M05CiEvidenceEnvelope) -> Result<(), M05CiEvidenceError> {
-    if envelope.schema_version != M05_CI_ENVELOPE_SCHEMA_VERSION
+fn validate_envelope(envelope: &ParserCiEvidenceEnvelope) -> Result<(), ParserCiEvidenceError> {
+    if envelope.schema_version != PARSER_CI_ENVELOPE_SCHEMA_VERSION
         || envelope.benchmark_id != BENCHMARK_ID
-        || envelope.evidence_status != M05CiEvidenceStatus::DeterministicFallback
+        || envelope.evidence_status != ParserCiEvidenceStatus::DeterministicFallback
         || !is_lower_hex_revision(&envelope.source_revision)
         || !is_sha256(&envelope.binary_sha256)
         || !is_compiler_identity(&envelope.compiler)
@@ -498,11 +504,11 @@ fn validate_envelope(envelope: &M05CiEvidenceEnvelope) -> Result<(), M05CiEviden
         || envelope.dataset_record_count != EXPECTED_DATASET_RECORDS as u64
         || envelope.sample_record_count != EXPECTED_SAMPLE_RECORDS as u64
     {
-        return Err(M05CiEvidenceError::InvalidEnvelope);
+        return Err(ParserCiEvidenceError::InvalidEnvelope);
     }
     validate_dataset_record_values(&envelope.dataset_records)?;
     if envelope.dataset_revision != dataset_revision(&envelope.dataset_records)? {
-        return Err(M05CiEvidenceError::InvalidEnvelope);
+        return Err(ParserCiEvidenceError::InvalidEnvelope);
     }
     validate_sample_record_values(&envelope.dataset_records, &envelope.sample_records)?;
     let (dataset_bytes, dataset_sha256) = record_set_identity(&envelope.dataset_records)?;
@@ -525,16 +531,16 @@ fn validate_envelope(envelope: &M05CiEvidenceEnvelope) -> Result<(), M05CiEviden
         || envelope.total_syntax_nodes != totals.syntax_nodes
         || envelope.total_syntax_facts != totals.syntax_facts
     {
-        return Err(M05CiEvidenceError::DigestMismatch);
+        return Err(ParserCiEvidenceError::DigestMismatch);
     }
     Ok(())
 }
 
 fn validate_dataset_record_values(
-    records: &[M05CiDatasetRecord],
-) -> Result<(), M05CiEvidenceError> {
+    records: &[ParserCiDatasetRecord],
+) -> Result<(), ParserCiEvidenceError> {
     if records.len() != EXPECTED_DATASET_RECORDS {
-        return Err(M05CiEvidenceError::InvalidEnvelope);
+        return Err(ParserCiEvidenceError::InvalidEnvelope);
     }
     for (record, expected) in records.iter().zip(EXPECTED_DATASET) {
         if record.id != expected.id
@@ -546,17 +552,17 @@ fn validate_dataset_record_values(
             || !is_sha256(&record.source_sha256)
             || record.generated
         {
-            return Err(M05CiEvidenceError::InvalidEnvelope);
+            return Err(ParserCiEvidenceError::InvalidEnvelope);
         }
     }
     Ok(())
 }
 
 fn validate_sample_record_values(
-    datasets: &[M05CiDatasetRecord],
-    samples: &[M05CiSampleRecord],
-) -> Result<(), M05CiEvidenceError> {
-    let by_id: BTreeMap<&str, &M05CiDatasetRecord> = datasets
+    datasets: &[ParserCiDatasetRecord],
+    samples: &[ParserCiSampleRecord],
+) -> Result<(), ParserCiEvidenceError> {
+    let by_id: BTreeMap<&str, &ParserCiDatasetRecord> = datasets
         .iter()
         .map(|record| (record.id.as_str(), record))
         .collect();
@@ -566,16 +572,16 @@ fn validate_sample_record_values(
         let dataset = by_id
             .get(sample.dataset_entry_id.as_str())
             .copied()
-            .ok_or(M05CiEvidenceError::InvalidEnvelope)?;
+            .ok_or(ParserCiEvidenceError::InvalidEnvelope)?;
         let phase_counts = match sample.phase.as_str() {
             "warmup" => &mut warmups,
             "trial" => &mut trials,
-            _ => return Err(M05CiEvidenceError::InvalidEnvelope),
+            _ => return Err(ParserCiEvidenceError::InvalidEnvelope),
         };
         let count = phase_counts.entry(dataset.id.as_str()).or_default();
         *count = count
             .checked_add(1)
-            .ok_or(M05CiEvidenceError::InvalidEnvelope)?;
+            .ok_or(ParserCiEvidenceError::InvalidEnvelope)?;
         if sample.ordinal != usize_to_u64(ordinal)?
             || sample.grammar_family != dataset.grammar_family
             || sample.source_bytes != dataset.source_bytes
@@ -585,20 +591,20 @@ fn validate_sample_record_values(
             || sample.syntax_facts == 0
             || sample.syntax_facts > MAX_SYNTAX_ITEMS_PER_SAMPLE
         {
-            return Err(M05CiEvidenceError::InvalidEnvelope);
+            return Err(ParserCiEvidenceError::InvalidEnvelope);
         }
     }
     for dataset in datasets {
         if warmups.get(dataset.id.as_str()) != Some(&EXPECTED_WARMUP_ROUNDS)
             || trials.get(dataset.id.as_str()) != Some(&EXPECTED_TRIAL_ROUNDS)
         {
-            return Err(M05CiEvidenceError::InvalidEnvelope);
+            return Err(ParserCiEvidenceError::InvalidEnvelope);
         }
     }
     Ok(())
 }
 
-fn dataset_revision(records: &[M05CiDatasetRecord]) -> Result<String, M05CiEvidenceError> {
+fn dataset_revision(records: &[ParserCiDatasetRecord]) -> Result<String, ParserCiEvidenceError> {
     let mut hasher = Sha256::new();
     for record in records {
         hash_length_prefixed(&mut hasher, record.id.as_bytes())?;
@@ -609,7 +615,7 @@ fn dataset_revision(records: &[M05CiDatasetRecord]) -> Result<String, M05CiEvide
 
 fn record_set_identity<T: Serialize + ?Sized>(
     records: &T,
-) -> Result<(u64, String), M05CiEvidenceError> {
+) -> Result<(u64, String), ParserCiEvidenceError> {
     let encoded = bounded_json(records, MAX_RECORD_SET_BYTES)?;
     Ok((usize_to_u64(encoded.len())?, sha256_hex(&encoded)))
 }
@@ -622,27 +628,27 @@ struct SampleTotals {
     syntax_facts: u64,
 }
 
-fn sample_totals(samples: &[M05CiSampleRecord]) -> Result<SampleTotals, M05CiEvidenceError> {
+fn sample_totals(samples: &[ParserCiSampleRecord]) -> Result<SampleTotals, ParserCiEvidenceError> {
     samples.iter().try_fold(
         SampleTotals::default(),
-        |totals, sample| -> Result<SampleTotals, M05CiEvidenceError> {
+        |totals, sample| -> Result<SampleTotals, ParserCiEvidenceError> {
             Ok(SampleTotals {
                 source_bytes: totals
                     .source_bytes
                     .checked_add(sample.source_bytes)
-                    .ok_or(M05CiEvidenceError::InvalidEnvelope)?,
+                    .ok_or(ParserCiEvidenceError::InvalidEnvelope)?,
                 physical_lines: totals
                     .physical_lines
                     .checked_add(sample.physical_lines)
-                    .ok_or(M05CiEvidenceError::InvalidEnvelope)?,
+                    .ok_or(ParserCiEvidenceError::InvalidEnvelope)?,
                 syntax_nodes: totals
                     .syntax_nodes
                     .checked_add(sample.syntax_nodes)
-                    .ok_or(M05CiEvidenceError::InvalidEnvelope)?,
+                    .ok_or(ParserCiEvidenceError::InvalidEnvelope)?,
                 syntax_facts: totals
                     .syntax_facts
                     .checked_add(sample.syntax_facts)
-                    .ok_or(M05CiEvidenceError::InvalidEnvelope)?,
+                    .ok_or(ParserCiEvidenceError::InvalidEnvelope)?,
             })
         },
     )
@@ -651,18 +657,18 @@ fn sample_totals(samples: &[M05CiSampleRecord]) -> Result<SampleTotals, M05CiEvi
 fn bounded_json<T: Serialize + ?Sized>(
     value: &T,
     limit: usize,
-) -> Result<Vec<u8>, M05CiEvidenceError> {
+) -> Result<Vec<u8>, ParserCiEvidenceError> {
     let mut output = CiBuffer::new(limit);
     let result = serde_json::to_writer(&mut output, value);
     if output.allocation_failed {
-        return Err(M05CiEvidenceError::AllocationFailed);
+        return Err(ParserCiEvidenceError::AllocationFailed);
     }
     if output.exceeded {
-        return Err(M05CiEvidenceError::LimitExceeded {
+        return Err(ParserCiEvidenceError::LimitExceeded {
             resource: "encoded_bytes",
         });
     }
-    result.map_err(|_| M05CiEvidenceError::Encode)?;
+    result.map_err(|_| ParserCiEvidenceError::Encode)?;
     Ok(output.bytes)
 }
 
@@ -712,17 +718,19 @@ impl io::Write for CiBuffer {
     }
 }
 
-fn deserialize_dataset_records<'de, D>(deserializer: D) -> Result<Vec<M05CiDatasetRecord>, D::Error>
+fn deserialize_dataset_records<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ParserCiDatasetRecord>, D::Error>
 where
     D: Deserializer<'de>,
 {
     struct DatasetRecordsVisitor;
 
     impl<'de> Visitor<'de> for DatasetRecordsVisitor {
-        type Value = Vec<M05CiDatasetRecord>;
+        type Value = Vec<ParserCiDatasetRecord>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("the fixed four-record M05 dataset")
+            formatter.write_str("the fixed four-record parser dataset")
         }
 
         fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
@@ -749,17 +757,19 @@ where
     deserializer.deserialize_seq(DatasetRecordsVisitor)
 }
 
-fn deserialize_sample_records<'de, D>(deserializer: D) -> Result<Vec<M05CiSampleRecord>, D::Error>
+fn deserialize_sample_records<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ParserCiSampleRecord>, D::Error>
 where
     D: Deserializer<'de>,
 {
     struct SampleRecordsVisitor;
 
     impl<'de> Visitor<'de> for SampleRecordsVisitor {
-        type Value = Vec<M05CiSampleRecord>;
+        type Value = Vec<ParserCiSampleRecord>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("the fixed M05 sample schedule")
+            formatter.write_str("the fixed parser sample schedule")
         }
 
         fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
@@ -786,11 +796,13 @@ where
     deserializer.deserialize_seq(SampleRecordsVisitor)
 }
 
-fn require_observed_string(evidence: &EvidenceValue<String>) -> Result<&str, M05CiEvidenceError> {
+fn require_observed_string(
+    evidence: &EvidenceValue<String>,
+) -> Result<&str, ParserCiEvidenceError> {
     match evidence {
         EvidenceValue::Observed { value } => Ok(value),
         EvidenceValue::Target { .. } | EvidenceValue::Unavailable { .. } => {
-            Err(M05CiEvidenceError::InvalidEnvelope)
+            Err(ParserCiEvidenceError::InvalidEnvelope)
         }
     }
 }
@@ -830,17 +842,17 @@ fn is_build_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-fn hash_length_prefixed(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), M05CiEvidenceError> {
+fn hash_length_prefixed(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), ParserCiEvidenceError> {
     if bytes.len() > MAX_ID_BYTES {
-        return Err(M05CiEvidenceError::InvalidEnvelope);
+        return Err(ParserCiEvidenceError::InvalidEnvelope);
     }
     hasher.update(usize_to_u64(bytes.len())?.to_be_bytes());
     hasher.update(bytes);
     Ok(())
 }
 
-fn usize_to_u64(value: usize) -> Result<u64, M05CiEvidenceError> {
-    u64::try_from(value).map_err(|_| M05CiEvidenceError::InvalidEnvelope)
+fn usize_to_u64(value: usize) -> Result<u64, ParserCiEvidenceError> {
+    u64::try_from(value).map_err(|_| ParserCiEvidenceError::InvalidEnvelope)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -861,30 +873,30 @@ fn hex_digest(digest: impl AsRef<[u8]>) -> String {
 /// Strict CI evidence construction or verification failure.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum M05CiEvidenceError {
+pub enum ParserCiEvidenceError {
     /// The closed evidence contract or one of its invariants was violated.
-    #[error("M05 CI evidence is invalid")]
+    #[error("parser CI evidence is invalid")]
     InvalidEnvelope,
     /// A fixed encoded-input or output ceiling was exceeded.
-    #[error("M05 CI evidence limit exceeded: {resource}")]
+    #[error("parser CI evidence limit exceeded: {resource}")]
     LimitExceeded {
         /// Stable source-free resource label.
         resource: &'static str,
     },
     /// A bounded allocation could not be reserved.
-    #[error("M05 CI evidence allocation failed")]
+    #[error("parser CI evidence allocation failed")]
     AllocationFailed,
     /// Canonical serialization failed.
-    #[error("M05 CI evidence encoding failed")]
+    #[error("parser CI evidence encoding failed")]
     Encode,
     /// Strict JSON decoding failed.
-    #[error("M05 CI evidence decoding failed")]
+    #[error("parser CI evidence decoding failed")]
     Decode,
     /// Valid JSON did not use the one accepted canonical encoding.
-    #[error("M05 CI evidence encoding is not canonical")]
+    #[error("parser CI evidence encoding is not canonical")]
     Noncanonical,
     /// A recorded byte count, total, or SHA-256 did not match its records.
-    #[error("M05 CI evidence record identity is invalid")]
+    #[error("parser CI evidence record identity is invalid")]
     DigestMismatch,
 }
 
@@ -912,7 +924,7 @@ mod tests {
         let binary_sha256 = "00".repeat(32);
         let dataset_records = EXPECTED_DATASET
             .iter()
-            .map(|expected| M05CiDatasetRecord {
+            .map(|expected| ParserCiDatasetRecord {
                 id: expected.id.to_owned(),
                 grammar_family: expected.grammar_family.to_owned(),
                 language: expected.language.to_owned(),
@@ -978,7 +990,7 @@ mod tests {
         };
         let command = BenchmarkCommand {
             schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
-            subcommand: "m05-parser-evidence".to_owned(),
+            subcommand: "parser-evidence".to_owned(),
             arguments: Vec::new(),
             seed: 0x524f_4f54_4c49_4748,
             warmup_rounds: EXPECTED_WARMUP_ROUNDS,
@@ -1075,10 +1087,10 @@ mod tests {
         )
     }
 
-    fn fixture_envelope() -> M05CiEvidenceEnvelope {
+    fn fixture_envelope() -> ParserCiEvidenceEnvelope {
         let (source_revision, environment, dataset, provenance, command, evidence) =
             fixture_inputs();
-        build_m05_ci_evidence(
+        build_parser_ci_evidence(
             &source_revision,
             &environment,
             &dataset,
@@ -1093,9 +1105,9 @@ mod tests {
     fn fixed_envelope_is_canonical_deterministic_and_strictly_verified() {
         let envelope = fixture_envelope();
 
-        let first = encode_m05_ci_evidence(&envelope).expect("fixture encodes");
-        let second = encode_m05_ci_evidence(&envelope).expect("fixture re-encodes");
-        let decoded = decode_m05_ci_evidence(&first).expect("fixture strictly decodes");
+        let first = encode_parser_ci_evidence(&envelope).expect("fixture encodes");
+        let second = encode_parser_ci_evidence(&envelope).expect("fixture re-encodes");
+        let decoded = decode_parser_ci_evidence(&first).expect("fixture strictly decodes");
 
         assert_eq!(first, second);
         assert_eq!(decoded, envelope);
@@ -1115,27 +1127,27 @@ mod tests {
 
     #[test]
     fn strict_decoder_rejects_whitespace_unknown_fields_and_digest_tampering() {
-        let encoded = encode_m05_ci_evidence(&fixture_envelope()).expect("fixture encodes");
+        let encoded = encode_parser_ci_evidence(&fixture_envelope()).expect("fixture encodes");
 
         let mut whitespace = encoded.clone();
         whitespace.push(b'\n');
         assert_eq!(
-            decode_m05_ci_evidence(&whitespace),
-            Err(M05CiEvidenceError::Noncanonical)
+            decode_parser_ci_evidence(&whitespace),
+            Err(ParserCiEvidenceError::Noncanonical)
         );
 
         let mut unknown = b"{\"unknown\":0,".to_vec();
         unknown.extend_from_slice(&encoded[1..]);
         assert_eq!(
-            decode_m05_ci_evidence(&unknown),
-            Err(M05CiEvidenceError::Decode)
+            decode_parser_ci_evidence(&unknown),
+            Err(ParserCiEvidenceError::Decode)
         );
 
         let mut tampered = String::from_utf8(encoded).expect("canonical JSON is UTF-8");
         tampered = tampered.replacen("\"syntax_facts\":13", "\"syntax_facts\":12", 1);
         assert_eq!(
-            decode_m05_ci_evidence(tampered.as_bytes()),
-            Err(M05CiEvidenceError::DigestMismatch)
+            decode_parser_ci_evidence(tampered.as_bytes()),
+            Err(ParserCiEvidenceError::DigestMismatch)
         );
     }
 
@@ -1145,7 +1157,7 @@ mod tests {
             fixture_inputs();
         evidence.raw_samples[0].outcome = SampleOutcome::TimedOut;
 
-        let result = build_m05_ci_evidence(
+        let result = build_parser_ci_evidence(
             &source_revision,
             &environment,
             &dataset,
@@ -1154,13 +1166,13 @@ mod tests {
             &evidence,
         );
 
-        assert_eq!(result, Err(M05CiEvidenceError::InvalidEnvelope));
+        assert_eq!(result, Err(ParserCiEvidenceError::InvalidEnvelope));
 
         let (source_revision, environment, dataset, provenance, mut command, evidence) =
             fixture_inputs();
         command.seed = EXPECTED_SEED + 1;
         assert_eq!(
-            build_m05_ci_evidence(
+            build_parser_ci_evidence(
                 &source_revision,
                 &environment,
                 &dataset,
@@ -1168,13 +1180,13 @@ mod tests {
                 &command,
                 &evidence,
             ),
-            Err(M05CiEvidenceError::InvalidEnvelope)
+            Err(ParserCiEvidenceError::InvalidEnvelope)
         );
 
         command.seed = EXPECTED_SEED;
         command.timeout_ms = EXPECTED_TIMEOUT_MS + 1;
         assert_eq!(
-            build_m05_ci_evidence(
+            build_parser_ci_evidence(
                 &source_revision,
                 &environment,
                 &dataset,
@@ -1182,7 +1194,7 @@ mod tests {
                 &command,
                 &evidence,
             ),
-            Err(M05CiEvidenceError::InvalidEnvelope)
+            Err(ParserCiEvidenceError::InvalidEnvelope)
         );
     }
 

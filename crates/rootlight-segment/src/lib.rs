@@ -1,7 +1,7 @@
 //! Bounded in-memory prototype for immutable generation segments.
 //!
 //! The crate owns encoded bytes and deliberately exposes no filesystem,
-//! mapping, publication, or recovery API while ADR-026 remains Proposed.
+//! mapping, publication, or recovery API while native publication is disabled.
 
 #![forbid(unsafe_code)]
 

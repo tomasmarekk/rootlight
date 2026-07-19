@@ -10,10 +10,10 @@ mod bundle;
 mod ci;
 mod decode;
 mod integrity;
-mod m09;
 mod model;
 mod parser;
 mod sampler;
+mod semantic_contract;
 
 pub use bundle::{
     BundleError, BundleLimits, OperationalEvent, OperationalLog, OperationalLogRecord,
@@ -21,16 +21,11 @@ pub use bundle::{
     verify_bundle_with_limits,
 };
 pub use ci::{
-    M05_CI_ENVELOPE_SCHEMA_VERSION, M05_CI_MAX_ENVELOPE_BYTES, M05CiEvidenceEnvelope,
-    M05CiEvidenceError, build_m05_ci_evidence, decode_m05_ci_evidence, encode_m05_ci_evidence,
-    verify_m05_ci_evidence,
+    PARSER_CI_ENVELOPE_SCHEMA_VERSION, PARSER_CI_MAX_ENVELOPE_BYTES, ParserCiEvidenceEnvelope,
+    ParserCiEvidenceError, build_parser_ci_evidence, decode_parser_ci_evidence,
+    encode_parser_ci_evidence, verify_parser_ci_evidence,
 };
 pub use decode::{DecodeError, decode_benchmark_command, decode_dataset_manifest};
-pub use m09::{
-    M09_EVIDENCE_MAX_BYTES, M09_EVIDENCE_MAX_EXPECTATIONS, M09_EVIDENCE_SCHEMA_VERSION,
-    M09EvidenceError, M09SemanticEvidence, build_m09_semantic_evidence,
-    encode_m09_semantic_evidence,
-};
 pub use model::{
     AgentTrajectory, Availability, BenchmarkCommand, BuildProvenance, CoverageEvidence,
     DatasetEntry, DatasetManifest, EnvironmentEvidence, EvidenceValue,
@@ -45,6 +40,11 @@ pub use parser::{
 pub use sampler::{
     ProcessTreeMeasurement, ProcessTreeSample, ProcessTreeSampler, UnavailableProcessTreeSample,
     UnavailableProcessTreeSampler,
+};
+pub use semantic_contract::{
+    SEMANTIC_EVIDENCE_MAX_BYTES, SEMANTIC_EVIDENCE_MAX_EXPECTATIONS,
+    SEMANTIC_EVIDENCE_SCHEMA_VERSION, SemanticEvidence, SemanticEvidenceError,
+    build_semantic_evidence, encode_semantic_evidence,
 };
 
 /// Result-bundle schema version written and verified by this crate.

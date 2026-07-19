@@ -1,7 +1,7 @@
 //! Public-contract tests for bounded reconcile, invalidation, and equivalence.
 //!
 //! Fixtures use only stable IDs and source-free hashes so ordering, cancellation,
-//! and conservative fallback remain observable without storage or M12 publication.
+//! and conservative fallback remain observable without durable generation publication.
 
 use std::{
     collections::{BTreeMap, BTreeSet},

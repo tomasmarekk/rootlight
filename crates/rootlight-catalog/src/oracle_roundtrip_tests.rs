@@ -1287,7 +1287,7 @@ fn real_treesitter_generation_obtains_verified_capability_and_round_trips() {
         &analyzer,
         &request,
         ExtensionSupport::default(),
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &analysis_cancellation,
     )
     .expect("real Tree-sitter analysis commits");

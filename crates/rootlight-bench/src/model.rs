@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Versioned semantic-quality rubric used by the M05 parser evidence slice.
-pub const SEMANTIC_QUALITY_RUBRIC_ID: &str = "m05-parser-semantic-eligibility-2.0";
+/// Versioned semantic-quality rubric used by parser evidence.
+pub const SEMANTIC_QUALITY_RUBRIC_ID: &str = "parser-semantic-eligibility-2.0";
 /// Minimum accepted semantic precision, in millionths.
 pub const MIN_SEMANTIC_PRECISION_PPM: u64 = 980_000;
 /// Minimum accepted semantic recall, in millionths.
@@ -345,7 +345,7 @@ pub struct QualityEvidence {
 ///
 /// Counts alone do not establish correctness. A run can become semantically
 /// eligible only when all three quality metrics are observed and satisfy the
-/// versioned M05 rubric.
+/// versioned parser rubric.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticQualityMeasurement {
     /// Measured semantic precision in millionths.

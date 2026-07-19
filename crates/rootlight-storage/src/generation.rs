@@ -31,7 +31,7 @@ use serde::Serialize;
 pub const GENERATION_CONTRACT_VERSION: GenerationContractVersion =
     GenerationContractVersion::new(1, 2);
 
-/// Version of the proposed identity-claim recipe exercised by ADR-027.
+/// Version of the generation identity-claim recipe.
 pub const PROPOSED_IDENTITY_CLAIM_VERSION: GenerationContractVersion =
     GenerationContractVersion::new(1, 0);
 

@@ -527,7 +527,7 @@ pub trait IrBatchSink {
 ///
 /// Providers must reach cancellation checkpoints during parsing. This
 /// in-process trait cannot terminate a noncooperative call; hard process-tree
-/// ownership and termination belong to the M13 runtime boundary.
+/// ownership and termination belong to the isolated adapter host boundary.
 pub trait ParseProvider: Send + Sync {
     /// Returns immutable admission-control capabilities.
     fn capabilities(&self) -> &ParseCapabilities;
@@ -550,7 +550,7 @@ pub trait ParseProvider: Send + Sync {
 /// Synchronous cooperative language analyzer contract producing normalized IR.
 ///
 /// The SDK checks admission and transaction boundaries, but cannot terminate a
-/// noncooperative in-process call. Hard process-tree termination belongs to M13.
+/// noncooperative in-process call. Hard process-tree termination belongs to the isolated adapter supervisor.
 pub trait LanguageAnalyzer: Send + Sync {
     /// Returns immutable producer identity and capabilities.
     fn descriptor(&self) -> &ProducerDescriptor;
@@ -981,7 +981,7 @@ impl IrBatchSink for BoundedIrSink {
 ///
 /// `cancellation` must carry a process-local monotonic deadline. The explicit
 /// `memory_policy` either admits hard/reported enforcement or intentionally
-/// selects the visible M05 unavailable-enforcement fallback.
+/// selects the visible unavailable-enforcement fallback.
 ///
 /// # Errors
 ///
@@ -1090,7 +1090,7 @@ pub fn execute_parse_transaction<T>(
 ///
 /// `cancellation` must carry a process-local monotonic deadline. The explicit
 /// `memory_policy` either admits hard/reported enforcement or intentionally
-/// selects the visible M05 unavailable-enforcement fallback.
+/// selects the visible unavailable-enforcement fallback.
 ///
 /// # Errors
 ///
@@ -1253,9 +1253,10 @@ fn admit_memory(
     match (enforcement, policy) {
         (MemoryEnforcement::HardProcess, _) => Ok(MemoryAdmissionStatus::HardProcess),
         (MemoryEnforcement::AccountedInProcess, _) => Ok(MemoryAdmissionStatus::AccountedInProcess),
-        (MemoryEnforcement::Unavailable, MemoryAdmissionPolicy::AllowUnavailableM05Fallback) => {
-            Ok(MemoryAdmissionStatus::UnavailableM05Fallback)
-        }
+        (
+            MemoryEnforcement::Unavailable,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        ) => Ok(MemoryAdmissionStatus::UnavailableEnforcementFallback),
         (MemoryEnforcement::Unavailable, MemoryAdmissionPolicy::RequireHardOrAccounted) => {
             Err(RequestError::MemoryEnforcementUnavailable)
         }

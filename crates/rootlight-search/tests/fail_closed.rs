@@ -1,4 +1,4 @@
-//! Production-configuration proof for the Proposed ADR-026 boundary.
+//! Production-configuration proof for the disabled native boundary.
 
 use std::fs;
 

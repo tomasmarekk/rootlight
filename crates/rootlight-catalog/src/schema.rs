@@ -1275,7 +1275,7 @@ mod tests {
     #[test]
     fn proposed_private_file_boundary_fails_closed() {
         let error =
-            require_private_file_boundary(false).expect_err("proposed boundary is unavailable");
+            require_private_file_boundary(false).expect_err("disabled boundary is unavailable");
 
         assert_eq!(
             error.kind(),

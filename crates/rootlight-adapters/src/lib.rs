@@ -230,7 +230,7 @@ pub enum LanguageRegistryError {
     DuplicateLanguage,
 }
 
-/// Returns the initial M09 semantic language registry.
+/// Returns the initial semantic language registry.
 ///
 /// # Errors
 ///

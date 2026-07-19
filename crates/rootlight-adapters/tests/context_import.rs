@@ -61,7 +61,7 @@ fn imported_context_commits_deterministically_and_rejects_other_builds() {
         &analyzer,
         &request,
         ExtensionSupport::default(),
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("matching context commits");
@@ -69,7 +69,7 @@ fn imported_context_commits_deterministically_and_rejects_other_builds() {
         &analyzer,
         &request,
         ExtensionSupport::default(),
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("matching context repeats");
@@ -87,7 +87,7 @@ fn imported_context_commits_deterministically_and_rejects_other_builds() {
             &analyzer,
             &wrong_request,
             ExtensionSupport::default(),
-            MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         )
         .is_err()

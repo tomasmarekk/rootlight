@@ -111,7 +111,7 @@ impl Catalog {
     ///
     /// Production builds return
     /// [`CatalogErrorKind::UnsupportedPrivateFileBoundary`] before filesystem
-    /// mutation while ADR-026 remains proposed. Test builds additionally
+    /// mutation while the native private-file boundary is disabled. Test builds additionally
     /// exercise the schema scaffold.
     pub fn open_in(state_root: &Path) -> Result<Self, CatalogError> {
         let path = state_root.join(CATALOG_FILENAME);
@@ -152,7 +152,7 @@ impl OracleWriter {
     ///
     /// Production builds return
     /// [`CatalogErrorKind::UnsupportedPrivateFileBoundary`] before filesystem
-    /// mutation while ADR-026 remains proposed. Test builds additionally
+    /// mutation while the native private-file boundary is disabled. Test builds additionally
     /// exercise existing-file, SQLite, and schema failures.
     pub fn create_in(generation_directory: &Path) -> Result<Self, CatalogError> {
         let path = generation_directory.join(ORACLE_FILENAME);
@@ -241,7 +241,7 @@ impl OracleReader {
     ///
     /// Production builds return
     /// [`CatalogErrorKind::UnsupportedPrivateFileBoundary`] before filesystem
-    /// inspection while ADR-026 remains proposed. Test builds additionally
+    /// inspection while the native private-file boundary is disabled. Test builds additionally
     /// exercise cancellation, compatibility, integrity, and metadata failures.
     pub fn open_in(
         generation_directory: &Path,
@@ -287,7 +287,7 @@ impl OracleReader {
     /// # Errors
     ///
     /// Returns [`CatalogErrorKind::IdentityProofRequired`] for readable legacy
-    /// generations that predate the proposed identity-claim recipe.
+    /// generations that predate the current identity-claim recipe.
     pub fn read_verified(
         &self,
         context: &GenerationContext<'_>,
@@ -747,7 +747,7 @@ pub enum CatalogErrorKind {
     UnsupportedCriticalExtensions,
     /// The generation does not carry an accepted, validated identity proof.
     IdentityProofRequired,
-    /// ADR-026 has no accepted handle-bound SQLite file implementation.
+    /// the native boundary has no enabled handle-bound SQLite file implementation.
     UnsupportedPrivateFileBoundary,
     /// The database file is linked, non-regular, or not private.
     InsecureFile,

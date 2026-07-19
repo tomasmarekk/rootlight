@@ -1,6 +1,6 @@
 //! Versioned protobuf wire contracts for local Rootlight process boundaries.
 //!
-//! Generated messages are checked in during TASK-01.4 so ordinary builds never
+//! Generated messages are checked in during the protocol generation workflow so ordinary builds never
 //! require network access or a protobuf compiler.
 
 #![forbid(unsafe_code)]

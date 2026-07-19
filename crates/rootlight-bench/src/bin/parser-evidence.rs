@@ -1,4 +1,4 @@
-//! Offline BENCH-PARSE-001 micro-evidence executable.
+//! Offline rootlight-parser-benchmark-v1 micro-evidence executable.
 //!
 //! Emit mode projects a real parser run into one canonical source-free JSON
 //! envelope on stdout. Verify mode strictly validates one envelope from stdin.
@@ -24,10 +24,10 @@ use rootlight_adapter_treesitter::{
 };
 use rootlight_bench::{
     Availability, BenchmarkCommand, BuildProvenance, BundleLimits, DatasetEntry, DatasetManifest,
-    EnvironmentEvidence, EvidenceValue, M05_CI_MAX_ENVELOPE_BYTES, ParserBenchmarkConfig,
+    EnvironmentEvidence, EvidenceValue, PARSER_CI_MAX_ENVELOPE_BYTES, ParserBenchmarkConfig,
     ParserDatasetInput, RESULT_BUNDLE_SCHEMA_VERSION, UnavailableProcessTreeSampler,
-    UnavailableSemanticFacts, build_m05_ci_evidence, encode_m05_ci_evidence, run_parser_benchmark,
-    verify_m05_ci_evidence,
+    UnavailableSemanticFacts, build_parser_ci_evidence, encode_parser_ci_evidence,
+    run_parser_benchmark, verify_parser_ci_evidence,
 };
 use rootlight_ids::{GenerationId, derive_repository};
 use rootlight_ir::{IrLimits, SourceRef, SourceSpan};
@@ -35,7 +35,7 @@ use rootlight_vfs::{RelativePath, RepositoryRoot};
 use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 
-const DATASET_ID: &str = "rootlight-m05-parser-micro-v1";
+const DATASET_ID: &str = "rootlight-parser-micro-v1";
 const BENCHMARK_SEED: u64 = 0x524f_4f54_4c49_4748;
 const WARMUP_ROUNDS: u32 = 1;
 const TRIAL_ROUNDS: u32 = 10;
@@ -80,7 +80,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("m05-parser-evidence: {error}");
+            eprintln!("parser-evidence: {error}");
             ExitCode::from(2)
         }
     }
@@ -135,7 +135,7 @@ fn emit(source_revision: &str) -> Result<(), EvidenceError> {
             trial_rounds: TRIAL_ROUNDS,
             timeout: SAMPLE_TIMEOUT,
             limits: analysis_limits()?,
-            memory_policy: MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+            memory_policy: MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             evidence_limits: limits,
         },
         &UnavailableProcessTreeSampler,
@@ -153,7 +153,7 @@ fn emit(source_revision: &str) -> Result<(), EvidenceError> {
     let binary_sha256 = hash_file(&executable, MAX_BINARY_BYTES)?;
     let environment = environment(&binary_sha256)?;
     let provenance = build_provenance(source_revision, &binary_sha256);
-    let envelope = build_m05_ci_evidence(
+    let envelope = build_parser_ci_evidence(
         source_revision,
         &environment,
         &manifest,
@@ -161,8 +161,8 @@ fn emit(source_revision: &str) -> Result<(), EvidenceError> {
         &command,
         &benchmark,
     )?;
-    let encoded = encode_m05_ci_evidence(&envelope)?;
-    verify_m05_ci_evidence(&encoded)?;
+    let encoded = encode_parser_ci_evidence(&envelope)?;
+    verify_parser_ci_evidence(&encoded)?;
     let mut stdout = io::stdout().lock();
     stdout
         .write_all(&encoded)
@@ -175,13 +175,13 @@ fn emit(source_revision: &str) -> Result<(), EvidenceError> {
 }
 
 fn verify_stdin() -> Result<(), EvidenceError> {
-    let read_limit = u64::try_from(M05_CI_MAX_ENVELOPE_BYTES)
+    let read_limit = u64::try_from(PARSER_CI_MAX_ENVELOPE_BYTES)
         .map_err(|_| EvidenceError::LimitConversion)?
         .checked_add(1)
         .ok_or(EvidenceError::LimitConversion)?;
     let mut encoded = Vec::new();
     encoded
-        .try_reserve_exact(M05_CI_MAX_ENVELOPE_BYTES)
+        .try_reserve_exact(PARSER_CI_MAX_ENVELOPE_BYTES)
         .map_err(|_| EvidenceError::LimitConversion)?;
     io::stdin()
         .lock()
@@ -191,7 +191,7 @@ fn verify_stdin() -> Result<(), EvidenceError> {
             operation: "read CI evidence stdin",
             source,
         })?;
-    verify_m05_ci_evidence(&encoded)?;
+    verify_parser_ci_evidence(&encoded)?;
     Ok(())
 }
 
@@ -238,7 +238,7 @@ fn embedded_manifest() -> Result<DatasetManifest, EvidenceError> {
 fn benchmark_command() -> BenchmarkCommand {
     BenchmarkCommand {
         schema_version: RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
-        subcommand: "m05-parser-evidence".to_owned(),
+        subcommand: "parser-evidence".to_owned(),
         arguments: Vec::new(),
         seed: BENCHMARK_SEED,
         warmup_rounds: WARMUP_ROUNDS,
@@ -380,7 +380,7 @@ fn analysis_limits() -> Result<AnalysisLimits, rootlight_adapter_sdk::LimitError
 
 fn create_fixture_directory() -> Result<TempDir, EvidenceError> {
     tempfile::Builder::new()
-        .prefix(".rootlight-m05-fixtures-")
+        .prefix(".rootlight-parser-fixtures-")
         .tempdir()
         .map_err(|source| EvidenceError::Io {
             operation: "create fixture directory",
@@ -553,9 +553,7 @@ where
 
 #[derive(Debug, thiserror::Error)]
 enum EvidenceError {
-    #[error(
-        "usage: m05-parser-evidence --source-revision LOWERCASE_SHA | m05-parser-evidence --verify"
-    )]
+    #[error("usage: parser-evidence --source-revision LOWERCASE_SHA | parser-evidence --verify")]
     Usage,
     #[error("evidence executable is invalid")]
     InvalidExecutable,
@@ -580,7 +578,7 @@ enum EvidenceError {
     #[error(transparent)]
     Benchmark(#[from] rootlight_bench::ParserRunError),
     #[error(transparent)]
-    Ci(#[from] rootlight_bench::M05CiEvidenceError),
+    Ci(#[from] rootlight_bench::ParserCiEvidenceError),
 }
 
 #[cfg(test)]
@@ -626,7 +624,7 @@ mod tests {
     #[test]
     fn arguments_reject_missing_extra_and_noncanonical_values() {
         let valid = [
-            "m05-parser-evidence",
+            "parser-evidence",
             "--source-revision",
             "0123456789abcdef0123456789abcdef01234567",
         ];
@@ -636,7 +634,7 @@ mod tests {
         ));
         assert!(matches!(
             Arguments::parse(
-                ["m05-parser-evidence", "--verify"]
+                ["parser-evidence", "--verify"]
                     .into_iter()
                     .map(OsString::from)
             ),
@@ -644,7 +642,7 @@ mod tests {
         ));
 
         let extra = [
-            "m05-parser-evidence",
+            "parser-evidence",
             "--source-revision",
             "0123456789abcdef0123456789abcdef01234567",
             "--extra",
@@ -655,7 +653,7 @@ mod tests {
         ));
 
         let uppercase = [
-            "m05-parser-evidence",
+            "parser-evidence",
             "--source-revision",
             "0123456789ABCDEF0123456789ABCDEF01234567",
         ];
@@ -665,7 +663,7 @@ mod tests {
         ));
 
         let oversized = vec![
-            OsString::from("m05-parser-evidence"),
+            OsString::from("parser-evidence"),
             OsString::from("--source-revision"),
             OsString::from("x".repeat(MAX_ARGUMENT_BYTES + 1)),
         ];

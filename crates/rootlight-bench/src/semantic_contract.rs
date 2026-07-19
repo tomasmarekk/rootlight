@@ -1,4 +1,4 @@
-//! Source-free semantic contract conformance for M09.
+//! Source-free semantic contract conformance evidence.
 //!
 //! Reports consume the shared language registry and caller-supplied resolver
 //! decisions. Contract fixtures cannot authorize tier promotion or completion.
@@ -13,7 +13,7 @@ use rootlight_resolve::{
 };
 use serde::Serialize;
 
-const CORPUS_ID: &str = "rootlight-m09-contract-fixture-v1";
+const CORPUS_ID: &str = "rootlight-semantic-contract-fixture-v1";
 const ADAPTER_CRATE: &str = "rootlight-adapters";
 const MIN_EXACT_PRECISION_BASIS_POINTS: u16 = 9_500;
 const MIN_EXACT_RECALL_BASIS_POINTS: u16 = 9_000;
@@ -23,12 +23,12 @@ const P95_PERCENT: u64 = 95;
 const PERCENT_SCALE: u64 = 100;
 const MILLI_SCALE: u64 = 1_000;
 
-/// Version of the machine-readable M09 evidence schema.
-pub const M09_EVIDENCE_SCHEMA_VERSION: &str = "1.1";
-/// Maximum canonical byte size emitted for one M09 report.
-pub const M09_EVIDENCE_MAX_BYTES: usize = 64 * 1024;
-/// Maximum reviewed expectations accepted by one M09 corpus.
-pub const M09_EVIDENCE_MAX_EXPECTATIONS: usize = 65_536;
+/// Version of the machine-readable semantic contract evidence schema.
+pub const SEMANTIC_EVIDENCE_SCHEMA_VERSION: &str = "1.1";
+/// Maximum canonical byte size emitted for one semantic contract report.
+pub const SEMANTIC_EVIDENCE_MAX_BYTES: usize = 64 * 1024;
+/// Maximum reviewed expectations accepted by one semantic contract corpus.
+pub const SEMANTIC_EVIDENCE_MAX_EXPECTATIONS: usize = 65_536;
 
 const EXPECTED_PROFILES: [ExpectedProfile; 4] = [
     ExpectedProfile::new("go", AnalysisTier::TierA, LanguageSemantics::Static),
@@ -37,16 +37,16 @@ const EXPECTED_PROFILES: [ExpectedProfile; 4] = [
     ExpectedProfile::new("typescript", AnalysisTier::TierA, LanguageSemantics::Static),
 ];
 
-/// Opaque, source-free M09 conformance and quality report.
+/// Opaque, source-free semantic conformance and quality report.
 ///
-/// Use [`encode_m09_semantic_evidence`] to obtain the canonical JSON artifact.
+/// Use [`encode_semantic_evidence`] to obtain the canonical JSON artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct M09SemanticEvidence {
+pub struct SemanticEvidence {
     schema_version: String,
     corpus_id: String,
     adapter_crate: String,
     disposition: EvidenceDisposition,
-    milestone_completion_eligible: bool,
+    production_acceptance_eligible: bool,
     languages: Vec<LanguageEvidence>,
     resolver_quality: ResolverQualityEvidence,
     repository_execution: RepositoryExecutionEvidence,
@@ -147,27 +147,27 @@ enum RepositoryOperation {
     RepositoryBinary,
 }
 
-/// Invalid or oversized M09 semantic evidence.
+/// Invalid or oversized semantic contract evidence.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum M09EvidenceError {
+pub enum SemanticEvidenceError {
     /// The shared registry differs from the reviewed four-language profile.
-    #[error("M09 language conformance evidence is invalid")]
+    #[error("Semantic language conformance evidence is invalid")]
     InvalidLanguageEvidence,
     /// Resolver results fail the ambiguity-sensitive quality contract.
-    #[error("M09 resolver quality evidence is invalid")]
+    #[error("Semantic resolver quality evidence is invalid")]
     InvalidQualityEvidence,
     /// The resolver quality corpus was internally inconsistent.
-    #[error("M09 resolver quality evaluation failed")]
+    #[error("Semantic resolver quality evaluation failed")]
     Quality(#[source] rootlight_resolve::QualityError),
     /// A fixed input or output ceiling was exceeded.
-    #[error("M09 semantic evidence limit exceeded: {resource}")]
+    #[error("Semantic contract evidence limit exceeded: {resource}")]
     LimitExceeded {
         /// Stable source-free resource label.
         resource: &'static str,
     },
     /// Canonical JSON serialization failed.
-    #[error("M09 semantic evidence encoding failed")]
+    #[error("Semantic contract evidence encoding failed")]
     Encode,
 }
 
@@ -175,25 +175,25 @@ pub enum M09EvidenceError {
 ///
 /// The function accepts no repository path, environment, process, or command
 /// input. The report records that structural no-execution restriction and is
-/// explicitly ineligible for tier promotion or milestone completion.
+/// explicitly ineligible for tier promotion or production acceptance.
 ///
 /// # Errors
 ///
-/// Returns [`M09EvidenceError`] for a changed profile contract, an oversized
+/// Returns [`SemanticEvidenceError`] for a changed profile contract, an oversized
 /// corpus, inconsistent ground truth, hidden ambiguity, missing explicit
-/// outcomes, or quality and calibration below the M09 floors.
-pub fn build_m09_semantic_evidence(
+/// outcomes, or quality and calibration below the semantic quality floors.
+pub fn build_semantic_evidence(
     registry: &LanguageAdapterRegistry,
     batch: &ResolutionBatch,
     expectations: &[ResolutionExpectation],
-) -> Result<M09SemanticEvidence, M09EvidenceError> {
-    if expectations.len() > M09_EVIDENCE_MAX_EXPECTATIONS {
-        return Err(M09EvidenceError::LimitExceeded {
+) -> Result<SemanticEvidence, SemanticEvidenceError> {
+    if expectations.len() > SEMANTIC_EVIDENCE_MAX_EXPECTATIONS {
+        return Err(SemanticEvidenceError::LimitExceeded {
             resource: "expectation_count",
         });
     }
-    if batch.decisions.len() > M09_EVIDENCE_MAX_EXPECTATIONS {
-        return Err(M09EvidenceError::LimitExceeded {
+    if batch.decisions.len() > SEMANTIC_EVIDENCE_MAX_EXPECTATIONS {
+        return Err(SemanticEvidenceError::LimitExceeded {
             resource: "decision_count",
         });
     }
@@ -204,16 +204,16 @@ pub fn build_m09_semantic_evidence(
                 if symbols.len() > MAX_CANDIDATE_LIMIT
         )
     }) {
-        return Err(M09EvidenceError::LimitExceeded {
+        return Err(SemanticEvidenceError::LimitExceeded {
             resource: "candidate_count",
         });
     }
-    Ok(M09SemanticEvidence {
-        schema_version: M09_EVIDENCE_SCHEMA_VERSION.to_owned(),
+    Ok(SemanticEvidence {
+        schema_version: SEMANTIC_EVIDENCE_SCHEMA_VERSION.to_owned(),
         corpus_id: CORPUS_ID.to_owned(),
         adapter_crate: ADAPTER_CRATE.to_owned(),
         disposition: EvidenceDisposition::ContractFixtureOnly,
-        milestone_completion_eligible: false,
+        production_acceptance_eligible: false,
         languages: language_evidence(registry)?,
         resolver_quality: quality_evidence(batch, expectations)?,
         repository_execution: RepositoryExecutionEvidence {
@@ -236,14 +236,14 @@ pub fn build_m09_semantic_evidence(
 ///
 /// # Errors
 ///
-/// Returns [`M09EvidenceError`] when serialization fails or the report exceeds
-/// [`M09_EVIDENCE_MAX_BYTES`].
-pub fn encode_m09_semantic_evidence(
-    evidence: &M09SemanticEvidence,
-) -> Result<Vec<u8>, M09EvidenceError> {
-    let encoded = serde_json::to_vec(evidence).map_err(|_| M09EvidenceError::Encode)?;
-    if encoded.len() > M09_EVIDENCE_MAX_BYTES {
-        return Err(M09EvidenceError::LimitExceeded {
+/// Returns [`SemanticEvidenceError`] when serialization fails or the report exceeds
+/// [`SEMANTIC_EVIDENCE_MAX_BYTES`].
+pub fn encode_semantic_evidence(
+    evidence: &SemanticEvidence,
+) -> Result<Vec<u8>, SemanticEvidenceError> {
+    let encoded = serde_json::to_vec(evidence).map_err(|_| SemanticEvidenceError::Encode)?;
+    if encoded.len() > SEMANTIC_EVIDENCE_MAX_BYTES {
+        return Err(SemanticEvidenceError::LimitExceeded {
             resource: "encoded_bytes",
         });
     }
@@ -252,24 +252,24 @@ pub fn encode_m09_semantic_evidence(
 
 fn language_evidence(
     registry: &LanguageAdapterRegistry,
-) -> Result<Vec<LanguageEvidence>, M09EvidenceError> {
+) -> Result<Vec<LanguageEvidence>, SemanticEvidenceError> {
     EXPECTED_PROFILES
         .into_iter()
         .map(|expected| {
             let profile = registry
                 .iter()
                 .find(|profile| profile.language().as_str() == expected.language)
-                .ok_or(M09EvidenceError::InvalidLanguageEvidence)?;
+                .ok_or(SemanticEvidenceError::InvalidLanguageEvidence)?;
             if profile.maximum_tier() != expected.tier || profile.semantics() != expected.semantics
             {
-                return Err(M09EvidenceError::InvalidLanguageEvidence);
+                return Err(SemanticEvidenceError::InvalidLanguageEvidence);
             }
             let uncertainty_codes = profile
                 .uncertainties()
                 .map(|code| code.as_str().to_owned())
                 .collect::<Vec<_>>();
             if uncertainty_codes.is_empty() {
-                return Err(M09EvidenceError::InvalidLanguageEvidence);
+                return Err(SemanticEvidenceError::InvalidLanguageEvidence);
             }
             Ok(LanguageEvidence {
                 language: expected.language.to_owned(),
@@ -289,15 +289,15 @@ fn language_evidence(
 fn quality_evidence(
     batch: &ResolutionBatch,
     expectations: &[ResolutionExpectation],
-) -> Result<ResolverQualityEvidence, M09EvidenceError> {
+) -> Result<ResolverQualityEvidence, SemanticEvidenceError> {
     let report =
-        evaluate_resolution_quality(batch, expectations).map_err(M09EvidenceError::Quality)?;
+        evaluate_resolution_quality(batch, expectations).map_err(SemanticEvidenceError::Quality)?;
     let expectations_by_occurrence = expectations
         .iter()
         .map(|expectation| (expectation.occurrence, expectation.expected))
         .collect::<BTreeMap<_, _>>();
     if expectations_by_occurrence.len() != expectations.len() {
-        return Err(M09EvidenceError::InvalidQualityEvidence);
+        return Err(SemanticEvidenceError::InvalidQualityEvidence);
     }
 
     let (mut exact_expected, mut ambiguous_expected, mut unresolved_expected) = (0, 0, 0);
@@ -334,11 +334,11 @@ fn quality_evidence(
             } => {
                 increment(&mut candidate_outcomes)?;
                 let materialized = u64::try_from(symbols.len())
-                    .map_err(|_| M09EvidenceError::InvalidQualityEvidence)?;
+                    .map_err(|_| SemanticEvidenceError::InvalidQualityEvidence)?;
                 if *total_count < materialized
                     || (*completeness == CoverageStatus::Complete && *total_count != materialized)
                 {
-                    return Err(M09EvidenceError::InvalidQualityEvidence);
+                    return Err(SemanticEvidenceError::InvalidQualityEvidence);
                 }
                 candidate_sizes.push(*total_count);
             }
@@ -356,16 +356,16 @@ fn quality_evidence(
     let calibration_error = report
         .calibration
         .expected_calibration_error
-        .ok_or(M09EvidenceError::InvalidQualityEvidence)?;
+        .ok_or(SemanticEvidenceError::InvalidQualityEvidence)?;
 
     let expected_total = exact_expected
         .checked_add(ambiguous_expected)
         .and_then(|total| total.checked_add(unresolved_expected))
-        .ok_or(M09EvidenceError::InvalidQualityEvidence)?;
+        .ok_or(SemanticEvidenceError::InvalidQualityEvidence)?;
     let outcome_total = exact_outcomes
         .checked_add(candidate_outcomes)
         .and_then(|total| total.checked_add(unresolved_outcomes))
-        .ok_or(M09EvidenceError::InvalidQualityEvidence)?;
+        .ok_or(SemanticEvidenceError::InvalidQualityEvidence)?;
     if exact_expected == 0
         || ambiguous_expected == 0
         || unresolved_expected == 0
@@ -383,7 +383,7 @@ fn quality_evidence(
         || report.unexpected_decisions != 0
         || calibration_error > MAX_CALIBRATION_ERROR_MILLI
     {
-        return Err(M09EvidenceError::InvalidQualityEvidence);
+        return Err(SemanticEvidenceError::InvalidQualityEvidence);
     }
 
     Ok(ResolverQualityEvidence {
@@ -425,65 +425,70 @@ fn quality_evidence(
     })
 }
 
-fn candidate_metrics(sizes: &[u64]) -> Result<(u64, u64, u64), M09EvidenceError> {
-    let count = u64::try_from(sizes.len()).map_err(|_| M09EvidenceError::InvalidQualityEvidence)?;
+fn candidate_metrics(sizes: &[u64]) -> Result<(u64, u64, u64), SemanticEvidenceError> {
+    let count =
+        u64::try_from(sizes.len()).map_err(|_| SemanticEvidenceError::InvalidQualityEvidence)?;
     let total = sizes.iter().try_fold(0_u64, |sum, size| {
         sum.checked_add(*size)
-            .ok_or(M09EvidenceError::InvalidQualityEvidence)
+            .ok_or(SemanticEvidenceError::InvalidQualityEvidence)
     })?;
     let mean = total
         .checked_mul(MILLI_SCALE)
         .and_then(|scaled| scaled.checked_div(count))
-        .ok_or(M09EvidenceError::InvalidQualityEvidence)?;
+        .ok_or(SemanticEvidenceError::InvalidQualityEvidence)?;
     let rank = count
         .checked_mul(P95_PERCENT)
         .and_then(|scaled| scaled.checked_add(PERCENT_SCALE - 1))
         .and_then(|scaled| scaled.checked_div(PERCENT_SCALE))
         .and_then(|rank| rank.checked_sub(1))
-        .ok_or(M09EvidenceError::InvalidQualityEvidence)?;
-    let index = usize::try_from(rank).map_err(|_| M09EvidenceError::InvalidQualityEvidence)?;
+        .ok_or(SemanticEvidenceError::InvalidQualityEvidence)?;
+    let index = usize::try_from(rank).map_err(|_| SemanticEvidenceError::InvalidQualityEvidence)?;
     let p95 = *sizes
         .get(index)
-        .ok_or(M09EvidenceError::InvalidQualityEvidence)?;
+        .ok_or(SemanticEvidenceError::InvalidQualityEvidence)?;
     let maximum = *sizes
         .last()
-        .ok_or(M09EvidenceError::InvalidQualityEvidence)?;
+        .ok_or(SemanticEvidenceError::InvalidQualityEvidence)?;
     Ok((mean, p95, maximum))
 }
 
-fn basis_points(numerator: u64, denominator: u64) -> Result<u16, M09EvidenceError> {
+fn basis_points(numerator: u64, denominator: u64) -> Result<u16, SemanticEvidenceError> {
     let scaled = u128::from(numerator)
         .checked_mul(10_000)
         .and_then(|value| value.checked_div(u128::from(denominator)))
-        .ok_or(M09EvidenceError::InvalidQualityEvidence)?;
-    u16::try_from(scaled).map_err(|_| M09EvidenceError::InvalidQualityEvidence)
+        .ok_or(SemanticEvidenceError::InvalidQualityEvidence)?;
+    u16::try_from(scaled).map_err(|_| SemanticEvidenceError::InvalidQualityEvidence)
 }
 
-fn ratio(value: Option<u16>) -> Result<u16, M09EvidenceError> {
-    value.ok_or(M09EvidenceError::InvalidQualityEvidence)
+fn ratio(value: Option<u16>) -> Result<u16, SemanticEvidenceError> {
+    value.ok_or(SemanticEvidenceError::InvalidQualityEvidence)
 }
 
-fn increment(value: &mut u64) -> Result<(), M09EvidenceError> {
+fn increment(value: &mut u64) -> Result<(), SemanticEvidenceError> {
     *value = value
         .checked_add(1)
-        .ok_or(M09EvidenceError::InvalidQualityEvidence)?;
+        .ok_or(SemanticEvidenceError::InvalidQualityEvidence)?;
     Ok(())
 }
 
-fn tier_evidence(tier: AnalysisTier) -> Result<TierEvidence, M09EvidenceError> {
+fn tier_evidence(tier: AnalysisTier) -> Result<TierEvidence, SemanticEvidenceError> {
     match tier {
         AnalysisTier::TierA => Ok(TierEvidence::TierA),
         AnalysisTier::TierB => Ok(TierEvidence::TierB),
-        AnalysisTier::TierC | AnalysisTier::TierD => Err(M09EvidenceError::InvalidLanguageEvidence),
-        _ => Err(M09EvidenceError::InvalidLanguageEvidence),
+        AnalysisTier::TierC | AnalysisTier::TierD => {
+            Err(SemanticEvidenceError::InvalidLanguageEvidence)
+        }
+        _ => Err(SemanticEvidenceError::InvalidLanguageEvidence),
     }
 }
 
-fn semantics_evidence(semantics: LanguageSemantics) -> Result<SemanticsEvidence, M09EvidenceError> {
+fn semantics_evidence(
+    semantics: LanguageSemantics,
+) -> Result<SemanticsEvidence, SemanticEvidenceError> {
     match semantics {
         LanguageSemantics::Static => Ok(SemanticsEvidence::Static),
         LanguageSemantics::Dynamic => Ok(SemanticsEvidence::Dynamic),
-        _ => Err(M09EvidenceError::InvalidLanguageEvidence),
+        _ => Err(SemanticEvidenceError::InvalidLanguageEvidence),
     }
 }
 
@@ -520,17 +525,17 @@ mod tests {
     fn report_is_deterministic_bounded_and_source_free() {
         let registry = initial_semantic_registry().expect("shared registry is valid");
         let (batch, expectations) = corpus();
-        let first = build_m09_semantic_evidence(&registry, &batch, &expectations)
+        let first = build_semantic_evidence(&registry, &batch, &expectations)
             .expect("reference corpus passes");
-        let repeated = build_m09_semantic_evidence(&registry, &batch, &expectations)
+        let repeated = build_semantic_evidence(&registry, &batch, &expectations)
             .expect("reference corpus repeats");
-        let first_bytes = encode_m09_semantic_evidence(&first).expect("evidence encodes");
+        let first_bytes = encode_semantic_evidence(&first).expect("evidence encodes");
         let repeated_bytes =
-            encode_m09_semantic_evidence(&repeated).expect("repeated evidence encodes");
+            encode_semantic_evidence(&repeated).expect("repeated evidence encodes");
 
         assert_eq!(first_bytes, repeated_bytes);
         assert_eq!(first.disposition, EvidenceDisposition::ContractFixtureOnly);
-        assert!(!first.milestone_completion_eligible);
+        assert!(!first.production_acceptance_eligible);
         assert_eq!(first.languages.len(), 4);
         assert!(
             first
@@ -555,7 +560,7 @@ mod tests {
         assert_eq!(first.repository_execution.observed_command_attempts, 0);
         let text = String::from_utf8(first_bytes).expect("canonical evidence is UTF-8");
         assert!(text.contains("\"disposition\":\"contract_fixture_only\""));
-        assert!(text.contains("\"milestone_completion_eligible\":false"));
+        assert!(text.contains("\"production_acceptance_eligible\":false"));
         assert!(!text.contains("fn target"));
         assert!(!text.contains("\\Users\\"));
         assert!(!text.contains("/home/"));
@@ -570,8 +575,8 @@ mod tests {
             confidence: Confidence::new(900).expect("fixture confidence is valid"),
         };
         assert!(matches!(
-            build_m09_semantic_evidence(&registry, &batch, &expectations),
-            Err(M09EvidenceError::InvalidQualityEvidence)
+            build_semantic_evidence(&registry, &batch, &expectations),
+            Err(SemanticEvidenceError::InvalidQualityEvidence)
         ));
 
         let incomplete = LanguageAdapterRegistry::new(
@@ -584,8 +589,8 @@ mod tests {
         .expect("remaining profiles form a valid registry");
         let (batch, expectations) = corpus();
         assert!(matches!(
-            build_m09_semantic_evidence(&incomplete, &batch, &expectations),
-            Err(M09EvidenceError::InvalidLanguageEvidence)
+            build_semantic_evidence(&incomplete, &batch, &expectations),
+            Err(SemanticEvidenceError::InvalidLanguageEvidence)
         ));
     }
 
@@ -593,10 +598,10 @@ mod tests {
     fn expectation_count_is_bounded_before_quality_evaluation() {
         let registry = initial_semantic_registry().expect("shared registry is valid");
         let (mut batch, expectations) = corpus();
-        let oversized = vec![expectations[0]; M09_EVIDENCE_MAX_EXPECTATIONS + 1];
+        let oversized = vec![expectations[0]; SEMANTIC_EVIDENCE_MAX_EXPECTATIONS + 1];
         assert!(matches!(
-            build_m09_semantic_evidence(&registry, &batch, &oversized),
-            Err(M09EvidenceError::LimitExceeded {
+            build_semantic_evidence(&registry, &batch, &oversized),
+            Err(SemanticEvidenceError::LimitExceeded {
                 resource: "expectation_count"
             })
         ));
@@ -606,8 +611,8 @@ mod tests {
         };
         *symbols = vec![SymbolId::from_bytes([14; 20]); MAX_CANDIDATE_LIMIT + 1];
         assert!(matches!(
-            build_m09_semantic_evidence(&registry, &batch, &expectations),
-            Err(M09EvidenceError::LimitExceeded {
+            build_semantic_evidence(&registry, &batch, &expectations),
+            Err(SemanticEvidenceError::LimitExceeded {
                 resource: "candidate_count"
             })
         ));

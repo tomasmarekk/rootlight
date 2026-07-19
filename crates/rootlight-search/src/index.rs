@@ -71,8 +71,8 @@ impl LexicalIndexBuilder {
     /// must supply an empty directory rooted in its private generation staging tree.
     /// The returned manifest is created only after the writer and index handles close.
     /// Production path-backed construction remains unavailable until the
-    /// private file-handle boundary is accepted; unit tests exercise the
-    /// proposed artifact contract without enabling it for callers.
+    /// private file-handle boundary is enabled; unit tests exercise the
+    /// reserved artifact contract without enabling it for callers.
     ///
     /// # Errors
     ///

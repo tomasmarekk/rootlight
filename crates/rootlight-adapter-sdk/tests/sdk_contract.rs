@@ -668,13 +668,13 @@ fn unavailable_memory_requires_explicit_visible_fallback() {
     let parse_output = execute_parse(
         &provider,
         &parse_request,
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("explicit parser fallback commits");
     assert_eq!(
         parse_output.memory_admission(),
-        MemoryAdmissionStatus::UnavailableM05Fallback
+        MemoryAdmissionStatus::UnavailableEnforcementFallback
     );
 
     let analysis_request = analysis_request(&snapshot, &source, &limits);
@@ -709,13 +709,13 @@ fn unavailable_memory_requires_explicit_visible_fallback() {
         &analyzer,
         &analysis_request,
         ExtensionSupport::default(),
-        MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("explicit analyzer fallback commits");
     assert_eq!(
         analysis_output.memory_admission(),
-        MemoryAdmissionStatus::UnavailableM05Fallback
+        MemoryAdmissionStatus::UnavailableEnforcementFallback
     );
 }
 

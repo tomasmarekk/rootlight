@@ -17,7 +17,7 @@ pub use vertical::{
     SymbolExplainInput, SymbolExplainOutput, ToolResponse, VerticalTool,
 };
 
-/// The MCP specification revision selected by ADR-015.
+/// The MCP specification revision fixed by the compatibility contract.
 pub const MCP_SPECIFICATION_DATE: &str = "2025-11-25";
 
 /// The initial Rootlight MCP schema version.

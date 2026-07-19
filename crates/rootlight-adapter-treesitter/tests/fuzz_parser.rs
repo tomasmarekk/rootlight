@@ -1,4 +1,4 @@
-//! FUZZ-PARSER-001 stable property coverage for bounded parser extraction.
+//! Stable property coverage for bounded parser extraction.
 //!
 //! CI-safe generated inputs span invalid UTF-8, Unicode/CRLF, incomplete
 //! nesting, and token storms without requiring nightly fuzzing toolchains.
@@ -37,7 +37,7 @@ proptest! {
     })]
 
     #[test]
-    fn fuzz_parser_001_preserves_bounds_and_cleanup(
+    fn bounded_parser_inputs_preserve_bounds_and_cleanup(
         input in adversarial_input(),
         max_nodes in 1usize..=256,
         max_depth in 1usize..=32,
@@ -58,7 +58,7 @@ proptest! {
             let result = execute_parse(
                 &provider,
                 &fuzz_request,
-                MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
                 &cancellation,
             );
 
@@ -103,7 +103,7 @@ proptest! {
                 execute_parse(
                     &provider,
                     &fuzz_request,
-                    MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
                     &cancelled,
                 ),
                 Err(AdapterError::Cancelled {
@@ -118,7 +118,7 @@ proptest! {
             prop_assert!(execute_parse(
                 &provider,
                 &cleanup_request,
-                MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
                 &deadline(),
             )
             .is_ok());

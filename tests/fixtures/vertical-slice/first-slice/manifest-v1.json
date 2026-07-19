@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "fixture": "gate-1-first-slice",
+  "fixture": "vertical-slice-first-slice",
   "snapshot": "v1",
   "root": "v1",
   "integrity": {

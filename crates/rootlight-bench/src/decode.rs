@@ -164,7 +164,7 @@ fn decode_benchmark_command_with_control(
         return Err(DecodeError::InvalidSchema);
     }
     validate_string(input.subcommand, limits, StringKind::Label)?;
-    if input.subcommand != "m05-parser-evidence" {
+    if input.subcommand != "parser-evidence" {
         return Err(DecodeError::UnsupportedSubcommand);
     }
     if input.warmup_rounds == 0 || input.trial_rounds == 0 || input.timeout_ms == 0 {
@@ -1181,7 +1181,7 @@ pub enum DecodeError {
     /// Schema 2.0 does not permit a free-form command argument channel.
     #[error("benchmark command arguments are unsupported")]
     UnsupportedArguments,
-    /// Schema 2.0 supports only the closed M05 parser-evidence command.
+    /// Schema 2.0 supports only the closed parser-evidence command.
     #[error("benchmark command subcommand is unsupported")]
     UnsupportedSubcommand,
     /// Warm-up, trial, or timeout policy is zero.
@@ -1302,7 +1302,7 @@ mod tests {
     fn command_decoder_is_strict_bounded_and_source_free() {
         let valid = br#"{
             "schema_version":"2.0",
-            "subcommand":"m05-parser-evidence",
+            "subcommand":"parser-evidence",
             "arguments":[],
             "seed":7,
             "warmup_rounds":1,
@@ -1347,7 +1347,7 @@ mod tests {
 
         let unsupported_subcommand = String::from_utf8(valid.to_vec())
             .expect("fixture is UTF-8")
-            .replace("m05-parser-evidence", "m05-parser");
+            .replace("parser-evidence", "parser");
         assert!(matches!(
             decode_benchmark_command(unsupported_subcommand.as_bytes(), BundleLimits::default()),
             Err(DecodeError::UnsupportedSubcommand)
@@ -1370,7 +1370,7 @@ mod tests {
             ..BundleLimits::default()
         };
         let command_prefix = concat!(
-            "{\"schema_version\":\"2.0\",\"subcommand\":\"m05-parser-evidence\",",
+            "{\"schema_version\":\"2.0\",\"subcommand\":\"parser-evidence\",",
             "\"arguments\":[],\"seed\":7,\"warmup_rounds\":1,\"trial_rounds\":2,",
             "\"timeout_ms\":1000,\""
         );
@@ -1446,7 +1446,7 @@ mod tests {
 
         let command = br#"{
             "schema_version":"2.0",
-            "subcommand":"m05-parser-evidence",
+            "subcommand":"parser-evidence",
             "arguments":[],
             "seed":7,
             "warmup_rounds":1,

@@ -2261,7 +2261,7 @@ pub struct Health {
     pub catalog_status: HealthStatus,
     /// Current operation catalog schema version.
     pub catalog_schema_version: u32,
-    /// Generation storage status; not configured in the M04 control slice.
+    /// Generation storage status; not configured by the daemon control plane.
     pub generation_status: HealthStatus,
     /// Adapter status; not configured before parser providers exist.
     pub adapter_status: HealthStatus,

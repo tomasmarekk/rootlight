@@ -437,7 +437,9 @@ fn structural_artifact_bytes(output: &ParseOutput) -> Result<usize, AdapterError
 
 fn memory_policy_for(enforcement: MemoryEnforcement) -> MemoryAdmissionPolicy {
     match enforcement {
-        MemoryEnforcement::Unavailable => MemoryAdmissionPolicy::AllowUnavailableM05Fallback,
+        MemoryEnforcement::Unavailable => {
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback
+        }
         MemoryEnforcement::HardProcess | MemoryEnforcement::AccountedInProcess => {
             MemoryAdmissionPolicy::RequireHardOrAccounted
         }

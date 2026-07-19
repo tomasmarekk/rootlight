@@ -24,7 +24,8 @@ const TOOLCHAIN_POLICY_PATH: &str = "policy/toolchain.toml";
 const UNSAFE_POLICY_PATH: &str = "policy/unsafe.toml";
 const WORKFLOW_ROOT: &str = ".github/workflows";
 const CURRENT_SCHEMA_VERSION: &str = "1.0";
-const ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED: &str = "Accepted unsafe boundary evidence requires compiler-derived expanded input inventory and the full cargo-geiger SafetyReport; this evidence is not implemented";
+const UNSAFE_SCHEMA_VERSION: &str = "2.0";
+const ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED: &str = "Enabled unsafe boundary evidence requires compiler-derived expanded input inventory and the full cargo-geiger SafetyReport; this evidence is not implemented";
 
 pub(crate) fn check() -> Result<(), PolicyError> {
     let metadata = MetadataCommand::new()
@@ -43,7 +44,7 @@ pub(crate) fn check() -> Result<(), PolicyError> {
     require_version(&supply_chain.schema_version, SUPPLY_CHAIN_POLICY_PATH)?;
     require_version(&action_policy.schema_version, ACTION_POLICY_PATH)?;
     require_version(&toolchain_policy.schema_version, TOOLCHAIN_POLICY_PATH)?;
-    require_version(&unsafe_policy.schema_version, UNSAFE_POLICY_PATH)?;
+    require_unsafe_version(&unsafe_policy.schema_version)?;
     validate_dependency_surfaces(&metadata, &supply_chain)?;
     crate::grammar_lock::check(&metadata, workspace_root)
         .map_err(|error| PolicyError::GrammarLock(Box::new(error)))?;
@@ -94,6 +95,17 @@ fn require_version(version: &str, path: &str) -> Result<(), PolicyError> {
     } else {
         Err(PolicyError::UnsupportedPolicyVersion {
             path: path.to_owned(),
+            version: version.to_owned(),
+        })
+    }
+}
+
+fn require_unsafe_version(version: &str) -> Result<(), PolicyError> {
+    if version == UNSAFE_SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(PolicyError::UnsupportedPolicyVersion {
+            path: UNSAFE_POLICY_PATH.to_owned(),
             version: version.to_owned(),
         })
     }
@@ -538,7 +550,7 @@ fn scan_workspace_unsafe(
     metadata: &Metadata,
     policy: &UnsafePolicy,
 ) -> Result<(), PolicyError> {
-    reject_accepted_boundaries_without_authoritative_evidence(policy)?;
+    reject_enabled_boundaries_without_authoritative_evidence(policy)?;
     let root = fs::canonicalize(root).map_err(|source| PolicyError::Read {
         path: root.to_path_buf(),
         source,
@@ -581,7 +593,7 @@ fn scan_workspace_unsafe(
                 line: observation.first_line,
             });
         };
-        if boundary.status != UnsafeBoundaryStatus::Accepted {
+        if boundary.status != UnsafeBoundaryStatus::Enabled {
             return Err(PolicyError::UnsafeToken {
                 path: path.clone(),
                 line: observation.first_line,
@@ -594,22 +606,22 @@ fn scan_workspace_unsafe(
         let observation = observed.get(&absolute).copied().unwrap_or_default();
         let expected = boundary.expected_source_tokens;
         match boundary.status {
-            UnsafeBoundaryStatus::Proposed if expected != 0 || observation.count != 0 => {
+            UnsafeBoundaryStatus::Disabled if expected != 0 || observation.count != 0 => {
                 return Err(PolicyError::UnsafeBoundaryCount {
                     path: source,
                     expected: 0,
                     observed: observation.count,
                 });
             }
-            UnsafeBoundaryStatus::Accepted if expected == 0 => {
+            UnsafeBoundaryStatus::Enabled if expected == 0 => {
                 return Err(PolicyError::InvalidUnsafeBoundary {
                     detail: format!(
-                        "accepted boundary {} must expect at least one token",
+                        "enabled boundary {} must expect at least one token",
                         source.display()
                     ),
                 });
             }
-            UnsafeBoundaryStatus::Accepted | UnsafeBoundaryStatus::Proposed
+            UnsafeBoundaryStatus::Enabled | UnsafeBoundaryStatus::Disabled
                 if observation.count != expected =>
             {
                 return Err(PolicyError::UnsafeBoundaryCount {
@@ -618,22 +630,22 @@ fn scan_workspace_unsafe(
                     observed: observation.count,
                 });
             }
-            UnsafeBoundaryStatus::Accepted | UnsafeBoundaryStatus::Proposed => {}
+            UnsafeBoundaryStatus::Enabled | UnsafeBoundaryStatus::Disabled => {}
         }
     }
     Ok(())
 }
 
-fn reject_accepted_boundaries_without_authoritative_evidence(
+fn reject_enabled_boundaries_without_authoritative_evidence(
     policy: &UnsafePolicy,
 ) -> Result<(), PolicyError> {
     if policy
         .boundaries
         .iter()
-        .any(|boundary| boundary.status == UnsafeBoundaryStatus::Accepted)
+        .any(|boundary| boundary.status == UnsafeBoundaryStatus::Enabled)
     {
         return Err(PolicyError::InvalidUnsafeBoundary {
-            detail: ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED.to_owned(),
+            detail: ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED.to_owned(),
         });
     }
     Ok(())
@@ -648,7 +660,6 @@ fn validate_unsafe_boundaries<'a>(
     let mut modules = BTreeSet::new();
     for boundary in &policy.boundaries {
         validate_relative_policy_path(&boundary.source)?;
-        validate_relative_policy_path(&boundary.adr)?;
         validate_relative_policy_path(&boundary.manifest)?;
         if boundary.module.is_empty()
             || boundary.owner != "@tomasmarekk"
@@ -693,7 +704,6 @@ fn validate_unsafe_boundaries<'a>(
             })?;
         let absolute_source =
             canonical_policy_file(root, &boundary.source, "unsafe boundary source")?;
-        let absolute_adr = canonical_policy_file(root, &boundary.adr, "unsafe boundary ADR")?;
         if !absolute_source.starts_with(&package_root)
             || absolute_source.extension().and_then(|value| value.to_str()) != Some("rs")
         {
@@ -705,13 +715,7 @@ fn validate_unsafe_boundaries<'a>(
                 ),
             });
         }
-        validate_unsafe_boundary_governance(
-            package,
-            &package_root,
-            &absolute_source,
-            &absolute_adr,
-            boundary,
-        )?;
+        validate_unsafe_boundary_governance(package, &package_root, &absolute_source, boundary)?;
         if !modules.insert(boundary.module.as_str())
             || by_source
                 .insert(boundary.source.clone(), boundary)
@@ -975,7 +979,6 @@ fn validate_unsafe_boundary_governance(
     package: &Package,
     package_root: &Path,
     source: &Path,
-    adr: &Path,
     boundary: &UnsafeBoundary,
 ) -> Result<(), PolicyError> {
     let manifest_path = package.manifest_path.as_std_path();
@@ -988,12 +991,6 @@ fn validate_unsafe_boundary_governance(
             path: manifest_path.to_path_buf(),
             source,
         })?;
-    let adr_text = fs::read_to_string(adr).map_err(|source| PolicyError::Read {
-        path: adr.to_path_buf(),
-        source,
-    })?;
-    validate_adr_header(adr, &adr_text, boundary)?;
-
     let module_graph =
         package_target_defining_module(package, package_root, boundary.module.as_str(), source)?
             .ok_or_else(|| PolicyError::InvalidUnsafeBoundary {
@@ -1022,162 +1019,14 @@ fn validate_unsafe_boundary_governance(
             detail: format!(
                 "{} boundary {} must retain workspace forbid, one target-root forbid declaration, no reachable override, and zero inventory",
                 match boundary.status {
-                    UnsafeBoundaryStatus::Proposed => "proposed",
-                    UnsafeBoundaryStatus::Accepted => "accepted",
+                    UnsafeBoundaryStatus::Disabled => "disabled",
+                    UnsafeBoundaryStatus::Enabled => "enabled",
                 },
                 boundary.source.display()
             ),
         });
     }
     Ok(())
-}
-
-fn validate_adr_header(
-    adr: &Path,
-    text: &str,
-    boundary: &UnsafeBoundary,
-) -> Result<(), PolicyError> {
-    let (identifier, fields) =
-        parse_adr_header(adr, text).ok_or_else(|| PolicyError::InvalidUnsafeBoundary {
-            detail: format!(
-                "{} must have one strict metadata header before Context",
-                boundary.adr.display()
-            ),
-        })?;
-    let expected_fields = BTreeSet::from([
-        "Decision date",
-        "Manifest",
-        "Module",
-        "Owner",
-        "Package",
-        "Proposal date",
-        "Related baseline",
-        "Source",
-        "Status",
-    ]);
-    if fields.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected_fields {
-        return Err(PolicyError::InvalidUnsafeBoundary {
-            detail: format!(
-                "{} has missing or unknown ADR metadata fields",
-                boundary.adr.display()
-            ),
-        });
-    }
-    let expected_status = match boundary.status {
-        UnsafeBoundaryStatus::Proposed => "Proposed",
-        UnsafeBoundaryStatus::Accepted => "Accepted",
-    };
-    let package_identity = format!("{}@{}", boundary.package, boundary.package_version);
-    let proposal_date = fields.get("Proposal date").map(String::as_str);
-    let decision_date = fields.get("Decision date").map(String::as_str);
-    let identity_matches = fields.get("Status").map(String::as_str) == Some(expected_status)
-        && fields.get("Owner").map(String::as_str) == Some(boundary.owner.as_str())
-        && fields.get("Package").map(String::as_str) == Some(package_identity.as_str())
-        && fields.get("Manifest").map(String::as_str) == boundary.manifest.to_str()
-        && fields.get("Module").map(String::as_str) == Some(boundary.module.as_str())
-        && fields.get("Source").map(String::as_str) == boundary.source.to_str();
-    if !identity_matches
-        || proposal_date.and_then(parse_iso_date).is_none()
-        || !adr_decision_state_is_valid(boundary.status, proposal_date, decision_date)
-        || fields
-            .get("Related baseline")
-            .is_none_or(|value| value.trim().is_empty())
-    {
-        return Err(PolicyError::InvalidUnsafeBoundary {
-            detail: format!(
-                "{} metadata does not bind {identifier} to the exact boundary identity and state",
-                boundary.adr.display()
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn parse_adr_header(adr: &Path, text: &str) -> Option<(String, BTreeMap<String, String>)> {
-    let filename = adr.file_name()?.to_str()?;
-    let mut filename_parts = filename.splitn(3, '-');
-    if filename_parts.next()? != "ADR" {
-        return None;
-    }
-    let number = filename_parts.next()?;
-    if number.len() != 3 || !number.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let identifier = format!("ADR-{number}");
-    let mut lines = text.lines();
-    let title = lines.next()?;
-    let title_prefix = format!("# {identifier}: ");
-    if !title.starts_with(&title_prefix) || title.len() == title_prefix.len() {
-        return None;
-    }
-    if !lines.next()?.is_empty() {
-        return None;
-    }
-    let mut fields = BTreeMap::new();
-    for line in lines.by_ref() {
-        if line.is_empty() {
-            break;
-        }
-        let metadata = line.strip_prefix("**")?;
-        let (key, value) = metadata.split_once(":** ")?;
-        if key.is_empty()
-            || value.is_empty()
-            || fields.insert(key.to_owned(), value.to_owned()).is_some()
-        {
-            return None;
-        }
-    }
-    if lines.next()? != "## Context" {
-        return None;
-    }
-    Some((identifier, fields))
-}
-
-fn adr_decision_state_is_valid(
-    status: UnsafeBoundaryStatus,
-    proposal_date: Option<&str>,
-    decision_date: Option<&str>,
-) -> bool {
-    let Some(proposal_date) = proposal_date.and_then(parse_iso_date) else {
-        return false;
-    };
-    match status {
-        UnsafeBoundaryStatus::Proposed => decision_date == Some("not accepted"),
-        UnsafeBoundaryStatus::Accepted => decision_date
-            .and_then(parse_iso_date)
-            .is_some_and(|decision_date| decision_date >= proposal_date),
-    }
-}
-
-fn parse_iso_date(value: &str) -> Option<(u16, u8, u8)> {
-    let bytes = value.as_bytes();
-    if bytes.len() != 10
-        || bytes[4] != b'-'
-        || bytes[7] != b'-'
-        || !bytes
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
-    {
-        return None;
-    }
-    let year = value.get(..4)?.parse::<u16>().ok()?;
-    let month = value.get(5..7)?.parse::<u8>().ok()?;
-    let day = value.get(8..)?.parse::<u8>().ok()?;
-    if year == 0 || !(1..=12).contains(&month) {
-        return None;
-    }
-    let leap_year =
-        year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
-    let maximum_day = match month {
-        2 if leap_year => 29,
-        2 => 28,
-        4 | 6 | 9 | 11 => 30,
-        _ => 31,
-    };
-    (1..=maximum_day)
-        .contains(&day)
-        .then_some((year, month, day))
 }
 
 fn boundary_lint_state_is_valid(
@@ -1188,7 +1037,7 @@ fn boundary_lint_state_is_valid(
     expected_geiger_count: usize,
 ) -> bool {
     match status {
-        UnsafeBoundaryStatus::Proposed => {
+        UnsafeBoundaryStatus::Disabled => {
             let inherits_workspace = lints
                 .and_then(|value| value.get("workspace"))
                 .and_then(toml::Value::as_bool)
@@ -1205,7 +1054,7 @@ fn boundary_lint_state_is_valid(
                 && expected_source_tokens == 0
                 && expected_geiger_count == 0
         }
-        UnsafeBoundaryStatus::Accepted => false,
+        UnsafeBoundaryStatus::Enabled => false,
     }
 }
 
@@ -1528,8 +1377,8 @@ impl<'ast> Visit<'ast> for CompilerInputVisitor {
                 Err(_) => self.inputs.push(CompilerInput::Generated("include!")),
             }
         } else {
-            // This catches only obvious Proposed-state wrappers. Stable syn cannot
-            // inventory expansion, so every Accepted boundary is rejected earlier.
+            // This catches only obvious Disabled-state wrappers. Stable syn cannot
+            // inventory expansion, so every Enabled boundary is rejected earlier.
             if rust_text_contains_identifier(&node.tokens.to_string(), "include") {
                 self.inputs
                     .push(CompilerInput::Generated("macro-expanded include!"));
@@ -1865,7 +1714,6 @@ struct UnsafeBoundary {
     module: String,
     source: PathBuf,
     status: UnsafeBoundaryStatus,
-    adr: PathBuf,
     owner: String,
     reason: String,
     expected_source_tokens: usize,
@@ -1875,8 +1723,8 @@ struct UnsafeBoundary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum UnsafeBoundaryStatus {
-    Proposed,
-    Accepted,
+    Disabled,
+    Enabled,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2061,11 +1909,10 @@ mod tests {
             module: "rootlight_vfs::platform::os".to_owned(),
             source: "crates/rootlight-vfs/src/platform/os.rs".into(),
             status,
-            adr: "policy/adr/ADR-026-fixture.md".into(),
             owner: "@tomasmarekk".to_owned(),
             reason: "fixture".to_owned(),
-            expected_source_tokens: usize::from(status == UnsafeBoundaryStatus::Accepted),
-            expected_geiger_count: usize::from(status == UnsafeBoundaryStatus::Accepted),
+            expected_source_tokens: usize::from(status == UnsafeBoundaryStatus::Enabled),
+            expected_geiger_count: usize::from(status == UnsafeBoundaryStatus::Enabled),
         }
     }
 
@@ -2136,10 +1983,10 @@ mod tests {
     }
 
     #[test]
-    fn proposed_boundaries_require_exact_reachable_lint_state() {
-        let proposed_manifest: toml::Value =
+    fn disabled_boundaries_require_exact_reachable_lint_state() {
+        let disabled_manifest: toml::Value =
             toml::from_str("[lints]\nworkspace = true\n").expect("fixture parses");
-        let accepted_manifest: toml::Value =
+        let enabled_manifest: toml::Value =
             toml::from_str("[lints.rust]\nunsafe_code = \"deny\"\n").expect("fixture parses");
         let exact = lint_inventory(
             "#![forbid(unsafe_code, reason = \"workspace safety baseline\")]",
@@ -2148,29 +1995,29 @@ mod tests {
         .expect("exact lint state parses");
 
         assert!(boundary_lint_state_is_valid(
-            UnsafeBoundaryStatus::Proposed,
-            proposed_manifest.get("lints"),
+            UnsafeBoundaryStatus::Disabled,
+            disabled_manifest.get("lints"),
             Some(&exact),
             0,
             0,
         ));
         assert!(!boundary_lint_state_is_valid(
-            UnsafeBoundaryStatus::Proposed,
-            accepted_manifest.get("lints"),
+            UnsafeBoundaryStatus::Disabled,
+            enabled_manifest.get("lints"),
             Some(&exact),
             0,
             0,
         ));
         assert!(!boundary_lint_state_is_valid(
-            UnsafeBoundaryStatus::Accepted,
-            accepted_manifest.get("lints"),
+            UnsafeBoundaryStatus::Enabled,
+            enabled_manifest.get("lints"),
             Some(&exact),
             2,
             1,
         ));
         assert!(!boundary_lint_state_is_valid(
-            UnsafeBoundaryStatus::Proposed,
-            proposed_manifest.get("lints"),
+            UnsafeBoundaryStatus::Disabled,
+            disabled_manifest.get("lints"),
             lint_inventory(
                 "// #![forbid(unsafe_code)]\nconst CLAIM: &str = \"#![forbid(unsafe_code)]\";",
                 &[]
@@ -2188,8 +2035,8 @@ mod tests {
         ] {
             let inventory = lint_inventory(target, &[]);
             assert!(!boundary_lint_state_is_valid(
-                UnsafeBoundaryStatus::Proposed,
-                proposed_manifest.get("lints"),
+                UnsafeBoundaryStatus::Disabled,
+                disabled_manifest.get("lints"),
                 inventory.as_ref(),
                 0,
                 0,
@@ -2203,8 +2050,8 @@ mod tests {
             ],
         );
         assert!(!boundary_lint_state_is_valid(
-            UnsafeBoundaryStatus::Proposed,
-            proposed_manifest.get("lints"),
+            UnsafeBoundaryStatus::Disabled,
+            disabled_manifest.get("lints"),
             reachable_override.as_ref(),
             0,
             0,
@@ -2255,66 +2102,12 @@ mod tests {
             }]
         );
         assert!(!boundary_lint_state_is_valid(
-            UnsafeBoundaryStatus::Proposed,
+            UnsafeBoundaryStatus::Disabled,
             manifest.get("lints"),
             Some(&inventory),
             0,
             0,
         ));
-    }
-
-    #[test]
-    fn unsafe_boundary_status_requires_a_consistent_decision_date() {
-        assert!(adr_decision_state_is_valid(
-            UnsafeBoundaryStatus::Proposed,
-            Some("2026-07-17"),
-            Some("not accepted")
-        ));
-        assert!(!adr_decision_state_is_valid(
-            UnsafeBoundaryStatus::Proposed,
-            Some("2026-02-30"),
-            Some("2026-07-17")
-        ));
-        assert!(adr_decision_state_is_valid(
-            UnsafeBoundaryStatus::Accepted,
-            Some("2026-07-17"),
-            Some("2026-07-17")
-        ));
-        assert!(!adr_decision_state_is_valid(
-            UnsafeBoundaryStatus::Accepted,
-            Some("2026-07-18"),
-            Some("2026-07-17")
-        ));
-        assert!(!adr_decision_state_is_valid(
-            UnsafeBoundaryStatus::Accepted,
-            Some("2026-07-17"),
-            Some("not accepted")
-        ));
-    }
-
-    #[test]
-    fn unsafe_boundary_adr_header_binds_identity_outside_fences() {
-        let boundary = fixture_boundary(UnsafeBoundaryStatus::Proposed);
-        let header = "# ADR-026: Fixture\n\n**Status:** Proposed\n**Owner:** @tomasmarekk\n**Proposal date:** 2026-07-17\n**Decision date:** not accepted\n**Package:** rootlight-vfs@0.1.0\n**Manifest:** crates/rootlight-vfs/Cargo.toml\n**Module:** rootlight_vfs::platform::os\n**Source:** crates/rootlight-vfs/src/platform/os.rs\n**Related baseline:** ADR-010\n\n## Context\n";
-        let path = Path::new("policy/adr/ADR-026-fixture.md");
-
-        validate_adr_header(path, header, &boundary).expect("exact ADR header passes");
-        assert!(
-            validate_adr_header(
-                path,
-                &header.replace("@tomasmarekk", "@substitute"),
-                &boundary
-            )
-            .is_err()
-        );
-        assert!(
-            validate_adr_header(
-                path,
-                "# ADR-026: Fixture\n\n```\n**Status:** Proposed\n```\n\n## Context\n",
-                &boundary
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -2338,7 +2131,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_boundary_rejects_unexpanded_macro_generated_code() {
+    fn enabled_boundary_rejects_unexpanded_macro_generated_code() {
         let directory = tempdir().expect("temporary directory is available");
         let source = directory.path().join("lib.rs");
         let text = "emit_generated!();\n";
@@ -2356,15 +2149,15 @@ mod tests {
             0
         );
         let policy = UnsafePolicy {
-            schema_version: CURRENT_SCHEMA_VERSION.to_owned(),
-            boundaries: vec![fixture_boundary(UnsafeBoundaryStatus::Accepted)],
+            schema_version: UNSAFE_SCHEMA_VERSION.to_owned(),
+            boundaries: vec![fixture_boundary(UnsafeBoundaryStatus::Enabled)],
         };
-        let error = reject_accepted_boundaries_without_authoritative_evidence(&policy)
-            .expect_err("Accepted must fail without compiler-derived evidence");
+        let error = reject_enabled_boundaries_without_authoritative_evidence(&policy)
+            .expect_err("Enabled must fail without compiler-derived evidence");
 
         assert_eq!(
             error.to_string(),
-            format!("POLICY_UNSAFE_BOUNDARY: {ACCEPTED_UNSAFE_EVIDENCE_UNIMPLEMENTED}")
+            format!("POLICY_UNSAFE_BOUNDARY: {ENABLED_UNSAFE_EVIDENCE_UNIMPLEMENTED}")
         );
     }
 

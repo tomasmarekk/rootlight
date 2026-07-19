@@ -14,7 +14,7 @@
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
-      "blake3": "bc52f09d50ea6f0ebd389a4a9a323fd603de281959ae996e9b404ffdc5431803"
+      "blake3": "a49a48d5bdbf920aac110b9c0fcd6a85ff57b365984ec524110c0a50a9decd4d"
     },
     {
       "path": "crates/rootlight-config/src/lib.rs",
@@ -46,7 +46,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/lib.rs",
-      "blake3": "b3041c1862254c5672cf2f2628a16151de467701fb8b21086aabc1d98853784a"
+      "blake3": "2722491f758356938ff1ac2c84b0bf1e102da6b69d14aa5e74ddfc131c8c75c4"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
@@ -54,7 +54,7 @@
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
-      "blake3": "52abef4a5b21df2ffd87940f3de1c2a4899767af36f49c05812eb36b7bd23601"
+      "blake3": "c6a20f174540e4768c55552e0121c9794ec7cad6cdf3556177c5771c56c447b0"
     },
     {
       "path": "proto/adapter_v1.proto",
@@ -150,7 +150,7 @@
     },
     {
       "path": "xtask/src/main.rs",
-      "blake3": "3f2a643f61064f836def69c69176f247cf4d46abb7e7cc167a3a2ce893dca315"
+      "blake3": "d9b428dbefc736383da3833fcbca40e3d09719ed2bf17e1da42f07c10b35b920"
     },
     {
       "path": "xtask/src/schemas.rs",
