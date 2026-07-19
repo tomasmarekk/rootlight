@@ -121,6 +121,54 @@ fn shared_registry_keeps_language_profiles_bounded_and_independent() {
             ("typescript", AnalysisTier::TierA, LanguageSemantics::Static,),
         ]
     );
+    let uncertainties = registry
+        .iter()
+        .map(|profile| {
+            (
+                profile.language().as_str(),
+                profile
+                    .uncertainties()
+                    .map(|code| code.as_str())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        uncertainties,
+        vec![
+            (
+                "go",
+                vec!["build_tags", "code_generation", "runtime_registration"]
+            ),
+            (
+                "javascript",
+                vec![
+                    "dynamic_imports",
+                    "generated_code",
+                    "prototype_mutation",
+                    "reflection",
+                    "runtime_registration",
+                ]
+            ),
+            (
+                "python",
+                vec![
+                    "dynamic_attributes",
+                    "dynamic_imports",
+                    "monkey_patching",
+                    "reflection",
+                ]
+            ),
+            (
+                "rust",
+                vec!["generated_code", "macro_expansion", "procedural_macros"]
+            ),
+            (
+                "typescript",
+                vec!["dynamic_imports", "generated_code", "runtime_registration"]
+            ),
+        ]
+    );
 
     let rust = LanguageId::new("rust").expect("language identity is valid");
     assert_eq!(
@@ -129,6 +177,29 @@ fn shared_registry_keeps_language_profiles_bounded_and_independent() {
             .expect("Rust profile is registered")
             .language(),
         &rust
+    );
+}
+
+#[test]
+fn profile_rejects_invalid_duplicate_and_oversized_uncertainty_sets() {
+    let profile = || {
+        LanguageProfile::new("rust", AnalysisTier::TierA, LanguageSemantics::Static)
+            .expect("base profile is valid")
+    };
+    assert!(
+        profile()
+            .with_uncertainty_codes(&["not-canonical"])
+            .is_err()
+    );
+    assert!(
+        profile()
+            .with_uncertainty_codes(&["generated_code", "generated_code"])
+            .is_err()
+    );
+    assert!(
+        profile()
+            .with_uncertainty_codes(&["gap"; rootlight_adapters::MAX_LANGUAGE_UNCERTAINTIES + 1])
+            .is_err()
     );
 }
 

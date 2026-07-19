@@ -24,6 +24,10 @@ const CANCELLATION_CHECK_INTERVAL: usize = 64;
 pub const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Hard ceiling for one process-local language profile registry.
 pub const MAX_LANGUAGE_PROFILES: usize = 256;
+/// Hard ceiling for uncertainty classes declared by one language profile.
+pub const MAX_LANGUAGE_UNCERTAINTIES: usize = 32;
+/// Maximum byte length of one source-free uncertainty code.
+pub const MAX_LANGUAGE_UNCERTAINTY_CODE_BYTES: usize = 64;
 
 /// Broad semantic behavior used by calibration and promotion policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,12 +39,47 @@ pub enum LanguageSemantics {
     Dynamic,
 }
 
+/// Bounded source-free code for a documented language-analysis blind spot.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LanguageUncertaintyCode(String);
+
+impl LanguageUncertaintyCode {
+    /// Creates one stable lowercase `snake_case` uncertainty code.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LanguageProfileError::InvalidUncertaintyCode`] for an empty,
+    /// oversized, or non-canonical value.
+    pub fn new(value: &str) -> Result<Self, LanguageProfileError> {
+        let bytes = value.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > MAX_LANGUAGE_UNCERTAINTY_CODE_BYTES
+            || !bytes[0].is_ascii_lowercase()
+            || bytes.last() == Some(&b'_')
+            || bytes.windows(2).any(|pair| pair == b"__")
+            || bytes
+                .iter()
+                .any(|byte| !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && *byte != b'_')
+        {
+            return Err(LanguageProfileError::InvalidUncertaintyCode);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    /// Returns the canonical source-free code.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Immutable table-driven policy for one language identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageProfile {
     language: LanguageId,
     maximum_tier: AnalysisTier,
     semantics: LanguageSemantics,
+    uncertainties: BTreeSet<LanguageUncertaintyCode>,
 }
 
 impl LanguageProfile {
@@ -59,7 +98,28 @@ impl LanguageProfile {
                 .map_err(|_| LanguageProfileError::InvalidLanguage)?,
             maximum_tier,
             semantics,
+            uncertainties: BTreeSet::new(),
         })
+    }
+
+    /// Attaches the complete bounded blind-spot policy for this language.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LanguageProfileError`] when a code is invalid, duplicated, or
+    /// the per-language uncertainty ceiling is exceeded.
+    pub fn with_uncertainty_codes(mut self, codes: &[&str]) -> Result<Self, LanguageProfileError> {
+        if codes.len() > MAX_LANGUAGE_UNCERTAINTIES {
+            return Err(LanguageProfileError::TooManyUncertainties);
+        }
+        let mut uncertainties = BTreeSet::new();
+        for code in codes {
+            if !uncertainties.insert(LanguageUncertaintyCode::new(code)?) {
+                return Err(LanguageProfileError::DuplicateUncertainty);
+            }
+        }
+        self.uncertainties = uncertainties;
+        Ok(self)
     }
 
     /// Returns the canonical language identity.
@@ -79,6 +139,11 @@ impl LanguageProfile {
     pub const fn semantics(&self) -> LanguageSemantics {
         self.semantics
     }
+
+    /// Returns documented blind spots in canonical code order.
+    pub fn uncertainties(&self) -> impl ExactSizeIterator<Item = &LanguageUncertaintyCode> {
+        self.uncertainties.iter()
+    }
 }
 
 /// Invalid language profile.
@@ -88,6 +153,15 @@ pub enum LanguageProfileError {
     /// The language was not a bounded SDK label.
     #[error("language profile identity is invalid")]
     InvalidLanguage,
+    /// An uncertainty label was not canonical lowercase `snake_case`.
+    #[error("language profile uncertainty code is invalid")]
+    InvalidUncertaintyCode,
+    /// One uncertainty code appeared more than once.
+    #[error("language profile contains a duplicate uncertainty code")]
+    DuplicateUncertainty,
+    /// The bounded uncertainty collection exceeded its hard ceiling.
+    #[error("language profile contains too many uncertainty codes")]
+    TooManyUncertainties,
 }
 
 /// Bounded deterministic registry shared by all first-party language profiles.
@@ -164,18 +238,52 @@ pub enum LanguageRegistryError {
 /// bounded contracts applied to configured profiles.
 pub fn initial_semantic_registry() -> Result<LanguageAdapterRegistry, InitialRegistryError> {
     let profiles = [
-        ("go", AnalysisTier::TierA, LanguageSemantics::Static),
+        (
+            "go",
+            AnalysisTier::TierA,
+            LanguageSemantics::Static,
+            &["build_tags", "code_generation", "runtime_registration"][..],
+        ),
         (
             "javascript",
             AnalysisTier::TierB,
             LanguageSemantics::Dynamic,
+            &[
+                "dynamic_imports",
+                "generated_code",
+                "prototype_mutation",
+                "reflection",
+                "runtime_registration",
+            ][..],
         ),
-        ("python", AnalysisTier::TierB, LanguageSemantics::Dynamic),
-        ("rust", AnalysisTier::TierA, LanguageSemantics::Static),
-        ("typescript", AnalysisTier::TierA, LanguageSemantics::Static),
+        (
+            "python",
+            AnalysisTier::TierB,
+            LanguageSemantics::Dynamic,
+            &[
+                "dynamic_attributes",
+                "dynamic_imports",
+                "monkey_patching",
+                "reflection",
+            ][..],
+        ),
+        (
+            "rust",
+            AnalysisTier::TierA,
+            LanguageSemantics::Static,
+            &["generated_code", "macro_expansion", "procedural_macros"][..],
+        ),
+        (
+            "typescript",
+            AnalysisTier::TierA,
+            LanguageSemantics::Static,
+            &["dynamic_imports", "generated_code", "runtime_registration"][..],
+        ),
     ]
     .into_iter()
-    .map(|(language, tier, semantics)| LanguageProfile::new(language, tier, semantics))
+    .map(|(language, tier, semantics, uncertainties)| {
+        LanguageProfile::new(language, tier, semantics)?.with_uncertainty_codes(uncertainties)
+    })
     .collect::<Result<Vec<_>, _>>()?;
     LanguageAdapterRegistry::new(profiles).map_err(InitialRegistryError::Registry)
 }

@@ -31,35 +31,10 @@ pub const M09_EVIDENCE_MAX_BYTES: usize = 64 * 1024;
 pub const M09_EVIDENCE_MAX_EXPECTATIONS: usize = 65_536;
 
 const EXPECTED_PROFILES: [ExpectedProfile; 4] = [
-    ExpectedProfile::new(
-        "go",
-        AnalysisTier::TierA,
-        LanguageSemantics::Static,
-        &["build_tags", "code_generation", "runtime_registration"],
-    ),
-    ExpectedProfile::new(
-        "python",
-        AnalysisTier::TierB,
-        LanguageSemantics::Dynamic,
-        &[
-            "dynamic_attributes",
-            "dynamic_imports",
-            "monkey_patching",
-            "reflection",
-        ],
-    ),
-    ExpectedProfile::new(
-        "rust",
-        AnalysisTier::TierA,
-        LanguageSemantics::Static,
-        &["generated_code", "macro_expansion", "procedural_macros"],
-    ),
-    ExpectedProfile::new(
-        "typescript",
-        AnalysisTier::TierA,
-        LanguageSemantics::Static,
-        &["dynamic_imports", "generated_code", "runtime_registration"],
-    ),
+    ExpectedProfile::new("go", AnalysisTier::TierA, LanguageSemantics::Static),
+    ExpectedProfile::new("python", AnalysisTier::TierB, LanguageSemantics::Dynamic),
+    ExpectedProfile::new("rust", AnalysisTier::TierA, LanguageSemantics::Static),
+    ExpectedProfile::new("typescript", AnalysisTier::TierA, LanguageSemantics::Static),
 ];
 
 /// Opaque, source-free M09 conformance and quality report.
@@ -289,6 +264,13 @@ fn language_evidence(
             {
                 return Err(M09EvidenceError::InvalidLanguageEvidence);
             }
+            let uncertainty_codes = profile
+                .uncertainties()
+                .map(|code| code.as_str().to_owned())
+                .collect::<Vec<_>>();
+            if uncertainty_codes.is_empty() {
+                return Err(M09EvidenceError::InvalidLanguageEvidence);
+            }
             Ok(LanguageEvidence {
                 language: expected.language.to_owned(),
                 maximum_tier: tier_evidence(expected.tier)?,
@@ -298,11 +280,7 @@ fn language_evidence(
                 observed_context_imports: 0,
                 tier_promotion_eligible: false,
                 required_coverage_domains: 8,
-                uncertainty_codes: expected
-                    .uncertainty_codes
-                    .iter()
-                    .map(|code| (*code).to_owned())
-                    .collect(),
+                uncertainty_codes,
             })
         })
         .collect()
@@ -514,21 +492,14 @@ struct ExpectedProfile {
     language: &'static str,
     tier: AnalysisTier,
     semantics: LanguageSemantics,
-    uncertainty_codes: &'static [&'static str],
 }
 
 impl ExpectedProfile {
-    const fn new(
-        language: &'static str,
-        tier: AnalysisTier,
-        semantics: LanguageSemantics,
-        uncertainty_codes: &'static [&'static str],
-    ) -> Self {
+    const fn new(language: &'static str, tier: AnalysisTier, semantics: LanguageSemantics) -> Self {
         Self {
             language,
             tier,
             semantics,
-            uncertainty_codes,
         }
     }
 }
