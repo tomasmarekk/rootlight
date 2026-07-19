@@ -237,16 +237,27 @@ fn contains_numbered_plan_label(input: &[u8]) -> bool {
 
 fn contains_numbered_gate_label(input: &[u8]) -> bool {
     const HEAD: &[u8] = b"gate";
-    const TAIL: &[u8] = b"-";
-    let pattern_length = HEAD.len() + TAIL.len();
     input
-        .windows(pattern_length + 1)
+        .windows(HEAD.len())
         .enumerate()
         .any(|(index, window)| {
-            (index == 0 || !is_identifier_byte(input[index - 1]))
-                && window[..HEAD.len()].eq_ignore_ascii_case(HEAD)
-                && window[HEAD.len()..pattern_length].eq_ignore_ascii_case(TAIL)
-                && window[pattern_length].is_ascii_digit()
+            if (index != 0 && is_identifier_byte(input[index - 1]))
+                || !window.eq_ignore_ascii_case(HEAD)
+            {
+                return false;
+            }
+            let Some(separator) = input.get(index + HEAD.len()) else {
+                return false;
+            };
+            if !matches!(separator, b'-' | b'_') {
+                return false;
+            }
+            let tail = &input[index + HEAD.len() + 1..];
+            let tail = tail
+                .strip_prefix(b"v")
+                .or_else(|| tail.strip_prefix(b"V"))
+                .unwrap_or(tail);
+            tail.first().is_some_and(u8::is_ascii_digit)
         })
 }
 
@@ -369,6 +380,11 @@ mod tests {
         let label = ["TASK", "-09.1"].concat();
         assert_eq!(
             forbidden_reference(label.as_bytes()),
+            Some(ForbiddenRule::StructuredPlanLabel)
+        );
+        let numbered_gate = ["gate", "_v2"].concat();
+        assert_eq!(
+            forbidden_reference(numbered_gate.as_bytes()),
             Some(ForbiddenRule::StructuredPlanLabel)
         );
     }

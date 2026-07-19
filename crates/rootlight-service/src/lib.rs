@@ -3067,11 +3067,11 @@ mod tests {
 
     use super::*;
 
-    const GATE_FIXTURE_ROOT: &str = concat!(
+    const VERTICAL_SLICE_FIXTURE_ROOT: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../tests/fixtures/vertical-slice/first-slice/v1"
     );
-    const GATE_V2_PATCH: &str =
+    const VERTICAL_SLICE_V2_PATCH: &str =
         include_str!("../../../tests/fixtures/vertical-slice/first-slice/v1-to-v2.patch");
     const IGNORED_SENTINEL: &str = "ROOTLIGHT_IGNORED_SENTINEL";
     const EQUIVALENCE_COMPONENT_BYTES: usize = 4 * 1024 * 1024;
@@ -3566,8 +3566,8 @@ mod tests {
     }
 
     #[test]
-    fn gate_fixture_preserves_nested_policy_recovery_and_generation_lineage() {
-        let fixture = materialize_gate_fixture();
+    fn vertical_slice_fixture_preserves_nested_policy_recovery_and_generation_lineage() {
+        let fixture = materialize_vertical_slice_fixture();
         let cancellation = Cancellation::with_deadline(
             Instant::now()
                 .checked_add(Duration::from_secs(30))
@@ -3650,7 +3650,7 @@ mod tests {
             .expect("unchanged Vertical slice v1 is idempotent");
         assert_eq!(repeated, first);
 
-        apply_gate_v2_patch(fixture.path());
+        apply_vertical_slice_v2_patch(fixture.path());
         let second = service
             .index_rust_fixture(fixture.path(), &cancellation)
             .expect("Vertical slice v2 indexes");
@@ -3733,9 +3733,9 @@ mod tests {
         );
     }
 
-    fn materialize_gate_fixture() -> TempDir {
+    fn materialize_vertical_slice_fixture() -> TempDir {
         let fixture = TempDir::new().expect("materialized fixture root exists");
-        copy_fixture_tree(Path::new(GATE_FIXTURE_ROOT), fixture.path());
+        copy_fixture_tree(Path::new(VERTICAL_SLICE_FIXTURE_ROOT), fixture.path());
         fixture
     }
 
@@ -3754,17 +3754,17 @@ mod tests {
         }
     }
 
-    fn apply_gate_v2_patch(root: &Path) {
-        let target = GATE_V2_PATCH
+    fn apply_vertical_slice_v2_patch(root: &Path) {
+        let target = VERTICAL_SLICE_V2_PATCH
             .lines()
             .find_map(|line| line.strip_prefix("+++ b/"))
             .expect("Vertical slice patch names a target");
-        let removed = GATE_V2_PATCH
+        let removed = VERTICAL_SLICE_V2_PATCH
             .lines()
             .find(|line| line.starts_with('-') && !line.starts_with("---"))
             .and_then(|line| line.strip_prefix('-'))
             .expect("Vertical slice patch removes one line");
-        let added = GATE_V2_PATCH
+        let added = VERTICAL_SLICE_V2_PATCH
             .lines()
             .find(|line| line.starts_with('+') && !line.starts_with("+++"))
             .and_then(|line| line.strip_prefix('+'))
