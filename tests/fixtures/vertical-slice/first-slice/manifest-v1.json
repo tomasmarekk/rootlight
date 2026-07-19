@@ -21,8 +21,8 @@
   "files": [
     {
       "path": "Cargo.toml",
-      "bytes": 135,
-      "sha256": "4b0402ee86fd9b592944cf104683d95154368623db90d3cffb9b30193f532a99",
+      "bytes": 143,
+      "sha256": "412d623c1d24eb8cfa7c02e43657d9d196fc24b53cd6658b4edddbaa1a313e0d",
       "discovery_class": "source",
       "parser_coverage_expectation": {
         "status": "not_applicable",
