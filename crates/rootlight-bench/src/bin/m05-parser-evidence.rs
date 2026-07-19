@@ -711,7 +711,7 @@ mod tests {
             value: grammar_versions,
         } = &environment.grammar_versions
         {
-            assert_eq!(grammar_versions.len(), 4);
+            assert_eq!(grammar_versions.len(), 6);
         }
         assert!(matches!(
             &environment.grammar_source_package_checksums,
@@ -721,7 +721,7 @@ mod tests {
             value: source_package_checksums,
         } = &environment.grammar_source_package_checksums
         {
-            assert_eq!(source_package_checksums.len(), 4);
+            assert_eq!(source_package_checksums.len(), 6);
         }
         assert!(matches!(
             &environment.grammar_hashes,
@@ -731,9 +731,13 @@ mod tests {
             value: grammar_hashes,
         } = &environment.grammar_hashes
         {
-            assert_eq!(grammar_hashes.len(), 7);
+            assert_eq!(grammar_hashes.len(), 10);
             assert!(grammar_hashes.contains_key("java.parser"));
             assert!(!grammar_hashes.contains_key("java.scanner"));
+            assert!(grammar_hashes.contains_key("go.parser"));
+            assert!(!grammar_hashes.contains_key("go.scanner"));
+            assert!(grammar_hashes.contains_key("typescript.parser"));
+            assert!(grammar_hashes.contains_key("typescript.scanner"));
             assert!(grammar_hashes.values().all(|hash| {
                 hash.len() == 64
                     && hash
