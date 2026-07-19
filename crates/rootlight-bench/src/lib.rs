@@ -1,4 +1,4 @@
-//! Deterministic benchmark evidence contracts and bounded M05 parser harnesses.
+//! Deterministic benchmark evidence for bounded parser and semantic checks.
 //!
 //! The crate is development-only: shipping binaries must not depend on it.
 //! Directory publication remains fail-closed until the VFS private-tree
@@ -10,6 +10,7 @@ mod bundle;
 mod ci;
 mod decode;
 mod integrity;
+mod m09;
 mod model;
 mod parser;
 mod sampler;
@@ -25,6 +26,11 @@ pub use ci::{
     verify_m05_ci_evidence,
 };
 pub use decode::{DecodeError, decode_benchmark_command, decode_dataset_manifest};
+pub use m09::{
+    M09_EVIDENCE_MAX_BYTES, M09_EVIDENCE_MAX_EXPECTATIONS, M09_EVIDENCE_SCHEMA_VERSION,
+    M09EvidenceError, M09SemanticEvidence, build_m09_semantic_evidence,
+    encode_m09_semantic_evidence,
+};
 pub use model::{
     AgentTrajectory, Availability, BenchmarkCommand, BuildProvenance, CoverageEvidence,
     DatasetEntry, DatasetManifest, EnvironmentEvidence, EvidenceValue,

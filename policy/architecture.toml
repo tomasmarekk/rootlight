@@ -94,9 +94,11 @@ name = "rootlight-bench"
 allowed_internal_dependencies = [
   "rootlight-adapter-sdk",
   "rootlight-adapter-treesitter",
+  "rootlight-adapters",
   "rootlight-cancel",
   "rootlight-ids",
   "rootlight-ir",
+  "rootlight-resolve",
   "rootlight-vfs",
 ]
 allow_build_script = true

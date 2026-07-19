@@ -20,6 +20,8 @@ use rootlight_ir::{
 };
 
 const CANCELLATION_CHECK_INTERVAL: usize = 64;
+/// Version of the shared first-party semantic adapter implementation.
+pub const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Hard ceiling for one process-local language profile registry.
 pub const MAX_LANGUAGE_PROFILES: usize = 256;
 
@@ -405,7 +407,7 @@ impl ContextAnalyzer {
         }
         let identity = ProducerIdentity::new(
             "rootlight-adapters",
-            env!("CARGO_PKG_VERSION"),
+            ADAPTER_VERSION,
             context.build_context.digest(),
         )
         .map_err(ContextAnalyzerConfigError::InvalidProducer)?;
