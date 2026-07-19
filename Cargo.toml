@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/rootlight",
+    "apps/rootlight-adapter-host",
     "apps/rootlight-daemon",
     "apps/rootlight-mcp",
     "crates/rootlight-adapter-sdk",

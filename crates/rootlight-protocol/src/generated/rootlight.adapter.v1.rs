@@ -12,7 +12,39 @@ pub struct AdapterIdentity {
     #[allow(missing_docs)]
     pub source_digest: ::prost::alloc::vec::Vec<u8>,
 }
+/// Child-declared ceilings used for negotiation, never as enforcement evidence.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ResourceLimits {
+    #[prost(uint64, tag = "1")]
+    #[allow(missing_docs)]
+    pub wall_time_ms: u64,
+    #[prost(uint64, tag = "2")]
+    #[allow(missing_docs)]
+    pub cpu_time_ms: u64,
+    #[prost(uint64, tag = "3")]
+    #[allow(missing_docs)]
+    pub memory_bytes: u64,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub input_bytes: u64,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub output_bytes: u64,
+    #[prost(uint32, tag = "6")]
+    #[allow(missing_docs)]
+    pub files: u32,
+    #[prost(uint32, tag = "7")]
+    #[allow(missing_docs)]
+    pub processes: u32,
+    #[prost(uint32, tag = "8")]
+    #[allow(missing_docs)]
+    pub handles: u32,
+    #[prost(uint32, tag = "9")]
+    #[allow(missing_docs)]
+    pub retries: u32,
+}
 /// Adapter protocol range, capabilities, and extension declarations.
+/// Trust, limits, and cancellation are mandatory beginning with protocol 1.1.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CapabilityAdvertisement {
     #[prost(message, optional, tag = "1")]
@@ -31,4 +63,172 @@ pub struct CapabilityAdvertisement {
     pub extensions: ::prost::alloc::vec::Vec<
         super::super::common::v1::ExtensionDescriptor,
     >,
+    #[prost(enumeration = "AdapterTrustLevel", tag = "5")]
+    #[allow(missing_docs)]
+    pub trust_level: i32,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub hard_limits: ::core::option::Option<ResourceLimits>,
+    #[prost(bool, tag = "7")]
+    #[allow(missing_docs)]
+    pub supports_cancellation: bool,
+}
+/// Host-selected contract sent only after validating an advertisement.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SessionRequirements {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub selected_protocol: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub expected_adapter: ::core::option::Option<AdapterIdentity>,
+    #[prost(string, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub required_capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub required_extensions: ::prost::alloc::vec::Vec<
+        super::super::common::v1::ExtensionDescriptor,
+    >,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub granted_limits: ::core::option::Option<ResourceLimits>,
+    #[prost(enumeration = "AdapterTrustLevel", tag = "7")]
+    #[allow(missing_docs)]
+    pub maximum_trust: i32,
+    #[prost(bool, tag = "8")]
+    #[allow(missing_docs)]
+    pub require_cancellation: bool,
+}
+/// Source-bound request for one immutable generation input.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnalysisRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub request_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<super::super::common::v1::GenerationId>,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub file: ::core::option::Option<super::super::common::v1::FileId>,
+    #[prost(string, tag = "6")]
+    #[allow(missing_docs)]
+    pub language: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub build_context: ::core::option::Option<super::super::common::v1::ContentHash>,
+    #[prost(message, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub source_digest: ::core::option::Option<super::super::common::v1::ContentHash>,
+    #[prost(bytes = "vec", tag = "9")]
+    #[allow(missing_docs)]
+    pub source: ::prost::alloc::vec::Vec<u8>,
+}
+/// Bounded normalized output returned by an isolated adapter.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AnalysisResult {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub request_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    #[allow(missing_docs)]
+    pub normalized_ir: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub output_digest: ::core::option::Option<super::super::common::v1::ContentHash>,
+}
+/// Cooperative cancellation for one in-flight adapter request.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CancelRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    #[allow(missing_docs)]
+    pub request_id: ::prost::alloc::vec::Vec<u8>,
+}
+/// Length-prefixed message union used on the adapter pipe.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AdapterFrame {
+    #[prost(oneof = "adapter_frame::Message", tags = "1, 2, 3, 4, 5, 6")]
+    #[allow(missing_docs)]
+    pub message: ::core::option::Option<adapter_frame::Message>,
+}
+/// Nested message and enum types in `AdapterFrame`.
+pub mod adapter_frame {
+    #[allow(missing_docs)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Message {
+        #[prost(message, tag = "1")]
+        #[allow(missing_docs)]
+        Advertisement(super::CapabilityAdvertisement),
+        #[prost(message, tag = "2")]
+        #[allow(missing_docs)]
+        Session(super::SessionRequirements),
+        #[prost(message, tag = "3")]
+        #[allow(missing_docs)]
+        AnalysisRequest(super::AnalysisRequest),
+        #[prost(message, tag = "4")]
+        #[allow(missing_docs)]
+        AnalysisResult(super::AnalysisResult),
+        #[prost(message, tag = "5")]
+        #[allow(missing_docs)]
+        Cancel(super::CancelRequest),
+        #[prost(message, tag = "6")]
+        #[allow(missing_docs)]
+        Error(super::super::super::common::v1::PublicError),
+    }
+}
+/// Trust origin applied before any adapter process is started.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AdapterTrustLevel {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    FirstParty = 1,
+    #[allow(missing_docs)]
+    UserProvided = 2,
+    #[allow(missing_docs)]
+    Untrusted = 3,
+}
+impl AdapterTrustLevel {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ADAPTER_TRUST_LEVEL_UNSPECIFIED",
+            Self::FirstParty => "FIRST_PARTY",
+            Self::UserProvided => "USER_PROVIDED",
+            Self::Untrusted => "UNTRUSTED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ADAPTER_TRUST_LEVEL_UNSPECIFIED" => Some(Self::Unspecified),
+            "FIRST_PARTY" => Some(Self::FirstParty),
+            "USER_PROVIDED" => Some(Self::UserProvided),
+            "UNTRUSTED" => Some(Self::Untrusted),
+            _ => None,
+        }
+    }
 }

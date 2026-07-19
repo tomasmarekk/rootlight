@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod adapter_contract;
+
 /// Generated messages compiled from the checked protocol sources.
 pub mod generated;
 

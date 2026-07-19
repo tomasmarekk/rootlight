@@ -1,0 +1,20 @@
+[package]
+name = "rootlight-adapter-host"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+rootlight-cancel = { path = "../../crates/rootlight-cancel" }
+rootlight-ids = { path = "../../crates/rootlight-ids" }
+rootlight-ir = { path = "../../crates/rootlight-ir" }
+rootlight-protocol = { path = "../../crates/rootlight-protocol" }
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
