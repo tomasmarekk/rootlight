@@ -1,4 +1,4 @@
-//! Checked identities and capabilities for the four audited grammar families.
+//! Checked identities and capabilities for the audited grammar families.
 //!
 //! Runtime code resolves private Tree-sitter languages through this closed
 //! registry; callers can inspect only stable, parser-independent descriptors.
@@ -21,6 +21,10 @@ pub enum GrammarFamily {
     JavaScript,
     /// Java grammar.
     Java,
+    /// Go grammar.
+    Go,
+    /// TypeScript grammar.
+    TypeScript,
 }
 
 /// Stable parser-independent metadata for one registered grammar.
@@ -100,12 +104,14 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(4);
+        let mut descriptors = Vec::with_capacity(6);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
             GrammarFamily::JavaScript,
             GrammarFamily::Java,
+            GrammarFamily::Go,
+            GrammarFamily::TypeScript,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -190,6 +196,8 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Python => tree_sitter_python::LANGUAGE.into(),
         GrammarFamily::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
         GrammarFamily::Java => tree_sitter_java::LANGUAGE.into(),
+        GrammarFamily::Go => tree_sitter_go::LANGUAGE.into(),
+        GrammarFamily::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
     }
 }
 
@@ -238,6 +246,22 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "4add5150cf4531eb5dd97f3343dcf65cd11704c84711348b328582b83424a0e4",
             scanner_sha256: None,
         },
+        GrammarFamily::Go => GrammarIdentity {
+            language_id: "go",
+            grammar_version: "0.25.0",
+            source_package_sha256: "c8560a4d2f835cc0d4d2c2e03cbd0dde2f6114b43bc491164238d333e28b16ea",
+            parser_sha256: "3dbf6ed1238b5dfcf2be4d2f2d4cb27a14d34f34d7784eccccbfd532fd4a6d85",
+            scanner_sha256: None,
+        },
+        GrammarFamily::TypeScript => GrammarIdentity {
+            language_id: "typescript",
+            grammar_version: "0.23.2",
+            source_package_sha256: "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff",
+            parser_sha256: "74fe453edd70f4eae9af0a1050cbd7943d8971d59165b6aaebbaa0a0b716d1aa",
+            scanner_sha256: Some(
+                "9125013b42cb888379d9be909f1d73dfb75a37626c2cdbf4122718a2b431a6d3",
+            ),
+        },
     }
 }
 
@@ -251,12 +275,14 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 4);
+        assert_eq!(registry.descriptors().len(), 6);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
             GrammarFamily::JavaScript,
             GrammarFamily::Java,
+            GrammarFamily::Go,
+            GrammarFamily::TypeScript,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -305,6 +331,12 @@ mod tests {
                 "tree-sitter-javascript",
             ),
             (GrammarFamily::Java, "java", "tree-sitter-java"),
+            (GrammarFamily::Go, "go", "tree-sitter-go"),
+            (
+                GrammarFamily::TypeScript,
+                "typescript",
+                "tree-sitter-typescript",
+            ),
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             let (version, source_package_checksum) = locked_package(&lock, package);

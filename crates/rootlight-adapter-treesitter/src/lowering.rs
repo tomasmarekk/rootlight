@@ -1972,7 +1972,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
     fact.kind() == SyntaxFactKind::Module
         && matches!(
             fact.syntax_kind().as_str(),
-            "python.file.module" | "javascript.file.module"
+            "python.file.module" | "javascript.file.module" | "typescript.file.module"
         )
         && matches!(language, "python" | "javascript" | "typescript")
 }
@@ -2616,6 +2616,10 @@ mod tests {
             ("rust.type.declaration", EntityKind::TypeAlias),
             ("rust.const.declaration", EntityKind::Constant),
             ("rust.static.declaration", EntityKind::Variable),
+            ("go.type.declaration", EntityKind::TypeAlias),
+            ("go.constant.declaration", EntityKind::Constant),
+            ("typescript.interface.declaration", EntityKind::Interface),
+            ("typescript.type_alias.declaration", EntityKind::TypeAlias),
         ] {
             assert_eq!(entity_kind(&declaration(label)), Some(expected));
         }
@@ -2642,6 +2646,10 @@ mod tests {
         assert!(is_explicit_file_module(
             &module("javascript.file.module"),
             "javascript"
+        ));
+        assert!(is_explicit_file_module(
+            &module("typescript.file.module"),
+            "typescript"
         ));
         assert!(!is_explicit_file_module(&module("python.module"), "python"));
         assert!(!is_explicit_file_module(

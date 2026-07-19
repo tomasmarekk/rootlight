@@ -258,6 +258,8 @@ impl QueryPack {
                         GrammarFamily::Python => "python.call",
                         GrammarFamily::JavaScript => "javascript.call",
                         GrammarFamily::Java => "java.call",
+                        GrammarFamily::Go => "go.call",
+                        GrammarFamily::TypeScript => "typescript.call",
                     },
                     _ => canonical_syntax(family, capture.node.kind())
                         .ok_or_else(|| query_failure("query-node-kind"))?,
@@ -369,13 +371,57 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Java, "line_comment") => Some("java.line_comment"),
         (GrammarFamily::Java, "block_comment") => Some("java.block_comment"),
         (GrammarFamily::Java, "string_literal") => Some("java.string"),
+        (GrammarFamily::Go, "source_file") => Some("go.file"),
+        (GrammarFamily::Go, "package_clause") => Some("go.package"),
+        (GrammarFamily::Go, "function_declaration") => Some("go.function"),
+        (GrammarFamily::Go, "method_declaration") => Some("go.method"),
+        (GrammarFamily::Go, "type_spec") => Some("go.type"),
+        (GrammarFamily::Go, "var_spec") => Some("go.variable"),
+        (GrammarFamily::Go, "const_spec") => Some("go.constant"),
+        (GrammarFamily::Go, "import_declaration") => Some("go.import"),
+        (GrammarFamily::Go, "parameter_list") => Some("go.parameters"),
+        (GrammarFamily::Go, "block") => Some("go.block"),
+        (GrammarFamily::Go, "identifier") => Some("go.identifier"),
+        (GrammarFamily::Go, "field_identifier") => Some("go.field_identifier"),
+        (GrammarFamily::Go, "type_identifier") => Some("go.type_identifier"),
+        (GrammarFamily::Go, "package_identifier") => Some("go.package_identifier"),
+        (GrammarFamily::Go, "comment") => Some("go.comment"),
+        (GrammarFamily::Go, "interpreted_string_literal") => Some("go.string"),
+        (GrammarFamily::Go, "raw_string_literal") => Some("go.raw_string"),
+        (GrammarFamily::TypeScript, "program") => Some("typescript.program"),
+        (GrammarFamily::TypeScript, "function_declaration") => Some("typescript.function"),
+        (GrammarFamily::TypeScript, "function_signature") => Some("typescript.function_signature"),
+        (GrammarFamily::TypeScript, "class_declaration") => Some("typescript.class"),
+        (GrammarFamily::TypeScript, "abstract_class_declaration") => {
+            Some("typescript.abstract_class")
+        }
+        (GrammarFamily::TypeScript, "interface_declaration") => Some("typescript.interface"),
+        (GrammarFamily::TypeScript, "type_alias_declaration") => Some("typescript.type_alias"),
+        (GrammarFamily::TypeScript, "enum_declaration") => Some("typescript.enum"),
+        (GrammarFamily::TypeScript, "method_definition") => Some("typescript.method"),
+        (GrammarFamily::TypeScript, "method_signature") => Some("typescript.method_signature"),
+        (GrammarFamily::TypeScript, "abstract_method_signature") => {
+            Some("typescript.abstract_method")
+        }
+        (GrammarFamily::TypeScript, "variable_declarator") => Some("typescript.variable"),
+        (GrammarFamily::TypeScript, "import_statement") => Some("typescript.import"),
+        (GrammarFamily::TypeScript, "formal_parameters") => Some("typescript.parameters"),
+        (GrammarFamily::TypeScript, "statement_block") => Some("typescript.block"),
+        (GrammarFamily::TypeScript, "identifier") => Some("typescript.identifier"),
+        (GrammarFamily::TypeScript, "type_identifier") => Some("typescript.type_identifier"),
+        (GrammarFamily::TypeScript, "property_identifier") => {
+            Some("typescript.property_identifier")
+        }
+        (GrammarFamily::TypeScript, "comment") => Some("typescript.comment"),
+        (GrammarFamily::TypeScript, "string") => Some("typescript.string"),
+        (GrammarFamily::TypeScript, "template_string") => Some("typescript.template"),
         _ => None,
     }
 }
 
 impl QueryPackRegistry {
     pub(crate) fn audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(4);
+        let mut packs = Vec::with_capacity(6);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -384,6 +430,11 @@ impl QueryPackRegistry {
                 include_str!("../queries/javascript.scm"),
             ),
             (GrammarFamily::Java, include_str!("../queries/java.scm")),
+            (GrammarFamily::Go, include_str!("../queries/go.scm")),
+            (
+                GrammarFamily::TypeScript,
+                include_str!("../queries/typescript.scm"),
+            ),
         ] {
             packs.push((family, QueryPack::compile(family, source)?));
         }
@@ -424,6 +475,8 @@ mod tests {
             GrammarFamily::Python,
             GrammarFamily::JavaScript,
             GrammarFamily::Java,
+            GrammarFamily::Go,
+            GrammarFamily::TypeScript,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.query.capture_names().to_vec();

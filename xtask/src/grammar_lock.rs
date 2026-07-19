@@ -17,17 +17,25 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "925fcae685241c79da6ccba18d38a6f81e963cd2cad75434a65b28b50246ac8c";
+    "b8fb5302844d496a63deffe884b078e5a3ee9a733d2fb157a27c673c49be9ce0";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
+const TYPESCRIPT_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-typescript-0.23.2-LICENSE";
+const TYPESCRIPT_LICENSE_SHA256: &str =
+    "49bf33cf78ef5897e4e161ce1517df7de1ae5042a65b6bcfd44401e0fc606559";
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
-const EXPECTED_PACKAGES: [(&str, &str, &str); 5] = [
+const EXPECTED_PACKAGES: [(&str, &str, &str); 7] = [
     (
         "tree-sitter",
         "0.26.11",
         "af1c71c1c4cc0920b20d6b0f6572e7682cd07a6a2faec71067a31fa394c586df",
+    ),
+    (
+        "tree-sitter-go",
+        "0.25.0",
+        "c8560a4d2f835cc0d4d2c2e03cbd0dde2f6114b43bc491164238d333e28b16ea",
     ),
     (
         "tree-sitter-java",
@@ -48,6 +56,11 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 5] = [
         "tree-sitter-rust",
         "0.24.2",
         "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45",
+    ),
+    (
+        "tree-sitter-typescript",
+        "0.23.2",
+        "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff",
     ),
 ];
 
@@ -70,13 +83,19 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_direct_dependencies(metadata)?;
     validate_cargo_lock(root, &manifest)?;
 
-    let java_license = root.join(JAVA_LICENSE_PATH);
-    let license_bytes = fs::read(&java_license).map_err(|source| GrammarLockError::Read {
-        path: java_license,
-        source,
-    })?;
-    require_digest(JAVA_LICENSE_PATH, &license_bytes, JAVA_LICENSE_SHA256)?;
+    validate_local_license(root, JAVA_LICENSE_PATH, JAVA_LICENSE_SHA256)?;
+    validate_local_license(root, TYPESCRIPT_LICENSE_PATH, TYPESCRIPT_LICENSE_SHA256)?;
     Ok(())
+}
+
+fn validate_local_license(
+    root: &Path,
+    relative_path: &'static str,
+    expected_sha256: &str,
+) -> Result<(), GrammarLockError> {
+    let path = root.join(relative_path);
+    let bytes = fs::read(&path).map_err(|source| GrammarLockError::Read { path, source })?;
+    require_digest(relative_path, &bytes, expected_sha256)
 }
 
 fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
@@ -86,7 +105,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 4 {
+    if manifest.grammars.len() != 6 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -106,7 +125,8 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
             ),
         );
     }
-    let expected_languages = BTreeSet::from(["java", "javascript", "python", "rust"]);
+    let expected_languages =
+        BTreeSet::from(["go", "java", "javascript", "python", "rust", "typescript"]);
     if languages != expected_languages {
         return Err(GrammarLockError::LanguageSet);
     }
@@ -179,6 +199,11 @@ fn validate_grammar(grammar: &GrammarEvidence) -> Result<(), GrammarLockError> {
         && (grammar.audit_notes.len() != 2 || grammar.license_source != JAVA_LICENSE_PATH)
     {
         return Err(GrammarLockError::MissingAuditCaveat("java"));
+    }
+    if grammar.language == "typescript"
+        && (grammar.audit_notes.len() != 2 || grammar.license_source != TYPESCRIPT_LICENSE_PATH)
+    {
+        return Err(GrammarLockError::MissingAuditCaveat("typescript"));
     }
     Ok(())
 }
@@ -466,7 +491,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of four")]
+    #[error("grammar lock contains {0} grammars instead of six")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),

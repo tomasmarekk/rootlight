@@ -47,6 +47,8 @@ proptest! {
             ("fuzz.py", "python"),
             ("fuzz.js", "javascript"),
             ("Fuzz.java", "java"),
+            ("fuzz.go", "go"),
+            ("fuzz.ts", "typescript"),
         ] {
             let provider = provider();
             let fixture = Fixture::new(name, &input);
@@ -220,6 +222,8 @@ fn cleanup_source(language: &str) -> &'static [u8] {
         "python" => b"def cleanup():\n    pass\n",
         "javascript" => b"function cleanup() {}\n",
         "java" => b"class Cleanup {}\n",
+        "go" => b"package cleanup\nfunc cleanup() {}\n",
+        "typescript" => b"function cleanup(): void {}\n",
         _ => b"",
     }
 }

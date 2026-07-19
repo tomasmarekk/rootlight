@@ -1414,6 +1414,7 @@ fn normalize_query_candidates(
         let base = match (candidate.syntax, candidate.role) {
             ("python.module", StructuralRole::Module) => "python.file",
             ("javascript.program", StructuralRole::Module) => "javascript.file",
+            ("typescript.program", StructuralRole::Module) => "typescript.file",
             _ => candidate.syntax,
         };
         let label = format!("{base}.{}", candidate.role.label());

@@ -87,7 +87,7 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 4] = [
+    let cases: [(&str, &str, &[u8]); 6] = [
         ("sample.rs", "rust", b"fn sample() {}\n"),
         ("sample.py", "python", b"def sample():\n    return None\n"),
         (
@@ -100,6 +100,8 @@ fn every_audited_grammar_parses_a_clean_representative_file() {
             "java",
             b"class Sample { void sample() {} }\n",
         ),
+        ("sample.go", "go", b"package sample\nfunc Sample() {}\n"),
+        ("sample.ts", "typescript", b"function sample(): void {}\n"),
     ];
     let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
     let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);

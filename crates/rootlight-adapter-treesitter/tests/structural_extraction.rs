@@ -32,7 +32,7 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 4] = [
+const CASES: [LanguageCase; 6] = [
     LanguageCase {
         name: "structural.rs",
         language: "rust",
@@ -53,10 +53,20 @@ const CASES: [LanguageCase; 4] = [
         language: "java",
         source: include_str!("fixtures/structural/java.java"),
     },
+    LanguageCase {
+        name: "structural.go",
+        language: "go",
+        source: include_str!("fixtures/structural/go.go"),
+    },
+    LanguageCase {
+        name: "structural.ts",
+        language: "typescript",
+        source: include_str!("fixtures/structural/typescript.ts"),
+    },
 ];
 
 #[test]
-fn four_language_crlf_unicode_fixtures_match_structural_goldens() {
+fn six_language_crlf_unicode_fixtures_match_structural_goldens() {
     let provider = provider();
     let limits = limits(4096, 128);
 
@@ -536,6 +546,52 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("java.parameters.signature", 2),
             ("java.program.root", 1),
             ("java.string.string", 1),
+        ],
+        "go" => &[
+            ("go.block.scope", 1),
+            ("go.call.call", 1),
+            ("go.comment.comment", 1),
+            ("go.comment.documentation", 2),
+            ("go.constant.declaration", 1),
+            ("go.field_identifier.definition", 1),
+            ("go.field_identifier.reference", 3),
+            ("go.file.root", 1),
+            ("go.identifier.definition", 2),
+            ("go.identifier.reference", 7),
+            ("go.import.import", 1),
+            ("go.method.declaration", 1),
+            ("go.package.module", 1),
+            ("go.package_identifier.definition", 1),
+            ("go.parameters.signature", 1),
+            ("go.raw_string.string", 1),
+            ("go.string.string", 2),
+            ("go.type.declaration", 1),
+            ("go.type_identifier.definition", 1),
+            ("go.type_identifier.reference", 4),
+            ("go.variable.declaration", 1),
+        ],
+        "typescript" => &[
+            ("typescript.block.scope", 1),
+            ("typescript.call.call", 1),
+            ("typescript.class.declaration", 1),
+            ("typescript.comment.documentation", 1),
+            ("typescript.file.module", 1),
+            ("typescript.identifier.definition", 1),
+            ("typescript.identifier.reference", 7),
+            ("typescript.import.import", 1),
+            ("typescript.interface.declaration", 1),
+            ("typescript.method.declaration", 1),
+            ("typescript.method_signature.declaration", 1),
+            ("typescript.parameters.signature", 2),
+            ("typescript.program.root", 1),
+            ("typescript.property_identifier.definition", 2),
+            ("typescript.property_identifier.reference", 1),
+            ("typescript.string.string", 2),
+            ("typescript.template.string", 1),
+            ("typescript.type_alias.declaration", 1),
+            ("typescript.type_identifier.definition", 3),
+            ("typescript.type_identifier.reference", 2),
+            ("typescript.variable.declaration", 1),
         ],
         _ => panic!("unexpected fixture language"),
     };

@@ -1,6 +1,6 @@
 //! Public-boundary integration contracts for the real Tree-sitter analyzer.
 //!
-//! The four audited grammars flow from VFS snapshots through parsing, lowering,
+//! The audited grammars flow from VFS snapshots through parsing, lowering,
 //! canonical normalized IR, and explicit validation without native parser types.
 
 use std::{
@@ -47,7 +47,7 @@ const EXPECTED_DOMAINS: [FactDomain; 8] = [
     FactDomain::Extensions,
 ];
 
-const CASES: [LanguageCase; 4] = [
+const CASES: [LanguageCase; 6] = [
     LanguageCase {
         name: "rust",
         path: "src/lib.rs",
@@ -83,6 +83,24 @@ const CASES: [LanguageCase; 4] = [
         generated: true,
         body_before: "String greet(String name) {\n        String text = \"Hello 🌍\";\n        return name + text;\n    }",
         body_after: "String greet(String name) {\r\n            String text = \"Hello 🌍\";\r\n            return name + text;\r\n    }",
+    },
+    LanguageCase {
+        name: "go",
+        path: "src/structural.go",
+        frontend: "tree-sitter-go-0.25.0",
+        source: include_str!("fixtures/structural/go.go"),
+        generated: false,
+        body_before: "func (greeter Greeter) Greet(name string) string {\n\ttext := \"Hello 🌍\"\n\tfmt.Println(name)\n\treturn greeter.Prefix + text\n}",
+        body_after: "func (greeter Greeter) Greet(name string) string {\r\n\t\ttext := \"Hello 🌍\"\r\n\t\tfmt.Println(name)\r\n\t\treturn greeter.Prefix + text\r\n}",
+    },
+    LanguageCase {
+        name: "typescript",
+        path: "src/structural.ts",
+        frontend: "tree-sitter-typescript-0.23.2",
+        source: include_str!("fixtures/structural/typescript.ts"),
+        generated: true,
+        body_before: "greet(name: string): string {\n    const text: Greeting = \"Hello 🌍\";\n    logger.info(name);\n    return `${text}, ${name}`;\n  }",
+        body_after: "greet(name: string): string {\r\n        const text: Greeting = \"Hello 🌍\";\r\n        logger.info(name);\r\n        return `${text}, ${name}`;\r\n  }",
     },
 ];
 
@@ -168,7 +186,12 @@ fn reviewed_queries_preserve_explicit_call_sites() {
     let limits = limits();
     let extensions = ExtensionSupport::default();
 
-    for case in CASES.into_iter().take(3) {
+    for case in CASES.into_iter().filter(|case| {
+        matches!(
+            case.name,
+            "rust" | "python" | "javascript" | "go" | "typescript"
+        )
+    }) {
         let fixture = Fixture::new(case, case.source.as_bytes());
         let analyzer = analyzer(&provider, case);
         let request = request(&fixture.snapshot, &fixture.source, case, &limits);
@@ -578,7 +601,7 @@ fn assert_contract(
             .iter()
             .all(|relation| relation.predicate != RelationPredicate::Calls)
     );
-    if matches!(case.name, "python" | "javascript") {
+    if matches!(case.name, "python" | "javascript" | "typescript") {
         let file_module = document
             .entities
             .iter()
