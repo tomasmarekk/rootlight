@@ -15,7 +15,7 @@ use std::{
 
 #[cfg(any(unix, windows))]
 use cap_fs_ext::OsMetadataExt as _;
-use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::{
     ambient_authority,
     fs::{Dir, File, Metadata, OpenOptions},
@@ -794,8 +794,8 @@ fn snapshot_metadata(metadata: &Metadata) -> SnapshotMetadata {
         length: metadata.len(),
         modified_ns,
         change_token: metadata_change_token(metadata),
-        volume: Some(metadata.dev()),
-        file_index: Some(metadata.ino()),
+        volume: Some(cap_fs_ext::MetadataExt::dev(metadata)),
+        file_index: Some(cap_fs_ext::MetadataExt::ino(metadata)),
     }
 }
 
