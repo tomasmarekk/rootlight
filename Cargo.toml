@@ -16,6 +16,7 @@ members = [
     "crates/rootlight-ids",
     "crates/rootlight-ipc",
     "crates/rootlight-ir",
+    "crates/rootlight-incremental",
     "crates/rootlight-discovery",
     "crates/rootlight-mcp-contract",
     "crates/rootlight-observability",

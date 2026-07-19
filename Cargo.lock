@@ -1998,6 +1998,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootlight-incremental"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "proptest",
+ "rootlight-cancel",
+ "rootlight-ids",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "rootlight-ipc"
 version = "0.1.0"
 dependencies = [

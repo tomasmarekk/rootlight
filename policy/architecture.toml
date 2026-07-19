@@ -17,6 +17,7 @@ workspace_members = [
   "rootlight-ids",
   "rootlight-ipc",
   "rootlight-ir",
+  "rootlight-incremental",
   "rootlight-mcp-contract",
   "rootlight-observability",
   "rootlight-operations",
@@ -192,6 +193,14 @@ allow_build_script = false
 [[crates]]
 name = "rootlight-ir"
 allowed_internal_dependencies = ["rootlight-ids"]
+allow_build_script = false
+
+[[crates]]
+name = "rootlight-incremental"
+allowed_internal_dependencies = [
+  "rootlight-cancel",
+  "rootlight-ids",
+]
 allow_build_script = false
 
 [[crates]]
