@@ -25,6 +25,7 @@ members = [
     "crates/rootlight-resolve",
     "crates/rootlight-runtime",
     "crates/rootlight-search",
+    "crates/rootlight-segment",
     "crates/rootlight-service",
     "crates/rootlight-source",
     "crates/rootlight-storage",

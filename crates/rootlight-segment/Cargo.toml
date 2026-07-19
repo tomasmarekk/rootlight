@@ -1,0 +1,22 @@
+[package]
+name = "rootlight-segment"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+blake3.workspace = true
+rootlight-ids = { path = "../rootlight-ids" }
+rootlight-ir = { path = "../rootlight-ir" }
+rootlight-storage = { path = "../rootlight-storage" }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rootlight-cancel = { path = "../rootlight-cancel" }
+rootlight-catalog = { path = "../rootlight-catalog" }
+
+[lints]
+workspace = true

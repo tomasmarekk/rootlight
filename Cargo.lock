@@ -2160,6 +2160,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootlight-segment"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rootlight-cancel",
+ "rootlight-catalog",
+ "rootlight-ids",
+ "rootlight-ir",
+ "rootlight-storage",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "rootlight-service"
 version = "0.1.0"
 dependencies = [
