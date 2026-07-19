@@ -3024,32 +3024,48 @@ enum WorkerStartAuthorization {
 #[cfg(test)]
 #[derive(Debug)]
 struct WorkerStartReceiptHook {
-    entered: Arc<std::sync::Barrier>,
-    release: Arc<std::sync::Barrier>,
+    entered: SyncSender<()>,
+    release: Mutex<Receiver<()>>,
+}
+
+#[cfg(test)]
+impl WorkerStartReceiptHook {
+    fn pause(&self) {
+        if self.entered.send(()).is_err() {
+            return;
+        }
+        let release = match self.release.lock() {
+            Ok(release) => release,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        // Test-side teardown closes the channel so a failed assertion cannot
+        // strand a worker at this coordination point.
+        let _ = release.recv();
+    }
 }
 
 #[cfg(test)]
 struct ControlledStartReceive {
     deadline: WorkerDeadline,
     force_expired: Arc<AtomicBool>,
-    entered: Arc<std::sync::Barrier>,
-    release: Arc<std::sync::Barrier>,
+    entered: Receiver<()>,
+    release: SyncSender<()>,
 }
 
 #[cfg(test)]
 struct ControlledStartReceipt {
     deadline: WorkerDeadline,
     force_expired: Arc<AtomicBool>,
-    entered: Arc<std::sync::Barrier>,
-    release: Arc<std::sync::Barrier>,
+    entered: Receiver<()>,
+    release: SyncSender<()>,
 }
 
 #[cfg(test)]
 struct ControlledStartAcknowledgement {
     deadline: WorkerDeadline,
     force_expired: Arc<AtomicBool>,
-    entered: Arc<std::sync::Barrier>,
-    release: Arc<std::sync::Barrier>,
+    entered: Receiver<()>,
+    release: SyncSender<()>,
 }
 
 /// One monotonic budget shared by admission, actor enqueue, and actor execution.
@@ -3121,24 +3137,21 @@ impl WorkerDeadline {
     fn pause_before_start_receive(&self) {
         #[cfg(test)]
         if let Some(hook) = self.start_receive_hook.as_ref() {
-            hook.entered.wait();
-            hook.release.wait();
+            hook.pause();
         }
     }
 
     fn pause_after_start_receipt(&self) {
         #[cfg(test)]
         if let Some(hook) = self.start_receipt_hook.as_ref() {
-            hook.entered.wait();
-            hook.release.wait();
+            hook.pause();
         }
     }
 
     fn pause_before_start_acknowledgement(&self) {
         #[cfg(test)]
         if let Some(hook) = self.start_acknowledgement_hook.as_ref() {
-            hook.entered.wait();
-            hook.release.wait();
+            hook.pause();
         }
     }
 
@@ -3162,11 +3175,11 @@ impl WorkerDeadline {
         timeout: Duration,
     ) -> Result<ControlledStartReceive, ServiceError> {
         let (mut deadline, forced_expired) = Self::controlled(timeout)?;
-        let entered = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
+        let (entered_sender, entered) = mpsc::sync_channel(0);
+        let (release, release_receiver) = mpsc::sync_channel(0);
         deadline.start_receive_hook = Some(Arc::new(WorkerStartReceiptHook {
-            entered: Arc::clone(&entered),
-            release: Arc::clone(&release),
+            entered: entered_sender,
+            release: Mutex::new(release_receiver),
         }));
         Ok(ControlledStartReceive {
             deadline,
@@ -3181,11 +3194,11 @@ impl WorkerDeadline {
         timeout: Duration,
     ) -> Result<ControlledStartReceipt, ServiceError> {
         let (mut deadline, forced_expired) = Self::controlled(timeout)?;
-        let entered = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
+        let (entered_sender, entered) = mpsc::sync_channel(0);
+        let (release, release_receiver) = mpsc::sync_channel(0);
         deadline.start_receipt_hook = Some(Arc::new(WorkerStartReceiptHook {
-            entered: Arc::clone(&entered),
-            release: Arc::clone(&release),
+            entered: entered_sender,
+            release: Mutex::new(release_receiver),
         }));
         Ok(ControlledStartReceipt {
             deadline,
@@ -3200,11 +3213,11 @@ impl WorkerDeadline {
         timeout: Duration,
     ) -> Result<ControlledStartAcknowledgement, ServiceError> {
         let (mut deadline, forced_expired) = Self::controlled(timeout)?;
-        let entered = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
+        let (entered_sender, entered) = mpsc::sync_channel(0);
+        let (release, release_receiver) = mpsc::sync_channel(0);
         deadline.start_acknowledgement_hook = Some(Arc::new(WorkerStartReceiptHook {
-            entered: Arc::clone(&entered),
-            release: Arc::clone(&release),
+            entered: entered_sender,
+            release: Mutex::new(release_receiver),
         }));
         Ok(ControlledStartAcknowledgement {
             deadline,
@@ -8879,7 +8892,9 @@ mod tests {
         let worker =
             thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
 
-        entered.wait();
+        entered
+            .recv_timeout(DEFAULT_REQUEST_TIMEOUT)
+            .expect("worker reaches the start receive boundary");
         let durable_start_observed = (0..100).any(|_| {
             if journal
                 .status(operation)
@@ -8914,7 +8929,7 @@ mod tests {
         sentinel_release
             .send(())
             .expect("control sentinel releases");
-        release.wait();
+        release.send(()).expect("start receive boundary releases");
 
         assert!(matches!(
             worker.join().expect("worker joins"),
@@ -8948,9 +8963,11 @@ mod tests {
         let worker =
             thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
 
-        entered.wait();
+        entered
+            .recv_timeout(DEFAULT_REQUEST_TIMEOUT)
+            .expect("worker reaches the start receipt boundary");
         force_expired.store(true, Ordering::Release);
-        release.wait();
+        release.send(()).expect("start receipt boundary releases");
 
         assert!(matches!(
             worker.join().expect("worker joins"),
@@ -8967,7 +8984,9 @@ mod tests {
                 },
             )
             .expect("actor barrier queues");
-        entered_receiver.recv().expect("actor reaches barrier");
+        entered_receiver
+            .recv_timeout(DEFAULT_REQUEST_TIMEOUT)
+            .expect("actor reaches barrier");
         release.send(()).expect("actor barrier releases");
 
         let operation = journal.status(operation).expect("status loads");
@@ -8998,9 +9017,13 @@ mod tests {
         let worker =
             thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
 
-        entered.wait();
+        entered
+            .recv_timeout(DEFAULT_REQUEST_TIMEOUT)
+            .expect("worker reaches the start acknowledgement boundary");
         force_expired.store(true, Ordering::Release);
-        release.wait();
+        release
+            .send(())
+            .expect("start acknowledgement boundary releases");
 
         assert!(matches!(
             worker.join().expect("worker joins"),
@@ -9036,59 +9059,61 @@ mod tests {
 
     #[test]
     fn real_deadline_at_start_acknowledgement_never_authorizes_work() {
-        for byte in 80..100 {
-            let operation = OperationId::from_bytes([byte; 16]);
-            let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
-            let cancellation = journal.enqueue(operation).expect("operation enqueues");
-            let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
-            let handle = actor.handle();
-            let ControlledStartAcknowledgement {
-                deadline,
-                force_expired: _,
-                entered,
-                release,
-            } = WorkerDeadline::controlled_before_start_acknowledgement(Duration::from_millis(100))
-                .expect("deadline is valid");
-            let expires_at = deadline.expires_at();
-            let worker_handle = handle.clone();
-            let worker =
-                thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
+        let operation = OperationId::from_bytes([80; 16]);
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let cancellation = journal.enqueue(operation).expect("operation enqueues");
+        let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
+        let handle = actor.handle();
+        let ControlledStartAcknowledgement {
+            deadline,
+            force_expired: _,
+            entered,
+            release,
+        } = WorkerDeadline::controlled_before_start_acknowledgement(DEFAULT_REQUEST_TIMEOUT)
+            .expect("deadline is valid");
+        let expires_at = deadline.expires_at();
+        let worker_handle = handle.clone();
+        let worker =
+            thread::spawn(move || worker_handle.start_operation_blocking(operation, &deadline));
 
-            entered.wait();
+        entered
+            .recv_timeout(DEFAULT_REQUEST_TIMEOUT)
+            .expect("worker reaches the real deadline boundary");
+        while Instant::now() < expires_at {
             thread::sleep(expires_at.saturating_duration_since(Instant::now()));
-            release.wait();
-
-            assert!(matches!(
-                worker.join().expect("worker joins"),
-                Err(ServiceError::RequestTimedOut)
-            ));
-            let (sentinel_entered, sentinel_receiver) = mpsc::sync_channel(0);
-            let (sentinel_release, sentinel_release_receiver) = mpsc::sync_channel(0);
-            handle
-                .try_send(
-                    JournalLane::Control,
-                    JournalCommand::Barrier {
-                        entered: sentinel_entered,
-                        release: sentinel_release_receiver,
-                    },
-                )
-                .expect("control sentinel queues");
-            sentinel_receiver
-                .recv_timeout(Duration::from_secs(1))
-                .expect("actor settles the real deadline");
-            sentinel_release
-                .send(())
-                .expect("control sentinel releases");
-
-            let interrupted = journal.status(operation).expect("status loads");
-            assert_eq!(interrupted.state, OperationState::Interrupted);
-            assert_eq!(interrupted.recovery_class, RecoveryClass::DeadlineElapsed);
-            assert_eq!(
-                cancellation.reason(),
-                Some(rootlight_operations::CancellationReason::DeadlineExceeded)
-            );
-            actor.join().expect("actor joins");
         }
+        release.send(()).expect("real deadline boundary releases");
+
+        assert!(matches!(
+            worker.join().expect("worker joins"),
+            Err(ServiceError::RequestTimedOut)
+        ));
+        let (sentinel_entered, sentinel_receiver) = mpsc::sync_channel(0);
+        let (sentinel_release, sentinel_release_receiver) = mpsc::sync_channel(0);
+        handle
+            .try_send(
+                JournalLane::Control,
+                JournalCommand::Barrier {
+                    entered: sentinel_entered,
+                    release: sentinel_release_receiver,
+                },
+            )
+            .expect("control sentinel queues");
+        sentinel_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("actor settles the real deadline");
+        sentinel_release
+            .send(())
+            .expect("control sentinel releases");
+
+        let interrupted = journal.status(operation).expect("status loads");
+        assert_eq!(interrupted.state, OperationState::Interrupted);
+        assert_eq!(interrupted.recovery_class, RecoveryClass::DeadlineElapsed);
+        assert_eq!(
+            cancellation.reason(),
+            Some(rootlight_operations::CancellationReason::DeadlineExceeded)
+        );
+        actor.join().expect("actor joins");
     }
 
     #[test]
