@@ -1,7 +1,7 @@
-//! Source-free semantic conformance and quality evidence for M09.
+//! Source-free semantic contract conformance for M09.
 //!
-//! Reports consume the shared language registry and resolver decisions. The
-//! evidence API deliberately exposes no repository path or command surface.
+//! Reports consume the shared language registry and caller-supplied resolver
+//! decisions. Contract fixtures cannot authorize tier promotion or completion.
 
 use std::collections::BTreeMap;
 
@@ -13,7 +13,7 @@ use rootlight_resolve::{
 };
 use serde::Serialize;
 
-const CORPUS_ID: &str = "rootlight-m09-semantic-conformance-v1";
+const CORPUS_ID: &str = "rootlight-m09-contract-fixture-v1";
 const ADAPTER_CRATE: &str = "rootlight-adapters";
 const MIN_EXACT_PRECISION_BASIS_POINTS: u16 = 9_500;
 const MIN_EXACT_RECALL_BASIS_POINTS: u16 = 9_000;
@@ -24,7 +24,7 @@ const PERCENT_SCALE: u64 = 100;
 const MILLI_SCALE: u64 = 1_000;
 
 /// Version of the machine-readable M09 evidence schema.
-pub const M09_EVIDENCE_SCHEMA_VERSION: &str = "1.0";
+pub const M09_EVIDENCE_SCHEMA_VERSION: &str = "1.1";
 /// Maximum canonical byte size emitted for one M09 report.
 pub const M09_EVIDENCE_MAX_BYTES: usize = 64 * 1024;
 /// Maximum reviewed expectations accepted by one M09 corpus.
@@ -70,9 +70,17 @@ pub struct M09SemanticEvidence {
     schema_version: String,
     corpus_id: String,
     adapter_crate: String,
+    disposition: EvidenceDisposition,
+    milestone_completion_eligible: bool,
     languages: Vec<LanguageEvidence>,
     resolver_quality: ResolverQualityEvidence,
     repository_execution: RepositoryExecutionEvidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EvidenceDisposition {
+    ContractFixtureOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -81,7 +89,9 @@ struct LanguageEvidence {
     maximum_tier: TierEvidence,
     semantics: SemanticsEvidence,
     adapter_version: String,
-    context_import: String,
+    context_import_contract: String,
+    observed_context_imports: u64,
+    tier_promotion_eligible: bool,
     required_coverage_domains: u8,
     uncertainty_codes: Vec<String>,
 }
@@ -102,6 +112,10 @@ enum SemanticsEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ResolverQualityEvidence {
+    corpus_scope: ResolverCorpusScope,
+    language_breakdown_available: bool,
+    holdout_available: bool,
+    promotion_eligible: bool,
     expectations: u64,
     exact_expected: u64,
     ambiguous_expected: u64,
@@ -123,6 +137,12 @@ struct ResolverQualityEvidence {
     calibration_samples: u64,
     expected_calibration_error_milli: u16,
     calibration_bins: Vec<CalibrationBinEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ResolverCorpusScope {
+    CallerSuppliedContractFixture,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -176,10 +196,11 @@ pub enum M09EvidenceError {
     Encode,
 }
 
-/// Builds evidence from the shared profile registry and reviewed resolver decisions.
+/// Builds contract evidence from the shared registry and caller-supplied decisions.
 ///
 /// The function accepts no repository path, environment, process, or command
-/// input. Its report records that structural no-execution restriction.
+/// input. The report records that structural no-execution restriction and is
+/// explicitly ineligible for tier promotion or milestone completion.
 ///
 /// # Errors
 ///
@@ -216,6 +237,8 @@ pub fn build_m09_semantic_evidence(
         schema_version: M09_EVIDENCE_SCHEMA_VERSION.to_owned(),
         corpus_id: CORPUS_ID.to_owned(),
         adapter_crate: ADAPTER_CRATE.to_owned(),
+        disposition: EvidenceDisposition::ContractFixtureOnly,
+        milestone_completion_eligible: false,
         languages: language_evidence(registry)?,
         resolver_quality: quality_evidence(batch, expectations)?,
         repository_execution: RepositoryExecutionEvidence {
@@ -271,7 +294,9 @@ fn language_evidence(
                 maximum_tier: tier_evidence(expected.tier)?,
                 semantics: semantics_evidence(expected.semantics)?,
                 adapter_version: ADAPTER_VERSION.to_owned(),
-                context_import: "validated_declarative_normalized_ir".to_owned(),
+                context_import_contract: "validated_declarative_normalized_ir".to_owned(),
+                observed_context_imports: 0,
+                tier_promotion_eligible: false,
                 required_coverage_domains: 8,
                 uncertainty_codes: expected
                     .uncertainty_codes
@@ -384,6 +409,10 @@ fn quality_evidence(
     }
 
     Ok(ResolverQualityEvidence {
+        corpus_scope: ResolverCorpusScope::CallerSuppliedContractFixture,
+        language_breakdown_available: false,
+        holdout_available: false,
+        promotion_eligible: false,
         expectations: report.expectations,
         exact_expected,
         ambiguous_expected,
@@ -529,7 +558,23 @@ mod tests {
             encode_m09_semantic_evidence(&repeated).expect("repeated evidence encodes");
 
         assert_eq!(first_bytes, repeated_bytes);
+        assert_eq!(first.disposition, EvidenceDisposition::ContractFixtureOnly);
+        assert!(!first.milestone_completion_eligible);
         assert_eq!(first.languages.len(), 4);
+        assert!(
+            first
+                .languages
+                .iter()
+                .all(|language| language.observed_context_imports == 0
+                    && !language.tier_promotion_eligible)
+        );
+        assert_eq!(
+            first.resolver_quality.corpus_scope,
+            ResolverCorpusScope::CallerSuppliedContractFixture
+        );
+        assert!(!first.resolver_quality.language_breakdown_available);
+        assert!(!first.resolver_quality.holdout_available);
+        assert!(!first.resolver_quality.promotion_eligible);
         assert_eq!(first.resolver_quality.exact_outcomes, 1);
         assert_eq!(first.resolver_quality.candidate_outcomes, 1);
         assert_eq!(first.resolver_quality.unresolved_outcomes, 1);
@@ -538,6 +583,8 @@ mod tests {
         assert!(!first.repository_execution.command_surface_available);
         assert_eq!(first.repository_execution.observed_command_attempts, 0);
         let text = String::from_utf8(first_bytes).expect("canonical evidence is UTF-8");
+        assert!(text.contains("\"disposition\":\"contract_fixture_only\""));
+        assert!(text.contains("\"milestone_completion_eligible\":false"));
         assert!(!text.contains("fn target"));
         assert!(!text.contains("\\Users\\"));
         assert!(!text.contains("/home/"));
