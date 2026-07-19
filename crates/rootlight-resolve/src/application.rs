@@ -47,7 +47,7 @@ impl ResolutionEngine {
             .collect::<BTreeMap<_, _>>();
         let mut occurrence_remap = BTreeMap::new();
         let mut pending_relations = Vec::new();
-        let producer = resolver_producer(self.limits.candidate_limit())?;
+        let producer = resolver_producer(self.limits.candidate_limit(), &self.policy)?;
 
         for decision in &batch.decisions {
             cancellation.check()?;
@@ -141,11 +141,15 @@ impl PendingRelation {
     }
 }
 
-fn resolver_producer(candidate_limit: usize) -> Result<ProducerIdentity, ResolutionError> {
+fn resolver_producer(
+    candidate_limit: usize,
+    policy: &crate::ResolutionPolicy,
+) -> Result<ProducerIdentity, ResolutionError> {
     let mut configuration = Vec::with_capacity(RESOLVER_PROVIDER_VERSION.len() + 8);
     configuration.extend_from_slice(RESOLVER_PROVIDER_VERSION.as_bytes());
     let limit = u64::try_from(candidate_limit).map_err(|_| ResolutionError::CountOverflow)?;
     configuration.extend_from_slice(&limit.to_be_bytes());
+    policy.append_configuration(&mut configuration);
     ProducerIdentity::new(
         RESOLVER_PROVIDER_NAME,
         env!("CARGO_PKG_VERSION"),

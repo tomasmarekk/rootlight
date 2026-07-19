@@ -15,9 +15,10 @@ use rootlight_ir::{
     RelationPredicate, RelationRecord, SourceRef, SourceSpan, validate_ir_document,
 };
 use rootlight_resolve::{
-    CompletenessAssumption, ExpectedResolution, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION,
-    ResolutionError, ResolutionExpectation, ResolutionSignal, ResolverFactContext,
-    UnresolvedReason, evaluate_resolution_quality,
+    CompletenessAssumption, DynamicCallCalibration, ExpectedResolution, RESOLVER_PROVIDER_NAME,
+    RESOLVER_PROVIDER_VERSION, ResolutionError, ResolutionExpectation, ResolutionPenalty,
+    ResolutionPolicy, ResolutionSignal, ResolverFactContext, UnresolvedReason,
+    evaluate_resolution_quality,
 };
 use rootlight_resolve::{ResolutionEngine, ResolutionLimits, ResolutionOutcome};
 
@@ -795,6 +796,62 @@ fn scores_direct_ambiguous_and_unresolved_call_outcomes() {
             .filter(|relation| relation.predicate == RelationPredicate::Calls)
             .count(),
         1
+    );
+}
+
+#[test]
+fn dynamic_calls_require_calibrated_exact_promotion() {
+    let mut fixture = Fixture::new();
+    let target = fixture.add_entity(
+        160,
+        "dynamic_target",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    fixture.add_occurrence(
+        161,
+        "dynamic_target",
+        fixture.primary_file,
+        OccurrenceRole::CallSite,
+        None,
+    );
+    fixture.document.files[0].language = "python".to_owned();
+    fixture.document.entities[0].language = "python".to_owned();
+    fixture.document.provenance[0].language = "python".to_owned();
+    fixture.validate();
+
+    let conservative = ResolutionEngine::default()
+        .resolve(&fixture.document, &Cancellation::new())
+        .expect("dynamic fixture resolves conservatively");
+    assert_eq!(
+        conservative.decisions[0].outcome,
+        ResolutionOutcome::Candidates {
+            symbols: vec![target],
+            total_count: 1,
+            completeness: CoverageStatus::Complete,
+            confidence: Confidence::new(899).expect("dynamic ceiling is valid"),
+        }
+    );
+    assert!(
+        conservative.decisions[0].explanation.candidates[0]
+            .penalties
+            .contains(&ResolutionPenalty::DynamicCallUncalibrated)
+    );
+
+    assert!(DynamicCallCalibration::new("python", 8_999, 100, 0).is_err());
+    let calibration = DynamicCallCalibration::new("python", 9_000, 100, 0)
+        .expect("quality floor admits exact promotion");
+    let policy = ResolutionPolicy::default().with_dynamic_call_calibration(calibration);
+    let calibrated = ResolutionEngine::with_policy(ResolutionLimits::default(), policy)
+        .resolve(&fixture.document, &Cancellation::new())
+        .expect("calibrated dynamic fixture resolves");
+    assert_eq!(
+        calibrated.decisions[0].outcome,
+        ResolutionOutcome::Resolved {
+            symbol: target,
+            confidence: Confidence::new(900).expect("fixture confidence is valid"),
+        }
     );
 }
 

@@ -17,7 +17,8 @@ use crate::model::{
     CandidateExplanation, CompletenessAssumption, RESOLVER_PROVIDER_NAME,
     RESOLVER_PROVIDER_VERSION, RejectedCandidate, RejectionReason, ResolutionBatch,
     ResolutionDecision, ResolutionError, ResolutionExplanation, ResolutionLimits,
-    ResolutionOutcome, ResolutionPenalty, ResolutionRule, ResolutionSignal, UnresolvedReason,
+    ResolutionOutcome, ResolutionPenalty, ResolutionPolicy, ResolutionRule, ResolutionSignal,
+    UnresolvedReason,
 };
 
 const EXACT_BINDING_THRESHOLD: u16 = 900;
@@ -32,16 +33,23 @@ const REPOSITORY_SCOPE_PENALTY: u16 = 50;
 const MAX_SCOPE_DEPTH: usize = 64;
 
 /// Language-neutral semantic candidate resolver.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolutionEngine {
     pub(crate) limits: ResolutionLimits,
+    pub(crate) policy: ResolutionPolicy,
 }
 
 impl ResolutionEngine {
     /// Creates a resolver with checked limits.
     #[must_use]
-    pub const fn new(limits: ResolutionLimits) -> Self {
-        Self { limits }
+    pub fn new(limits: ResolutionLimits) -> Self {
+        Self::with_policy(limits, ResolutionPolicy::default())
+    }
+
+    /// Creates a resolver with checked limits and an explicit promotion policy.
+    #[must_use]
+    pub const fn with_policy(limits: ResolutionLimits, policy: ResolutionPolicy) -> Self {
+        Self { limits, policy }
     }
 
     /// Resolves unresolved and candidate occurrences in one normalized document.
@@ -136,12 +144,16 @@ impl ResolutionEngine {
                 }
                 continue;
             }
-            candidates.push(score_candidate(
-                occurrence,
-                entity,
-                indexed.name_match,
-                index,
-            )?);
+            let mut candidate = score_candidate(occurrence, entity, indexed.name_match, index)?;
+            if occurrence.role == OccurrenceRole::CallSite
+                && !self.policy.allows_exact_call(language)
+            {
+                candidate.score = confidence(candidate.score.get().min(899))?;
+                candidate
+                    .penalties
+                    .push(ResolutionPenalty::DynamicCallUncalibrated);
+            }
+            candidates.push(candidate);
         }
 
         candidates.sort_unstable_by(|left, right| {

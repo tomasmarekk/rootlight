@@ -3,6 +3,8 @@
 //! Explanations retain deterministic scoring evidence while candidate lists and
 //! rejection details remain bounded by the same per-site resource ceiling.
 
+use std::collections::BTreeMap;
+
 use rootlight_cancel::Cancelled;
 use rootlight_ids::{ContentHash, FactId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{
@@ -63,6 +65,128 @@ impl Default for ResolutionLimits {
 #[error("resolver candidate limit must be between 1 and 4096")]
 pub struct ResolutionLimitError;
 
+/// Minimum measured dynamic-call precision required for exact promotion.
+pub const MIN_DYNAMIC_CALL_PRECISION_BASIS_POINTS: u16 = 9_000;
+
+/// Reviewed evidence permitting exact call promotion for one dynamic language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicCallCalibration {
+    language: String,
+    precision_basis_points: u16,
+    sample_count: u64,
+    hidden_exact_count: u64,
+}
+
+impl DynamicCallCalibration {
+    /// Creates checked holdout evidence for one supported dynamic language.
+    ///
+    /// `precision_basis_points` uses 10,000 as 100 percent. Evidence is
+    /// accepted only for the dynamic-language adapters owned by this phase.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DynamicCallCalibrationError`] for an unsupported language,
+    /// out-of-range or below-floor precision, an empty corpus, or any hidden
+    /// exact binding in the evaluated ambiguity corpus.
+    pub fn new(
+        language: impl Into<String>,
+        precision_basis_points: u16,
+        sample_count: u64,
+        hidden_exact_count: u64,
+    ) -> Result<Self, DynamicCallCalibrationError> {
+        let language = language.into();
+        if !is_supported_dynamic_language(&language) {
+            return Err(DynamicCallCalibrationError::UnsupportedLanguage);
+        }
+        if !(MIN_DYNAMIC_CALL_PRECISION_BASIS_POINTS..=10_000).contains(&precision_basis_points) {
+            return Err(DynamicCallCalibrationError::PrecisionBelowFloor);
+        }
+        if sample_count == 0 {
+            return Err(DynamicCallCalibrationError::EmptyCorpus);
+        }
+        if hidden_exact_count != 0 {
+            return Err(DynamicCallCalibrationError::HiddenExactBinding);
+        }
+        Ok(Self {
+            language,
+            precision_basis_points,
+            sample_count,
+            hidden_exact_count,
+        })
+    }
+
+    /// Returns the canonical dynamic-language identity.
+    #[must_use]
+    pub fn language(&self) -> &str {
+        &self.language
+    }
+
+    /// Returns measured holdout precision in basis points.
+    #[must_use]
+    pub const fn precision_basis_points(&self) -> u16 {
+        self.precision_basis_points
+    }
+
+    /// Returns the number of evaluated call sites.
+    #[must_use]
+    pub const fn sample_count(&self) -> u64 {
+        self.sample_count
+    }
+}
+
+/// Invalid evidence for dynamic-call exact promotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum DynamicCallCalibrationError {
+    /// The language is not one of the reviewed dynamic adapters.
+    #[error("dynamic call calibration language is unsupported")]
+    UnsupportedLanguage,
+    /// Precision is outside 0..=10,000 or below the 90 percent quality floor.
+    #[error("dynamic call precision must be between 9000 and 10000 basis points")]
+    PrecisionBelowFloor,
+    /// An empty corpus cannot justify exact promotion.
+    #[error("dynamic call calibration corpus must not be empty")]
+    EmptyCorpus,
+    /// The evaluation hid at least one ambiguous call behind an exact binding.
+    #[error("dynamic call calibration must not contain hidden exact bindings")]
+    HiddenExactBinding,
+}
+
+/// Conservative policy controlling evidence-dependent exact promotion.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResolutionPolicy {
+    dynamic_call_calibrations: BTreeMap<String, DynamicCallCalibration>,
+}
+
+impl ResolutionPolicy {
+    /// Adds reviewed dynamic-call evidence, replacing evidence for that language.
+    #[must_use]
+    pub fn with_dynamic_call_calibration(mut self, calibration: DynamicCallCalibration) -> Self {
+        self.dynamic_call_calibrations
+            .insert(calibration.language.clone(), calibration);
+        self
+    }
+
+    pub(crate) fn allows_exact_call(&self, language: &str) -> bool {
+        !is_supported_dynamic_language(language)
+            || self.dynamic_call_calibrations.contains_key(language)
+    }
+
+    pub(crate) fn append_configuration(&self, bytes: &mut Vec<u8>) {
+        for calibration in self.dynamic_call_calibrations.values() {
+            bytes.extend_from_slice(&(calibration.language.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(calibration.language.as_bytes());
+            bytes.extend_from_slice(&calibration.precision_basis_points.to_be_bytes());
+            bytes.extend_from_slice(&calibration.sample_count.to_be_bytes());
+            bytes.extend_from_slice(&calibration.hidden_exact_count.to_be_bytes());
+        }
+    }
+}
+
+fn is_supported_dynamic_language(language: &str) -> bool {
+    matches!(language, "javascript" | "python" | "typescript")
+}
+
 /// Language-neutral rule that produced one decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -110,6 +234,8 @@ pub enum ResolutionPenalty {
     CrossFile,
     /// The declaration has only repository-wide or unknown scope evidence.
     RepositoryScope,
+    /// Dynamic-call evidence lacks a reviewed precision calibration.
+    DynamicCallUncalibrated,
 }
 
 /// Why a same-spelling entity was excluded from the candidate set.
