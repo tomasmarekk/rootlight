@@ -3,6 +3,8 @@
 //! Native execution remains unavailable until every required isolation control
 //! has an audited backend; this binary never substitutes an unsandboxed launch.
 
+#![forbid(unsafe_code)]
+
 use std::{
     ffi::OsStr,
     io::{self, Write as _},
