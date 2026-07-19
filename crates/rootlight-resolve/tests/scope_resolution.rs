@@ -15,9 +15,10 @@ use rootlight_ir::{
     RelationPredicate, RelationRecord, SourceRef, SourceSpan, validate_ir_document,
 };
 use rootlight_resolve::{
-    CompletenessAssumption, DynamicCallCalibration, ExpectedResolution, RESOLVER_PROVIDER_NAME,
-    RESOLVER_PROVIDER_VERSION, ResolutionError, ResolutionExpectation, ResolutionPenalty,
-    ResolutionPolicy, ResolutionSignal, ResolverFactContext, UnresolvedReason,
+    CompletenessAssumption, DynamicCallCalibration, ExpectedResolution, ForeignLinkEngine,
+    ForeignLinkInput, ForeignLinkLimits, ForeignLinkNamespace, ForeignLinkOutcome,
+    RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionError, ResolutionExpectation,
+    ResolutionPenalty, ResolutionPolicy, ResolutionSignal, ResolverFactContext, UnresolvedReason,
     evaluate_resolution_quality,
 };
 use rootlight_resolve::{ResolutionEngine, ResolutionLimits, ResolutionOutcome};
@@ -851,6 +852,214 @@ fn dynamic_calls_require_calibrated_exact_promotion() {
         ResolutionOutcome::Resolved {
             symbol: target,
             confidence: Confidence::new(900).expect("fixture confidence is valid"),
+        }
+    );
+}
+
+#[test]
+fn typed_foreign_links_retain_protocol_evidence_and_confidence() {
+    let mut fixture = Fixture::new();
+    let caller = fixture.add_entity(
+        170,
+        "caller",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    let target = fixture.add_entity(
+        171,
+        "native_target",
+        fixture.primary_file,
+        EntityKind::ExternalSymbol,
+        None,
+    );
+    fixture.validate();
+    let source = source_ref(
+        fixture.document.repository,
+        fixture.document.generation,
+        fixture.primary_file,
+        fixture.content_hash,
+        32,
+        40,
+    );
+    let protocol_key = content_hash(b"ffi:c:rootlight_target:v1");
+    let link = ForeignLinkInput::new(
+        RelationEndpoint::Entity(caller),
+        target,
+        RelationPredicate::CallsForeign,
+        ForeignLinkNamespace::ForeignFunction,
+        protocol_key,
+        Confidence::new(950).expect("fixture confidence is valid"),
+        source,
+        fixture.provenance,
+    )
+    .expect("typed FFI link is valid");
+
+    let applied = ForeignLinkEngine::default()
+        .apply(
+            fixture.document,
+            &[link],
+            ResolverFactContext::new(content_hash(b"foreign-link-binary")),
+            &Cancellation::new(),
+        )
+        .expect("typed foreign link applies");
+    assert_eq!(
+        applied.batch.decisions[0].outcome,
+        ForeignLinkOutcome::Exact {
+            target,
+            confidence: Confidence::new(950).expect("fixture confidence is valid"),
+        }
+    );
+    let relation = applied
+        .document
+        .relations
+        .iter()
+        .find(|relation| relation.predicate == RelationPredicate::CallsForeign)
+        .expect("exact FFI relation is persisted");
+    assert_eq!(relation.confidence.get(), 950);
+    assert_eq!(relation.object, RelationEndpoint::Entity(target));
+    let provenance = applied
+        .document
+        .provenance
+        .iter()
+        .find(|record| record.id == relation.provenance)
+        .expect("derived relation provenance exists");
+    assert_eq!(
+        provenance.rule.as_deref(),
+        Some("foreign-v1.foreign_function.calls_foreign")
+    );
+    assert_eq!(
+        provenance.evidence_sources,
+        vec![
+            relation
+                .evidence
+                .source
+                .clone()
+                .expect("relation retains source evidence")
+        ]
+    );
+}
+
+#[test]
+fn foreign_link_ambiguity_never_becomes_an_exact_service_relation() {
+    let mut fixture = Fixture::new();
+    let client = fixture.add_entity(
+        180,
+        "client",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    let first = fixture.add_entity(
+        181,
+        "first_route",
+        fixture.primary_file,
+        EntityKind::Route,
+        None,
+    );
+    let second = fixture.add_entity(
+        182,
+        "second_route",
+        fixture.primary_file,
+        EntityKind::Route,
+        None,
+    );
+    fixture.validate();
+    let source = source_ref(
+        fixture.document.repository,
+        fixture.document.generation,
+        fixture.primary_file,
+        fixture.content_hash,
+        40,
+        48,
+    );
+    let key = content_hash(b"http:GET:service:/users/{id}");
+    let inputs = [
+        ForeignLinkInput::new(
+            RelationEndpoint::Entity(client),
+            second,
+            RelationPredicate::CallsRoute,
+            ForeignLinkNamespace::Http,
+            key,
+            Confidence::new(920).expect("fixture confidence is valid"),
+            source.clone(),
+            fixture.provenance,
+        )
+        .expect("second route candidate is valid"),
+        ForeignLinkInput::new(
+            RelationEndpoint::Entity(client),
+            first,
+            RelationPredicate::CallsRoute,
+            ForeignLinkNamespace::Http,
+            key,
+            Confidence::new(940).expect("fixture confidence is valid"),
+            source,
+            fixture.provenance,
+        )
+        .expect("first route candidate is valid"),
+    ];
+
+    let limited_document = fixture.document.clone();
+    let applied = ForeignLinkEngine::default()
+        .apply(
+            fixture.document,
+            &inputs,
+            ResolverFactContext::new(content_hash(b"foreign-link-binary")),
+            &Cancellation::new(),
+        )
+        .expect("ambiguous HTTP links remain candidates");
+    assert_eq!(
+        applied.batch.decisions[0].outcome,
+        ForeignLinkOutcome::Candidates {
+            targets: vec![first, second],
+            total_count: 2,
+            completeness: CoverageStatus::Complete,
+            confidence: Confidence::new(940).expect("fixture confidence is valid"),
+        }
+    );
+    assert!(
+        applied
+            .document
+            .relations
+            .iter()
+            .all(|relation| relation.predicate != RelationPredicate::CallsRoute)
+    );
+    assert!(
+        ForeignLinkInput::new(
+            RelationEndpoint::Entity(client),
+            first,
+            RelationPredicate::ReadsTable,
+            ForeignLinkNamespace::Http,
+            key,
+            Confidence::new(940).expect("fixture confidence is valid"),
+            applied.document.files[0]
+                .evidence
+                .source
+                .clone()
+                .expect("fixture file source exists"),
+            fixture.provenance,
+        )
+        .is_err()
+    );
+
+    assert!(ForeignLinkLimits::new(0, 2).is_err());
+    let limited = ForeignLinkEngine::new(
+        ForeignLinkLimits::new(1, 2).expect("fixture foreign-link limits are valid"),
+    )
+    .apply(
+        limited_document,
+        &inputs,
+        ResolverFactContext::new(content_hash(b"foreign-link-binary")),
+        &Cancellation::new(),
+    )
+    .expect("bounded candidates apply");
+    assert_eq!(
+        limited.batch.decisions[0].outcome,
+        ForeignLinkOutcome::Candidates {
+            targets: vec![first],
+            total_count: 2,
+            completeness: CoverageStatus::Bounded,
+            confidence: Confidence::new(940).expect("fixture confidence is valid"),
         }
     );
 }

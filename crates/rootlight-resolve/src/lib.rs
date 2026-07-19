@@ -7,10 +7,17 @@
 
 mod application;
 mod engine;
+mod foreign;
 mod model;
 mod quality;
 
 pub use engine::ResolutionEngine;
+pub use foreign::{
+    AppliedForeignLinks, ForeignLinkBatch, ForeignLinkDecision, ForeignLinkEngine,
+    ForeignLinkError, ForeignLinkInput, ForeignLinkInputError, ForeignLinkLimitError,
+    ForeignLinkLimits, ForeignLinkNamespace, ForeignLinkOutcome, MAX_FOREIGN_LINK_INPUTS,
+    MIN_EXACT_FOREIGN_LINK_CONFIDENCE,
+};
 pub use model::{
     AppliedResolution, CandidateExplanation, CompletenessAssumption, DEFAULT_CANDIDATE_LIMIT,
     DynamicCallCalibration, DynamicCallCalibrationError, MAX_CANDIDATE_LIMIT,
