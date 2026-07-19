@@ -188,7 +188,8 @@ impl TreeSitterAnalyzer {
             parse_output: &parse_output,
         };
         let output = execute_analysis(&prepared, request, extensions, memory_policy, cancellation)?;
-        let artifact = TreeSitterStructuralArtifact::capture(self, request, parse_output)?;
+        let artifact =
+            TreeSitterStructuralArtifact::capture(self, request, parse_output, cancellation)?;
         Ok((output, artifact))
     }
 
@@ -213,7 +214,7 @@ impl TreeSitterAnalyzer {
     ) -> Result<AnalysisOutput, AdapterError> {
         cancellation.check()?;
         self.validate_request_identity(request)?;
-        if !artifact.matches(self, request) {
+        if !artifact.matches(self, request, cancellation)? {
             return Err(provider_failure("treesitter-structural-artifact-mismatch"));
         }
         let prepared = PreparsedTreeSitterAnalyzer {
@@ -298,8 +299,9 @@ impl TreeSitterStructuralArtifact {
         analyzer: &TreeSitterAnalyzer,
         request: &AnalysisRequest<'_>,
         parse_output: ParseOutput,
+        cancellation: &Cancellation,
     ) -> Result<Self, AdapterError> {
-        let parse_context_hash = structural_parse_context_hash(request)?;
+        let parse_context_hash = structural_parse_context_hash(request, cancellation)?;
         let accounted_bytes = structural_artifact_bytes(&parse_output)?;
         Ok(Self {
             analyzer_instance: Arc::clone(&analyzer.instance),
@@ -313,15 +315,21 @@ impl TreeSitterStructuralArtifact {
         })
     }
 
-    fn matches(&self, analyzer: &TreeSitterAnalyzer, request: &AnalysisRequest<'_>) -> bool {
+    fn matches(
+        &self,
+        analyzer: &TreeSitterAnalyzer,
+        request: &AnalysisRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
         let source = request.source().source_ref();
-        Arc::ptr_eq(&self.analyzer_instance, &analyzer.instance)
+        let context_matches =
+            structural_parse_context_hash(request, cancellation)? == self.parse_context_hash;
+        Ok(Arc::ptr_eq(&self.analyzer_instance, &analyzer.instance)
             && self.repository == source.repository()
             && self.file == source.span().file()
             && self.content_hash == source.content_hash()
-            && structural_parse_context_hash(request)
-                .is_ok_and(|context| context == self.parse_context_hash)
-            && self.limits == *request.limits()
+            && context_matches
+            && self.limits == *request.limits())
     }
 }
 
@@ -376,7 +384,9 @@ impl LanguageAnalyzer for TreeSitterAnalyzer {
 
 fn structural_parse_context_hash(
     request: &AnalysisRequest<'_>,
+    cancellation: &Cancellation,
 ) -> Result<ContentHash, AdapterError> {
+    cancellation.check()?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"rootlight.treesitter.structural-artifact-context/1\0");
     hash_sized_bytes(&mut hasher, request.source().path().identity_bytes())?;
@@ -385,12 +395,14 @@ fn structural_parse_context_hash(
     let range_count = u64::try_from(request.included_ranges().len())
         .map_err(|_| provider_failure("treesitter-structural-artifact-accounting"))?;
     hasher.update(&range_count.to_be_bytes());
-    for range in request.included_ranges() {
+    for (index, range) in request.included_ranges().iter().enumerate() {
+        check_periodically(index, cancellation)?;
         hasher.update(range.span().file().as_bytes());
         hasher.update(&range.span().start_byte().to_be_bytes());
         hasher.update(&range.span().end_byte().to_be_bytes());
         hash_sized_bytes(&mut hasher, range.language().as_str().as_bytes())?;
     }
+    cancellation.check()?;
     Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
 }
 
