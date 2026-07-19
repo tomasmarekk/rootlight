@@ -2225,6 +2225,7 @@ dependencies = [
  "rootlight-config",
  "rootlight-discovery",
  "rootlight-ids",
+ "rootlight-incremental",
  "rootlight-ir",
  "rootlight-query",
  "rootlight-resolve",
@@ -2233,6 +2234,7 @@ dependencies = [
  "rootlight-storage",
  "rootlight-vfs",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

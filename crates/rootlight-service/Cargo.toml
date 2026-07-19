@@ -15,6 +15,7 @@ rootlight-catalog = { path = "../rootlight-catalog" }
 rootlight-config = { path = "../rootlight-config" }
 rootlight-discovery = { path = "../rootlight-discovery" }
 rootlight-ids = { path = "../rootlight-ids" }
+rootlight-incremental = { path = "../rootlight-incremental" }
 rootlight-ir = { path = "../rootlight-ir" }
 rootlight-query = { path = "../rootlight-query" }
 rootlight-resolve = { path = "../rootlight-resolve" }
@@ -26,6 +27,7 @@ serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -7,8 +7,13 @@ use std::{
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, RepositoryId};
+use rootlight_incremental::FactDomainSet;
 use rootlight_query::{LocateMode, RepositoryDataTrust};
-use rootlight_service::{FirstSliceError, FirstSliceService};
+use rootlight_service::{
+    ChangeClass, FallbackReason, FileChangeKind, FirstSliceBuildStrategy, FirstSliceError,
+    FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence, FirstSliceObservedFreshness,
+    FirstSlicePublicationMode, FirstSliceService, FirstSliceTwoStageAvailability,
+};
 use tempfile::TempDir;
 
 const BEFORE: &str = "pub fn answer() -> u32 {\n    42\n}\n";
@@ -34,6 +39,20 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
     assert!(first.entities > 0);
     assert!(first.lexical_documents > 0);
     assert!(first.oracle_allocated_bytes > 0);
+    let initial_evidence = service
+        .incremental_evidence(first.generation)
+        .expect("initial incremental evidence is retained");
+    assert_eq!(
+        initial_evidence.strategy(),
+        FirstSliceBuildStrategy::Initial
+    );
+    assert_eq!(initial_evidence.fallback_reason(), None);
+    assert_eq!(
+        service
+            .generation_freshness(first.repository, first.generation)
+            .expect("initial freshness is available"),
+        current_process_local_freshness()
+    );
     let repeated = service
         .index_rust_fixture(fixture.path(), &cancellation)
         .expect("unchanged request is idempotent");
@@ -98,6 +117,32 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
     assert_eq!(second.parent, Some(first.generation));
     assert_ne!(second.generation, first.generation);
     assert_eq!(service.active_generation(), Some(second.generation));
+    let incremental_evidence = service
+        .incremental_evidence(second.generation)
+        .expect("successor incremental evidence is retained");
+    assert_conservative_rebuild(incremental_evidence);
+    assert_eq!(
+        input_change_count(incremental_evidence, ChangeClass::Surface),
+        1
+    );
+    assert_eq!(
+        file_change_count(incremental_evidence, FileChangeKind::Modified),
+        1
+    );
+    assert_eq!(incremental_evidence.hashed_files(), 1);
+    assert_eq!(
+        service
+            .generation_freshness(first.repository, first.generation)
+            .expect("superseded freshness is available")
+            .structural,
+        FirstSliceObservedFreshness::Superseded
+    );
+    assert_eq!(
+        service
+            .generation_freshness(second.repository, second.generation)
+            .expect("successor freshness is available"),
+        current_process_local_freshness()
+    );
     let pinned_first = service
         .code_locate(
             first.generation,
@@ -470,6 +515,46 @@ fn fixture(source: &str) -> TempDir {
     fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
     fs::write(fixture.path().join("src/lib.rs"), source).expect("fixture source writes");
     fixture
+}
+
+fn current_process_local_freshness() -> FirstSliceFreshnessStatus {
+    FirstSliceFreshnessStatus {
+        structural: FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
+        semantic: FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
+        publication: FirstSlicePublicationMode::ProcessLocalSingleStage,
+        two_stage: FirstSliceTwoStageAvailability::UnavailableWithoutDurablePublication,
+    }
+}
+
+fn assert_conservative_rebuild(evidence: &FirstSliceIncrementalEvidence) {
+    assert_eq!(
+        evidence.strategy(),
+        FirstSliceBuildStrategy::ConservativeRepositoryRebuild
+    );
+    assert_eq!(
+        evidence.fallback_reason(),
+        Some(FallbackReason::MissingDependencyDeclaration)
+    );
+    let all_domains = FactDomainSet::all().iter().collect::<Vec<_>>();
+    assert_eq!(evidence.invalidated_domains(), all_domains.as_slice());
+    assert_eq!(evidence.invalidated_units(), 1);
+    assert!(evidence.trace_entries() > 0);
+}
+
+fn input_change_count(evidence: &FirstSliceIncrementalEvidence, class: ChangeClass) -> u64 {
+    evidence
+        .input_changes()
+        .iter()
+        .find(|count| count.class() == class)
+        .map_or(0, |count| count.inputs())
+}
+
+fn file_change_count(evidence: &FirstSliceIncrementalEvidence, kind: FileChangeKind) -> u64 {
+    evidence
+        .file_changes()
+        .iter()
+        .find(|count| count.kind() == kind)
+        .map_or(0, |count| count.files())
 }
 
 fn deadline() -> Cancellation {

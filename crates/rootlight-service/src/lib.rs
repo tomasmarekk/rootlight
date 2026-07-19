@@ -24,13 +24,20 @@ pub use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::{CatalogError, CatalogErrorKind, EphemeralOracleWriter};
 use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
 use rootlight_discovery::{
-    DiscoveryError, DiscoveryLimits, DiscoveryPolicy, InputClass, LanguageEvidence, ManifestInput,
-    discover,
+    DiscoveryError, DiscoveryLimits, DiscoveryPolicy, IncrementalDiscovery,
+    IncrementalDiscoveryBaseline, IncrementalDiscoveryContext, InputClass, LanguageEvidence,
+    ManifestInput, correlate_incremental_manifest, discover, discover_incremental,
 };
 use rootlight_ids::{
     ContentHash, FileId, GenerationId, GenerationIdentity, RepositoryId, SymbolId, content_hash,
-    derive_generation, derive_repository,
+    derive_fact, derive_generation, derive_repository,
 };
+use rootlight_incremental::{
+    AnalysisUnitId, DependencyGraph, DependencyRegistry, FactDomainSet, FactNode,
+    GenerationSummary, GraphLimits, IncrementalError, InputSnapshot, InvalidationPlan,
+    PlanningLimits, ReconcileMode, plan_invalidation,
+};
+pub use rootlight_incremental::{ChangeClass, FactDomain, FallbackReason, FileChangeKind};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, ExtensionSupport, FileIdentityClaim, IrLimits,
     NormalizedIrDocument, ProducerIdentity, SourceRef, SourceSpan,
@@ -60,6 +67,8 @@ const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/2";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-rust/1";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/1";
+const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
+const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 
 /// Bounded receipt for one ephemeral first-slice generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -85,6 +94,169 @@ pub struct FirstSliceIndexReceipt {
     pub oracle_allocated_bytes: u64,
     /// End-to-end indexing time rounded up to microseconds.
     pub elapsed_micros: u64,
+}
+
+/// Construction strategy used for one process-local first-slice generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FirstSliceBuildStrategy {
+    /// No committed parent baseline existed.
+    Initial,
+    /// Declared dependencies selected a bounded partial rebuild.
+    DependencyDirected,
+    /// Missing fine-grained declarations required a complete repository rebuild.
+    ConservativeRepositoryRebuild,
+}
+
+/// Count of changed typed inputs in one conservative semantic class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct FirstSliceInputChangeCount {
+    class: ChangeClass,
+    inputs: u64,
+}
+
+impl FirstSliceInputChangeCount {
+    /// Returns the conservative semantic class.
+    #[must_use]
+    pub const fn class(self) -> ChangeClass {
+        self.class
+    }
+
+    /// Returns the number of changed typed inputs in this class.
+    #[must_use]
+    pub const fn inputs(self) -> u64 {
+        self.inputs
+    }
+}
+
+/// Count of authoritative file transitions in one canonical class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct FirstSliceFileChangeCount {
+    kind: FileChangeKind,
+    files: u64,
+}
+
+impl FirstSliceFileChangeCount {
+    /// Returns the authoritative file-transition class.
+    #[must_use]
+    pub const fn kind(self) -> FileChangeKind {
+        self.kind
+    }
+
+    /// Returns the number of files in this class.
+    #[must_use]
+    pub const fn files(self) -> u64 {
+        self.files
+    }
+}
+
+/// Source-free incremental planning evidence retained with one generation.
+///
+/// The evidence records what the process-local planner observed. It does not
+/// claim durable publication or fine-grained artifact reuse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FirstSliceIncrementalEvidence {
+    strategy: FirstSliceBuildStrategy,
+    input_changes: Vec<FirstSliceInputChangeCount>,
+    file_changes: Vec<FirstSliceFileChangeCount>,
+    hashed_files: u64,
+    invalidated_domains: Vec<FactDomain>,
+    invalidated_units: u64,
+    fallback_reason: Option<FallbackReason>,
+    trace_entries: u64,
+}
+
+impl FirstSliceIncrementalEvidence {
+    /// Returns the actual build strategy used for this generation.
+    #[must_use]
+    pub const fn strategy(&self) -> FirstSliceBuildStrategy {
+        self.strategy
+    }
+
+    /// Returns changed typed-input counts in canonical class order.
+    #[must_use]
+    pub fn input_changes(&self) -> &[FirstSliceInputChangeCount] {
+        &self.input_changes
+    }
+
+    /// Returns authoritative file-transition counts in canonical class order.
+    #[must_use]
+    pub fn file_changes(&self) -> &[FirstSliceFileChangeCount] {
+        &self.file_changes
+    }
+
+    /// Returns files whose bytes were hashed by the authoritative reconcile.
+    #[must_use]
+    pub const fn hashed_files(&self) -> u64 {
+        self.hashed_files
+    }
+
+    /// Returns invalidated fact domains in canonical order.
+    #[must_use]
+    pub fn invalidated_domains(&self) -> &[FactDomain] {
+        &self.invalidated_domains
+    }
+
+    /// Returns analysis units selected for rebuilding.
+    #[must_use]
+    pub const fn invalidated_units(&self) -> u64 {
+        self.invalidated_units
+    }
+
+    /// Returns why fine-grained planning fell back, when it did.
+    #[must_use]
+    pub const fn fallback_reason(&self) -> Option<FallbackReason> {
+        self.fallback_reason
+    }
+
+    /// Returns the number of bounded source-free trace entries produced.
+    #[must_use]
+    pub const fn trace_entries(&self) -> u64 {
+        self.trace_entries
+    }
+}
+
+/// Freshness observed by the last committed process-local index operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FirstSliceObservedFreshness {
+    /// The generation completed the latest committed authoritative scan.
+    CurrentAtLastAuthoritativeScan,
+    /// A later committed generation superseded this generation.
+    Superseded,
+}
+
+/// Publication shape available to the current first-slice service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FirstSlicePublicationMode {
+    /// Structural and semantic facts activate together inside this process.
+    ProcessLocalSingleStage,
+}
+
+/// Availability of structural-first semantic refinement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FirstSliceTwoStageAvailability {
+    /// Durable atomic generation publication is not yet authorized.
+    UnavailableWithoutDurablePublication,
+}
+
+/// Honest structural and semantic freshness for one retained generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct FirstSliceFreshnessStatus {
+    /// Structural facts relative to the latest committed scan.
+    pub structural: FirstSliceObservedFreshness,
+    /// Semantic facts relative to the latest committed scan.
+    pub semantic: FirstSliceObservedFreshness,
+    /// Activation shape implemented by the service.
+    pub publication: FirstSlicePublicationMode,
+    /// Explicit two-stage capability state.
+    pub two_stage: FirstSliceTwoStageAvailability,
 }
 
 /// Checked repository and generation correlation for one first-slice query.
@@ -131,6 +303,7 @@ pub struct PreparedFirstSliceIndex {
     verified: IdentityVerifiedGeneration,
     search: LexicalIndex,
     sources: Vec<RustSourceInput>,
+    incremental: PreparedIncrementalState,
     receipt: FirstSliceIndexReceipt,
     root_identity: ContentHash,
     register_repository: bool,
@@ -159,7 +332,13 @@ enum FirstSlicePublication {
     Pending {
         root_identity: ContentHash,
         register_repository: bool,
+        incremental: PreparedIncrementalState,
     },
+}
+
+struct PreparedIncrementalState {
+    baseline: IncrementalDiscoveryBaseline,
+    evidence: FirstSliceIncrementalEvidence,
 }
 
 struct RustSourceInput {
@@ -534,6 +713,8 @@ pub struct FirstSliceService {
     generations: GenerationSet<LexicalIndex>,
     source_snapshots: SourceSnapshotRetention,
     receipts: BTreeMap<GenerationId, FirstSliceIndexReceipt>,
+    incremental_baselines: BTreeMap<GenerationId, IncrementalDiscoveryBaseline>,
+    incremental_evidence: BTreeMap<GenerationId, FirstSliceIncrementalEvidence>,
 }
 
 impl FirstSliceService {
@@ -589,6 +770,8 @@ impl FirstSliceService {
             generations,
             source_snapshots,
             receipts: BTreeMap::new(),
+            incremental_baselines: BTreeMap::new(),
+            incremental_evidence: BTreeMap::new(),
         })
     }
 
@@ -647,11 +830,39 @@ impl FirstSliceService {
         let root = root_result.map_err(|_| FirstSliceError::Repository)?;
         let policy =
             DiscoveryPolicy::build(Vec::new(), false).map_err(|_| FirstSliceError::Discovery)?;
-        let manifest = discover(
+        let discovery_limits = DiscoveryLimits::from_config(&self.config);
+        let provider_set_hash = content_hash(PROVIDER_SET_SEED);
+        let active = self.active_by_repository.get(&repository).copied();
+        let parent_baseline = active
+            .map(|generation| {
+                self.incremental_baselines
+                    .get(&generation)
+                    .ok_or(FirstSliceError::Incremental)
+            })
+            .transpose()?;
+        let incremental_context = IncrementalDiscoveryContext::new(
+            self.config.hash(),
+            derive_fact("incremental-provider", INCREMENTAL_PROVIDER_SEED).id(),
+            provider_set_hash,
+        );
+        let incremental = discover_incremental(
             &root,
-            &self.config,
+            parent_baseline,
+            incremental_context,
             &policy,
-            DiscoveryLimits::from_config(&self.config),
+            ReconcileMode::Normal,
+            discovery_limits,
+            cancellation,
+        )
+        .map_err(|error| map_discovery_error(error, cancellation))?;
+        let manifest = discover(&root, &self.config, &policy, discovery_limits, cancellation)
+            .map_err(|error| map_discovery_error(error, cancellation))?;
+        let incremental = correlate_incremental_manifest(
+            &incremental,
+            parent_baseline,
+            incremental_context,
+            &manifest,
+            discovery_limits,
             cancellation,
         )
         .map_err(|error| map_discovery_error(error, cancellation))?;
@@ -702,8 +913,6 @@ impl FirstSliceService {
                 .map_err(|_| FirstSliceError::Identity)?
                 .canonical_hash()
                 .map_err(|_| FirstSliceError::Identity)?;
-        let provider_set_hash = content_hash(PROVIDER_SET_SEED);
-        let active = self.active_by_repository.get(&repository).copied();
         if let Some(active) = active
             && let Ok(snapshot) = self.generations.generation(active)
         {
@@ -732,6 +941,13 @@ impl FirstSliceService {
             check_cancellation(cancellation)?;
             return Ok(FirstSliceIndexPreparation::Retained(receipt));
         }
+        let incremental = prepare_incremental_state(
+            repository,
+            parent_baseline,
+            &incremental,
+            discovery_limits,
+            cancellation,
+        )?;
         let mut document = NormalizedIrDocument::empty(repository, generation);
         for input in &rust_sources {
             check_cancellation(cancellation)?;
@@ -842,6 +1058,7 @@ impl FirstSliceService {
                 verified,
                 search,
                 sources: rust_sources,
+                incremental,
                 receipt,
                 root_identity,
                 register_repository: existing_repository.is_none(),
@@ -899,6 +1116,7 @@ impl FirstSliceService {
                     verified,
                     search,
                     sources,
+                    incremental,
                     receipt,
                     root_identity,
                     register_repository,
@@ -920,6 +1138,7 @@ impl FirstSliceService {
                     publication: FirstSlicePublication::Pending {
                         root_identity,
                         register_repository,
+                        incremental,
                     },
                 })
             }
@@ -951,6 +1170,7 @@ impl FirstSliceService {
             FirstSlicePublication::Pending {
                 root_identity,
                 register_repository,
+                incremental,
             } => {
                 self.source_snapshots
                     .commit_staged(receipt.generation)
@@ -966,6 +1186,10 @@ impl FirstSliceService {
                     return Err(FirstSliceError::Retention);
                 }
                 self.receipts.insert(receipt.generation, receipt);
+                self.incremental_baselines
+                    .insert(receipt.generation, incremental.baseline);
+                self.incremental_evidence
+                    .insert(receipt.generation, incremental.evidence);
                 if register_repository {
                     self.repositories.insert(root_identity, receipt.repository);
                 }
@@ -1000,6 +1224,50 @@ impl FirstSliceService {
             self.source_snapshots.finish_discard(source_release);
         }
         Ok(())
+    }
+
+    /// Returns source-free incremental evidence retained with one generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::GenerationNotFound`] when the generation is
+    /// not retained by this service process.
+    pub fn incremental_evidence(
+        &self,
+        generation: GenerationId,
+    ) -> Result<&FirstSliceIncrementalEvidence, FirstSliceError> {
+        self.incremental_evidence
+            .get(&generation)
+            .ok_or(FirstSliceError::GenerationNotFound)
+    }
+
+    /// Returns separately named structural and semantic freshness.
+    ///
+    /// This call does not touch the filesystem. `CurrentAtLastAuthoritativeScan`
+    /// therefore means current relative to the latest successfully committed
+    /// reconcile, not a live watcher observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same repository, generation, and ownership errors as
+    /// [`Self::resolve_generation`].
+    pub fn generation_freshness(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationId,
+    ) -> Result<FirstSliceFreshnessStatus, FirstSliceError> {
+        let generation = self.resolve_generation(repository, Some(generation))?;
+        let observed = if generation.active {
+            FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan
+        } else {
+            FirstSliceObservedFreshness::Superseded
+        };
+        Ok(FirstSliceFreshnessStatus {
+            structural: observed,
+            semantic: observed,
+            publication: FirstSlicePublicationMode::ProcessLocalSingleStage,
+            two_stage: FirstSliceTwoStageAvailability::UnavailableWithoutDurablePublication,
+        })
     }
 
     /// Returns the most recently activated generation across all repositories.
@@ -1190,6 +1458,9 @@ pub enum FirstSliceError {
     /// Deterministic discovery failed.
     #[error("first-slice discovery failed")]
     Discovery,
+    /// Incremental baseline or invalidation planning failed.
+    #[error("first-slice incremental planning failed")]
+    Incremental,
     /// Source changed between discovery and capability snapshot.
     #[error("first-slice discovery snapshot changed")]
     DiscoveryDrift,
@@ -1229,6 +1500,128 @@ pub enum FirstSliceError {
     /// A configured integer or duration is not representable.
     #[error("first-slice limits are invalid")]
     Limits,
+}
+
+fn prepare_incremental_state(
+    repository: RepositoryId,
+    parent: Option<&IncrementalDiscoveryBaseline>,
+    discovery: &IncrementalDiscovery,
+    discovery_limits: DiscoveryLimits,
+    cancellation: &Cancellation,
+) -> Result<PreparedIncrementalState, FirstSliceError> {
+    check_cancellation(cancellation)?;
+    let planning_limits = incremental_planning_limits(discovery_limits)?;
+    let parent_inputs = match parent {
+        Some(parent) => parent.inputs().clone(),
+        None => InputSnapshot::new([], planning_limits, cancellation)
+            .map_err(|error| map_incremental_error(error, cancellation))?,
+    };
+    let parent_summary = GenerationSummary::new(parent_inputs, [], planning_limits, cancellation)
+        .map_err(|error| map_incremental_error(error, cancellation))?;
+
+    let domains = FactDomainSet::all();
+    let graph_limits = GraphLimits::new(1, domains.iter().count(), 1)
+        .map_err(|error| map_incremental_error(error, cancellation))?;
+    let registry = DependencyRegistry::new([], graph_limits, cancellation)
+        .map_err(|error| map_incremental_error(error, cancellation))?;
+    let unit = AnalysisUnitId::new(derive_fact(INCREMENTAL_UNIT_SEED, repository.as_bytes()).id());
+    let graph = DependencyGraph::new(
+        domains.iter().map(|domain| FactNode::new(unit, domain)),
+        [],
+        &registry,
+        graph_limits,
+        cancellation,
+    )
+    .map_err(|error| map_incremental_error(error, cancellation))?;
+    let plan = plan_invalidation(
+        &parent_summary,
+        discovery.baseline().inputs(),
+        &graph,
+        planning_limits,
+        cancellation,
+    )
+    .map_err(|error| map_incremental_error(error, cancellation))?;
+    if plan.changes() != discovery.changes() {
+        return Err(FirstSliceError::Incremental);
+    }
+
+    let evidence = summarize_incremental_evidence(parent.is_some(), discovery, &plan)?;
+    Ok(PreparedIncrementalState {
+        baseline: discovery.baseline().clone(),
+        evidence,
+    })
+}
+
+fn incremental_planning_limits(
+    discovery_limits: DiscoveryLimits,
+) -> Result<PlanningLimits, FirstSliceError> {
+    let max_inputs = discovery_limits
+        .max_entries
+        .checked_mul(2)
+        .and_then(|inputs| inputs.checked_add(2))
+        .ok_or(FirstSliceError::Limits)?;
+    let max_trace_entries = max_inputs
+        .checked_add(FactDomainSet::all().iter().count())
+        .and_then(|entries| entries.checked_add(1))
+        .ok_or(FirstSliceError::Limits)?;
+    PlanningLimits::new(max_inputs, 1, 1, max_trace_entries).map_err(|_| FirstSliceError::Limits)
+}
+
+fn summarize_incremental_evidence(
+    has_parent: bool,
+    discovery: &IncrementalDiscovery,
+    plan: &InvalidationPlan,
+) -> Result<FirstSliceIncrementalEvidence, FirstSliceError> {
+    let mut input_counts = BTreeMap::new();
+    for change in plan.changes().changes() {
+        increment_evidence_count(&mut input_counts, change.class())?;
+    }
+    let input_changes = input_counts
+        .into_iter()
+        .map(|(class, inputs)| FirstSliceInputChangeCount { class, inputs })
+        .collect();
+
+    let mut file_counts = BTreeMap::new();
+    for change in discovery.file_changes() {
+        increment_evidence_count(&mut file_counts, change.kind())?;
+    }
+    let file_changes = file_counts
+        .into_iter()
+        .map(|(kind, files)| FirstSliceFileChangeCount { kind, files })
+        .collect();
+
+    let fallback_reason = has_parent
+        .then(|| plan.fallback().map(|fallback| fallback.reason()))
+        .flatten();
+    let strategy = if !has_parent {
+        FirstSliceBuildStrategy::Initial
+    } else if fallback_reason.is_some() {
+        FirstSliceBuildStrategy::ConservativeRepositoryRebuild
+    } else {
+        FirstSliceBuildStrategy::DependencyDirected
+    };
+    Ok(FirstSliceIncrementalEvidence {
+        strategy,
+        input_changes,
+        file_changes,
+        hashed_files: u64::try_from(discovery.hashed_files().len())
+            .map_err(|_| FirstSliceError::Limits)?,
+        invalidated_domains: plan.rerun_domains().iter().collect(),
+        invalidated_units: u64::try_from(plan.reanalyze().count())
+            .map_err(|_| FirstSliceError::Limits)?,
+        fallback_reason,
+        trace_entries: u64::try_from(plan.trace().entries().len())
+            .map_err(|_| FirstSliceError::Limits)?,
+    })
+}
+
+fn increment_evidence_count<Key: Ord>(
+    counts: &mut BTreeMap<Key, u64>,
+    key: Key,
+) -> Result<(), FirstSliceError> {
+    let count = counts.entry(key).or_insert(0);
+    *count = count.checked_add(1).ok_or(FirstSliceError::Limits)?;
+    Ok(())
 }
 
 fn is_rust_source(input: &ManifestInput) -> bool {
@@ -1425,7 +1818,19 @@ fn map_discovery_error(error: DiscoveryError, cancellation: &Cancellation) -> Fi
     match error {
         DiscoveryError::Cancelled(cancelled) => FirstSliceError::Cancelled(cancelled.reason()),
         DiscoveryError::Vfs(VfsError::Cancelled(reason)) => FirstSliceError::Cancelled(reason),
+        DiscoveryError::Incremental(error) => map_incremental_error(error, cancellation),
+        DiscoveryError::IncrementalDrift => FirstSliceError::DiscoveryDrift,
         _ => FirstSliceError::Discovery,
+    }
+}
+
+fn map_incremental_error(error: IncrementalError, cancellation: &Cancellation) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    match error {
+        IncrementalError::Cancelled(cancelled) => FirstSliceError::Cancelled(cancelled.reason()),
+        _ => FirstSliceError::Incremental,
     }
 }
 
@@ -1675,15 +2080,19 @@ fn elapsed_micros(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         fs,
         path::Path,
         time::{Duration, Instant},
     };
 
     use rootlight_ids::GenerationId;
+    use rootlight_incremental::{EquivalenceSnapshot, LogicalComponent, LogicalDomain};
     use rootlight_ir::{
         CoverageScope, CoverageStatus, OccurrenceRole, OccurrenceTarget, RelationPredicate,
     };
+    use serde::Serialize;
+    use serde_json::json;
     use tempfile::TempDir;
 
     use super::*;
@@ -1695,6 +2104,13 @@ mod tests {
     const GATE_V2_PATCH: &str =
         include_str!("../../../tests/fixtures/gate-1/first-slice/v1-to-v2.patch");
     const IGNORED_SENTINEL: &str = "ROOTLIGHT_IGNORED_SENTINEL";
+    const EQUIVALENCE_COMPONENT_BYTES: usize = 4 * 1024 * 1024;
+    const EQUIVALENCE_INITIAL: &str =
+        "pub fn answer() -> u32 {\n    42\n}\n\npub fn helper() -> u32 {\n    7\n}\n";
+    const EQUIVALENCE_BODY_EDIT: &str =
+        "pub fn answer() -> u32 {\n    43\n}\n\npub fn helper() -> u32 {\n    7\n}\n";
+    const EQUIVALENCE_SURFACE_EDIT: &str =
+        "pub fn answer() -> u32 {\n    43\n}\n\npub fn renamed() -> u32 {\n    7\n}\n";
 
     #[test]
     fn malformed_file_retains_unknown_coverage_and_recovery_diagnostic() {
@@ -1793,6 +2209,81 @@ mod tests {
             provenance.id == call.provenance
                 && provenance.producer.name() == rootlight_resolve::RESOLVER_PROVIDER_NAME
         }));
+    }
+
+    #[test]
+    fn conservative_successors_match_fresh_logical_rebuilds() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        let primary = fixture.path().join("src/lib.rs");
+        let added = fixture.path().join("src/added.rs");
+        let moved = fixture.path().join("src/moved.rs");
+        fs::write(&primary, EQUIVALENCE_INITIAL).expect("initial source writes");
+        let cancellation = deadline();
+        let mut incremental = FirstSliceService::new(8).expect("incremental service initializes");
+        let initial = incremental
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("initial generation publishes");
+
+        fs::write(&primary, EQUIVALENCE_BODY_EDIT).expect("body edit writes");
+        let body = incremental
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("body successor publishes");
+        assert_fresh_equivalent(
+            &incremental,
+            fixture.path(),
+            initial.generation,
+            body,
+            &cancellation,
+        );
+
+        fs::write(&primary, EQUIVALENCE_SURFACE_EDIT).expect("surface edit writes");
+        let surface = incremental
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("surface successor publishes");
+        assert_fresh_equivalent(
+            &incremental,
+            fixture.path(),
+            body.generation,
+            surface,
+            &cancellation,
+        );
+
+        fs::write(&added, "pub fn added() -> u32 { 11 }\n").expect("added source writes");
+        let addition = incremental
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("addition successor publishes");
+        assert_fresh_equivalent(
+            &incremental,
+            fixture.path(),
+            surface.generation,
+            addition,
+            &cancellation,
+        );
+
+        fs::rename(&added, &moved).expect("source move writes");
+        let movement = incremental
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("move successor publishes");
+        assert_fresh_equivalent(
+            &incremental,
+            fixture.path(),
+            addition.generation,
+            movement,
+            &cancellation,
+        );
+
+        fs::remove_file(&moved).expect("moved source deletes");
+        let deletion = incremental
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("deletion successor publishes");
+        assert_fresh_equivalent(
+            &incremental,
+            fixture.path(),
+            movement.generation,
+            deletion,
+            &cancellation,
+        );
     }
 
     #[test]
@@ -2173,6 +2664,199 @@ mod tests {
         );
         fs::write(path, source.replacen(&removed, &added, 1))
             .expect("Gate-1 v2 source materializes");
+    }
+
+    fn assert_fresh_equivalent(
+        incremental: &FirstSliceService,
+        root: &Path,
+        parent: GenerationId,
+        successor: FirstSliceIndexReceipt,
+        cancellation: &Cancellation,
+    ) {
+        let evidence = incremental
+            .incremental_evidence(successor.generation)
+            .expect("successor evidence remains retained");
+        assert_eq!(
+            evidence.strategy(),
+            FirstSliceBuildStrategy::ConservativeRepositoryRebuild
+        );
+        assert_eq!(
+            evidence.fallback_reason(),
+            Some(FallbackReason::MissingDependencyDeclaration)
+        );
+
+        let mut fresh = FirstSliceService::new(2).expect("fresh comparison service initializes");
+        fresh.repositories = incremental.repositories.clone();
+        fresh
+            .active_by_repository
+            .insert(successor.repository, parent);
+        fresh.incremental_baselines.insert(
+            parent,
+            incremental
+                .incremental_baselines
+                .get(&parent)
+                .expect("parent baseline remains retained")
+                .clone(),
+        );
+        let rebuilt = fresh
+            .index_rust_fixture(root, cancellation)
+            .expect("fresh logical rebuild publishes");
+        assert_eq!(rebuilt.repository, successor.repository);
+        assert_eq!(rebuilt.parent, successor.parent);
+        assert_eq!(rebuilt.generation, successor.generation);
+
+        let incremental_snapshot =
+            equivalence_snapshot(incremental, successor.generation, cancellation);
+        let clean_snapshot = equivalence_snapshot(&fresh, rebuilt.generation, cancellation);
+        incremental_snapshot
+            .compare_clean(&clean_snapshot, cancellation)
+            .expect("equivalence comparison completes")
+            .require_equivalent()
+            .expect("incremental successor equals the fresh logical rebuild");
+    }
+
+    fn equivalence_snapshot(
+        service: &FirstSliceService,
+        generation: GenerationId,
+        cancellation: &Cancellation,
+    ) -> EquivalenceSnapshot {
+        let snapshot = service
+            .generations
+            .generation(generation)
+            .expect("generation remains retained");
+        let document = snapshot.document();
+        let discovery_inputs = service
+            .incremental_baselines
+            .get(&generation)
+            .expect("generation baseline remains retained")
+            .inputs()
+            .iter()
+            .collect::<Vec<_>>();
+        let mut query_names = document
+            .entities
+            .iter()
+            .map(|entity| entity.canonical_name.clone())
+            .collect::<BTreeSet<_>>();
+        query_names.remove("");
+        let query_outputs = query_names
+            .into_iter()
+            .map(|query| {
+                let response = service
+                    .code_locate(
+                        generation,
+                        query.clone(),
+                        LocateMode::Exact,
+                        64,
+                        cancellation,
+                    )
+                    .expect("equivalence locate query succeeds");
+                json!({"query": query, "response": response.data})
+            })
+            .collect::<Vec<_>>();
+        let coverage = json!({
+            "coverage": document.coverage_records,
+            "skipped_regions": document.skipped_regions,
+            "diagnostics": document.diagnostics,
+        });
+        let stable_ids = json!({
+            "files": document.files.iter().map(|record| record.id).collect::<Vec<_>>(),
+            "entities": document.entities.iter().map(|record| record.id).collect::<Vec<_>>(),
+            "occurrences": document.occurrences.iter().map(|record| record.id).collect::<Vec<_>>(),
+            "relations": document.relations.iter().map(|record| record.id).collect::<Vec<_>>(),
+            "provenance": document.provenance.iter().map(|record| record.id).collect::<Vec<_>>(),
+            "source_mappings": document.source_mappings.iter().map(|record| record.id).collect::<Vec<_>>(),
+            "coverage": document.coverage_records.iter().map(|record| record.id).collect::<Vec<_>>(),
+            "skipped_regions": document.skipped_regions.iter().map(|record| record.id).collect::<Vec<_>>(),
+            "diagnostics": document.diagnostics.iter().map(|record| record.id).collect::<Vec<_>>(),
+            "extensions": document.extensions.iter().map(|record| record.id).collect::<Vec<_>>(),
+        });
+        let normalized_records =
+            u64::try_from(normalized_record_count(document).expect("record count is bounded"))
+                .expect("record count fits u64");
+        let coverage_records = document
+            .coverage_records
+            .len()
+            .checked_add(document.skipped_regions.len())
+            .and_then(|count| count.checked_add(document.diagnostics.len()))
+            .and_then(|count| u64::try_from(count).ok())
+            .expect("coverage record count is bounded");
+        let stable_records = document
+            .files
+            .len()
+            .checked_add(document.entities.len())
+            .and_then(|count| count.checked_add(document.occurrences.len()))
+            .and_then(|count| count.checked_add(document.relations.len()))
+            .and_then(|count| count.checked_add(document.provenance.len()))
+            .and_then(|count| count.checked_add(document.source_mappings.len()))
+            .and_then(|count| count.checked_add(document.coverage_records.len()))
+            .and_then(|count| count.checked_add(document.skipped_regions.len()))
+            .and_then(|count| count.checked_add(document.diagnostics.len()))
+            .and_then(|count| count.checked_add(document.extensions.len()))
+            .and_then(|count| u64::try_from(count).ok())
+            .expect("stable identity count is bounded");
+        let components = [
+            logical_component(
+                LogicalDomain::Discovery,
+                &discovery_inputs,
+                u64::try_from(discovery_inputs.len()).expect("input count fits u64"),
+                cancellation,
+            ),
+            logical_component(
+                LogicalDomain::NormalizedIr,
+                document,
+                normalized_records,
+                cancellation,
+            ),
+            logical_component(
+                LogicalDomain::LogicalStore,
+                document,
+                normalized_records,
+                cancellation,
+            ),
+            logical_component(
+                LogicalDomain::QueryOutputs,
+                &query_outputs,
+                u64::try_from(query_outputs.len()).expect("query count fits u64"),
+                cancellation,
+            ),
+            logical_component(
+                LogicalDomain::Coverage,
+                &coverage,
+                coverage_records,
+                cancellation,
+            ),
+            logical_component(
+                LogicalDomain::Provenance,
+                &document.provenance,
+                u64::try_from(document.provenance.len()).expect("provenance count fits u64"),
+                cancellation,
+            ),
+            logical_component(
+                LogicalDomain::StableIds,
+                &stable_ids,
+                stable_records,
+                cancellation,
+            ),
+        ];
+        EquivalenceSnapshot::new(components, cancellation)
+            .expect("complete equivalence snapshot builds")
+    }
+
+    fn logical_component(
+        domain: LogicalDomain,
+        value: &impl Serialize,
+        records: u64,
+        cancellation: &Cancellation,
+    ) -> LogicalComponent {
+        let bytes = serde_json::to_vec(value).expect("logical projection encodes");
+        LogicalComponent::from_canonical_bytes(
+            domain,
+            &bytes,
+            records,
+            EQUIVALENCE_COMPONENT_BYTES,
+            cancellation,
+        )
+        .expect("bounded logical component hashes")
     }
 
     fn deadline() -> Cancellation {
