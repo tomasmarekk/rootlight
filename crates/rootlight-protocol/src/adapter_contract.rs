@@ -3,7 +3,10 @@
 //! Raw protobuf messages cross a hostile process boundary only after these
 //! source-redacted structural, compatibility, identity, and quota checks.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    mem,
+};
 
 use prost::Message;
 
@@ -23,6 +26,8 @@ pub const MINIMUM_ADAPTER_PROTOCOL_MINOR: u32 = 1;
 pub const CURRENT_ADAPTER_PROTOCOL_MINOR: u32 = 1;
 /// Maximum encoded adapter frame accepted from a child process.
 pub const MAX_ADAPTER_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// Width of the big-endian payload-length prefix used on adapter pipes.
+pub const ADAPTER_FRAME_PREFIX_BYTES: usize = 4;
 /// Maximum advertised capabilities or extensions.
 pub const MAX_ADAPTER_DECLARATIONS: usize = 64;
 /// Canonical session and request identifier length.
@@ -401,6 +406,135 @@ pub fn encode_adapter_frame(frame: &AdapterFrame) -> Result<Vec<u8>, AdapterCont
     Ok(encoded)
 }
 
+/// Incremental length-prefix decoder for one hostile adapter byte stream.
+///
+/// The decoder validates the four-byte big-endian payload length before
+/// reserving memory. One call returns at most one frame; callers retain and
+/// resubmit any unconsumed trailing bytes so batching cannot bypass quotas.
+#[derive(Debug)]
+pub struct AdapterFrameDecoder {
+    prefix: [u8; ADAPTER_FRAME_PREFIX_BYTES],
+    prefix_bytes: usize,
+    expected_payload_bytes: Option<usize>,
+    payload: Vec<u8>,
+}
+
+impl AdapterFrameDecoder {
+    /// Creates an empty decoder without allocating a payload buffer.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            prefix: [0; ADAPTER_FRAME_PREFIX_BYTES],
+            prefix_bytes: 0,
+            expected_payload_bytes: None,
+            payload: Vec::new(),
+        }
+    }
+
+    /// Consumes a bounded prefix of one byte chunk.
+    ///
+    /// The returned count is always at most `input.len()`. A completed frame
+    /// resets the decoder before protobuf validation, so malformed payloads do
+    /// not poison the next independent frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterContractError`] for a zero or oversized length,
+    /// allocation failure, or malformed protobuf payload.
+    pub fn push(
+        &mut self,
+        input: &[u8],
+    ) -> Result<(usize, Option<AdapterFrame>), AdapterContractError> {
+        let mut consumed = 0usize;
+        if self.expected_payload_bytes.is_none() {
+            let prefix_remaining = ADAPTER_FRAME_PREFIX_BYTES
+                .checked_sub(self.prefix_bytes)
+                .ok_or(AdapterContractError::MalformedFrame)?;
+            let prefix_chunk = prefix_remaining.min(input.len());
+            let prefix_end = self
+                .prefix_bytes
+                .checked_add(prefix_chunk)
+                .ok_or(AdapterContractError::FrameSize)?;
+            self.prefix[self.prefix_bytes..prefix_end].copy_from_slice(&input[..prefix_chunk]);
+            self.prefix_bytes = prefix_end;
+            consumed = prefix_chunk;
+            if self.prefix_bytes < ADAPTER_FRAME_PREFIX_BYTES {
+                return Ok((consumed, None));
+            }
+
+            let expected = usize::try_from(u32::from_be_bytes(self.prefix))
+                .map_err(|_| AdapterContractError::FrameSize)?;
+            if expected == 0 || expected > MAX_ADAPTER_FRAME_BYTES {
+                self.reset();
+                return Err(AdapterContractError::FrameSize);
+            }
+            if self.payload.try_reserve_exact(expected).is_err() {
+                self.reset();
+                return Err(AdapterContractError::FrameCapacity);
+            }
+            self.expected_payload_bytes = Some(expected);
+        }
+
+        let expected = self
+            .expected_payload_bytes
+            .ok_or(AdapterContractError::MalformedFrame)?;
+        let payload_remaining = expected
+            .checked_sub(self.payload.len())
+            .ok_or(AdapterContractError::MalformedFrame)?;
+        let available = &input[consumed..];
+        let payload_chunk = payload_remaining.min(available.len());
+        self.payload.extend_from_slice(&available[..payload_chunk]);
+        consumed = consumed
+            .checked_add(payload_chunk)
+            .ok_or(AdapterContractError::FrameSize)?;
+        if self.payload.len() < expected {
+            return Ok((consumed, None));
+        }
+
+        let payload = mem::take(&mut self.payload);
+        self.reset();
+        let frame = decode_adapter_frame(&payload)?;
+        Ok((consumed, Some(frame)))
+    }
+
+    fn reset(&mut self) {
+        self.prefix = [0; ADAPTER_FRAME_PREFIX_BYTES];
+        self.prefix_bytes = 0;
+        self.expected_payload_bytes = None;
+        self.payload.clear();
+    }
+}
+
+impl Default for AdapterFrameDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Encodes one validated protobuf frame with its pipe length prefix.
+///
+/// # Errors
+///
+/// Returns [`AdapterContractError`] when the frame is invalid, oversized, or
+/// the bounded output allocation cannot be reserved.
+pub fn encode_length_delimited_adapter_frame(
+    frame: &AdapterFrame,
+) -> Result<Vec<u8>, AdapterContractError> {
+    let payload = encode_adapter_frame(frame)?;
+    let payload_bytes =
+        u32::try_from(payload.len()).map_err(|_| AdapterContractError::FrameSize)?;
+    let packet_bytes = ADAPTER_FRAME_PREFIX_BYTES
+        .checked_add(payload.len())
+        .ok_or(AdapterContractError::FrameSize)?;
+    let mut packet = Vec::new();
+    packet
+        .try_reserve_exact(packet_bytes)
+        .map_err(|_| AdapterContractError::FrameCapacity)?;
+    packet.extend_from_slice(&payload_bytes.to_be_bytes());
+    packet.extend_from_slice(&payload);
+    Ok(packet)
+}
+
 /// Returns the message family carried by a validated frame without exposing
 /// repository-derived payloads.
 #[must_use]
@@ -459,6 +593,9 @@ pub enum AdapterContractError {
     /// Protobuf frame bytes were malformed.
     #[error("adapter frame encoding is invalid")]
     MalformedFrame,
+    /// The bounded frame buffer could not be reserved.
+    #[error("adapter frame capacity is unavailable")]
+    FrameCapacity,
 }
 
 fn select_protocol(range: &VersionRange) -> Result<ContractVersion, AdapterContractError> {
@@ -807,6 +944,80 @@ mod tests {
             encode_adapter_frame(&oversized_frame),
             Err(AdapterContractError::FrameSize)
         );
+    }
+
+    #[test]
+    fn length_delimited_codec_handles_fragmentation_and_batch_boundaries() {
+        let first = AdapterFrame {
+            message: Some(adapter_frame::Message::Cancel(CancelRequest {
+                session_id: vec![7; ADAPTER_NONCE_BYTES],
+                request_id: vec![9; ADAPTER_NONCE_BYTES],
+            })),
+        };
+        let second = AdapterFrame {
+            message: Some(adapter_frame::Message::AnalysisRequest(analysis_request(
+                32,
+            ))),
+        };
+        let first_packet =
+            encode_length_delimited_adapter_frame(&first).expect("first packet encodes");
+        let second_packet =
+            encode_length_delimited_adapter_frame(&second).expect("second packet encodes");
+        let mut combined = first_packet.clone();
+        combined.extend_from_slice(&second_packet);
+        let mut decoder = AdapterFrameDecoder::new();
+
+        let (prefix_bytes, frame) = decoder
+            .push(&combined[..2])
+            .expect("partial prefix is accepted");
+        assert_eq!(prefix_bytes, 2);
+        assert!(frame.is_none());
+        let (first_bytes, frame) = decoder
+            .push(&combined[2..])
+            .expect("first fragmented frame completes");
+        assert_eq!(first_bytes, first_packet.len() - 2);
+        assert_eq!(frame.as_ref().map(frame_kind), Some("cancel"));
+
+        let second_start = 2 + first_bytes;
+        let (second_bytes, frame) = decoder
+            .push(&combined[second_start..])
+            .expect("second batched frame completes independently");
+        assert_eq!(second_bytes, second_packet.len());
+        assert_eq!(frame.as_ref().map(frame_kind), Some("analysis_request"));
+    }
+
+    #[test]
+    fn length_delimited_decoder_rejects_prefix_attacks_and_recovers() {
+        let mut decoder = AdapterFrameDecoder::new();
+        assert_eq!(
+            decoder.push(&0_u32.to_be_bytes()),
+            Err(AdapterContractError::FrameSize)
+        );
+        let oversized = u32::try_from(MAX_ADAPTER_FRAME_BYTES + 1)
+            .expect("frame ceiling fits the transport prefix");
+        assert_eq!(
+            decoder.push(&oversized.to_be_bytes()),
+            Err(AdapterContractError::FrameSize)
+        );
+
+        let malformed = [1_u32.to_be_bytes().as_slice(), &[0xff]].concat();
+        assert_eq!(
+            decoder.push(&malformed),
+            Err(AdapterContractError::MalformedFrame)
+        );
+
+        let valid = AdapterFrame {
+            message: Some(adapter_frame::Message::Cancel(CancelRequest {
+                session_id: vec![7; ADAPTER_NONCE_BYTES],
+                request_id: vec![9; ADAPTER_NONCE_BYTES],
+            })),
+        };
+        let packet = encode_length_delimited_adapter_frame(&valid).expect("valid packet encodes");
+        let (consumed, decoded) = decoder
+            .push(&packet)
+            .expect("decoder recovers after rejection");
+        assert_eq!(consumed, packet.len());
+        assert_eq!(decoded.as_ref().map(frame_kind), Some("cancel"));
     }
 
     fn advertisement() -> CapabilityAdvertisement {
