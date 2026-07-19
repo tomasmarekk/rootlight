@@ -13,7 +13,7 @@ use std::{
     time::Instant,
 };
 
-#[cfg(windows)]
+#[cfg(any(unix, windows))]
 use cap_fs_ext::OsMetadataExt as _;
 use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt};
 use cap_std::{
@@ -315,10 +315,29 @@ pub struct SnapshotMetadata {
     pub length: u64,
     /// Last modification time in nanoseconds since the Unix epoch, when available.
     pub modified_ns: Option<u128>,
+    /// Additional platform change-detection token, when safely available.
+    ///
+    /// Unix uses the status-change timestamp. Platforms without an equivalent
+    /// handle-derived change token leave this absent and force content hashing.
+    pub change_token: Option<u128>,
     /// Platform volume/device identity, when exposed safely.
     pub volume: Option<u64>,
     /// Platform file identity, when exposed safely.
     pub file_index: Option<u64>,
+}
+
+impl SnapshotMetadata {
+    /// Reports whether every field required for metadata-only hash reuse exists.
+    ///
+    /// This checks shape, not provenance. Only metadata emitted by an opened
+    /// [`RepositoryRoot`] handle can be used as a trust attestation.
+    #[must_use]
+    pub const fn supports_hash_reuse(self) -> bool {
+        self.modified_ns.is_some()
+            && self.change_token.is_some()
+            && self.volume.is_some()
+            && self.file_index.is_some()
+    }
 }
 
 /// A capability handle confining all repository content access.
@@ -420,10 +439,26 @@ impl RepositoryRoot {
             } else {
                 EntryKind::Special
             };
+            let source_metadata = if kind == EntryKind::File {
+                let mut options = OpenOptions::new();
+                options.read(true).follow(FollowSymlinks::No);
+                entry
+                    .open_with(&options)
+                    .and_then(|file| file.metadata())
+                    .ok()
+                    .filter(|metadata| metadata.is_file() && !is_reparse_point(metadata))
+                    .map_or_else(
+                        || directory_entry_metadata(&metadata),
+                        |metadata| snapshot_metadata(&metadata),
+                    )
+            } else {
+                directory_entry_metadata(&metadata)
+            };
             entries.push(DirectoryEntry {
                 name,
                 kind,
-                length: metadata.len(),
+                length: source_metadata.length,
+                metadata: source_metadata,
             });
         }
         entries.sort_by(|left, right| {
@@ -701,6 +736,8 @@ pub struct DirectoryEntry {
     pub kind: EntryKind,
     /// Observed byte length for regular files.
     pub length: u64,
+    /// Source-free metadata used by authoritative incremental reconciliation.
+    pub metadata: SnapshotMetadata,
 }
 
 /// Closed entry classification at the VFS boundary.
@@ -752,19 +789,53 @@ fn checked_metadata(file: &File, maximum_bytes: u64) -> Result<SnapshotMetadata,
 }
 
 fn snapshot_metadata(metadata: &Metadata) -> SnapshotMetadata {
-    let modified_ns = metadata.modified().ok().and_then(|modified| {
+    let modified_ns = metadata_modified_ns(metadata);
+    SnapshotMetadata {
+        length: metadata.len(),
+        modified_ns,
+        change_token: metadata_change_token(metadata),
+        volume: Some(metadata.dev()),
+        file_index: Some(metadata.ino()),
+    }
+}
+
+fn directory_entry_metadata(metadata: &Metadata) -> SnapshotMetadata {
+    SnapshotMetadata {
+        length: metadata.len(),
+        modified_ns: metadata_modified_ns(metadata),
+        change_token: metadata_change_token(metadata),
+        volume: None,
+        file_index: None,
+    }
+}
+
+fn metadata_modified_ns(metadata: &Metadata) -> Option<u128> {
+    metadata.modified().ok().and_then(|modified| {
         modified
             .into_std()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .map(|duration| duration.as_nanos())
-    });
-    SnapshotMetadata {
-        length: metadata.len(),
-        modified_ns,
-        volume: Some(metadata.dev()),
-        file_index: Some(metadata.ino()),
-    }
+    })
+}
+
+#[cfg(unix)]
+fn metadata_change_token(metadata: &Metadata) -> Option<u128> {
+    let seconds = u128::try_from(metadata.ctime()).ok()?;
+    let nanoseconds = u128::try_from(metadata.ctime_nsec()).ok()?;
+    seconds.checked_mul(1_000_000_000)?.checked_add(nanoseconds)
+}
+
+#[cfg(windows)]
+fn metadata_change_token(_metadata: &Metadata) -> Option<u128> {
+    // CreationTime is not NTFS ChangeTime, so it cannot attest that an
+    // unchanged mtime and size imply unchanged bytes.
+    None
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_change_token(_metadata: &Metadata) -> Option<u128> {
+    None
 }
 
 #[cfg(windows)]

@@ -18,10 +18,18 @@ use ignore::{
 use rootlight_cancel::{Cancellation, Cancelled};
 use rootlight_config::ConfigSnapshot;
 use rootlight_ids::{ContentHash, FileId, RepositoryId, content_hash};
+use rootlight_incremental::IncrementalError;
 use rootlight_vfs::{
     DirectoryEntry, EntryKind, RelativePath, RepositoryRoot, SourceSnapshot, VfsError,
 };
 use serde::{Deserialize, Serialize};
+
+mod incremental;
+
+pub use incremental::{
+    IncrementalDiscovery, IncrementalDiscoveryBaseline, IncrementalDiscoveryContext,
+    discover_incremental,
+};
 
 /// Initial deterministic discovery-manifest version.
 pub const DISCOVERY_MANIFEST_VERSION: &str = "1.0";
@@ -933,6 +941,12 @@ pub enum DiscoveryError {
     /// Cooperative cancellation stopped discovery.
     #[error(transparent)]
     Cancelled(#[from] Cancelled),
+    /// Incremental reconciliation rejected a malformed or over-limit state.
+    #[error(transparent)]
+    Incremental(IncrementalError),
+    /// Metadata changed between the complete scan and stable VFS snapshot.
+    #[error("repository changed during incremental discovery")]
+    IncrementalDrift,
     /// Canonical manifest serialization failed unexpectedly.
     #[error("failed to serialize discovery manifest")]
     SerializeManifest(#[source] serde_json::Error),

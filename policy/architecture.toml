@@ -171,6 +171,7 @@ allowed_internal_dependencies = [
   "rootlight-cancel",
   "rootlight-config",
   "rootlight-ids",
+  "rootlight-incremental",
   "rootlight-vfs",
 ]
 allow_build_script = false
