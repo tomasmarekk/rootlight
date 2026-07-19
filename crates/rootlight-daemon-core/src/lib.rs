@@ -3232,7 +3232,7 @@ impl WorkerDeadline {
 struct WorkerJob {
     operation: OperationId,
     admitted: Receiver<()>,
-    handshake_deadline: WorkerDeadline,
+    handshake_timeout: Duration,
     journal: JournalActorHandle,
     permit: SchedulerPermit,
     #[cfg(test)]
@@ -3385,12 +3385,30 @@ fn synthetic_worker_loop(
         let Ok(mut job) = job else {
             return;
         };
-        if !wait_for_worker_admission(&job.admitted, &job.handshake_deadline) {
+        // Queue capacity bounds residence; the handoff budget starts when a worker owns the job.
+        let handshake_deadline = match WorkerDeadline::from_timeout(job.handshake_timeout) {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                if !deliver_worker_completion(
+                    &completion,
+                    WorkerCompletion {
+                        operation: job.operation,
+                        start: Err(error),
+                        cancellation_reason: None,
+                        permit: job.permit,
+                    },
+                ) {
+                    return;
+                }
+                continue;
+            }
+        };
+        if !wait_for_worker_admission(&job.admitted, &handshake_deadline) {
             continue;
         }
         let start = job
             .journal
-            .start_operation_blocking(job.operation, &job.handshake_deadline);
+            .start_operation_blocking(job.operation, &handshake_deadline);
         let cancellation_reason = match &start {
             Ok((operation, Some(cancellation))) if operation.state == OperationState::Running => {
                 job.permit.start();
@@ -3704,11 +3722,10 @@ impl DaemonOrchestrator {
             Err(error) => return Err(error),
         };
         let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
-        let handshake_deadline = WorkerDeadline::from_timeout(self.limits.request_timeout())?;
         if let Err(failure) = self.workers.submit(WorkerJob {
             operation: submission.operation,
             admitted: admitted_rx,
-            handshake_deadline,
+            handshake_timeout: self.limits.request_timeout(),
             journal: self.journal.clone(),
             permit,
             #[cfg(test)]
@@ -9189,22 +9206,19 @@ mod tests {
         )
         .expect("permit reserves");
         let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
-        let (handshake_deadline, force_expired) =
-            WorkerDeadline::controlled(DEFAULT_REQUEST_TIMEOUT).expect("deadline is valid");
         pool.submit(WorkerJob {
             operation: OperationId::from_bytes([61; 16]),
             admitted: admitted_rx,
-            handshake_deadline,
+            handshake_timeout: DEFAULT_REQUEST_TIMEOUT,
             journal: closed_handle,
             permit,
             started: None,
         })
         .expect("job submits");
-        force_expired.store(true, Ordering::Release);
         drop(admitted_tx);
         pool.join_until(tokio::time::Instant::now() + Duration::from_secs(5))
             .await
-            .expect("expired admission cannot stall join");
+            .expect("disconnected admission cannot stall join");
         assert_eq!(state.admitted_operations.load(Ordering::Acquire), 0);
 
         let (completion_tx, completions) = tokio::sync::mpsc::channel(1);
@@ -10868,8 +10882,7 @@ mod tests {
             .submit(WorkerJob {
                 operation,
                 admitted: admitted_rx,
-                handshake_deadline: WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT)
-                    .expect("deadline is valid"),
+                handshake_timeout: DEFAULT_REQUEST_TIMEOUT,
                 journal: actor.handle(),
                 permit,
                 started: Some(started_tx),
@@ -10921,8 +10934,7 @@ mod tests {
             .submit(WorkerJob {
                 operation: first,
                 admitted: first_admitted_rx,
-                handshake_deadline: WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT)
-                    .expect("deadline is valid"),
+                handshake_timeout: DEFAULT_REQUEST_TIMEOUT,
                 journal: actor.handle(),
                 permit: SchedulerPermit::reserve(
                     Arc::clone(&state),
@@ -10948,8 +10960,7 @@ mod tests {
             .submit(WorkerJob {
                 operation: second,
                 admitted: second_admitted_rx,
-                handshake_deadline: WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT)
-                    .expect("deadline is valid"),
+                handshake_timeout: DEFAULT_REQUEST_TIMEOUT,
                 journal: actor.handle(),
                 permit: SchedulerPermit::reserve(
                     Arc::clone(&state),
@@ -11505,8 +11516,7 @@ mod tests {
         pool.submit(WorkerJob {
             operation,
             admitted: admitted_rx,
-            handshake_deadline: WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT)
-                .expect("deadline is valid"),
+            handshake_timeout: DEFAULT_REQUEST_TIMEOUT,
             journal: actor.handle(),
             permit,
             started: Some(started_tx),
@@ -11536,7 +11546,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_worker_stays_durable_until_a_worker_dequeues_it() {
+    async fn queued_worker_gets_a_fresh_handshake_deadline_when_dequeued() {
         let state = Arc::new(DaemonState::starting());
         let client_admissions = Arc::new(Mutex::new(ClientOperationAdmissions::default()));
         let mut pool = SyntheticWorkerPool::start(1, 2).expect("worker pool starts");
@@ -11544,7 +11554,8 @@ mod tests {
         let actor = JournalActor::start(Arc::clone(&journal), 2, 2).expect("actor starts");
         let first = OperationId::from_bytes([40; 16]);
         let second = OperationId::from_bytes([41; 16]);
-        let first_cancellation = journal.enqueue(first).expect("first operation enqueues");
+        let handshake_timeout = Duration::from_secs(1);
+        journal.enqueue(first).expect("first operation enqueues");
         let second_cancellation = journal.enqueue(second).expect("second operation enqueues");
 
         let reserve = |operation, started| {
@@ -11560,8 +11571,7 @@ mod tests {
             pool.submit(WorkerJob {
                 operation,
                 admitted: admitted_rx,
-                handshake_deadline: WorkerDeadline::from_timeout(DEFAULT_REQUEST_TIMEOUT)
-                    .expect("deadline is valid"),
+                handshake_timeout,
                 journal: actor.handle(),
                 permit,
                 started: Some(started),
@@ -11574,7 +11584,9 @@ mod tests {
         reserve(first, first_started_tx);
         reserve(second, second_started_tx);
 
-        first_started_rx.recv().expect("first worker starts");
+        first_started_rx
+            .recv_timeout(DEFAULT_REQUEST_TIMEOUT)
+            .expect("first worker starts");
         assert_eq!(
             journal.status(first).expect("first status loads").state,
             OperationState::Running
@@ -11584,10 +11596,14 @@ mod tests {
             OperationState::Queued
         );
 
-        assert!(first_cancellation.cancel(rootlight_operations::CancellationReason::ClientRequest));
+        // The first slice exceeds the second job's enqueue-time budget by construction.
         let first_completion = pool.completion().await.expect("first completion arrives");
+        assert!(first_completion.start.is_ok());
+        assert_eq!(first_completion.cancellation_reason, None);
         first_completion.permit.finish();
-        second_started_rx.recv().expect("second worker starts");
+        second_started_rx
+            .recv_timeout(DEFAULT_REQUEST_TIMEOUT)
+            .expect("second worker starts with a fresh handshake deadline");
         assert_eq!(
             journal.status(second).expect("second status loads").state,
             OperationState::Running
