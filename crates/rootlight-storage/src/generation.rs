@@ -1407,29 +1407,6 @@ impl<'a> GenerationContext<'a> {
     }
 }
 
-/// A backend-neutral reader for one immutable, pinned generation.
-pub trait GenerationReader: Send + Sync {
-    /// Typed backend error with a source-redacted display contract.
-    type Error: Error + Send + Sync + 'static;
-
-    /// Returns the pinned generation metadata.
-    fn metadata(&self) -> GenerationMetadata;
-
-    /// Returns verified generation cardinalities.
-    fn stats(&self) -> GenerationStats;
-
-    /// Materializes an identity-verified generation within the supplied limits.
-    ///
-    /// # Errors
-    ///
-    /// Returns the backend error for cancellation, budget, compatibility,
-    /// corruption, or storage failures.
-    fn read_generation(
-        &self,
-        context: &GenerationContext<'_>,
-    ) -> Result<IdentityVerifiedGeneration, Self::Error>;
-}
-
 /// A backend-neutral writer that consumes one identity-verified generation.
 pub trait GenerationWriter {
     /// Typed backend error with a source-redacted display contract.

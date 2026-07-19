@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod codec;
+mod indexed_read;
 mod read;
 mod schema;
 mod write;
@@ -22,11 +23,15 @@ use std::{
     sync::Mutex,
 };
 
-use rootlight_ids::ContentHash;
+use rootlight_ids::{ContentHash, FactId, FileId, SymbolId};
+use rootlight_ir::{
+    CoverageRecord, EntityRecord, FileRecord, OccurrenceRecord, ProvenanceRecord, RelationRecord,
+};
 use rootlight_storage::{
-    GenerationContext, GenerationControlError, GenerationMetadata, GenerationReader,
-    GenerationResource, GenerationSnapshot, GenerationStats, GenerationValidationError,
-    GenerationWriter, IdentityVerificationError, IdentityVerifiedGeneration,
+    CoverageReadRequest, GENERATION_CONTRACT_VERSION, GenerationContext, GenerationControlError,
+    GenerationMetadata, GenerationReader, GenerationResource, GenerationSnapshot, GenerationStats,
+    GenerationValidationError, GenerationWriter, IdentityVerificationError,
+    IdentityVerifiedGeneration, OccurrenceReadRequest, ReadPage, RelationReadRequest,
 };
 use rusqlite::Connection;
 
@@ -306,6 +311,19 @@ impl OracleReader {
             },
         )
     }
+
+    fn with_indexed_connection<T>(
+        &self,
+        context: &GenerationContext<'_>,
+        read: impl FnOnce(&Connection) -> Result<T, CatalogError>,
+    ) -> Result<T, CatalogError> {
+        require_indexed_contract(self.metadata)?;
+        context.check().map_err(CatalogError::control)?;
+        let connection = schema::open_oracle_reader(&self.path, context)?;
+        let result = read(&connection)?;
+        context.check().map_err(CatalogError::control)?;
+        Ok(result)
+    }
 }
 
 impl fmt::Debug for OracleReader {
@@ -327,6 +345,84 @@ impl GenerationReader for OracleReader {
 
     fn stats(&self) -> GenerationStats {
         self.stats
+    }
+
+    fn file(
+        &self,
+        id: FileId,
+        context: &GenerationContext<'_>,
+    ) -> Result<Option<FileRecord>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::file(connection, self.metadata, id, context)
+        })
+    }
+
+    fn entity(
+        &self,
+        id: SymbolId,
+        context: &GenerationContext<'_>,
+    ) -> Result<Option<EntityRecord>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::entity(connection, self.metadata, id, context)
+        })
+    }
+
+    fn relations(
+        &self,
+        request: &RelationReadRequest,
+        context: &GenerationContext<'_>,
+    ) -> Result<ReadPage<RelationRecord>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::relations(
+                connection,
+                self.metadata,
+                self.stats.relations(),
+                request,
+                context,
+            )
+        })
+    }
+
+    fn occurrences(
+        &self,
+        request: &OccurrenceReadRequest,
+        context: &GenerationContext<'_>,
+    ) -> Result<ReadPage<OccurrenceRecord>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::occurrences(
+                connection,
+                self.metadata,
+                self.stats.occurrences(),
+                request,
+                context,
+            )
+        })
+    }
+
+    fn provenance(
+        &self,
+        id: FactId,
+        context: &GenerationContext<'_>,
+    ) -> Result<Option<ProvenanceRecord>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::provenance(connection, self.metadata, id, context)
+        })
+    }
+
+    fn coverage(
+        &self,
+        request: &CoverageReadRequest,
+        context: &GenerationContext<'_>,
+    ) -> Result<ReadPage<CoverageRecord>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::coverage(
+                connection,
+                self.metadata,
+                self.stats.coverage(),
+                request,
+                context,
+            )
+        })
     }
 
     fn read_generation(
@@ -369,8 +465,24 @@ impl EphemeralOracleWriter {
         generation: IdentityVerifiedGeneration,
         context: &GenerationContext<'_>,
     ) -> Result<EphemeralOracleReader, CatalogError> {
+        self.seal_snapshot(generation.into_snapshot(), context)
+    }
+
+    #[cfg(test)]
+    fn seal_unverified_for_test(
+        self,
+        generation: GenerationSnapshot,
+        context: &GenerationContext<'_>,
+    ) -> Result<EphemeralOracleReader, CatalogError> {
+        self.seal_snapshot(generation, context)
+    }
+
+    fn seal_snapshot(
+        self,
+        snapshot: GenerationSnapshot,
+        context: &GenerationContext<'_>,
+    ) -> Result<EphemeralOracleReader, CatalogError> {
         let Self { mut connection } = self;
-        let snapshot = generation.into_snapshot();
         schema::install_generation_cancellation(&connection, context)?;
         let expected_stats = write::write_generation(&mut connection, &snapshot, context)?;
         schema::configure_ephemeral_oracle_reader(&connection, context)?;
@@ -466,6 +578,31 @@ impl EphemeralOracleReader {
             },
         )
     }
+
+    fn with_indexed_connection<T>(
+        &self,
+        context: &GenerationContext<'_>,
+        read: impl FnOnce(&Connection) -> Result<T, CatalogError>,
+    ) -> Result<T, CatalogError> {
+        require_indexed_contract(self.metadata)?;
+        context.check().map_err(CatalogError::control)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
+        schema::install_generation_cancellation(&connection, context)?;
+        let result = read(&connection)?;
+        context.check().map_err(CatalogError::control)?;
+        Ok(result)
+    }
+}
+
+fn require_indexed_contract(metadata: GenerationMetadata) -> Result<(), CatalogError> {
+    if metadata.contract_version() == GENERATION_CONTRACT_VERSION {
+        Ok(())
+    } else {
+        Err(CatalogError::new(CatalogErrorKind::IdentityProofRequired))
+    }
 }
 
 impl fmt::Debug for EphemeralOracleReader {
@@ -487,6 +624,84 @@ impl GenerationReader for EphemeralOracleReader {
 
     fn stats(&self) -> GenerationStats {
         self.stats
+    }
+
+    fn file(
+        &self,
+        id: FileId,
+        context: &GenerationContext<'_>,
+    ) -> Result<Option<FileRecord>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::file(connection, self.metadata, id, context)
+        })
+    }
+
+    fn entity(
+        &self,
+        id: SymbolId,
+        context: &GenerationContext<'_>,
+    ) -> Result<Option<EntityRecord>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::entity(connection, self.metadata, id, context)
+        })
+    }
+
+    fn relations(
+        &self,
+        request: &RelationReadRequest,
+        context: &GenerationContext<'_>,
+    ) -> Result<ReadPage<RelationRecord>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::relations(
+                connection,
+                self.metadata,
+                self.stats.relations(),
+                request,
+                context,
+            )
+        })
+    }
+
+    fn occurrences(
+        &self,
+        request: &OccurrenceReadRequest,
+        context: &GenerationContext<'_>,
+    ) -> Result<ReadPage<OccurrenceRecord>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::occurrences(
+                connection,
+                self.metadata,
+                self.stats.occurrences(),
+                request,
+                context,
+            )
+        })
+    }
+
+    fn provenance(
+        &self,
+        id: FactId,
+        context: &GenerationContext<'_>,
+    ) -> Result<Option<ProvenanceRecord>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::provenance(connection, self.metadata, id, context)
+        })
+    }
+
+    fn coverage(
+        &self,
+        request: &CoverageReadRequest,
+        context: &GenerationContext<'_>,
+    ) -> Result<ReadPage<CoverageRecord>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::coverage(
+                connection,
+                self.metadata,
+                self.stats.coverage(),
+                request,
+                context,
+            )
+        })
     }
 
     fn read_generation(

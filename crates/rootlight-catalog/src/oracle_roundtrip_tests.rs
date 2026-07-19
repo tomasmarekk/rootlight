@@ -21,25 +21,28 @@ use rootlight_adapter_treesitter::{
 };
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::{
-    CATALOG_FILENAME, Catalog, CatalogErrorKind, ORACLE_FILENAME, OracleReader, OracleWriter,
-    catalog_schema_compatibility, oracle_schema_compatibility,
+    CATALOG_FILENAME, Catalog, CatalogError, CatalogErrorKind, EphemeralOracleWriter,
+    ORACLE_FILENAME, OracleReader, OracleWriter, catalog_schema_compatibility,
+    oracle_schema_compatibility,
 };
 use rootlight_ids::{
     FactId, FileId, GenerationIdentity, content_hash, derive_generation, derive_repository,
 };
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageStatus, ExtensionCriticality, ExtensionIdentifier,
-    ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FileIdentityClaim,
-    FilePathLocator, FilePathLocatorEncoding, FileRecord, IrDocument, IrLimits, ProducerIdentity,
-    ProducerKind, ProvenanceRecord, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, SourceSpan,
-    decode_file_identity_claim_envelope, decode_ir_document, decode_symbol_identity_claim_envelope,
-    derive_provenance_record_id, new_file_identity_claim_envelope,
-    new_symbol_identity_claim_envelope,
+    ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, FactDomain, FactEvidence, FileIdentityClaim,
+    FilePathLocator, FilePathLocatorEncoding, FileRecord, IrDocument, IrLimits, OccurrenceRole,
+    ProducerIdentity, ProducerKind, ProvenanceRecord, RelationPredicate,
+    SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef, SourceSpan, decode_file_identity_claim_envelope,
+    decode_ir_document, decode_symbol_identity_claim_envelope, derive_coverage_record_id,
+    derive_occurrence_record_id, derive_provenance_record_id, derive_relation_record_id,
+    new_file_identity_claim_envelope, new_symbol_identity_claim_envelope,
 };
 use rootlight_storage::{
-    GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationManifestRecipe,
-    GenerationMetadata, GenerationReader, GenerationSnapshot, IdentityVerificationError,
-    IdentityVerifiedGeneration,
+    CoverageReadRequest, GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext,
+    GenerationManifestRecipe, GenerationMetadata, GenerationReadLimit, GenerationReader,
+    GenerationSnapshot, IdentityVerificationError, IdentityVerifiedGeneration,
+    OccurrenceReadRequest, ReadPageCompleteness, RelationReadDirection, RelationReadRequest,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot};
 use rusqlite::Connection;
@@ -212,6 +215,187 @@ fn write_fixture(directory: &Path) -> GenerationSnapshot {
     generation
 }
 
+fn indexed_fixture_snapshot() -> GenerationSnapshot {
+    let mut document = fixture_documents().0;
+    let provenance = &mut document.provenance[0];
+    provenance.id =
+        derive_provenance_record_id(provenance).expect("fixture provenance identity derives");
+    let provenance_id = provenance.id;
+    for record in &mut document.files {
+        record.provenance = provenance_id;
+    }
+    for record in &mut document.entities {
+        record.provenance = provenance_id;
+    }
+    for record in &mut document.occurrences {
+        record.provenance = provenance_id;
+        record.id =
+            derive_occurrence_record_id(record).expect("fixture occurrence identity derives");
+    }
+    for record in &mut document.relations {
+        record.provenance = provenance_id;
+        record.id = derive_relation_record_id(record).expect("fixture relation identity derives");
+    }
+    for record in &mut document.source_mappings {
+        record.provenance = provenance_id;
+    }
+    for record in &mut document.coverage_records {
+        record.provenance = provenance_id;
+        record.id = derive_coverage_record_id(record).expect("fixture coverage identity derives");
+    }
+    for record in &mut document.skipped_regions {
+        record.provenance = provenance_id;
+    }
+    for record in &mut document.diagnostics {
+        record.provenance = provenance_id;
+    }
+    for record in &mut document.extensions {
+        record.provenance = provenance_id;
+    }
+
+    let mut second_occurrence = document.occurrences[0].clone();
+    second_occurrence.role = OccurrenceRole::Reference;
+    second_occurrence.syntax_kind = "identifier.reference".to_owned();
+    second_occurrence.id = derive_occurrence_record_id(&second_occurrence)
+        .expect("second occurrence identity derives");
+    document.occurrences.push(second_occurrence);
+
+    let mut second_relation = document.relations[0].clone();
+    second_relation.predicate = RelationPredicate::Contains;
+    second_relation.id =
+        derive_relation_record_id(&second_relation).expect("second relation identity derives");
+    document.relations.push(second_relation);
+
+    let mut second_coverage = document.coverage_records[0].clone();
+    second_coverage.domain = FactDomain::Relations;
+    second_coverage.discovered = 2;
+    second_coverage.indexed = 2;
+    second_coverage.skipped = 0;
+    second_coverage.id =
+        derive_coverage_record_id(&second_coverage).expect("second coverage identity derives");
+    document.coverage_records.push(second_coverage);
+
+    snapshot(document)
+}
+
+fn assert_indexed_conformance<R>(
+    reader: &R,
+    expected: &GenerationSnapshot,
+    context: &GenerationContext<'_>,
+) where
+    R: GenerationReader<Error = CatalogError>,
+{
+    let document = expected.document();
+    for file in &document.files {
+        assert_eq!(
+            reader.file(file.id, context).expect("file read succeeds"),
+            Some(file.clone())
+        );
+    }
+    assert_eq!(
+        reader
+            .file(FileId::from_bytes([0xff; 20]), context)
+            .expect("missing file read succeeds"),
+        None
+    );
+    let entity = &document.entities[0];
+    assert_eq!(
+        reader
+            .entity(entity.id, context)
+            .expect("entity read succeeds"),
+        Some(entity.clone())
+    );
+    let provenance = &document.provenance[0];
+    assert_eq!(
+        reader
+            .provenance(provenance.id, context)
+            .expect("provenance read succeeds"),
+        Some(provenance.clone())
+    );
+
+    let limit = GenerationReadLimit::new(1).expect("one-record page is valid");
+    let relation_anchor = document.relations[0].subject;
+    let relation_request =
+        RelationReadRequest::new(relation_anchor, RelationReadDirection::Outgoing, limit);
+    let first_relations = reader
+        .relations(&relation_request, context)
+        .expect("first relation page reads");
+    assert_eq!(
+        first_relations.total_available(),
+        u64::try_from(document.relations.len()).expect("fixture relation count fits")
+    );
+    assert_eq!(
+        first_relations.completeness(),
+        ReadPageCompleteness::Truncated
+    );
+    let relation_cursor = first_relations
+        .next_cursor()
+        .expect("truncated relation page has a cursor");
+    let second_relations = reader
+        .relations(
+            &relation_request.clone().with_after(relation_cursor),
+            context,
+        )
+        .expect("second relation page reads");
+    assert_eq!(
+        second_relations.completeness(),
+        ReadPageCompleteness::Complete
+    );
+    let mut observed_relations = first_relations.into_items();
+    observed_relations.extend(second_relations.into_items());
+    assert_eq!(observed_relations, document.relations);
+
+    let predicate = document.relations[0].predicate;
+    let filtered = reader
+        .relations(
+            &relation_request
+                .with_predicates(vec![predicate])
+                .expect("predicate filter is bounded"),
+            context,
+        )
+        .expect("filtered relations read");
+    assert_eq!(filtered.total_available(), 1);
+    assert_eq!(filtered.items(), &[document.relations[0].clone()]);
+
+    let occurrence_file = document.occurrences[0].file;
+    let occurrence_request = OccurrenceReadRequest::new(occurrence_file, limit);
+    let first_occurrences = reader
+        .occurrences(&occurrence_request, context)
+        .expect("first occurrence page reads");
+    assert_eq!(
+        first_occurrences.completeness(),
+        ReadPageCompleteness::Truncated
+    );
+    let occurrence_cursor = first_occurrences
+        .next_cursor()
+        .expect("truncated occurrence page has a cursor");
+    let second_occurrences = reader
+        .occurrences(&occurrence_request.with_after(occurrence_cursor), context)
+        .expect("second occurrence page reads");
+    let mut observed_occurrences = first_occurrences.into_items();
+    observed_occurrences.extend(second_occurrences.into_items());
+    assert_eq!(observed_occurrences, document.occurrences);
+
+    let coverage_scope = document.coverage_records[0].scope;
+    let coverage_request = CoverageReadRequest::new(coverage_scope, limit);
+    let first_coverage = reader
+        .coverage(&coverage_request, context)
+        .expect("first coverage page reads");
+    assert_eq!(
+        first_coverage.completeness(),
+        ReadPageCompleteness::Truncated
+    );
+    let coverage_cursor = first_coverage
+        .next_cursor()
+        .expect("truncated coverage page has a cursor");
+    let second_coverage = reader
+        .coverage(&coverage_request.with_after(coverage_cursor), context)
+        .expect("second coverage page reads");
+    let mut observed_coverage = first_coverage.into_items();
+    observed_coverage.extend(second_coverage.into_items());
+    assert_eq!(observed_coverage, document.coverage_records);
+}
+
 #[test]
 fn control_catalog_owns_only_the_exact_private_filename() {
     let directory = TempDir::new().expect("temporary state root is created");
@@ -341,6 +525,59 @@ fn rebuild_and_insertion_order_have_equal_logical_results() {
         u64::try_from(stored_rows).expect("fixture cardinality is nonnegative"),
         first.stats().stored_rows()
     );
+}
+
+#[test]
+fn indexed_readers_share_bounded_stable_cursor_semantics() {
+    let directory = TempDir::new().expect("temporary generation directory is created");
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let expected = indexed_fixture_snapshot();
+    let path_reader = OracleWriter::create_in(directory.path())
+        .expect("path oracle target is created")
+        .seal_unverified_for_test(expected.clone(), &context)
+        .expect("path oracle seals");
+    let ephemeral_reader = EphemeralOracleWriter::create()
+        .expect("ephemeral oracle initializes")
+        .seal_unverified_for_test(expected.clone(), &context)
+        .expect("ephemeral oracle seals");
+
+    assert_indexed_conformance(&path_reader, &expected, &context);
+    assert_indexed_conformance(&ephemeral_reader, &expected, &context);
+
+    let file = expected.document().files[0].id;
+    let cancelled = Cancellation::new();
+    assert!(cancelled.cancel(CancellationReason::ClientRequest));
+    let cancelled_context = default_context(&cancelled);
+    for error in [
+        path_reader
+            .file(file, &cancelled_context)
+            .expect_err("path indexed read observes cancellation"),
+        ephemeral_reader
+            .file(file, &cancelled_context)
+            .expect_err("ephemeral indexed read observes cancellation"),
+    ] {
+        assert_eq!(error.kind(), CatalogErrorKind::Cancelled);
+    }
+
+    let constrained = Cancellation::new();
+    let constrained_context = GenerationContext::new(
+        &constrained,
+        GenerationBudget::new(1, 1, 1).expect("tiny read budget is valid"),
+    );
+    for error in [
+        path_reader
+            .file(file, &constrained_context)
+            .expect_err("path indexed read enforces its budget"),
+        ephemeral_reader
+            .file(file, &constrained_context)
+            .expect_err("ephemeral indexed read enforces its budget"),
+    ] {
+        assert!(matches!(
+            error.kind(),
+            CatalogErrorKind::BudgetExceeded { .. }
+        ));
+    }
 }
 
 #[test]
