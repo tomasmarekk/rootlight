@@ -348,6 +348,42 @@ fn language_mismatch_does_not_masquerade_as_a_kind_failure() {
     assert_eq!(batch.decisions[0].explanation.rejected_total, 1);
 }
 
+#[test]
+fn tier_d_evidence_never_becomes_an_exact_semantic_binding() {
+    let mut fixture = Fixture::new();
+    let symbol = fixture.add_entity(
+        90,
+        "syntax_only",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    fixture.add_occurrence(
+        91,
+        "syntax_only",
+        fixture.primary_file,
+        OccurrenceRole::Reference,
+        None,
+    );
+    fixture.document.provenance[0].tier = AnalysisTier::TierD;
+    fixture.document.entities[0].tier = AnalysisTier::TierD;
+    fixture.validate();
+
+    let batch = ResolutionEngine::default()
+        .resolve(&fixture.document, &Cancellation::new())
+        .expect("valid syntax-only fixture resolves conservatively");
+
+    assert_eq!(
+        batch.decisions[0].outcome,
+        ResolutionOutcome::Candidates {
+            symbols: vec![symbol],
+            total_count: 1,
+            completeness: CoverageStatus::Complete,
+            confidence: Confidence::new(399).expect("tier-D ceiling is valid"),
+        }
+    );
+}
+
 struct Fixture {
     document: NormalizedIrDocument,
     primary_file: FileId,

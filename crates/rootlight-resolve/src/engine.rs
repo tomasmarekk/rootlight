@@ -6,11 +6,11 @@
 use std::collections::BTreeMap;
 
 use rootlight_cancel::Cancellation;
-use rootlight_ids::{ContentHash, FileId, SymbolId, content_hash};
+use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
 use rootlight_ir::{
-    Confidence, ContainerRef, CoverageStatus, EntityKind, EntityRecord, ExtensionSupport,
-    FileRecord, IrLimits, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
-    validate_ir_document,
+    AnalysisTier, Confidence, ContainerRef, CoverageStatus, EntityKind, EntityRecord,
+    ExtensionSupport, FileRecord, IrLimits, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole,
+    OccurrenceTarget, ProvenanceRecord, validate_ir_document,
 };
 
 use crate::model::{
@@ -216,6 +216,7 @@ struct CandidateIndex<'a> {
     by_name_hash: BTreeMap<ContentHash, Vec<&'a EntityRecord>>,
     entities: BTreeMap<SymbolId, &'a EntityRecord>,
     files: BTreeMap<FileId, &'a FileRecord>,
+    provenance: BTreeMap<FactId, &'a ProvenanceRecord>,
 }
 
 impl<'a> CandidateIndex<'a> {
@@ -226,6 +227,7 @@ impl<'a> CandidateIndex<'a> {
         let mut by_name_hash = BTreeMap::<ContentHash, Vec<&EntityRecord>>::new();
         let mut entities = BTreeMap::new();
         let mut files = BTreeMap::new();
+        let mut provenance = BTreeMap::new();
         for file in &document.files {
             cancellation.check()?;
             files.insert(file.id, file);
@@ -238,6 +240,10 @@ impl<'a> CandidateIndex<'a> {
                 .or_default()
                 .push(entity);
         }
+        for record in &document.provenance {
+            cancellation.check()?;
+            provenance.insert(record.id, record);
+        }
         for entries in by_name_hash.values_mut() {
             entries.sort_unstable_by_key(|entity| entity.id);
         }
@@ -245,6 +251,7 @@ impl<'a> CandidateIndex<'a> {
             by_name_hash,
             entities,
             files,
+            provenance,
         })
     }
 }
@@ -291,9 +298,16 @@ fn score_candidate(
         penalties.push(ResolutionPenalty::CrossFile);
     }
 
+    let occurrence_tier = index
+        .provenance
+        .get(&occurrence.provenance)
+        .map(|provenance| provenance.tier)
+        .ok_or(ResolutionError::InvalidScore)?;
+    let tier_ceiling = confidence_ceiling(occurrence_tier).min(confidence_ceiling(entity.tier));
+
     Ok(CandidateExplanation {
         symbol: entity.id,
-        score: confidence(score.min(1_000))?,
+        score: confidence(score.min(tier_ceiling))?,
         positive_signals,
         penalties,
     })
@@ -332,6 +346,16 @@ fn entity_source_file(entity: &EntityRecord) -> Option<FileId> {
 
 fn confidence(score: u16) -> Result<Confidence, ResolutionError> {
     Confidence::new(score).map_err(|_| ResolutionError::InvalidScore)
+}
+
+fn confidence_ceiling(tier: AnalysisTier) -> u16 {
+    match tier {
+        AnalysisTier::TierA => 1_000,
+        AnalysisTier::TierB => 999,
+        AnalysisTier::TierC => 699,
+        AnalysisTier::TierD => 399,
+        _ => 399,
+    }
 }
 
 fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> UnresolvedReason {
