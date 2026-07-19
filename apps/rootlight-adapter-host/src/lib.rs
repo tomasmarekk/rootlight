@@ -22,8 +22,13 @@ use rootlight_protocol::{
         common::v1::{ContractVersion, ExtensionDescriptor},
     },
 };
+use serde::Serialize;
 
 const NORMALIZED_IR_CAPABILITY: &str = "normalized_ir";
+/// Version of the machine-readable platform isolation evidence.
+pub const ISOLATION_EVIDENCE_SCHEMA: &str = "rootlight.adapter-isolation/1";
+/// Maximum encoded size of one platform isolation report.
+pub const ISOLATION_EVIDENCE_MAX_BYTES: usize = 16 * 1024;
 
 /// Controls required before Rootlight may activate an untrusted deep adapter.
 pub const REQUIRED_SANDBOX_CONTROLS: [SandboxControl; 9] = [
@@ -39,7 +44,8 @@ pub const REQUIRED_SANDBOX_CONTROLS: [SandboxControl; 9] = [
 ];
 
 /// A security property that must be enforced outside the daemon process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SandboxControl {
     /// The process can observe only approved immutable inputs.
@@ -63,7 +69,8 @@ pub enum SandboxControl {
 }
 
 /// Required platform family reported by the isolation probe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum HostPlatform {
     /// Linux sandbox backend.
@@ -172,7 +179,8 @@ impl IsolationReport {
 }
 
 /// Fail-closed tier decision made before process creation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AdapterActivation {
     /// All mandatory controls are enforced; a backend may create the process.
@@ -189,6 +197,74 @@ pub fn evaluate_adapter_activation(report: &IsolationReport) -> AdapterActivatio
     } else {
         AdapterActivation::StructuralFallback
     }
+}
+
+/// Encodes deterministic source-free platform isolation evidence.
+///
+/// The source revision must be a lowercase 40-digit hexadecimal Git object
+/// name. Controls are emitted in the reviewed required-control order.
+///
+/// # Errors
+///
+/// Returns [`AdapterHostError`] for an invalid revision, missing control,
+/// serialization failure, or an encoded report above its hard ceiling.
+pub fn encode_isolation_report(
+    report: &IsolationReport,
+    source_revision: &str,
+) -> Result<Vec<u8>, AdapterHostError> {
+    if source_revision.len() != 40
+        || source_revision
+            .bytes()
+            .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
+    {
+        return Err(AdapterHostError::SourceRevision);
+    }
+    let controls = REQUIRED_SANDBOX_CONTROLS
+        .into_iter()
+        .map(|control| {
+            let evidence = report
+                .control(control)
+                .ok_or(AdapterHostError::IsolationEvidence)?;
+            Ok(IsolationControlEvidence {
+                control,
+                enforced: evidence.is_enforced(),
+                reason_code: evidence.reason_code(),
+            })
+        })
+        .collect::<Result<Vec<_>, AdapterHostError>>()?;
+    let activation = evaluate_adapter_activation(report);
+    let evidence = IsolationEvidence {
+        schema: ISOLATION_EVIDENCE_SCHEMA,
+        source_revision,
+        platform: report.platform,
+        activation,
+        deep_adapter_permitted: activation == AdapterActivation::IsolatedDeep,
+        structural_fallback_active: activation == AdapterActivation::StructuralFallback,
+        controls,
+    };
+    let encoded = serde_json::to_vec(&evidence).map_err(|_| AdapterHostError::Encode)?;
+    if encoded.len() > ISOLATION_EVIDENCE_MAX_BYTES {
+        return Err(AdapterHostError::IsolationEvidence);
+    }
+    Ok(encoded)
+}
+
+#[derive(Debug, Serialize)]
+struct IsolationEvidence<'a> {
+    schema: &'static str,
+    source_revision: &'a str,
+    platform: HostPlatform,
+    activation: AdapterActivation,
+    deep_adapter_permitted: bool,
+    structural_fallback_active: bool,
+    controls: Vec<IsolationControlEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+struct IsolationControlEvidence {
+    control: SandboxControl,
+    enforced: bool,
+    reason_code: &'static str,
 }
 
 /// Generation-bound request identity retained across an untrusted process call.
@@ -494,6 +570,15 @@ pub enum AdapterHostError {
     /// A returned extension was not negotiated for the session.
     #[error("adapter result extension was not negotiated")]
     ExtensionMismatch,
+    /// Source revision was not a canonical full Git object name.
+    #[error("adapter isolation source revision is invalid")]
+    SourceRevision,
+    /// Required isolation evidence was missing or exceeded its hard ceiling.
+    #[error("adapter isolation evidence is invalid")]
+    IsolationEvidence,
+    /// Isolation evidence could not be serialized.
+    #[error("adapter isolation evidence encoding failed")]
+    Encode,
 }
 
 #[cfg(test)]
@@ -540,6 +625,41 @@ mod tests {
             evaluate_adapter_activation(&complete),
             AdapterActivation::IsolatedDeep
         );
+    }
+
+    #[test]
+    fn isolation_evidence_is_deterministic_complete_and_source_bound() {
+        let report = IsolationReport::current();
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let first = encode_isolation_report(&report, revision).expect("report encodes");
+        let second = encode_isolation_report(&report, revision).expect("report re-encodes");
+        assert_eq!(first, second);
+        assert!(first.len() <= ISOLATION_EVIDENCE_MAX_BYTES);
+
+        let value: serde_json::Value = serde_json::from_slice(&first).expect("report JSON decodes");
+        assert_eq!(value["schema"], ISOLATION_EVIDENCE_SCHEMA);
+        assert_eq!(value["source_revision"], revision);
+        assert_eq!(value["activation"], "structural_fallback");
+        assert_eq!(value["deep_adapter_permitted"], false);
+        assert_eq!(value["structural_fallback_active"], true);
+        assert_eq!(
+            value["controls"]
+                .as_array()
+                .expect("controls are an array")
+                .len(),
+            REQUIRED_SANDBOX_CONTROLS.len()
+        );
+        assert!(
+            value["controls"]
+                .as_array()
+                .expect("controls are an array")
+                .iter()
+                .all(|control| control["enforced"] == false)
+        );
+        assert!(matches!(
+            encode_isolation_report(&report, "not-a-revision"),
+            Err(AdapterHostError::SourceRevision)
+        ));
     }
 
     #[test]

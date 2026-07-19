@@ -1799,6 +1799,7 @@ dependencies = [
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-protocol",
+ "serde",
  "serde_json",
  "thiserror",
 ]

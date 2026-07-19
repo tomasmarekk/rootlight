@@ -332,10 +332,117 @@ jobs:
             echo "- artifact digest: \`$ARTIFACT_DIGEST\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  adapter-isolation:
+    name: adapter isolation evidence / ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+            reason_prefix: linux
+          - os: windows-2025
+            platform: windows
+            reason_prefix: windows
+          - os: macos-15
+            platform: mac_os
+            reason_prefix: macos
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup show active-toolchain
+      - name: Generate deterministic fail-closed isolation evidence
+        shell: bash
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+          EXPECTED_REASON_PREFIX: ${{ matrix.reason_prefix }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          mkdir -p artifacts/adapter-isolation
+          cargo run --locked --quiet --package rootlight-adapter-host -- \
+            --report --source-revision "$SOURCE_REVISION" \
+            > "artifacts/adapter-isolation/$EXPECTED_PLATFORM.json"
+          cargo run --locked --quiet --package rootlight-adapter-host -- \
+            --report --source-revision "$SOURCE_REVISION" \
+            > "artifacts/adapter-isolation/$EXPECTED_PLATFORM.second.json"
+          cmp \
+            "artifacts/adapter-isolation/$EXPECTED_PLATFORM.json" \
+            "artifacts/adapter-isolation/$EXPECTED_PLATFORM.second.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          expected_controls = [
+              "filesystem_view",
+              "temporary_directory",
+              "network_egress",
+              "process_creation",
+              "memory",
+              "cpu",
+              "handles",
+              "dynamic_library_search",
+              "descendant_cleanup",
+          ]
+          platform = os.environ["EXPECTED_PLATFORM"]
+          path = Path(f"artifacts/adapter-isolation/{platform}.json")
+          evidence = json.loads(path.read_bytes())
+          expected = {
+              "schema": "rootlight.adapter-isolation/1",
+              "source_revision": os.environ["SOURCE_REVISION"],
+              "platform": platform,
+              "activation": "structural_fallback",
+              "deep_adapter_permitted": False,
+              "structural_fallback_active": True,
+          }
+          observed = {key: evidence.get(key) for key in expected}
+          if observed != expected:
+              raise SystemExit(
+                  f"adapter isolation evidence mismatch: {observed!r}"
+              )
+          controls = evidence.get("controls")
+          if not isinstance(controls, list):
+              raise SystemExit("adapter isolation controls are missing")
+          if [item.get("control") for item in controls] != expected_controls:
+              raise SystemExit("adapter isolation controls differ")
+          expected_reason = (
+              f"{os.environ['EXPECTED_REASON_PREFIX']}"
+              "_native_enforcement_not_implemented"
+          )
+          if any(
+              item.get("enforced") is not False
+              or item.get("reason_code") != expected_reason
+              for item in controls
+          ):
+              raise SystemExit("adapter isolation fallback evidence differs")
+          if path.stat().st_size > 16 * 1024:
+              raise SystemExit("adapter isolation evidence exceeds its ceiling")
+          PY
+          if grep --fixed-strings --binary-files=without-match "$PWD" \
+            "artifacts/adapter-isolation/$EXPECTED_PLATFORM.json"; then
+            echo "adapter isolation evidence contains the checkout path" >&2
+            exit 1
+          fi
+      - name: Upload immutable adapter isolation evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: adapter-isolation-${{ matrix.platform }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/adapter-isolation/${{ matrix.platform }}.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, parser-evidence]
+    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, parser-evidence, adapter-isolation]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -370,7 +477,7 @@ jobs:
               print(f"required CI jobs did not succeed: {failures}", file=sys.stderr)
               raise SystemExit(1)
           print(
-              "all required foundation, daemon, vertical-slice, and evidence CI jobs "
-              "satisfied their gates"
+              "all required foundation, daemon, vertical-slice, and evidence jobs "
+              "satisfied their requirements"
           )
           PY

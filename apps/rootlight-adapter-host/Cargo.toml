@@ -11,10 +11,9 @@ rootlight-cancel = { path = "../../crates/rootlight-cancel" }
 rootlight-ids = { path = "../../crates/rootlight-ids" }
 rootlight-ir = { path = "../../crates/rootlight-ir" }
 rootlight-protocol = { path = "../../crates/rootlight-protocol" }
-thiserror.workspace = true
-
-[dev-dependencies]
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
