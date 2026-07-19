@@ -109,8 +109,9 @@ impl ResolutionEngine {
         let mut rejected_total = 0_u64;
         let mut kind_rejection_total = 0_u64;
 
-        for entity in same_spelling {
+        for indexed in same_spelling {
             cancellation.check()?;
+            let entity = indexed.entity;
             let rejection = if entity.language != language {
                 Some(RejectionReason::LanguageMismatch)
             } else if !kind_supports_role(entity.kind, occurrence.role) {
@@ -135,7 +136,12 @@ impl ResolutionEngine {
                 }
                 continue;
             }
-            candidates.push(score_candidate(occurrence, entity, index)?);
+            candidates.push(score_candidate(
+                occurrence,
+                entity,
+                indexed.name_match,
+                index,
+            )?);
         }
 
         candidates.sort_unstable_by(|left, right| {
@@ -213,10 +219,23 @@ impl Default for ResolutionEngine {
 }
 
 struct CandidateIndex<'a> {
-    by_name_hash: BTreeMap<ContentHash, Vec<&'a EntityRecord>>,
+    by_name_hash: BTreeMap<ContentHash, Vec<IndexedCandidate<'a>>>,
     entities: BTreeMap<SymbolId, &'a EntityRecord>,
     files: BTreeMap<FileId, &'a FileRecord>,
     provenance: BTreeMap<FactId, &'a ProvenanceRecord>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum NameMatch {
+    Canonical,
+    Display,
+    Qualified,
+}
+
+#[derive(Clone, Copy)]
+struct IndexedCandidate<'a> {
+    entity: &'a EntityRecord,
+    name_match: NameMatch,
 }
 
 impl<'a> CandidateIndex<'a> {
@@ -224,7 +243,7 @@ impl<'a> CandidateIndex<'a> {
         document: &'a NormalizedIrDocument,
         cancellation: &Cancellation,
     ) -> Result<Self, ResolutionError> {
-        let mut by_name_hash = BTreeMap::<ContentHash, Vec<&EntityRecord>>::new();
+        let mut by_name_hash = BTreeMap::<ContentHash, Vec<IndexedCandidate<'_>>>::new();
         let mut entities = BTreeMap::new();
         let mut files = BTreeMap::new();
         let mut provenance = BTreeMap::new();
@@ -235,17 +254,32 @@ impl<'a> CandidateIndex<'a> {
         for entity in &document.entities {
             cancellation.check()?;
             entities.insert(entity.id, entity);
-            by_name_hash
-                .entry(content_hash(entity.canonical_name.as_bytes()))
-                .or_default()
-                .push(entity);
+            index_name(
+                &mut by_name_hash,
+                entity.canonical_name.as_bytes(),
+                entity,
+                NameMatch::Canonical,
+            );
+            index_name(
+                &mut by_name_hash,
+                entity.display_name.as_bytes(),
+                entity,
+                NameMatch::Display,
+            );
+            index_name(
+                &mut by_name_hash,
+                entity.qualified_name.as_bytes(),
+                entity,
+                NameMatch::Qualified,
+            );
         }
         for record in &document.provenance {
             cancellation.check()?;
             provenance.insert(record.id, record);
         }
         for entries in by_name_hash.values_mut() {
-            entries.sort_unstable_by_key(|entity| entity.id);
+            entries.sort_unstable_by_key(|entry| (entry.entity.id, entry.name_match));
+            entries.dedup_by_key(|entry| entry.entity.id);
         }
         Ok(Self {
             by_name_hash,
@@ -259,11 +293,12 @@ impl<'a> CandidateIndex<'a> {
 fn score_candidate(
     occurrence: &OccurrenceRecord,
     entity: &EntityRecord,
+    name_match: NameMatch,
     index: &CandidateIndex<'_>,
 ) -> Result<CandidateExplanation, ResolutionError> {
     let mut score = NAME_AND_LANGUAGE_SCORE;
     let mut positive_signals = vec![
-        ResolutionSignal::CanonicalNameHash,
+        name_match.signal(),
         ResolutionSignal::SameLanguage,
         ResolutionSignal::CompatibleKind,
     ];
@@ -311,6 +346,28 @@ fn score_candidate(
         positive_signals,
         penalties,
     })
+}
+
+impl NameMatch {
+    fn signal(self) -> ResolutionSignal {
+        match self {
+            Self::Canonical => ResolutionSignal::CanonicalNameHash,
+            Self::Display => ResolutionSignal::DisplayNameHash,
+            Self::Qualified => ResolutionSignal::QualifiedNameHash,
+        }
+    }
+}
+
+fn index_name<'a>(
+    index: &mut BTreeMap<ContentHash, Vec<IndexedCandidate<'a>>>,
+    name: &[u8],
+    entity: &'a EntityRecord,
+    name_match: NameMatch,
+) {
+    index
+        .entry(content_hash(name))
+        .or_default()
+        .push(IndexedCandidate { entity, name_match });
 }
 
 fn declaring_scope_depth(

@@ -79,6 +79,10 @@ pub enum ResolutionRule {
 pub enum ResolutionSignal {
     /// The entity canonical-name hash matches the occurrence text hash.
     CanonicalNameHash,
+    /// The entity presentation name matches an explicit alias spelling.
+    DisplayNameHash,
+    /// The entity qualified name matches the complete occurrence spelling.
+    QualifiedNameHash,
     /// The entity and containing file use the same language identity.
     SameLanguage,
     /// The entity is the enclosing symbol, such as a recursive call.

@@ -657,6 +657,53 @@ fn anchors_hierarchy_relations_on_the_enclosing_type() {
     }));
 }
 
+#[test]
+fn resolves_import_aliases_and_qualified_names() {
+    let mut fixture = Fixture::new();
+    let module = fixture.add_entity(
+        140,
+        "canonical_module",
+        fixture.primary_file,
+        EntityKind::Module,
+        None,
+    );
+    let entity = fixture
+        .document
+        .entities
+        .iter_mut()
+        .find(|entity| entity.id == module)
+        .expect("fixture module exists");
+    entity.display_name = "module_alias".to_owned();
+    entity.qualified_name = "workspace::canonical_module".to_owned();
+    fixture.add_occurrence(
+        141,
+        "module_alias",
+        fixture.primary_file,
+        OccurrenceRole::ImportUse,
+        None,
+    );
+    fixture.add_occurrence(
+        142,
+        "workspace::canonical_module",
+        fixture.primary_file,
+        OccurrenceRole::ImportUse,
+        None,
+    );
+    fixture.validate();
+
+    let batch = ResolutionEngine::default()
+        .resolve(&fixture.document, &Cancellation::new())
+        .expect("alias fixture resolves");
+
+    assert_eq!(batch.decisions.len(), 2);
+    assert!(batch.decisions.iter().all(|decision| {
+        matches!(
+            decision.outcome,
+            ResolutionOutcome::Resolved { symbol, .. } if symbol == module
+        )
+    }));
+}
+
 struct Fixture {
     document: NormalizedIrDocument,
     primary_file: FileId,
