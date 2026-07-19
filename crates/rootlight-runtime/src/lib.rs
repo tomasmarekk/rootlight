@@ -438,8 +438,8 @@ impl PrivateOutputFile {
     /// # Errors
     ///
     /// On macOS, returns [`RuntimeError::PrivateOutputSecurityPolicy`] with an unsupported source
-    /// until descriptor-bound inherited-ACL removal and verification plus identity-safe
-    /// publication are accepted and implemented.
+    /// while descriptor-bound inherited-ACL removal and verification plus identity-safe
+    /// publication remain unavailable.
     pub fn preflight() -> Result<(), RuntimeError> {
         #[cfg(target_os = "macos")]
         {
@@ -458,7 +458,7 @@ impl PrivateOutputFile {
     /// Returns [`RuntimeError::Io`] when the destination cannot be created exclusively. On macOS,
     /// returns [`RuntimeError::PrivateOutputSecurityPolicy`] with an unsupported source before any
     /// path inspection or filesystem mutation because the descriptor-bound ACL and identity-safe
-    /// publication boundary is not accepted or implemented.
+    /// publication boundary remains unavailable.
     pub fn create(path: &Path) -> Result<Self, RuntimeError> {
         #[cfg(target_os = "macos")]
         {
@@ -507,8 +507,8 @@ impl PrivateOutputFile {
     ///
     /// Returns [`RuntimeError`] when file or parent-directory synchronization fails. The
     /// destination is visible from [`Self::create`]; macOS callers cannot construct this handle
-    /// until the accepted descriptor-bound ACL and identity-safe publication boundary is
-    /// implemented.
+    /// while the descriptor-bound ACL and identity-safe publication boundary remains
+    /// unavailable.
     pub fn commit(mut self) -> Result<(), RuntimeError> {
         self.file.flush().map_err(RuntimeError::Io)?;
         self.file.sync_all().map_err(RuntimeError::Io)?;

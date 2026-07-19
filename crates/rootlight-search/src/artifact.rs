@@ -123,8 +123,8 @@ impl VerifiedLexicalArtifact {
     /// non-portable or colliding names, manifest drift, and all declared budget
     /// overruns. File contents are hashed through no-follow handles with
     /// cooperative cancellation checkpoints around every read.
-    /// Production path-backed verification remains unavailable until the
-    /// private file-handle boundary is accepted.
+    /// Production path-backed verification remains unavailable while the
+    /// private file-handle boundary is disabled.
     ///
     /// # Errors
     ///

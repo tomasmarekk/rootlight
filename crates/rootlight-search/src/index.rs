@@ -190,8 +190,8 @@ pub struct LexicalIndex {
 impl LexicalIndex {
     /// Consumes a verified artifact only when schema, metadata, count, and generation align.
     ///
-    /// Production path-backed opening remains unavailable until the private
-    /// file-handle boundary is accepted.
+    /// Production path-backed opening remains unavailable while the private
+    /// file-handle boundary is disabled.
     ///
     /// # Errors
     ///

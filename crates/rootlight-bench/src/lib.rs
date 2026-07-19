@@ -1,8 +1,8 @@
 //! Deterministic benchmark evidence for bounded parser and semantic checks.
 //!
 //! The crate is development-only: shipping binaries must not depend on it.
-//! Directory publication remains fail-closed until the VFS private-tree
-//! boundary is accepted; CI uses the canonical single-file fallback envelope.
+//! Directory publication remains fail-closed while the VFS private-tree
+//! boundary is disabled; CI uses the canonical single-file fallback envelope.
 
 #![forbid(unsafe_code)]
 

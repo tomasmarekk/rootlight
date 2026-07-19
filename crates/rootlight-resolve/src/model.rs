@@ -81,7 +81,7 @@ impl DynamicCallCalibration {
     /// Creates checked holdout evidence for one supported dynamic language.
     ///
     /// `precision_basis_points` uses 10,000 as 100 percent. Evidence is
-    /// accepted only for the dynamic-language adapters owned by this phase.
+    /// accepted only for registered dynamic-language adapters.
     ///
     /// # Errors
     ///

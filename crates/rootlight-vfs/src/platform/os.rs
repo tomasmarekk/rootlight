@@ -1,6 +1,6 @@
 //! Fail-closed mechanics for the disabled native platform boundary.
 //!
-//! No target receives a native implementation before the decision is accepted.
+//! Native implementations remain unavailable while the private-tree policy is disabled.
 
 use std::io;
 

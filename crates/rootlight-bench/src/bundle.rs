@@ -1582,8 +1582,8 @@ pub enum BundleError {
     /// The VFS account-private tree boundary is not available.
     #[error("result publication private-tree boundary is unavailable")]
     PublicationUnavailable(#[source] rootlight_vfs::platform::PlatformError),
-    /// The VFS boundary became available before production publication was implemented.
-    #[error("result publication remains disabled pending an accepted private-tree design")]
+    /// The VFS boundary became available while production publication remained disabled.
+    #[error("result publication remains disabled by the private-tree policy")]
     PublicationDisabled,
     /// The final destination already exists.
     #[error("result destination already exists")]
