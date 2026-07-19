@@ -16,7 +16,8 @@ const HARD_MAX_QUERY_MATCHES: usize = 1_048_576;
 const HARD_MAX_QUERY_CAPTURES: usize = 2_097_152;
 const HARD_MAX_QUERY_FACTS: usize = 1_048_576;
 
-const EXPECTED_CAPTURES: [&str; 11] = [
+const EXPECTED_CAPTURES: [&str; 12] = [
+    "call",
     "comment",
     "declaration",
     "definition",
@@ -42,6 +43,7 @@ pub(crate) enum StructuralRole {
     ScopeTrait,
     ScopeType,
     Definition,
+    Call,
     Reference,
     Comment,
     Documentation,
@@ -60,6 +62,7 @@ impl StructuralRole {
             "scope_trait" => Some(Self::ScopeTrait),
             "scope_type" => Some(Self::ScopeType),
             "definition" => Some(Self::Definition),
+            "call" => Some(Self::Call),
             "reference" => Some(Self::Reference),
             "comment" => Some(Self::Comment),
             "documentation" => Some(Self::Documentation),
@@ -76,7 +79,7 @@ impl StructuralRole {
             Self::Signature | Self::ScopeTrait | Self::ScopeType => SyntaxFactKind::Signature,
             Self::Import => SyntaxFactKind::Import,
             Self::Scope => SyntaxFactKind::Scope,
-            Self::Definition | Self::Reference => SyntaxFactKind::Occurrence,
+            Self::Definition | Self::Call | Self::Reference => SyntaxFactKind::Occurrence,
             Self::Comment | Self::Documentation => SyntaxFactKind::Comment,
             Self::StringLiteral => SyntaxFactKind::StringLiteral,
         }
@@ -93,6 +96,7 @@ impl StructuralRole {
             Self::ScopeTrait => "scope_trait",
             Self::ScopeType => "scope_type",
             Self::Definition => "definition",
+            Self::Call => "call",
             Self::Reference => "reference",
             Self::Comment => "comment",
             Self::Documentation => "documentation",
@@ -249,6 +253,12 @@ impl QueryPack {
                 let syntax = match role {
                     StructuralRole::ScopeTrait => "rust.impl_trait",
                     StructuralRole::ScopeType => "rust.impl_type",
+                    StructuralRole::Call => match family {
+                        GrammarFamily::Rust => "rust.call",
+                        GrammarFamily::Python => "python.call",
+                        GrammarFamily::JavaScript => "javascript.call",
+                        GrammarFamily::Java => "java.call",
+                    },
                     _ => canonical_syntax(family, capture.node.kind())
                         .ok_or_else(|| query_failure("query-node-kind"))?,
                 };

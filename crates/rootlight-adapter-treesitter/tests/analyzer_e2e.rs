@@ -163,6 +163,30 @@ fn real_analyzer_produces_valid_deterministic_ir_for_all_grammars() {
 }
 
 #[test]
+fn reviewed_queries_preserve_explicit_call_sites() {
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let extensions = ExtensionSupport::default();
+
+    for case in CASES.into_iter().take(3) {
+        let fixture = Fixture::new(case, case.source.as_bytes());
+        let analyzer = analyzer(&provider, case);
+        let request = request(&fixture.snapshot, &fixture.source, case, &limits);
+        let output = analyze(&analyzer, &request, &extensions);
+
+        assert!(
+            output
+                .document()
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.role == OccurrenceRole::CallSite),
+            "{} reviewed query omitted every call site",
+            case.name
+        );
+    }
+}
+
+#[test]
 fn real_analyzer_reports_invalid_utf8_without_source_material() {
     const SECRET: &str = "do-not-leak-this-source-material";
     let case = CASES[0];

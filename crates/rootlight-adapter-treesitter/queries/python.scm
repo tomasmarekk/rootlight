@@ -16,6 +16,12 @@
 [(import_statement) (import_from_statement)] @import
 (parameters) @signature
 (block) @scope
+(call
+  function: [
+    (identifier)
+    (attribute
+      attribute: (identifier))
+  ] @call)
 (identifier) @reference
 (comment) @comment
 

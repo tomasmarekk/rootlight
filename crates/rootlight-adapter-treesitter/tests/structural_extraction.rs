@@ -479,6 +479,7 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
     let entries: &[(&str, usize)] = match language {
         "rust" => &[
             ("rust.block.scope", 1),
+            ("rust.call.call", 1),
             ("rust.file.root", 1),
             ("rust.function.declaration", 1),
             ("rust.identifier.definition", 2),
@@ -491,6 +492,7 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
         ],
         "python" => &[
             ("python.block.scope", 2),
+            ("python.call.call", 1),
             ("python.class.declaration", 1),
             ("python.file.module", 1),
             ("python.function.declaration", 1),
@@ -504,6 +506,7 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
         ],
         "javascript" => &[
             ("javascript.block.scope", 1),
+            ("javascript.call.call", 1),
             ("javascript.class.declaration", 1),
             ("javascript.comment.documentation", 2),
             ("javascript.file.module", 1),

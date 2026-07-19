@@ -33,6 +33,12 @@
 (impl_item
   trait: (_) @scope_trait)
 (block) @scope
+(call_expression
+  function: [
+    (identifier)
+    (field_expression
+      field: (field_identifier))
+  ] @call)
 (identifier) @reference
 (type_identifier) @reference
 [(line_comment) (block_comment)] @comment

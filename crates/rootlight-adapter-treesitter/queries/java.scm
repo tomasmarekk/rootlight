@@ -44,6 +44,8 @@
   ")")
 
 (block) @scope
+(method_invocation
+  name: (identifier) @call)
 (identifier) @reference
 [(line_comment) (block_comment)] @comment
 

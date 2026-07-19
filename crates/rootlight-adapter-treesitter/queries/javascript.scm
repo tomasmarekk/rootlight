@@ -1,5 +1,5 @@
 ; Reviewed Tier C/D structural evidence for the pinned JavaScript grammar.
-; Captures describe source structure only; no call or name resolution is inferred.
+; Captures describe source structure only; no name resolution is inferred.
 
 (program) @root @module
 
@@ -20,6 +20,12 @@
 (import_statement) @import
 (formal_parameters) @signature
 (statement_block) @scope
+(call_expression
+  function: [
+    (identifier)
+    (member_expression
+      property: (property_identifier))
+  ] @call)
 [(identifier) (property_identifier)] @reference
 (comment) @comment
 
