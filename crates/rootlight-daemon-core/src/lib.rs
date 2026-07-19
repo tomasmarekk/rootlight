@@ -4372,16 +4372,16 @@ fn diagnostic_actor_loop(
             reply,
         } = command;
         if state.stopping.load(Ordering::Acquire) || Instant::now() >= deadline {
-            let _ = reply.send(ControlResponse::Error(request_timed_out()));
             state.busy.store(false, Ordering::Release);
+            let _ = reply.send(ControlResponse::Error(request_timed_out()));
             continue;
         }
         let response = match kind {
             DiagnosticKind::Quick => service.diagnostics_quick_until(deadline),
             DiagnosticKind::SupportBundle(schema) => service.support_bundle_until(schema, deadline),
         };
-        let _ = reply.send(response);
         state.busy.store(false, Ordering::Release);
+        let _ = reply.send(response);
     }
 }
 
