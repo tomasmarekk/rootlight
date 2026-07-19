@@ -731,10 +731,28 @@ fn collect_sparse_checkout(
         ["config", "--bool", "--get", "core.sparseCheckout"],
         cancellation,
     )?;
-    if !output.status.success() {
-        return Ok(SparseCheckoutState::Disabled);
+    sparse_checkout_from_probe(
+        output.status.success(),
+        output.status.code(),
+        &output.stdout,
+    )
+}
+
+fn sparse_checkout_from_probe(
+    succeeded: bool,
+    exit_code: Option<i32>,
+    output: &[u8],
+) -> Result<SparseCheckoutState, GitCollectError> {
+    if !succeeded {
+        if exit_code == Some(1) && trim_ascii(output).is_empty() {
+            return Ok(SparseCheckoutState::Disabled);
+        }
+        return Err(GitCollectError::CommandFailed {
+            operation: GitCollectOperation::SparseCheckout,
+            exit_code,
+        });
     }
-    match trim_ascii(&output.stdout) {
+    match trim_ascii(output) {
         b"false" => Ok(SparseCheckoutState::Disabled),
         b"true" => Ok(SparseCheckoutState::Unknown),
         _ => Err(GitCollectError::InvalidOutput {
@@ -771,8 +789,11 @@ fn collect_history(
         ["rev-parse", "--is-shallow-repository"],
         cancellation,
     )?;
-    let is_shallow =
-        shallow_output.status.success() && trim_ascii(&shallow_output.stdout) == b"true";
+    let is_shallow = shallow_repository_from_probe(
+        shallow_output.status.success(),
+        shallow_output.status.code(),
+        &shallow_output.stdout,
+    )?;
 
     if !output.status.success() {
         return Ok((
@@ -828,6 +849,26 @@ fn collect_history(
             truncation,
         },
     ))
+}
+
+fn shallow_repository_from_probe(
+    succeeded: bool,
+    exit_code: Option<i32>,
+    output: &[u8],
+) -> Result<bool, GitCollectError> {
+    if !succeeded {
+        return Err(GitCollectError::CommandFailed {
+            operation: GitCollectOperation::History,
+            exit_code,
+        });
+    }
+    match trim_ascii(output) {
+        b"false" => Ok(false),
+        b"true" => Ok(true),
+        _ => Err(GitCollectError::InvalidOutput {
+            operation: GitCollectOperation::History,
+        }),
+    }
 }
 
 fn parse_commits(
@@ -903,27 +944,33 @@ fn collect_changes(
         worktree: PRIMARY_WORKTREE.to_owned(),
     };
 
+    let staged_base = head_commit.map_or_else(
+        || RevisionSelector::Head {
+            worktree: PRIMARY_WORKTREE.to_owned(),
+        },
+        RevisionSelector::Commit,
+    );
+    let staged = collect_diff(
+        runner,
+        ["diff", "--cached"],
+        staged_base.clone(),
+        index.clone(),
+        limits,
+        cancellation,
+    )?;
+    candidates.extend(collect_rename_candidates(
+        runner,
+        ["diff", "--cached"],
+        staged_base,
+        index.clone(),
+        cancellation,
+    )?);
+    if !staged.changes.is_empty() {
+        change_sets.push(staged);
+    }
+
     if let Some(commit) = head_commit {
         let base = RevisionSelector::Commit(commit);
-        let staged = collect_diff(
-            runner,
-            ["diff", "--cached"],
-            base.clone(),
-            index.clone(),
-            limits,
-            cancellation,
-        )?;
-        candidates.extend(collect_rename_candidates(
-            runner,
-            ["diff", "--cached"],
-            base.clone(),
-            index.clone(),
-            cancellation,
-        )?);
-        if !staged.changes.is_empty() {
-            change_sets.push(staged);
-        }
-
         let mut combined = collect_diff(
             runner,
             ["diff", "HEAD"],
@@ -1311,4 +1358,66 @@ fn parse_text(value: &[u8], operation: GitCollectOperation) -> Result<String, Gi
 
 fn trim_ascii(value: &[u8]) -> &[u8] {
     value.trim_ascii()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sparse_checkout_probe_distinguishes_absence_from_failure() {
+        assert_eq!(
+            sparse_checkout_from_probe(true, Some(0), b"false\n")
+                .expect("explicit false is accepted"),
+            SparseCheckoutState::Disabled
+        );
+        assert_eq!(
+            sparse_checkout_from_probe(true, Some(0), b"true\n")
+                .expect("explicit true is accepted"),
+            SparseCheckoutState::Unknown
+        );
+        assert_eq!(
+            sparse_checkout_from_probe(false, Some(1), b"")
+                .expect("missing configuration is disabled"),
+            SparseCheckoutState::Disabled
+        );
+        assert!(matches!(
+            sparse_checkout_from_probe(false, Some(128), b""),
+            Err(GitCollectError::CommandFailed {
+                operation: GitCollectOperation::SparseCheckout,
+                ..
+            })
+        ));
+        assert!(matches!(
+            sparse_checkout_from_probe(true, Some(0), b"unknown"),
+            Err(GitCollectError::InvalidOutput {
+                operation: GitCollectOperation::SparseCheckout
+            })
+        ));
+    }
+
+    #[test]
+    fn shallow_repository_probe_requires_an_exact_successful_boolean() {
+        assert!(
+            !shallow_repository_from_probe(true, Some(0), b"false\n")
+                .expect("explicit false is accepted")
+        );
+        assert!(
+            shallow_repository_from_probe(true, Some(0), b"true\n")
+                .expect("explicit true is accepted")
+        );
+        assert!(matches!(
+            shallow_repository_from_probe(false, Some(128), b""),
+            Err(GitCollectError::CommandFailed {
+                operation: GitCollectOperation::History,
+                ..
+            })
+        ));
+        assert!(matches!(
+            shallow_repository_from_probe(true, Some(0), b"unknown"),
+            Err(GitCollectError::InvalidOutput {
+                operation: GitCollectOperation::History
+            })
+        ));
+    }
 }

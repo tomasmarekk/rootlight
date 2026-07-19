@@ -191,6 +191,36 @@ fn history_window_is_bounded_and_reports_truncation() {
 }
 
 #[test]
+fn unborn_repository_reports_indexed_files_as_staged_additions() {
+    let directory = initialized_repository();
+    fs::write(
+        directory.path().join("staged.rs"),
+        "pub fn staged_before_first_commit() {}\n",
+    )
+    .expect("unborn fixture source is written");
+    run_git(directory.path(), &["add", "--", "staged.rs"]);
+
+    let snapshot = collect_repository(
+        directory.path(),
+        repository(),
+        &GitLimits::default(),
+        collection_limits(8),
+        &Cancellation::new(),
+    )
+    .expect("unborn repository collection succeeds");
+    let input = snapshot.as_input();
+    assert!(matches!(input.worktrees[0].head, HeadState::Unborn { .. }));
+    assert!(input.change_sets.iter().any(|set| {
+        matches!(set.base, rootlight_git::RevisionSelector::Head { .. })
+            && matches!(set.head, rootlight_git::RevisionSelector::Index { .. })
+            && set.changes.iter().any(|change| {
+                change.kind == FileChangeKind::Added
+                    && change.after_path.as_deref() == Some("staged.rs")
+            })
+    }));
+}
+
+#[test]
 fn rename_signal_remains_candidate_evidence_beside_add_and_delete() {
     let directory = initialized_repository();
     write_and_commit(
