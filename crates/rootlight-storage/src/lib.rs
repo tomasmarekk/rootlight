@@ -7,6 +7,7 @@
 
 mod generation;
 mod lifecycle;
+mod migration;
 mod publication;
 mod reader;
 
@@ -23,6 +24,11 @@ pub use lifecycle::{
     HARD_MAX_GENERATION_LEASES, HARD_MAX_LIFECYCLE_BYTES, HARD_MAX_LIFECYCLE_GENERATIONS,
     HARD_MAX_RECLAIM_GENERATIONS, LeaseTick, LifecycleError, LifecycleLimits,
     PublicationSpaceEstimate, ReclaimPlan, ReclaimReceipt, ReclaimTransaction, RetentionPolicy,
+};
+pub use migration::{
+    HARD_MAX_MIGRATION_JOURNAL_BYTES, HARD_MAX_MIGRATION_STEPS, MIGRATION_JOURNAL_SCHEMA,
+    MigrationActivation, MigrationError, MigrationLimits, MigrationPlan, MigrationRegistry,
+    MigrationResumeAction, MigrationSession, MigrationStep, MigrationStepKind,
 };
 pub use publication::{
     GenerationArtifact, GenerationArtifactKind, HARD_MAX_PUBLICATION_ARTIFACT_BYTES,
