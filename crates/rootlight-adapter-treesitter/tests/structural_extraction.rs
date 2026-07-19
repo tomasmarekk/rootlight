@@ -640,7 +640,7 @@ fn assert_role_precedence(facts: &[SyntaxFact]) {
 }
 
 fn assert_python_non_doc_string(output: &ParseOutput, source: &[u8]) {
-    let target = "\"samostatný řetězec není dokumentace\"";
+    let target = "\"a standalone string is not documentation\"";
     let fact = output
         .facts()
         .iter()

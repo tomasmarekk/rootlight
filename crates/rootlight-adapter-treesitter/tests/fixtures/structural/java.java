@@ -2,15 +2,15 @@ package demo;
 
 import java.util.List;
 
-/** Kořenová dokumentace Ω. */
+/** Root-level documentation Ω. */
 @interface Marker {
-    /** Dokumentace elementu. */
+    /** Element documentation. */
     String value();
 }
 
 class Greeter {
     String greet(String name) {
-        String text = "Ahoj 🌍";
+        String text = "Hello 🌍";
         return name + text;
     }
 }

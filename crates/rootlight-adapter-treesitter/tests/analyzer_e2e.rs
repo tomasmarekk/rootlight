@@ -54,8 +54,8 @@ const CASES: [LanguageCase; 4] = [
         frontend: "tree-sitter-rust-0.24.2",
         source: include_str!("fixtures/structural/rust.rs"),
         generated: false,
-        body_before: " {\n        let text = \"Ahoj 🌍\";\n        greet(name);\n        text\n    }",
-        body_after: " {\r\n            let text = \"Ahoj 🌍\";\r\n            greet(name);\r\n            text\r\n    }",
+        body_before: " {\n        let text = \"Hello 🌍\";\n        greet(name);\n        text\n    }",
+        body_after: " {\r\n            let text = \"Hello 🌍\";\r\n            greet(name);\r\n            text\r\n    }",
     },
     LanguageCase {
         name: "python",
@@ -63,8 +63,8 @@ const CASES: [LanguageCase; 4] = [
         frontend: "tree-sitter-python-0.25.0",
         source: include_str!("fixtures/structural/python.py"),
         generated: true,
-        body_before: "def greet(self, name):\n        \"\"\"Dokumentace funkce.\"\"\"\n        text = \"Ahoj 🌍\"\n        print(name)\n        \"samostatný řetězec není dokumentace\"\n        return text",
-        body_after: "def greet(self, name):\r\n            \"\"\"Dokumentace funkce.\"\"\"\r\n            text = \"Ahoj 🌍\"\r\n            print(name)\r\n            \"samostatný řetězec není dokumentace\"\r\n            return text",
+        body_before: "def greet(self, name):\n        \"\"\"Function documentation.\"\"\"\n        text = \"Hello 🌍\"\n        print(name)\n        \"a standalone string is not documentation\"\n        return text",
+        body_after: "def greet(self, name):\r\n            \"\"\"Function documentation.\"\"\"\r\n            text = \"Hello 🌍\"\r\n            print(name)\r\n            \"a standalone string is not documentation\"\r\n            return text",
     },
     LanguageCase {
         name: "javascript",
@@ -72,8 +72,8 @@ const CASES: [LanguageCase; 4] = [
         frontend: "tree-sitter-javascript-0.25.0",
         source: include_str!("fixtures/structural/javascript.js"),
         generated: false,
-        body_before: "greet(name) {\n    const text = \"Ahoj 🌍\";\n    console.log(name);\n    return text;\n  }",
-        body_after: "greet(name) {\r\n        const text = \"Ahoj 🌍\";\r\n        console.log(name);\r\n        return text;\r\n  }",
+        body_before: "greet(name) {\n    const text = \"Hello 🌍\";\n    console.log(name);\n    return text;\n  }",
+        body_after: "greet(name) {\r\n        const text = \"Hello 🌍\";\r\n        console.log(name);\r\n        return text;\r\n  }",
     },
     LanguageCase {
         name: "java",
@@ -81,8 +81,8 @@ const CASES: [LanguageCase; 4] = [
         frontend: "tree-sitter-java-0.23.5",
         source: include_str!("fixtures/structural/java.java"),
         generated: true,
-        body_before: "String greet(String name) {\n        String text = \"Ahoj 🌍\";\n        return name + text;\n    }",
-        body_after: "String greet(String name) {\r\n            String text = \"Ahoj 🌍\";\r\n            return name + text;\r\n    }",
+        body_before: "String greet(String name) {\n        String text = \"Hello 🌍\";\n        return name + text;\n    }",
+        body_after: "String greet(String name) {\r\n            String text = \"Hello 🌍\";\r\n            return name + text;\r\n    }",
     },
 ];
 

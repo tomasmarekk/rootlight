@@ -1,11 +1,11 @@
-/** Kořenová dokumentace Ω. */
+/** Root-level documentation Ω. */
 
 import value from "./dep.js";
 
 class Greeter {
-  /** Dokumentace metody. */
+  /** Method documentation. */
   greet(name) {
-    const text = "Ahoj 🌍";
+    const text = "Hello 🌍";
     console.log(name);
     return text;
   }

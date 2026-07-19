@@ -1939,7 +1939,7 @@ mod tests {
         let (_directory, _manifest, index) = build(vec![
             document(2, "HTTPServer", "src/net/server.rs"),
             document(1, "query_budget", "src/search/budget.rs"),
-            document(3, "ŽlutýKůň", "src/unicode.rs"),
+            document(3, "CaféValue", "src/unicode.rs"),
         ]);
 
         assert_eq!(
@@ -1971,7 +1971,7 @@ mod tests {
             SymbolId::from_bytes([2; 20])
         );
         assert_eq!(
-            search(&index, "žlutý kůň", SearchMode::Text)[0].symbol_id,
+            search(&index, "café value", SearchMode::Text)[0].symbol_id,
             SymbolId::from_bytes([3; 20])
         );
     }

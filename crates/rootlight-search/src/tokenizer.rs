@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn lowercases_unicode_without_losing_boundaries() {
-        assert_eq!(tokens("ŽlutýKůň"), ["žlutý", "kůň"]);
+        assert_eq!(tokens("CaféValue"), ["café", "value"]);
         assert_eq!(tokens("Cafe\u{301}Value"), ["café", "value"]);
         assert_eq!(tokens("Straße STRASSE"), ["strasse", "strasse"]);
         assert_eq!(tokens("Σίσυφος ςσΣ"), ["σίσυφοσ", "σσ", "σ"]);

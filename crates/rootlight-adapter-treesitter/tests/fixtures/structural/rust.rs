@@ -1,11 +1,11 @@
-//! Kořenová dokumentace Ω.
+//! Root-level documentation Ω.
 
 use std::fmt;
 
 mod demo {
-    /// Pozdraví uživatele.
+    /// Greets the user.
     pub fn greet(name: &str) -> &'static str {
-        let text = "Ahoj 🌍";
+        let text = "Hello 🌍";
         greet(name);
         text
     }

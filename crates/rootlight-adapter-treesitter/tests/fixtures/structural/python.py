@@ -1,13 +1,13 @@
-"""Kořenová dokumentace Ω."""
+"""Root-level documentation Ω."""
 
 import os
 
 class Greeter:
-    """Dokumentace třídy."""
+    """Class documentation."""
 
     def greet(self, name):
-        """Dokumentace funkce."""
-        text = "Ahoj 🌍"
+        """Function documentation."""
+        text = "Hello 🌍"
         print(name)
-        "samostatný řetězec není dokumentace"
+        "a standalone string is not documentation"
         return text
