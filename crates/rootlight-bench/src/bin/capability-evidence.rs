@@ -91,7 +91,7 @@ fn encode_evidence(source_revision: &str) -> Result<Vec<u8>, &'static str> {
         semantic_expansion_eligible: false,
         semantic: SemanticCapability {
             status: SemanticStatus::ContractFixtureOnly,
-            declared_languages: ["go", "python", "rust", "typescript"],
+            declared_languages: ["go", "javascript", "python", "rust", "typescript"],
             observed_language_reports: 0,
             holdout_available: false,
             language_breakdown_available: false,
@@ -171,7 +171,7 @@ enum SafeOperatingMode {
 #[derive(Debug, Serialize)]
 struct SemanticCapability {
     status: SemanticStatus,
-    declared_languages: [&'static str; 4],
+    declared_languages: [&'static str; 5],
     observed_language_reports: u8,
     holdout_available: bool,
     language_breakdown_available: bool,

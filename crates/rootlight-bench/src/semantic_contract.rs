@@ -34,8 +34,13 @@ pub const SEMANTIC_EVIDENCE_ENVELOPE_MAX_BYTES: usize = 128 * 1024;
 /// Maximum reviewed expectations accepted by one semantic contract corpus.
 pub const SEMANTIC_EVIDENCE_MAX_EXPECTATIONS: usize = 65_536;
 
-const EXPECTED_PROFILES: [ExpectedProfile; 4] = [
+const EXPECTED_PROFILES: [ExpectedProfile; 5] = [
     ExpectedProfile::new("go", AnalysisTier::TierA, LanguageSemantics::Static),
+    ExpectedProfile::new(
+        "javascript",
+        AnalysisTier::TierB,
+        LanguageSemantics::Dynamic,
+    ),
     ExpectedProfile::new("python", AnalysisTier::TierB, LanguageSemantics::Dynamic),
     ExpectedProfile::new("rust", AnalysisTier::TierA, LanguageSemantics::Static),
     ExpectedProfile::new("typescript", AnalysisTier::TierA, LanguageSemantics::Static),
@@ -298,6 +303,9 @@ struct SemanticEvidenceEnvelope<'a> {
 fn language_evidence(
     registry: &LanguageAdapterRegistry,
 ) -> Result<Vec<LanguageEvidence>, SemanticEvidenceError> {
+    if registry.iter().len() != EXPECTED_PROFILES.len() {
+        return Err(SemanticEvidenceError::InvalidLanguageEvidence);
+    }
     EXPECTED_PROFILES
         .into_iter()
         .map(|expected| {
@@ -556,7 +564,7 @@ impl ExpectedProfile {
 
 #[cfg(test)]
 mod tests {
-    use rootlight_adapters::initial_semantic_registry;
+    use rootlight_adapters::{LanguageProfile, initial_semantic_registry};
     use rootlight_ids::{FactId, GenerationId, RepositoryId, SymbolId};
     use rootlight_ir::{Confidence, CoverageStatus};
     use rootlight_resolve::{
@@ -581,7 +589,7 @@ mod tests {
         assert_eq!(first_bytes, repeated_bytes);
         assert_eq!(first.disposition, EvidenceDisposition::ContractFixtureOnly);
         assert!(!first.production_acceptance_eligible);
-        assert_eq!(first.languages.len(), 4);
+        assert_eq!(first.languages.len(), 5);
         assert!(
             first
                 .languages
@@ -635,6 +643,20 @@ mod tests {
         let (batch, expectations) = corpus();
         assert!(matches!(
             build_semantic_evidence(&incomplete, &batch, &expectations),
+            Err(SemanticEvidenceError::InvalidLanguageEvidence)
+        ));
+
+        let mut extra_profiles = registry.iter().cloned().collect::<Vec<_>>();
+        extra_profiles.push(
+            LanguageProfile::new("ruby", AnalysisTier::TierB, LanguageSemantics::Dynamic)
+                .expect("additional profile is valid")
+                .with_uncertainty_codes(&["runtime_dispatch"])
+                .expect("additional uncertainty is valid"),
+        );
+        let extra =
+            LanguageAdapterRegistry::new(extra_profiles).expect("expanded registry is valid");
+        assert!(matches!(
+            build_semantic_evidence(&extra, &batch, &expectations),
             Err(SemanticEvidenceError::InvalidLanguageEvidence)
         ));
     }

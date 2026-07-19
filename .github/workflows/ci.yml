@@ -399,7 +399,13 @@ jobs:
               )
 
           languages = evidence.get("languages")
-          expected_languages = ["go", "python", "rust", "typescript"]
+          expected_languages = [
+              "go",
+              "javascript",
+              "python",
+              "rust",
+              "typescript",
+          ]
           if not isinstance(languages, list):
               raise SystemExit("semantic language evidence is missing")
           if [item.get("language") for item in languages] != expected_languages:
@@ -529,7 +535,13 @@ jobs:
           semantic = evidence.get("semantic")
           expected_semantic = {
               "status": "contract_fixture_only",
-              "declared_languages": ["go", "python", "rust", "typescript"],
+              "declared_languages": [
+                  "go",
+                  "javascript",
+                  "python",
+                  "rust",
+                  "typescript",
+              ],
               "observed_language_reports": 0,
               "holdout_available": False,
               "language_breakdown_available": False,
