@@ -9,10 +9,12 @@ use std::{
 };
 
 use rootlight_cancel::{Cancellation, CancellationReason};
+use rootlight_config::ConfigSnapshot;
 use rootlight_discovery::{
-    DiscoveryLimits, DiscoveryPolicy, IncrementalDiscoveryContext, discover_incremental,
+    DiscoveryError, DiscoveryLimits, DiscoveryPolicy, IncrementalDiscoveryContext,
+    correlate_incremental_manifest, discover, discover_incremental,
 };
-use rootlight_ids::{FactId, content_hash, derive_repository};
+use rootlight_ids::{FactId, RepositoryId, content_hash, derive_repository};
 use rootlight_incremental::{ChangeClass, FileChangeKind, ReconcileMode};
 use rootlight_vfs::{RelativePath, RepositoryRoot};
 use tempfile::{TempDir, tempdir_in};
@@ -279,5 +281,73 @@ fn cancelled_incremental_scan_stops_before_repository_work() {
         ),
         Err(rootlight_discovery::DiscoveryError::Cancelled(cancelled))
             if cancelled.reason() == CancellationReason::ClientRequest
+    ));
+}
+
+#[test]
+fn clean_manifest_must_match_the_incremental_observation() {
+    let temporary = local_tempdir();
+    fs::write(temporary.path().join("lib.rs"), b"pub fn value() {}\n")
+        .expect("fixture source is written");
+    let root = root(&temporary, b"incremental-manifest-correlation");
+    let config = ConfigSnapshot::resolve(&[]).expect("default config resolves");
+    let policy = policy();
+    let context = IncrementalDiscoveryContext::new(
+        config.hash(),
+        FactId::from_bytes([7; 20]),
+        content_hash(b"provider-v1"),
+    );
+    let observed = discover_incremental(
+        &root,
+        None,
+        context,
+        &policy,
+        ReconcileMode::Normal,
+        limits(),
+        &Cancellation::new(),
+    )
+    .expect("incremental observation succeeds");
+    let manifest = discover(&root, &config, &policy, limits(), &Cancellation::new())
+        .expect("clean discovery succeeds");
+    let correlated = correlate_incremental_manifest(
+        &observed,
+        None,
+        context,
+        &manifest,
+        limits(),
+        &Cancellation::new(),
+    )
+    .expect("matching observations correlate");
+    assert_eq!(
+        correlated.baseline().metadata().len(),
+        manifest.inputs.len()
+    );
+
+    let mut wrong_repository = manifest.clone();
+    wrong_repository.repository = RepositoryId::from_bytes([0x44; 16]);
+    assert!(matches!(
+        correlate_incremental_manifest(
+            &observed,
+            None,
+            context,
+            &wrong_repository,
+            limits(),
+            &Cancellation::new(),
+        ),
+        Err(DiscoveryError::IncrementalDrift)
+    ));
+
+    let mut drifted = manifest;
+    drifted.inputs[0].content_hash = content_hash(b"different bytes");
+    assert!(matches!(
+        correlate_incremental_manifest(
+            &observed,
+            None,
+            context,
+            &drifted,
+            limits(),
+            &Cancellation::new(),
+        ),
+        Err(DiscoveryError::IncrementalDrift)
     ));
 }

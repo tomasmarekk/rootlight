@@ -3,10 +3,13 @@
 //! Watcher events never enter this API. Complete bounded scans decide which
 //! files require content hashing and derive canonical typed generation changes.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    path::Path,
+};
 
 use rootlight_cancel::Cancellation;
-use rootlight_ids::{ContentHash, FactId, FileId, content_hash};
+use rootlight_ids::{ContentHash, FactId, FileId, RepositoryId, content_hash};
 use rootlight_incremental::{
     AuthoritativeScan, ChangeSet, FileChange, FileDescriptor, FileMetadata, IncrementalError,
     InputFingerprint, InputKey, InputSnapshot, MetadataBaseline, PlanningLimits,
@@ -14,7 +17,7 @@ use rootlight_incremental::{
 };
 use rootlight_vfs::{EntryKind, RelativePath, RepositoryRoot, SnapshotMetadata};
 
-use crate::{DiscoveryError, DiscoveryLimits, DiscoveryPolicy, child_path};
+use crate::{DiscoveryError, DiscoveryLimits, DiscoveryManifest, DiscoveryPolicy, child_path};
 
 /// Configuration and provider identities included in one incremental input set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +87,7 @@ impl IncrementalDiscoveryBaseline {
 /// Result of one complete authoritative incremental discovery scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncrementalDiscovery {
+    repository: RepositoryId,
     baseline: IncrementalDiscoveryBaseline,
     changes: ChangeSet,
     file_changes: Vec<FileChange>,
@@ -91,6 +95,12 @@ pub struct IncrementalDiscovery {
 }
 
 impl IncrementalDiscovery {
+    /// Returns the repository whose authoritative handle produced this scan.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
     /// Returns state suitable as the parent of the next reconcile.
     #[must_use]
     pub const fn baseline(&self) -> &IncrementalDiscoveryBaseline {
@@ -192,6 +202,138 @@ pub fn discover_incremental(
     };
 
     Ok(IncrementalDiscovery {
+        repository: root.repository(),
+        baseline,
+        changes,
+        file_changes,
+        hashed_files,
+    })
+}
+
+/// Correlates an incremental metadata result with one clean discovery manifest.
+///
+/// Clean discovery applies repository-scoped ignore files and content
+/// classification after the incremental candidate scan. This function makes
+/// the clean manifest the generation boundary: only its inputs enter the next
+/// baseline, and their paths, lengths, and content hashes must agree with the
+/// independently observed incremental result. No filesystem reads occur here.
+///
+/// # Errors
+///
+/// Returns [`DiscoveryError::IncrementalDrift`] when the two observations do
+/// not describe the same generation inputs or when the supplied context does
+/// not match them. Typed limit and cancellation errors are propagated.
+pub fn correlate_incremental_manifest(
+    observed: &IncrementalDiscovery,
+    parent: Option<&IncrementalDiscoveryBaseline>,
+    context: IncrementalDiscoveryContext,
+    manifest: &DiscoveryManifest,
+    limits: DiscoveryLimits,
+    cancellation: &Cancellation,
+) -> Result<IncrementalDiscovery, DiscoveryError> {
+    cancellation.check()?;
+    if manifest.repository != observed.repository()
+        || manifest.configuration_hash != context.configuration_revision()
+        || u64::try_from(manifest.inputs.len()).ok() != Some(manifest.coverage.included)
+    {
+        return Err(DiscoveryError::IncrementalDrift);
+    }
+
+    let reconcile_limits =
+        ReconcileLimits::new(limits.max_entries).map_err(map_incremental_error)?;
+    let planning_limits = planning_limits(limits)?;
+    let expected_observed_inputs = build_inputs(
+        observed.baseline().metadata(),
+        context,
+        planning_limits,
+        cancellation,
+    )?;
+    if &expected_observed_inputs != observed.baseline().inputs() {
+        return Err(DiscoveryError::IncrementalDrift);
+    }
+
+    let observed_files: BTreeMap<_, _> = observed
+        .baseline()
+        .metadata()
+        .files()
+        .map(|file| (file.descriptor().file(), file))
+        .collect();
+    let mut included = BTreeSet::new();
+    let mut included_paths = BTreeSet::new();
+    let mut scanned = Vec::with_capacity(manifest.inputs.len());
+    let mut manifest_hashes = BTreeMap::new();
+    for input in &manifest.inputs {
+        cancellation.check()?;
+        if !included.insert(input.file) {
+            return Err(DiscoveryError::Incremental(
+                IncrementalError::DuplicateFile { file: input.file },
+            ));
+        }
+        if !included_paths.insert(input.path.as_str()) {
+            return Err(DiscoveryError::IncrementalDrift);
+        }
+        let path = RelativePath::parse(Path::new(&input.path))?;
+        let observed_file = observed_files
+            .get(&input.file)
+            .copied()
+            .ok_or(DiscoveryError::IncrementalDrift)?;
+        let descriptor = observed_file.descriptor();
+        if descriptor.path_hash() != content_hash(path.identity_bytes())
+            || descriptor.metadata().length() != input.bytes
+            || observed_file.content_hash() != input.content_hash
+        {
+            return Err(DiscoveryError::IncrementalDrift);
+        }
+        scanned.push(ScannedFile::new(descriptor));
+        manifest_hashes.insert(input.file, input.content_hash);
+    }
+
+    let scan = AuthoritativeScan::new(scanned, reconcile_limits, cancellation)
+        .map_err(map_incremental_error)?;
+    let empty_metadata =
+        MetadataBaseline::new([], reconcile_limits, cancellation).map_err(map_incremental_error)?;
+    let empty_inputs =
+        InputSnapshot::new([], planning_limits, cancellation).map_err(map_incremental_error)?;
+    let parent_metadata = parent.map_or(&empty_metadata, IncrementalDiscoveryBaseline::metadata);
+    let parent_inputs = parent.map_or(&empty_inputs, IncrementalDiscoveryBaseline::inputs);
+    let plan = plan_reconcile(
+        parent_metadata,
+        &scan,
+        ReconcileMode::Normal,
+        reconcile_limits,
+        cancellation,
+    )
+    .map_err(map_incremental_error)?;
+    let mut requested_hashes = BTreeMap::new();
+    for file in plan.files_to_hash() {
+        cancellation.check()?;
+        let hash = manifest_hashes
+            .get(&file)
+            .copied()
+            .ok_or(DiscoveryError::IncrementalDrift)?;
+        requested_hashes.insert(file, hash);
+    }
+    let outcome = plan
+        .finish(&requested_hashes, reconcile_limits, cancellation)
+        .map_err(map_incremental_error)?;
+    let current_inputs = build_inputs(outcome.baseline(), context, planning_limits, cancellation)?;
+    let changes = parent_inputs
+        .changes_to(&current_inputs, planning_limits, cancellation)
+        .map_err(map_incremental_error)?;
+    let file_changes = outcome.changes().to_vec();
+    let hashed_files = observed
+        .hashed_files()
+        .iter()
+        .copied()
+        .filter(|file| included.contains(file))
+        .collect();
+    let baseline = IncrementalDiscoveryBaseline {
+        metadata: outcome.baseline().clone(),
+        inputs: current_inputs,
+    };
+
+    Ok(IncrementalDiscovery {
+        repository: observed.repository(),
         baseline,
         changes,
         file_changes,

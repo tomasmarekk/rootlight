@@ -28,7 +28,7 @@ mod incremental;
 
 pub use incremental::{
     IncrementalDiscovery, IncrementalDiscoveryBaseline, IncrementalDiscoveryContext,
-    discover_incremental,
+    correlate_incremental_manifest, discover_incremental,
 };
 
 /// Initial deterministic discovery-manifest version.
