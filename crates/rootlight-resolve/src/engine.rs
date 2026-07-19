@@ -34,7 +34,7 @@ const MAX_SCOPE_DEPTH: usize = 64;
 /// Language-neutral semantic candidate resolver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolutionEngine {
-    limits: ResolutionLimits,
+    pub(crate) limits: ResolutionLimits,
 }
 
 impl ResolutionEngine {

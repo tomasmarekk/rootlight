@@ -5,14 +5,15 @@
 
 #![forbid(unsafe_code)]
 
+mod application;
 mod engine;
 mod model;
 
 pub use engine::ResolutionEngine;
 pub use model::{
-    CandidateExplanation, CompletenessAssumption, DEFAULT_CANDIDATE_LIMIT, MAX_CANDIDATE_LIMIT,
-    RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, RejectedCandidate, RejectionReason,
-    ResolutionBatch, ResolutionDecision, ResolutionError, ResolutionExplanation,
+    AppliedResolution, CandidateExplanation, CompletenessAssumption, DEFAULT_CANDIDATE_LIMIT,
+    MAX_CANDIDATE_LIMIT, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, RejectedCandidate,
+    RejectionReason, ResolutionBatch, ResolutionDecision, ResolutionError, ResolutionExplanation,
     ResolutionLimitError, ResolutionLimits, ResolutionOutcome, ResolutionPenalty, ResolutionRule,
-    ResolutionSignal, UnresolvedReason,
+    ResolutionSignal, ResolverFactContext, UnresolvedReason,
 };

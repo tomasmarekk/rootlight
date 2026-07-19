@@ -4,8 +4,11 @@
 //! rejection details remain bounded by the same per-site resource ceiling.
 
 use rootlight_cancel::Cancelled;
-use rootlight_ids::{FactId, GenerationId, RepositoryId, SymbolId};
-use rootlight_ir::{Confidence, CoverageStatus, IrDocumentValidationError};
+use rootlight_ids::{ContentHash, FactId, GenerationId, RepositoryId, SymbolId};
+use rootlight_ir::{
+    Confidence, CoverageStatus, FactIdentityRecipeError, IrDocumentValidationError,
+    IrValidationError, NormalizedIrDocument,
+};
 
 /// Stable language-neutral resolver identity.
 pub const RESOLVER_PROVIDER_NAME: &str = "rootlight-resolve";
@@ -234,6 +237,35 @@ pub struct ResolutionBatch {
     pub decisions: Vec<ResolutionDecision>,
 }
 
+/// Immutable build identity supplied by the host applying resolver facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolverFactContext {
+    binary_digest: ContentHash,
+}
+
+impl ResolverFactContext {
+    /// Creates resolver-fact context from the producing binary digest.
+    #[must_use]
+    pub const fn new(binary_digest: ContentHash) -> Self {
+        Self { binary_digest }
+    }
+
+    /// Returns the producing binary digest recorded in resolver provenance.
+    #[must_use]
+    pub const fn binary_digest(self) -> ContentHash {
+        self.binary_digest
+    }
+}
+
+/// Canonical resolved IR paired with the decisions that produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedResolution {
+    /// Validated and canonicalized normalized facts.
+    pub document: NormalizedIrDocument,
+    /// Source-free decision and explanation bundle.
+    pub batch: ResolutionBatch,
+}
+
 /// Semantic resolution failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ResolutionError {
@@ -249,4 +281,13 @@ pub enum ResolutionError {
     /// An internal score escaped the documented confidence range.
     #[error("resolver score escaped the confidence range")]
     InvalidScore,
+    /// Resolver producer metadata violated normalized-IR label constraints.
+    #[error("resolver producer identity is invalid")]
+    InvalidProducer(#[source] IrValidationError),
+    /// A typed resolver fact identity could not be derived.
+    #[error("resolver fact identity could not be derived")]
+    FactIdentity(#[source] FactIdentityRecipeError),
+    /// Applying a changed fact would require an unsupported dependent identity cascade.
+    #[error("resolver application requires an unsupported dependent identity remap")]
+    UnsupportedIdentityRemap,
 }

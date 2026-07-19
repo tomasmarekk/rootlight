@@ -9,13 +9,14 @@ use rootlight_ids::{
 };
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, Confidence, ContainerRef, CoverageStatus, EntityFlag,
-    EntityKind, EntityRecord, EntityVisibility, ExtensionSupport, FactEvidence, FileRecord,
-    IrLimits, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
-    ProducerIdentity, ProducerKind, ProvenanceRecord, SourceRef, SourceSpan, validate_ir_document,
+    EntityKind, EntityRecord, EntityVisibility, EvidenceKind, ExtensionSupport, FactEvidence,
+    FactRef, FileRecord, IrLimits, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole,
+    OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord, RelationEndpoint,
+    RelationPredicate, RelationRecord, SourceRef, SourceSpan, validate_ir_document,
 };
 use rootlight_resolve::{
     CompletenessAssumption, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, ResolutionError,
-    ResolutionSignal, UnresolvedReason,
+    ResolutionSignal, ResolverFactContext, UnresolvedReason,
 };
 use rootlight_resolve::{ResolutionEngine, ResolutionLimits, ResolutionOutcome};
 
@@ -382,6 +383,164 @@ fn tier_d_evidence_never_becomes_an_exact_semantic_binding() {
             confidence: Confidence::new(399).expect("tier-D ceiling is valid"),
         }
     );
+}
+
+#[test]
+fn applies_exact_bindings_with_derived_provenance_and_identity() {
+    let mut fixture = Fixture::new();
+    let target = fixture.add_entity(
+        100,
+        "target",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    let original_occurrence = fixture.add_occurrence(
+        101,
+        "target",
+        fixture.primary_file,
+        OccurrenceRole::Reference,
+        None,
+    );
+    let relation_source = source_ref(
+        fixture.document.repository,
+        fixture.document.generation,
+        fixture.primary_file,
+        fixture.content_hash,
+        16,
+        24,
+    );
+    fixture.document.relations.push(RelationRecord {
+        id: FactId::from_bytes([102; 20]),
+        repository: fixture.document.repository,
+        generation: fixture.document.generation,
+        subject: RelationEndpoint::Entity(target),
+        predicate: RelationPredicate::DefinesAt,
+        object: RelationEndpoint::Occurrence(original_occurrence),
+        confidence: Confidence::new(1_000).expect("fixture confidence is valid"),
+        evidence_kind: EvidenceKind::Syntax,
+        provenance: fixture.provenance,
+        evidence: FactEvidence {
+            source: Some(relation_source),
+            derivation: vec![FactRef::Entity(target), FactRef::Fact(original_occurrence)],
+        },
+    });
+    fixture.validate();
+
+    let applied = ResolutionEngine::default()
+        .apply(
+            fixture.document,
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        )
+        .expect("valid exact binding applies");
+    validate_ir_document(
+        &applied.document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .expect("resolved IR remains valid");
+    let occurrence = &applied.document.occurrences[0];
+
+    assert_ne!(occurrence.id, original_occurrence);
+    assert_eq!(
+        occurrence.target,
+        OccurrenceTarget::Resolved { symbol: target }
+    );
+    let provenance = applied
+        .document
+        .provenance
+        .iter()
+        .find(|provenance| provenance.id == occurrence.provenance)
+        .expect("resolved occurrence provenance exists");
+    assert_eq!(provenance.producer_kind, ProducerKind::Rule);
+    assert_eq!(provenance.rule.as_deref(), Some("scope-v1.lexical_scope"));
+    assert!(applied.document.relations.iter().any(|relation| {
+        relation.subject == RelationEndpoint::Occurrence(occurrence.id)
+            && relation.predicate == RelationPredicate::RefersTo
+            && relation.object == RelationEndpoint::Entity(target)
+    }));
+    assert!(applied.document.relations.iter().any(|relation| {
+        relation.subject == RelationEndpoint::Entity(target)
+            && relation.predicate == RelationPredicate::DefinesAt
+            && relation.object == RelationEndpoint::Occurrence(occurrence.id)
+            && relation.id != FactId::from_bytes([102; 20])
+            && relation
+                .evidence
+                .derivation
+                .contains(&FactRef::Fact(occurrence.id))
+    }));
+}
+
+#[test]
+fn applies_ambiguous_calls_only_as_dispatch_candidates() {
+    let mut fixture = Fixture::new();
+    let first = fixture.add_entity(
+        110,
+        "dispatch",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    let second = fixture.add_entity(
+        111,
+        "dispatch",
+        fixture.primary_file,
+        EntityKind::Method,
+        None,
+    );
+    fixture.add_occurrence(
+        112,
+        "dispatch",
+        fixture.primary_file,
+        OccurrenceRole::CallSite,
+        None,
+    );
+    fixture.validate();
+
+    let applied = ResolutionEngine::default()
+        .apply(
+            fixture.document,
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        )
+        .expect("valid ambiguous call applies");
+    let occurrence = &applied.document.occurrences[0];
+    let OccurrenceTarget::Candidates {
+        symbols,
+        total_count,
+        completeness,
+    } = &occurrence.target
+    else {
+        panic!("ambiguous call must remain a candidate target");
+    };
+    let mut expected = vec![first, second];
+    expected.sort_unstable();
+    assert_eq!(symbols, &expected);
+    assert_eq!(*total_count, 2);
+    assert_eq!(*completeness, CoverageStatus::Complete);
+    assert!(
+        !applied
+            .document
+            .relations
+            .iter()
+            .any(|relation| relation.predicate == RelationPredicate::Calls)
+    );
+    let mut dispatch_targets = applied
+        .document
+        .relations
+        .iter()
+        .filter_map(|relation| {
+            (relation.predicate == RelationPredicate::DispatchCandidate).then_some(relation.object)
+        })
+        .collect::<Vec<_>>();
+    dispatch_targets.sort_unstable();
+    let mut expected_targets = expected
+        .into_iter()
+        .map(RelationEndpoint::Entity)
+        .collect::<Vec<_>>();
+    expected_targets.sort_unstable();
+    assert_eq!(dispatch_targets, expected_targets);
 }
 
 struct Fixture {
