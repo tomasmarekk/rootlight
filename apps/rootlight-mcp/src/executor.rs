@@ -527,7 +527,7 @@ where
                 | VerticalTool::PlanChange
                 | VerticalTool::ContextPack
                 | VerticalTool::QueryAdvanced
-                | VerticalTool::QueryBatch => Err(ToolExecutionError::new(unsupported.clone())),
+                | VerticalTool::QueryBatch => execute_intent_fallback(tool, arguments).await,
                 VerticalTool::OperationStatus => {
                     execute_operation_status(port, arguments, cancellation).await
                 }
@@ -558,6 +558,29 @@ impl<P> fmt::Debug for FirstSliceToolExecutor<P> {
             .debug_struct("FirstSliceToolExecutor")
             .finish_non_exhaustive()
     }
+}
+
+/// Executes a typed fallback response for intent tools pending daemon port.
+///
+/// Extracts repository and generation from the validated arguments and returns
+/// a schema-conformant empty result with bounded-fallback warning.
+async fn execute_intent_fallback(
+    tool: VerticalTool,
+    arguments: Map<String, Value>,
+) -> Result<Map<String, Value>, ToolExecutionError> {
+    let repository = arguments
+        .get("repository")
+        .and_then(|r| r.get("repository_id"))
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<rootlight_ids::RepositoryId>().ok())
+        .unwrap_or_else(|| rootlight_ids::RepositoryId::from_bytes([0; 16]));
+    let generation = arguments
+        .get("generation")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<rootlight_ids::GenerationId>().ok())
+        .unwrap_or_else(|| rootlight_ids::GenerationId::from_bytes([0; 20]));
+    let data = crate::fallback::empty_data_for_tool(tool.name());
+    crate::fallback::intent_fallback_response(repository, generation, data)
 }
 
 async fn execute_repository_index<P>(
