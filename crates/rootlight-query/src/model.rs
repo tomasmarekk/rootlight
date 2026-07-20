@@ -200,6 +200,8 @@ pub enum PlanKind {
     ChangeImpact,
     /// Build a bounded ordered change plan for explicit targets.
     PlanChange,
+    /// Compare two immutable generations for bounded semantic changes.
+    HistoryCompare,
     /// Read generation-bound source.
     SourceRead,
 }
@@ -1465,6 +1467,207 @@ pub struct PlanChangeResult {
     pub open_decisions: Vec<PlanChangeDecision>,
     /// Ready follow-up context-pack arguments.
     pub context_pack_request: PlanChangeContextPack,
+    /// Resource limits that stopped work, in deterministic execution order.
+    pub limiting_resources: Vec<QueryResource>,
+    /// Mandatory trust marker for repository-controlled values.
+    pub trust: RepositoryDataTrust,
+}
+
+/// Change category filter for a `history.compare` query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HistoryChangeKind {
+    /// Entity additions and removals.
+    Entities,
+    /// Signature modifications.
+    Signatures,
+    /// Relation additions and removals.
+    Relations,
+    /// Architectural boundary changes.
+    Architecture,
+    /// Ownership changes.
+    Ownership,
+    /// Test additions, removals, or modifications.
+    Tests,
+    /// Route or endpoint changes.
+    Routes,
+    /// Data schema changes.
+    Data,
+}
+
+impl HistoryChangeKind {
+    /// Returns the stable wire label shared with the MCP change-kind contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Entities => "entities",
+            Self::Signatures => "signatures",
+            Self::Relations => "relations",
+            Self::Architecture => "architecture",
+            Self::Ownership => "ownership",
+            Self::Tests => "tests",
+            Self::Routes => "routes",
+            Self::Data => "data",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "entities" => Some(Self::Entities),
+            "signatures" => Some(Self::Signatures),
+            "relations" => Some(Self::Relations),
+            "architecture" => Some(Self::Architecture),
+            "ownership" => Some(Self::Ownership),
+            "tests" => Some(Self::Tests),
+            "routes" => Some(Self::Routes),
+            "data" => Some(Self::Data),
+            _ => None,
+        }
+    }
+}
+
+/// Kind of semantic change detected between two generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HistorySemanticChangeKind {
+    /// A new entity was added.
+    Added,
+    /// An entity was removed.
+    Removed,
+    /// An entity body or location was modified without a kind change.
+    Modified,
+    /// An entity kind or signature span was modified.
+    SignatureModified,
+    /// A relation was added or removed.
+    RelationChanged,
+}
+
+impl HistorySemanticChangeKind {
+    /// Returns the stable wire label shared with the MCP semantic-change contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Removed => "removed",
+            Self::Modified => "modified",
+            Self::SignatureModified => "signature_modified",
+            Self::RelationChanged => "relation_changed",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "added" => Some(Self::Added),
+            "removed" => Some(Self::Removed),
+            "modified" => Some(Self::Modified),
+            "signature_modified" => Some(Self::SignatureModified),
+            "relation_changed" => Some(Self::RelationChanged),
+            _ => None,
+        }
+    }
+}
+
+/// Prevalidated `history.compare` plan.
+///
+/// The head generation is the plan's pinned generation; the base generation is
+/// carried explicitly so the result can name the resolved state pair.
+#[derive(Debug, Clone)]
+pub struct HistoryComparePlan {
+    pub(crate) base_generation: GenerationId,
+    pub(crate) change_kinds: BTreeSet<HistoryChangeKind>,
+    pub(crate) max_results: usize,
+    pub(crate) budget: QueryBudget,
+    pub(crate) explanation: PlanExplanation,
+}
+
+impl HistoryComparePlan {
+    /// Returns the deterministic plan explanation.
+    #[must_use]
+    pub const fn explanation(&self) -> &PlanExplanation {
+        &self.explanation
+    }
+}
+
+/// One semantic change between two generations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SemanticChangeRecord {
+    /// Kind of semantic change.
+    pub kind: HistorySemanticChangeKind,
+    /// Affected symbol identity.
+    pub symbol_id: SymbolId,
+    /// Entity kind label of the affected symbol.
+    pub entity_kind: String,
+    /// Whether this change is a breaking candidate.
+    pub breaking_candidate: bool,
+    /// Significance rank, 0 through 1000.
+    pub significance: u16,
+}
+
+/// Aggregate architecture delta between two generations.
+///
+/// This slice models no service or component-boundary graph, so every field is
+/// an honest zero rather than a fabricated delta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct HistoryArchitectureDelta {
+    /// Number of new cross-service edges; always zero in this slice.
+    pub new_cross_service_edges: u32,
+    /// Number of removed cross-service edges; always zero in this slice.
+    pub removed_cross_service_edges: u32,
+    /// Number of new component boundaries; always zero in this slice.
+    pub new_boundaries: u32,
+    /// Number of removed component boundaries; always zero in this slice.
+    pub removed_boundaries: u32,
+}
+
+/// One breaking-change candidate with consumer evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BreakingCandidateRecord {
+    /// Affected symbol identity.
+    pub symbol_id: SymbolId,
+    /// Number of known consumers in the base generation.
+    pub consumer_count: u32,
+    /// Whether the symbol is part of a public API surface.
+    pub is_public_surface: bool,
+    /// Source-free reason code.
+    pub reason: String,
+}
+
+/// One lineage match between base and head entities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LineageMatchRecord {
+    /// Base symbol identity.
+    pub base_symbol_id: SymbolId,
+    /// Head symbol identity.
+    pub head_symbol_id: SymbolId,
+    /// Match confidence, 0 through 1000.
+    pub confidence: u16,
+    /// Whether this is a rename rather than identity preservation.
+    pub is_rename: bool,
+}
+
+/// Data returned by a `history.compare` plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HistoryCompareResult {
+    /// Resolved base generation.
+    pub base_generation: GenerationId,
+    /// Resolved head generation that served the query.
+    pub head_generation: GenerationId,
+    /// Coverage of the comparison.
+    pub coverage: CoverageStatus,
+    /// Semantic changes in significance order.
+    pub changes: Vec<SemanticChangeRecord>,
+    /// Aggregate architecture delta.
+    pub architecture_delta: HistoryArchitectureDelta,
+    /// Breaking-change candidates in significance order.
+    pub breaking_candidates: Vec<BreakingCandidateRecord>,
+    /// Entity lineage matches in deterministic identity order.
+    pub lineage: Vec<LineageMatchRecord>,
     /// Resource limits that stopped work, in deterministic execution order.
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.

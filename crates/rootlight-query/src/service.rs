@@ -20,22 +20,24 @@ use crate::model::{
     ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesPlan,
     ArchitectureCyclesProjection, ArchitectureCyclesResult, ArchitectureHotspot,
     ArchitectureOverviewDerivedView, ArchitectureOverviewPlan, ArchitectureOverviewResult,
-    ArchitectureOverviewView, ChangeImpactClassification, ChangeImpactPlan, ChangeImpactResult,
-    ChangeImpactRiskLevel, ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadBlindSpot,
-    CodeDeadEntryPointPolicy, CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult,
-    CodeDeadSuppressionRule, CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent,
-    CyclePath, DeadCodeCandidate, DeadCodeClassification, FlowTraceEdge, FlowTraceFrontier,
-    FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult, ImpactEntryRecord,
-    ImpactGroupRecord, LocateHit, LocateMode, PlanChangeContextPack, PlanChangeDecision,
-    PlanChangeImpactSummary, PlanChangeObjective, PlanChangePlan, PlanChangeResult,
-    PlanChangeStepRecord, PlanEstimate, PlanExplanation, PlanKind, QueryBudget, QueryError,
-    QueryOperator, QueryResource, QueryResponse, QueryUsage, RankedTestSelection,
+    ArchitectureOverviewView, BreakingCandidateRecord, ChangeImpactClassification,
+    ChangeImpactPlan, ChangeImpactResult, ChangeImpactRiskLevel, ChangeImpactRiskSummary,
+    ChangeImpactTestCandidate, CodeDeadBlindSpot, CodeDeadEntryPointPolicy,
+    CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult, CodeDeadSuppressionRule,
+    CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent, CyclePath, DeadCodeCandidate,
+    DeadCodeClassification, FlowTraceEdge, FlowTraceFrontier, FlowTracePath, FlowTracePlan,
+    FlowTraceProjection, FlowTraceResult, HistoryArchitectureDelta, HistoryChangeKind,
+    HistoryComparePlan, HistoryCompareResult, HistorySemanticChangeKind, ImpactEntryRecord,
+    ImpactGroupRecord, LineageMatchRecord, LocateHit, LocateMode, PlanChangeContextPack,
+    PlanChangeDecision, PlanChangeImpactSummary, PlanChangeObjective, PlanChangePlan,
+    PlanChangeResult, PlanChangeStepRecord, PlanEstimate, PlanExplanation, PlanKind, QueryBudget,
+    QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage, RankedTestSelection,
     RelationDirection, RelationFamily, RelationshipEdgeTarget, RelationshipGroup,
-    RepositoryDataTrust, ResolvedChangeRecord, SourceChunkResult, SourceReadPlan,
-    SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
-    SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap, TestsSelectKind,
-    TestsSelectPlan, TestsSelectResult, TokenAccountingProfile, checked_add, checked_u128_to_u64,
-    checked_usize_to_u64, ensure_estimate, search_mode,
+    RepositoryDataTrust, ResolvedChangeRecord, SemanticChangeRecord, SourceChunkResult,
+    SourceReadPlan, SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult,
+    SymbolRelationshipsPlan, SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap,
+    TestsSelectKind, TestsSelectPlan, TestsSelectResult, TokenAccountingProfile, checked_add,
+    checked_u128_to_u64, checked_usize_to_u64, ensure_estimate, search_mode,
 };
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
@@ -1538,6 +1540,126 @@ where
             test_plan: analysis.test_plan,
             open_decisions: analysis.open_decisions,
             context_pack_request: analysis.context_pack_request,
+            limiting_resources,
+            trust: RepositoryDataTrust::UntrustedRepositoryData,
+        };
+        finish_response(plan.explanation.clone(), data, tracker, started, &control)
+    }
+
+    /// Builds a deterministic bounded `history.compare` plan.
+    ///
+    /// The plan pins the head generation to this service and carries the base
+    /// generation identity explicitly. The optional change-kind filter and the
+    /// result cap are validated here; scope bounding, unchanged-context
+    /// inclusion, custom budgets, and non-compact profiles are not modeled and
+    /// must be rejected by the caller before planning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid budget, an out-of-range result cap,
+    /// an oversized change-kind filter, arithmetic overflow, or a conservative
+    /// estimate that cannot be admitted.
+    pub fn plan_history_compare(
+        &self,
+        base_generation: GenerationId,
+        change_kinds: BTreeSet<HistoryChangeKind>,
+        max_results: usize,
+        budget: QueryBudget,
+    ) -> Result<HistoryComparePlan, QueryError> {
+        budget.validate()?;
+        if max_results == 0 || max_results > HISTORY_COMPARE_MAX_RESULTS {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if change_kinds.len() > HISTORY_COMPARE_MAX_CHANGE_KINDS {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if checked_usize_to_u64(max_results)? > budget.max_results {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        let estimate = PlanEstimate {
+            rows: budget.max_rows,
+            edges: budget.max_edges,
+            results: budget.max_results,
+            source_bytes: 0,
+            // Both normalized generations bound every record, while the query
+            // memory budget remains the conservative aggregate ceiling.
+            memory_bytes: budget.max_memory_bytes,
+            json_bytes: budget.max_json_bytes,
+            estimated_tokens: budget.max_tokens,
+            duration_micros: duration_micros(budget.max_duration),
+        };
+        ensure_estimate(estimate, budget)?;
+        let explanation = PlanExplanation {
+            generation: self.generation.metadata().generation(),
+            kind: PlanKind::HistoryCompare,
+            operators: vec![
+                QueryOperator::GenerationPin,
+                QueryOperator::EntityLookup,
+                QueryOperator::RelationScan,
+                QueryOperator::OutputBudget,
+            ],
+            estimate,
+        };
+        Ok(HistoryComparePlan {
+            base_generation,
+            change_kinds,
+            max_results,
+            budget,
+            explanation,
+        })
+    }
+
+    /// Executes a prevalidated `history.compare` plan.
+    ///
+    /// The head generation is this service's pinned generation; the caller
+    /// supplies the resolved base generation document. The scan diffs the two
+    /// entity sets by stable identity into added, removed, and modified changes,
+    /// records identity-preserved lineage matches, ranks breaking public-surface
+    /// removals and modifications by their base-generation consumer count, and
+    /// reports an honest zero architecture delta. Rows, results, and memory are
+    /// measured exactly like `change.impact`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
+    /// resource exhaustion.
+    pub fn execute_history_compare(
+        &self,
+        plan: &HistoryComparePlan,
+        base_document: &NormalizedIrDocument,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<HistoryCompareResult>, QueryError> {
+        self.require_generation(plan.explanation.generation)?;
+        let started = Instant::now();
+        let control = QueryControl::new(cancellation, plan.budget.max_duration);
+        control.check()?;
+        let head_document = self.generation.document();
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+
+        let analysis = build_history_compare(
+            base_document,
+            head_document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )?;
+
+        let data = HistoryCompareResult {
+            base_generation: plan.base_generation,
+            head_generation: self.generation.metadata().generation(),
+            coverage: analysis.coverage,
+            changes: analysis.changes,
+            architecture_delta: analysis.architecture_delta,
+            breaking_candidates: analysis.breaking_candidates,
+            lineage: analysis.lineage,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
@@ -3826,6 +3948,340 @@ fn plan_change_context_pack(
         .take(PLAN_CHANGE_MAX_CONTEXT_ITEMS)
         .collect();
     PlanChangeContextPack { symbols, files }
+}
+
+/// Maximum semantic changes, breaking candidates, or lineage matches carried in
+/// one `history.compare` result page.
+const HISTORY_COMPARE_MAX_RESULTS: usize = 1_000;
+
+/// Maximum change-kind filter categories admitted by one `history.compare` plan.
+const HISTORY_COMPARE_MAX_CHANGE_KINDS: usize = 8;
+
+/// Maximum breaking candidates carried in one `history.compare` result.
+const HISTORY_COMPARE_MAX_BREAKING: usize = 256;
+
+/// Comparable per-entity fingerprint used to diff two generations.
+///
+/// The fingerprint captures only what the normalized IR honestly exposes: the
+/// entity kind label, public-surface membership, and the definition source span.
+/// A kind or span difference is reported as a modification; rename and move
+/// detection are not claimed by this slice.
+struct HistoryEntityFingerprint {
+    kind_label: String,
+    is_public: bool,
+    source_file: Option<FileId>,
+    source_start: u64,
+    source_end: u64,
+}
+
+impl HistoryEntityFingerprint {
+    fn from_entity(entity: &rootlight_ir::EntityRecord) -> Result<Self, QueryError> {
+        let span = entity.evidence.source.as_ref().map(|source| source.span());
+        Ok(Self {
+            kind_label: serialized_label(&entity.kind)?,
+            is_public: entity_is_exported(entity),
+            source_file: span.map(|span| span.file()),
+            source_start: span.map_or(0, |span| span.start_byte()),
+            source_end: span.map_or(0, |span| span.end_byte()),
+        })
+    }
+
+    /// Returns whether the kind or definition source span differs from `other`.
+    fn signature_differs(&self, other: &Self) -> bool {
+        self.kind_label != other.kind_label
+            || self.source_file != other.source_file
+            || self.source_start != other.source_start
+            || self.source_end != other.source_end
+    }
+}
+
+/// Bounded `history.compare` analysis assembled before result emission.
+struct HistoryCompareAnalysis {
+    coverage: CoverageStatus,
+    changes: Vec<SemanticChangeRecord>,
+    architecture_delta: HistoryArchitectureDelta,
+    breaking_candidates: Vec<BreakingCandidateRecord>,
+    lineage: Vec<LineageMatchRecord>,
+}
+
+/// Builds a bounded semantic comparison between two generation documents.
+///
+/// The base and head entity sets are indexed by stable identity and diffed into
+/// added, removed, and modified changes. Identity-preserved symbols form honest
+/// lineage matches. Removed or modified public-surface symbols become breaking
+/// candidates ranked by their base-generation consumer count. The architecture
+/// delta is an honest zero because this slice models no service or boundary
+/// graph. Rows, edges, results, and memory are bounded exactly like
+/// `change.impact`.
+fn build_history_compare(
+    base_document: &NormalizedIrDocument,
+    head_document: &NormalizedIrDocument,
+    plan: &HistoryComparePlan,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<HistoryCompareAnalysis, QueryError> {
+    let base_entities = history_entity_index(base_document, control, tracker, limiting_resources)?;
+    let head_entities = history_entity_index(head_document, control, tracker, limiting_resources)?;
+
+    // Union of every observed identity in deterministic order.
+    let mut identities: BTreeSet<SymbolId> = BTreeSet::new();
+    identities.extend(base_entities.keys().copied());
+    identities.extend(head_entities.keys().copied());
+
+    let mut changes: Vec<SemanticChangeRecord> = Vec::new();
+    let mut lineage: Vec<LineageMatchRecord> = Vec::new();
+    // Breaking candidates carry their change significance for deterministic
+    // ordering; the consumer count is filled after one bounded relation scan.
+    let mut breaking: Vec<(u16, BreakingCandidateRecord)> = Vec::new();
+    let mut breaking_symbols: BTreeSet<SymbolId> = BTreeSet::new();
+
+    for symbol in identities {
+        control.check()?;
+        match (base_entities.get(&symbol), head_entities.get(&symbol)) {
+            (None, Some(head)) => {
+                let kind = HistorySemanticChangeKind::Added;
+                let change = SemanticChangeRecord {
+                    kind,
+                    symbol_id: symbol,
+                    entity_kind: head.kind_label.clone(),
+                    breaking_candidate: false,
+                    significance: history_significance(kind, false),
+                };
+                emit_cycle_value(&mut changes, change, tracker, limiting_resources, control)?;
+            }
+            (Some(base), None) => {
+                let kind = HistorySemanticChangeKind::Removed;
+                let breaking_candidate = base.is_public;
+                let significance = history_significance(kind, breaking_candidate);
+                let change = SemanticChangeRecord {
+                    kind,
+                    symbol_id: symbol,
+                    entity_kind: base.kind_label.clone(),
+                    breaking_candidate,
+                    significance,
+                };
+                emit_cycle_value(&mut changes, change, tracker, limiting_resources, control)?;
+                if breaking_candidate {
+                    breaking_symbols.insert(symbol);
+                    breaking.push((
+                        significance,
+                        BreakingCandidateRecord {
+                            symbol_id: symbol,
+                            consumer_count: 0,
+                            is_public_surface: true,
+                            reason: "removed_public_surface".to_owned(),
+                        },
+                    ));
+                }
+            }
+            (Some(base), Some(head)) => {
+                // Identity preserved: an honest lineage match, never a rename.
+                if lineage.len() < plan.max_results {
+                    emit_cycle_value(
+                        &mut lineage,
+                        LineageMatchRecord {
+                            base_symbol_id: symbol,
+                            head_symbol_id: symbol,
+                            confidence: 1_000,
+                            is_rename: false,
+                        },
+                        tracker,
+                        limiting_resources,
+                        control,
+                    )?;
+                }
+                // A kind or definition-span difference is a modification.
+                if base.signature_differs(head) {
+                    let kind = if base.kind_label != head.kind_label {
+                        HistorySemanticChangeKind::SignatureModified
+                    } else {
+                        HistorySemanticChangeKind::Modified
+                    };
+                    let breaking_candidate = head.is_public;
+                    let significance = history_significance(kind, breaking_candidate);
+                    let change = SemanticChangeRecord {
+                        kind,
+                        symbol_id: symbol,
+                        entity_kind: head.kind_label.clone(),
+                        breaking_candidate,
+                        significance,
+                    };
+                    emit_cycle_value(&mut changes, change, tracker, limiting_resources, control)?;
+                    if breaking_candidate {
+                        breaking_symbols.insert(symbol);
+                        breaking.push((
+                            significance,
+                            BreakingCandidateRecord {
+                                symbol_id: symbol,
+                                consumer_count: 0,
+                                is_public_surface: true,
+                                reason: "modified_public_surface".to_owned(),
+                            },
+                        ));
+                    }
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    // Fill base-generation consumer counts for the breaking candidates.
+    let incoming = count_history_incoming(
+        base_document,
+        &breaking_symbols,
+        control,
+        tracker,
+        limiting_resources,
+    )?;
+    for (_, candidate) in &mut breaking {
+        candidate.consumer_count = incoming.get(&candidate.symbol_id).copied().unwrap_or(0);
+    }
+
+    // Apply the optional change-kind filter.
+    if !plan.change_kinds.is_empty() {
+        changes.retain(|change| history_change_matches_filter(change.kind, &plan.change_kinds));
+    }
+
+    // Deterministic significance ordering under the result cap.
+    changes.sort_by(|left, right| {
+        right
+            .significance
+            .cmp(&left.significance)
+            .then_with(|| left.symbol_id.cmp(&right.symbol_id))
+    });
+    changes.truncate(plan.max_results);
+
+    breaking.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.symbol_id.cmp(&right.1.symbol_id))
+    });
+    let breaking_candidates: Vec<BreakingCandidateRecord> = breaking
+        .into_iter()
+        .take(plan.max_results.min(HISTORY_COMPARE_MAX_BREAKING))
+        .map(|(_, candidate)| candidate)
+        .collect();
+
+    // Lineage was emitted in deterministic identity order; cap it.
+    lineage.truncate(plan.max_results);
+
+    let coverage = if plan.base_generation == plan.explanation.generation {
+        // Comparing a generation against itself is trivially complete.
+        CoverageStatus::Complete
+    } else if limits_optional_results(limiting_resources) {
+        CoverageStatus::Sampled
+    } else {
+        // The entity diff is complete over both documents, but rename, move, and
+        // architecture detection are documented out-of-scope bounds.
+        CoverageStatus::Bounded
+    };
+
+    Ok(HistoryCompareAnalysis {
+        coverage,
+        changes,
+        architecture_delta: HistoryArchitectureDelta {
+            new_cross_service_edges: 0,
+            removed_cross_service_edges: 0,
+            new_boundaries: 0,
+            removed_boundaries: 0,
+        },
+        breaking_candidates,
+        lineage,
+    })
+}
+
+/// Indexes one generation's entities by stable identity under the row budget.
+fn history_entity_index(
+    document: &NormalizedIrDocument,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<BTreeMap<SymbolId, HistoryEntityFingerprint>, QueryError> {
+    let mut index: BTreeMap<SymbolId, HistoryEntityFingerprint> = BTreeMap::new();
+    for entity in &document.entities {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
+        tracker.add_rows(1)?;
+        index.insert(entity.id, HistoryEntityFingerprint::from_entity(entity)?);
+    }
+    Ok(index)
+}
+
+/// Counts incoming entity-to-entity relations for the breaking symbols in base.
+///
+/// A relation whose object endpoint resolves to a breaking symbol contributes
+/// one consumer; file endpoints and self-loops contribute nothing.
+fn count_history_incoming(
+    document: &NormalizedIrDocument,
+    breaking_symbols: &BTreeSet<SymbolId>,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<BTreeMap<SymbolId, u32>, QueryError> {
+    let mut incoming: BTreeMap<SymbolId, u32> = BTreeMap::new();
+    if breaking_symbols.is_empty() {
+        return Ok(incoming);
+    }
+    for relation in &document.relations {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Edges, 1) {
+            record_limit(limiting_resources, QueryResource::Edges)?;
+            break;
+        }
+        tracker.add_edges(1)?;
+        let Some(object) = endpoint_entity(document, relation.object) else {
+            continue;
+        };
+        if !breaking_symbols.contains(&object) {
+            continue;
+        }
+        let Some(subject) = endpoint_entity(document, relation.subject) else {
+            continue;
+        };
+        if subject == object {
+            continue;
+        }
+        let count = incoming.entry(object).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+    Ok(incoming)
+}
+
+/// Returns the deterministic significance rank for one semantic change.
+const fn history_significance(kind: HistorySemanticChangeKind, breaking_candidate: bool) -> u16 {
+    let base = match kind {
+        HistorySemanticChangeKind::Removed => 700,
+        HistorySemanticChangeKind::SignatureModified => 600,
+        HistorySemanticChangeKind::Modified => 400,
+        HistorySemanticChangeKind::RelationChanged => 300,
+        HistorySemanticChangeKind::Added => 200,
+    };
+    let boosted = if breaking_candidate { base + 300 } else { base };
+    if boosted > 1_000 { 1_000 } else { boosted }
+}
+
+/// Returns whether one semantic change kind satisfies the change-kind filter.
+fn history_change_matches_filter(
+    kind: HistorySemanticChangeKind,
+    filter: &BTreeSet<HistoryChangeKind>,
+) -> bool {
+    match kind {
+        HistorySemanticChangeKind::Added
+        | HistorySemanticChangeKind::Removed
+        | HistorySemanticChangeKind::Modified => filter.contains(&HistoryChangeKind::Entities),
+        HistorySemanticChangeKind::SignatureModified => {
+            filter.contains(&HistoryChangeKind::Entities)
+                || filter.contains(&HistoryChangeKind::Signatures)
+        }
+        HistorySemanticChangeKind::RelationChanged => {
+            filter.contains(&HistoryChangeKind::Relations)
+        }
+    }
 }
 
 /// Builds a directed outbound adjacency view over the requested projection.
@@ -6854,5 +7310,299 @@ mod tests {
         assert_eq!(first.open_decisions, second.open_decisions);
         assert_eq!(first.context_pack_request, second.context_pack_request);
         assert_eq!(first.test_plan, second.test_plan);
+    }
+
+    fn history_document(gen_byte: u8) -> NormalizedIrDocument {
+        NormalizedIrDocument::empty(
+            RepositoryId::from_bytes([7; 16]),
+            GenerationId::from_bytes([gen_byte; 20]),
+        )
+    }
+
+    fn history_generation(gen_byte: u8) -> GenerationId {
+        GenerationId::from_bytes([gen_byte; 20])
+    }
+
+    fn history_compare_plan(
+        base_generation: GenerationId,
+        head_generation: GenerationId,
+        change_kinds: BTreeSet<HistoryChangeKind>,
+        max_results: usize,
+    ) -> HistoryComparePlan {
+        HistoryComparePlan {
+            base_generation,
+            change_kinds,
+            max_results,
+            budget: QueryBudget::new(),
+            explanation: PlanExplanation {
+                generation: head_generation,
+                kind: PlanKind::HistoryCompare,
+                operators: Vec::new(),
+                estimate: PlanEstimate {
+                    rows: 0,
+                    edges: 0,
+                    results: 0,
+                    source_bytes: 0,
+                    memory_bytes: 0,
+                    json_bytes: 0,
+                    estimated_tokens: 0,
+                    duration_micros: 0,
+                },
+            },
+        }
+    }
+
+    fn run_history_compare(
+        base: &NormalizedIrDocument,
+        head: &NormalizedIrDocument,
+        plan: &HistoryComparePlan,
+    ) -> HistoryCompareAnalysis {
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+        build_history_compare(
+            base,
+            head,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("bounded history compare succeeds")
+    }
+
+    #[test]
+    fn history_compare_detects_added_removed_and_preserved_entities() {
+        let mut base = history_document(1);
+        add_file(&mut base, 1, "src/a.rs");
+        add_entity(&mut base, 11, 1, EntityKind::Function);
+        add_entity(&mut base, 12, 1, EntityKind::Function);
+
+        let mut head = history_document(2);
+        add_file(&mut head, 1, "src/a.rs");
+        add_entity(&mut head, 11, 1, EntityKind::Function);
+        add_entity(&mut head, 13, 1, EntityKind::Function);
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            100,
+        );
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        // The removed entity (significance 700) ranks before the addition (200).
+        assert_eq!(analysis.changes.len(), 2);
+        assert_eq!(analysis.changes[0].kind, HistorySemanticChangeKind::Removed);
+        assert_eq!(analysis.changes[0].symbol_id, symbol(12));
+        assert_eq!(analysis.changes[0].significance, 700);
+        assert!(!analysis.changes[0].breaking_candidate);
+        assert_eq!(analysis.changes[1].kind, HistorySemanticChangeKind::Added);
+        assert_eq!(analysis.changes[1].symbol_id, symbol(13));
+        assert_eq!(analysis.changes[1].significance, 200);
+
+        // The preserved identity forms an honest lineage match, never a rename.
+        assert_eq!(analysis.lineage.len(), 1);
+        assert_eq!(analysis.lineage[0].base_symbol_id, symbol(11));
+        assert_eq!(analysis.lineage[0].head_symbol_id, symbol(11));
+        assert_eq!(analysis.lineage[0].confidence, 1_000);
+        assert!(!analysis.lineage[0].is_rename);
+
+        // No public surface and no service model: no breaking candidates, zeros.
+        assert!(analysis.breaking_candidates.is_empty());
+        assert_eq!(analysis.architecture_delta.new_cross_service_edges, 0);
+        assert_eq!(analysis.architecture_delta.removed_cross_service_edges, 0);
+        assert_eq!(analysis.architecture_delta.new_boundaries, 0);
+        assert_eq!(analysis.architecture_delta.removed_boundaries, 0);
+        assert_eq!(analysis.coverage, CoverageStatus::Bounded);
+    }
+
+    #[test]
+    fn history_compare_flags_a_public_removal_as_breaking_with_consumer_count() {
+        let mut base = history_document(1);
+        add_file(&mut base, 1, "src/a.rs");
+        add_public_entity(&mut base, 21, 1, EntityKind::Function);
+        add_entity(&mut base, 22, 1, EntityKind::Function);
+        // 22 calls 21, so the removed public symbol has one base consumer.
+        add_calls(&mut base, 110, 22, 21, 900);
+
+        let mut head = history_document(2);
+        add_file(&mut head, 1, "src/a.rs");
+        add_entity(&mut head, 22, 1, EntityKind::Function);
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            100,
+        );
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        assert_eq!(analysis.changes[0].kind, HistorySemanticChangeKind::Removed);
+        assert_eq!(analysis.changes[0].symbol_id, symbol(21));
+        assert!(analysis.changes[0].breaking_candidate);
+        assert_eq!(analysis.changes[0].significance, 1_000);
+
+        assert_eq!(analysis.breaking_candidates.len(), 1);
+        assert_eq!(analysis.breaking_candidates[0].symbol_id, symbol(21));
+        assert_eq!(analysis.breaking_candidates[0].consumer_count, 1);
+        assert!(analysis.breaking_candidates[0].is_public_surface);
+        assert_eq!(
+            analysis.breaking_candidates[0].reason,
+            "removed_public_surface"
+        );
+    }
+
+    #[test]
+    fn history_compare_detects_a_kind_change_as_signature_modified() {
+        let mut base = history_document(1);
+        add_file(&mut base, 1, "src/a.rs");
+        add_entity(&mut base, 31, 1, EntityKind::Function);
+
+        let mut head = history_document(2);
+        add_file(&mut head, 1, "src/a.rs");
+        add_entity(&mut head, 31, 1, EntityKind::Struct);
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            100,
+        );
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        // The identity is preserved as lineage, but the kind change is a
+        // signature-level modification.
+        assert_eq!(analysis.changes.len(), 1);
+        assert_eq!(
+            analysis.changes[0].kind,
+            HistorySemanticChangeKind::SignatureModified
+        );
+        assert_eq!(analysis.changes[0].symbol_id, symbol(31));
+        assert_eq!(analysis.changes[0].significance, 600);
+        assert!(!analysis.changes[0].breaking_candidate);
+        assert_eq!(analysis.lineage.len(), 1);
+        assert_eq!(analysis.lineage[0].base_symbol_id, symbol(31));
+    }
+
+    #[test]
+    fn history_compare_reports_an_empty_complete_comparison_when_base_equals_head() {
+        let mut document = history_document(1);
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Function);
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(1),
+            BTreeSet::new(),
+            100,
+        );
+        let analysis = run_history_compare(&document, &document, &plan);
+
+        assert!(analysis.changes.is_empty());
+        assert!(analysis.breaking_candidates.is_empty());
+        assert_eq!(analysis.architecture_delta.new_cross_service_edges, 0);
+        assert_eq!(analysis.architecture_delta.removed_cross_service_edges, 0);
+        assert_eq!(analysis.architecture_delta.new_boundaries, 0);
+        assert_eq!(analysis.architecture_delta.removed_boundaries, 0);
+        assert_eq!(analysis.coverage, CoverageStatus::Complete);
+        // Both identities survive as honest, non-rename lineage matches.
+        assert_eq!(analysis.lineage.len(), 2);
+        assert!(analysis.lineage.iter().all(|lineage| {
+            lineage.base_symbol_id == lineage.head_symbol_id
+                && !lineage.is_rename
+                && lineage.confidence == 1_000
+        }));
+    }
+
+    #[test]
+    fn history_compare_honors_the_change_kind_filter() {
+        let mut base = history_document(1);
+        add_file(&mut base, 1, "src/a.rs");
+        add_entity(&mut base, 12, 1, EntityKind::Function);
+
+        let mut head = history_document(2);
+        add_file(&mut head, 1, "src/a.rs");
+        add_entity(&mut head, 13, 1, EntityKind::Function);
+
+        let entities = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::from([HistoryChangeKind::Entities]),
+            100,
+        );
+        let analysis = run_history_compare(&base, &head, &entities);
+        assert_eq!(analysis.changes.len(), 2);
+
+        // A signatures-only filter admits no entity addition or removal.
+        let signatures = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::from([HistoryChangeKind::Signatures]),
+            100,
+        );
+        let analysis = run_history_compare(&base, &head, &signatures);
+        assert!(analysis.changes.is_empty());
+    }
+
+    #[test]
+    fn history_compare_honors_the_max_results_cap() {
+        let base = history_document(1);
+        let mut head = history_document(2);
+        add_file(&mut head, 1, "src/a.rs");
+        for byte in [41u8, 42, 43, 44] {
+            add_entity(&mut head, byte, 1, EntityKind::Function);
+        }
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            2,
+        );
+        let analysis = run_history_compare(&base, &head, &plan);
+
+        assert_eq!(analysis.changes.len(), 2);
+        assert!(
+            analysis
+                .changes
+                .iter()
+                .all(|change| change.kind == HistorySemanticChangeKind::Added)
+        );
+    }
+
+    #[test]
+    fn history_compare_is_deterministic() {
+        let mut base = history_document(1);
+        add_file(&mut base, 1, "src/a.rs");
+        add_public_entity(&mut base, 21, 1, EntityKind::Function);
+        add_entity(&mut base, 22, 1, EntityKind::Function);
+        add_calls(&mut base, 110, 22, 21, 900);
+
+        let mut head = history_document(2);
+        add_file(&mut head, 1, "src/a.rs");
+        add_entity(&mut head, 22, 1, EntityKind::Function);
+        add_entity(&mut head, 23, 1, EntityKind::Function);
+
+        let plan = history_compare_plan(
+            history_generation(1),
+            history_generation(2),
+            BTreeSet::new(),
+            100,
+        );
+        let first = run_history_compare(&base, &head, &plan);
+        let second = run_history_compare(&base, &head, &plan);
+
+        assert_eq!(first.changes, second.changes);
+        assert_eq!(first.breaking_candidates, second.breaking_candidates);
+        assert_eq!(first.lineage, second.lineage);
+        assert_eq!(first.architecture_delta, second.architecture_delta);
+        assert_eq!(first.coverage, second.coverage);
     }
 }
