@@ -14,7 +14,8 @@ use std::{
 use rootlight_client::{
     AnalysisTier as ClientTier, CoverageStatus as ClientCoverage, LocateHit, OperationKind,
     OperationStage, OperationState as ClientOperationState, QueryContext, QueryUsage,
-    RecoveryClass, SourceChunk as ClientSourceChunk, SymbolExplanation as ClientExplanation,
+    RecoveryClass, RepositoryCoverageEntry, RepositoryList, RepositoryListEntry, RepositoryStatus,
+    SourceChunk as ClientSourceChunk, SymbolExplanation as ClientExplanation,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{CoverageStatus as IrCoverage, LineRange, SourceRef, SourceSpan};
@@ -22,6 +23,7 @@ use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
     SymbolExplainOutput,
     context::{ContextPackOutput, QueryBatchOutput},
+    repository::{RepoListOutput, RepoStatusOutput, RepositoryState},
     vertical::{
         AnalysisTier, CacheStatus, Freshness, IndexMode, IndexPlanScope, IndexPlanSummary,
         LanguageCoverage, OperationState, RequiredNullable,
@@ -50,6 +52,8 @@ enum FakeOutcome {
     CodeLocate(Result<CodeLocatePortResponse, ClientPortError>),
     SymbolExplain(Result<SymbolExplainPortResponse, ClientPortError>),
     SourceRead(Result<SourceReadPortResponse, ClientPortError>),
+    RepositoryList(Result<RepositoryList, ClientPortError>),
+    RepositoryStatus(Result<RepositoryStatus, ClientPortError>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +63,8 @@ enum ObservedCall {
     CodeLocate(CodeLocatePortRequest),
     SymbolExplain(SymbolExplainPortRequest),
     SourceRead(SourceReadPortRequest),
+    RepositoryList(RepositoryListPortRequest),
+    RepositoryStatus(RepositoryStatusPortRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +167,32 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::SourceRead(request));
         let outcome = match &self.outcome {
             FakeOutcome::SourceRead(outcome) => outcome.clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { outcome })
+    }
+
+    fn repository_list(
+        &self,
+        request: RepositoryListPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<RepositoryList> {
+        self.record(ObservedCall::RepositoryList(request));
+        let outcome = match &self.outcome {
+            FakeOutcome::RepositoryList(outcome) => outcome.clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { outcome })
+    }
+
+    fn repository_status(
+        &self,
+        request: RepositoryStatusPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<RepositoryStatus> {
+        self.record(ObservedCall::RepositoryStatus(request));
+        let outcome = match &self.outcome {
+            FakeOutcome::RepositoryStatus(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1072,6 +1104,83 @@ async fn context_pack_assembles_definition_evidence_under_budget() {
         panic!("expected context pack success");
     };
     assert_eq!(pack.data.pack_id, second.data.pack_id);
+}
+
+#[tokio::test]
+async fn repo_list_maps_registered_repositories() {
+    let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
+        repositories: vec![RepositoryListEntry {
+            repository_id: repository(),
+            active_generation: generation(),
+            languages: vec!["rust".to_owned()],
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
+            state: "ready".to_owned(),
+        }],
+    })));
+    let output: RepoListOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({"max_results": 10}),
+        )
+        .await
+        .expect("repo list maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected repo list success");
+    };
+    assert_eq!(output.data.total_count, 1);
+    assert_eq!(output.data.repositories.len(), 1);
+    assert_eq!(output.data.repositories[0].repository_id, repository());
+    assert_eq!(output.data.repositories[0].state, RepositoryState::Ready);
+    assert_eq!(
+        output.data.repositories[0].active_generation.0,
+        Some(generation())
+    );
+}
+
+#[tokio::test]
+async fn repo_status_maps_active_generation_and_coverage() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
+        repository_id: repository(),
+        active_generation: generation(),
+        parent_generation: Some(parent_generation()),
+        structural_freshness: "current".to_owned(),
+        semantic_freshness: "current".to_owned(),
+        state: "ready".to_owned(),
+        coverage: vec![RepositoryCoverageEntry {
+            language: "rust".to_owned(),
+            tier: "tier_a".to_owned(),
+            status: "complete".to_owned(),
+            discovered_files: 3,
+            indexed_files: 3,
+        }],
+    })));
+    let output: RepoStatusOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoStatus,
+            json!({"repository": {"repository_id": repository()}}),
+        )
+        .await
+        .expect("repo status maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected repo status success");
+    };
+    assert_eq!(output.data.repository_state, RepositoryState::Ready);
+    assert_eq!(
+        output
+            .data
+            .active_generation
+            .0
+            .expect("active generation")
+            .generation_id,
+        generation()
+    );
+    assert_eq!(output.data.coverage.indexed_files, 3);
+    assert_eq!(output.data.coverage.languages[0].tier, "A");
 }
 
 #[tokio::test]

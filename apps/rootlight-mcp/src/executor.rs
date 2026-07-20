@@ -12,8 +12,9 @@ use std::{
 };
 
 use rootlight_client::{
-    self as client, CodeLocate, LocateMode, RepositoryIndex, RepositoryOperationAction,
-    RepositoryOperationStatus, SourceRead, SymbolExplain,
+    self as client, CodeLocate, LocateMode, RepositoryIndex, RepositoryList,
+    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, SourceRead,
+    SymbolExplain,
 };
 use rootlight_error::SafeLabel;
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
@@ -28,17 +29,21 @@ use rootlight_mcp_contract::{
         EvidenceRole as ContextEvidenceRole, FailurePolicy, OmissionSummary, QueryBatchData,
         QueryBatchInput, TokenAccounting, ToolSuggestion,
     },
+    repository::{
+        CoverageReport, LanguageCoverageReport, RepoListData, RepoListInput, RepoStatusData,
+        RepoStatusInput, RepositoryEntry, RepositoryState,
+    },
     vertical::{
-        ActiveGeneration, CacheStatus, CodeLocateData, CodeLocateInput, CoverageSummary,
-        DetailHandle, Diagnostic, EntityKind, Freshness, GenerationSummary, IndexMode,
-        IndexPlanScope, IndexPlanSummary, IndexScope, LanguageCoverage, LocateReason, LocatedItem,
-        OperationAction, OperationDetail, OperationProgress, OperationResources, OperationState,
-        OperationStatusData, OperationStatusInput, OperationStatusSuccess, ProvenanceLevel,
-        ProvenanceSummary, QueryInterpretation, ReadEnvelope, RepoIndexData, RepoIndexSuccess,
-        RequiredNullable, ResolvedRepository, ResponseBudget, ResponseProfile, ResponseWarning,
-        SearchMode, SourceChunk, SourceElision, SourceEncoding, SourceEncodingRequest,
-        SourceFreeMessage, SourceReadData, SourceReadSelector, StaleSourceReference,
-        SymbolExplainData, SymbolExplanation, UsageSummary,
+        ActiveGeneration, AnalysisTier, CacheStatus, CodeLocateData, CodeLocateInput,
+        CoverageSummary, DetailHandle, Diagnostic, EntityKind, Freshness, GenerationSummary,
+        IndexMode, IndexPlanScope, IndexPlanSummary, IndexScope, LanguageCoverage, LocateReason,
+        LocatedItem, OperationAction, OperationDetail, OperationProgress, OperationResources,
+        OperationState, OperationStatusData, OperationStatusInput, OperationStatusSuccess,
+        ProvenanceLevel, ProvenanceSummary, QueryInterpretation, ReadEnvelope, RepoIndexData,
+        RepoIndexSuccess, RequiredNullable, ResolvedRepository, ResponseBudget, ResponseProfile,
+        ResponseWarning, SearchMode, SourceChunk, SourceElision, SourceEncoding,
+        SourceEncodingRequest, SourceFreeMessage, SourceReadData, SourceReadSelector,
+        StaleSourceReference, SymbolExplainData, SymbolExplanation, UsageSummary,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -114,6 +119,20 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         request: SourceReadPortRequest,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<SourceReadPortResponse>;
+
+    /// Lists the repositories known to the daemon process.
+    fn repository_list(
+        &self,
+        request: RepositoryListPortRequest,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<RepositoryList>;
+
+    /// Reads one repository's active generation status.
+    fn repository_status(
+        &self,
+        request: RepositoryStatusPortRequest,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<RepositoryStatus>;
 }
 
 /// Source-free failure emitted by an injected daemon client port.
@@ -128,6 +147,63 @@ pub enum ClientPortError {
     InvalidResponse,
     /// The port failed before a valid request or response existed.
     Executor,
+}
+
+/// Normalized `repo.list` request accepted by the current first-slice daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryListPortRequest {
+    max_results: Option<u32>,
+    query: Option<String>,
+}
+
+impl RepositoryListPortRequest {
+    /// Creates a bounded repository list request.
+    #[must_use]
+    pub fn new(max_results: Option<u32>, query: Option<String>) -> Self {
+        Self { max_results, query }
+    }
+
+    /// Returns the optional result bound.
+    #[must_use]
+    pub const fn max_results(&self) -> Option<u32> {
+        self.max_results
+    }
+
+    /// Returns the optional display-name filter.
+    #[must_use]
+    pub fn query(&self) -> Option<&str> {
+        self.query.as_deref()
+    }
+}
+
+/// Normalized `repo.status` request accepted by the current first-slice daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryStatusPortRequest {
+    repository: RepositoryId,
+    generation: client::GenerationSelector,
+}
+
+impl RepositoryStatusPortRequest {
+    /// Creates a repository status request for one resolved repository.
+    #[must_use]
+    pub const fn new(repository: RepositoryId, generation: client::GenerationSelector) -> Self {
+        Self {
+            repository,
+            generation,
+        }
+    }
+
+    /// Returns the resolved repository identity.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the active or explicit generation selector.
+    #[must_use]
+    pub const fn generation(&self) -> client::GenerationSelector {
+        self.generation
+    }
 }
 
 /// Normalized `repo.index` request accepted by the current first-slice daemon.
@@ -542,9 +618,13 @@ where
                     )
                     .await
                 }
-                VerticalTool::RepoStatus
-                | VerticalTool::RepoList
-                | VerticalTool::SymbolRelationships
+                VerticalTool::RepoStatus => {
+                    execute_repo_status(port, arguments, cancellation, &unsupported).await
+                }
+                VerticalTool::RepoList => {
+                    execute_repo_list(port, arguments, cancellation, &unsupported).await
+                }
+                VerticalTool::SymbolRelationships
                 | VerticalTool::FlowTrace
                 | VerticalTool::ChangeImpact
                 | VerticalTool::TestsSelect
@@ -1231,6 +1311,249 @@ const fn context_role_label(role: ContextEvidenceRole) -> &'static str {
         ContextEvidenceRole::Risk => "risk",
         ContextEvidenceRole::Architecture => "architecture",
         ContextEvidenceRole::Change => "change",
+    }
+}
+
+/// Lists the repositories known to the daemon process.
+///
+/// The envelope identity is borrowed from the first listed repository; when no
+/// repository is registered the tool fails with a checked not-found error
+/// rather than fabricating an identity.
+async fn execute_repo_list<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: RepoListInput = decode_input(arguments)?;
+    // Cursor paging and state filtering are not served by this slice.
+    if input.cursor.is_some() || input.states.is_some() {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    let request = RepositoryListPortRequest::new(input.max_results.map(u32::from), input.query);
+    let future = port.repository_list(request, cancellation.clone());
+    let list = await_port(future, cancellation).await?;
+
+    let Some(first) = list.repositories.first() else {
+        return Err(ToolExecutionError::new(no_repositories_error()?));
+    };
+
+    let repositories: Vec<RepositoryEntry> = list
+        .repositories
+        .iter()
+        .map(|entry| RepositoryEntry {
+            repository_id: entry.repository_id,
+            display_name: entry.repository_id.to_string(),
+            state: repository_state(&entry.state),
+            active_generation: RequiredNullable(Some(entry.active_generation)),
+            generation_count: 1,
+            alias: RequiredNullable(None),
+        })
+        .collect();
+    let total_count = u64::try_from(repositories.len()).unwrap_or(u64::MAX);
+    let data = RepoListData {
+        repositories,
+        total_count,
+    };
+    let envelope = ReadEnvelope {
+        schema_version: SchemaVersion::V1_0,
+        repository: ResolvedRepository {
+            repository_id: first.repository_id,
+            display_name: first.repository_id.to_string(),
+        },
+        generation: GenerationSummary {
+            generation_id: first.active_generation,
+            parent_generation: RequiredNullable(None),
+            structural_freshness: freshness_from_label(&first.structural_freshness),
+            semantic_freshness: freshness_from_label(&first.semantic_freshness),
+        },
+        coverage: CoverageSummary {
+            status: rootlight_ir::CoverageStatus::Complete,
+            languages: Vec::new(),
+            skipped_inputs: 0,
+        },
+        data,
+        truncated: false,
+        next_cursor: RequiredNullable(None),
+        usage: UsageSummary {
+            rows: total_count,
+            edges: 0,
+            source_bytes: 0,
+            json_bytes: 0,
+            estimated_tokens: 0,
+            wall_time_ms: 0,
+            cache_status: CacheStatus::Miss,
+            trace_id: "repo-list".to_owned(),
+        },
+        warnings: Vec::new(),
+        trust: TrustClassification::UntrustedRepositoryData,
+    };
+    serialize_success(envelope)
+}
+
+/// Reads one repository's active generation, freshness, and coverage.
+async fn execute_repo_status<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: RepoStatusInput = decode_input(arguments)?;
+    let repository = repository_id(input.repository.clone(), unsupported)?;
+    // Granular coverage, operation lists, and freshness gates are not served by
+    // this slice.
+    if input.coverage_detail.is_some()
+        || input.require_freshness.is_some()
+        || input.include_operations == Some(true)
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    let request = RepositoryStatusPortRequest::new(repository, client_generation(input.generation));
+    let future = port.repository_status(request, cancellation.clone());
+    let status = await_port(future, cancellation).await?;
+
+    let generation_summary = GenerationSummary {
+        generation_id: status.active_generation,
+        parent_generation: RequiredNullable(status.parent_generation),
+        structural_freshness: freshness_from_label(&status.structural_freshness),
+        semantic_freshness: freshness_from_label(&status.semantic_freshness),
+    };
+    let summary_languages: Vec<LanguageCoverage> = status
+        .coverage
+        .iter()
+        .map(|entry| LanguageCoverage {
+            language: entry.language.clone(),
+            tier: analysis_tier(&entry.tier),
+            status: coverage_status_from_label(&entry.status),
+        })
+        .collect();
+    let data = RepoStatusData {
+        repository_state: repository_state(&status.state),
+        active_generation: RequiredNullable(Some(generation_summary.clone())),
+        coverage: status_coverage_report(&status.coverage),
+        operations: Vec::new(),
+        recommended_actions: Vec::new(),
+    };
+    let envelope = ReadEnvelope {
+        schema_version: SchemaVersion::V1_0,
+        repository: ResolvedRepository {
+            repository_id: status.repository_id,
+            display_name: status.repository_id.to_string(),
+        },
+        generation: generation_summary,
+        coverage: CoverageSummary {
+            status: aggregate_coverage_status(&status.coverage),
+            languages: summary_languages,
+            skipped_inputs: 0,
+        },
+        data,
+        truncated: false,
+        next_cursor: RequiredNullable(None),
+        usage: UsageSummary {
+            rows: 1,
+            edges: 0,
+            source_bytes: 0,
+            json_bytes: 0,
+            estimated_tokens: 0,
+            wall_time_ms: 0,
+            cache_status: CacheStatus::Miss,
+            trace_id: "repo-status".to_owned(),
+        },
+        warnings: Vec::new(),
+        trust: TrustClassification::UntrustedRepositoryData,
+    };
+    serialize_success(envelope)
+}
+
+fn no_repositories_error() -> Result<PublicError, ToolExecutionError> {
+    PublicError::builder(ErrorCode::NotFound, "no repositories are registered")
+        .build()
+        .map_err(|_| internal(ToolExecutionFailure::Executor))
+}
+
+fn status_coverage_report(entries: &[client::RepositoryCoverageEntry]) -> CoverageReport {
+    let languages: Vec<LanguageCoverageReport> = entries
+        .iter()
+        .map(|entry| LanguageCoverageReport {
+            language: entry.language.clone(),
+            tier: tier_label(&entry.tier),
+            files_indexed: entry.indexed_files,
+            files_skipped: entry.discovered_files.saturating_sub(entry.indexed_files),
+            missing_build_context: 0,
+        })
+        .collect();
+    let total_files: u64 = entries.iter().map(|entry| entry.discovered_files).sum();
+    let indexed_files: u64 = entries.iter().map(|entry| entry.indexed_files).sum();
+    CoverageReport {
+        status: aggregate_coverage_status(entries),
+        languages,
+        total_files,
+        indexed_files,
+        skipped_files: total_files.saturating_sub(indexed_files),
+    }
+}
+
+fn aggregate_coverage_status(
+    entries: &[client::RepositoryCoverageEntry],
+) -> rootlight_ir::CoverageStatus {
+    if entries.iter().all(|entry| entry.status == "complete") {
+        rootlight_ir::CoverageStatus::Complete
+    } else {
+        rootlight_ir::CoverageStatus::Bounded
+    }
+}
+
+fn repository_state(label: &str) -> RepositoryState {
+    match label {
+        "ready" => RepositoryState::Ready,
+        "indexing" => RepositoryState::Indexing,
+        "degraded" => RepositoryState::Degraded,
+        "corrupt" => RepositoryState::Corrupt,
+        "migration_required" => RepositoryState::MigrationRequired,
+        "rebuild_required" => RepositoryState::RebuildRequired,
+        _ => RepositoryState::Degraded,
+    }
+}
+
+fn freshness_from_label(label: &str) -> Freshness {
+    match label {
+        "current" => Freshness::Current,
+        "superseded" => Freshness::Superseded,
+        _ => Freshness::Stale,
+    }
+}
+
+fn coverage_status_from_label(label: &str) -> rootlight_ir::CoverageStatus {
+    match label {
+        "complete" => rootlight_ir::CoverageStatus::Complete,
+        "bounded" => rootlight_ir::CoverageStatus::Bounded,
+        "sampled" => rootlight_ir::CoverageStatus::Sampled,
+        _ => rootlight_ir::CoverageStatus::Unknown,
+    }
+}
+
+fn tier_label(label: &str) -> String {
+    match label {
+        "tier_a" => "A",
+        "tier_b" => "B",
+        "tier_d" => "D",
+        _ => "C",
+    }
+    .to_owned()
+}
+
+fn analysis_tier(label: &str) -> AnalysisTier {
+    match label {
+        "tier_a" => AnalysisTier::A,
+        "tier_b" => AnalysisTier::B,
+        "tier_d" => AnalysisTier::D,
+        _ => AnalysisTier::C,
     }
 }
 

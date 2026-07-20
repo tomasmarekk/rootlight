@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use rootlight_client::{
     AnalysisTier as ClientAnalysisTier, ClientError, CodeLocate, CoverageStatus,
     GenerationSelector, LocateMode, OperationKind, OperationStage, OperationState, QueryContext,
-    QueryUsage, RecoveryClass, RepositoryIndex, RepositoryOperationAction,
-    RepositoryOperationStatus, RequestTimeout, SourceChunk, SourceRead, SourceReference,
-    SymbolExplain,
+    QueryUsage, RecoveryClass, RepositoryCoverageEntry, RepositoryIndex, RepositoryList,
+    RepositoryListEntry, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
+    RequestTimeout, SourceChunk, SourceRead, SourceReference, SymbolExplain,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -63,6 +63,16 @@ enum Call {
         repository: RepositoryId,
         generation: GenerationSelector,
         references: Vec<SourceReference>,
+        timeout: RequestTimeout,
+    },
+    RepositoryList {
+        max_results: Option<u32>,
+        query: Option<String>,
+        timeout: RequestTimeout,
+    },
+    RepositoryStatus {
+        repository: RepositoryId,
+        generation: GenerationSelector,
         timeout: RequestTimeout,
     },
 }
@@ -238,6 +248,61 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 chunks,
                 total_source_bytes: 0,
                 truncated: false,
+            })
+        })
+    }
+
+    fn repository_list(
+        &self,
+        max_results: Option<u32>,
+        query: Option<String>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<RepositoryList> {
+        self.record(Call::RepositoryList {
+            max_results,
+            query,
+            timeout,
+        });
+        Box::pin(async move {
+            Ok(RepositoryList {
+                repositories: vec![RepositoryListEntry {
+                    repository_id: repository(),
+                    active_generation: generation(),
+                    languages: vec!["rust".to_owned()],
+                    structural_freshness: "current".to_owned(),
+                    semantic_freshness: "current".to_owned(),
+                    state: "ready".to_owned(),
+                }],
+            })
+        })
+    }
+
+    fn repository_status(
+        &self,
+        repository: RepositoryId,
+        generation_selector: GenerationSelector,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<RepositoryStatus> {
+        self.record(Call::RepositoryStatus {
+            repository,
+            generation: generation_selector,
+            timeout,
+        });
+        Box::pin(async move {
+            Ok(RepositoryStatus {
+                repository_id: repository,
+                active_generation: generation(),
+                parent_generation: Some(parent_generation()),
+                structural_freshness: "current".to_owned(),
+                semantic_freshness: "current".to_owned(),
+                state: "ready".to_owned(),
+                coverage: vec![RepositoryCoverageEntry {
+                    language: "rust".to_owned(),
+                    tier: "tier_a".to_owned(),
+                    status: "complete".to_owned(),
+                    discovered_files: 1,
+                    indexed_files: 1,
+                }],
             })
         })
     }

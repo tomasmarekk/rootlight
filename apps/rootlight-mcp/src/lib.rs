@@ -31,9 +31,9 @@ pub use client_port::{NativeFirstSliceClientPort, UnavailableFirstSliceClientPor
 pub use executor::{
     ClientPortError, ClientPortFuture, CodeLocatePortRequest, CodeLocatePortResponse,
     FirstSliceClientPort, FirstSliceToolExecutor, OperationStatusPortRequest, ReadResponseMetadata,
-    RepositoryIndexPortRequest, RepositoryIndexPortResponse, SourceReadPortRequest,
-    SourceReadPortResponse, SymbolExplainPortRequest, SymbolExplainPortResponse,
-    ToolExecutorBuildError,
+    RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
+    RepositoryStatusPortRequest, SourceReadPortRequest, SourceReadPortResponse,
+    SymbolExplainPortRequest, SymbolExplainPortResponse, ToolExecutorBuildError,
 };
 pub use tools::{
     ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture, ToolExecutor, ToolRegistryError,

@@ -7,8 +7,9 @@ use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time:
 
 use rootlight_client::{
     AnalysisTier as ClientAnalysisTier, Client, ClientError, CodeLocate, CoverageStatus,
-    GenerationSelector, LocateMode, RepositoryIndex, RepositoryOperationAction,
-    RepositoryOperationStatus, RequestTimeout, SourceRead, SourceReference, SymbolExplain,
+    GenerationSelector, LocateMode, RepositoryIndex, RepositoryList, RepositoryOperationAction,
+    RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceRead, SourceReference,
+    SymbolExplain,
 };
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
@@ -20,9 +21,9 @@ use rootlight_mcp_contract::vertical::{
 use crate::{
     ClientPortError, ClientPortFuture, CodeLocatePortRequest, CodeLocatePortResponse,
     FirstSliceClientPort, OperationStatusPortRequest, ReadResponseMetadata,
-    RepositoryIndexPortRequest, RepositoryIndexPortResponse, RequestCancellation,
-    SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
-    SymbolExplainPortResponse,
+    RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
+    RepositoryStatusPortRequest, RequestCancellation, SourceReadPortRequest,
+    SourceReadPortResponse, SymbolExplainPortRequest, SymbolExplainPortResponse,
 };
 
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -75,6 +76,20 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         references: Vec<SourceReference>,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<SourceRead>;
+
+    fn repository_list(
+        &self,
+        max_results: Option<u32>,
+        query: Option<String>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<RepositoryList>;
+
+    fn repository_status(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<RepositoryStatus>;
 }
 
 struct LiveAsyncFirstSliceClient {
@@ -169,6 +184,34 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         Box::pin(async move {
             client
                 .source_read_async(repository, generation, &references, timeout)
+                .await
+        })
+    }
+
+    fn repository_list(
+        &self,
+        max_results: Option<u32>,
+        query: Option<String>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<RepositoryList> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .repository_list_async(max_results, query.as_deref(), timeout)
+                .await
+        })
+    }
+
+    fn repository_status(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<RepositoryStatus> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .repository_status_async(repository, generation, timeout)
                 .await
         })
     }
@@ -338,6 +381,42 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
             ))
         })
     }
+
+    fn repository_list(
+        &self,
+        request: RepositoryListPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<RepositoryList> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .repository_list(
+                    request.max_results(),
+                    request.query().map(str::to_owned),
+                    request_timeout()?,
+                )
+                .await
+                .map_err(map_client_error)
+        })
+    }
+
+    fn repository_status(
+        &self,
+        request: RepositoryStatusPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<RepositoryStatus> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .repository_status(
+                    request.repository(),
+                    request.generation(),
+                    request_timeout()?,
+                )
+                .await
+                .map_err(map_client_error)
+        })
+    }
 }
 
 /// Source-free first-slice port used when synchronous daemon setup is unavailable.
@@ -382,6 +461,22 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
         _request: SourceReadPortRequest,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SourceReadPortResponse> {
+        unavailable()
+    }
+
+    fn repository_list(
+        &self,
+        _request: RepositoryListPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<RepositoryList> {
+        unavailable()
+    }
+
+    fn repository_status(
+        &self,
+        _request: RepositoryStatusPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<RepositoryStatus> {
         unavailable()
     }
 }
