@@ -50,10 +50,11 @@ pub use rootlight_query::{
     ArchitectureOverviewDerivedView, ArchitectureOverviewResult, ArchitectureOverviewView,
     ChangeImpactClassification, ChangeImpactResult, ChangeImpactRiskLevel, ChangeImpactRiskSummary,
     ChangeImpactTestCandidate, CodeDeadEntryPointPolicy, CodeDeadResult, CodeLocateResult,
-    FlowTraceResult, ImpactEntryRecord, ImpactGroupRecord, LocateMode, QueryResponse,
-    RankedTestSelection, RelationDirection, RelationFamily, ResolvedChangeRecord,
-    SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult, TestsSelectCoverage,
-    TestsSelectGap, TestsSelectKind, TestsSelectResult,
+    FlowTraceResult, ImpactEntryRecord, ImpactGroupRecord, LocateMode, PlanChangeContextPack,
+    PlanChangeDecision, PlanChangeImpactSummary, PlanChangeObjective, PlanChangeResult,
+    PlanChangeStepRecord, QueryResponse, RankedTestSelection, RelationDirection, RelationFamily,
+    ResolvedChangeRecord, SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult,
+    TestsSelectCoverage, TestsSelectGap, TestsSelectKind, TestsSelectResult,
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
 use rootlight_resolve::{
@@ -2161,6 +2162,45 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_change_impact(&plan, cancellation)
+            .map_err(|error| map_query_error(error, cancellation))
+    }
+
+    /// Executes a generation-pinned bounded `plan.change` query.
+    ///
+    /// The objective class, explicit symbol and file targets, and step cap are
+    /// validated by the query plan. The result carries deterministic source-free
+    /// ordered steps, a compact impact summary, a verification test plan, open
+    /// decisions, and a ready context-pack request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    pub fn plan_change(
+        &self,
+        generation: GenerationId,
+        objective: PlanChangeObjective,
+        target_symbols: BTreeSet<SymbolId>,
+        target_files: BTreeSet<FileId>,
+        max_steps: usize,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<PlanChangeResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let service = self
+            .generations
+            .query(generation)
+            .map_err(|_| FirstSliceError::Query)?;
+        let plan = service
+            .plan_plan_change(
+                objective,
+                target_symbols,
+                target_files,
+                max_steps,
+                QueryBudget::new(),
+            )
+            .map_err(|error| map_query_error(error, cancellation))?;
+        service
+            .execute_plan_change(&plan, cancellation)
             .map_err(|error| map_query_error(error, cancellation))
     }
 
