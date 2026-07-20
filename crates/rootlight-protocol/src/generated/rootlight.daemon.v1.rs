@@ -49,7 +49,7 @@ pub struct RequestEnvelope {
     pub timeout_ms: ::core::option::Option<u32>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -113,6 +113,9 @@ pub mod request_envelope {
         #[prost(message, tag = "40")]
         #[allow(missing_docs)]
         CodeDead(super::CodeDeadRequest),
+        #[prost(message, tag = "41")]
+        #[allow(missing_docs)]
+        ArchitectureOverview(super::ArchitectureOverviewRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -123,7 +126,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -187,6 +190,9 @@ pub mod response_envelope {
         #[prost(message, tag = "40")]
         #[allow(missing_docs)]
         CodeDead(super::CodeDeadResponse),
+        #[prost(message, tag = "41")]
+        #[allow(missing_docs)]
+        ArchitectureOverview(super::ArchitectureOverviewResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -1409,6 +1415,132 @@ pub struct CodeDeadResponse {
     #[prost(message, repeated, tag = "6")]
     #[allow(missing_docs)]
     pub false_positive_controls: ::prost::alloc::vec::Vec<FirstSliceSuppressionRule>,
+}
+/// Requests a bounded file-granularity architecture overview over one generation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ArchitectureOverviewRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(string, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub views: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub max_components: ::core::option::Option<u32>,
+    #[prost(bool, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub include_edges: ::core::option::Option<bool>,
+    #[prost(uint32, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub min_confidence: ::core::option::Option<u32>,
+}
+/// One aggregated architecture component keyed by its containing file.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceArchitectureComponent {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "4")]
+    #[allow(missing_docs)]
+    pub symbol_count: u32,
+    #[prost(string, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub responsibility_evidence: ::prost::alloc::vec::Vec<
+        ::prost::alloc::string::String,
+    >,
+    #[prost(uint32, tag = "6")]
+    #[allow(missing_docs)]
+    pub confidence: u32,
+}
+/// One aggregated typed connection between two architecture components.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceArchitectureConnection {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub from: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub to: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "4")]
+    #[allow(missing_docs)]
+    pub weight: u32,
+    #[prost(uint32, tag = "5")]
+    #[allow(missing_docs)]
+    pub confidence: u32,
+}
+/// One structural hotspot ranking entry for a component.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceHotspot {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub component_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub fan_in: u32,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub fan_out: u32,
+    #[prost(uint32, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub change_frequency: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub complexity: ::core::option::Option<u32>,
+    #[prost(uint32, tag = "6")]
+    #[allow(missing_docs)]
+    pub score: u32,
+}
+/// Derived-view algorithm metadata for community or ownership algorithms.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceDerivedView {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub view: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub algorithm_version: ::prost::alloc::string::String,
+}
+/// Returns bounded architecture components, connections, and hotspots.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ArchitectureOverviewResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub components: ::prost::alloc::vec::Vec<FirstSliceArchitectureComponent>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub connections: ::prost::alloc::vec::Vec<FirstSliceArchitectureConnection>,
+    #[prost(message, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub hotspots: ::prost::alloc::vec::Vec<FirstSliceHotspot>,
+    #[prost(message, repeated, tag = "6")]
+    #[allow(missing_docs)]
+    pub views: ::prost::alloc::vec::Vec<FirstSliceDerivedView>,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]

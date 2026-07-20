@@ -82,7 +82,7 @@
     },
     {
       "path": "proto/daemon_v1.proto",
-      "blake3": "3be91c05b00bb23e2b9fb1925df6c2cc92e335614f91b3988fa56c9cd041f7d3"
+      "blake3": "8c40ff38a2d4213b270b2a7d38b331129941d8abb018596927e9aa41e60d6bb3"
     },
     {
       "path": "tests/fixtures/compatibility/contract-0.1.json",
@@ -188,7 +188,7 @@
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.daemon.v1.rs",
-      "blake3": "d9a97f47bfc75fc35bc78910f490ab5101f559261636db81274d5d4054f9ace1"
+      "blake3": "4bc05276ad0697a40cf040dcb22117e2bd48cd71615763fdb0002f581c3b394e"
     },
     {
       "path": "schemas/generated/json/config-1.0.schema.json",
@@ -372,7 +372,7 @@
     },
     {
       "path": "schemas/generated/protobuf/rootlight.desc",
-      "blake3": "0e70694e2ed5fe6d83b19004ebf13b48890d464c82a3534309abc9e42e35f728"
+      "blake3": "ef711b1fb0a7ae941ea3d564bbf9a4a5e44f871dfb4b62144ca1c326bdfa0f39"
     }
   ]
 }

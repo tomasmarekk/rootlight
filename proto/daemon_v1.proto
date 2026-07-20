@@ -44,6 +44,7 @@ message RequestEnvelope {
     FlowTraceRequest flow_trace = 38;
     ArchitectureCyclesRequest architecture_cycles = 39;
     CodeDeadRequest code_dead = 40;
+    ArchitectureOverviewRequest architecture_overview = 41;
   }
 }
 
@@ -69,6 +70,7 @@ message ResponseEnvelope {
     FlowTraceResponse flow_trace = 38;
     ArchitectureCyclesResponse architecture_cycles = 39;
     CodeDeadResponse code_dead = 40;
+    ArchitectureOverviewResponse architecture_overview = 41;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -735,4 +737,60 @@ message CodeDeadResponse {
   FirstSliceEntryPointSummary entry_points = 4;
   repeated FirstSliceBlindSpot blind_spots = 5;
   repeated FirstSliceSuppressionRule false_positive_controls = 6;
+}
+
+// Requests a bounded file-granularity architecture overview over one generation.
+message ArchitectureOverviewRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  repeated string views = 4;
+  optional uint32 max_components = 5;
+  optional bool include_edges = 6;
+  optional uint32 min_confidence = 7;
+}
+
+// One aggregated architecture component keyed by its containing file.
+message FirstSliceArchitectureComponent {
+  string id = 1;
+  string kind = 2;
+  string name = 3;
+  uint32 symbol_count = 4;
+  repeated string responsibility_evidence = 5;
+  uint32 confidence = 6;
+}
+
+// One aggregated typed connection between two architecture components.
+message FirstSliceArchitectureConnection {
+  string from = 1;
+  string to = 2;
+  string kind = 3;
+  uint32 weight = 4;
+  uint32 confidence = 5;
+}
+
+// One structural hotspot ranking entry for a component.
+message FirstSliceHotspot {
+  string component_id = 1;
+  uint32 fan_in = 2;
+  uint32 fan_out = 3;
+  optional uint32 change_frequency = 4;
+  optional uint32 complexity = 5;
+  uint32 score = 6;
+}
+
+// Derived-view algorithm metadata for community or ownership algorithms.
+message FirstSliceDerivedView {
+  string view = 1;
+  string algorithm_version = 2;
+}
+
+// Returns bounded architecture components, connections, and hotspots.
+message ArchitectureOverviewResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  repeated FirstSliceArchitectureComponent components = 3;
+  repeated FirstSliceArchitectureConnection connections = 4;
+  repeated FirstSliceHotspot hotspots = 5;
+  repeated FirstSliceDerivedView views = 6;
 }
