@@ -39,7 +39,8 @@ use rootlight_operations::{
 };
 use rootlight_protocol::generated::{common::v1 as common, daemon::v1 as daemon};
 use rootlight_query::{
-    CodeDeadEntryPointPolicy, LocateMode, QueryUsage, RelationDirection, RelationFamily,
+    ArchitectureOverviewView, CodeDeadEntryPointPolicy, LocateMode, QueryUsage, RelationDirection,
+    RelationFamily,
 };
 use rootlight_service::{
     FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexReceipt, FirstSliceService,
@@ -59,6 +60,7 @@ const DEFAULT_FLOW_PATHS: u32 = 10;
 const DEFAULT_CYCLE_MIN_SIZE: u32 = 2;
 const DEFAULT_CYCLE_MAX_CYCLES: u32 = 50;
 const DEFAULT_CODE_DEAD_MAX_CANDIDATES: u32 = 50;
+const DEFAULT_ARCHITECTURE_OVERVIEW_MAX_COMPONENTS: u32 = 50;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
 
@@ -537,6 +539,10 @@ fn execute_service_request(
         }
         FirstSliceIpcRequest::CodeDead(request) => {
             code_dead(service, request, &context).map(FirstSliceIpcResponse::CodeDead)
+        }
+        FirstSliceIpcRequest::ArchitectureOverview(request) => {
+            architecture_overview(service, request, &context)
+                .map(FirstSliceIpcResponse::ArchitectureOverview)
         }
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
     }
@@ -1428,6 +1434,104 @@ fn code_dead(
         }),
         blind_spots,
         false_positive_controls,
+    })
+}
+
+fn architecture_overview(
+    service: &FirstSliceService,
+    request: daemon::ArchitectureOverviewRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::ArchitectureOverviewResponse, PublicError> {
+    let repository = parse_repository(request.repository.as_ref())?;
+    let selected = parse_generation_selector(request.generation.as_ref())?;
+    let generation = service
+        .resolve_generation(repository, selected)
+        .map_err(service_error)?;
+    let mut views = Vec::new();
+    views
+        .try_reserve_exact(request.views.len())
+        .map_err(|_| resource_exhausted())?;
+    for label in &request.views {
+        let view = ArchitectureOverviewView::from_label(label).ok_or_else(invalid_argument)?;
+        views.push(view);
+    }
+    let include_edges = request.include_edges.unwrap_or(true);
+    let min_confidence =
+        u16::try_from(request.min_confidence.unwrap_or(0)).map_err(|_| invalid_argument())?;
+    let max_components = usize::try_from(
+        request
+            .max_components
+            .unwrap_or(DEFAULT_ARCHITECTURE_OVERVIEW_MAX_COMPONENTS),
+    )
+    .map_err(|_| invalid_argument())?;
+    let response = service
+        .architecture_overview(
+            generation.generation,
+            views,
+            min_confidence,
+            max_components,
+            include_edges,
+            &context.cancellation,
+        )
+        .map_err(service_error)?;
+    let mut components = Vec::new();
+    components
+        .try_reserve_exact(response.data.components.len())
+        .map_err(|_| resource_exhausted())?;
+    for component in response.data.components {
+        components.push(daemon::FirstSliceArchitectureComponent {
+            id: component.id,
+            kind: component.kind,
+            name: component.name,
+            symbol_count: component.symbol_count,
+            responsibility_evidence: component.responsibility_evidence,
+            confidence: u32::from(component.confidence),
+        });
+    }
+    let mut connections = Vec::new();
+    connections
+        .try_reserve_exact(response.data.connections.len())
+        .map_err(|_| resource_exhausted())?;
+    for connection in response.data.connections {
+        connections.push(daemon::FirstSliceArchitectureConnection {
+            from: connection.from,
+            to: connection.to,
+            kind: connection.kind.as_str().to_owned(),
+            weight: connection.weight,
+            confidence: u32::from(connection.confidence),
+        });
+    }
+    let mut hotspots = Vec::new();
+    hotspots
+        .try_reserve_exact(response.data.hotspots.len())
+        .map_err(|_| resource_exhausted())?;
+    for hotspot in response.data.hotspots {
+        hotspots.push(daemon::FirstSliceHotspot {
+            component_id: hotspot.component_id,
+            fan_in: hotspot.fan_in,
+            fan_out: hotspot.fan_out,
+            change_frequency: hotspot.change_frequency,
+            complexity: hotspot.complexity,
+            score: u32::from(hotspot.score),
+        });
+    }
+    let mut wire_views = Vec::new();
+    wire_views
+        .try_reserve_exact(response.data.views.len())
+        .map_err(|_| resource_exhausted())?;
+    for view in response.data.views {
+        wire_views.push(daemon::FirstSliceDerivedView {
+            view: view.view.as_str().to_owned(),
+            algorithm_version: view.algorithm_version,
+        });
+    }
+    Ok(daemon::ArchitectureOverviewResponse {
+        schema_version: Some(schema_version()),
+        context: Some(query_context(generation, &response.usage, &[])),
+        components,
+        connections,
+        hotspots,
+        views: wire_views,
     })
 }
 
