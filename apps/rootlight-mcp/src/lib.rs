@@ -33,7 +33,8 @@ pub use executor::{
     FirstSliceClientPort, FirstSliceToolExecutor, OperationStatusPortRequest, ReadResponseMetadata,
     RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
     RepositoryStatusPortRequest, SourceReadPortRequest, SourceReadPortResponse,
-    SymbolExplainPortRequest, SymbolExplainPortResponse, ToolExecutorBuildError,
+    SymbolExplainPortRequest, SymbolExplainPortResponse, SymbolRelationshipsPortRequest,
+    SymbolRelationshipsPortResponse, ToolExecutorBuildError,
 };
 pub use tools::{
     ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture, ToolExecutor, ToolRegistryError,

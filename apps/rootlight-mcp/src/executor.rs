@@ -18,6 +18,10 @@ use rootlight_client::{
 };
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{LineRange, SourceRef, SourceSpan};
+use rootlight_mcp_contract::intent::{
+    Direction, RelationKind, RelationshipGroup, RelationshipTarget, RelationshipTotals,
+    SymbolRelationshipsData, SymbolRelationshipsInput,
+};
 use rootlight_mcp_contract::{
     DetailKey, ErrorCode, GenerationSelector, McpTool, NextAction, PublicError,
     PublicErrorBuildError, RepoIndexInput, RepositorySelector, SafeLabel, SchemaVersion,
@@ -132,6 +136,13 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         request: RepositoryStatusPortRequest,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<RepositoryStatus>;
+
+    /// Expands bounded typed relation neighborhoods for stable symbols.
+    fn symbol_relationships(
+        &self,
+        request: SymbolRelationshipsPortRequest,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<SymbolRelationshipsPortResponse>;
 }
 
 /// Source-free failure emitted by an injected daemon client port.
@@ -443,6 +454,77 @@ impl SymbolExplainPortResponse {
     }
 }
 
+/// Normalized `symbol.relationships` request supported by the current daemon protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRelationshipsPortRequest {
+    repository: RepositoryId,
+    generation: client::GenerationSelector,
+    seeds: Vec<SymbolId>,
+    relations: Vec<String>,
+    direction: Option<String>,
+    min_confidence: Option<u16>,
+    max_results: Option<u16>,
+}
+
+impl SymbolRelationshipsPortRequest {
+    /// Returns the selected repository.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the active or explicit immutable-generation selector.
+    #[must_use]
+    pub const fn generation(&self) -> client::GenerationSelector {
+        self.generation
+    }
+
+    /// Returns seed symbols in deterministic request order.
+    #[must_use]
+    pub fn seeds(&self) -> &[SymbolId] {
+        &self.seeds
+    }
+
+    /// Returns requested relation family labels.
+    #[must_use]
+    pub fn relations(&self) -> &[String] {
+        &self.relations
+    }
+
+    /// Returns the optional direction label.
+    #[must_use]
+    pub fn direction(&self) -> Option<&str> {
+        self.direction.as_deref()
+    }
+
+    /// Returns the optional confidence floor.
+    #[must_use]
+    pub const fn min_confidence(&self) -> Option<u16> {
+        self.min_confidence
+    }
+
+    /// Returns the optional result bound.
+    #[must_use]
+    pub const fn max_results(&self) -> Option<u16> {
+        self.max_results
+    }
+}
+
+/// Expanded daemon data plus mandatory MCP read metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRelationshipsPortResponse {
+    result: client::SymbolRelationships,
+    metadata: ReadResponseMetadata,
+}
+
+impl SymbolRelationshipsPortResponse {
+    /// Creates a complete `symbol.relationships` response for MCP mapping.
+    #[must_use]
+    pub const fn new(result: client::SymbolRelationships, metadata: ReadResponseMetadata) -> Self {
+        Self { result, metadata }
+    }
+}
+
 /// Normalized exact-reference `source.read` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceReadPortRequest {
@@ -623,8 +705,7 @@ where
                 VerticalTool::RepoList => {
                     execute_repo_list(port, arguments, cancellation, &unsupported).await
                 }
-                VerticalTool::SymbolRelationships
-                | VerticalTool::FlowTrace
+                VerticalTool::FlowTrace
                 | VerticalTool::ChangeImpact
                 | VerticalTool::TestsSelect
                 | VerticalTool::ArchitectureOverview
@@ -633,6 +714,9 @@ where
                 | VerticalTool::HistoryCompare
                 | VerticalTool::PlanChange
                 | VerticalTool::QueryAdvanced => execute_intent_fallback(&unavailable).await,
+                VerticalTool::SymbolRelationships => {
+                    execute_symbol_relationships(port, arguments, cancellation, &unsupported).await
+                }
                 VerticalTool::ContextPack => {
                     execute_context_pack(port, arguments, cancellation, &unsupported).await
                 }
@@ -1634,6 +1718,154 @@ where
     let response = await_port(future, cancellation).await?;
     let output = map_symbol_explain(response, &expected)?;
     serialize_success(output)
+}
+
+async fn execute_symbol_relationships<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: SymbolRelationshipsInput = decode_input(arguments)?;
+    let request = normalize_symbol_relationships(input, unsupported)?;
+    let expected = request.clone();
+    let future = port.symbol_relationships(request, cancellation.clone());
+    let response = await_port(future, cancellation).await?;
+    let output = map_symbol_relationships(response, &expected)?;
+    serialize_success(output)
+}
+
+fn normalize_symbol_relationships(
+    input: SymbolRelationshipsInput,
+    unsupported: &PublicError,
+) -> Result<SymbolRelationshipsPortRequest, ToolExecutionError> {
+    let repository = repository_id(input.repository, unsupported)?;
+    // Structural scope, ambiguous candidates, paging, and custom budgets are not
+    // served by this slice.
+    if input.scope.is_some()
+        || input.include_candidates == Some(true)
+        || input.budget.is_some()
+        || input.cursor.is_some()
+        || !compact_profile(input.response_profile)
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    let mut relations = Vec::new();
+    relations
+        .try_reserve_exact(input.relations.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for kind in &input.relations {
+        relations.push(relation_kind_label(*kind)?);
+    }
+    let direction = match input.direction {
+        Some(direction) => Some(direction_label(direction)?),
+        None => None,
+    };
+    Ok(SymbolRelationshipsPortRequest {
+        repository,
+        generation: client_generation(input.generation),
+        seeds: input.symbol_ids.into_iter().collect(),
+        relations,
+        direction,
+        min_confidence: input.min_confidence,
+        max_results: input.max_results,
+    })
+}
+
+fn map_symbol_relationships(
+    response: SymbolRelationshipsPortResponse,
+    request: &SymbolRelationshipsPortRequest,
+) -> Result<ReadEnvelope<SymbolRelationshipsData>, ToolExecutionError> {
+    validate_query_context(
+        &response.result.context,
+        request.repository,
+        request.generation,
+    )?;
+    let mut groups = Vec::new();
+    groups
+        .try_reserve_exact(response.result.groups.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for group in response.result.groups {
+        let relation = relation_kind_from_label(&group.relation)?;
+        let direction = direction_from_label(&group.direction)?;
+        let mut items = Vec::new();
+        items
+            .try_reserve_exact(group.items.len())
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        for item in group.items {
+            let mut source_refs = Vec::new();
+            source_refs
+                .try_reserve_exact(item.source_refs.len())
+                .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+            for source in &item.source_refs {
+                source_refs.push(client_source_ref(source)?);
+            }
+            items.push(RelationshipTarget {
+                symbol_id: item.symbol,
+                confidence: item.confidence,
+                source_refs,
+                provenance: Vec::new(),
+                trust: TrustClassification::UntrustedRepositoryData,
+            });
+        }
+        let total_count = u32::try_from(group.total_count)
+            .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+        groups.push(RelationshipGroup {
+            seed: group.seed,
+            relation,
+            direction,
+            items,
+            total_count,
+        });
+    }
+    let returned_edges = u32::try_from(response.result.returned_edges)
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+    let total_edges = u32::try_from(response.result.total_edges)
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+    let data = SymbolRelationshipsData {
+        groups,
+        unresolved: Vec::new(),
+        totals: RelationshipTotals {
+            returned_edges,
+            total_edges,
+            exact: response.result.exact,
+        },
+    };
+    map_read_envelope(
+        response.result.context,
+        response.metadata,
+        data,
+        response.result.truncated,
+    )
+}
+
+fn relation_kind_label(kind: RelationKind) -> Result<String, ToolExecutionError> {
+    match serde_json::to_value(kind).map_err(|_| internal(ToolExecutionFailure::InvalidResponse))? {
+        Value::String(label) => Ok(label),
+        _ => Err(internal(ToolExecutionFailure::InvalidResponse)),
+    }
+}
+
+fn relation_kind_from_label(label: &str) -> Result<RelationKind, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+fn direction_label(direction: Direction) -> Result<String, ToolExecutionError> {
+    match serde_json::to_value(direction)
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?
+    {
+        Value::String(label) => Ok(label),
+        _ => Err(internal(ToolExecutionFailure::InvalidResponse)),
+    }
+}
+
+fn direction_from_label(label: &str) -> Result<Direction, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
 async fn execute_source_read<P>(

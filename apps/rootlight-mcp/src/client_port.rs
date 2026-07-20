@@ -9,7 +9,7 @@ use rootlight_client::{
     AnalysisTier as ClientAnalysisTier, Client, ClientError, CodeLocate, CoverageStatus,
     GenerationSelector, LocateMode, RepositoryIndex, RepositoryList, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceRead, SourceReference,
-    SymbolExplain,
+    SymbolExplain, SymbolRelationships,
 };
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
@@ -24,6 +24,7 @@ use crate::{
     RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
     RepositoryStatusPortRequest, RequestCancellation, SourceReadPortRequest,
     SourceReadPortResponse, SymbolExplainPortRequest, SymbolExplainPortResponse,
+    SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
 };
 
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -90,6 +91,22 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         generation: GenerationSelector,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<RepositoryStatus>;
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded relationships query dimension"
+    )]
+    fn symbol_relationships(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: Vec<SymbolId>,
+        relations: Vec<String>,
+        direction: Option<String>,
+        min_confidence: Option<u16>,
+        max_results: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<SymbolRelationships>;
 }
 
 struct LiveAsyncFirstSliceClient {
@@ -212,6 +229,34 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         Box::pin(async move {
             client
                 .repository_status_async(repository, generation, timeout)
+                .await
+        })
+    }
+
+    fn symbol_relationships(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: Vec<SymbolId>,
+        relations: Vec<String>,
+        direction: Option<String>,
+        min_confidence: Option<u16>,
+        max_results: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<SymbolRelationships> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .symbol_relationships_async(
+                    repository,
+                    generation,
+                    &seeds,
+                    &relations,
+                    direction.as_deref(),
+                    min_confidence,
+                    max_results,
+                    timeout,
+                )
                 .await
         })
     }
@@ -417,6 +462,31 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                 .map_err(map_client_error)
         })
     }
+
+    fn symbol_relationships(
+        &self,
+        request: SymbolRelationshipsPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<SymbolRelationshipsPortResponse> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let result = client
+                .symbol_relationships(
+                    request.repository(),
+                    request.generation(),
+                    request.seeds().to_vec(),
+                    request.relations().to_vec(),
+                    request.direction().map(str::to_owned),
+                    request.min_confidence(),
+                    request.max_results(),
+                    request_timeout()?,
+                )
+                .await
+                .map_err(map_client_error)?;
+            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            Ok(SymbolRelationshipsPortResponse::new(result, metadata))
+        })
+    }
 }
 
 /// Source-free first-slice port used when synchronous daemon setup is unavailable.
@@ -477,6 +547,14 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
         _request: RepositoryStatusPortRequest,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<RepositoryStatus> {
+        unavailable()
+    }
+
+    fn symbol_relationships(
+        &self,
+        _request: SymbolRelationshipsPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<SymbolRelationshipsPortResponse> {
         unavailable()
     }
 }

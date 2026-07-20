@@ -14,8 +14,10 @@ use std::{
 use rootlight_client::{
     AnalysisTier as ClientTier, CoverageStatus as ClientCoverage, LocateHit, OperationKind,
     OperationStage, OperationState as ClientOperationState, QueryContext, QueryUsage,
-    RecoveryClass, RepositoryCoverageEntry, RepositoryList, RepositoryListEntry, RepositoryStatus,
-    SourceChunk as ClientSourceChunk, SymbolExplanation as ClientExplanation,
+    RecoveryClass, RelationshipGroup as ClientRelationshipGroup,
+    RelationshipTarget as ClientRelationshipTarget, RepositoryCoverageEntry, RepositoryList,
+    RepositoryListEntry, RepositoryStatus, SourceChunk as ClientSourceChunk,
+    SymbolExplanation as ClientExplanation, SymbolRelationships as ClientRelationships,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{CoverageStatus as IrCoverage, LineRange, SourceRef, SourceSpan};
@@ -23,6 +25,7 @@ use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
     SymbolExplainOutput,
     context::{ContextPackOutput, QueryBatchOutput},
+    intent::SymbolRelationshipsOutput,
     repository::{RepoListOutput, RepoStatusOutput, RepositoryState},
     vertical::{
         AnalysisTier, CacheStatus, Freshness, IndexMode, IndexPlanScope, IndexPlanSummary,
@@ -54,6 +57,7 @@ enum FakeOutcome {
     SourceRead(Result<SourceReadPortResponse, ClientPortError>),
     RepositoryList(Result<RepositoryList, ClientPortError>),
     RepositoryStatus(Result<RepositoryStatus, ClientPortError>),
+    SymbolRelationships(Result<SymbolRelationshipsPortResponse, ClientPortError>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +69,7 @@ enum ObservedCall {
     SourceRead(SourceReadPortRequest),
     RepositoryList(RepositoryListPortRequest),
     RepositoryStatus(RepositoryStatusPortRequest),
+    SymbolRelationships(SymbolRelationshipsPortRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +198,19 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::RepositoryStatus(request));
         let outcome = match &self.outcome {
             FakeOutcome::RepositoryStatus(outcome) => outcome.clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { outcome })
+    }
+
+    fn symbol_relationships(
+        &self,
+        request: SymbolRelationshipsPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<SymbolRelationshipsPortResponse> {
+        self.record(ObservedCall::SymbolRelationships(request));
+        let outcome = match &self.outcome {
+            FakeOutcome::SymbolRelationships(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1181,6 +1199,68 @@ async fn repo_status_maps_active_generation_and_coverage() {
     );
     assert_eq!(output.data.coverage.indexed_files, 3);
     assert_eq!(output.data.coverage.languages[0].tier, "A");
+}
+
+#[tokio::test]
+async fn symbol_relationships_maps_groups_and_totals() {
+    let response = SymbolRelationshipsPortResponse::new(
+        ClientRelationships {
+            context: context(1, 0),
+            groups: vec![ClientRelationshipGroup {
+                seed: symbol(),
+                relation: "calls".to_owned(),
+                direction: "outbound".to_owned(),
+                items: vec![ClientRelationshipTarget {
+                    symbol: missing_symbol(),
+                    confidence: 900,
+                    source_refs: vec![source_reference(0, 10, 1, 1)],
+                }],
+                total_count: 1,
+            }],
+            returned_edges: 1,
+            total_edges: 1,
+            exact: true,
+            truncated: false,
+        },
+        metadata("trace-rel-1"),
+    );
+    let harness = Harness::new(FakeOutcome::SymbolRelationships(Ok(response)));
+    let output: SymbolRelationshipsOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::SymbolRelationships,
+            json!({
+                "repository": {"repository_id": repository()},
+                "symbol_ids": [symbol()],
+                "relations": ["calls"]
+            }),
+        )
+        .await
+        .expect("symbol relationships maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected symbol relationships success");
+    };
+    assert_eq!(output.data.groups.len(), 1);
+    let group = &output.data.groups[0];
+    assert_eq!(group.seed, symbol());
+    assert_eq!(group.relation, RelationKind::Calls);
+    assert_eq!(group.direction, Direction::Outbound);
+    assert_eq!(group.total_count, 1);
+    assert_eq!(group.items.len(), 1);
+    assert_eq!(group.items[0].symbol_id, missing_symbol());
+    assert_eq!(group.items[0].confidence, 900);
+    assert_eq!(group.items[0].source_refs.len(), 1);
+    assert_eq!(output.data.totals.returned_edges, 1);
+    assert_eq!(output.data.totals.total_edges, 1);
+    assert!(output.data.totals.exact);
+    assert!(output.data.unresolved.is_empty());
+    let ObservedCall::SymbolRelationships(request) = harness.only_call() else {
+        panic!("expected symbol relationships call");
+    };
+    assert_eq!(request.repository(), repository());
+    assert_eq!(request.seeds(), &[symbol()]);
+    assert_eq!(request.relations(), &["calls".to_owned()]);
 }
 
 #[tokio::test]

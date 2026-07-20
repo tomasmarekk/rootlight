@@ -10,7 +10,7 @@ use rootlight_client::{
     GenerationSelector, LocateMode, OperationKind, OperationStage, OperationState, QueryContext,
     QueryUsage, RecoveryClass, RepositoryCoverageEntry, RepositoryIndex, RepositoryList,
     RepositoryListEntry, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
-    RequestTimeout, SourceChunk, SourceRead, SourceReference, SymbolExplain,
+    RequestTimeout, SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -73,6 +73,16 @@ enum Call {
     RepositoryStatus {
         repository: RepositoryId,
         generation: GenerationSelector,
+        timeout: RequestTimeout,
+    },
+    SymbolRelationships {
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: Vec<SymbolId>,
+        relations: Vec<String>,
+        direction: Option<String>,
+        min_confidence: Option<u16>,
+        max_results: Option<u16>,
         timeout: RequestTimeout,
     },
 }
@@ -303,6 +313,39 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     discovered_files: 1,
                     indexed_files: 1,
                 }],
+            })
+        })
+    }
+
+    fn symbol_relationships(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: Vec<SymbolId>,
+        relations: Vec<String>,
+        direction: Option<String>,
+        min_confidence: Option<u16>,
+        max_results: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<SymbolRelationships> {
+        self.record(Call::SymbolRelationships {
+            repository,
+            generation,
+            seeds,
+            relations,
+            direction,
+            min_confidence,
+            max_results,
+            timeout,
+        });
+        Box::pin(async move {
+            Ok(SymbolRelationships {
+                context: query_context(repository, generation, true),
+                groups: Vec::new(),
+                returned_edges: 0,
+                total_edges: 0,
+                exact: true,
+                truncated: false,
             })
         })
     }
