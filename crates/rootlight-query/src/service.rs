@@ -1,11 +1,11 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io, mem,
     time::{Duration, Instant},
 };
 
 use rootlight_cancel::{Cancellation, CancellationReason};
-use rootlight_ids::{FileId, GenerationId, SymbolId};
+use rootlight_ids::{FactId, FileId, GenerationId, SymbolId};
 use rootlight_ir::{
     CoverageRecord, CoverageScope, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint,
     SourceRef,
@@ -18,9 +18,11 @@ use serde::Serialize;
 use crate::model::{
     CodeLocatePlan, CodeLocateResult, LocateHit, LocateMode, PlanEstimate, PlanExplanation,
     PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage,
+    RelationDirection, RelationFamily, RelationshipEdgeTarget, RelationshipGroup,
     RepositoryDataTrust, SourceChunkResult, SourceReadPlan, SourceReadQueryResult,
-    SymbolExplainPlan, SymbolExplainResult, TokenAccountingProfile, checked_add,
-    checked_u128_to_u64, checked_usize_to_u64, ensure_estimate, search_mode,
+    SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult,
+    TokenAccountingProfile, checked_add, checked_u128_to_u64, checked_usize_to_u64,
+    ensure_estimate, search_mode,
 };
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
@@ -426,6 +428,204 @@ where
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
     }
 
+    /// Builds a deterministic bounded `symbol.relationships` plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid budget, empty or oversized seed or
+    /// relation-family sets, an out-of-range confidence threshold or result
+    /// bound, arithmetic overflow, or a conservative estimate that cannot be
+    /// admitted.
+    pub fn plan_symbol_relationships(
+        &self,
+        seeds: BTreeSet<SymbolId>,
+        families: Vec<RelationFamily>,
+        direction: Option<RelationDirection>,
+        min_confidence: u16,
+        max_results: usize,
+        budget: QueryBudget,
+    ) -> Result<SymbolRelationshipsPlan, QueryError> {
+        budget.validate()?;
+        if seeds.is_empty() || seeds.len() > 64 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if families.is_empty() || families.len() > 16 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if min_confidence > 1_000 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if max_results == 0
+            || max_results > 500
+            || checked_usize_to_u64(max_results)? > budget.max_results
+        {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        let estimate = PlanEstimate {
+            rows: budget.max_rows,
+            edges: budget.max_edges,
+            results: budget.max_results,
+            source_bytes: 0,
+            // The normalized generation bounds every record, while the query
+            // memory budget remains the conservative aggregate ceiling.
+            memory_bytes: budget.max_memory_bytes,
+            json_bytes: budget.max_json_bytes,
+            estimated_tokens: budget.max_tokens,
+            duration_micros: duration_micros(budget.max_duration),
+        };
+        ensure_estimate(estimate, budget)?;
+        let explanation = PlanExplanation {
+            generation: self.generation.metadata().generation(),
+            kind: PlanKind::SymbolRelationships,
+            operators: vec![
+                QueryOperator::GenerationPin,
+                QueryOperator::RelationScan,
+                QueryOperator::OutputBudget,
+            ],
+            estimate,
+        };
+        Ok(SymbolRelationshipsPlan {
+            seeds,
+            families,
+            direction,
+            min_confidence,
+            max_results,
+            budget,
+            explanation,
+        })
+    }
+
+    /// Executes a prevalidated `symbol.relationships` plan.
+    ///
+    /// The scan expands each requested relation family around every seed,
+    /// keeping qualifying edges under the result bound and measuring rows,
+    /// edges, results, and memory exactly like `symbol.explain`. Groups are
+    /// keyed by seed, family, and effective direction so a `both` traversal
+    /// reports each edge under the direction it actually matched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
+    /// resource exhaustion.
+    pub fn execute_symbol_relationships(
+        &self,
+        plan: &SymbolRelationshipsPlan,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<SymbolRelationshipsResult>, QueryError> {
+        self.require_generation(plan.explanation.generation)?;
+        let started = Instant::now();
+        let control = QueryControl::new(cancellation, plan.budget.max_duration);
+        control.check()?;
+        let document = self.generation.document();
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let max_results_bound = checked_usize_to_u64(plan.max_results)?;
+
+        let mut groups: BTreeMap<(SymbolId, RelationFamily, RelationDirection), RelationshipGroup> =
+            BTreeMap::new();
+        let mut returned_edges: u64 = 0;
+        let mut total_edges: u64 = 0;
+        let mut truncated = false;
+
+        'scan: for family in &plan.families {
+            let predicates = family.predicates();
+            if predicates.is_empty() {
+                // The first-slice oracle has no data for this family; an honest
+                // empty result is safer than fabricated edges.
+                continue;
+            }
+            let effective = plan.direction.unwrap_or_else(|| family.natural_direction());
+            for relation in &document.relations {
+                control.check()?;
+                if !tracker.can_add(QueryResource::Rows, 1) {
+                    record_limit(&mut limiting_resources, QueryResource::Rows)?;
+                    truncated = true;
+                    break 'scan;
+                }
+                if !tracker.can_add(QueryResource::Edges, 1) {
+                    record_limit(&mut limiting_resources, QueryResource::Edges)?;
+                    truncated = true;
+                    break 'scan;
+                }
+                tracker.add_rows(1)?;
+                tracker.add_edges(1)?;
+                if !predicates.contains(&relation.predicate) {
+                    continue;
+                }
+                for (seed, direction, target) in
+                    relation_candidates(document, relation, &plan.seeds, effective)
+                {
+                    let confidence = relation.confidence.get();
+                    if confidence < plan.min_confidence {
+                        continue;
+                    }
+                    let key = (seed, *family, direction);
+                    total_edges = total_edges.saturating_add(1);
+                    let group = groups.entry(key).or_insert_with(|| RelationshipGroup {
+                        seed,
+                        family: *family,
+                        direction,
+                        items: Vec::new(),
+                        total_count: 0,
+                    });
+                    group.total_count = group.total_count.saturating_add(1);
+                    if returned_edges >= max_results_bound {
+                        record_limit(&mut limiting_resources, QueryResource::Results)?;
+                        truncated = true;
+                        break 'scan;
+                    }
+                    if !tracker.can_add(QueryResource::Results, 1) {
+                        record_limit(&mut limiting_resources, QueryResource::Results)?;
+                        truncated = true;
+                        break 'scan;
+                    }
+                    let bytes = serialized_size(relation, u64::MAX, &control)?;
+                    if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
+                        record_limit(&mut limiting_resources, QueryResource::MemoryBytes)?;
+                        truncated = true;
+                        break 'scan;
+                    }
+                    tracker.add_results(1)?;
+                    tracker.add_memory(bytes)?;
+                    group.items.push(RelationshipEdgeTarget {
+                        symbol: target,
+                        confidence,
+                        source_refs: relation.evidence.source.iter().cloned().collect(),
+                    });
+                    returned_edges = returned_edges.saturating_add(1);
+                }
+            }
+        }
+
+        let mut groups: Vec<RelationshipGroup> = groups.into_values().collect();
+        for group in &mut groups {
+            group.items.sort_by(|left, right| {
+                left.symbol
+                    .cmp(&right.symbol)
+                    .then_with(|| right.confidence.cmp(&left.confidence))
+            });
+        }
+        let data = SymbolRelationshipsResult {
+            generation: self.generation.metadata().generation(),
+            groups,
+            returned_edges: u32::try_from(returned_edges).unwrap_or(u32::MAX),
+            total_edges: u32::try_from(total_edges).unwrap_or(u32::MAX),
+            exact: !truncated,
+            truncated,
+            limiting_resources,
+            trust: RepositoryDataTrust::UntrustedRepositoryData,
+        };
+        finish_response(plan.explanation.clone(), data, tracker, started, &control)
+    }
+
     /// Builds a deterministic generation-bound `source.read` plan.
     ///
     /// # Errors
@@ -619,6 +819,79 @@ fn serialized_label(value: &impl Serialize) -> Result<String, QueryError> {
 
 fn endpoint_matches(endpoint: RelationEndpoint, symbol: SymbolId) -> bool {
     endpoint == RelationEndpoint::Entity(symbol)
+}
+
+/// Expands one relation into its matching `(seed, direction, target)` candidate
+/// edges for the requested seed set under an effective traversal direction.
+///
+/// Each endpoint contributes its effective entity: a direct entity endpoint
+/// contributes itself, while an occurrence endpoint contributes its enclosing
+/// entity. This lets a seed function match the call, reference, and type-use
+/// occurrences the oracle records against it, and lets the opposite endpoint
+/// report the related entity. Repository and file endpoints contribute nothing
+/// because they are not relationship targets. A `both` traversal reports each
+/// matched edge under the direction it actually satisfied, so a caller can
+/// group inbound and outbound edges separately.
+fn relation_candidates(
+    document: &NormalizedIrDocument,
+    relation: &rootlight_ir::RelationRecord,
+    seeds: &BTreeSet<SymbolId>,
+    effective: RelationDirection,
+) -> Vec<(SymbolId, RelationDirection, SymbolId)> {
+    let subject = endpoint_entity(document, relation.subject);
+    let object = endpoint_entity(document, relation.object);
+    let mut candidates = Vec::new();
+    match effective {
+        RelationDirection::Outbound => {
+            if let (Some(seed), Some(target)) = (subject, object)
+                && seeds.contains(&seed)
+            {
+                candidates.push((seed, RelationDirection::Outbound, target));
+            }
+        }
+        RelationDirection::Inbound => {
+            if let (Some(seed), Some(target)) = (object, subject)
+                && seeds.contains(&seed)
+            {
+                candidates.push((seed, RelationDirection::Inbound, target));
+            }
+        }
+        RelationDirection::Both => {
+            if let (Some(seed), Some(target)) = (subject, object)
+                && seeds.contains(&seed)
+            {
+                candidates.push((seed, RelationDirection::Outbound, target));
+            }
+            if let (Some(seed), Some(target)) = (object, subject)
+                && seeds.contains(&seed)
+            {
+                candidates.push((seed, RelationDirection::Inbound, target));
+            }
+        }
+    }
+    candidates
+}
+
+/// Resolves one relation endpoint to its effective entity, when present.
+fn endpoint_entity(
+    document: &NormalizedIrDocument,
+    endpoint: RelationEndpoint,
+) -> Option<SymbolId> {
+    match endpoint {
+        RelationEndpoint::Entity(symbol) => Some(symbol),
+        RelationEndpoint::Occurrence(occurrence) => occurrence_enclosing(document, occurrence),
+        RelationEndpoint::Repository(_) | RelationEndpoint::File(_) => None,
+    }
+}
+
+/// Returns the enclosing entity recorded for one occurrence, when present.
+fn occurrence_enclosing(document: &NormalizedIrDocument, occurrence: FactId) -> Option<SymbolId> {
+    document
+        .occurrences
+        .binary_search_by_key(&occurrence, |record| record.id)
+        .ok()
+        .and_then(|index| document.occurrences.get(index))
+        .and_then(|record| record.enclosing)
 }
 
 fn occurrence_matches(occurrence: &rootlight_ir::OccurrenceRecord, symbol: SymbolId) -> bool {

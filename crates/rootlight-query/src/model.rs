@@ -1,9 +1,11 @@
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use rootlight_cancel::CancellationReason;
 use rootlight_ids::{ContentHash, FileId, GenerationId, SymbolId};
 use rootlight_ir::{
-    CoverageRecord, EntityRecord, OccurrenceRecord, ProvenanceRecord, RelationRecord, SourceRef,
+    CoverageRecord, EntityRecord, OccurrenceRecord, ProvenanceRecord, RelationPredicate,
+    RelationRecord, SourceRef,
 };
 use rootlight_search::{SearchBudget, SearchError, SearchMode};
 use rootlight_source::{SourceBudget, SourceError, SourceReadOptions};
@@ -182,6 +184,8 @@ pub enum PlanKind {
     CodeLocate,
     /// Explain one stable symbol.
     SymbolExplain,
+    /// Expand typed relation neighborhoods for stable symbols.
+    SymbolRelationships,
     /// Read generation-bound source.
     SourceRead,
 }
@@ -358,6 +362,201 @@ impl SymbolExplainPlan {
     }
 }
 
+/// Traversal direction for a relationship expansion relative to the seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RelationDirection {
+    /// Follow outbound edges from the seed (seed is the subject).
+    Outbound,
+    /// Follow inbound edges toward the seed (seed is the object).
+    Inbound,
+    /// Follow edges in both directions.
+    Both,
+}
+
+impl RelationDirection {
+    /// Returns the stable wire label shared with the MCP direction contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Outbound => "outbound",
+            Self::Inbound => "inbound",
+            Self::Both => "both",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "outbound" => Some(Self::Outbound),
+            "inbound" => Some(Self::Inbound),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+}
+
+/// Typed relation family expanded by a `symbol.relationships` query.
+///
+/// Each family maps to a closed set of normalized IR predicates plus a natural
+/// traversal direction relative to the seed. Families without first-slice
+/// oracle data map to an empty predicate set and therefore expand to no groups
+/// rather than fabricated edges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RelationFamily {
+    /// Direct outbound call.
+    Calls,
+    /// Inbound caller.
+    CalledBy,
+    /// Symbol reference or usage.
+    References,
+    /// Type dependency or type-of relation.
+    Types,
+    /// Trait or interface implementation.
+    Implements,
+    /// Import or module dependency.
+    Imports,
+    /// Test coverage relation.
+    Tests,
+    /// Code ownership or authorship.
+    Ownership,
+    /// Service or RPC call.
+    ServiceCall,
+    /// HTTP route invocation.
+    CallsRoute,
+    /// Message publish or consume.
+    Messaging,
+    /// Database table read.
+    ReadsTable,
+    /// Database table write.
+    WritesTable,
+    /// Build or compilation dependency.
+    BuildDependency,
+    /// Data flow propagation.
+    DataFlow,
+    /// Co-change history signal.
+    History,
+}
+
+impl RelationFamily {
+    /// Returns the stable wire label shared with the MCP relation contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Calls => "calls",
+            Self::CalledBy => "called_by",
+            Self::References => "references",
+            Self::Types => "types",
+            Self::Implements => "implements",
+            Self::Imports => "imports",
+            Self::Tests => "tests",
+            Self::Ownership => "ownership",
+            Self::ServiceCall => "service_call",
+            Self::CallsRoute => "calls_route",
+            Self::Messaging => "messaging",
+            Self::ReadsTable => "reads_table",
+            Self::WritesTable => "writes_table",
+            Self::BuildDependency => "build_dependency",
+            Self::DataFlow => "data_flow",
+            Self::History => "history",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "calls" => Some(Self::Calls),
+            "called_by" => Some(Self::CalledBy),
+            "references" => Some(Self::References),
+            "types" => Some(Self::Types),
+            "implements" => Some(Self::Implements),
+            "imports" => Some(Self::Imports),
+            "tests" => Some(Self::Tests),
+            "ownership" => Some(Self::Ownership),
+            "service_call" => Some(Self::ServiceCall),
+            "calls_route" => Some(Self::CallsRoute),
+            "messaging" => Some(Self::Messaging),
+            "reads_table" => Some(Self::ReadsTable),
+            "writes_table" => Some(Self::WritesTable),
+            "build_dependency" => Some(Self::BuildDependency),
+            "data_flow" => Some(Self::DataFlow),
+            "history" => Some(Self::History),
+            _ => None,
+        }
+    }
+
+    /// Returns the closed IR predicate set backing this family.
+    ///
+    /// Families the first-slice oracle cannot serve return an empty set, so they
+    /// expand to no groups instead of fabricated edges.
+    #[must_use]
+    pub fn predicates(self) -> &'static [RelationPredicate] {
+        match self {
+            Self::Calls => &[RelationPredicate::Calls],
+            Self::CalledBy => &[RelationPredicate::Calls],
+            Self::References => &[RelationPredicate::RefersTo],
+            Self::Types => &[
+                RelationPredicate::UsesType,
+                RelationPredicate::ReturnsType,
+                RelationPredicate::ParameterType,
+            ],
+            Self::Implements => &[
+                RelationPredicate::Implements,
+                RelationPredicate::Satisfies,
+                RelationPredicate::Extends,
+                RelationPredicate::Embeds,
+                RelationPredicate::MixesIn,
+                RelationPredicate::Overrides,
+            ],
+            Self::Imports => &[RelationPredicate::Imports],
+            Self::Tests
+            | Self::Ownership
+            | Self::ServiceCall
+            | Self::CallsRoute
+            | Self::Messaging
+            | Self::ReadsTable
+            | Self::WritesTable
+            | Self::BuildDependency
+            | Self::DataFlow
+            | Self::History => &[],
+        }
+    }
+
+    /// Returns the natural traversal direction relative to the seed.
+    #[must_use]
+    pub const fn natural_direction(self) -> RelationDirection {
+        match self {
+            Self::CalledBy => RelationDirection::Inbound,
+            _ => RelationDirection::Outbound,
+        }
+    }
+}
+
+/// Prevalidated `symbol.relationships` plan.
+#[derive(Debug, Clone)]
+pub struct SymbolRelationshipsPlan {
+    pub(crate) seeds: BTreeSet<SymbolId>,
+    pub(crate) families: Vec<RelationFamily>,
+    pub(crate) direction: Option<RelationDirection>,
+    pub(crate) min_confidence: u16,
+    pub(crate) max_results: usize,
+    pub(crate) budget: QueryBudget,
+    pub(crate) explanation: PlanExplanation,
+}
+
+impl SymbolRelationshipsPlan {
+    /// Returns the deterministic plan explanation.
+    #[must_use]
+    pub const fn explanation(&self) -> &PlanExplanation {
+        &self.explanation
+    }
+}
+
 /// Prevalidated source-read plan.
 #[derive(Debug, Clone)]
 pub struct SourceReadPlan {
@@ -451,6 +650,53 @@ pub struct SymbolExplainResult {
     /// Resource limits that stopped optional scans, in deterministic scan order.
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled names and labels.
+    pub trust: RepositoryDataTrust,
+}
+
+/// One typed relationship target expanded from a seed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RelationshipEdgeTarget {
+    /// Stable identity of the related entity.
+    pub symbol: SymbolId,
+    /// Fixed-point edge confidence from 0 through 1000.
+    pub confidence: u16,
+    /// Direct immutable source evidence for the edge.
+    pub source_refs: Vec<SourceRef>,
+}
+
+/// One seed-relation group expanded by a relationships query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RelationshipGroup {
+    /// Seed symbol that was expanded.
+    pub seed: SymbolId,
+    /// Relation family for this group.
+    pub family: RelationFamily,
+    /// Effective direction of the returned edges.
+    pub direction: RelationDirection,
+    /// Bounded relationship targets in deterministic order.
+    pub items: Vec<RelationshipEdgeTarget>,
+    /// Qualifying edges known for this group before truncation.
+    pub total_count: u32,
+}
+
+/// Data returned by a `symbol.relationships` plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SymbolRelationshipsResult {
+    /// Immutable generation that served the query.
+    pub generation: GenerationId,
+    /// Seed-relation groups in deterministic order.
+    pub groups: Vec<RelationshipGroup>,
+    /// Total edges returned across all groups.
+    pub returned_edges: u32,
+    /// Qualifying edges known before budget limits.
+    pub total_edges: u32,
+    /// Whether the counts are exact or lower bounds.
+    pub exact: bool,
+    /// Whether a resource limit stopped complete materialization.
+    pub truncated: bool,
+    /// Resource limits that stopped work, in deterministic execution order.
+    pub limiting_resources: Vec<QueryResource>,
+    /// Mandatory trust marker for repository-controlled values.
     pub trust: RepositoryDataTrust,
 }
 
