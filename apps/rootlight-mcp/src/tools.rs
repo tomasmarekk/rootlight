@@ -8,10 +8,14 @@ use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 use jsonschema::Validator;
 use rootlight_mcp_contract::{
     CodeLocateInput, CodeLocateOutput, DetailKey, ErrorCode, ErrorResponse, ExposureProfile,
-    GenerationSelector, NextAction, OperationStatusInput, OperationStatusOutput, PublicError,
-    RepoIndexInput, RepoIndexOutput, RepositorySelector, SchemaVersion, SourceReadInput,
-    SourceReadOutput, SymbolExplainInput, SymbolExplainOutput, ToolResponse, TrustClassification,
-    VerticalTool,
+    GenerationSelector, McpTool, NextAction, OperationStatusInput, OperationStatusOutput,
+    PublicError, RepoIndexInput, RepoIndexOutput, RepositorySelector, SchemaVersion,
+    SourceReadInput, SourceReadOutput, SymbolExplainInput, SymbolExplainOutput, ToolResponse,
+    TrustClassification, VerticalTool,
+    context::{
+        BatchOperation, BatchTool, ContextPackInput, QueryAdvancedInput, QueryAstNode,
+        QueryBatchInput,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -23,6 +27,8 @@ use super::{
     INVALID_PARAMS, MAX_REQUEST_ID_BYTES, METHOD_NOT_FOUND, OperatingRequest, RequestCancellation,
     RequestHandler, request_meta_is_valid,
 };
+use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL, QueryOperator};
+use crate::batch::{BatchPlan, is_batch_allowed_under_profile};
 
 const INTERNAL_ERROR: i32 = -32_603;
 const MAX_TOOL_NAME_BYTES: usize = 128;
@@ -328,6 +334,13 @@ where
                 );
             }
         };
+        if !typed_input_invariants_are_valid(contract.tool, &typed_input, profile) {
+            return cancel_or(
+                &cancellation,
+                tool_error(contract, invalid_arguments)
+                    .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
+            );
+        }
         if cancellation.is_cancelled() {
             return HandlerResponse::Cancelled;
         }
@@ -546,6 +559,9 @@ fn parse_object_schema(
 enum TypedInput {
     Other,
     SourceRead(SourceReadInput),
+    ContextPack(ContextPackInput),
+    QueryAdvanced(QueryAdvancedInput),
+    QueryBatch(QueryBatchInput),
 }
 
 fn decode_typed_input(tool: VerticalTool, input: &Value) -> Result<TypedInput, ()> {
@@ -565,10 +581,16 @@ fn decode_typed_input(tool: VerticalTool, input: &Value) -> Result<TypedInput, (
         | VerticalTool::ArchitectureCycles
         | VerticalTool::CodeDead
         | VerticalTool::HistoryCompare
-        | VerticalTool::PlanChange
-        | VerticalTool::ContextPack
-        | VerticalTool::QueryAdvanced
-        | VerticalTool::QueryBatch => Ok(TypedInput::Other),
+        | VerticalTool::PlanChange => Ok(TypedInput::Other),
+        VerticalTool::ContextPack => ContextPackInput::deserialize(input)
+            .map(TypedInput::ContextPack)
+            .map_err(|_| ()),
+        VerticalTool::QueryAdvanced => QueryAdvancedInput::deserialize(input)
+            .map(TypedInput::QueryAdvanced)
+            .map_err(|_| ()),
+        VerticalTool::QueryBatch => QueryBatchInput::deserialize(input)
+            .map(TypedInput::QueryBatch)
+            .map_err(|_| ()),
         VerticalTool::OperationStatus => OperationStatusInput::deserialize(input)
             .map(|_| TypedInput::Other)
             .map_err(|_| ()),
@@ -582,6 +604,202 @@ fn decode_typed_input(tool: VerticalTool, input: &Value) -> Result<TypedInput, (
             .map(TypedInput::SourceRead)
             .map_err(|_| ()),
     }
+}
+
+/// Enforces the cross-field invariants JSON Schema cannot express for the
+/// intent tools that carry a typed wire contract.
+///
+/// These checks run on the public path before execution so malformed batch
+/// plans, advanced queries, and context packs are rejected with a checked
+/// argument error instead of reaching an executor.
+fn typed_input_invariants_are_valid(
+    tool: VerticalTool,
+    input: &TypedInput,
+    profile: ExposureProfile,
+) -> bool {
+    match (tool, input) {
+        (VerticalTool::ContextPack, TypedInput::ContextPack(input)) => {
+            context_pack_invariants_are_valid(input)
+        }
+        (VerticalTool::QueryAdvanced, TypedInput::QueryAdvanced(input)) => {
+            advanced_invariants_are_valid(input)
+        }
+        (VerticalTool::QueryBatch, TypedInput::QueryBatch(input)) => {
+            batch_invariants_are_valid(input, profile)
+        }
+        _ => true,
+    }
+}
+
+/// A context pack must anchor to at least one non-empty seed kind.
+fn context_pack_invariants_are_valid(input: &ContextPackInput) -> bool {
+    let seeds = &input.seeds;
+    seeds
+        .symbols
+        .as_ref()
+        .is_some_and(|values| !values.is_empty())
+        || seeds
+            .paths
+            .as_ref()
+            .is_some_and(|values| !values.is_empty())
+        || seeds
+            .routes
+            .as_ref()
+            .is_some_and(|values| !values.is_empty())
+        || seeds
+            .tests
+            .as_ref()
+            .is_some_and(|values| !values.is_empty())
+        || seeds.located.is_some()
+        || seeds.change.is_some()
+        || seeds.plan.is_some()
+}
+
+/// Validates the safe query AST: bounded depth, allow-listed operators, static
+/// cost within the hard ceiling, and within any client-supplied cost limit.
+fn advanced_invariants_are_valid(input: &QueryAdvancedInput) -> bool {
+    let mut operators = Vec::new();
+    let mut depth = 0usize;
+    collect_ast_operators(&input.query, &mut operators, &mut depth, 1);
+    let max_rows = usize::from(input.max_results.unwrap_or(100));
+    let Ok(plan) = AdvancedQueryPlan::validate(&operators, max_rows, MAX_ADVANCED_TRAVERSAL, depth)
+    else {
+        return false;
+    };
+    input
+        .cost_limit
+        .is_none_or(|limit| plan.estimated_cost <= limit)
+}
+
+/// Walks the query AST, recording the operator sequence and maximum nesting
+/// depth used for static cost estimation.
+fn collect_ast_operators(
+    node: &QueryAstNode,
+    operators: &mut Vec<QueryOperator>,
+    depth: &mut usize,
+    current: usize,
+) {
+    *depth = (*depth).max(current);
+    let (operator, children): (QueryOperator, Vec<&QueryAstNode>) = match node {
+        QueryAstNode::Scan { .. } => (QueryOperator::Scan, Vec::new()),
+        QueryAstNode::Filter { input, .. } => (QueryOperator::Filter, vec![input]),
+        QueryAstNode::Project { input, .. } => (QueryOperator::Project, vec![input]),
+        QueryAstNode::Join { left, right, .. } => (QueryOperator::Join, vec![left, right]),
+        QueryAstNode::Aggregate { input, .. } => (QueryOperator::Aggregate, vec![input]),
+        QueryAstNode::Traverse { .. } => (QueryOperator::Traverse, Vec::new()),
+        QueryAstNode::Sort { input, .. } => (QueryOperator::Sort, vec![input]),
+        QueryAstNode::Limit { input, .. } => (QueryOperator::Limit, vec![input]),
+    };
+    operators.push(operator);
+    for child in children {
+        collect_ast_operators(child, operators, depth, current + 1);
+    }
+}
+
+/// Maps a public batch subtool to its catalog counterpart.
+const fn mcp_tool_for_batch(tool: BatchTool) -> McpTool {
+    match tool {
+        BatchTool::CodeLocate => McpTool::CodeLocate,
+        BatchTool::SymbolExplain => McpTool::SymbolExplain,
+        BatchTool::SymbolRelationships => McpTool::SymbolRelationships,
+        BatchTool::FlowTrace => McpTool::FlowTrace,
+        BatchTool::ChangeImpact => McpTool::ChangeImpact,
+        BatchTool::TestsSelect => McpTool::TestsSelect,
+        BatchTool::ArchitectureOverview => McpTool::ArchitectureOverview,
+        BatchTool::ArchitectureCycles => McpTool::ArchitectureCycles,
+        BatchTool::CodeDead => McpTool::CodeDead,
+        BatchTool::PlanChange => McpTool::PlanChange,
+        BatchTool::ContextPack => McpTool::ContextPack,
+        BatchTool::SourceRead => McpTool::SourceRead,
+    }
+}
+
+/// Validates the public batch invariants: unique operation ids, an acyclic
+/// dependency graph of bounded depth, the closed allowlist intersected with the
+/// active exposure profile, and bindings that only reference declared
+/// dependencies.
+fn batch_invariants_are_valid(input: &QueryBatchInput, profile: ExposureProfile) -> bool {
+    let operations = &input.operations;
+
+    let mut ids: Vec<&str> = operations.iter().map(|op| op.id.as_str()).collect();
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return false;
+    }
+
+    let tools: Vec<McpTool> = operations
+        .iter()
+        .map(|op| mcp_tool_for_batch(op.tool))
+        .collect();
+    if !tools
+        .iter()
+        .all(|tool| is_batch_allowed_under_profile(*tool, profile))
+    {
+        return false;
+    }
+
+    let mut dependencies: Vec<Vec<usize>> = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let mut resolved = Vec::new();
+        if let Some(declared) = &operation.depends_on {
+            for name in declared {
+                let Some(index) = operations.iter().position(|other| other.id == *name) else {
+                    return false;
+                };
+                resolved.push(index);
+            }
+        }
+        dependencies.push(resolved);
+    }
+
+    if BatchPlan::validate(&tools, &dependencies).is_err() {
+        return false;
+    }
+
+    for (index, operation) in operations.iter().enumerate() {
+        if !bindings_reference_declared_dependencies(
+            &operation.arguments,
+            &dependencies[index],
+            operations,
+        ) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Checks that every `$from` binding leaf names a declared dependency of its
+/// operation. Wildcards and references to undeclared operations are rejected.
+fn bindings_reference_declared_dependencies(
+    arguments: &Map<String, Value>,
+    declared: &[usize],
+    operations: &[BatchOperation],
+) -> bool {
+    let declared_ids: Vec<&str> = declared
+        .iter()
+        .map(|&index| operations[index].id.as_str())
+        .collect();
+    let mut stack: Vec<&Value> = arguments.values().collect();
+    while let Some(value) = stack.pop() {
+        match value {
+            Value::Object(map) => {
+                if let Some(from) = map.get("$from") {
+                    if !from
+                        .as_str()
+                        .is_some_and(|name| declared_ids.contains(&name))
+                    {
+                        return false;
+                    }
+                } else {
+                    stack.extend(map.values());
+                }
+            }
+            Value::Array(items) => stack.extend(items),
+            _ => {}
+        }
+    }
+    true
 }
 
 /// Reports whether a tool name is exposed by the given profile.
@@ -1762,5 +1980,236 @@ mod tests {
             .handle(request("tools/list", json!({})), cancellation())
             .await;
         assert_eq!(listed_tool_names(&success(response)).len(), 6);
+    }
+
+    use rootlight_mcp_contract::context::{ContextSeedSelector, QueryPredicate, QueryValue};
+    use rootlight_mcp_contract::vertical::{EntityKind, RepositoryIdSelector};
+
+    fn selector() -> RepositorySelector {
+        RepositorySelector::ById(RepositoryIdSelector {
+            repository_id: "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+                .parse()
+                .expect("valid repository id"),
+        })
+    }
+
+    fn batch_operation(id: &str, tool: BatchTool, depends_on: Option<Vec<&str>>) -> BatchOperation {
+        BatchOperation {
+            id: id.to_owned(),
+            tool,
+            depends_on: depends_on.map(|names| names.into_iter().map(str::to_owned).collect()),
+            arguments: Map::new(),
+            local_budget: None,
+        }
+    }
+
+    fn batch_input(operations: Vec<BatchOperation>) -> QueryBatchInput {
+        QueryBatchInput {
+            repository: selector(),
+            generation: None,
+            operations,
+            failure_policy: None,
+            budget: None,
+            response_profile: None,
+        }
+    }
+
+    #[test]
+    fn batch_with_unique_ids_and_acyclic_graph_is_valid() {
+        let input = batch_input(vec![
+            batch_operation("find", BatchTool::CodeLocate, None),
+            batch_operation("explain", BatchTool::SymbolExplain, Some(vec!["find"])),
+        ]);
+        assert!(batch_invariants_are_valid(
+            &input,
+            ExposureProfile::Developer
+        ));
+    }
+
+    #[test]
+    fn batch_with_duplicate_operation_ids_is_rejected() {
+        let input = batch_input(vec![
+            batch_operation("dup", BatchTool::CodeLocate, None),
+            batch_operation("dup", BatchTool::SymbolExplain, None),
+        ]);
+        assert!(!batch_invariants_are_valid(
+            &input,
+            ExposureProfile::Developer
+        ));
+    }
+
+    #[test]
+    fn batch_with_dependency_cycle_is_rejected() {
+        let input = batch_input(vec![
+            batch_operation("a", BatchTool::CodeLocate, Some(vec!["b"])),
+            batch_operation("b", BatchTool::SymbolExplain, Some(vec!["a"])),
+        ]);
+        assert!(!batch_invariants_are_valid(
+            &input,
+            ExposureProfile::Developer
+        ));
+    }
+
+    #[test]
+    fn batch_with_unknown_dependency_is_rejected() {
+        let input = batch_input(vec![batch_operation(
+            "a",
+            BatchTool::CodeLocate,
+            Some(vec!["missing"]),
+        )]);
+        assert!(!batch_invariants_are_valid(
+            &input,
+            ExposureProfile::Developer
+        ));
+    }
+
+    #[test]
+    fn batch_subtool_hidden_by_profile_is_rejected() {
+        // symbol.relationships is batch-allowed but not exposed under scout.
+        let input = batch_input(vec![batch_operation(
+            "rel",
+            BatchTool::SymbolRelationships,
+            None,
+        )]);
+        assert!(!batch_invariants_are_valid(&input, ExposureProfile::Scout));
+        assert!(batch_invariants_are_valid(
+            &input,
+            ExposureProfile::Developer
+        ));
+    }
+
+    #[test]
+    fn batch_binding_must_reference_declared_dependency() {
+        let mut arguments = Map::new();
+        arguments.insert(
+            "symbol_ids".to_owned(),
+            json!([{ "$from": "find", "pointer": "/data/matches/0/symbol_id" }]),
+        );
+        let mut declared = batch_operation("explain", BatchTool::SymbolExplain, Some(vec!["find"]));
+        declared.arguments = arguments.clone();
+        let valid = batch_input(vec![
+            batch_operation("find", BatchTool::CodeLocate, None),
+            declared,
+        ]);
+        assert!(batch_invariants_are_valid(
+            &valid,
+            ExposureProfile::Developer
+        ));
+
+        let mut undeclared = batch_operation("explain", BatchTool::SymbolExplain, None);
+        undeclared.arguments = arguments;
+        let invalid = batch_input(vec![
+            batch_operation("find", BatchTool::CodeLocate, None),
+            undeclared,
+        ]);
+        assert!(!batch_invariants_are_valid(
+            &invalid,
+            ExposureProfile::Developer
+        ));
+    }
+
+    fn advanced_input(query: QueryAstNode) -> QueryAdvancedInput {
+        QueryAdvancedInput {
+            repository: selector(),
+            generation: None,
+            query,
+            parameters: None,
+            explain: None,
+            max_results: None,
+            max_depth: None,
+            cost_limit: None,
+            cursor: None,
+        }
+    }
+
+    fn scan() -> QueryAstNode {
+        QueryAstNode::Scan {
+            entity: EntityKind::Function,
+            filter: None,
+        }
+    }
+
+    fn nested_filters(depth: usize) -> QueryAstNode {
+        let mut node = scan();
+        for _ in 0..depth {
+            node = QueryAstNode::Filter {
+                input: Box::new(node),
+                predicate: QueryPredicate::Equals {
+                    field: "name".to_owned(),
+                    value: QueryValue::Boolean(true),
+                },
+            };
+        }
+        node
+    }
+
+    #[test]
+    fn advanced_simple_scan_is_valid() {
+        assert!(advanced_invariants_are_valid(&advanced_input(scan())));
+    }
+
+    #[test]
+    fn advanced_ast_exceeding_max_depth_is_rejected() {
+        // Scan plus five filters nests to depth six, above the ceiling of five.
+        assert!(!advanced_invariants_are_valid(&advanced_input(
+            nested_filters(5)
+        )));
+        assert!(advanced_invariants_are_valid(&advanced_input(
+            nested_filters(4)
+        )));
+    }
+
+    #[test]
+    fn advanced_cost_limit_bounds_the_static_estimate() {
+        let mut tight = advanced_input(scan());
+        tight.cost_limit = Some(1);
+        assert!(!advanced_invariants_are_valid(&tight));
+        let mut generous = advanced_input(scan());
+        generous.cost_limit = Some(1_000);
+        assert!(advanced_invariants_are_valid(&generous));
+    }
+
+    fn pack_input(seeds: ContextSeedSelector) -> ContextPackInput {
+        ContextPackInput {
+            repository: selector(),
+            generation: None,
+            task: "fix duplicate payment creation".to_owned(),
+            seeds,
+            token_budget: 4500,
+            source_policy: None,
+            sections: None,
+            diversity: None,
+            min_confidence: None,
+            continuation: None,
+        }
+    }
+
+    #[test]
+    fn context_pack_requires_at_least_one_seed() {
+        let empty = ContextSeedSelector {
+            symbols: None,
+            paths: None,
+            routes: None,
+            tests: None,
+            located: None,
+            change: None,
+            plan: None,
+        };
+        assert!(!context_pack_invariants_are_valid(&pack_input(empty)));
+
+        let symbol = ContextSeedSelector {
+            symbols: Some(vec![
+                "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+                    .parse()
+                    .expect("valid symbol id"),
+            ]),
+            paths: None,
+            routes: None,
+            tests: None,
+            located: None,
+            change: None,
+            plan: None,
+        };
+        assert!(context_pack_invariants_are_valid(&pack_input(symbol)));
     }
 }
