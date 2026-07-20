@@ -62,6 +62,8 @@ const DEFAULT_CYCLE_MAX_CYCLES: u32 = 50;
 const DEFAULT_CODE_DEAD_MAX_CANDIDATES: u32 = 50;
 const DEFAULT_ARCHITECTURE_OVERVIEW_MAX_COMPONENTS: u32 = 50;
 const DEFAULT_TESTS_SELECT_MAX_TESTS: u32 = 20;
+const DEFAULT_CHANGE_IMPACT_MAX_DEPTH: u32 = 3;
+const DEFAULT_CHANGE_IMPACT_MAX_DEPENDENTS: u32 = 100;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
 
@@ -547,6 +549,9 @@ fn execute_service_request(
         }
         FirstSliceIpcRequest::TestsSelect(request) => {
             tests_select(service, request, &context).map(FirstSliceIpcResponse::TestsSelect)
+        }
+        FirstSliceIpcRequest::ChangeImpact(request) => {
+            change_impact(service, request, &context).map(FirstSliceIpcResponse::ChangeImpact)
         }
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
     }
@@ -1615,6 +1620,116 @@ fn tests_select(
     })
 }
 
+fn change_impact(
+    service: &FirstSliceService,
+    request: daemon::ChangeImpactRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::ChangeImpactResponse, PublicError> {
+    let repository = parse_repository(request.repository.as_ref())?;
+    let selected = parse_generation_selector(request.generation.as_ref())?;
+    let generation = service
+        .resolve_generation(repository, selected)
+        .map_err(service_error)?;
+    let mut changed_symbols = BTreeSet::new();
+    for symbol in &request.changed_symbols {
+        changed_symbols.insert(parse_symbol(Some(symbol))?);
+    }
+    let mut changed_paths = Vec::new();
+    changed_paths
+        .try_reserve_exact(request.changed_paths.len())
+        .map_err(|_| resource_exhausted())?;
+    for path in &request.changed_paths {
+        changed_paths.push(path.clone());
+    }
+    let max_depth = u8::try_from(request.max_depth.unwrap_or(DEFAULT_CHANGE_IMPACT_MAX_DEPTH))
+        .map_err(|_| invalid_argument())?;
+    let min_confidence =
+        u16::try_from(request.min_confidence.unwrap_or(0)).map_err(|_| invalid_argument())?;
+    let include_tests = request.include_tests.unwrap_or(false);
+    let max_dependents = usize::try_from(
+        request
+            .max_dependents
+            .unwrap_or(DEFAULT_CHANGE_IMPACT_MAX_DEPENDENTS),
+    )
+    .map_err(|_| invalid_argument())?;
+    let response = service
+        .change_impact(
+            generation.generation,
+            changed_symbols,
+            changed_paths,
+            max_depth,
+            min_confidence,
+            include_tests,
+            max_dependents,
+            &context.cancellation,
+        )
+        .map_err(service_error)?;
+    let risk = response.data.risk_summary;
+    let mut resolved_changes = Vec::new();
+    resolved_changes
+        .try_reserve_exact(response.data.resolved_changes.len())
+        .map_err(|_| resource_exhausted())?;
+    for change in response.data.resolved_changes {
+        resolved_changes.push(daemon::FirstSliceResolvedChange {
+            symbol_id: change.symbol_id.map(symbol_to_wire),
+            file_id: change.file_id.map(file_to_wire),
+            classification: change.classification.as_str().to_owned(),
+            kind: change.kind,
+        });
+    }
+    let mut impacted = Vec::new();
+    impacted
+        .try_reserve_exact(response.data.impacted.len())
+        .map_err(|_| resource_exhausted())?;
+    for group in response.data.impacted {
+        let mut dependents = Vec::new();
+        dependents
+            .try_reserve_exact(group.dependents.len())
+            .map_err(|_| resource_exhausted())?;
+        for entry in group.dependents {
+            dependents.push(daemon::FirstSliceImpactEntry {
+                symbol_id: Some(symbol_to_wire(entry.symbol_id)),
+                kind: entry.kind,
+                distance: u32::from(entry.distance),
+                confidence: u32::from(entry.confidence),
+                via: entry.via,
+                is_public: entry.is_public,
+            });
+        }
+        impacted.push(daemon::FirstSliceImpactGroup {
+            source_index: u32::from(group.source_index),
+            dependents,
+        });
+    }
+    let mut tests = Vec::new();
+    tests
+        .try_reserve_exact(response.data.tests.len())
+        .map_err(|_| resource_exhausted())?;
+    for test in response.data.tests {
+        tests.push(daemon::FirstSliceChangeImpactTest {
+            test_id: test.test_id,
+            relevance: u32::from(test.relevance),
+            why: test.why,
+            estimated_cost_ms: test.estimated_cost_ms,
+        });
+    }
+    Ok(daemon::ChangeImpactResponse {
+        schema_version: Some(schema_version()),
+        context: Some(query_context(generation, &response.usage, &[])),
+        resolved_changes,
+        impacted,
+        tests,
+        risk_summary: Some(daemon::FirstSliceImpactRiskSummary {
+            level: risk.level.as_str().to_owned(),
+            reasons: risk.reasons,
+            coverage: coverage_label(risk.coverage).to_owned(),
+            breaking_surface: risk.breaking_surface,
+            fanout: risk.fanout,
+            dynamic_blind_spots: risk.dynamic_blind_spots,
+        }),
+    })
+}
+
 fn source_read(
     service: &FirstSliceService,
     request: daemon::SourceReadRequest,
@@ -2021,6 +2136,18 @@ fn coverage_status_to_wire(status: CoverageStatus) -> daemon::FirstSliceCoverage
         CoverageStatus::Sampled => daemon::FirstSliceCoverageStatus::FirstSliceCoverageSampled,
         CoverageStatus::Unknown => daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown,
         _ => daemon::FirstSliceCoverageStatus::Unspecified,
+    }
+}
+
+/// Returns the stable wire label for a coverage status, matching the client's
+/// `coverage_status_from_label` parsing.
+const fn coverage_label(status: CoverageStatus) -> &'static str {
+    match status {
+        CoverageStatus::Complete => "complete",
+        CoverageStatus::Bounded => "bounded",
+        CoverageStatus::Sampled => "sampled",
+        CoverageStatus::Unknown => "unknown",
+        _ => "unknown",
     }
 }
 
