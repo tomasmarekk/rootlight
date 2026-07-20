@@ -938,6 +938,67 @@ pub struct ArchitectureCycles {
     pub projection: CycleProjection,
 }
 
+/// One dead-code candidate with classification and source-free evidence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CodeDeadCandidate {
+    /// Stable symbol identity of the candidate.
+    pub symbol_id: SymbolId,
+    /// Reachability classification label, such as `proven_dead`.
+    pub classification: String,
+    /// Classification confidence from 0 through 1000.
+    pub confidence: u16,
+    /// Source-free reasons supporting the classification.
+    pub why: Vec<String>,
+    /// Suppression rules checked for this candidate.
+    pub suppressions_checked: Vec<String>,
+    /// Direct immutable source evidence for the candidate definition.
+    pub source_refs: Vec<SourceReference>,
+}
+
+/// Summary of the entry-point model used for reachability.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CodeDeadEntryPointSummary {
+    /// Policy label used for entry-point resolution.
+    pub policy: String,
+    /// Number of resolved entry points.
+    pub entry_point_count: u32,
+    /// Whether the model is complete for the scope.
+    pub complete: bool,
+}
+
+/// One known blind spot in the reachability analysis.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CodeDeadBlindSpot {
+    /// Source-free blind-spot category label.
+    pub category: String,
+    /// Number of symbols potentially affected.
+    pub affected_count: u32,
+}
+
+/// One applied false-positive suppression rule.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CodeDeadSuppressionRule {
+    /// Rule identifier or annotation pattern.
+    pub rule: String,
+    /// Number of symbols suppressed by this rule.
+    pub suppressed_count: u32,
+}
+
+/// Bounded dead-code candidates among stable symbols for one generation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CodeDead {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Ranked dead-code candidates in deterministic order.
+    pub candidates: Vec<CodeDeadCandidate>,
+    /// Entry-point model summary.
+    pub entry_points: CodeDeadEntryPointSummary,
+    /// Known analysis blind spots.
+    pub blind_spots: Vec<CodeDeadBlindSpot>,
+    /// Applied false-positive suppression rules.
+    pub false_positive_controls: Vec<CodeDeadSuppressionRule>,
+}
+
 /// Validated total deadline budget for one asynchronous daemon request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestTimeout(Duration);
@@ -2068,6 +2129,94 @@ impl Client {
         }
     }
 
+    /// Detects bounded dead-code candidates over one generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid endpoint, policy, confidence, or
+    /// candidate bounds, unavailable protocol support, transport failure,
+    /// timeout, or a malformed or uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded code dead dimension"
+    )]
+    pub fn code_dead(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        entry_point_policy: Option<&str>,
+        include_exported: Option<bool>,
+        include_tests: Option<bool>,
+        min_confidence: Option<u16>,
+        max_candidates: Option<u16>,
+    ) -> Result<CodeDead, ClientError> {
+        match self.request(build_code_dead_request(
+            repository,
+            generation,
+            entry_point_policy,
+            include_exported,
+            include_tests,
+            min_confidence,
+            max_candidates,
+        )?)? {
+            daemon::response_envelope::Response::CodeDead(response) => {
+                parse_code_dead(response, repository, generation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously detects bounded dead-code candidates over one generation.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached detection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid endpoint, policy, confidence, or
+    /// candidate bounds, unavailable protocol support, transport failure,
+    /// timeout, or a malformed or uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded code dead dimension"
+    )]
+    pub async fn code_dead_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        entry_point_policy: Option<&str>,
+        include_exported: Option<bool>,
+        include_tests: Option<bool>,
+        min_confidence: Option<u16>,
+        max_candidates: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> Result<CodeDead, ClientError> {
+        match self
+            .request_async(
+                build_code_dead_request(
+                    repository,
+                    generation,
+                    entry_point_policy,
+                    include_exported,
+                    include_tests,
+                    min_confidence,
+                    max_candidates,
+                )?,
+                timeout,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::CodeDead(response) => {
+                parse_code_dead(response, repository, generation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     fn request(
         &self,
         request: daemon::request_envelope::Request,
@@ -2665,7 +2814,8 @@ fn ensure_request_supported(
         | daemon::request_envelope::Request::RepositoryStatus(_)
         | daemon::request_envelope::Request::SymbolRelationships(_)
         | daemon::request_envelope::Request::FlowTrace(_)
-        | daemon::request_envelope::Request::ArchitectureCycles(_) => 5,
+        | daemon::request_envelope::Request::ArchitectureCycles(_)
+        | daemon::request_envelope::Request::CodeDead(_) => 5,
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
         daemon::request_envelope::Request::OperationLeaseRenew(_) => {
@@ -4089,6 +4239,130 @@ fn parse_architecture_cycles(
             min_confidence: u16::try_from(wire_projection.min_confidence)
                 .map_err(|_| ClientError::InvalidResponseCorrelation)?,
         },
+    })
+}
+
+fn build_code_dead_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    entry_point_policy: Option<&str>,
+    include_exported: Option<bool>,
+    include_tests: Option<bool>,
+    min_confidence: Option<u16>,
+    max_candidates: Option<u16>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if entry_point_policy.is_some_and(|policy| {
+        policy.is_empty() || policy.len() > 32 || policy.as_bytes().contains(&0)
+    }) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if min_confidence.is_some_and(|confidence| confidence > 1_000) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if max_candidates.is_some_and(|max| !(1..=500).contains(&max)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::CodeDead(
+        daemon::CodeDeadRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            entry_point_policy: entry_point_policy.map(str::to_owned),
+            include_exported,
+            include_tests,
+            min_confidence: min_confidence.map(u32::from),
+            max_candidates: max_candidates.map(u32::from),
+        },
+    ))
+}
+
+fn parse_code_dead(
+    response: daemon::CodeDeadResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+) -> Result<CodeDead, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(response.context, repository, selector)?;
+    let wire_entry_points = response
+        .entry_points
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    if response.candidates.len() > 500
+        || response.blind_spots.len() > 32
+        || response.false_positive_controls.len() > 32
+        || wire_entry_points.policy.is_empty()
+        || wire_entry_points.policy.len() > 32
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(response.candidates.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for candidate in response.candidates {
+        if candidate.classification.is_empty()
+            || candidate.classification.len() > 32
+            || candidate.confidence > 1_000
+            || candidate.why.is_empty()
+            || candidate.why.len() > 16
+            || candidate.suppressions_checked.len() > 16
+            || candidate.source_refs.len() > 8
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let symbol_id = parse_symbol(candidate.symbol_id)?;
+        let mut source_refs = Vec::new();
+        source_refs
+            .try_reserve_exact(candidate.source_refs.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for source in candidate.source_refs {
+            source_refs.push(parse_source_reference(source, &context)?);
+        }
+        candidates.push(CodeDeadCandidate {
+            symbol_id,
+            classification: candidate.classification,
+            confidence: u16::try_from(candidate.confidence)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            why: candidate.why,
+            suppressions_checked: candidate.suppressions_checked,
+            source_refs,
+        });
+    }
+    let mut blind_spots = Vec::new();
+    blind_spots
+        .try_reserve_exact(response.blind_spots.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for spot in response.blind_spots {
+        if spot.category.is_empty() || spot.category.len() > 256 {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        blind_spots.push(CodeDeadBlindSpot {
+            category: spot.category,
+            affected_count: spot.affected_count,
+        });
+    }
+    let mut false_positive_controls = Vec::new();
+    false_positive_controls
+        .try_reserve_exact(response.false_positive_controls.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for rule in response.false_positive_controls {
+        if rule.rule.is_empty() || rule.rule.len() > 256 {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        false_positive_controls.push(CodeDeadSuppressionRule {
+            rule: rule.rule,
+            suppressed_count: rule.suppressed_count,
+        });
+    }
+    Ok(CodeDead {
+        context,
+        candidates,
+        entry_points: CodeDeadEntryPointSummary {
+            policy: wire_entry_points.policy,
+            entry_point_count: wire_entry_points.entry_point_count,
+            complete: wire_entry_points.complete,
+        },
+        blind_spots,
+        false_positive_controls,
     })
 }
 
