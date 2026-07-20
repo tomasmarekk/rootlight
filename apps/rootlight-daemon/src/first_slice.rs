@@ -38,7 +38,9 @@ use rootlight_operations::{
     OperationSubmission, PlanHash,
 };
 use rootlight_protocol::generated::{common::v1 as common, daemon::v1 as daemon};
-use rootlight_query::{LocateMode, QueryUsage, RelationDirection, RelationFamily};
+use rootlight_query::{
+    CodeDeadEntryPointPolicy, LocateMode, QueryUsage, RelationDirection, RelationFamily,
+};
 use rootlight_service::{
     FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexReceipt, FirstSliceService,
 };
@@ -56,6 +58,7 @@ const DEFAULT_FLOW_DEPTH: u32 = 3;
 const DEFAULT_FLOW_PATHS: u32 = 10;
 const DEFAULT_CYCLE_MIN_SIZE: u32 = 2;
 const DEFAULT_CYCLE_MAX_CYCLES: u32 = 50;
+const DEFAULT_CODE_DEAD_MAX_CANDIDATES: u32 = 50;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
 
@@ -531,6 +534,9 @@ fn execute_service_request(
         FirstSliceIpcRequest::ArchitectureCycles(request) => {
             architecture_cycles(service, request, &context)
                 .map(FirstSliceIpcResponse::ArchitectureCycles)
+        }
+        FirstSliceIpcRequest::CodeDead(request) => {
+            code_dead(service, request, &context).map(FirstSliceIpcResponse::CodeDead)
         }
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
     }
@@ -1334,6 +1340,87 @@ fn architecture_cycles(
                 .collect(),
             min_confidence: u32::from(projection.min_confidence),
         }),
+    })
+}
+
+fn code_dead(
+    service: &FirstSliceService,
+    request: daemon::CodeDeadRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::CodeDeadResponse, PublicError> {
+    let repository = parse_repository(request.repository.as_ref())?;
+    let selected = parse_generation_selector(request.generation.as_ref())?;
+    let generation = service
+        .resolve_generation(repository, selected)
+        .map_err(service_error)?;
+    let entry_point_policy = match request.entry_point_policy.as_deref() {
+        Some(label) => CodeDeadEntryPointPolicy::from_label(label).ok_or_else(invalid_argument)?,
+        None => CodeDeadEntryPointPolicy::Standard,
+    };
+    let include_exported = request.include_exported.unwrap_or(false);
+    let include_tests = request.include_tests.unwrap_or(false);
+    let min_confidence =
+        u16::try_from(request.min_confidence.unwrap_or(0)).map_err(|_| invalid_argument())?;
+    let max_candidates =
+        usize::try_from(request.max_candidates.unwrap_or(DEFAULT_CODE_DEAD_MAX_CANDIDATES))
+            .map_err(|_| invalid_argument())?;
+    let response = service
+        .code_dead(
+            generation.generation,
+            entry_point_policy,
+            include_exported,
+            include_tests,
+            min_confidence,
+            max_candidates,
+            &context.cancellation,
+        )
+        .map_err(service_error)?;
+    let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(response.data.candidates.len())
+        .map_err(|_| resource_exhausted())?;
+    for candidate in response.data.candidates {
+        candidates.push(daemon::FirstSliceDeadCandidate {
+            symbol_id: Some(symbol_to_wire(candidate.symbol_id)),
+            classification: candidate.classification.as_str().to_owned(),
+            confidence: u32::from(candidate.confidence),
+            why: candidate.why,
+            suppressions_checked: candidate.suppressions_checked,
+            source_refs: candidate.source_refs.iter().map(source_ref_to_wire).collect(),
+        });
+    }
+    let mut blind_spots = Vec::new();
+    blind_spots
+        .try_reserve_exact(response.data.blind_spots.len())
+        .map_err(|_| resource_exhausted())?;
+    for spot in response.data.blind_spots {
+        blind_spots.push(daemon::FirstSliceBlindSpot {
+            category: spot.category,
+            affected_count: spot.affected_count,
+        });
+    }
+    let mut false_positive_controls = Vec::new();
+    false_positive_controls
+        .try_reserve_exact(response.data.suppression_rules.len())
+        .map_err(|_| resource_exhausted())?;
+    for rule in response.data.suppression_rules {
+        false_positive_controls.push(daemon::FirstSliceSuppressionRule {
+            rule: rule.rule,
+            suppressed_count: rule.suppressed_count,
+        });
+    }
+    let entry_points = response.data.entry_points;
+    Ok(daemon::CodeDeadResponse {
+        schema_version: Some(schema_version()),
+        context: Some(query_context(generation, &response.usage, &[])),
+        candidates,
+        entry_points: Some(daemon::FirstSliceEntryPointSummary {
+            policy: entry_points.policy.as_str().to_owned(),
+            entry_point_count: entry_points.entry_point_count,
+            complete: entry_points.complete,
+        }),
+        blind_spots,
+        false_positive_controls,
     })
 }
 
