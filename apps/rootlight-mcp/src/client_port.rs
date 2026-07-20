@@ -6,10 +6,10 @@
 use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use rootlight_client::{
-    AnalysisTier as ClientAnalysisTier, Client, ClientError, CodeLocate, CoverageStatus, FlowTrace,
-    GenerationSelector, LocateMode, RepositoryIndex, RepositoryList, RepositoryOperationAction,
-    RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceRead, SourceReference,
-    SymbolExplain, SymbolRelationships,
+    AnalysisTier as ClientAnalysisTier, ArchitectureCycles, Client, ClientError, CodeLocate,
+    CoverageStatus, FlowTrace, GenerationSelector, LocateMode, RepositoryIndex, RepositoryList,
+    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, RequestTimeout,
+    SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
 };
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
@@ -19,12 +19,13 @@ use rootlight_mcp_contract::vertical::{
 };
 
 use crate::{
-    ClientPortError, ClientPortFuture, CodeLocatePortRequest, CodeLocatePortResponse,
-    FirstSliceClientPort, FlowTracePortRequest, FlowTracePortResponse, OperationStatusPortRequest,
-    ReadResponseMetadata, RepositoryIndexPortRequest, RepositoryIndexPortResponse,
-    RepositoryListPortRequest, RepositoryStatusPortRequest, RequestCancellation,
-    SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
-    SymbolExplainPortResponse, SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
+    ArchitectureCyclesPortRequest, ArchitectureCyclesPortResponse, ClientPortError,
+    ClientPortFuture, CodeLocatePortRequest, CodeLocatePortResponse, FirstSliceClientPort,
+    FlowTracePortRequest, FlowTracePortResponse, OperationStatusPortRequest, ReadResponseMetadata,
+    RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
+    RepositoryStatusPortRequest, RequestCancellation, SourceReadPortRequest,
+    SourceReadPortResponse, SymbolExplainPortRequest, SymbolExplainPortResponse,
+    SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
 };
 
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -125,6 +126,21 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         min_confidence: Option<u16>,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<FlowTrace>;
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded architecture cycles dimension"
+    )]
+    fn architecture_cycles(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        relations: Vec<String>,
+        min_size: Option<u8>,
+        max_cycles: Option<u16>,
+        include_self_cycles: Option<bool>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<ArchitectureCycles>;
 }
 
 struct LiveAsyncFirstSliceClient {
@@ -305,6 +321,32 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     max_depth,
                     max_paths,
                     min_confidence,
+                    timeout,
+                )
+                .await
+        })
+    }
+
+    fn architecture_cycles(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        relations: Vec<String>,
+        min_size: Option<u8>,
+        max_cycles: Option<u16>,
+        include_self_cycles: Option<bool>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<ArchitectureCycles> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .architecture_cycles_async(
+                    repository,
+                    generation,
+                    &relations,
+                    min_size,
+                    max_cycles,
+                    include_self_cycles,
                     timeout,
                 )
                 .await
@@ -564,6 +606,30 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
             Ok(FlowTracePortResponse::new(result, metadata))
         })
     }
+
+    fn architecture_cycles(
+        &self,
+        request: ArchitectureCyclesPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<ArchitectureCyclesPortResponse> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let result = client
+                .architecture_cycles(
+                    request.repository(),
+                    request.generation(),
+                    request.relations().to_vec(),
+                    request.min_size(),
+                    request.max_cycles(),
+                    request.include_self_cycles(),
+                    request_timeout()?,
+                )
+                .await
+                .map_err(map_client_error)?;
+            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            Ok(ArchitectureCyclesPortResponse::new(result, metadata))
+        })
+    }
 }
 
 /// Source-free first-slice port used when synchronous daemon setup is unavailable.
@@ -640,6 +706,14 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
         _request: FlowTracePortRequest,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<FlowTracePortResponse> {
+        unavailable()
+    }
+
+    fn architecture_cycles(
+        &self,
+        _request: ArchitectureCyclesPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<ArchitectureCyclesPortResponse> {
         unavailable()
     }
 }

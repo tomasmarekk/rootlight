@@ -6,12 +6,12 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use rootlight_client::{
-    AnalysisTier as ClientAnalysisTier, ClientError, CodeLocate, CoverageStatus, FlowTrace,
-    FlowTraceFrontier, FlowTraceProjection, GenerationSelector, LocateMode, OperationKind,
-    OperationStage, OperationState, QueryContext, QueryUsage, RecoveryClass,
-    RepositoryCoverageEntry, RepositoryIndex, RepositoryList, RepositoryListEntry,
-    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, RequestTimeout,
-    SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
+    AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ClientError, CodeLocate,
+    CoverageStatus, CycleProjection, FlowTrace, FlowTraceFrontier, FlowTraceProjection,
+    GenerationSelector, LocateMode, OperationKind, OperationStage, OperationState, QueryContext,
+    QueryUsage, RecoveryClass, RepositoryCoverageEntry, RepositoryIndex, RepositoryList,
+    RepositoryListEntry, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
+    RequestTimeout, SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -96,6 +96,15 @@ enum Call {
         max_depth: Option<u8>,
         max_paths: Option<u16>,
         min_confidence: Option<u16>,
+        timeout: RequestTimeout,
+    },
+    ArchitectureCycles {
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        relations: Vec<String>,
+        min_size: Option<u8>,
+        max_cycles: Option<u16>,
+        include_self_cycles: Option<bool>,
         timeout: RequestTimeout,
     },
 }
@@ -401,6 +410,39 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 projection: FlowTraceProjection {
                     relations,
                     min_confidence: min_confidence.unwrap_or(0),
+                },
+            })
+        })
+    }
+
+    fn architecture_cycles(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        relations: Vec<String>,
+        min_size: Option<u8>,
+        max_cycles: Option<u16>,
+        include_self_cycles: Option<bool>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<ArchitectureCycles> {
+        self.record(Call::ArchitectureCycles {
+            repository,
+            generation,
+            relations: relations.clone(),
+            min_size,
+            max_cycles,
+            include_self_cycles,
+            timeout,
+        });
+        Box::pin(async move {
+            Ok(ArchitectureCycles {
+                context: query_context(repository, generation, true),
+                components: Vec::new(),
+                cycles: Vec::new(),
+                break_candidates: Vec::new(),
+                projection: CycleProjection {
+                    relations,
+                    min_confidence: 0,
                 },
             })
         })

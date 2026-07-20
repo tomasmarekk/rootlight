@@ -29,8 +29,9 @@ use tokio::{
 
 pub use client_port::{NativeFirstSliceClientPort, UnavailableFirstSliceClientPort};
 pub use executor::{
-    ClientPortError, ClientPortFuture, CodeLocatePortRequest, CodeLocatePortResponse,
-    FirstSliceClientPort, FirstSliceToolExecutor, FlowTracePortRequest, FlowTracePortResponse,
+    ArchitectureCyclesPortRequest, ArchitectureCyclesPortResponse, ClientPortError,
+    ClientPortFuture, CodeLocatePortRequest, CodeLocatePortResponse, FirstSliceClientPort,
+    FirstSliceToolExecutor, FlowTracePortRequest, FlowTracePortResponse,
     OperationStatusPortRequest, ReadResponseMetadata, RepositoryIndexPortRequest,
     RepositoryIndexPortResponse, RepositoryListPortRequest, RepositoryStatusPortRequest,
     SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,

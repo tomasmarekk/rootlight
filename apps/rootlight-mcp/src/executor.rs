@@ -19,9 +19,10 @@ use rootlight_client::{
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::intent::{
-    Direction, FlowTraceData, FlowTraceInput, FrontierSummary, RelationKind, RelationProjection,
-    RelationshipGroup, RelationshipTarget, RelationshipTotals, SymbolRelationshipsData,
-    SymbolRelationshipsInput, TraceEdge, TracePath,
+    ArchitectureCyclesData, ArchitectureCyclesInput, CycleBreakCandidate, Direction, FlowTraceData,
+    FlowTraceInput, FrontierSummary, MinimalCycle, RelationKind, RelationProjection,
+    RelationshipGroup, RelationshipTarget, RelationshipTotals, StronglyConnectedComponent,
+    SymbolRelationshipsData, SymbolRelationshipsInput, TraceEdge, TracePath,
 };
 use rootlight_mcp_contract::{
     DetailKey, ErrorCode, GenerationSelector, McpTool, NextAction, PublicError,
@@ -151,6 +152,13 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         request: FlowTracePortRequest,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<FlowTracePortResponse>;
+
+    /// Detects bounded architecture cycles over a relation projection.
+    fn architecture_cycles(
+        &self,
+        request: ArchitectureCyclesPortRequest,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<ArchitectureCyclesPortResponse>;
 }
 
 /// Source-free failure emitted by an injected daemon client port.
@@ -618,6 +626,70 @@ impl FlowTracePortResponse {
     }
 }
 
+/// Normalized `architecture.cycles` request supported by the current daemon protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchitectureCyclesPortRequest {
+    repository: RepositoryId,
+    generation: client::GenerationSelector,
+    relations: Vec<String>,
+    min_size: Option<u8>,
+    max_cycles: Option<u16>,
+    include_self_cycles: Option<bool>,
+}
+
+impl ArchitectureCyclesPortRequest {
+    /// Returns the selected repository.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the active or explicit immutable-generation selector.
+    #[must_use]
+    pub const fn generation(&self) -> client::GenerationSelector {
+        self.generation
+    }
+
+    /// Returns requested relation family labels.
+    #[must_use]
+    pub fn relations(&self) -> &[String] {
+        &self.relations
+    }
+
+    /// Returns the optional minimum component size.
+    #[must_use]
+    pub const fn min_size(&self) -> Option<u8> {
+        self.min_size
+    }
+
+    /// Returns the optional cycle bound.
+    #[must_use]
+    pub const fn max_cycles(&self) -> Option<u16> {
+        self.max_cycles
+    }
+
+    /// Returns the optional self-cycle opt-in.
+    #[must_use]
+    pub const fn include_self_cycles(&self) -> Option<bool> {
+        self.include_self_cycles
+    }
+}
+
+/// Detected daemon data plus mandatory MCP read metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchitectureCyclesPortResponse {
+    result: client::ArchitectureCycles,
+    metadata: ReadResponseMetadata,
+}
+
+impl ArchitectureCyclesPortResponse {
+    /// Creates a complete `architecture.cycles` response for MCP mapping.
+    #[must_use]
+    pub const fn new(result: client::ArchitectureCycles, metadata: ReadResponseMetadata) -> Self {
+        Self { result, metadata }
+    }
+}
+
 /// Normalized exact-reference `source.read` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceReadPortRequest {
@@ -801,7 +873,6 @@ where
                 VerticalTool::ChangeImpact
                 | VerticalTool::TestsSelect
                 | VerticalTool::ArchitectureOverview
-                | VerticalTool::ArchitectureCycles
                 | VerticalTool::CodeDead
                 | VerticalTool::HistoryCompare
                 | VerticalTool::PlanChange
@@ -811,6 +882,9 @@ where
                 }
                 VerticalTool::FlowTrace => {
                     execute_flow_trace(port, arguments, cancellation, &unsupported).await
+                }
+                VerticalTool::ArchitectureCycles => {
+                    execute_architecture_cycles(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::ContextPack => {
                     execute_context_pack(port, arguments, cancellation, &unsupported).await
@@ -2099,6 +2173,139 @@ fn map_flow_trace(
         data,
         frontier.truncated,
     )
+}
+
+async fn execute_architecture_cycles<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: ArchitectureCyclesInput = decode_input(arguments)?;
+    let request = normalize_architecture_cycles(input, unsupported)?;
+    let expected = request.clone();
+    let future = port.architecture_cycles(request, cancellation.clone());
+    let response = await_port(future, cancellation).await?;
+    let output = map_architecture_cycles(response, &expected)?;
+    serialize_success(output)
+}
+
+fn normalize_architecture_cycles(
+    input: ArchitectureCyclesInput,
+    unsupported: &PublicError,
+) -> Result<ArchitectureCyclesPortRequest, ToolExecutionError> {
+    let repository = repository_id(input.repository, unsupported)?;
+    // Structural scope, ranking strategies, custom budgets, and non-compact
+    // profiles are not served by this slice. The projection level is accepted
+    // as a descriptive label; detection runs at symbol granularity.
+    if input.scope.is_some()
+        || input.rank_by.is_some()
+        || input.budget.is_some()
+        || !compact_profile(input.response_profile)
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    let mut relations = Vec::new();
+    relations
+        .try_reserve_exact(input.projection.relations.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for kind in &input.projection.relations {
+        relations.push(relation_kind_label(*kind)?);
+    }
+    Ok(ArchitectureCyclesPortRequest {
+        repository,
+        generation: client_generation(input.generation),
+        relations,
+        min_size: input.min_size,
+        max_cycles: input.max_cycles,
+        include_self_cycles: input.include_self_cycles,
+    })
+}
+
+fn map_architecture_cycles(
+    response: ArchitectureCyclesPortResponse,
+    request: &ArchitectureCyclesPortRequest,
+) -> Result<ReadEnvelope<ArchitectureCyclesData>, ToolExecutionError> {
+    validate_query_context(
+        &response.result.context,
+        request.repository,
+        request.generation,
+    )?;
+    let mut components = Vec::new();
+    components
+        .try_reserve_exact(response.result.components.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for component in response.result.components {
+        let mut members = Vec::new();
+        members
+            .try_reserve_exact(component.members.len())
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        for member in component.members {
+            members.push(member.to_string());
+        }
+        components.push(StronglyConnectedComponent {
+            size: component.size,
+            members,
+            internal_edges: component.internal_edges,
+        });
+    }
+    let mut cycles = Vec::new();
+    cycles
+        .try_reserve_exact(response.result.cycles.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for cycle in response.result.cycles {
+        let mut nodes = Vec::new();
+        nodes
+            .try_reserve_exact(cycle.nodes.len())
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        for node in cycle.nodes {
+            nodes.push(node.to_string());
+        }
+        let mut edge_evidence = Vec::new();
+        edge_evidence
+            .try_reserve_exact(cycle.edge_evidence.len())
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        for source in &cycle.edge_evidence {
+            edge_evidence.push(client_source_ref(source)?);
+        }
+        cycles.push(MinimalCycle {
+            nodes,
+            edge_evidence,
+            confidence: cycle.confidence,
+        });
+    }
+    let mut break_candidates = Vec::new();
+    break_candidates
+        .try_reserve_exact(response.result.break_candidates.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for candidate in response.result.break_candidates {
+        let kind = relation_kind_from_label(&candidate.kind)?;
+        let mut source_refs = Vec::new();
+        source_refs
+            .try_reserve_exact(candidate.source_refs.len())
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        for source in &candidate.source_refs {
+            source_refs.push(client_source_ref(source)?);
+        }
+        break_candidates.push(CycleBreakCandidate {
+            from: candidate.from.to_string(),
+            to: candidate.to.to_string(),
+            kind,
+            break_cost: candidate.break_cost,
+            source_refs,
+        });
+    }
+    let data = ArchitectureCyclesData {
+        components,
+        cycles,
+        break_candidates,
+    };
+    // The requested cycle cap is an explicit bound honored by the daemon; this
+    // slice does not surface separate budget-truncation through the wire.
+    map_read_envelope(response.result.context, response.metadata, data, false)
 }
 
 async fn execute_source_read<P>(

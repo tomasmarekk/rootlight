@@ -12,7 +12,10 @@ use std::{
 };
 
 use rootlight_client::{
-    AnalysisTier as ClientTier, CoverageStatus as ClientCoverage, FlowTrace as ClientFlowTrace,
+    AnalysisTier as ClientTier, ArchitectureCycles as ClientArchitectureCycles,
+    CoverageStatus as ClientCoverage, Cycle as ClientCycle,
+    CycleBreakCandidate as ClientCycleBreak, CycleComponent as ClientCycleComponent,
+    CycleProjection as ClientCycleProjection, FlowTrace as ClientFlowTrace,
     FlowTraceEdge as ClientTraceEdge, FlowTraceFrontier as ClientTraceFrontier,
     FlowTracePath as ClientTracePath, FlowTraceProjection as ClientTraceProjection, LocateHit,
     OperationKind, OperationStage, OperationState as ClientOperationState, QueryContext,
@@ -27,7 +30,7 @@ use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
     SymbolExplainOutput,
     context::{ContextPackOutput, QueryBatchOutput},
-    intent::{FlowTraceOutput, SymbolRelationshipsOutput},
+    intent::{ArchitectureCyclesOutput, FlowTraceOutput, SymbolRelationshipsOutput},
     repository::{RepoListOutput, RepoStatusOutput, RepositoryState},
     vertical::{
         AnalysisTier, CacheStatus, Freshness, IndexMode, IndexPlanScope, IndexPlanSummary,
@@ -61,6 +64,7 @@ enum FakeOutcome {
     RepositoryStatus(Result<RepositoryStatus, ClientPortError>),
     SymbolRelationships(Result<SymbolRelationshipsPortResponse, ClientPortError>),
     FlowTrace(Result<FlowTracePortResponse, ClientPortError>),
+    ArchitectureCycles(Result<ArchitectureCyclesPortResponse, ClientPortError>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +78,7 @@ enum ObservedCall {
     RepositoryStatus(RepositoryStatusPortRequest),
     SymbolRelationships(SymbolRelationshipsPortRequest),
     FlowTrace(FlowTracePortRequest),
+    ArchitectureCycles(ArchitectureCyclesPortRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +233,19 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::FlowTrace(request));
         let outcome = match &self.outcome {
             FakeOutcome::FlowTrace(outcome) => outcome.clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { outcome })
+    }
+
+    fn architecture_cycles(
+        &self,
+        request: ArchitectureCyclesPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<ArchitectureCyclesPortResponse> {
+        self.record(ObservedCall::ArchitectureCycles(request));
+        let outcome = match &self.outcome {
+            FakeOutcome::ArchitectureCycles(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1354,6 +1372,112 @@ async fn flow_trace_maps_paths_frontier_and_projection() {
     assert_eq!(request.from(), symbol());
     assert_eq!(request.to(), None);
     assert_eq!(request.relations(), &["calls".to_owned()]);
+}
+
+#[tokio::test]
+async fn architecture_cycles_maps_components_cycles_and_breaks() {
+    let response = ArchitectureCyclesPortResponse::new(
+        ClientArchitectureCycles {
+            context: context(1, 0),
+            components: vec![ClientCycleComponent {
+                size: 2,
+                members: vec![symbol(), missing_symbol()],
+                internal_edges: 2,
+            }],
+            cycles: vec![ClientCycle {
+                nodes: vec![symbol(), missing_symbol(), symbol()],
+                edge_evidence: vec![source_reference(0, 10, 1, 1)],
+                confidence: 700,
+            }],
+            break_candidates: vec![ClientCycleBreak {
+                from: missing_symbol(),
+                to: symbol(),
+                kind: "calls".to_owned(),
+                break_cost: 700,
+                source_refs: vec![source_reference(0, 10, 1, 1)],
+            }],
+            projection: ClientCycleProjection {
+                relations: vec!["calls".to_owned()],
+                min_confidence: 0,
+            },
+        },
+        metadata("architecture-cycles-1"),
+    );
+    let harness = Harness::new(FakeOutcome::ArchitectureCycles(Ok(response)));
+    let output: ArchitectureCyclesOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::ArchitectureCycles,
+            json!({
+                "repository": {"repository_id": repository()},
+                "projection": {"relations": ["calls"], "level": "symbol"}
+            }),
+        )
+        .await
+        .expect("architecture cycles maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected architecture cycles success");
+    };
+    assert_eq!(output.data.components.len(), 1);
+    let component = &output.data.components[0];
+    assert_eq!(component.size, 2);
+    assert_eq!(
+        component.members,
+        vec![symbol().to_string(), missing_symbol().to_string()]
+    );
+    assert_eq!(component.internal_edges, 2);
+    assert_eq!(output.data.cycles.len(), 1);
+    let cycle = &output.data.cycles[0];
+    assert_eq!(
+        cycle.nodes,
+        vec![
+            symbol().to_string(),
+            missing_symbol().to_string(),
+            symbol().to_string()
+        ]
+    );
+    assert_eq!(cycle.confidence, 700);
+    assert_eq!(cycle.edge_evidence.len(), 1);
+    assert_eq!(output.data.break_candidates.len(), 1);
+    let candidate = &output.data.break_candidates[0];
+    assert_eq!(candidate.from, missing_symbol().to_string());
+    assert_eq!(candidate.to, symbol().to_string());
+    assert_eq!(candidate.kind, RelationKind::Calls);
+    assert_eq!(candidate.break_cost, 700);
+    assert_eq!(candidate.source_refs.len(), 1);
+    let ObservedCall::ArchitectureCycles(request) = harness.only_call() else {
+        panic!("expected architecture cycles call");
+    };
+    assert_eq!(request.repository(), repository());
+    assert_eq!(request.relations(), &["calls".to_owned()]);
+    assert_eq!(request.min_size(), None);
+    assert_eq!(request.max_cycles(), None);
+    assert_eq!(request.include_self_cycles(), None);
+}
+
+#[tokio::test]
+async fn architecture_cycles_rejects_unsupported_ranking() {
+    let harness = Harness::new(FakeOutcome::ArchitectureCycles(Err(
+        ClientPortError::Executor,
+    )));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::ArchitectureCycles,
+        json!({
+            "repository": {"repository_id": repository()},
+            "projection": {"relations": ["calls"], "level": "symbol"},
+            "rank_by": "size"
+        }),
+    )
+    .await
+    .expect_err("unsupported ranking is rejected before the port");
+    let public = error
+        .public_error()
+        .expect("unsupported option is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
