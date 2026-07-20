@@ -26,8 +26,10 @@ use crate::model::{
     CodeDeadSuppressionRule, CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent,
     CyclePath, DeadCodeCandidate, DeadCodeClassification, FlowTraceEdge, FlowTraceFrontier,
     FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult, ImpactEntryRecord,
-    ImpactGroupRecord, LocateHit, LocateMode, PlanEstimate, PlanExplanation, PlanKind, QueryBudget,
-    QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage, RankedTestSelection,
+    ImpactGroupRecord, LocateHit, LocateMode, PlanChangeContextPack, PlanChangeDecision,
+    PlanChangeImpactSummary, PlanChangeObjective, PlanChangePlan, PlanChangeResult,
+    PlanChangeStepRecord, PlanEstimate, PlanExplanation, PlanKind, QueryBudget, QueryError,
+    QueryOperator, QueryResource, QueryResponse, QueryUsage, RankedTestSelection,
     RelationDirection, RelationFamily, RelationshipEdgeTarget, RelationshipGroup,
     RepositoryDataTrust, ResolvedChangeRecord, SourceChunkResult, SourceReadPlan,
     SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
@@ -1406,6 +1408,136 @@ where
             impacted: analysis.impacted,
             tests: analysis.tests,
             risk_summary: analysis.risk_summary,
+            limiting_resources,
+            trust: RepositoryDataTrust::UntrustedRepositoryData,
+        };
+        finish_response(plan.explanation.clone(), data, tracker, started, &control)
+    }
+
+    /// Builds a deterministic bounded `plan.change` plan.
+    ///
+    /// An explicit target set of stable symbols and files drives the analysis;
+    /// the objective class colors the source-free step text, and the step cap
+    /// bounds the emitted plan. The transitive closure reuses the change.impact
+    /// depth and dependent bounds. Change context, user constraints, custom
+    /// budgets, and non-compact profiles are not modeled here and must be
+    /// rejected by the caller before planning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid budget, an empty or oversized
+    /// target set, an out-of-range step cap, arithmetic overflow, or a
+    /// conservative estimate that cannot be admitted.
+    pub fn plan_plan_change(
+        &self,
+        objective: PlanChangeObjective,
+        target_symbols: BTreeSet<SymbolId>,
+        target_files: BTreeSet<FileId>,
+        max_steps: usize,
+        budget: QueryBudget,
+    ) -> Result<PlanChangePlan, QueryError> {
+        budget.validate()?;
+        // The first slice plans only an explicit target set; an empty selector
+        // carries no resolvable target.
+        if target_symbols.is_empty() && target_files.is_empty() {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if target_symbols.len() > 64 || target_files.len() > 64 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if max_steps == 0 || max_steps > 100 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        let max_dependents = PLAN_CHANGE_DEFAULT_DEPENDENTS
+            .min(usize::try_from(budget.max_results).unwrap_or(usize::MAX));
+        if max_dependents == 0 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        let estimate = PlanEstimate {
+            rows: budget.max_rows,
+            edges: budget.max_edges,
+            results: budget.max_results,
+            source_bytes: 0,
+            // The normalized generation bounds every record, while the query
+            // memory budget remains the conservative aggregate ceiling.
+            memory_bytes: budget.max_memory_bytes,
+            json_bytes: budget.max_json_bytes,
+            estimated_tokens: budget.max_tokens,
+            duration_micros: duration_micros(budget.max_duration),
+        };
+        ensure_estimate(estimate, budget)?;
+        let explanation = PlanExplanation {
+            generation: self.generation.metadata().generation(),
+            kind: PlanKind::PlanChange,
+            operators: vec![
+                QueryOperator::GenerationPin,
+                QueryOperator::RelationScan,
+                QueryOperator::EntityLookup,
+                QueryOperator::OutputBudget,
+            ],
+            estimate,
+        };
+        Ok(PlanChangePlan {
+            objective,
+            target_symbols,
+            target_files,
+            max_steps,
+            max_depth: PLAN_CHANGE_DEFAULT_DEPTH,
+            max_dependents,
+            budget,
+            explanation,
+        })
+    }
+
+    /// Executes a prevalidated `plan.change` plan.
+    ///
+    /// The scan resolves the explicit targets to symbols, runs a bounded forward
+    /// impact closure over the served relation families, relates test entities to
+    /// the impacted symbols through the reused tests.select ranking, and builds a
+    /// deterministic ordered plan with an honest impact summary, open decisions,
+    /// and a ready context-pack request. Rows, edges, results, and memory are
+    /// measured exactly like `change.impact`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
+    /// resource exhaustion.
+    pub fn execute_plan_change(
+        &self,
+        plan: &PlanChangePlan,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<PlanChangeResult>, QueryError> {
+        self.require_generation(plan.explanation.generation)?;
+        let started = Instant::now();
+        let control = QueryControl::new(cancellation, plan.budget.max_duration);
+        control.check()?;
+        let document = self.generation.document();
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+
+        let analysis = build_plan_change(
+            document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )?;
+
+        let data = PlanChangeResult {
+            generation: self.generation.metadata().generation(),
+            plan: analysis.plan,
+            affected_scope: analysis.affected_scope,
+            test_plan: analysis.test_plan,
+            open_decisions: analysis.open_decisions,
+            context_pack_request: analysis.context_pack_request,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
@@ -3131,6 +3263,569 @@ fn change_impact_risk_summary(
         fanout,
         dynamic_blind_spots: true,
     }
+}
+
+/// Default transitive depth for the reused `plan.change` impact closure.
+const PLAN_CHANGE_DEFAULT_DEPTH: u8 = 3;
+
+/// Default dependent cap for the reused `plan.change` impact closure.
+const PLAN_CHANGE_DEFAULT_DEPENDENTS: usize = 100;
+
+/// Maximum related tests carried in one `plan.change` verification plan.
+const PLAN_CHANGE_MAX_TESTS: usize = 500;
+
+/// Maximum symbols or files carried in one `plan.change` context pack.
+const PLAN_CHANGE_MAX_CONTEXT_ITEMS: usize = 64;
+
+/// Maximum target symbols attached to one `plan.change` step.
+const PLAN_CHANGE_MAX_STEP_TARGETS: usize = 32;
+
+/// Change plan assembled before bounded result emission.
+struct PlanChangeAnalysis {
+    plan: Vec<PlanChangeStepRecord>,
+    affected_scope: PlanChangeImpactSummary,
+    test_plan: Vec<ChangeImpactTestCandidate>,
+    open_decisions: Vec<PlanChangeDecision>,
+    context_pack_request: PlanChangeContextPack,
+}
+
+/// Builds a bounded change plan for the explicit target set.
+///
+/// The explicit symbol and file targets are resolved to concrete symbols, the
+/// reused `change.impact` forward closure propagates the targets to their
+/// dependents over the served relation families, the reused `tests.select`
+/// ranking relates test entities to the impacted surface, and a deterministic
+/// ordered plan is built from the objective class and the measured impact. The
+/// impact summary, open decisions, and context-pack request are all source-free
+/// and honest: no dependent or repository content is fabricated. Rows, edges,
+/// results, and memory are bounded exactly like `change.impact`.
+fn build_plan_change(
+    document: &NormalizedIrDocument,
+    plan: &PlanChangePlan,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<PlanChangeAnalysis, QueryError> {
+    // Resolve per-entity metadata: declaring file, kind label, and public
+    // surface membership, exactly like `change.impact`.
+    let mut entity_file: BTreeMap<SymbolId, FileId> = BTreeMap::new();
+    let mut entity_kind: BTreeMap<SymbolId, String> = BTreeMap::new();
+    let mut entity_public: BTreeSet<SymbolId> = BTreeSet::new();
+    for entity in &document.entities {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
+        tracker.add_rows(1)?;
+        if let Some(source) = entity.evidence.source.as_ref() {
+            entity_file.insert(entity.id, source.span().file());
+        }
+        entity_kind.insert(entity.id, serialized_label(&entity.kind)?);
+        if entity_is_exported(entity) {
+            entity_public.insert(entity.id);
+        }
+    }
+
+    // Single bounded relation scan: `Contains` relations confirm the owning file
+    // of each entity, while served family relations contribute the reverse
+    // dependent adjacency reused from `change.impact`.
+    let allowed: BTreeSet<RelationPredicate> = CHANGE_IMPACT_FAMILIES
+        .iter()
+        .flat_map(|family| family.predicates().iter().copied())
+        .collect();
+    let mut dependents: BTreeMap<SymbolId, Vec<(SymbolId, RelationFamily, u16)>> = BTreeMap::new();
+    for relation in &document.relations {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
+        tracker.add_rows(1)?;
+        if relation.predicate == RelationPredicate::Contains {
+            if let (RelationEndpoint::File(file), RelationEndpoint::Entity(symbol)) =
+                (relation.subject, relation.object)
+            {
+                entity_file.insert(symbol, file);
+            }
+            continue;
+        }
+        if !allowed.contains(&relation.predicate) {
+            continue;
+        }
+        let Some(family) = predicate_family(CHANGE_IMPACT_FAMILIES, relation.predicate) else {
+            continue;
+        };
+        let Some(subject) = endpoint_entity(document, relation.subject) else {
+            continue;
+        };
+        let Some(object) = endpoint_entity(document, relation.object) else {
+            continue;
+        };
+        if subject == object {
+            continue;
+        }
+        if !tracker.can_add(QueryResource::Edges, 1) {
+            record_limit(limiting_resources, QueryResource::Edges)?;
+            break;
+        }
+        tracker.add_edges(1)?;
+        dependents
+            .entry(object)
+            .or_default()
+            .push((subject, family, relation.confidence.get()));
+    }
+    for edges in dependents.values_mut() {
+        edges.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.as_str().cmp(right.1.as_str()))
+                .then_with(|| right.2.cmp(&left.2))
+        });
+    }
+
+    // Build the file-to-entity map after containment is fully resolved.
+    let mut file_entities: BTreeMap<FileId, BTreeSet<SymbolId>> = BTreeMap::new();
+    for (symbol, file) in &entity_file {
+        file_entities.entry(*file).or_default().insert(*symbol);
+    }
+
+    // Resolve the explicit targets to concrete symbols: symbol targets carry
+    // their identity directly, while file targets expand to the entities
+    // declared in the matching file.
+    let mut resolved_targets: BTreeSet<SymbolId> = BTreeSet::new();
+    for symbol in &plan.target_symbols {
+        resolved_targets.insert(*symbol);
+    }
+    let mut resolved_target_files: BTreeSet<FileId> = BTreeSet::new();
+    for file in &plan.target_files {
+        resolved_target_files.insert(*file);
+        if let Some(declared) = file_entities.get(file) {
+            for symbol in declared {
+                resolved_targets.insert(*symbol);
+            }
+        }
+    }
+
+    // Run the reused bounded forward impact closure from the resolved targets.
+    let closure = impact_closure(
+        &dependents,
+        &resolved_targets,
+        plan.max_depth,
+        &entity_kind,
+        &entity_public,
+        plan.max_dependents,
+        tracker,
+        limiting_resources,
+        control,
+    )?;
+
+    // Relate test entities to the targets and impacted dependents through the
+    // reused tests.select ranking.
+    let selection = build_plan_change_tests(
+        document,
+        plan,
+        &resolved_targets,
+        &closure,
+        control,
+        tracker,
+        limiting_resources,
+    )?;
+    let test_symbols: Vec<SymbolId> = selection
+        .tests
+        .iter()
+        .map(|ranked| ranked.test_id)
+        .take(PLAN_CHANGE_MAX_STEP_TARGETS)
+        .collect();
+    let mut test_plan: Vec<ChangeImpactTestCandidate> = Vec::new();
+    for ranked in selection.tests {
+        if test_plan.len() >= PLAN_CHANGE_MAX_TESTS {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            break;
+        }
+        let candidate = ChangeImpactTestCandidate {
+            test_id: ranked.test_id.to_string(),
+            relevance: ranked.score,
+            why: ranked.why,
+            estimated_cost_ms: ranked.estimated_cost_ms,
+        };
+        emit_cycle_value(
+            &mut test_plan,
+            candidate,
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+
+    let affected_scope =
+        plan_change_impact_summary(&resolved_targets, &closure, &entity_file, &entity_public);
+
+    let plan_steps = build_plan_change_steps(
+        plan.objective,
+        &resolved_targets,
+        &closure,
+        &test_symbols,
+        &affected_scope,
+        plan.max_steps,
+    );
+
+    let open_decisions = plan_change_decisions(plan.objective, &affected_scope);
+
+    let context_pack_request = plan_change_context_pack(
+        &resolved_targets,
+        &closure,
+        &resolved_target_files,
+        &entity_file,
+    );
+
+    Ok(PlanChangeAnalysis {
+        plan: plan_steps,
+        affected_scope,
+        test_plan,
+        open_decisions,
+        context_pack_request,
+    })
+}
+
+/// Relates test entities to the targets and impacted dependents.
+///
+/// The reused `tests.select` ranking is seeded from the resolved targets and
+/// every reached dependent, so a test related to either is surfaced with the
+/// same honest direct, transitive, and co-location signals.
+fn build_plan_change_tests(
+    document: &NormalizedIrDocument,
+    plan: &PlanChangePlan,
+    resolved_targets: &BTreeSet<SymbolId>,
+    closure: &[ImpactEntryRecord],
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<TestsSelectAnalysis, QueryError> {
+    let mut seeds: BTreeSet<SymbolId> = resolved_targets.clone();
+    for entry in closure {
+        seeds.insert(entry.symbol_id);
+    }
+    if seeds.is_empty() {
+        return Ok(TestsSelectAnalysis {
+            tests: Vec::new(),
+            coverage_strategy: TestsSelectCoverage {
+                direct_edges: false,
+                transitive_signals: false,
+                history_signals: false,
+                build_target_signals: false,
+            },
+            gaps: Vec::new(),
+        });
+    }
+    // The reused selection admits a bounded seed set; keep the smallest
+    // identities deterministically when the impacted surface is larger.
+    if seeds.len() > 64 {
+        seeds = seeds.into_iter().take(64).collect();
+    }
+    let selection_plan = TestsSelectPlan {
+        seeds,
+        test_kinds: Vec::new(),
+        max_tests: PLAN_CHANGE_MAX_TESTS,
+        include_commands: false,
+        budget: plan.budget,
+        explanation: plan.explanation.clone(),
+    };
+    build_tests_select(
+        document,
+        &selection_plan,
+        control,
+        tracker,
+        limiting_resources,
+    )
+}
+
+/// Aggregates an honest impact summary from the resolved targets and closure.
+///
+/// Affected symbols count the targets plus every reached dependent; affected
+/// files count their declaring files; the risk level orders local changes below
+/// cross-module fanout below public-surface effects, mirroring `change.impact`.
+fn plan_change_impact_summary(
+    resolved_targets: &BTreeSet<SymbolId>,
+    closure: &[ImpactEntryRecord],
+    entity_file: &BTreeMap<SymbolId, FileId>,
+    entity_public: &BTreeSet<SymbolId>,
+) -> PlanChangeImpactSummary {
+    let mut affected: BTreeSet<SymbolId> = resolved_targets.clone();
+    for entry in closure {
+        affected.insert(entry.symbol_id);
+    }
+    let affected_symbols = u32::try_from(affected.len())
+        .unwrap_or(u32::MAX)
+        .min(100_000);
+    let mut files: BTreeSet<FileId> = BTreeSet::new();
+    for symbol in &affected {
+        if let Some(file) = entity_file.get(symbol) {
+            files.insert(*file);
+        }
+    }
+    let affected_files = u32::try_from(files.len()).unwrap_or(u32::MAX).min(100_000);
+    let touches_public_surface = affected.iter().any(|symbol| entity_public.contains(symbol));
+    let fanout = u32::try_from(closure.len())
+        .unwrap_or(u32::MAX)
+        .min(100_000);
+    let risk_level = if touches_public_surface && fanout >= 20 {
+        ChangeImpactRiskLevel::Critical
+    } else if touches_public_surface {
+        ChangeImpactRiskLevel::High
+    } else if fanout >= 20 {
+        ChangeImpactRiskLevel::Medium
+    } else if fanout > 0 {
+        ChangeImpactRiskLevel::Low
+    } else {
+        ChangeImpactRiskLevel::None
+    };
+    PlanChangeImpactSummary {
+        affected_symbols,
+        affected_files,
+        risk_level,
+        touches_public_surface,
+    }
+}
+
+/// Builds the deterministic ordered plan steps from the objective and impact.
+///
+/// Modification objectives emit inspect, modify, update-dependents, and
+/// run-tests steps plus a public-surface confirmation when public surface is
+/// touched; explanation and review objectives emit read-only inspect, trace or
+/// assess, and report steps. Every action, risk, and verification hint is
+/// source-free, and the sequence is capped at `max_steps`; because each step
+/// only depends on earlier ordinals, truncation keeps every dependency valid.
+fn build_plan_change_steps(
+    objective: PlanChangeObjective,
+    resolved_targets: &BTreeSet<SymbolId>,
+    closure: &[ImpactEntryRecord],
+    test_symbols: &[SymbolId],
+    affected_scope: &PlanChangeImpactSummary,
+    max_steps: usize,
+) -> Vec<PlanChangeStepRecord> {
+    let target_symbols: Vec<SymbolId> = resolved_targets
+        .iter()
+        .copied()
+        .take(PLAN_CHANGE_MAX_STEP_TARGETS)
+        .collect();
+    let direct_dependents: Vec<SymbolId> = closure
+        .iter()
+        .filter(|entry| entry.distance == 1)
+        .map(|entry| entry.symbol_id)
+        .take(PLAN_CHANGE_MAX_STEP_TARGETS)
+        .collect();
+    let test_targets: Vec<SymbolId> = test_symbols
+        .iter()
+        .copied()
+        .take(PLAN_CHANGE_MAX_STEP_TARGETS)
+        .collect();
+
+    let mut steps: Vec<PlanChangeStepRecord> = Vec::new();
+    match objective {
+        PlanChangeObjective::Explanation => {
+            steps.push(plan_step(
+                1,
+                "Inspect the target symbols and the relations that define their behavior.",
+                target_symbols.clone(),
+                Vec::new(),
+                &[],
+                Some("confirm the inspected behavior matches the documented intent"),
+            ));
+            steps.push(plan_step(
+                2,
+                "Trace the dependency closure to understand how the targets are used.",
+                direct_dependents.clone(),
+                vec![1],
+                &[],
+                None,
+            ));
+            steps.push(plan_step(
+                3,
+                "Summarize the observed behavior and dependencies into an explanation.",
+                target_symbols.clone(),
+                vec![1, 2],
+                &[],
+                Some("review the explanation against the inspected behavior"),
+            ));
+        }
+        PlanChangeObjective::Review => {
+            steps.push(plan_step(
+                1,
+                "Inspect the target symbols and their current implementation.",
+                target_symbols.clone(),
+                Vec::new(),
+                &[],
+                Some("confirm the review scope covers the target symbols"),
+            ));
+            steps.push(plan_step(
+                2,
+                "Assess the impact and risk of the target symbols across their dependents.",
+                direct_dependents.clone(),
+                vec![1],
+                &["review_scope_incomplete"],
+                None,
+            ));
+            steps.push(plan_step(
+                3,
+                "Report findings and recommended follow-ups for the reviewed targets.",
+                target_symbols.clone(),
+                vec![1, 2],
+                &[],
+                Some("record findings with source-free rationale"),
+            ));
+        }
+        PlanChangeObjective::BugFix
+        | PlanChangeObjective::Refactor
+        | PlanChangeObjective::Migration => {
+            let (inspect_action, modify_action, modify_risk) = match objective {
+                PlanChangeObjective::BugFix => (
+                    "Inspect the target symbols and reproduce the reported defect.",
+                    "Apply the minimal fix to the target symbols.",
+                    "regression",
+                ),
+                PlanChangeObjective::Refactor => (
+                    "Inspect the target symbols and confirm their current behavior.",
+                    "Restructure the target symbols without changing observable behavior.",
+                    "behavior_drift",
+                ),
+                // PlanChangeObjective::Migration is the only remaining arm.
+                _ => (
+                    "Inspect the target symbols and the API or dependency they currently use.",
+                    "Migrate the target symbols to the new API or dependency.",
+                    "compatibility_break",
+                ),
+            };
+            steps.push(plan_step(
+                1,
+                inspect_action,
+                target_symbols.clone(),
+                Vec::new(),
+                &[],
+                Some("confirm current behavior of the target symbols"),
+            ));
+            steps.push(plan_step(
+                2,
+                modify_action,
+                target_symbols.clone(),
+                vec![1],
+                &[modify_risk],
+                None,
+            ));
+            steps.push(plan_step(
+                3,
+                "Update any direct dependents affected by the change.",
+                direct_dependents.clone(),
+                vec![2],
+                &["dependent_breakage"],
+                None,
+            ));
+            steps.push(plan_step(
+                4,
+                "Run the related tests to verify the change.",
+                test_targets.clone(),
+                vec![2, 3],
+                &[],
+                Some("run the related tests"),
+            ));
+            if affected_scope.touches_public_surface {
+                steps.push(plan_step(
+                    5,
+                    "Confirm the public-surface change preserves the intended contract.",
+                    target_symbols.clone(),
+                    vec![2],
+                    &["public_surface_break"],
+                    Some("verify the public contract is preserved"),
+                ));
+            }
+        }
+    }
+    steps.truncate(max_steps);
+    steps
+}
+
+/// Builds one source-free ordered plan step.
+fn plan_step(
+    step: u8,
+    action: &str,
+    targets: Vec<SymbolId>,
+    depends_on: Vec<u8>,
+    risks: &[&str],
+    verification: Option<&str>,
+) -> PlanChangeStepRecord {
+    PlanChangeStepRecord {
+        step,
+        action: action.to_owned(),
+        targets,
+        depends_on,
+        risks: risks.iter().map(|risk| (*risk).to_owned()).collect(),
+        verification: verification.map(str::to_owned),
+    }
+}
+
+/// Builds the honest open decisions that cannot be safely inferred.
+///
+/// A public-surface change always raises a backward-compatibility confirmation,
+/// and migration or refactor objectives raise a behavior-preservation
+/// confirmation; every question and recommended default is source-free.
+fn plan_change_decisions(
+    objective: PlanChangeObjective,
+    affected_scope: &PlanChangeImpactSummary,
+) -> Vec<PlanChangeDecision> {
+    let mut decisions: Vec<PlanChangeDecision> = Vec::new();
+    if affected_scope.touches_public_surface {
+        decisions.push(PlanChangeDecision {
+            question: "confirm_public_surface_change".to_owned(),
+            recommended_default: "preserve_backward_compatibility".to_owned(),
+        });
+    }
+    match objective {
+        PlanChangeObjective::Migration => decisions.push(PlanChangeDecision {
+            question: "confirm_migration_compatibility".to_owned(),
+            recommended_default: "keep_old_and_new_paths_until_verified".to_owned(),
+        }),
+        PlanChangeObjective::Refactor => decisions.push(PlanChangeDecision {
+            question: "confirm_behavior_preservation".to_owned(),
+            recommended_default: "preserve_observable_behavior".to_owned(),
+        }),
+        PlanChangeObjective::BugFix
+        | PlanChangeObjective::Explanation
+        | PlanChangeObjective::Review => {}
+    }
+    decisions.truncate(16);
+    decisions
+}
+
+/// Builds the ready follow-up context-pack arguments.
+///
+/// The pack carries the resolved targets plus the reached dependents and the
+/// declaring files of those symbols together with the explicit target files, all
+/// in deterministic order and capped for a bounded follow-up request.
+fn plan_change_context_pack(
+    resolved_targets: &BTreeSet<SymbolId>,
+    closure: &[ImpactEntryRecord],
+    resolved_target_files: &BTreeSet<FileId>,
+    entity_file: &BTreeMap<SymbolId, FileId>,
+) -> PlanChangeContextPack {
+    let mut symbols: BTreeSet<SymbolId> = resolved_targets.clone();
+    for entry in closure {
+        symbols.insert(entry.symbol_id);
+    }
+    let symbols: Vec<SymbolId> = symbols
+        .into_iter()
+        .take(PLAN_CHANGE_MAX_CONTEXT_ITEMS)
+        .collect();
+    let mut files: BTreeSet<FileId> = resolved_target_files.clone();
+    for symbol in &symbols {
+        if let Some(file) = entity_file.get(symbol) {
+            files.insert(*file);
+        }
+    }
+    let files: Vec<FileId> = files
+        .into_iter()
+        .take(PLAN_CHANGE_MAX_CONTEXT_ITEMS)
+        .collect();
+    PlanChangeContextPack { symbols, files }
 }
 
 /// Builds a directed outbound adjacency view over the requested projection.
@@ -5918,5 +6613,246 @@ mod tests {
         assert_eq!(first.resolved_changes, second.resolved_changes);
         assert_eq!(first.impacted, second.impacted);
         assert_eq!(first.risk_summary, second.risk_summary);
+    }
+
+    fn plan_change_plan(
+        objective: PlanChangeObjective,
+        target_symbols: BTreeSet<SymbolId>,
+        target_files: BTreeSet<FileId>,
+        max_steps: usize,
+    ) -> PlanChangePlan {
+        PlanChangePlan {
+            objective,
+            target_symbols,
+            target_files,
+            max_steps,
+            max_depth: 3,
+            max_dependents: 100,
+            budget: QueryBudget::new(),
+            explanation: PlanExplanation {
+                generation: GenerationId::from_bytes([0; 20]),
+                kind: PlanKind::PlanChange,
+                operators: Vec::new(),
+                estimate: PlanEstimate {
+                    rows: 0,
+                    edges: 0,
+                    results: 0,
+                    source_bytes: 0,
+                    memory_bytes: 0,
+                    json_bytes: 0,
+                    estimated_tokens: 0,
+                    duration_micros: 0,
+                },
+            },
+        }
+    }
+
+    fn run_plan_change(
+        document: &NormalizedIrDocument,
+        plan: &PlanChangePlan,
+    ) -> PlanChangeAnalysis {
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+        build_plan_change(
+            document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("bounded plan change succeeds")
+    }
+
+    #[test]
+    fn plan_change_builds_ordered_steps_with_dependency_ordering() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Function);
+        add_entity(&mut document, 13, 1, EntityKind::Function);
+        // 12 calls the target 11 (distance 1); 13 calls 12 (distance 2).
+        add_calls(&mut document, 110, 12, 11, 900);
+        add_calls(&mut document, 111, 13, 12, 800);
+
+        let plan = plan_change_plan(
+            PlanChangeObjective::BugFix,
+            BTreeSet::from([symbol(11)]),
+            BTreeSet::new(),
+            6,
+        );
+        let analysis = run_plan_change(&document, &plan);
+
+        // A modification objective emits inspect, modify, update-dependents, and
+        // run-tests steps in ordinal order.
+        assert_eq!(analysis.plan.len(), 4);
+        for (index, step) in analysis.plan.iter().enumerate() {
+            assert_eq!(step.step, u8::try_from(index + 1).expect("ordinal fits"));
+            // Every dependency references an earlier ordinal.
+            assert!(step.depends_on.iter().all(|dep| *dep < step.step));
+            assert!(!step.action.is_empty());
+        }
+        // The inspect step targets the resolved symbol.
+        assert_eq!(analysis.plan[0].targets, vec![symbol(11)]);
+        assert!(analysis.plan[0].depends_on.is_empty());
+        // The modify step depends on inspect.
+        assert_eq!(analysis.plan[1].depends_on, vec![1]);
+        assert_eq!(analysis.plan[1].targets, vec![symbol(11)]);
+        // The update-dependents step carries the direct dependent and depends on modify.
+        assert_eq!(analysis.plan[2].depends_on, vec![2]);
+        assert_eq!(analysis.plan[2].targets, vec![symbol(12)]);
+        // The run-tests step depends on modify and update-dependents.
+        assert_eq!(analysis.plan[3].depends_on, vec![2, 3]);
+
+        // The impact summary counts the target plus its two reached dependents.
+        assert_eq!(analysis.affected_scope.affected_symbols, 3);
+        assert_eq!(analysis.affected_scope.affected_files, 1);
+        assert!(!analysis.affected_scope.touches_public_surface);
+        assert_eq!(
+            analysis.affected_scope.risk_level,
+            ChangeImpactRiskLevel::Low
+        );
+
+        // The context pack carries the affected symbols and their declaring file.
+        assert_eq!(
+            analysis.context_pack_request.symbols,
+            vec![symbol(11), symbol(12), symbol(13)]
+        );
+        assert_eq!(analysis.context_pack_request.files, vec![file_id(1)]);
+    }
+
+    #[test]
+    fn plan_change_honors_the_max_steps_cap() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Function);
+        add_calls(&mut document, 110, 12, 11, 900);
+
+        let plan = plan_change_plan(
+            PlanChangeObjective::BugFix,
+            BTreeSet::from([symbol(11)]),
+            BTreeSet::new(),
+            2,
+        );
+        let analysis = run_plan_change(&document, &plan);
+
+        assert_eq!(analysis.plan.len(), 2);
+        assert_eq!(analysis.plan[0].step, 1);
+        assert_eq!(analysis.plan[1].step, 2);
+        // Truncation keeps every dependency reference valid.
+        assert!(analysis.plan[1].depends_on.iter().all(|dep| *dep <= 2));
+    }
+
+    #[test]
+    fn plan_change_flags_public_surface_risk_and_decision() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_public_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Function);
+        add_calls(&mut document, 110, 12, 11, 900);
+
+        let plan = plan_change_plan(
+            PlanChangeObjective::BugFix,
+            BTreeSet::from([symbol(11)]),
+            BTreeSet::new(),
+            6,
+        );
+        let analysis = run_plan_change(&document, &plan);
+
+        assert!(analysis.affected_scope.touches_public_surface);
+        assert_eq!(
+            analysis.affected_scope.risk_level,
+            ChangeImpactRiskLevel::High
+        );
+        // A public-surface change adds a confirmation step and an open decision.
+        assert_eq!(analysis.plan.len(), 5);
+        assert_eq!(analysis.plan[4].step, 5);
+        assert!(
+            analysis
+                .open_decisions
+                .iter()
+                .any(|decision| decision.question == "confirm_public_surface_change")
+        );
+    }
+
+    #[test]
+    fn plan_change_resolves_a_file_target_to_its_declared_entities() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_contains(&mut document, 100, 1, 11, 800);
+
+        let plan = plan_change_plan(
+            PlanChangeObjective::Review,
+            BTreeSet::new(),
+            BTreeSet::from([file_id(1)]),
+            6,
+        );
+        let analysis = run_plan_change(&document, &plan);
+
+        // The file target expands to the entity it declares, which becomes the
+        // inspect step target and the context-pack symbol.
+        assert_eq!(analysis.plan[0].targets, vec![symbol(11)]);
+        assert_eq!(analysis.context_pack_request.symbols, vec![symbol(11)]);
+        assert_eq!(analysis.context_pack_request.files, vec![file_id(1)]);
+        assert_eq!(analysis.affected_scope.affected_symbols, 1);
+    }
+
+    #[test]
+    fn plan_change_explanation_objective_emits_read_only_steps() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+
+        let plan = plan_change_plan(
+            PlanChangeObjective::Explanation,
+            BTreeSet::from([symbol(11)]),
+            BTreeSet::new(),
+            6,
+        );
+        let analysis = run_plan_change(&document, &plan);
+
+        assert_eq!(analysis.plan.len(), 3);
+        // No modification step is emitted for a read-only objective.
+        assert!(
+            analysis
+                .plan
+                .iter()
+                .all(|step| !step.action.contains("Apply") && !step.action.contains("Migrate"))
+        );
+        assert!(analysis.open_decisions.is_empty());
+    }
+
+    #[test]
+    fn plan_change_is_deterministic() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/b.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Function);
+        add_entity(&mut document, 13, 2, EntityKind::Function);
+        add_calls(&mut document, 110, 12, 11, 900);
+        add_calls(&mut document, 111, 13, 11, 700);
+
+        let plan = plan_change_plan(
+            PlanChangeObjective::Refactor,
+            BTreeSet::from([symbol(11)]),
+            BTreeSet::new(),
+            6,
+        );
+        let first = run_plan_change(&document, &plan);
+        let second = run_plan_change(&document, &plan);
+
+        assert_eq!(first.plan, second.plan);
+        assert_eq!(first.affected_scope, second.affected_scope);
+        assert_eq!(first.open_decisions, second.open_decisions);
+        assert_eq!(first.context_pack_request, second.context_pack_request);
+        assert_eq!(first.test_plan, second.test_plan);
     }
 }

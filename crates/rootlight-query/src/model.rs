@@ -198,6 +198,8 @@ pub enum PlanKind {
     TestsSelect,
     /// Map bounded change impact for an explicit change set.
     ChangeImpact,
+    /// Build a bounded ordered change plan for explicit targets.
+    PlanChange,
     /// Read generation-bound source.
     SourceRead,
 }
@@ -1329,6 +1331,140 @@ pub struct ChangeImpactResult {
     pub tests: Vec<ChangeImpactTestCandidate>,
     /// Aggregate risk summary.
     pub risk_summary: ChangeImpactRiskSummary,
+    /// Resource limits that stopped work, in deterministic execution order.
+    pub limiting_resources: Vec<QueryResource>,
+    /// Mandatory trust marker for repository-controlled values.
+    pub trust: RepositoryDataTrust,
+}
+
+/// Objective class for a `plan.change` plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PlanChangeObjective {
+    /// Fix a defect.
+    BugFix,
+    /// Restructure without behavior change.
+    Refactor,
+    /// Explain or document existing behavior.
+    Explanation,
+    /// Migrate to a new API, platform, or dependency.
+    Migration,
+    /// Review and assess existing code.
+    Review,
+}
+
+impl PlanChangeObjective {
+    /// Returns the stable wire label shared with the MCP plan-objective contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BugFix => "bug_fix",
+            Self::Refactor => "refactor",
+            Self::Explanation => "explanation",
+            Self::Migration => "migration",
+            Self::Review => "review",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "bug_fix" => Some(Self::BugFix),
+            "refactor" => Some(Self::Refactor),
+            "explanation" => Some(Self::Explanation),
+            "migration" => Some(Self::Migration),
+            "review" => Some(Self::Review),
+            _ => None,
+        }
+    }
+}
+
+/// Prevalidated `plan.change` plan.
+#[derive(Debug, Clone)]
+pub struct PlanChangePlan {
+    pub(crate) objective: PlanChangeObjective,
+    pub(crate) target_symbols: BTreeSet<SymbolId>,
+    pub(crate) target_files: BTreeSet<FileId>,
+    pub(crate) max_steps: usize,
+    pub(crate) max_depth: u8,
+    pub(crate) max_dependents: usize,
+    pub(crate) budget: QueryBudget,
+    pub(crate) explanation: PlanExplanation,
+}
+
+impl PlanChangePlan {
+    /// Returns the deterministic plan explanation.
+    #[must_use]
+    pub const fn explanation(&self) -> &PlanExplanation {
+        &self.explanation
+    }
+}
+
+/// One ordered step in a `plan.change` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlanChangeStepRecord {
+    /// One-based step ordinal.
+    pub step: u8,
+    /// Source-free action description.
+    pub action: String,
+    /// Target symbol identities for this step, in deterministic order.
+    pub targets: Vec<SymbolId>,
+    /// Step ordinals this step depends on, in deterministic order.
+    pub depends_on: Vec<u8>,
+    /// Source-free risk codes for this step, in deterministic order.
+    pub risks: Vec<String>,
+    /// Source-free verification hint, when one applies.
+    pub verification: Option<String>,
+}
+
+/// Compact impact and ownership summary for a `plan.change` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlanChangeImpactSummary {
+    /// Total affected symbol count.
+    pub affected_symbols: u32,
+    /// Total affected file count.
+    pub affected_files: u32,
+    /// Aggregate risk level.
+    pub risk_level: ChangeImpactRiskLevel,
+    /// Whether public surface is affected.
+    pub touches_public_surface: bool,
+}
+
+/// One open decision that cannot be safely inferred.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlanChangeDecision {
+    /// Source-free question identifier.
+    pub question: String,
+    /// Recommended default choice.
+    pub recommended_default: String,
+}
+
+/// Ready follow-up context-pack arguments for a `plan.change` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlanChangeContextPack {
+    /// Symbol identities to include in the context pack, in deterministic order.
+    pub symbols: Vec<SymbolId>,
+    /// File identities to include in the context pack, in deterministic order.
+    pub files: Vec<FileId>,
+}
+
+/// Data returned by a `plan.change` plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlanChangeResult {
+    /// Immutable generation that served the query.
+    pub generation: GenerationId,
+    /// Ordered plan steps in deterministic order.
+    pub plan: Vec<PlanChangeStepRecord>,
+    /// Compact impact and ownership summary.
+    pub affected_scope: PlanChangeImpactSummary,
+    /// Ranked verification test plan, in deterministic order.
+    pub test_plan: Vec<ChangeImpactTestCandidate>,
+    /// Open decisions requiring user input, in deterministic order.
+    pub open_decisions: Vec<PlanChangeDecision>,
+    /// Ready follow-up context-pack arguments.
+    pub context_pack_request: PlanChangeContextPack,
     /// Resource limits that stopped work, in deterministic execution order.
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.
