@@ -30,13 +30,16 @@ use rootlight_client::{
     RelationshipGroup as ClientRelationshipGroup, RelationshipTarget as ClientRelationshipTarget,
     RepositoryCoverageEntry, RepositoryList, RepositoryListEntry, RepositoryStatus,
     SourceChunk as ClientSourceChunk, SymbolExplanation as ClientExplanation,
-    SymbolRelationships as ClientRelationships,
+    SymbolRelationships as ClientRelationships, TestsSelect as ClientTestsSelect,
+    TestsSelectCoverageStrategy as ClientCoverageStrategy, TestsSelectGap as ClientTestGap,
+    TestsSelectRankedTest as ClientRankedTest,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{CoverageStatus as IrCoverage, LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
     SymbolExplainOutput,
+    change::{TestKind, TestsSelectOutput},
     context::{ContextPackOutput, QueryBatchOutput},
     intent::{
         ArchitectureCyclesOutput, ArchitectureOverviewOutput, ArchitectureView, CodeDeadOutput,
@@ -78,6 +81,7 @@ enum FakeOutcome {
     ArchitectureCycles(Result<ArchitectureCyclesPortResponse, ClientPortError>),
     CodeDead(Result<CodeDeadPortResponse, ClientPortError>),
     ArchitectureOverview(Result<ArchitectureOverviewPortResponse, ClientPortError>),
+    TestsSelect(Result<TestsSelectPortResponse, ClientPortError>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +98,7 @@ enum ObservedCall {
     ArchitectureCycles(ArchitectureCyclesPortRequest),
     CodeDead(CodeDeadPortRequest),
     ArchitectureOverview(ArchitectureOverviewPortRequest),
+    TestsSelect(TestsSelectPortRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +292,19 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::ArchitectureOverview(request));
         let outcome = match &self.outcome {
             FakeOutcome::ArchitectureOverview(outcome) => outcome.clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { outcome })
+    }
+
+    fn tests_select(
+        &self,
+        request: TestsSelectPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<TestsSelectPortResponse> {
+        self.record(ObservedCall::TestsSelect(request));
+        let outcome = match &self.outcome {
+            FakeOutcome::TestsSelect(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1729,6 +1747,100 @@ async fn architecture_overview_rejects_unsupported_view() {
     )
     .await
     .expect_err("unsupported view is rejected before the port");
+    let public = error
+        .public_error()
+        .expect("unsupported option is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn tests_select_maps_ranked_tests_strategy_and_gaps() {
+    let response = TestsSelectPortResponse::new(
+        ClientTestsSelect {
+            context: context(1, 0),
+            tests: vec![ClientRankedTest {
+                test_id: "test-1".to_owned(),
+                kind: "unit".to_owned(),
+                path: Some("src/a.rs".to_owned()),
+                score: 970,
+                why: vec!["direct_test_edge".to_owned(), "via:calls".to_owned()],
+                estimated_cost_ms: None,
+                command_hint: Some("test:unit".to_owned()),
+            }],
+            coverage_strategy: ClientCoverageStrategy {
+                direct_edges: true,
+                transitive_signals: false,
+                history_signals: false,
+                build_target_signals: true,
+            },
+            gaps: vec![ClientTestGap {
+                scope: "scope-1".to_owned(),
+                reason: "no_related_test".to_owned(),
+            }],
+        },
+        metadata("tests-select-1"),
+    );
+    let harness = Harness::new(FakeOutcome::TestsSelect(Ok(response)));
+    let output: TestsSelectOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::TestsSelect,
+            json!({
+                "repository": {"repository_id": repository()},
+                "seeds": {"symbols": [symbol()]}
+            }),
+        )
+        .await
+        .expect("tests select maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected tests select success");
+    };
+    assert_eq!(output.data.tests.len(), 1);
+    let test = &output.data.tests[0];
+    assert_eq!(test.test_id, "test-1");
+    assert_eq!(test.kind, TestKind::Unit);
+    assert_eq!(test.path.as_deref(), Some("src/a.rs"));
+    assert_eq!(test.score, 970);
+    assert_eq!(
+        test.why,
+        vec!["direct_test_edge".to_owned(), "via:calls".to_owned()]
+    );
+    assert_eq!(test.estimated_cost_ms, None);
+    assert_eq!(test.command_hint.as_deref(), Some("test:unit"));
+    assert!(output.data.coverage_strategy.direct_edges);
+    assert!(!output.data.coverage_strategy.transitive_signals);
+    assert!(!output.data.coverage_strategy.history_signals);
+    assert!(output.data.coverage_strategy.build_target_signals);
+    assert_eq!(output.data.gaps.len(), 1);
+    assert_eq!(output.data.gaps[0].scope, "scope-1");
+    assert_eq!(output.data.gaps[0].reason.as_str(), "no_related_test");
+    let ObservedCall::TestsSelect(request) = harness.only_call() else {
+        panic!("expected tests select call");
+    };
+    assert_eq!(request.repository(), repository());
+    assert_eq!(request.seeds(), &[symbol()]);
+    assert_eq!(request.test_kinds(), &[] as &[String]);
+    assert_eq!(request.max_tests(), None);
+    assert_eq!(request.include_commands(), None);
+}
+
+#[tokio::test]
+async fn tests_select_rejects_unsupported_frameworks() {
+    let harness = Harness::new(FakeOutcome::TestsSelect(Err(ClientPortError::Executor)));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::TestsSelect,
+        json!({
+            "repository": {"repository_id": repository()},
+            "seeds": {"symbols": [symbol()]},
+            "frameworks": ["cargo-nextest"]
+        }),
+    )
+    .await
+    .expect_err("unsupported frameworks are rejected before the port");
     let public = error
         .public_error()
         .expect("unsupported option is a checked public error");

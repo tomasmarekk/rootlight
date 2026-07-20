@@ -37,7 +37,7 @@ pub use executor::{
     RepositoryIndexPortResponse, RepositoryListPortRequest, RepositoryStatusPortRequest,
     SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
     SymbolExplainPortResponse, SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
-    ToolExecutorBuildError,
+    TestsSelectPortRequest, TestsSelectPortResponse, ToolExecutorBuildError,
 };
 pub use tools::{
     ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture, ToolExecutor, ToolRegistryError,

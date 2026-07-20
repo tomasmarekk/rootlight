@@ -10,7 +10,7 @@ use rootlight_client::{
     ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace, GenerationSelector, LocateMode,
     RepositoryIndex, RepositoryList, RepositoryOperationAction, RepositoryOperationStatus,
     RepositoryStatus, RequestTimeout, SourceRead, SourceReference, SymbolExplain,
-    SymbolRelationships,
+    SymbolRelationships, TestsSelect,
 };
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
@@ -27,7 +27,8 @@ use crate::{
     RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
     RepositoryStatusPortRequest, RequestCancellation, SourceReadPortRequest,
     SourceReadPortResponse, SymbolExplainPortRequest, SymbolExplainPortResponse,
-    SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
+    SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse, TestsSelectPortRequest,
+    TestsSelectPortResponse,
 };
 
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -174,6 +175,21 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         min_confidence: Option<u16>,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<ArchitectureOverview>;
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded tests select dimension"
+    )]
+    fn tests_select(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: Vec<SymbolId>,
+        test_kinds: Vec<String>,
+        max_tests: Option<u16>,
+        include_commands: Option<bool>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<TestsSelect>;
 }
 
 struct LiveAsyncFirstSliceClient {
@@ -434,6 +450,32 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     max_components,
                     include_edges,
                     min_confidence,
+                    timeout,
+                )
+                .await
+        })
+    }
+
+    fn tests_select(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: Vec<SymbolId>,
+        test_kinds: Vec<String>,
+        max_tests: Option<u16>,
+        include_commands: Option<bool>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<TestsSelect> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .tests_select_async(
+                    repository,
+                    generation,
+                    &seeds,
+                    &test_kinds,
+                    max_tests,
+                    include_commands,
                     timeout,
                 )
                 .await
@@ -766,6 +808,30 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
             Ok(ArchitectureOverviewPortResponse::new(result, metadata))
         })
     }
+
+    fn tests_select(
+        &self,
+        request: TestsSelectPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<TestsSelectPortResponse> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let result = client
+                .tests_select(
+                    request.repository(),
+                    request.generation(),
+                    request.seeds().to_vec(),
+                    request.test_kinds().to_vec(),
+                    request.max_tests(),
+                    request.include_commands(),
+                    request_timeout()?,
+                )
+                .await
+                .map_err(map_client_error)?;
+            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            Ok(TestsSelectPortResponse::new(result, metadata))
+        })
+    }
 }
 
 /// Source-free first-slice port used when synchronous daemon setup is unavailable.
@@ -866,6 +932,14 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
         _request: ArchitectureOverviewPortRequest,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<ArchitectureOverviewPortResponse> {
+        unavailable()
+    }
+
+    fn tests_select(
+        &self,
+        _request: TestsSelectPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<TestsSelectPortResponse> {
         unavailable()
     }
 }

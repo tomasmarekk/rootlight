@@ -18,6 +18,9 @@ use rootlight_client::{
 };
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{LineRange, SourceRef, SourceSpan};
+use rootlight_mcp_contract::change::{
+    RankedTest, TestCoverageStrategy, TestGap, TestKind, TestsSelectData, TestsSelectInput,
+};
 use rootlight_mcp_contract::intent::{
     ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesData, ArchitectureCyclesInput,
     ArchitectureOverviewData, ArchitectureOverviewInput, ArchitectureView, BlindSpot, CodeDeadData,
@@ -177,6 +180,13 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         request: ArchitectureOverviewPortRequest,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<ArchitectureOverviewPortResponse>;
+
+    /// Selects bounded relevant tests for a seed set over one generation.
+    fn tests_select(
+        &self,
+        request: TestsSelectPortRequest,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<TestsSelectPortResponse>;
 }
 
 /// Source-free failure emitted by an injected daemon client port.
@@ -844,6 +854,70 @@ impl ArchitectureOverviewPortResponse {
     }
 }
 
+/// Normalized `tests.select` request supported by the current daemon protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestsSelectPortRequest {
+    repository: RepositoryId,
+    generation: client::GenerationSelector,
+    seeds: Vec<SymbolId>,
+    test_kinds: Vec<String>,
+    max_tests: Option<u16>,
+    include_commands: Option<bool>,
+}
+
+impl TestsSelectPortRequest {
+    /// Returns the selected repository.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the active or explicit immutable-generation selector.
+    #[must_use]
+    pub const fn generation(&self) -> client::GenerationSelector {
+        self.generation
+    }
+
+    /// Returns the seed symbol identifiers.
+    #[must_use]
+    pub fn seeds(&self) -> &[SymbolId] {
+        &self.seeds
+    }
+
+    /// Returns the requested test-kind labels.
+    #[must_use]
+    pub fn test_kinds(&self) -> &[String] {
+        &self.test_kinds
+    }
+
+    /// Returns the optional test cap.
+    #[must_use]
+    pub const fn max_tests(&self) -> Option<u16> {
+        self.max_tests
+    }
+
+    /// Returns the optional command-inclusion flag.
+    #[must_use]
+    pub const fn include_commands(&self) -> Option<bool> {
+        self.include_commands
+    }
+}
+
+/// Detected daemon data plus mandatory MCP read metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestsSelectPortResponse {
+    result: client::TestsSelect,
+    metadata: ReadResponseMetadata,
+}
+
+impl TestsSelectPortResponse {
+    /// Creates a complete `tests.select` response for MCP mapping.
+    #[must_use]
+    pub const fn new(result: client::TestsSelect, metadata: ReadResponseMetadata) -> Self {
+        Self { result, metadata }
+    }
+}
+
 /// Normalized exact-reference `source.read` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceReadPortRequest {
@@ -1025,7 +1099,6 @@ where
                     execute_repo_list(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::ChangeImpact
-                | VerticalTool::TestsSelect
                 | VerticalTool::HistoryCompare
                 | VerticalTool::PlanChange
                 | VerticalTool::QueryAdvanced => execute_intent_fallback(&unavailable).await,
@@ -1043,6 +1116,9 @@ where
                 }
                 VerticalTool::ArchitectureOverview => {
                     execute_architecture_overview(port, arguments, cancellation, &unsupported).await
+                }
+                VerticalTool::TestsSelect => {
+                    execute_tests_select(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::ContextPack => {
                     execute_context_pack(port, arguments, cancellation, &unsupported).await
@@ -2731,6 +2807,130 @@ fn architecture_view_label(view: ArchitectureView) -> Result<String, ToolExecuti
 }
 
 fn architecture_view_from_label(label: &str) -> Result<ArchitectureView, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+async fn execute_tests_select<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: TestsSelectInput = decode_input(arguments)?;
+    let request = normalize_tests_select(input, unsupported)?;
+    let expected = request.clone();
+    let future = port.tests_select(request, cancellation.clone());
+    let response = await_port(future, cancellation).await?;
+    let output = map_tests_select(response, &expected)?;
+    serialize_success(output)
+}
+
+fn normalize_tests_select(
+    input: TestsSelectInput,
+    unsupported: &PublicError,
+) -> Result<TestsSelectPortRequest, ToolExecutionError> {
+    let repository = repository_id(input.repository, unsupported)?;
+    // Custom budgets, execution budgets, framework filters, and non-compact
+    // profiles are not served by this slice.
+    if input.budget.is_some()
+        || input.execution_budget.is_some()
+        || input.frameworks.is_some()
+        || !compact_profile(input.profile)
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    // Only explicit symbol seeds are served; path, change, and build-target
+    // seeds require capabilities this slice does not provide.
+    if input.seeds.paths.is_some()
+        || input.seeds.change.is_some()
+        || input.seeds.build_targets.is_some()
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    let seeds = match input.seeds.symbols {
+        Some(symbols) if !symbols.is_empty() => symbols,
+        _ => return Err(ToolExecutionError::new(unsupported.clone())),
+    };
+    let mut test_kinds = Vec::new();
+    if let Some(requested) = input.test_kinds {
+        for kind in requested {
+            test_kinds.push(test_kind_label(kind)?);
+        }
+    }
+    Ok(TestsSelectPortRequest {
+        repository,
+        generation: client_generation(input.generation),
+        seeds,
+        test_kinds,
+        max_tests: input.max_tests,
+        include_commands: input.include_commands,
+    })
+}
+
+fn map_tests_select(
+    response: TestsSelectPortResponse,
+    request: &TestsSelectPortRequest,
+) -> Result<ReadEnvelope<TestsSelectData>, ToolExecutionError> {
+    validate_query_context(
+        &response.result.context,
+        request.repository,
+        request.generation,
+    )?;
+    let mut tests = Vec::new();
+    tests
+        .try_reserve_exact(response.result.tests.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for test in response.result.tests {
+        let kind = test_kind_from_label(&test.kind)?;
+        tests.push(RankedTest {
+            test_id: test.test_id,
+            kind,
+            path: test.path,
+            score: test.score,
+            why: test.why,
+            estimated_cost_ms: test.estimated_cost_ms,
+            command_hint: test.command_hint,
+        });
+    }
+    let strategy = response.result.coverage_strategy;
+    let mut gaps = Vec::new();
+    gaps.try_reserve_exact(response.result.gaps.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for gap in response.result.gaps {
+        let reason = SafeLabel::parse(&gap.reason)
+            .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+        gaps.push(TestGap {
+            scope: gap.scope,
+            reason,
+        });
+    }
+    let data = TestsSelectData {
+        tests,
+        coverage_strategy: TestCoverageStrategy {
+            direct_edges: strategy.direct_edges,
+            transitive_signals: strategy.transitive_signals,
+            history_signals: strategy.history_signals,
+            build_target_signals: strategy.build_target_signals,
+        },
+        gaps,
+    };
+    // The requested test cap is an explicit bound honored by the daemon; this
+    // slice does not surface separate budget-truncation through the wire.
+    map_read_envelope(response.result.context, response.metadata, data, false)
+}
+
+fn test_kind_label(kind: TestKind) -> Result<String, ToolExecutionError> {
+    match serde_json::to_value(kind).map_err(|_| internal(ToolExecutionFailure::InvalidResponse))? {
+        Value::String(label) => Ok(label),
+        _ => Err(internal(ToolExecutionFailure::InvalidResponse)),
+    }
+}
+
+fn test_kind_from_label(label: &str) -> Result<TestKind, ToolExecutionError> {
     serde_json::from_value(Value::String(label.to_owned()))
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }

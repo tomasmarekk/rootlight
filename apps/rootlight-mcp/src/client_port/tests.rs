@@ -12,7 +12,8 @@ use rootlight_client::{
     OperationStage, OperationState, QueryContext, QueryUsage, RecoveryClass,
     RepositoryCoverageEntry, RepositoryIndex, RepositoryList, RepositoryListEntry,
     RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, RequestTimeout,
-    SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
+    SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
+    TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -125,6 +126,15 @@ enum Call {
         max_components: Option<u16>,
         include_edges: Option<bool>,
         min_confidence: Option<u16>,
+        timeout: RequestTimeout,
+    },
+    TestsSelect {
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: Vec<SymbolId>,
+        test_kinds: Vec<String>,
+        max_tests: Option<u16>,
+        include_commands: Option<bool>,
         timeout: RequestTimeout,
     },
 }
@@ -530,6 +540,40 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 connections: Vec::new(),
                 hotspots: Vec::new(),
                 views: Vec::new(),
+            })
+        })
+    }
+
+    fn tests_select(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: Vec<SymbolId>,
+        test_kinds: Vec<String>,
+        max_tests: Option<u16>,
+        include_commands: Option<bool>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<TestsSelect> {
+        self.record(Call::TestsSelect {
+            repository,
+            generation,
+            seeds,
+            test_kinds,
+            max_tests,
+            include_commands,
+            timeout,
+        });
+        Box::pin(async move {
+            Ok(TestsSelect {
+                context: query_context(repository, generation, true),
+                tests: Vec::new(),
+                coverage_strategy: TestsSelectCoverageStrategy {
+                    direct_edges: false,
+                    transitive_signals: false,
+                    history_signals: false,
+                    build_target_signals: false,
+                },
+                gaps: Vec::new(),
             })
         })
     }
