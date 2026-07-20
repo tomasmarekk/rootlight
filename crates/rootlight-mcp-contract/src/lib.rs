@@ -2,6 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod catalog;
+pub mod change;
+pub mod context;
+pub mod intent;
 pub mod vertical;
 
 use rootlight_ids::{GenerationId, RepositoryId};
@@ -9,6 +13,7 @@ use rootlight_ir::CoverageStatus;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub use catalog::{ExposureProfile, McpTool};
 pub use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicErrorBuildError};
 pub use vertical::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, GenerationSelector,
