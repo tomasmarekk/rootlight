@@ -41,6 +41,7 @@ const DEFAULT_LOCATE_RESULTS: u16 = 20;
 const CURRENT_SOURCE_CONTEXT_LINES: u8 = 2;
 const INVALID_ARGUMENT_MESSAGE: &str = "tool arguments are invalid";
 const UNSUPPORTED_MESSAGE: &str = "requested option is not supported";
+const UNAVAILABLE_MESSAGE: &str = "tool is not yet available through this bridge";
 
 /// Future returned by one injected first-slice client-port operation.
 pub type ClientPortFuture<T> =
@@ -454,6 +455,7 @@ pub struct FirstSliceToolExecutor<P> {
     port: Arc<P>,
     invalid_arguments: PublicError,
     unsupported: PublicError,
+    unavailable: PublicError,
 }
 
 impl<P> FirstSliceToolExecutor<P>
@@ -481,10 +483,15 @@ where
                 .next_action(NextAction::CorrectField { field })
                 .build()
                 .map_err(ToolExecutorBuildError::InvalidArgumentError)?;
+        let unavailable =
+            PublicError::builder(ErrorCode::UnsupportedCapability, UNAVAILABLE_MESSAGE)
+                .build()
+                .map_err(ToolExecutorBuildError::UnsupportedError)?;
         Ok(Self {
             port: Arc::new(port),
             invalid_arguments,
             unsupported,
+            unavailable,
         })
     }
 }
@@ -502,6 +509,7 @@ where
         let port = Arc::clone(&self.port);
         let invalid_arguments = self.invalid_arguments.clone();
         let unsupported = self.unsupported.clone();
+        let unavailable = self.unavailable.clone();
         Box::pin(async move {
             match tool {
                 VerticalTool::RepoIndex => {
@@ -527,7 +535,7 @@ where
                 | VerticalTool::PlanChange
                 | VerticalTool::ContextPack
                 | VerticalTool::QueryAdvanced
-                | VerticalTool::QueryBatch => execute_intent_fallback(tool, arguments).await,
+                | VerticalTool::QueryBatch => execute_intent_fallback(&unavailable).await,
                 VerticalTool::OperationStatus => {
                     execute_operation_status(port, arguments, cancellation).await
                 }
@@ -560,27 +568,18 @@ impl<P> fmt::Debug for FirstSliceToolExecutor<P> {
     }
 }
 
-/// Executes a typed fallback response for intent tools pending daemon port.
+/// Fails intent tools that have no production engine behind this bridge yet.
 ///
-/// Extracts repository and generation from the validated arguments and returns
-/// a schema-conformant empty result with bounded-fallback warning.
+/// These tools are advertised in the catalog but cannot produce a provable
+/// generation-pinned result here, so they return a checked, schema-valid
+/// capability error instead of fabricating repository or generation identity,
+/// coverage, or data that Rootlight cannot prove. The router validates the
+/// input schema before execution, so malformed requests are rejected before
+/// this point.
 async fn execute_intent_fallback(
-    tool: VerticalTool,
-    arguments: Map<String, Value>,
+    unavailable: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError> {
-    let repository = arguments
-        .get("repository")
-        .and_then(|r| r.get("repository_id"))
-        .and_then(Value::as_str)
-        .and_then(|s| s.parse::<rootlight_ids::RepositoryId>().ok())
-        .unwrap_or_else(|| rootlight_ids::RepositoryId::from_bytes([0; 16]));
-    let generation = arguments
-        .get("generation")
-        .and_then(Value::as_str)
-        .and_then(|s| s.parse::<rootlight_ids::GenerationId>().ok())
-        .unwrap_or_else(|| rootlight_ids::GenerationId::from_bytes([0; 20]));
-    let data = crate::fallback::empty_data_for_tool(tool.name());
-    crate::fallback::intent_fallback_response(repository, generation, data)
+    Err(ToolExecutionError::new(unavailable.clone()))
 }
 
 async fn execute_repository_index<P>(

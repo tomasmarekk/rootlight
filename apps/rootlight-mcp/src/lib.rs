@@ -11,7 +11,6 @@ pub mod batch;
 mod client_port;
 pub mod context_pack;
 mod executor;
-pub(crate) mod fallback;
 mod json;
 mod tools;
 
