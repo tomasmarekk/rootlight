@@ -158,6 +158,8 @@ pub enum FirstSliceIpcRequest {
     ArchitectureCycles(daemon::ArchitectureCyclesRequest),
     /// Detect bounded dead-code candidates among stable symbols.
     CodeDead(daemon::CodeDeadRequest),
+    /// Aggregate a bounded file-granularity architecture overview.
+    ArchitectureOverview(daemon::ArchitectureOverviewRequest),
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -185,6 +187,8 @@ pub enum FirstSliceIpcResponse {
     ArchitectureCycles(daemon::ArchitectureCyclesResponse),
     /// Bounded dead-code candidates among stable symbols.
     CodeDead(daemon::CodeDeadResponse),
+    /// Bounded file-granularity architecture overview.
+    ArchitectureOverview(daemon::ArchitectureOverviewResponse),
 }
 
 impl FirstSliceIpcResponse {
@@ -215,6 +219,9 @@ impl FirstSliceIpcResponse {
                 daemon::response_envelope::Response::ArchitectureCycles(response)
             }
             Self::CodeDead(response) => daemon::response_envelope::Response::CodeDead(response),
+            Self::ArchitectureOverview(response) => {
+                daemon::response_envelope::Response::ArchitectureOverview(response)
+            }
         }
     }
 }
@@ -5437,6 +5444,9 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::CodeDead(request)) => {
             Ok(Some(FirstSliceIpcRequest::CodeDead(request)))
         }
+        Some(daemon::request_envelope::Request::ArchitectureOverview(request)) => {
+            Ok(Some(FirstSliceIpcRequest::ArchitectureOverview(request)))
+        }
         Some(request) => Err(request),
         None => Ok(None),
     }
@@ -5975,6 +5985,60 @@ fn first_slice_response_correlates(
                     .false_positive_controls
                     .iter()
                     .all(|rule| !rule.rule.is_empty() && rule.rule.len() <= 256)
+        }
+        (
+            FirstSliceIpcRequest::ArchitectureOverview(request),
+            FirstSliceIpcResponse::ArchitectureOverview(response),
+        ) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    request.generation.as_ref(),
+                )
+                && request
+                    .views
+                    .iter()
+                    .all(|view| !view.is_empty() && view.len() <= 32)
+                && request.max_components.is_none_or(|max| (1..=250).contains(&max))
+                && request.min_confidence.is_none_or(|confidence| confidence <= 1_000)
+                && response.components.len() <= 250
+                && response.connections.len() <= 1_000
+                && response.hotspots.len() <= 250
+                && response.views.len() <= 8
+                && response.components.iter().all(|component| {
+                    !component.id.is_empty()
+                        && component.id.len() <= 512
+                        && !component.kind.is_empty()
+                        && component.kind.len() <= 64
+                        && !component.name.is_empty()
+                        && component.name.len() <= 1_024
+                        && component.responsibility_evidence.len() <= 16
+                        && component.confidence <= 1_000
+                })
+                && response.connections.iter().all(|connection| {
+                    !connection.from.is_empty()
+                        && connection.from.len() <= 512
+                        && !connection.to.is_empty()
+                        && connection.to.len() <= 512
+                        && !connection.kind.is_empty()
+                        && connection.kind.len() <= 32
+                        && connection.confidence <= 1_000
+                })
+                && response.hotspots.iter().all(|hotspot| {
+                    !hotspot.component_id.is_empty()
+                        && hotspot.component_id.len() <= 512
+                        && hotspot.score <= 1_000
+                })
+                && response.views.iter().all(|view| {
+                    !view.view.is_empty()
+                        && view.view.len() <= 32
+                        && !view.algorithm_version.is_empty()
+                        && view.algorithm_version.len() <= 128
+                })
         }
         _ => false,
     }
@@ -6546,6 +6610,40 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 return Err(Box::new(invalid_argument("code dead request is invalid")));
             }
         }
+        FirstSliceIpcRequest::ArchitectureOverview(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_generation_selector(request.generation.as_ref())?;
+            if request.views.len() > 8
+                || request
+                    .views
+                    .iter()
+                    .any(|view| view.is_empty() || view.len() > 32 || view.as_bytes().contains(&0))
+            {
+                return Err(Box::new(invalid_argument(
+                    "architecture overview request is invalid",
+                )));
+            }
+            if request
+                .min_confidence
+                .is_some_and(|confidence| confidence > 1_000)
+            {
+                return Err(Box::new(invalid_argument(
+                    "architecture overview request is invalid",
+                )));
+            }
+            if request
+                .max_components
+                .is_some_and(|max| !(1..=250).contains(&max))
+            {
+                return Err(Box::new(invalid_argument(
+                    "architecture overview request is invalid",
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -6665,6 +6763,9 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
             ControlMethod::ArchitectureCycles
         }
         Some(daemon::request_envelope::Request::CodeDead(_)) => ControlMethod::CodeDead,
+        Some(daemon::request_envelope::Request::ArchitectureOverview(_)) => {
+            ControlMethod::ArchitectureOverview
+        }
         None => ControlMethod::Unknown,
     }
 }
@@ -7114,6 +7215,9 @@ fn request_from_wire(
             | daemon::request_envelope::Request::ArchitectureCycles(_),
         ) => Err(Box::new(first_slice_unavailable())),
         Some(daemon::request_envelope::Request::CodeDead(_)) => {
+            Err(Box::new(first_slice_unavailable()))
+        }
+        Some(daemon::request_envelope::Request::ArchitectureOverview(_)) => {
             Err(Box::new(first_slice_unavailable()))
         }
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
