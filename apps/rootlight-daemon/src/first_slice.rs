@@ -44,6 +44,7 @@ use rootlight_query::{
 };
 use rootlight_service::{
     FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexReceipt, FirstSliceService,
+    PlanChangeObjective,
 };
 
 const FIRST_SLICE_SCHEMA_MAJOR: u32 = 1;
@@ -64,6 +65,7 @@ const DEFAULT_ARCHITECTURE_OVERVIEW_MAX_COMPONENTS: u32 = 50;
 const DEFAULT_TESTS_SELECT_MAX_TESTS: u32 = 20;
 const DEFAULT_CHANGE_IMPACT_MAX_DEPTH: u32 = 3;
 const DEFAULT_CHANGE_IMPACT_MAX_DEPENDENTS: u32 = 100;
+const DEFAULT_PLAN_CHANGE_MAX_STEPS: u32 = 6;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
 
@@ -552,6 +554,9 @@ fn execute_service_request(
         }
         FirstSliceIpcRequest::ChangeImpact(request) => {
             change_impact(service, request, &context).map(FirstSliceIpcResponse::ChangeImpact)
+        }
+        FirstSliceIpcRequest::PlanChange(request) => {
+            plan_change(service, request, &context).map(FirstSliceIpcResponse::PlanChange)
         }
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
     }
@@ -1726,6 +1731,98 @@ fn change_impact(
             breaking_surface: risk.breaking_surface,
             fanout: risk.fanout,
             dynamic_blind_spots: risk.dynamic_blind_spots,
+        }),
+    })
+}
+
+fn plan_change(
+    service: &FirstSliceService,
+    request: daemon::PlanChangeRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::PlanChangeResponse, PublicError> {
+    let repository = parse_repository(request.repository.as_ref())?;
+    let selected = parse_generation_selector(request.generation.as_ref())?;
+    let generation = service
+        .resolve_generation(repository, selected)
+        .map_err(service_error)?;
+    let objective =
+        PlanChangeObjective::from_label(&request.objective).ok_or_else(invalid_argument)?;
+    let mut target_symbols = BTreeSet::new();
+    for symbol in &request.target_symbols {
+        target_symbols.insert(parse_symbol(Some(symbol))?);
+    }
+    let mut target_files = BTreeSet::new();
+    for file in &request.target_files {
+        target_files.insert(parse_file(Some(file))?);
+    }
+    let max_steps = usize::try_from(request.max_steps.unwrap_or(DEFAULT_PLAN_CHANGE_MAX_STEPS))
+        .map_err(|_| invalid_argument())?;
+    let response = service
+        .plan_change(
+            generation.generation,
+            objective,
+            target_symbols,
+            target_files,
+            max_steps,
+            &context.cancellation,
+        )
+        .map_err(service_error)?;
+    let affected_scope = response.data.affected_scope;
+    let context_pack = response.data.context_pack_request;
+    let mut plan = Vec::new();
+    plan.try_reserve_exact(response.data.plan.len())
+        .map_err(|_| resource_exhausted())?;
+    for step in response.data.plan {
+        plan.push(daemon::FirstSliceChangePlanStep {
+            step: u32::from(step.step),
+            action: step.action,
+            targets: step.targets.into_iter().map(symbol_to_wire).collect(),
+            depends_on: step.depends_on.into_iter().map(u32::from).collect(),
+            risks: step.risks,
+            verification: step.verification,
+        });
+    }
+    let mut test_plan = Vec::new();
+    test_plan
+        .try_reserve_exact(response.data.test_plan.len())
+        .map_err(|_| resource_exhausted())?;
+    for test in response.data.test_plan {
+        test_plan.push(daemon::FirstSliceChangeImpactTest {
+            test_id: test.test_id,
+            relevance: u32::from(test.relevance),
+            why: test.why,
+            estimated_cost_ms: test.estimated_cost_ms,
+        });
+    }
+    let mut open_decisions = Vec::new();
+    open_decisions
+        .try_reserve_exact(response.data.open_decisions.len())
+        .map_err(|_| resource_exhausted())?;
+    for decision in response.data.open_decisions {
+        open_decisions.push(daemon::FirstSlicePlanDecision {
+            question: decision.question,
+            recommended_default: decision.recommended_default,
+        });
+    }
+    Ok(daemon::PlanChangeResponse {
+        schema_version: Some(schema_version()),
+        context: Some(query_context(generation, &response.usage, &[])),
+        plan,
+        affected_scope: Some(daemon::FirstSlicePlanImpactSummary {
+            affected_symbols: affected_scope.affected_symbols,
+            affected_files: affected_scope.affected_files,
+            risk_level: affected_scope.risk_level.as_str().to_owned(),
+            touches_public_surface: affected_scope.touches_public_surface,
+        }),
+        test_plan,
+        open_decisions,
+        context_pack_request: Some(daemon::FirstSliceContextPackRequest {
+            symbols: context_pack
+                .symbols
+                .into_iter()
+                .map(symbol_to_wire)
+                .collect(),
+            files: context_pack.files.into_iter().map(file_to_wire).collect(),
         }),
     })
 }
