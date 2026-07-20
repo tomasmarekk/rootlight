@@ -19,12 +19,13 @@ use rootlight_client::{
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::intent::{
-    ArchitectureCyclesData, ArchitectureCyclesInput, BlindSpot, CodeDeadData, CodeDeadInput,
-    CycleBreakCandidate, DeadCandidate, DeadClassification, Direction, EntryPointPolicy,
-    EntryPointSummary, FlowTraceData, FlowTraceInput, FrontierSummary, MinimalCycle, RelationKind,
-    RelationProjection, RelationshipGroup, RelationshipTarget, RelationshipTotals, RuleSummary,
-    StronglyConnectedComponent, SymbolRelationshipsData, SymbolRelationshipsInput, TraceEdge,
-    TracePath,
+    ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesData, ArchitectureCyclesInput,
+    ArchitectureOverviewData, ArchitectureOverviewInput, ArchitectureView, BlindSpot, CodeDeadData,
+    CodeDeadInput, CycleBreakCandidate, DeadCandidate, DeadClassification, DerivedViewInfo,
+    Direction, EntryPointPolicy, EntryPointSummary, FlowTraceData, FlowTraceInput, FrontierSummary,
+    Hotspot, MinimalCycle, RelationKind, RelationProjection, RelationshipGroup, RelationshipTarget,
+    RelationshipTotals, RuleSummary, StronglyConnectedComponent, SymbolRelationshipsData,
+    SymbolRelationshipsInput, TraceEdge, TracePath,
 };
 use rootlight_mcp_contract::{
     DetailKey, ErrorCode, GenerationSelector, McpTool, NextAction, PublicError,
@@ -168,6 +169,14 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         request: CodeDeadPortRequest,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<CodeDeadPortResponse>;
+
+    /// Aggregates a bounded file-granularity architecture overview over one
+    /// generation.
+    fn architecture_overview(
+        &self,
+        request: ArchitectureOverviewPortRequest,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<ArchitectureOverviewPortResponse>;
 }
 
 /// Source-free failure emitted by an injected daemon client port.
@@ -770,6 +779,71 @@ impl CodeDeadPortResponse {
     }
 }
 
+/// Normalized `architecture.overview` request supported by the current daemon
+/// protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchitectureOverviewPortRequest {
+    repository: RepositoryId,
+    generation: client::GenerationSelector,
+    views: Vec<String>,
+    max_components: Option<u16>,
+    include_edges: Option<bool>,
+    min_confidence: Option<u16>,
+}
+
+impl ArchitectureOverviewPortRequest {
+    /// Returns the selected repository.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the active or explicit immutable-generation selector.
+    #[must_use]
+    pub const fn generation(&self) -> client::GenerationSelector {
+        self.generation
+    }
+
+    /// Returns the accepted derived-view labels.
+    #[must_use]
+    pub fn views(&self) -> &[String] {
+        &self.views
+    }
+
+    /// Returns the optional component cap.
+    #[must_use]
+    pub const fn max_components(&self) -> Option<u16> {
+        self.max_components
+    }
+
+    /// Returns the optional edge-inclusion flag.
+    #[must_use]
+    pub const fn include_edges(&self) -> Option<bool> {
+        self.include_edges
+    }
+
+    /// Returns the optional confidence floor.
+    #[must_use]
+    pub const fn min_confidence(&self) -> Option<u16> {
+        self.min_confidence
+    }
+}
+
+/// Detected daemon data plus mandatory MCP read metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchitectureOverviewPortResponse {
+    result: client::ArchitectureOverview,
+    metadata: ReadResponseMetadata,
+}
+
+impl ArchitectureOverviewPortResponse {
+    /// Creates a complete `architecture.overview` response for MCP mapping.
+    #[must_use]
+    pub const fn new(result: client::ArchitectureOverview, metadata: ReadResponseMetadata) -> Self {
+        Self { result, metadata }
+    }
+}
+
 /// Normalized exact-reference `source.read` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceReadPortRequest {
@@ -952,7 +1026,6 @@ where
                 }
                 VerticalTool::ChangeImpact
                 | VerticalTool::TestsSelect
-                | VerticalTool::ArchitectureOverview
                 | VerticalTool::HistoryCompare
                 | VerticalTool::PlanChange
                 | VerticalTool::QueryAdvanced => execute_intent_fallback(&unavailable).await,
@@ -967,6 +1040,9 @@ where
                 }
                 VerticalTool::CodeDead => {
                     execute_code_dead(port, arguments, cancellation, &unsupported).await
+                }
+                VerticalTool::ArchitectureOverview => {
+                    execute_architecture_overview(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::ContextPack => {
                     execute_context_pack(port, arguments, cancellation, &unsupported).await
@@ -2517,6 +2593,144 @@ fn entry_point_policy_from_label(label: &str) -> Result<EntryPointPolicy, ToolEx
 }
 
 fn dead_classification_from_label(label: &str) -> Result<DeadClassification, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+async fn execute_architecture_overview<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: ArchitectureOverviewInput = decode_input(arguments)?;
+    let request = normalize_architecture_overview(input, unsupported)?;
+    let expected = request.clone();
+    let future = port.architecture_overview(request, cancellation.clone());
+    let response = await_port(future, cancellation).await?;
+    let output = map_architecture_overview(response, &expected)?;
+    serialize_success(output)
+}
+
+fn normalize_architecture_overview(
+    input: ArchitectureOverviewInput,
+    unsupported: &PublicError,
+) -> Result<ArchitectureOverviewPortRequest, ToolExecutionError> {
+    let repository = repository_id(input.repository, unsupported)?;
+    // Structural scope, explicit detail levels, custom budgets, and non-compact
+    // profiles are not served by this slice. The base file-granularity model is
+    // always returned; only the hotspot derived view is honored.
+    if input.scope.is_some()
+        || input.detail.is_some()
+        || input.budget.is_some()
+        || !compact_profile(input.response_profile)
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    let mut views = Vec::new();
+    if let Some(requested) = input.views {
+        for view in requested {
+            if view != ArchitectureView::Hotspots {
+                return Err(ToolExecutionError::new(unsupported.clone()));
+            }
+            views.push(architecture_view_label(view)?);
+        }
+    }
+    Ok(ArchitectureOverviewPortRequest {
+        repository,
+        generation: client_generation(input.generation),
+        views,
+        max_components: input.max_components,
+        include_edges: input.include_edges,
+        min_confidence: input.min_confidence,
+    })
+}
+
+fn map_architecture_overview(
+    response: ArchitectureOverviewPortResponse,
+    request: &ArchitectureOverviewPortRequest,
+) -> Result<ReadEnvelope<ArchitectureOverviewData>, ToolExecutionError> {
+    validate_query_context(
+        &response.result.context,
+        request.repository,
+        request.generation,
+    )?;
+    let mut components = Vec::new();
+    components
+        .try_reserve_exact(response.result.components.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for component in response.result.components {
+        components.push(ArchitectureComponent {
+            id: component.id,
+            kind: component.kind,
+            name: component.name,
+            symbol_count: component.symbol_count,
+            responsibility_evidence: component.responsibility_evidence,
+            confidence: component.confidence,
+            trust: TrustClassification::UntrustedRepositoryData,
+        });
+    }
+    let mut connections = Vec::new();
+    connections
+        .try_reserve_exact(response.result.connections.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for connection in response.result.connections {
+        let kind = relation_kind_from_label(&connection.kind)?;
+        connections.push(ArchitectureConnection {
+            from: connection.from,
+            to: connection.to,
+            kind,
+            weight: connection.weight,
+            confidence: connection.confidence,
+        });
+    }
+    let mut hotspots = Vec::new();
+    hotspots
+        .try_reserve_exact(response.result.hotspots.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for hotspot in response.result.hotspots {
+        hotspots.push(Hotspot {
+            component_id: hotspot.component_id,
+            fan_in: hotspot.fan_in,
+            fan_out: hotspot.fan_out,
+            change_frequency: hotspot.change_frequency,
+            complexity: hotspot.complexity,
+            score: hotspot.score,
+        });
+    }
+    let mut views = Vec::new();
+    views
+        .try_reserve_exact(response.result.views.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for view in response.result.views {
+        let category = architecture_view_from_label(&view.view)?;
+        views.push(DerivedViewInfo {
+            view: category,
+            algorithm_version: view.algorithm_version,
+        });
+    }
+    let data = ArchitectureOverviewData {
+        components,
+        connections,
+        hotspots,
+        views,
+    };
+    // The requested component cap is an explicit bound honored by the daemon;
+    // this slice does not surface separate budget-truncation through the wire.
+    map_read_envelope(response.result.context, response.metadata, data, false)
+}
+
+fn architecture_view_label(view: ArchitectureView) -> Result<String, ToolExecutionError> {
+    match serde_json::to_value(view).map_err(|_| internal(ToolExecutionFailure::InvalidResponse))? {
+        Value::String(label) => Ok(label),
+        _ => Err(internal(ToolExecutionFailure::InvalidResponse)),
+    }
+}
+
+fn architecture_view_from_label(label: &str) -> Result<ArchitectureView, ToolExecutionError> {
     serde_json::from_value(Value::String(label.to_owned()))
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }

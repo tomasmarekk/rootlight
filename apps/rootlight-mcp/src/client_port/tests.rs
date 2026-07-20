@@ -6,8 +6,8 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use rootlight_client::{
-    AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ClientError, CodeDead,
-    CodeDeadEntryPointSummary, CodeLocate, CoverageStatus, CycleProjection, FlowTrace,
+    AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview, ClientError,
+    CodeDead, CodeDeadEntryPointSummary, CodeLocate, CoverageStatus, CycleProjection, FlowTrace,
     FlowTraceFrontier, FlowTraceProjection, GenerationSelector, LocateMode, OperationKind,
     OperationStage, OperationState, QueryContext, QueryUsage, RecoveryClass,
     RepositoryCoverageEntry, RepositoryIndex, RepositoryList, RepositoryListEntry,
@@ -116,6 +116,15 @@ enum Call {
         include_tests: Option<bool>,
         min_confidence: Option<u16>,
         max_candidates: Option<u16>,
+        timeout: RequestTimeout,
+    },
+    ArchitectureOverview {
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        views: Vec<String>,
+        max_components: Option<u16>,
+        include_edges: Option<bool>,
+        min_confidence: Option<u16>,
         timeout: RequestTimeout,
     },
 }
@@ -491,6 +500,36 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 },
                 blind_spots: Vec::new(),
                 false_positive_controls: Vec::new(),
+            })
+        })
+    }
+
+    fn architecture_overview(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        views: Vec<String>,
+        max_components: Option<u16>,
+        include_edges: Option<bool>,
+        min_confidence: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<ArchitectureOverview> {
+        self.record(Call::ArchitectureOverview {
+            repository,
+            generation,
+            views,
+            max_components,
+            include_edges,
+            min_confidence,
+            timeout,
+        });
+        Box::pin(async move {
+            Ok(ArchitectureOverview {
+                context: query_context(repository, generation, true),
+                components: Vec::new(),
+                connections: Vec::new(),
+                hotspots: Vec::new(),
+                views: Vec::new(),
             })
         })
     }

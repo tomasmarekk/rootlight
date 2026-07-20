@@ -13,8 +13,13 @@ use std::{
 
 use rootlight_client::{
     AnalysisTier as ClientTier, ArchitectureCycles as ClientArchitectureCycles,
-    CodeDead as ClientCodeDead, CodeDeadBlindSpot as ClientBlindSpot,
-    CodeDeadCandidate as ClientDeadCandidate, CodeDeadEntryPointSummary as ClientEntryPointSummary,
+    ArchitectureOverview as ClientArchitectureOverview,
+    ArchitectureOverviewComponent as ClientArchitectureComponent,
+    ArchitectureOverviewConnection as ClientArchitectureConnection,
+    ArchitectureOverviewDerivedView as ClientDerivedView,
+    ArchitectureOverviewHotspot as ClientArchitectureHotspot, CodeDead as ClientCodeDead,
+    CodeDeadBlindSpot as ClientBlindSpot, CodeDeadCandidate as ClientDeadCandidate,
+    CodeDeadEntryPointSummary as ClientEntryPointSummary,
     CodeDeadSuppressionRule as ClientSuppressionRule, CoverageStatus as ClientCoverage,
     Cycle as ClientCycle, CycleBreakCandidate as ClientCycleBreak,
     CycleComponent as ClientCycleComponent, CycleProjection as ClientCycleProjection,
@@ -34,7 +39,8 @@ use rootlight_mcp_contract::{
     SymbolExplainOutput,
     context::{ContextPackOutput, QueryBatchOutput},
     intent::{
-        ArchitectureCyclesOutput, CodeDeadOutput, FlowTraceOutput, SymbolRelationshipsOutput,
+        ArchitectureCyclesOutput, ArchitectureOverviewOutput, ArchitectureView, CodeDeadOutput,
+        FlowTraceOutput, RelationKind, SymbolRelationshipsOutput,
     },
     repository::{RepoListOutput, RepoStatusOutput, RepositoryState},
     vertical::{
@@ -71,6 +77,7 @@ enum FakeOutcome {
     FlowTrace(Result<FlowTracePortResponse, ClientPortError>),
     ArchitectureCycles(Result<ArchitectureCyclesPortResponse, ClientPortError>),
     CodeDead(Result<CodeDeadPortResponse, ClientPortError>),
+    ArchitectureOverview(Result<ArchitectureOverviewPortResponse, ClientPortError>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +93,7 @@ enum ObservedCall {
     FlowTrace(FlowTracePortRequest),
     ArchitectureCycles(ArchitectureCyclesPortRequest),
     CodeDead(CodeDeadPortRequest),
+    ArchitectureOverview(ArchitectureOverviewPortRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -266,6 +274,19 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::CodeDead(request));
         let outcome = match &self.outcome {
             FakeOutcome::CodeDead(outcome) => outcome.clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { outcome })
+    }
+
+    fn architecture_overview(
+        &self,
+        request: ArchitectureOverviewPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<ArchitectureOverviewPortResponse> {
+        self.record(ObservedCall::ArchitectureOverview(request));
+        let outcome = match &self.outcome {
+            FakeOutcome::ArchitectureOverview(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1595,6 +1616,119 @@ async fn code_dead_rejects_unsupported_scope() {
     )
     .await
     .expect_err("unsupported scope is rejected before the port");
+    let public = error
+        .public_error()
+        .expect("unsupported option is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn architecture_overview_maps_components_connections_and_hotspots() {
+    let response = ArchitectureOverviewPortResponse::new(
+        ClientArchitectureOverview {
+            context: context(1, 0),
+            components: vec![ClientArchitectureComponent {
+                id: "file-a".to_owned(),
+                kind: "file".to_owned(),
+                name: "src/a.rs".to_owned(),
+                symbol_count: 2,
+                responsibility_evidence: vec!["contains_symbols".to_owned()],
+                confidence: 800,
+            }],
+            connections: vec![ClientArchitectureConnection {
+                from: "file-a".to_owned(),
+                to: "file-b".to_owned(),
+                kind: "calls".to_owned(),
+                weight: 2,
+                confidence: 900,
+            }],
+            hotspots: vec![ClientArchitectureHotspot {
+                component_id: "file-b".to_owned(),
+                fan_in: 1,
+                fan_out: 0,
+                change_frequency: None,
+                complexity: None,
+                score: 1_000,
+            }],
+            views: vec![ClientDerivedView {
+                view: "hotspots".to_owned(),
+                algorithm_version: "fan_in_out_v1".to_owned(),
+            }],
+        },
+        metadata("architecture-overview-1"),
+    );
+    let harness = Harness::new(FakeOutcome::ArchitectureOverview(Ok(response)));
+    let output: ArchitectureOverviewOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::ArchitectureOverview,
+            json!({
+                "repository": {"repository_id": repository()},
+                "views": ["hotspots"]
+            }),
+        )
+        .await
+        .expect("architecture overview maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected architecture overview success");
+    };
+    assert_eq!(output.data.components.len(), 1);
+    let component = &output.data.components[0];
+    assert_eq!(component.id, "file-a");
+    assert_eq!(component.kind, "file");
+    assert_eq!(component.name, "src/a.rs");
+    assert_eq!(component.symbol_count, 2);
+    assert_eq!(component.confidence, 800);
+    assert_eq!(
+        component.trust,
+        TrustClassification::UntrustedRepositoryData
+    );
+    assert_eq!(output.data.connections.len(), 1);
+    let connection = &output.data.connections[0];
+    assert_eq!(connection.from, "file-a");
+    assert_eq!(connection.to, "file-b");
+    assert_eq!(connection.kind, RelationKind::Calls);
+    assert_eq!(connection.weight, 2);
+    assert_eq!(connection.confidence, 900);
+    assert_eq!(output.data.hotspots.len(), 1);
+    let hotspot = &output.data.hotspots[0];
+    assert_eq!(hotspot.component_id, "file-b");
+    assert_eq!(hotspot.fan_in, 1);
+    assert_eq!(hotspot.fan_out, 0);
+    assert_eq!(hotspot.change_frequency, None);
+    assert_eq!(hotspot.complexity, None);
+    assert_eq!(hotspot.score, 1_000);
+    assert_eq!(output.data.views.len(), 1);
+    assert_eq!(output.data.views[0].view, ArchitectureView::Hotspots);
+    assert_eq!(output.data.views[0].algorithm_version, "fan_in_out_v1");
+    let ObservedCall::ArchitectureOverview(request) = harness.only_call() else {
+        panic!("expected architecture overview call");
+    };
+    assert_eq!(request.repository(), repository());
+    assert_eq!(request.views(), &["hotspots".to_owned()]);
+    assert_eq!(request.max_components(), None);
+    assert_eq!(request.include_edges(), None);
+    assert_eq!(request.min_confidence(), None);
+}
+
+#[tokio::test]
+async fn architecture_overview_rejects_unsupported_view() {
+    let harness = Harness::new(FakeOutcome::ArchitectureOverview(Err(
+        ClientPortError::Executor,
+    )));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::ArchitectureOverview,
+        json!({
+            "repository": {"repository_id": repository()},
+            "views": ["services"]
+        }),
+    )
+    .await
+    .expect_err("unsupported view is rejected before the port");
     let public = error
         .public_error()
         .expect("unsupported option is a checked public error");
