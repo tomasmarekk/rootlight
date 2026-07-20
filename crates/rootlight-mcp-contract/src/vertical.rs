@@ -1635,6 +1635,7 @@ mod tests {
         RepoIndexInput, RepoIndexOutput, SourceReadInput, SourceReadOutput, SymbolExplainInput,
         SymbolExplainOutput, VerticalTool,
     };
+    use crate::repository::{RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutput};
 
     #[test]
     fn embedded_vertical_schemas_are_unique_strict_draft_2020_12_objects() {
@@ -1748,6 +1749,14 @@ mod tests {
                 "repo.index" => {
                     assert_round_trip::<RepoIndexInput>(VerticalTool::RepoIndex, &input, true);
                     assert_round_trip::<RepoIndexOutput>(VerticalTool::RepoIndex, &output, false);
+                }
+                "repo.status" => {
+                    assert_round_trip::<RepoStatusInput>(VerticalTool::RepoStatus, &input, true);
+                    assert_round_trip::<RepoStatusOutput>(VerticalTool::RepoStatus, &output, false);
+                }
+                "repo.list" => {
+                    assert_round_trip::<RepoListInput>(VerticalTool::RepoList, &input, true);
+                    assert_round_trip::<RepoListOutput>(VerticalTool::RepoList, &output, false);
                 }
                 "operation.status" => {
                     assert_round_trip::<OperationStatusInput>(
