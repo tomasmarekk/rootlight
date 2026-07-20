@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod change;
 pub mod context;
 pub mod intent;
+pub mod repository;
 pub mod vertical;
 
 use rootlight_ids::{GenerationId, RepositoryId};
