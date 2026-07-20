@@ -42,6 +42,7 @@ message RequestEnvelope {
     RepositoryStatusRequest repository_status = 36;
     SymbolRelationshipsRequest symbol_relationships = 37;
     FlowTraceRequest flow_trace = 38;
+    ArchitectureCyclesRequest architecture_cycles = 39;
   }
 }
 
@@ -65,6 +66,7 @@ message ResponseEnvelope {
     RepositoryStatusResponse repository_status = 36;
     SymbolRelationshipsResponse symbol_relationships = 37;
     FlowTraceResponse flow_trace = 38;
+    ArchitectureCyclesResponse architecture_cycles = 39;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -630,4 +632,54 @@ message FlowTraceResponse {
   repeated FirstSliceTracePath paths = 3;
   FirstSliceTraceFrontier frontier = 4;
   FirstSliceTraceProjection projection = 5;
+}
+
+// Requests bounded architecture cycle detection over a relation projection.
+message ArchitectureCyclesRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  repeated string relations = 4;
+  optional uint32 min_size = 5;
+  optional uint32 max_cycles = 6;
+  optional bool include_self_cycles = 7;
+}
+
+// One strongly connected component containing cycles.
+message FirstSliceCycleComponent {
+  uint32 size = 1;
+  repeated rootlight.common.v1.SymbolId members = 2;
+  uint32 internal_edges = 3;
+}
+
+// One bounded representative minimal cycle with evidence.
+message FirstSliceCycle {
+  repeated rootlight.common.v1.SymbolId nodes = 1;
+  repeated FirstSliceSourceRef edge_evidence = 2;
+  uint32 confidence = 3;
+}
+
+// One candidate edge for breaking a reported cycle.
+message FirstSliceCycleBreak {
+  rootlight.common.v1.SymbolId from = 1;
+  rootlight.common.v1.SymbolId to = 2;
+  string kind = 3;
+  uint32 break_cost = 4;
+  repeated FirstSliceSourceRef source_refs = 5;
+}
+
+// Relation projection actually used by an architecture cycles query.
+message FirstSliceCycleProjection {
+  repeated string relations = 1;
+  uint32 min_confidence = 2;
+}
+
+// Returns bounded architecture cycles and generation correlation.
+message ArchitectureCyclesResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  repeated FirstSliceCycleComponent components = 3;
+  repeated FirstSliceCycle cycles = 4;
+  repeated FirstSliceCycleBreak break_candidates = 5;
+  FirstSliceCycleProjection projection = 6;
 }

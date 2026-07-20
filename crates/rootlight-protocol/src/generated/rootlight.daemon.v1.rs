@@ -49,7 +49,7 @@ pub struct RequestEnvelope {
     pub timeout_ms: ::core::option::Option<u32>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -107,6 +107,9 @@ pub mod request_envelope {
         #[prost(message, tag = "38")]
         #[allow(missing_docs)]
         FlowTrace(super::FlowTraceRequest),
+        #[prost(message, tag = "39")]
+        #[allow(missing_docs)]
+        ArchitectureCycles(super::ArchitectureCyclesRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -117,7 +120,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -175,6 +178,9 @@ pub mod response_envelope {
         #[prost(message, tag = "38")]
         #[allow(missing_docs)]
         FlowTrace(super::FlowTraceResponse),
+        #[prost(message, tag = "39")]
+        #[allow(missing_docs)]
+        ArchitectureCycles(super::ArchitectureCyclesResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -1182,6 +1188,112 @@ pub struct FlowTraceResponse {
     #[prost(message, optional, tag = "5")]
     #[allow(missing_docs)]
     pub projection: ::core::option::Option<FirstSliceTraceProjection>,
+}
+/// Requests bounded architecture cycle detection over a relation projection.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ArchitectureCyclesRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(string, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub relations: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub min_size: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub max_cycles: ::core::option::Option<u32>,
+    #[prost(bool, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub include_self_cycles: ::core::option::Option<bool>,
+}
+/// One strongly connected component containing cycles.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceCycleComponent {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub size: u32,
+    #[prost(message, repeated, tag = "2")]
+    #[allow(missing_docs)]
+    pub members: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub internal_edges: u32,
+}
+/// One bounded representative minimal cycle with evidence.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceCycle {
+    #[prost(message, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub nodes: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+    #[prost(message, repeated, tag = "2")]
+    #[allow(missing_docs)]
+    pub edge_evidence: ::prost::alloc::vec::Vec<FirstSliceSourceRef>,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub confidence: u32,
+}
+/// One candidate edge for breaking a reported cycle.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceCycleBreak {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub from: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub to: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "4")]
+    #[allow(missing_docs)]
+    pub break_cost: u32,
+    #[prost(message, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub source_refs: ::prost::alloc::vec::Vec<FirstSliceSourceRef>,
+}
+/// Relation projection actually used by an architecture cycles query.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceCycleProjection {
+    #[prost(string, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub relations: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub min_confidence: u32,
+}
+/// Returns bounded architecture cycles and generation correlation.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ArchitectureCyclesResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub components: ::prost::alloc::vec::Vec<FirstSliceCycleComponent>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub cycles: ::prost::alloc::vec::Vec<FirstSliceCycle>,
+    #[prost(message, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub break_candidates: ::prost::alloc::vec::Vec<FirstSliceCycleBreak>,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub projection: ::core::option::Option<FirstSliceCycleProjection>,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]
