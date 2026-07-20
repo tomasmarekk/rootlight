@@ -23,6 +23,7 @@ use rootlight_mcp_contract::{
     CodeLocateInput, CodeLocateOutput, ErrorResponse, OperationStatusInput, OperationStatusOutput,
     RepoIndexInput, RepoIndexOutput, ResponseMetadata, SourceReadInput, SourceReadOutput,
     SymbolExplainInput, SymbolExplainOutput,
+    repository::{RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutput},
 };
 use rootlight_protocol::CURRENT_PROTOCOL_MINOR;
 use rootlight_protocol::generated::common::v1::ContractVersion as ProtocolContractVersion;
@@ -73,7 +74,7 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 4] = [
     ("1.3", "protobuf/1.3/rootlight.desc"),
     ("1.4", "protobuf/1.4/rootlight.desc"),
 ];
-const SCHEMA_PROVENANCE_INPUTS: [&str; 15] = [
+const SCHEMA_PROVENANCE_INPUTS: [&str; 16] = [
     "Cargo.lock",
     "crates/rootlight-config/src/lib.rs",
     "crates/rootlight-error/src/lib.rs",
@@ -83,6 +84,7 @@ const SCHEMA_PROVENANCE_INPUTS: [&str; 15] = [
     "crates/rootlight-ir/src/normalized.rs",
     "crates/rootlight-ir/src/validation.rs",
     "crates/rootlight-mcp-contract/src/lib.rs",
+    "crates/rootlight-mcp-contract/src/repository.rs",
     "crates/rootlight-mcp-contract/src/vertical.rs",
     "tests/fixtures/mcp/1.0/tool-contracts.json",
     "tests/fixtures/mcp/1.0/tool-transcript.jsonl",
@@ -805,6 +807,10 @@ fn generate_json_schemas(staged_root: &Path) -> Result<(), SchemaError> {
     write_mcp_tool_schema::<SymbolExplainOutput>(&schema_root, "symbol.explain", "output")?;
     write_mcp_tool_schema::<SourceReadInput>(&schema_root, "source.read", "input")?;
     write_mcp_tool_schema::<SourceReadOutput>(&schema_root, "source.read", "output")?;
+    write_mcp_tool_schema::<RepoStatusInput>(&schema_root, "repo.status", "input")?;
+    write_mcp_tool_schema::<RepoStatusOutput>(&schema_root, "repo.status", "output")?;
+    write_mcp_tool_schema::<RepoListInput>(&schema_root, "repo.list", "input")?;
+    write_mcp_tool_schema::<RepoListOutput>(&schema_root, "repo.list", "output")?;
     Ok(())
 }
 
@@ -1831,6 +1837,10 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-status-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-status-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-list-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-repo-list-output-1.0.schema.json"),
     ]);
     paths.sort();
     paths

@@ -1,0 +1,109 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/repo.list/input/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RepoListInput",
+  "description": "Strict input for `repo.list`.",
+  "type": "object",
+  "properties": {
+    "cursor": {
+      "description": "Opaque continuation cursor.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContinuationCursor"
+        }
+      ]
+    },
+    "max_results": {
+      "description": "Maximum results to return.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 200,
+      "minimum": 1
+    },
+    "query": {
+      "description": "Case-folded display-name or root filter.",
+      "type": "string",
+      "maxLength": 256
+    },
+    "response_profile": {
+      "description": "Requested evidence detail.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResponseProfile"
+        }
+      ]
+    },
+    "states": {
+      "description": "Filter by repository state.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RepositoryState"
+      },
+      "maxItems": 8
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ContinuationCursor": {
+      "description": "A bounded opaque continuation cursor.",
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1
+    },
+    "RepositoryState": {
+      "description": "Overall repository health state.",
+      "oneOf": [
+        {
+          "description": "Repository is indexed and queryable.",
+          "type": "string",
+          "const": "ready"
+        },
+        {
+          "description": "An indexing operation is in progress.",
+          "type": "string",
+          "const": "indexing"
+        },
+        {
+          "description": "Repository is queryable but some capabilities are reduced.",
+          "type": "string",
+          "const": "degraded"
+        },
+        {
+          "description": "Index integrity checks failed.",
+          "type": "string",
+          "const": "corrupt"
+        },
+        {
+          "description": "A schema migration is required before use.",
+          "type": "string",
+          "const": "migration_required"
+        },
+        {
+          "description": "A full rebuild is required.",
+          "type": "string",
+          "const": "rebuild_required"
+        }
+      ]
+    },
+    "ResponseProfile": {
+      "description": "Requested response representation.",
+      "oneOf": [
+        {
+          "description": "Smallest complete correctness-bearing response.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "More explanatory response within the same hard budgets.",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "Maximum bounded provenance and evidence.",
+          "type": "string",
+          "const": "evidence"
+        }
+      ]
+    }
+  }
+}
