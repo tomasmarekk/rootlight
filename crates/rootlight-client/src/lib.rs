@@ -1210,6 +1210,71 @@ pub struct ChangeImpact {
     pub risk_summary: ChangeImpactRiskSummary,
 }
 
+/// One ordered step in a change plan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PlanChangeStep {
+    /// One-based step ordinal.
+    pub step: u8,
+    /// Source-free action description.
+    pub action: String,
+    /// Target symbol identities for this step.
+    pub targets: Vec<SymbolId>,
+    /// Step ordinals this step depends on.
+    pub depends_on: Vec<u8>,
+    /// Source-free risk codes for this step.
+    pub risks: Vec<String>,
+    /// Source-free verification hint, when one applies.
+    pub verification: Option<String>,
+}
+
+/// Compact impact and ownership summary for a change plan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PlanChangeImpactSummary {
+    /// Total affected symbol count.
+    pub affected_symbols: u32,
+    /// Total affected file count.
+    pub affected_files: u32,
+    /// Aggregate risk level label, such as `low` or `high`.
+    pub risk_level: String,
+    /// Whether public surface is affected.
+    pub touches_public_surface: bool,
+}
+
+/// One open decision that cannot be safely inferred.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PlanChangeDecision {
+    /// Source-free question identifier.
+    pub question: String,
+    /// Recommended default choice.
+    pub recommended_default: String,
+}
+
+/// Ready follow-up context-pack arguments for a change plan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PlanChangeContextPack {
+    /// Symbol identities to include in the context pack.
+    pub symbols: Vec<SymbolId>,
+    /// File identities to include in the context pack.
+    pub files: Vec<FileId>,
+}
+
+/// Bounded ordered change plan for one generation and target set.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PlanChange {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Ordered plan steps.
+    pub plan: Vec<PlanChangeStep>,
+    /// Compact impact and ownership summary.
+    pub affected_scope: PlanChangeImpactSummary,
+    /// Ranked verification test plan.
+    pub test_plan: Vec<ChangeImpactTest>,
+    /// Open decisions requiring user input.
+    pub open_decisions: Vec<PlanChangeDecision>,
+    /// Ready follow-up context-pack arguments.
+    pub context_pack_request: PlanChangeContextPack,
+}
+
 /// Validated total deadline budget for one asynchronous daemon request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestTimeout(Duration);
@@ -2687,6 +2752,98 @@ impl Client {
         }
     }
 
+    /// Builds a bounded ordered change plan for an explicit target set over one
+    /// generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for an invalid endpoint, an empty or oversized
+    /// target set, an invalid objective or objective text, an out-of-range step
+    /// cap, unavailable protocol support, transport failure, or a malformed or
+    /// uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded plan change dimension"
+    )]
+    pub fn plan_change(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        objective: &str,
+        objective_text: &str,
+        target_symbols: &[SymbolId],
+        target_files: &[FileId],
+        max_steps: Option<u8>,
+    ) -> Result<PlanChange, ClientError> {
+        match self.request(build_plan_change_request(
+            repository,
+            generation,
+            objective,
+            objective_text,
+            target_symbols,
+            target_files,
+            max_steps,
+        )?)? {
+            daemon::response_envelope::Response::PlanChange(response) => {
+                parse_plan_change(response, repository, generation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously builds a bounded ordered change plan for an explicit
+    /// target set over one generation.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached analysis.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for an invalid endpoint, an empty or oversized
+    /// target set, an invalid objective or objective text, an out-of-range step
+    /// cap, unavailable protocol support, transport failure, timeout, or a
+    /// malformed or uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded plan change dimension"
+    )]
+    pub async fn plan_change_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        objective: &str,
+        objective_text: &str,
+        target_symbols: &[SymbolId],
+        target_files: &[FileId],
+        max_steps: Option<u8>,
+        timeout: RequestTimeout,
+    ) -> Result<PlanChange, ClientError> {
+        match self
+            .request_async(
+                build_plan_change_request(
+                    repository,
+                    generation,
+                    objective,
+                    objective_text,
+                    target_symbols,
+                    target_files,
+                    max_steps,
+                )?,
+                timeout,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::PlanChange(response) => {
+                parse_plan_change(response, repository, generation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     fn request(
         &self,
         request: daemon::request_envelope::Request,
@@ -3288,7 +3445,8 @@ fn ensure_request_supported(
         | daemon::request_envelope::Request::CodeDead(_)
         | daemon::request_envelope::Request::ArchitectureOverview(_)
         | daemon::request_envelope::Request::TestsSelect(_)
-        | daemon::request_envelope::Request::ChangeImpact(_) => 5,
+        | daemon::request_envelope::Request::ChangeImpact(_)
+        | daemon::request_envelope::Request::PlanChange(_) => 5,
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
         daemon::request_envelope::Request::OperationLeaseRenew(_) => {
@@ -5292,6 +5450,191 @@ fn parse_change_impact(
             fanout: wire_risk.fanout,
             dynamic_blind_spots: wire_risk.dynamic_blind_spots,
         },
+    })
+}
+
+fn build_plan_change_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    objective: &str,
+    objective_text: &str,
+    target_symbols: &[SymbolId],
+    target_files: &[FileId],
+    max_steps: Option<u8>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if objective.is_empty() || objective.len() > 32 {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if objective_text.is_empty() || objective_text.len() > 4_096 {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if target_symbols.is_empty() && target_files.is_empty() {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if target_symbols.len() > 64 || target_files.len() > 64 {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if max_steps.is_some_and(|steps| !(1..=100).contains(&steps)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::PlanChange(
+        daemon::PlanChangeRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            objective: objective.to_owned(),
+            objective_text: objective_text.to_owned(),
+            target_symbols: target_symbols.iter().copied().map(symbol_to_wire).collect(),
+            target_files: target_files.iter().copied().map(file_to_wire).collect(),
+            max_steps: max_steps.map(u32::from),
+        },
+    ))
+}
+
+fn parse_plan_change(
+    response: daemon::PlanChangeResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+) -> Result<PlanChange, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(response.context, repository, selector)?;
+    let wire_scope = response
+        .affected_scope
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    let wire_pack = response
+        .context_pack_request
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    if response.plan.is_empty()
+        || response.plan.len() > 100
+        || response.test_plan.len() > 500
+        || response.open_decisions.len() > 16
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut plan = Vec::new();
+    plan.try_reserve_exact(response.plan.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for step in response.plan {
+        if !(1..=100).contains(&step.step)
+            || step.action.is_empty()
+            || step.action.len() > 1_024
+            || step.targets.len() > 32
+            || step.depends_on.len() > 32
+            || step.depends_on.iter().any(|dep| !(1..=100).contains(dep))
+            || step.risks.len() > 8
+            || step
+                .risks
+                .iter()
+                .any(|risk| risk.is_empty() || risk.len() > 128)
+            || step
+                .verification
+                .as_ref()
+                .is_some_and(|hint| hint.is_empty() || hint.len() > 1_024)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let mut targets = Vec::new();
+        targets
+            .try_reserve_exact(step.targets.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for symbol in step.targets {
+            targets.push(parse_symbol(Some(symbol))?);
+        }
+        let mut depends_on = Vec::new();
+        depends_on
+            .try_reserve_exact(step.depends_on.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for dep in step.depends_on {
+            depends_on
+                .push(u8::try_from(dep).map_err(|_| ClientError::InvalidResponseCorrelation)?);
+        }
+        plan.push(PlanChangeStep {
+            step: u8::try_from(step.step).map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            action: step.action,
+            targets,
+            depends_on,
+            risks: step.risks,
+            verification: step.verification,
+        });
+    }
+    if wire_scope.affected_symbols > 100_000
+        || wire_scope.affected_files > 100_000
+        || wire_scope.risk_level.is_empty()
+        || wire_scope.risk_level.len() > 32
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut test_plan = Vec::new();
+    test_plan
+        .try_reserve_exact(response.test_plan.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for test in response.test_plan {
+        if test.test_id.is_empty()
+            || test.test_id.len() > 512
+            || test.relevance > 1_000
+            || test.why.is_empty()
+            || test.why.len() > 8
+            || test
+                .why
+                .iter()
+                .any(|reason| reason.is_empty() || reason.len() > 128)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        test_plan.push(ChangeImpactTest {
+            test_id: test.test_id,
+            relevance: u16::try_from(test.relevance)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            why: test.why,
+            estimated_cost_ms: test.estimated_cost_ms,
+        });
+    }
+    let mut open_decisions = Vec::new();
+    open_decisions
+        .try_reserve_exact(response.open_decisions.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for decision in response.open_decisions {
+        if decision.question.is_empty()
+            || decision.question.len() > 512
+            || decision.recommended_default.is_empty()
+            || decision.recommended_default.len() > 512
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        open_decisions.push(PlanChangeDecision {
+            question: decision.question,
+            recommended_default: decision.recommended_default,
+        });
+    }
+    if wire_pack.symbols.len() > 64 || wire_pack.files.len() > 64 {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut symbols = Vec::new();
+    symbols
+        .try_reserve_exact(wire_pack.symbols.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for symbol in wire_pack.symbols {
+        symbols.push(parse_symbol(Some(symbol))?);
+    }
+    let mut files = Vec::new();
+    files
+        .try_reserve_exact(wire_pack.files.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for file in wire_pack.files {
+        files.push(parse_file(Some(file))?);
+    }
+    Ok(PlanChange {
+        context,
+        plan,
+        affected_scope: PlanChangeImpactSummary {
+            affected_symbols: wire_scope.affected_symbols,
+            affected_files: wire_scope.affected_files,
+            risk_level: wire_scope.risk_level,
+            touches_public_surface: wire_scope.touches_public_surface,
+        },
+        test_plan,
+        open_decisions,
+        context_pack_request: PlanChangeContextPack { symbols, files },
     })
 }
 
