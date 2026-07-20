@@ -5,6 +5,8 @@
 //! profile. Unexplained increases in definition cost block review.
 
 use crate::catalog::{ExposureProfile, McpTool};
+use crate::vertical::VerticalTool;
+use serde_json::{Map, Value};
 
 /// Token estimate uses the conservative 4-bytes-per-token heuristic.
 const BYTES_PER_TOKEN: usize = 4;
@@ -63,26 +65,91 @@ impl InvocationAccounting {
 
 /// Measures the complete `tools/list` definition cost for a profile.
 ///
-/// The measurement serializes each tool definition that would appear under
-/// the given profile and sums the bytes. This is the cost an agent pays for
-/// tool discovery before any invocation.
+/// The measurement serializes the full `{"tools": [...]}` result object an
+/// agent receives under the profile, including every tool's input and output
+/// schemas and annotations, then counts the serialized UTF-8 bytes. This is
+/// the discovery cost paid before any invocation, so it reflects the real
+/// wire payload rather than a metadata-only estimate.
+///
+/// # Panics
+///
+/// Panics only when a baked-in generated schema fails to parse or the
+/// assembled result fails to serialize, both of which are checked invariants
+/// of the schema catalog.
 #[must_use]
 pub fn measure_tool_list(profile: ExposureProfile) -> ToolListAccounting {
     let tools = profile.tools();
-    let mut definition_bytes = 0usize;
-    for tool in tools {
-        definition_bytes = definition_bytes
-            .saturating_add(tool.name().len())
-            .saturating_add(tool.title().len())
-            .saturating_add(tool.description().len())
-            .saturating_add(128);
-    }
+    let definitions: Vec<Value> = tools.iter().copied().map(tool_definition_value).collect();
+    let mut result = Map::new();
+    result.insert("tools".to_owned(), Value::Array(definitions));
+    // A value assembled from valid JSON parts always serializes.
+    let serialized =
+        serde_json::to_vec(&Value::Object(result)).expect("tool list result serializes");
+    let definition_bytes = serialized.len();
     ToolListAccounting {
         profile,
         tool_count: tools.len(),
         definition_bytes,
         estimated_tokens: estimate_tokens(definition_bytes),
     }
+}
+
+/// Bridges a catalog tool to its schema-bearing vertical counterpart.
+///
+/// Both enums enumerate the same nineteen tools with identical stable names,
+/// so the name lookup is a fixed invariant for any tool drawn from the
+/// catalog.
+fn vertical_tool_for(tool: McpTool) -> VerticalTool {
+    VerticalTool::ALL
+        .iter()
+        .copied()
+        .find(|candidate| candidate.name() == tool.name())
+        .expect("every catalog tool has a vertical counterpart")
+}
+
+/// Builds one tool definition mirroring the router's serialized wire shape.
+///
+/// Field names and nesting match the router's `ToolDefinition` so the measured
+/// bytes equal the real `tools/list` payload an agent receives. The baked-in
+/// generated schemas are parsed into values so their full serialized size is
+/// counted, not just the surrounding metadata.
+fn tool_definition_value(tool: McpTool) -> Value {
+    let vertical = vertical_tool_for(tool);
+    // The generated schema artifacts are compiled into the binary and checked
+    // by the schema tests, so parsing them here cannot fail.
+    let input_schema: Value = serde_json::from_str(vertical.input_schema_json())
+        .expect("baked-in input schema is valid json");
+    let output_schema: Value = serde_json::from_str(vertical.output_schema_json())
+        .expect("baked-in output schema is valid json");
+
+    let mut annotations = Map::new();
+    annotations.insert("readOnlyHint".to_owned(), Value::Bool(tool.read_only()));
+    annotations.insert(
+        "destructiveHint".to_owned(),
+        Value::Bool(tool.destructive()),
+    );
+    annotations.insert("idempotentHint".to_owned(), Value::Bool(tool.idempotent()));
+    annotations.insert("openWorldHint".to_owned(), Value::Bool(false));
+
+    let mut execution = Map::new();
+    execution.insert(
+        "taskSupport".to_owned(),
+        Value::String("forbidden".to_owned()),
+    );
+
+    let mut definition = Map::new();
+    definition.insert("name".to_owned(), Value::String(tool.name().to_owned()));
+    definition.insert("title".to_owned(), Value::String(tool.title().to_owned()));
+    definition.insert(
+        "description".to_owned(),
+        Value::String(tool.description().to_owned()),
+    );
+    definition.insert("inputSchema".to_owned(), input_schema);
+    definition.insert("outputSchema".to_owned(), output_schema);
+    definition.insert("annotations".to_owned(), Value::Object(annotations));
+    definition.insert("execution".to_owned(), Value::Object(execution));
+
+    Value::Object(definition)
 }
 
 /// Asserts that a tool's default budget is consistent with its profile.
@@ -102,6 +169,8 @@ mod tests {
         measure_tool_list,
     };
     use crate::McpTool;
+    use crate::vertical::VerticalTool;
+    use serde_json::{Map, Value};
 
     #[test]
     fn token_estimate_is_deterministic_and_conservative() {
@@ -152,13 +221,78 @@ mod tests {
     #[test]
     fn developer_profile_definition_cost_is_bounded() {
         let developer = measure_tool_list(ExposureProfile::Developer);
-        assert!(
-            developer.definition_bytes < 64 * 1024,
-            "developer tools/list exceeds 64 KiB"
+
+        // Independently re-serialize the complete developer tools/list result
+        // and require the accounting to report its exact byte length.
+        let definitions: Vec<Value> = ExposureProfile::Developer
+            .tools()
+            .iter()
+            .copied()
+            .map(serialize_developer_definition)
+            .collect();
+        let mut result = Map::new();
+        result.insert("tools".to_owned(), Value::Array(definitions));
+        let serialized = serde_json::to_vec(&Value::Object(result)).expect("result serializes");
+
+        assert_eq!(
+            developer.definition_bytes,
+            serialized.len(),
+            "definition_bytes must equal the real serialized tools/list length"
         );
+        // Guards against regressing to the old name+title+description estimate,
+        // which ignored schemas and serialized only a few kilobytes.
         assert!(
-            developer.estimated_tokens < 16_000,
-            "developer tools/list exceeds 16k tokens"
+            developer.definition_bytes > 100_000,
+            "developer tools/list measurement looks shallow: {} bytes",
+            developer.definition_bytes
         );
+        assert_eq!(
+            developer.estimated_tokens,
+            estimate_tokens(developer.definition_bytes)
+        );
+    }
+
+    /// Independently rebuilds one developer tool definition from the catalog
+    /// metadata and generated schemas, mirroring the MCP wire shape, so the
+    /// accounting can be checked against a from-scratch serialization.
+    fn serialize_developer_definition(tool: McpTool) -> Value {
+        let vertical = VerticalTool::ALL
+            .iter()
+            .copied()
+            .find(|candidate| candidate.name() == tool.name())
+            .expect("developer tool has a vertical counterpart");
+        let input_schema: Value =
+            serde_json::from_str(vertical.input_schema_json()).expect("input schema is valid json");
+        let output_schema: Value = serde_json::from_str(vertical.output_schema_json())
+            .expect("output schema is valid json");
+
+        let mut annotations = Map::new();
+        annotations.insert("readOnlyHint".to_owned(), Value::Bool(tool.read_only()));
+        annotations.insert(
+            "destructiveHint".to_owned(),
+            Value::Bool(tool.destructive()),
+        );
+        annotations.insert("idempotentHint".to_owned(), Value::Bool(tool.idempotent()));
+        annotations.insert("openWorldHint".to_owned(), Value::Bool(false));
+
+        let mut execution = Map::new();
+        execution.insert(
+            "taskSupport".to_owned(),
+            Value::String("forbidden".to_owned()),
+        );
+
+        let mut definition = Map::new();
+        definition.insert("name".to_owned(), Value::String(tool.name().to_owned()));
+        definition.insert("title".to_owned(), Value::String(tool.title().to_owned()));
+        definition.insert(
+            "description".to_owned(),
+            Value::String(tool.description().to_owned()),
+        );
+        definition.insert("inputSchema".to_owned(), input_schema);
+        definition.insert("outputSchema".to_owned(), output_schema);
+        definition.insert("annotations".to_owned(), Value::Object(annotations));
+        definition.insert("execution".to_owned(), Value::Object(execution));
+
+        Value::Object(definition)
     }
 }
