@@ -13,16 +13,19 @@ use std::{
 
 use rootlight_client::{
     AnalysisTier as ClientTier, ArchitectureCycles as ClientArchitectureCycles,
-    CoverageStatus as ClientCoverage, Cycle as ClientCycle,
-    CycleBreakCandidate as ClientCycleBreak, CycleComponent as ClientCycleComponent,
-    CycleProjection as ClientCycleProjection, FlowTrace as ClientFlowTrace,
-    FlowTraceEdge as ClientTraceEdge, FlowTraceFrontier as ClientTraceFrontier,
-    FlowTracePath as ClientTracePath, FlowTraceProjection as ClientTraceProjection, LocateHit,
-    OperationKind, OperationStage, OperationState as ClientOperationState, QueryContext,
-    QueryUsage, RecoveryClass, RelationshipGroup as ClientRelationshipGroup,
-    RelationshipTarget as ClientRelationshipTarget, RepositoryCoverageEntry, RepositoryList,
-    RepositoryListEntry, RepositoryStatus, SourceChunk as ClientSourceChunk,
-    SymbolExplanation as ClientExplanation, SymbolRelationships as ClientRelationships,
+    CodeDead as ClientCodeDead, CodeDeadBlindSpot as ClientBlindSpot,
+    CodeDeadCandidate as ClientDeadCandidate, CodeDeadEntryPointSummary as ClientEntryPointSummary,
+    CodeDeadSuppressionRule as ClientSuppressionRule, CoverageStatus as ClientCoverage,
+    Cycle as ClientCycle, CycleBreakCandidate as ClientCycleBreak,
+    CycleComponent as ClientCycleComponent, CycleProjection as ClientCycleProjection,
+    FlowTrace as ClientFlowTrace, FlowTraceEdge as ClientTraceEdge,
+    FlowTraceFrontier as ClientTraceFrontier, FlowTracePath as ClientTracePath,
+    FlowTraceProjection as ClientTraceProjection, LocateHit, OperationKind, OperationStage,
+    OperationState as ClientOperationState, QueryContext, QueryUsage, RecoveryClass,
+    RelationshipGroup as ClientRelationshipGroup, RelationshipTarget as ClientRelationshipTarget,
+    RepositoryCoverageEntry, RepositoryList, RepositoryListEntry, RepositoryStatus,
+    SourceChunk as ClientSourceChunk, SymbolExplanation as ClientExplanation,
+    SymbolRelationships as ClientRelationships,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{CoverageStatus as IrCoverage, LineRange, SourceRef, SourceSpan};
@@ -30,7 +33,9 @@ use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
     SymbolExplainOutput,
     context::{ContextPackOutput, QueryBatchOutput},
-    intent::{ArchitectureCyclesOutput, FlowTraceOutput, SymbolRelationshipsOutput},
+    intent::{
+        ArchitectureCyclesOutput, CodeDeadOutput, FlowTraceOutput, SymbolRelationshipsOutput,
+    },
     repository::{RepoListOutput, RepoStatusOutput, RepositoryState},
     vertical::{
         AnalysisTier, CacheStatus, Freshness, IndexMode, IndexPlanScope, IndexPlanSummary,
@@ -65,6 +70,7 @@ enum FakeOutcome {
     SymbolRelationships(Result<SymbolRelationshipsPortResponse, ClientPortError>),
     FlowTrace(Result<FlowTracePortResponse, ClientPortError>),
     ArchitectureCycles(Result<ArchitectureCyclesPortResponse, ClientPortError>),
+    CodeDead(Result<CodeDeadPortResponse, ClientPortError>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +85,7 @@ enum ObservedCall {
     SymbolRelationships(SymbolRelationshipsPortRequest),
     FlowTrace(FlowTracePortRequest),
     ArchitectureCycles(ArchitectureCyclesPortRequest),
+    CodeDead(CodeDeadPortRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +253,19 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::ArchitectureCycles(request));
         let outcome = match &self.outcome {
             FakeOutcome::ArchitectureCycles(outcome) => outcome.clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { outcome })
+    }
+
+    fn code_dead(
+        &self,
+        request: CodeDeadPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<CodeDeadPortResponse> {
+        self.record(ObservedCall::CodeDead(request));
+        let outcome = match &self.outcome {
+            FakeOutcome::CodeDead(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1472,6 +1492,106 @@ async fn architecture_cycles_rejects_unsupported_ranking() {
     )
     .await
     .expect_err("unsupported ranking is rejected before the port");
+    let public = error
+        .public_error()
+        .expect("unsupported option is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
+    let response = CodeDeadPortResponse::new(
+        ClientCodeDead {
+            context: context(1, 0),
+            candidates: vec![ClientDeadCandidate {
+                symbol_id: missing_symbol(),
+                classification: "proven_dead".to_owned(),
+                confidence: 1_000,
+                why: vec![
+                    "no_incoming_references".to_owned(),
+                    "unreachable_from_entry_points".to_owned(),
+                ],
+                suppressions_checked: vec!["entry_point".to_owned()],
+                source_refs: vec![source_reference(0, 10, 1, 1)],
+            }],
+            entry_points: ClientEntryPointSummary {
+                policy: "standard".to_owned(),
+                entry_point_count: 2,
+                complete: false,
+            },
+            blind_spots: vec![ClientBlindSpot {
+                category: "dynamic_dispatch".to_owned(),
+                affected_count: 0,
+            }],
+            false_positive_controls: vec![ClientSuppressionRule {
+                rule: "exported".to_owned(),
+                suppressed_count: 2,
+            }],
+        },
+        metadata("code-dead-1"),
+    );
+    let harness = Harness::new(FakeOutcome::CodeDead(Ok(response)));
+    let output: CodeDeadOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::CodeDead,
+            json!({
+                "repository": {"repository_id": repository()}
+            }),
+        )
+        .await
+        .expect("code dead maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected code dead success");
+    };
+    assert_eq!(output.data.candidates.len(), 1);
+    let candidate = &output.data.candidates[0];
+    assert_eq!(candidate.symbol_id, missing_symbol());
+    assert_eq!(candidate.classification, DeadClassification::ProvenDead);
+    assert_eq!(candidate.confidence, 1_000);
+    assert_eq!(
+        candidate.why,
+        vec![
+            "no_incoming_references".to_owned(),
+            "unreachable_from_entry_points".to_owned()
+        ]
+    );
+    assert_eq!(candidate.suppressions_checked, vec!["entry_point".to_owned()]);
+    assert_eq!(candidate.source_refs.len(), 1);
+    assert_eq!(output.data.entry_points.policy, EntryPointPolicy::Standard);
+    assert_eq!(output.data.entry_points.entry_point_count, 2);
+    assert!(!output.data.entry_points.complete);
+    assert_eq!(output.data.blind_spots.len(), 1);
+    assert_eq!(output.data.blind_spots[0].category, "dynamic_dispatch");
+    assert_eq!(output.data.false_positive_controls.len(), 1);
+    assert_eq!(output.data.false_positive_controls[0].rule, "exported");
+    let ObservedCall::CodeDead(request) = harness.only_call() else {
+        panic!("expected code dead call");
+    };
+    assert_eq!(request.repository(), repository());
+    assert_eq!(request.entry_point_policy(), None);
+    assert_eq!(request.include_exported(), None);
+    assert_eq!(request.include_tests(), None);
+    assert_eq!(request.min_confidence(), None);
+    assert_eq!(request.max_candidates(), None);
+}
+
+#[tokio::test]
+async fn code_dead_rejects_unsupported_scope() {
+    let harness = Harness::new(FakeOutcome::CodeDead(Err(ClientPortError::Executor)));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::CodeDead,
+        json!({
+            "repository": {"repository_id": repository()},
+            "scope": {"paths": ["src"]}
+        }),
+    )
+    .await
+    .expect_err("unsupported scope is rejected before the port");
     let public = error
         .public_error()
         .expect("unsupported option is a checked public error");

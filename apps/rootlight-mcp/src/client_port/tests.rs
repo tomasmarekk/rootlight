@@ -6,12 +6,13 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use rootlight_client::{
-    AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ClientError, CodeLocate,
-    CoverageStatus, CycleProjection, FlowTrace, FlowTraceFrontier, FlowTraceProjection,
-    GenerationSelector, LocateMode, OperationKind, OperationStage, OperationState, QueryContext,
-    QueryUsage, RecoveryClass, RepositoryCoverageEntry, RepositoryIndex, RepositoryList,
-    RepositoryListEntry, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
-    RequestTimeout, SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
+    AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ClientError, CodeDead,
+    CodeDeadEntryPointSummary, CodeLocate, CoverageStatus, CycleProjection, FlowTrace,
+    FlowTraceFrontier, FlowTraceProjection, GenerationSelector, LocateMode, OperationKind,
+    OperationStage, OperationState, QueryContext, QueryUsage, RecoveryClass,
+    RepositoryCoverageEntry, RepositoryIndex, RepositoryList, RepositoryListEntry,
+    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, RequestTimeout,
+    SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -105,6 +106,16 @@ enum Call {
         min_size: Option<u8>,
         max_cycles: Option<u16>,
         include_self_cycles: Option<bool>,
+        timeout: RequestTimeout,
+    },
+    CodeDead {
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        entry_point_policy: Option<String>,
+        include_exported: Option<bool>,
+        include_tests: Option<bool>,
+        min_confidence: Option<u16>,
+        max_candidates: Option<u16>,
         timeout: RequestTimeout,
     },
 }
@@ -444,6 +455,46 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     relations,
                     min_confidence: 0,
                 },
+            })
+        })
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded code dead dimension"
+    )]
+    fn code_dead(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        entry_point_policy: Option<String>,
+        include_exported: Option<bool>,
+        include_tests: Option<bool>,
+        min_confidence: Option<u16>,
+        max_candidates: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<CodeDead> {
+        self.record(Call::CodeDead {
+            repository,
+            generation,
+            entry_point_policy,
+            include_exported,
+            include_tests,
+            min_confidence,
+            max_candidates,
+            timeout,
+        });
+        Box::pin(async move {
+            Ok(CodeDead {
+                context: query_context(repository, generation, true),
+                candidates: Vec::new(),
+                entry_points: CodeDeadEntryPointSummary {
+                    policy: "standard".to_owned(),
+                    entry_point_count: 0,
+                    complete: false,
+                },
+                blind_spots: Vec::new(),
+                false_positive_controls: Vec::new(),
             })
         })
     }

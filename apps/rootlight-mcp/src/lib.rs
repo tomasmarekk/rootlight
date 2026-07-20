@@ -30,13 +30,13 @@ use tokio::{
 pub use client_port::{NativeFirstSliceClientPort, UnavailableFirstSliceClientPort};
 pub use executor::{
     ArchitectureCyclesPortRequest, ArchitectureCyclesPortResponse, ClientPortError,
-    ClientPortFuture, CodeLocatePortRequest, CodeLocatePortResponse, FirstSliceClientPort,
-    FirstSliceToolExecutor, FlowTracePortRequest, FlowTracePortResponse,
-    OperationStatusPortRequest, ReadResponseMetadata, RepositoryIndexPortRequest,
-    RepositoryIndexPortResponse, RepositoryListPortRequest, RepositoryStatusPortRequest,
-    SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
-    SymbolExplainPortResponse, SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
-    ToolExecutorBuildError,
+    ClientPortFuture, CodeDeadPortRequest, CodeDeadPortResponse, CodeLocatePortRequest,
+    CodeLocatePortResponse, FirstSliceClientPort, FirstSliceToolExecutor, FlowTracePortRequest,
+    FlowTracePortResponse, OperationStatusPortRequest, ReadResponseMetadata,
+    RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
+    RepositoryStatusPortRequest, SourceReadPortRequest, SourceReadPortResponse,
+    SymbolExplainPortRequest, SymbolExplainPortResponse, SymbolRelationshipsPortRequest,
+    SymbolRelationshipsPortResponse, ToolExecutorBuildError,
 };
 pub use tools::{
     ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture, ToolExecutor, ToolRegistryError,

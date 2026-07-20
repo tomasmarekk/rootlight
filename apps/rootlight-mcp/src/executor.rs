@@ -19,10 +19,12 @@ use rootlight_client::{
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::intent::{
-    ArchitectureCyclesData, ArchitectureCyclesInput, CycleBreakCandidate, Direction, FlowTraceData,
-    FlowTraceInput, FrontierSummary, MinimalCycle, RelationKind, RelationProjection,
-    RelationshipGroup, RelationshipTarget, RelationshipTotals, StronglyConnectedComponent,
-    SymbolRelationshipsData, SymbolRelationshipsInput, TraceEdge, TracePath,
+    ArchitectureCyclesData, ArchitectureCyclesInput, BlindSpot, CodeDeadData, CodeDeadInput,
+    CycleBreakCandidate, DeadCandidate, DeadClassification, Direction, EntryPointPolicy,
+    EntryPointSummary, FlowTraceData, FlowTraceInput, FrontierSummary, MinimalCycle, RelationKind,
+    RelationProjection, RelationshipGroup, RelationshipTarget, RelationshipTotals, RuleSummary,
+    StronglyConnectedComponent, SymbolRelationshipsData, SymbolRelationshipsInput, TraceEdge,
+    TracePath,
 };
 use rootlight_mcp_contract::{
     DetailKey, ErrorCode, GenerationSelector, McpTool, NextAction, PublicError,
@@ -159,6 +161,13 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         request: ArchitectureCyclesPortRequest,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<ArchitectureCyclesPortResponse>;
+
+    /// Detects bounded dead-code candidates over one generation.
+    fn code_dead(
+        &self,
+        request: CodeDeadPortRequest,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<CodeDeadPortResponse>;
 }
 
 /// Source-free failure emitted by an injected daemon client port.
@@ -690,6 +699,77 @@ impl ArchitectureCyclesPortResponse {
     }
 }
 
+/// Normalized `code.dead` request supported by the current daemon protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeDeadPortRequest {
+    repository: RepositoryId,
+    generation: client::GenerationSelector,
+    entry_point_policy: Option<String>,
+    include_exported: Option<bool>,
+    include_tests: Option<bool>,
+    min_confidence: Option<u16>,
+    max_candidates: Option<u16>,
+}
+
+impl CodeDeadPortRequest {
+    /// Returns the selected repository.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the active or explicit immutable-generation selector.
+    #[must_use]
+    pub const fn generation(&self) -> client::GenerationSelector {
+        self.generation
+    }
+
+    /// Returns the optional entry-point policy label.
+    #[must_use]
+    pub fn entry_point_policy(&self) -> Option<&str> {
+        self.entry_point_policy.as_deref()
+    }
+
+    /// Returns the optional exported-inclusion flag.
+    #[must_use]
+    pub const fn include_exported(&self) -> Option<bool> {
+        self.include_exported
+    }
+
+    /// Returns the optional test-inclusion flag.
+    #[must_use]
+    pub const fn include_tests(&self) -> Option<bool> {
+        self.include_tests
+    }
+
+    /// Returns the optional confidence floor.
+    #[must_use]
+    pub const fn min_confidence(&self) -> Option<u16> {
+        self.min_confidence
+    }
+
+    /// Returns the optional candidate cap.
+    #[must_use]
+    pub const fn max_candidates(&self) -> Option<u16> {
+        self.max_candidates
+    }
+}
+
+/// Detected daemon data plus mandatory MCP read metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeDeadPortResponse {
+    result: client::CodeDead,
+    metadata: ReadResponseMetadata,
+}
+
+impl CodeDeadPortResponse {
+    /// Creates a complete `code.dead` response for MCP mapping.
+    #[must_use]
+    pub const fn new(result: client::CodeDead, metadata: ReadResponseMetadata) -> Self {
+        Self { result, metadata }
+    }
+}
+
 /// Normalized exact-reference `source.read` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceReadPortRequest {
@@ -873,7 +953,6 @@ where
                 VerticalTool::ChangeImpact
                 | VerticalTool::TestsSelect
                 | VerticalTool::ArchitectureOverview
-                | VerticalTool::CodeDead
                 | VerticalTool::HistoryCompare
                 | VerticalTool::PlanChange
                 | VerticalTool::QueryAdvanced => execute_intent_fallback(&unavailable).await,
@@ -885,6 +964,9 @@ where
                 }
                 VerticalTool::ArchitectureCycles => {
                     execute_architecture_cycles(port, arguments, cancellation, &unsupported).await
+                }
+                VerticalTool::CodeDead => {
+                    execute_code_dead(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::ContextPack => {
                     execute_context_pack(port, arguments, cancellation, &unsupported).await
@@ -2306,6 +2388,139 @@ fn map_architecture_cycles(
     // The requested cycle cap is an explicit bound honored by the daemon; this
     // slice does not surface separate budget-truncation through the wire.
     map_read_envelope(response.result.context, response.metadata, data, false)
+}
+
+async fn execute_code_dead<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: CodeDeadInput = decode_input(arguments)?;
+    let request = normalize_code_dead(input, unsupported)?;
+    let expected = request.clone();
+    let future = port.code_dead(request, cancellation.clone());
+    let response = await_port(future, cancellation).await?;
+    let output = map_code_dead(response, &expected)?;
+    serialize_success(output)
+}
+
+fn normalize_code_dead(
+    input: CodeDeadInput,
+    unsupported: &PublicError,
+) -> Result<CodeDeadPortRequest, ToolExecutionError> {
+    let repository = repository_id(input.repository, unsupported)?;
+    // Structural scope, custom budgets, and non-compact profiles are not served
+    // by this slice.
+    if input.scope.is_some()
+        || input.budget.is_some()
+        || !compact_profile(input.response_profile)
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    let entry_point_policy = match input.entry_point_policy {
+        Some(policy) => Some(entry_point_policy_label(policy)?),
+        None => None,
+    };
+    Ok(CodeDeadPortRequest {
+        repository,
+        generation: client_generation(input.generation),
+        entry_point_policy,
+        include_exported: input.include_exported,
+        include_tests: input.include_tests,
+        min_confidence: input.min_confidence,
+        max_candidates: input.max_candidates,
+    })
+}
+
+fn map_code_dead(
+    response: CodeDeadPortResponse,
+    request: &CodeDeadPortRequest,
+) -> Result<ReadEnvelope<CodeDeadData>, ToolExecutionError> {
+    validate_query_context(
+        &response.result.context,
+        request.repository,
+        request.generation,
+    )?;
+    let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(response.result.candidates.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for candidate in response.result.candidates {
+        let classification = dead_classification_from_label(&candidate.classification)?;
+        let mut source_refs = Vec::new();
+        source_refs
+            .try_reserve_exact(candidate.source_refs.len())
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        for source in &candidate.source_refs {
+            source_refs.push(client_source_ref(source)?);
+        }
+        candidates.push(DeadCandidate {
+            symbol_id: candidate.symbol_id,
+            classification,
+            confidence: candidate.confidence,
+            why: candidate.why,
+            suppressions_checked: candidate.suppressions_checked,
+            source_refs,
+            trust: TrustClassification::UntrustedRepositoryData,
+        });
+    }
+    let entry_points = response.result.entry_points;
+    let policy = entry_point_policy_from_label(&entry_points.policy)?;
+    let mut blind_spots = Vec::new();
+    blind_spots
+        .try_reserve_exact(response.result.blind_spots.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for spot in response.result.blind_spots {
+        blind_spots.push(BlindSpot {
+            category: spot.category,
+            affected_count: spot.affected_count,
+        });
+    }
+    let mut false_positive_controls = Vec::new();
+    false_positive_controls
+        .try_reserve_exact(response.result.false_positive_controls.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for rule in response.result.false_positive_controls {
+        false_positive_controls.push(RuleSummary {
+            rule: rule.rule,
+            suppressed_count: rule.suppressed_count,
+        });
+    }
+    let data = CodeDeadData {
+        candidates,
+        entry_points: EntryPointSummary {
+            policy,
+            entry_point_count: entry_points.entry_point_count,
+            complete: entry_points.complete,
+        },
+        blind_spots,
+        false_positive_controls,
+    };
+    // The requested candidate cap is an explicit bound honored by the daemon;
+    // this slice does not surface separate budget-truncation through the wire.
+    map_read_envelope(response.result.context, response.metadata, data, false)
+}
+
+fn entry_point_policy_label(policy: EntryPointPolicy) -> Result<String, ToolExecutionError> {
+    match serde_json::to_value(policy).map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?
+    {
+        Value::String(label) => Ok(label),
+        _ => Err(internal(ToolExecutionFailure::InvalidResponse)),
+    }
+}
+
+fn entry_point_policy_from_label(label: &str) -> Result<EntryPointPolicy, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+fn dead_classification_from_label(label: &str) -> Result<DeadClassification, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
 async fn execute_source_read<P>(
