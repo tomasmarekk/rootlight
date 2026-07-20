@@ -156,6 +156,8 @@ pub enum FirstSliceIpcRequest {
     FlowTrace(daemon::FlowTraceRequest),
     /// Detect bounded architecture cycles among stable symbols.
     ArchitectureCycles(daemon::ArchitectureCyclesRequest),
+    /// Detect bounded dead-code candidates among stable symbols.
+    CodeDead(daemon::CodeDeadRequest),
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -181,6 +183,8 @@ pub enum FirstSliceIpcResponse {
     FlowTrace(daemon::FlowTraceResponse),
     /// Bounded architecture cycles among stable symbols.
     ArchitectureCycles(daemon::ArchitectureCyclesResponse),
+    /// Bounded dead-code candidates among stable symbols.
+    CodeDead(daemon::CodeDeadResponse),
 }
 
 impl FirstSliceIpcResponse {
@@ -210,6 +214,7 @@ impl FirstSliceIpcResponse {
             Self::ArchitectureCycles(response) => {
                 daemon::response_envelope::Response::ArchitectureCycles(response)
             }
+            Self::CodeDead(response) => daemon::response_envelope::Response::CodeDead(response),
         }
     }
 }
@@ -5429,6 +5434,9 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::ArchitectureCycles(request)) => {
             Ok(Some(FirstSliceIpcRequest::ArchitectureCycles(request)))
         }
+        Some(daemon::request_envelope::Request::CodeDead(request)) => {
+            Ok(Some(FirstSliceIpcRequest::CodeDead(request)))
+        }
         Some(request) => Err(request),
         None => Ok(None),
     }
@@ -5916,6 +5924,55 @@ fn first_slice_response_correlates(
                             .iter()
                             .all(|source| source_ref_correlates(source, context))
                 })
+        }
+        (FirstSliceIpcRequest::CodeDead(request), FirstSliceIpcResponse::CodeDead(response)) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            let Some(entry_points) = response.entry_points.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    request.generation.as_ref(),
+                )
+                && request
+                    .entry_point_policy
+                    .as_ref()
+                    .is_none_or(|policy| !policy.is_empty() && policy.len() <= 32)
+                && request.min_confidence.is_none_or(|confidence| confidence <= 1_000)
+                && request
+                    .max_candidates
+                    .is_none_or(|max| (1..=500).contains(&max))
+                && !entry_points.policy.is_empty()
+                && entry_points.policy.len() <= 32
+                && response.candidates.len() <= 500
+                && response.blind_spots.len() <= 32
+                && response.false_positive_controls.len() <= 32
+                && response.candidates.iter().all(|candidate| {
+                    wire_id_has_len(candidate.symbol_id.as_ref().map(|id| &id.value), 20)
+                        && !candidate.classification.is_empty()
+                        && candidate.classification.len() <= 32
+                        && candidate.confidence <= 1_000
+                        && !candidate.why.is_empty()
+                        && candidate.why.len() <= 16
+                        && candidate.suppressions_checked.len() <= 16
+                        && candidate.source_refs.len() <= 8
+                        && candidate
+                            .source_refs
+                            .iter()
+                            .all(|source| source_ref_correlates(source, context))
+                })
+                && response
+                    .blind_spots
+                    .iter()
+                    .all(|spot| !spot.category.is_empty() && spot.category.len() <= 256)
+                && response
+                    .false_positive_controls
+                    .iter()
+                    .all(|rule| !rule.rule.is_empty() && rule.rule.len() <= 256)
         }
         _ => false,
     }
@@ -6462,6 +6519,31 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 )));
             }
         }
+        FirstSliceIpcRequest::CodeDead(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_generation_selector(request.generation.as_ref())?;
+            if request.entry_point_policy.as_ref().is_some_and(|policy| {
+                policy.is_empty() || policy.len() > 32 || policy.as_bytes().contains(&0)
+            }) {
+                return Err(Box::new(invalid_argument("code dead request is invalid")));
+            }
+            if request
+                .min_confidence
+                .is_some_and(|confidence| confidence > 1_000)
+            {
+                return Err(Box::new(invalid_argument("code dead request is invalid")));
+            }
+            if request
+                .max_candidates
+                .is_some_and(|max| !(1..=500).contains(&max))
+            {
+                return Err(Box::new(invalid_argument("code dead request is invalid")));
+            }
+        }
     }
     Ok(())
 }
@@ -6580,6 +6662,7 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         Some(daemon::request_envelope::Request::ArchitectureCycles(_)) => {
             ControlMethod::ArchitectureCycles
         }
+        Some(daemon::request_envelope::Request::CodeDead(_)) => ControlMethod::CodeDead,
         None => ControlMethod::Unknown,
     }
 }
@@ -7028,6 +7111,9 @@ fn request_from_wire(
             | daemon::request_envelope::Request::FlowTrace(_)
             | daemon::request_envelope::Request::ArchitectureCycles(_),
         ) => Err(Box::new(first_slice_unavailable())),
+        Some(daemon::request_envelope::Request::CodeDead(_)) => {
+            Err(Box::new(first_slice_unavailable()))
+        }
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
     }
 }
