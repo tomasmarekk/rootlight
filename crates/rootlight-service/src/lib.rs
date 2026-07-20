@@ -49,8 +49,9 @@ pub use rootlight_query::{
     ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesResult, ArchitectureHotspot,
     ArchitectureOverviewDerivedView, ArchitectureOverviewResult, ArchitectureOverviewView,
     CodeDeadEntryPointPolicy, CodeDeadResult, CodeLocateResult, FlowTraceResult, LocateMode,
-    QueryResponse, RelationDirection, RelationFamily, SourceReadQueryResult, SymbolExplainResult,
-    SymbolRelationshipsResult,
+    QueryResponse, RankedTestSelection, RelationDirection, RelationFamily, SourceReadQueryResult,
+    SymbolExplainResult, SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap,
+    TestsSelectKind, TestsSelectResult,
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
 use rootlight_resolve::{
@@ -2072,6 +2073,45 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_architecture_overview(&plan, cancellation)
+            .map_err(|error| map_query_error(error, cancellation))
+    }
+
+    /// Executes a generation-pinned bounded `tests.select` query.
+    ///
+    /// The seed set, requested test kinds, test cap, and command inclusion are
+    /// validated by the query plan. The result carries deterministic ranked
+    /// tests, the coverage strategy actually used, and honest gaps for seeds
+    /// with no related test.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    pub fn tests_select(
+        &self,
+        generation: GenerationId,
+        seeds: BTreeSet<SymbolId>,
+        test_kinds: Vec<TestsSelectKind>,
+        max_tests: usize,
+        include_commands: bool,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<TestsSelectResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let service = self
+            .generations
+            .query(generation)
+            .map_err(|_| FirstSliceError::Query)?;
+        let plan = service
+            .plan_tests_select(
+                seeds,
+                test_kinds,
+                max_tests,
+                include_commands,
+                QueryBudget::new(),
+            )
+            .map_err(|error| map_query_error(error, cancellation))?;
+        service
+            .execute_tests_select(&plan, cancellation)
             .map_err(|error| map_query_error(error, cancellation))
     }
 
