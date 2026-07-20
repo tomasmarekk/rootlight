@@ -12,8 +12,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::vertical::{
-    GenerationSelector, ReadEnvelope, RepositorySelector, RequiredNullable,
-    ResponseBudget, ResponseProfile, ToolResponse,
+    GenerationSelector, ReadEnvelope, RepositorySelector, RequiredNullable, ResponseBudget,
+    ResponseProfile, ToolResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,7 +49,9 @@ pub enum ChangeClassification {
 }
 
 /// Aggregate risk level for an impact result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
     /// No measurable risk.

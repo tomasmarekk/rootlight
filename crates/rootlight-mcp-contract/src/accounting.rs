@@ -97,7 +97,10 @@ pub fn budget_is_consistent(tool: McpTool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExposureProfile, InvocationAccounting, budget_is_consistent, estimate_tokens, measure_tool_list};
+    use super::{
+        ExposureProfile, InvocationAccounting, budget_is_consistent, estimate_tokens,
+        measure_tool_list,
+    };
     use crate::McpTool;
 
     #[test]
@@ -138,7 +141,11 @@ mod tests {
     #[test]
     fn all_tool_budgets_are_consistent() {
         for tool in McpTool::ALL {
-            assert!(budget_is_consistent(tool), "{} budget inconsistent", tool.name());
+            assert!(
+                budget_is_consistent(tool),
+                "{} budget inconsistent",
+                tool.name()
+            );
         }
     }
 

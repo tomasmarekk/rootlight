@@ -13,12 +13,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::TrustClassification;
 use crate::vertical::{
     ContinuationCursor, EntityKind, GenerationSelector, ReadEnvelope, RepositorySelector,
-    RequiredNullable, ResponseBudget, ResponseProfile, ResponseWarning,
-    SourceFreeMessage, ToolResponse, UsageSummary,
+    RequiredNullable, ResponseBudget, ResponseProfile, ResponseWarning, SourceFreeMessage,
+    ToolResponse, UsageSummary,
 };
-use crate::TrustClassification;
 
 // ---------------------------------------------------------------------------
 // context.pack

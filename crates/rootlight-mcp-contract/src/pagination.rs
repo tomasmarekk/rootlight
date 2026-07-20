@@ -126,8 +126,12 @@ impl AuthenticatedCursor {
         if elapsed > CURSOR_TTL_MS {
             return Err(CursorError::Expired);
         }
-        let expected_tag =
-            compute_tag(&self.context, &self.last_sort_key, self.issued_at_ms, server_key);
+        let expected_tag = compute_tag(
+            &self.context,
+            &self.last_sort_key,
+            self.issued_at_ms,
+            server_key,
+        );
         if expected_tag != self.tag {
             return Err(CursorError::IntegrityFailed);
         }
@@ -456,7 +460,8 @@ mod tests {
     fn cursor_rejects_tampered_sort_key() {
         let key = [42; 32];
         let context = test_context();
-        let mut cursor = AuthenticatedCursor::create(context.clone(), vec![1, 2, 3], 1_000_000, &key);
+        let mut cursor =
+            AuthenticatedCursor::create(context.clone(), vec![1, 2, 3], 1_000_000, &key);
         cursor.last_sort_key = vec![4, 5, 6];
         assert_eq!(
             cursor.validate(&context, 1_100_000, &key),

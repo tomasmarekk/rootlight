@@ -9,11 +9,11 @@ use rootlight_ids::{GenerationId, OperationId, RepositoryId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use rootlight_ir::CoverageStatus;
 use crate::vertical::{
     GenerationSelector, GenerationSummary, OperationState, ReadEnvelope, RepositorySelector,
     RequiredNullable, ResponseBudget, ResponseProfile, ToolResponse,
 };
+use rootlight_ir::CoverageStatus;
 
 /// Strict input for `repo.status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

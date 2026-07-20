@@ -208,36 +208,22 @@ mod tests {
     #[test]
     fn excessive_depth_is_rejected() {
         assert_eq!(
-            AdvancedQueryPlan::validate(
-                &[QueryOperator::Scan],
-                100,
-                10_000,
-                MAX_AST_DEPTH + 1
-            ),
+            AdvancedQueryPlan::validate(&[QueryOperator::Scan], 100, 10_000, MAX_AST_DEPTH + 1),
             Err(AdvancedQueryError::DepthExceeded)
         );
     }
 
     #[test]
     fn maximum_depth_is_accepted() {
-        assert!(AdvancedQueryPlan::validate(
-            &[QueryOperator::Scan],
-            100,
-            10_000,
-            MAX_AST_DEPTH
-        )
-        .is_ok());
+        assert!(
+            AdvancedQueryPlan::validate(&[QueryOperator::Scan], 100, 10_000, MAX_AST_DEPTH).is_ok()
+        );
     }
 
     #[test]
     fn excessive_row_limit_is_rejected() {
         assert_eq!(
-            AdvancedQueryPlan::validate(
-                &[QueryOperator::Scan],
-                MAX_ADVANCED_ROWS + 1,
-                10_000,
-                1
-            ),
+            AdvancedQueryPlan::validate(&[QueryOperator::Scan], MAX_ADVANCED_ROWS + 1, 10_000, 1),
             Err(AdvancedQueryError::RowLimitExceeded)
         );
     }
@@ -265,7 +251,11 @@ mod tests {
     #[test]
     fn explain_produces_readable_output() {
         let plan = AdvancedQueryPlan::validate(
-            &[QueryOperator::Scan, QueryOperator::Filter, QueryOperator::Limit],
+            &[
+                QueryOperator::Scan,
+                QueryOperator::Filter,
+                QueryOperator::Limit,
+            ],
             50,
             5_000,
             3,

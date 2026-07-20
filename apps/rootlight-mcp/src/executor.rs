@@ -527,9 +527,7 @@ where
                 | VerticalTool::PlanChange
                 | VerticalTool::ContextPack
                 | VerticalTool::QueryAdvanced
-                | VerticalTool::QueryBatch => {
-                    Err(ToolExecutionError::new(unsupported.clone()))
-                }
+                | VerticalTool::QueryBatch => Err(ToolExecutionError::new(unsupported.clone())),
                 VerticalTool::OperationStatus => {
                     execute_operation_status(port, arguments, cancellation).await
                 }

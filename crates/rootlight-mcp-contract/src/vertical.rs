@@ -207,9 +207,9 @@ impl VerticalTool {
             Self::RepoStatus => include_str!(
                 "../../../schemas/generated/json/mcp-repo-status-input-1.0.schema.json"
             ),
-            Self::RepoList => include_str!(
-                "../../../schemas/generated/json/mcp-repo-list-input-1.0.schema.json"
-            ),
+            Self::RepoList => {
+                include_str!("../../../schemas/generated/json/mcp-repo-list-input-1.0.schema.json")
+            }
             Self::OperationStatus => include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-input-1.0.schema.json"
             ),
@@ -222,9 +222,9 @@ impl VerticalTool {
             Self::SymbolRelationships => include_str!(
                 "../../../schemas/generated/json/mcp-symbol-relationships-input-1.0.schema.json"
             ),
-            Self::FlowTrace => include_str!(
-                "../../../schemas/generated/json/mcp-flow-trace-input-1.0.schema.json"
-            ),
+            Self::FlowTrace => {
+                include_str!("../../../schemas/generated/json/mcp-flow-trace-input-1.0.schema.json")
+            }
             Self::ChangeImpact => include_str!(
                 "../../../schemas/generated/json/mcp-change-impact-input-1.0.schema.json"
             ),
@@ -237,9 +237,9 @@ impl VerticalTool {
             Self::ArchitectureCycles => include_str!(
                 "../../../schemas/generated/json/mcp-architecture-cycles-input-1.0.schema.json"
             ),
-            Self::CodeDead => include_str!(
-                "../../../schemas/generated/json/mcp-code-dead-input-1.0.schema.json"
-            ),
+            Self::CodeDead => {
+                include_str!("../../../schemas/generated/json/mcp-code-dead-input-1.0.schema.json")
+            }
             Self::HistoryCompare => include_str!(
                 "../../../schemas/generated/json/mcp-history-compare-input-1.0.schema.json"
             ),
@@ -271,9 +271,9 @@ impl VerticalTool {
             Self::RepoStatus => include_str!(
                 "../../../schemas/generated/json/mcp-repo-status-output-1.0.schema.json"
             ),
-            Self::RepoList => include_str!(
-                "../../../schemas/generated/json/mcp-repo-list-output-1.0.schema.json"
-            ),
+            Self::RepoList => {
+                include_str!("../../../schemas/generated/json/mcp-repo-list-output-1.0.schema.json")
+            }
             Self::OperationStatus => include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-output-1.0.schema.json"
             ),
@@ -301,9 +301,9 @@ impl VerticalTool {
             Self::ArchitectureCycles => include_str!(
                 "../../../schemas/generated/json/mcp-architecture-cycles-output-1.0.schema.json"
             ),
-            Self::CodeDead => include_str!(
-                "../../../schemas/generated/json/mcp-code-dead-output-1.0.schema.json"
-            ),
+            Self::CodeDead => {
+                include_str!("../../../schemas/generated/json/mcp-code-dead-output-1.0.schema.json")
+            }
             Self::HistoryCompare => include_str!(
                 "../../../schemas/generated/json/mcp-history-compare-output-1.0.schema.json"
             ),
@@ -1900,8 +1900,14 @@ mod tests {
         let tools = fixture["tools"]
             .as_array()
             .expect("retained tool contracts contain a tool array");
-        assert!(tools.len() >= 7, "fixture must retain at least the original seven tools");
-        assert!(tools.len() <= VerticalTool::ALL.len(), "fixture cannot exceed the catalog");
+        assert!(
+            tools.len() >= 7,
+            "fixture must retain at least the original seven tools"
+        );
+        assert!(
+            tools.len() <= VerticalTool::ALL.len(),
+            "fixture cannot exceed the catalog"
+        );
 
         for fixture in tools {
             let name = fixture["tool"].as_str().expect("tool name is a string");

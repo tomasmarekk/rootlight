@@ -33,8 +33,8 @@ use rootlight_mcp_contract::{
     },
     intent::{
         ArchitectureCyclesInput, ArchitectureCyclesOutput, ArchitectureOverviewInput,
-        ArchitectureOverviewOutput, CodeDeadInput, CodeDeadOutput, FlowTraceInput,
-        FlowTraceOutput, SymbolRelationshipsInput, SymbolRelationshipsOutput,
+        ArchitectureOverviewOutput, CodeDeadInput, CodeDeadOutput, FlowTraceInput, FlowTraceOutput,
+        SymbolRelationshipsInput, SymbolRelationshipsOutput,
     },
     repository::{RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutput},
 };
@@ -827,18 +827,38 @@ fn generate_json_schemas(staged_root: &Path) -> Result<(), SchemaError> {
     write_mcp_tool_schema::<RepoStatusOutput>(&schema_root, "repo.status", "output")?;
     write_mcp_tool_schema::<RepoListInput>(&schema_root, "repo.list", "input")?;
     write_mcp_tool_schema::<RepoListOutput>(&schema_root, "repo.list", "output")?;
-    write_mcp_tool_schema::<SymbolRelationshipsInput>(&schema_root, "symbol.relationships", "input")?;
-    write_mcp_tool_schema::<SymbolRelationshipsOutput>(&schema_root, "symbol.relationships", "output")?;
+    write_mcp_tool_schema::<SymbolRelationshipsInput>(
+        &schema_root,
+        "symbol.relationships",
+        "input",
+    )?;
+    write_mcp_tool_schema::<SymbolRelationshipsOutput>(
+        &schema_root,
+        "symbol.relationships",
+        "output",
+    )?;
     write_mcp_tool_schema::<FlowTraceInput>(&schema_root, "flow.trace", "input")?;
     write_mcp_tool_schema::<FlowTraceOutput>(&schema_root, "flow.trace", "output")?;
     write_mcp_tool_schema::<ChangeImpactInput>(&schema_root, "change.impact", "input")?;
     write_mcp_tool_schema::<ChangeImpactOutput>(&schema_root, "change.impact", "output")?;
     write_mcp_tool_schema::<TestsSelectInput>(&schema_root, "tests.select", "input")?;
     write_mcp_tool_schema::<TestsSelectOutput>(&schema_root, "tests.select", "output")?;
-    write_mcp_tool_schema::<ArchitectureOverviewInput>(&schema_root, "architecture.overview", "input")?;
-    write_mcp_tool_schema::<ArchitectureOverviewOutput>(&schema_root, "architecture.overview", "output")?;
+    write_mcp_tool_schema::<ArchitectureOverviewInput>(
+        &schema_root,
+        "architecture.overview",
+        "input",
+    )?;
+    write_mcp_tool_schema::<ArchitectureOverviewOutput>(
+        &schema_root,
+        "architecture.overview",
+        "output",
+    )?;
     write_mcp_tool_schema::<ArchitectureCyclesInput>(&schema_root, "architecture.cycles", "input")?;
-    write_mcp_tool_schema::<ArchitectureCyclesOutput>(&schema_root, "architecture.cycles", "output")?;
+    write_mcp_tool_schema::<ArchitectureCyclesOutput>(
+        &schema_root,
+        "architecture.cycles",
+        "output",
+    )?;
     write_mcp_tool_schema::<CodeDeadInput>(&schema_root, "code.dead", "input")?;
     write_mcp_tool_schema::<CodeDeadOutput>(&schema_root, "code.dead", "output")?;
     write_mcp_tool_schema::<HistoryCompareInput>(&schema_root, "history.compare", "input")?;

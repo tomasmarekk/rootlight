@@ -321,7 +321,11 @@ mod tests {
     fn catalog_contains_exactly_nineteen_unique_tools() {
         let mut names = std::collections::BTreeSet::new();
         for tool in McpTool::ALL {
-            assert!(names.insert(tool.name()), "duplicate tool name: {}", tool.name());
+            assert!(
+                names.insert(tool.name()),
+                "duplicate tool name: {}",
+                tool.name()
+            );
         }
         assert_eq!(names.len(), 19);
     }
@@ -410,7 +414,11 @@ mod tests {
     #[test]
     fn no_tool_is_destructive() {
         for tool in McpTool::ALL {
-            assert!(!tool.destructive(), "{} must not be destructive", tool.name());
+            assert!(
+                !tool.destructive(),
+                "{} must not be destructive",
+                tool.name()
+            );
         }
     }
 

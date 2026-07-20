@@ -42,8 +42,13 @@ impl ToolExecutor for TranscriptExecutor {
 async fn retained_tool_transcript_preserves_protocol_and_contract_outcomes() {
     let (mut input_writer, input_reader) = tokio::io::duplex(64 * 1024);
     let (output_writer, output_reader) = tokio::io::duplex(64 * 1024);
-    let handler: Arc<dyn RequestHandler> =
-        Arc::new(ToolRouter::new(TranscriptExecutor, rootlight_mcp_contract::ExposureProfile::Developer).expect("retained tool registry compiles"));
+    let handler: Arc<dyn RequestHandler> = Arc::new(
+        ToolRouter::new(
+            TranscriptExecutor,
+            rootlight_mcp_contract::ExposureProfile::Developer,
+        )
+        .expect("retained tool registry compiles"),
+    );
     let server = tokio::spawn(async move {
         let mut session = Session::rootlight();
         serve(

@@ -324,13 +324,22 @@ mod tests {
             candidate("impl", EvidenceRole::Implementation, 700, 100),
             candidate("test", EvidenceRole::Test, 600, 100),
         ];
-        let result = optimize_pack(PackObjective::BugFix, &mut candidates, 1000)
-            .expect("valid pack");
+        let result =
+            optimize_pack(PackObjective::BugFix, &mut candidates, 1000).expect("valid pack");
         // BugFix requires Definition, Implementation, Test
         let roles: Vec<EvidenceRole> = result.items.iter().map(|i| i.candidate.role).collect();
-        let def_pos = roles.iter().position(|r| *r == EvidenceRole::Definition).unwrap();
-        let arch_pos = roles.iter().position(|r| *r == EvidenceRole::Architecture).unwrap();
-        assert!(def_pos < arch_pos, "required Definition must come before non-required Architecture");
+        let def_pos = roles
+            .iter()
+            .position(|r| *r == EvidenceRole::Definition)
+            .unwrap();
+        let arch_pos = roles
+            .iter()
+            .position(|r| *r == EvidenceRole::Architecture)
+            .unwrap();
+        assert!(
+            def_pos < arch_pos,
+            "required Definition must come before non-required Architecture"
+        );
     }
 
     #[test]
@@ -340,8 +349,8 @@ mod tests {
             candidate("b", EvidenceRole::Implementation, 800, 500),
             candidate("c", EvidenceRole::Test, 700, 500),
         ];
-        let result = optimize_pack(PackObjective::BugFix, &mut candidates, 1000)
-            .expect("valid pack");
+        let result =
+            optimize_pack(PackObjective::BugFix, &mut candidates, 1000).expect("valid pack");
         assert!(result.total_tokens <= 1000);
         assert_eq!(result.items.len(), 2);
         assert!(result.truncated);
@@ -383,8 +392,8 @@ mod tests {
                 source_path: "src/other.rs".to_owned(),
             },
         ];
-        let result = optimize_pack(PackObjective::BugFix, &mut candidates, 5000)
-            .expect("valid pack");
+        let result =
+            optimize_pack(PackObjective::BugFix, &mut candidates, 5000).expect("valid pack");
         let shared_count = result
             .items
             .iter()
@@ -415,8 +424,8 @@ mod tests {
             candidate("a", EvidenceRole::Definition, 900, 900),
             candidate("b", EvidenceRole::Implementation, 800, 900),
         ];
-        let result = optimize_pack(PackObjective::BugFix, &mut candidates, 1000)
-            .expect("valid pack");
+        let result =
+            optimize_pack(PackObjective::BugFix, &mut candidates, 1000).expect("valid pack");
         assert!(result.truncated);
         assert!(!result.omissions.is_empty());
         assert!(!result.omissions[0].continuation_handle.is_empty());
@@ -436,7 +445,9 @@ mod tests {
                 "{objective:?} must have required roles"
             );
             assert!(
-                objective.required_roles().contains(&EvidenceRole::Definition)
+                objective
+                    .required_roles()
+                    .contains(&EvidenceRole::Definition)
                     || objective.required_roles().contains(&EvidenceRole::Change),
                 "{objective:?} must require Definition or Change"
             );

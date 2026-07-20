@@ -161,9 +161,7 @@ impl BatchPlan {
 }
 
 /// Kahn's algorithm for topological sort with cycle detection.
-fn topological_sort(
-    operations: &[BatchOperation],
-) -> Result<Vec<usize>, BatchValidationError> {
+fn topological_sort(operations: &[BatchOperation]) -> Result<Vec<usize>, BatchValidationError> {
     let count = operations.len();
     let mut in_degree = vec![0usize; count];
     let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); count];
@@ -233,8 +231,8 @@ pub fn is_batch_allowed_under_profile(
 #[cfg(test)]
 mod tests {
     use super::{
-        BatchPlan, BatchValidationError, MAX_BATCH_DEPTH, MAX_BATCH_OPERATIONS,
-        is_batch_allowed, is_batch_allowed_under_profile,
+        BatchPlan, BatchValidationError, MAX_BATCH_DEPTH, MAX_BATCH_OPERATIONS, is_batch_allowed,
+        is_batch_allowed_under_profile,
     };
     use rootlight_mcp_contract::{ExposureProfile, McpTool};
 
