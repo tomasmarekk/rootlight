@@ -9,12 +9,14 @@ use std::{
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, RepositoryId};
 use rootlight_incremental::{FactDomain, FactDomainSet};
+use rootlight_ir::CoverageStatus;
 use rootlight_query::{LocateMode, RepositoryDataTrust};
 use rootlight_service::{
-    ArchitectureOverviewView, ChangeClass, CodeDeadEntryPointPolicy, FileChangeKind,
-    FirstSliceBuildStrategy, FirstSliceError, FirstSliceFreshnessStatus,
-    FirstSliceIncrementalEvidence, FirstSliceObservedFreshness, FirstSlicePublicationMode,
-    FirstSliceService, FirstSliceTwoStageAvailability, RelationDirection, RelationFamily,
+    ArchitectureOverviewView, ChangeClass, ChangeImpactClassification, ChangeImpactRiskLevel,
+    CodeDeadEntryPointPolicy, FileChangeKind, FirstSliceBuildStrategy, FirstSliceError,
+    FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence, FirstSliceObservedFreshness,
+    FirstSlicePublicationMode, FirstSliceService, FirstSliceTwoStageAvailability,
+    RelationDirection, RelationFamily,
 };
 use tempfile::TempDir;
 
@@ -999,4 +1001,101 @@ fn tests_select_reports_an_honest_partial_result_for_a_known_fixture() {
         selection.data.trust,
         RepositoryDataTrust::UntrustedRepositoryData
     );
+}
+
+#[test]
+fn change_impact_reports_an_honest_result_for_a_known_fixture() {
+    // The first-slice oracle records a direct call as a `DispatchCandidate`
+    // occurrence and structural containment as a file-to-entity `Contains`
+    // relation, and it resolves no public visibility for this fixture, so no
+    // served relation family yields an entity-to-entity impact edge and no
+    // public surface is proven. An honest `change.impact` over an explicit
+    // symbol change therefore resolves the changed symbol as a body change but
+    // fabricates no dependents: the impact group stays empty, the fanout is
+    // zero, the breaking surface stays unset, and the risk level is none, while
+    // still proving the generation-pinned query path and mandatory trust
+    // labeling.
+    let source =
+        "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    let located = service
+        .code_locate(
+            indexed.generation,
+            "callee".to_owned(),
+            LocateMode::Exact,
+            8,
+            &cancellation,
+        )
+        .expect("locate query succeeds");
+    assert_eq!(located.data.hits.len(), 1);
+    let changed = located.data.hits[0].symbol;
+
+    let impact = service
+        .change_impact(
+            indexed.generation,
+            BTreeSet::from([changed]),
+            Vec::new(),
+            3,
+            0,
+            false,
+            100,
+            &cancellation,
+        )
+        .expect("change impact query succeeds");
+
+    // The explicit symbol resolves to one honest body-classified change; the
+    // lexical oracle proves no public surface for this fixture.
+    assert_eq!(impact.data.resolved_changes.len(), 1);
+    assert_eq!(impact.data.resolved_changes[0].symbol_id, Some(changed));
+    assert_eq!(
+        impact.data.resolved_changes[0].classification,
+        ChangeImpactClassification::Body
+    );
+    // The lexical oracle serves no entity-to-entity impact edge, so no dependent
+    // is fabricated.
+    assert_eq!(impact.data.impacted.len(), 1);
+    assert!(impact.data.impacted[0].dependents.is_empty());
+    assert!(impact.data.tests.is_empty());
+    // The honest risk summary reflects zero measured fanout, no proven public
+    // surface, and unknown coverage.
+    assert!(!impact.data.risk_summary.breaking_surface);
+    assert_eq!(impact.data.risk_summary.fanout, 0);
+    assert_eq!(impact.data.risk_summary.level, ChangeImpactRiskLevel::None);
+    assert_eq!(impact.data.risk_summary.coverage, CoverageStatus::Unknown);
+    assert!(impact.data.risk_summary.dynamic_blind_spots);
+    assert_eq!(
+        impact.data.trust,
+        RepositoryDataTrust::UntrustedRepositoryData
+    );
+}
+
+#[test]
+fn change_impact_requires_an_explicit_change_set() {
+    // The first slice maps only an explicit change set; an empty selector carries
+    // no resolvable change and is rejected by the bounded query plan.
+    let source = "pub fn answer() -> u32 {\n    42\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    let result = service.change_impact(
+        indexed.generation,
+        BTreeSet::new(),
+        Vec::new(),
+        3,
+        0,
+        false,
+        100,
+        &cancellation,
+    );
+    assert!(result.is_err());
 }
