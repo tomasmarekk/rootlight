@@ -17,7 +17,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub use catalog::{ExposureProfile, McpTool};
-pub use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicErrorBuildError};
+pub use rootlight_error::{
+    DetailKey, ErrorCode, NextAction, PublicError, PublicErrorBuildError, SafeLabel,
+};
 pub use vertical::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, GenerationSelector,
     OperationStatusInput, OperationStatusOutput, RepoIndexInput, RepoIndexOutput,

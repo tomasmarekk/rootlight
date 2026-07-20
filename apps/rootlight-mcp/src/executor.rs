@@ -16,13 +16,12 @@ use rootlight_client::{
     RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, SourceRead,
     SymbolExplain,
 };
-use rootlight_error::SafeLabel;
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
     DetailKey, ErrorCode, GenerationSelector, McpTool, NextAction, PublicError,
-    PublicErrorBuildError, RepoIndexInput, RepositorySelector, SchemaVersion, SourceReadInput,
-    SymbolExplainInput, ToolResponse, TrustClassification, VerticalTool,
+    PublicErrorBuildError, RepoIndexInput, RepositorySelector, SafeLabel, SchemaVersion,
+    SourceReadInput, SymbolExplainInput, ToolResponse, TrustClassification, VerticalTool,
     context::{
         BatchOperation, BatchOperationResult, BatchOperationStatus, BatchStatus, BatchTool,
         ContextItem, ContextPackData, ContextPackId, ContextPackInput, ContextStructure,

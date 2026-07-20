@@ -2074,7 +2074,6 @@ dependencies = [
  "getrandom 0.3.4",
  "jsonschema",
  "rootlight-client",
- "rootlight-error",
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-mcp-contract",
