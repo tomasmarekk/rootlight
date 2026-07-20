@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "8dcf67ae3490f397949ba85852223d473375fc5dd042f5a59c788d54a6711a83"
+      "blake3": "da185e0eb544795c4d859f482ba01a33850f2028a4fc228494759f79e09e734e"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
@@ -58,7 +58,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/lib.rs",
-      "blake3": "7f40c6a9c8102e4056104a9d173cf298ae15ca96b39f28f47393804f8522e4cd"
+      "blake3": "13bc3b4dc7b4eb43f4cc81a34ef67e7868a02dda18ae110594ab271ab78eb458"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/repository.rs",
