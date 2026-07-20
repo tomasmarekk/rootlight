@@ -572,3 +572,42 @@ fn deadline() -> Cancellation {
             .expect("test deadline is representable"),
     )
 }
+
+#[test]
+fn repository_list_and_status_report_the_active_generation() {
+    let fixture = TempDir::new().expect("fixture root exists");
+    fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+    fs::write(fixture.path().join("src/lib.rs"), BEFORE).expect("fixture source writes");
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(4).expect("first-slice service initializes");
+
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    let list = service.list_repositories();
+    assert_eq!(list.len(), 1);
+    let entry = &list[0];
+    assert_eq!(entry.repository, indexed.repository);
+    assert_eq!(entry.active_generation, indexed.generation);
+    assert_eq!(entry.languages, vec!["rust".to_owned()]);
+    assert_eq!(entry.state, "ready");
+    assert_eq!(entry.structural_freshness, "current");
+
+    let status = service
+        .repository_status(indexed.repository)
+        .expect("known repository reports status");
+    assert_eq!(status.repository, indexed.repository);
+    assert_eq!(status.active_generation, indexed.generation);
+    assert_eq!(status.state, "ready");
+    assert_eq!(status.structural_freshness, "current");
+    assert_eq!(status.coverage.len(), 1);
+    assert_eq!(status.coverage[0].language, "rust");
+    assert_eq!(status.coverage[0].indexed_files, 1);
+
+    let unknown = RepositoryId::from_bytes([250; 16]);
+    assert!(matches!(
+        service.repository_status(unknown),
+        Err(FirstSliceError::RepositoryNotFound)
+    ));
+}

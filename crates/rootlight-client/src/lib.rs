@@ -717,6 +717,64 @@ impl std::fmt::Debug for SourceRead {
     }
 }
 
+/// One repository entry in the bounded repository list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryListEntry {
+    /// Process-local repository identity.
+    pub repository_id: RepositoryId,
+    /// Active immutable generation for the repository.
+    pub active_generation: GenerationId,
+    /// Indexed languages.
+    pub languages: Vec<String>,
+    /// Structural freshness label, such as `current`.
+    pub structural_freshness: String,
+    /// Semantic freshness label, such as `current`.
+    pub semantic_freshness: String,
+    /// Repository state label, such as `ready`.
+    pub state: String,
+}
+
+/// Bounded list of repositories known to the daemon process.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryList {
+    /// Known repositories in deterministic order.
+    pub repositories: Vec<RepositoryListEntry>,
+}
+
+/// One language-scoped coverage entry for a repository generation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryCoverageEntry {
+    /// Stable normalized language label.
+    pub language: String,
+    /// Aggregate analysis tier label, such as `tier_a`.
+    pub tier: String,
+    /// Aggregate completeness label, such as `complete` or `bounded`.
+    pub status: String,
+    /// Inputs admitted by deterministic discovery.
+    pub discovered_files: u64,
+    /// Files committed into normalized IR.
+    pub indexed_files: u64,
+}
+
+/// One repository's active generation, freshness, and coverage.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryStatus {
+    /// Process-local repository identity.
+    pub repository_id: RepositoryId,
+    /// Active immutable generation for the repository.
+    pub active_generation: GenerationId,
+    /// Optional predecessor generation.
+    pub parent_generation: Option<GenerationId>,
+    /// Structural freshness label, such as `current`.
+    pub structural_freshness: String,
+    /// Semantic freshness label, such as `current`.
+    pub semantic_freshness: String,
+    /// Repository state label, such as `ready`.
+    pub state: String,
+    /// Language-scoped coverage entries.
+    pub coverage: Vec<RepositoryCoverageEntry>,
+}
+
 /// Validated total deadline budget for one asynchronous daemon request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestTimeout(Duration);
@@ -1467,6 +1525,113 @@ impl Client {
         }
     }
 
+    /// Lists repositories known to this daemon process.
+    ///
+    /// The optional `max_results` bounds the returned list; the optional
+    /// `query` is accepted for forward compatibility but repositories are
+    /// opaque process-local identities, so it does not filter today.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid list bounds, unavailable protocol
+    /// support, transport failure, or a malformed or uncorrelated response.
+    pub fn repository_list(
+        &self,
+        max_results: Option<u32>,
+        query: Option<&str>,
+    ) -> Result<RepositoryList, ClientError> {
+        match self.request(build_repository_list_request(max_results, query)?)? {
+            daemon::response_envelope::Response::RepositoryList(response) => {
+                parse_repository_list(response, max_results)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously lists repositories known to this daemon process.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid list bounds, unavailable protocol
+    /// support, transport failure, timeout, or a malformed or uncorrelated
+    /// response.
+    pub async fn repository_list_async(
+        &self,
+        max_results: Option<u32>,
+        query: Option<&str>,
+        timeout: RequestTimeout,
+    ) -> Result<RepositoryList, ClientError> {
+        match self
+            .request_async(build_repository_list_request(max_results, query)?, timeout)
+            .await?
+        {
+            daemon::response_envelope::Response::RepositoryList(response) => {
+                parse_repository_list(response, max_results)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Reads the active generation status of one repository.
+    ///
+    /// The response always reports the repository's active generation; the
+    /// selector is validated but does not change which generation is reported.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for unavailable protocol support, transport
+    /// failure, or a malformed or uncorrelated response.
+    pub fn repository_status(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+    ) -> Result<RepositoryStatus, ClientError> {
+        match self.request(build_repository_status_request(repository, generation)?)? {
+            daemon::response_envelope::Response::RepositoryStatus(response) => {
+                parse_repository_status(response, repository)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously reads the active generation status of one repository.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for unavailable protocol support, transport
+    /// failure, timeout, or a malformed or uncorrelated response.
+    pub async fn repository_status_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        timeout: RequestTimeout,
+    ) -> Result<RepositoryStatus, ClientError> {
+        match self
+            .request_async(
+                build_repository_status_request(repository, generation)?,
+                timeout,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::RepositoryStatus(response) => {
+                parse_repository_status(response, repository)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     fn request(
         &self,
         request: daemon::request_envelope::Request,
@@ -2059,7 +2224,9 @@ fn ensure_request_supported(
         | daemon::request_envelope::Request::RepositoryOperationStatus(_)
         | daemon::request_envelope::Request::CodeLocate(_)
         | daemon::request_envelope::Request::SymbolExplain(_)
-        | daemon::request_envelope::Request::SourceRead(_) => 5,
+        | daemon::request_envelope::Request::SourceRead(_)
+        | daemon::request_envelope::Request::RepositoryList(_)
+        | daemon::request_envelope::Request::RepositoryStatus(_) => 5,
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
         daemon::request_envelope::Request::OperationLeaseRenew(_) => {
@@ -2761,6 +2928,36 @@ fn build_source_read_request(
     ))
 }
 
+fn build_repository_list_request(
+    max_results: Option<u32>,
+    query: Option<&str>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if max_results.is_some_and(|max| !(1..=1000).contains(&max)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if query.is_some_and(|query| query.len() > 2048 || query.as_bytes().contains(&0)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::RepositoryList(
+        daemon::RepositoryListRequest {
+            max_results,
+            query: query.map(str::to_owned),
+        },
+    ))
+}
+
+fn build_repository_status_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    Ok(daemon::request_envelope::Request::RepositoryStatus(
+        daemon::RepositoryStatusRequest {
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+        },
+    ))
+}
+
 fn repository_to_wire(repository: RepositoryId) -> common::RepositoryId {
     common::RepositoryId {
         value: repository.as_bytes().to_vec(),
@@ -2908,6 +3105,77 @@ fn parse_repository_operation_status(
         written_bytes: response.written_bytes,
         files_examined: response.files_examined,
         retry_after_ms: response.retry_after_ms,
+    })
+}
+
+fn parse_repository_list(
+    response: daemon::RepositoryListResponse,
+    max_results: Option<u32>,
+) -> Result<RepositoryList, ClientError> {
+    let mut repositories = Vec::with_capacity(response.repositories.len());
+    for entry in response.repositories {
+        let repository_id =
+            parse_repository(entry.repository.ok_or(ClientError::InvalidIdentifier)?)?;
+        let active_generation = parse_generation(
+            entry
+                .active_generation
+                .ok_or(ClientError::InvalidIdentifier)?,
+        )?;
+        repositories.push(RepositoryListEntry {
+            repository_id,
+            active_generation,
+            languages: entry.languages,
+            structural_freshness: entry.structural_freshness,
+            semantic_freshness: entry.semantic_freshness,
+            state: entry.state,
+        });
+    }
+    // The daemon bounds the list; a longer reply is a correlation failure.
+    if let Some(max) = max_results
+        && repositories.len() > usize::try_from(max).unwrap_or(usize::MAX)
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(RepositoryList { repositories })
+}
+
+fn parse_repository_status(
+    response: daemon::RepositoryStatusResponse,
+    expected_repository: RepositoryId,
+) -> Result<RepositoryStatus, ClientError> {
+    let repository_id =
+        parse_repository(response.repository.ok_or(ClientError::InvalidIdentifier)?)?;
+    if repository_id != expected_repository {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let active_generation = parse_generation(
+        response
+            .active_generation
+            .ok_or(ClientError::InvalidIdentifier)?,
+    )?;
+    let parent_generation = response
+        .parent_generation
+        .map(parse_generation)
+        .transpose()?;
+    let coverage = response
+        .coverage
+        .into_iter()
+        .map(|entry| RepositoryCoverageEntry {
+            language: entry.language,
+            tier: entry.tier,
+            status: entry.status,
+            discovered_files: entry.discovered_files,
+            indexed_files: entry.indexed_files,
+        })
+        .collect();
+    Ok(RepositoryStatus {
+        repository_id,
+        active_generation,
+        parent_generation,
+        structural_freshness: response.structural_freshness,
+        semantic_freshness: response.semantic_freshness,
+        state: response.state,
+        coverage,
     })
 }
 

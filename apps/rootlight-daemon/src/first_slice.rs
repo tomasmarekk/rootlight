@@ -510,6 +510,12 @@ fn execute_service_request(
         FirstSliceIpcRequest::SourceRead(request) => {
             source_read(service, request, &context).map(FirstSliceIpcResponse::SourceRead)
         }
+        FirstSliceIpcRequest::RepositoryList(request) => {
+            repository_list(service, request).map(FirstSliceIpcResponse::RepositoryList)
+        }
+        FirstSliceIpcRequest::RepositoryStatus(request) => {
+            repository_status(service, request).map(FirstSliceIpcResponse::RepositoryStatus)
+        }
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
     }
 }
@@ -1096,6 +1102,64 @@ fn source_read(
         chunks,
         total_source_bytes: response.usage.source_bytes,
         truncated: false,
+    })
+}
+
+fn repository_list(
+    service: &FirstSliceService,
+    request: daemon::RepositoryListRequest,
+) -> Result<daemon::RepositoryListResponse, PublicError> {
+    let mut repositories = Vec::new();
+    for entry in service.list_repositories() {
+        repositories.push(daemon::RepositoryListEntry {
+            repository: Some(repository_to_wire(entry.repository)),
+            active_generation: Some(generation_to_wire(entry.active_generation)),
+            languages: entry.languages,
+            structural_freshness: entry.structural_freshness,
+            semantic_freshness: entry.semantic_freshness,
+            state: entry.state,
+        });
+    }
+    // The service enumerates every known repository; honor the optional bound.
+    // The optional query is validated at the protocol boundary but not applied
+    // because repositories are opaque process-local identities with no text
+    // field to match.
+    if let Some(max_results) = request.max_results {
+        repositories.truncate(usize::try_from(max_results).map_err(|_| invalid_argument())?);
+    }
+    Ok(daemon::RepositoryListResponse { repositories })
+}
+
+fn repository_status(
+    service: &FirstSliceService,
+    request: daemon::RepositoryStatusRequest,
+) -> Result<daemon::RepositoryStatusResponse, PublicError> {
+    let repository = parse_repository(request.repository.as_ref())?;
+    // The status reports the repository's active generation. The generation
+    // selector is validated at the protocol boundary; the active generation is
+    // returned regardless of the selector.
+    let status = service
+        .repository_status(repository)
+        .map_err(service_error)?;
+    let coverage = status
+        .coverage
+        .into_iter()
+        .map(|entry| daemon::RepositoryCoverageEntry {
+            language: entry.language,
+            tier: entry.tier,
+            status: entry.status,
+            discovered_files: entry.discovered_files,
+            indexed_files: entry.indexed_files,
+        })
+        .collect();
+    Ok(daemon::RepositoryStatusResponse {
+        repository: Some(repository_to_wire(status.repository)),
+        active_generation: Some(generation_to_wire(status.active_generation)),
+        parent_generation: status.parent_generation.map(generation_to_wire),
+        structural_freshness: status.structural_freshness,
+        semantic_freshness: status.semantic_freshness,
+        state: status.state,
+        coverage,
     })
 }
 

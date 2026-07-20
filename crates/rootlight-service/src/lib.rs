@@ -327,6 +327,99 @@ pub struct FirstSliceGenerationContext {
     pub receipt: FirstSliceIndexReceipt,
 }
 
+/// Language the bounded first-slice service indexes.
+///
+/// The first-slice pipeline admits only the supported whole-root Rust fixture,
+/// so repository coverage is reported for this single language.
+const FIRST_SLICE_LANGUAGE: &str = "rust";
+
+/// Repository state label reported while a generation is active and queryable.
+const REPOSITORY_STATE_READY: &str = "ready";
+
+/// One language-scoped coverage entry for a repository generation.
+///
+/// The tier and status labels mirror the daemon's coverage aggregation but are
+/// carried as stable strings so the wire protocol does not need new enums.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryCoverageEntryDto {
+    /// Stable normalized language label.
+    pub language: String,
+    /// Aggregate analysis tier label, such as `tier_a`.
+    pub tier: String,
+    /// Aggregate completeness label, such as `complete` or `bounded`.
+    pub status: String,
+    /// Inputs admitted by deterministic discovery.
+    pub discovered_files: u64,
+    /// Files committed into normalized IR.
+    pub indexed_files: u64,
+}
+
+/// One repository entry in the bounded repository list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryListEntryDto {
+    /// Process-local repository identity.
+    pub repository: RepositoryId,
+    /// Active immutable generation for the repository.
+    pub active_generation: GenerationId,
+    /// Indexed languages.
+    pub languages: Vec<String>,
+    /// Structural freshness label, such as `current`.
+    pub structural_freshness: String,
+    /// Semantic freshness label, such as `current`.
+    pub semantic_freshness: String,
+    /// Repository state label, such as `ready`.
+    pub state: String,
+}
+
+/// One repository's active generation, freshness, and coverage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryStatusDto {
+    /// Process-local repository identity.
+    pub repository: RepositoryId,
+    /// Active immutable generation for the repository.
+    pub active_generation: GenerationId,
+    /// Optional predecessor generation.
+    pub parent_generation: Option<GenerationId>,
+    /// Structural freshness label, such as `current`.
+    pub structural_freshness: String,
+    /// Semantic freshness label, such as `current`.
+    pub semantic_freshness: String,
+    /// Repository state label, such as `ready`.
+    pub state: String,
+    /// Language-scoped coverage entries.
+    pub coverage: Vec<RepositoryCoverageEntryDto>,
+}
+
+/// Maps an observed freshness value to its stable wire label.
+const fn freshness_label(freshness: FirstSliceObservedFreshness) -> &'static str {
+    match freshness {
+        FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan => "current",
+        FirstSliceObservedFreshness::Superseded => "superseded",
+    }
+}
+
+/// Derives language-scoped coverage from one generation receipt.
+///
+/// The tier and status are inferred from the admitted-versus-indexed input
+/// ratio, mirroring the daemon's empty-query coverage aggregation so the
+/// repository status stays source-free.
+fn coverage_from_receipt(receipt: &FirstSliceIndexReceipt) -> Vec<RepositoryCoverageEntryDto> {
+    let (tier, status) = if receipt.indexed_files == 0 {
+        ("tier_d", "unknown")
+    } else if receipt.discovered_inputs == receipt.indexed_files {
+        ("tier_a", "complete")
+    } else {
+        ("tier_b", "bounded")
+    };
+    vec![RepositoryCoverageEntryDto {
+        language: FIRST_SLICE_LANGUAGE.to_owned(),
+        tier: tier.to_owned(),
+        status: status.to_owned(),
+        discovered_files: receipt.discovered_inputs,
+        indexed_files: receipt.indexed_files,
+    }]
+}
+
 /// Two-phase index result awaiting an explicit publication decision.
 ///
 /// The prepared variant remains inline because adding a `Box` here would
@@ -1798,6 +1891,64 @@ impl FirstSliceService {
         service
             .execute_source_read(&plan, &source, cancellation)
             .map_err(|error| map_query_error(error, cancellation))
+    }
+
+    /// Lists every repository known to this daemon process.
+    ///
+    /// The result is deterministic because the underlying repository map is an
+    /// ordered map keyed by repository identity. Each entry joins the active
+    /// generation receipt for languages and freshness. The active generation is
+    /// always current relative to the latest committed authoritative scan, so
+    /// every entry reports current freshness and the ready state.
+    #[must_use]
+    pub fn list_repositories(&self) -> Vec<RepositoryListEntryDto> {
+        self.active_by_repository
+            .iter()
+            // The active generation always retains a receipt; skip the
+            // repository defensively if that invariant is ever violated.
+            .filter(|(_, active_generation)| self.receipts.contains_key(active_generation))
+            .map(|(repository, active_generation)| RepositoryListEntryDto {
+                repository: *repository,
+                active_generation: *active_generation,
+                languages: vec![FIRST_SLICE_LANGUAGE.to_owned()],
+                structural_freshness: freshness_label(
+                    FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
+                )
+                .to_owned(),
+                semantic_freshness: freshness_label(
+                    FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan,
+                )
+                .to_owned(),
+                state: REPOSITORY_STATE_READY.to_owned(),
+            })
+            .collect()
+    }
+
+    /// Returns the active generation, freshness, and coverage for one repository.
+    ///
+    /// The reported generation is the repository's active generation. Freshness
+    /// is derived from [`Self::generation_freshness`] and coverage from the
+    /// active generation's receipt, keeping the result source-free.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError::RepositoryNotFound`] when the repository is
+    /// unknown, or the same generation errors as [`Self::resolve_generation`].
+    pub fn repository_status(
+        &self,
+        repository: RepositoryId,
+    ) -> Result<RepositoryStatusDto, FirstSliceError> {
+        let context = self.resolve_generation(repository, None)?;
+        let freshness = self.generation_freshness(repository, context.generation)?;
+        Ok(RepositoryStatusDto {
+            repository: context.repository,
+            active_generation: context.generation,
+            parent_generation: context.parent,
+            structural_freshness: freshness_label(freshness.structural).to_owned(),
+            semantic_freshness: freshness_label(freshness.semantic).to_owned(),
+            state: REPOSITORY_STATE_READY.to_owned(),
+            coverage: coverage_from_receipt(&context.receipt),
+        })
     }
 }
 

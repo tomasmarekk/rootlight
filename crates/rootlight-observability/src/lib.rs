@@ -50,7 +50,7 @@ const SUPPORT_ENTRY_COUNT_V1: usize = 5;
 const SUPPORT_ENTRY_COUNT_V2: usize = 6;
 const SUPPORT_ENTRY_COUNT_V3: usize = 6;
 const CONTROL_METHOD_COUNT_V2: usize = 8;
-const CONTROL_METHOD_COUNT: usize = 13;
+const CONTROL_METHOD_COUNT: usize = 15;
 const TELEMETRY_OUTCOME_COUNT: usize = 6;
 /// Ordered allow-list for the frozen support archive schema.
 pub const SUPPORT_ENTRY_NAMES: [&str; SUPPORT_ENTRY_COUNT_V1] = [
@@ -386,6 +386,10 @@ pub enum ControlMethod {
     SymbolExplain,
     /// Verified immutable source read.
     SourceRead,
+    /// Bounded repository list.
+    RepositoryList,
+    /// One repository status.
+    RepositoryStatus,
 }
 
 impl ControlMethod {
@@ -404,6 +408,8 @@ impl ControlMethod {
         Self::CodeLocate,
         Self::SymbolExplain,
         Self::SourceRead,
+        Self::RepositoryList,
+        Self::RepositoryStatus,
     ];
 
     const fn index(self) -> usize {
@@ -421,6 +427,8 @@ impl ControlMethod {
             Self::CodeLocate => 10,
             Self::SymbolExplain => 11,
             Self::SourceRead => 12,
+            Self::RepositoryList => 13,
+            Self::RepositoryStatus => 14,
         }
     }
 }

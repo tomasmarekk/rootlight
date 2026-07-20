@@ -146,6 +146,10 @@ pub enum FirstSliceIpcRequest {
     SymbolExplain(daemon::SymbolExplainRequest),
     /// Read exact immutable source references.
     SourceRead(daemon::SourceReadRequest),
+    /// List repositories known to this daemon process.
+    RepositoryList(daemon::RepositoryListRequest),
+    /// Read one repository's active generation status.
+    RepositoryStatus(daemon::RepositoryStatusRequest),
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -161,6 +165,10 @@ pub enum FirstSliceIpcResponse {
     SymbolExplain(daemon::SymbolExplainResponse),
     /// Verified immutable source chunks.
     SourceRead(daemon::SourceReadResponse),
+    /// Bounded repository list.
+    RepositoryList(daemon::RepositoryListResponse),
+    /// One repository status.
+    RepositoryStatus(daemon::RepositoryStatusResponse),
 }
 
 impl FirstSliceIpcResponse {
@@ -177,6 +185,12 @@ impl FirstSliceIpcResponse {
                 daemon::response_envelope::Response::SymbolExplain(response)
             }
             Self::SourceRead(response) => daemon::response_envelope::Response::SourceRead(response),
+            Self::RepositoryList(response) => {
+                daemon::response_envelope::Response::RepositoryList(response)
+            }
+            Self::RepositoryStatus(response) => {
+                daemon::response_envelope::Response::RepositoryStatus(response)
+            }
         }
     }
 }
@@ -5377,6 +5391,12 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::SourceRead(request)) => {
             Ok(Some(FirstSliceIpcRequest::SourceRead(request)))
         }
+        Some(daemon::request_envelope::Request::RepositoryList(request)) => {
+            Ok(Some(FirstSliceIpcRequest::RepositoryList(request)))
+        }
+        Some(daemon::request_envelope::Request::RepositoryStatus(request)) => {
+            Ok(Some(FirstSliceIpcRequest::RepositoryStatus(request)))
+        }
         Some(request) => Err(request),
         None => Ok(None),
     }
@@ -5659,6 +5679,47 @@ fn first_slice_response_correlates(
                 && context.usage.as_ref().is_some_and(|usage| {
                     usage.source_bytes == response.total_source_bytes
                         && Some(usage.results) == u64::try_from(response.chunks.len()).ok()
+                })
+        }
+        (
+            FirstSliceIpcRequest::RepositoryList(request),
+            FirstSliceIpcResponse::RepositoryList(response),
+        ) => {
+            response.repositories.len()
+                <= usize::try_from(request.max_results.unwrap_or(u32::MAX)).unwrap_or(usize::MAX)
+                && response.repositories.iter().all(|entry| {
+                    wire_id_has_len(entry.repository.as_ref().map(|id| &id.value), 16)
+                        && wire_id_has_len(entry.active_generation.as_ref().map(|id| &id.value), 20)
+                        && !entry.languages.is_empty()
+                        && !entry.structural_freshness.is_empty()
+                        && !entry.semantic_freshness.is_empty()
+                        && !entry.state.is_empty()
+                })
+        }
+        (
+            FirstSliceIpcRequest::RepositoryStatus(request),
+            FirstSliceIpcResponse::RepositoryStatus(response),
+        ) => {
+            wire_id_equals(
+                response.repository.as_ref().map(|id| &id.value),
+                request.repository.as_ref().map(|id| &id.value),
+            ) && wire_id_has_len(response.active_generation.as_ref().map(|id| &id.value), 20)
+                && optional_wire_id_has_len(
+                    response.parent_generation.as_ref().map(|id| &id.value),
+                    20,
+                )
+                && !wire_id_equals(
+                    response.parent_generation.as_ref().map(|id| &id.value),
+                    response.active_generation.as_ref().map(|id| &id.value),
+                )
+                && !response.structural_freshness.is_empty()
+                && !response.semantic_freshness.is_empty()
+                && !response.state.is_empty()
+                && response.coverage.iter().all(|entry| {
+                    !entry.language.is_empty()
+                        && !entry.tier.is_empty()
+                        && !entry.status.is_empty()
+                        && entry.indexed_files <= entry.discovered_files
                 })
         }
         _ => false,
@@ -6044,6 +6105,32 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 }
             }
         }
+        FirstSliceIpcRequest::RepositoryList(request) => {
+            if request
+                .max_results
+                .is_some_and(|max| !(1..=1000).contains(&max))
+            {
+                return Err(Box::new(invalid_argument(
+                    "repository list request is invalid",
+                )));
+            }
+            if request
+                .query
+                .as_ref()
+                .is_some_and(|query| query.len() > 2048 || query.as_bytes().contains(&0))
+            {
+                return Err(Box::new(invalid_argument(
+                    "repository list request is invalid",
+                )));
+            }
+        }
+        FirstSliceIpcRequest::RepositoryStatus(request) => {
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_generation_selector(request.generation.as_ref())?;
+        }
     }
     Ok(())
 }
@@ -6151,6 +6238,10 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         Some(daemon::request_envelope::Request::CodeLocate(_)) => ControlMethod::CodeLocate,
         Some(daemon::request_envelope::Request::SymbolExplain(_)) => ControlMethod::SymbolExplain,
         Some(daemon::request_envelope::Request::SourceRead(_)) => ControlMethod::SourceRead,
+        Some(daemon::request_envelope::Request::RepositoryList(_)) => ControlMethod::RepositoryList,
+        Some(daemon::request_envelope::Request::RepositoryStatus(_)) => {
+            ControlMethod::RepositoryStatus
+        }
         None => ControlMethod::Unknown,
     }
 }
@@ -6591,6 +6682,10 @@ fn request_from_wire(
             | daemon::request_envelope::Request::CodeLocate(_)
             | daemon::request_envelope::Request::SymbolExplain(_)
             | daemon::request_envelope::Request::SourceRead(_),
+        ) => Err(Box::new(first_slice_unavailable())),
+        Some(
+            daemon::request_envelope::Request::RepositoryList(_)
+            | daemon::request_envelope::Request::RepositoryStatus(_),
         ) => Err(Box::new(first_slice_unavailable())),
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
     }

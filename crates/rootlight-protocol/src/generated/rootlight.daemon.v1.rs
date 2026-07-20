@@ -49,7 +49,7 @@ pub struct RequestEnvelope {
     pub timeout_ms: ::core::option::Option<u32>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -95,6 +95,12 @@ pub mod request_envelope {
         #[prost(message, tag = "34")]
         #[allow(missing_docs)]
         SourceRead(super::SourceReadRequest),
+        #[prost(message, tag = "35")]
+        #[allow(missing_docs)]
+        RepositoryList(super::RepositoryListRequest),
+        #[prost(message, tag = "36")]
+        #[allow(missing_docs)]
+        RepositoryStatus(super::RepositoryStatusRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -105,7 +111,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -151,6 +157,12 @@ pub mod response_envelope {
         #[prost(message, tag = "34")]
         #[allow(missing_docs)]
         SourceRead(super::SourceReadResponse),
+        #[prost(message, tag = "35")]
+        #[allow(missing_docs)]
+        RepositoryList(super::RepositoryListResponse),
+        #[prost(message, tag = "36")]
+        #[allow(missing_docs)]
+        RepositoryStatus(super::RepositoryStatusResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -858,6 +870,105 @@ pub struct SourceReadResponse {
     #[prost(bool, tag = "5")]
     #[allow(missing_docs)]
     pub truncated: bool,
+}
+/// Requests the bounded list of repositories known to this daemon process.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryListRequest {
+    #[prost(uint32, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub max_results: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub query: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// One repository entry in the bounded repository list.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryListEntry {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub active_generation: ::core::option::Option<
+        super::super::common::v1::GenerationId,
+    >,
+    #[prost(string, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub languages: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "4")]
+    #[allow(missing_docs)]
+    pub structural_freshness: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    #[allow(missing_docs)]
+    pub semantic_freshness: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    #[allow(missing_docs)]
+    pub state: ::prost::alloc::string::String,
+}
+/// Returns the bounded list of repositories with their active generation.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryListResponse {
+    #[prost(message, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub repositories: ::prost::alloc::vec::Vec<RepositoryListEntry>,
+}
+/// Requests the status of one repository known to this daemon process.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryStatusRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+}
+/// One language-scoped coverage entry for one repository generation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryCoverageEntry {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub language: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub tier: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub status: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub discovered_files: u64,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub indexed_files: u64,
+}
+/// Reports one repository's active generation, freshness, and coverage.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryStatusResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub active_generation: ::core::option::Option<
+        super::super::common::v1::GenerationId,
+    >,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub parent_generation: ::core::option::Option<
+        super::super::common::v1::GenerationId,
+    >,
+    #[prost(string, tag = "4")]
+    #[allow(missing_docs)]
+    pub structural_freshness: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    #[allow(missing_docs)]
+    pub semantic_freshness: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    #[allow(missing_docs)]
+    pub state: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "7")]
+    #[allow(missing_docs)]
+    pub coverage: ::prost::alloc::vec::Vec<RepositoryCoverageEntry>,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]

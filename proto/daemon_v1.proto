@@ -38,6 +38,8 @@ message RequestEnvelope {
     CodeLocateRequest code_locate = 32;
     SymbolExplainRequest symbol_explain = 33;
     SourceReadRequest source_read = 34;
+    RepositoryListRequest repository_list = 35;
+    RepositoryStatusRequest repository_status = 36;
   }
 }
 
@@ -57,6 +59,8 @@ message ResponseEnvelope {
     CodeLocateResponse code_locate = 32;
     SymbolExplainResponse symbol_explain = 33;
     SourceReadResponse source_read = 34;
+    RepositoryListResponse repository_list = 35;
+    RepositoryStatusResponse repository_status = 36;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -484,4 +488,51 @@ message SourceReadResponse {
   repeated FirstSliceSourceChunk chunks = 3;
   uint64 total_source_bytes = 4;
   bool truncated = 5;
+}
+
+// Requests the bounded list of repositories known to this daemon process.
+message RepositoryListRequest {
+  optional uint32 max_results = 1;
+  optional string query = 2;
+}
+
+// One repository entry in the bounded repository list.
+message RepositoryListEntry {
+  rootlight.common.v1.RepositoryId repository = 1;
+  rootlight.common.v1.GenerationId active_generation = 2;
+  repeated string languages = 3;
+  string structural_freshness = 4;
+  string semantic_freshness = 5;
+  string state = 6;
+}
+
+// Returns the bounded list of repositories with their active generation.
+message RepositoryListResponse {
+  repeated RepositoryListEntry repositories = 1;
+}
+
+// Requests the status of one repository known to this daemon process.
+message RepositoryStatusRequest {
+  rootlight.common.v1.RepositoryId repository = 1;
+  GenerationSelector generation = 2;
+}
+
+// One language-scoped coverage entry for one repository generation.
+message RepositoryCoverageEntry {
+  string language = 1;
+  string tier = 2;
+  string status = 3;
+  uint64 discovered_files = 4;
+  uint64 indexed_files = 5;
+}
+
+// Reports one repository's active generation, freshness, and coverage.
+message RepositoryStatusResponse {
+  rootlight.common.v1.RepositoryId repository = 1;
+  rootlight.common.v1.GenerationId active_generation = 2;
+  optional rootlight.common.v1.GenerationId parent_generation = 3;
+  string structural_freshness = 4;
+  string semantic_freshness = 5;
+  string state = 6;
+  repeated RepositoryCoverageEntry coverage = 7;
 }
