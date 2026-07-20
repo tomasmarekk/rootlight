@@ -96,6 +96,25 @@ impl QueryOperator {
             Self::Limit => 1,
         }
     }
+
+    /// Stable static display name used in plan explanations.
+    ///
+    /// Returning a borrowed static str avoids allocating and permanently
+    /// leaking one formatted string per operator on every `explain` call,
+    /// which would otherwise grow without bound in a long-running server.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scan => "Scan",
+            Self::Filter => "Filter",
+            Self::Project => "Project",
+            Self::Join => "Join",
+            Self::Aggregate => "Aggregate",
+            Self::Traverse => "Traverse",
+            Self::Sort => "Sort",
+            Self::Limit => "Limit",
+        }
+    }
 }
 
 /// A validated advanced query plan with static cost estimate.
@@ -160,11 +179,7 @@ impl AdvancedQueryPlan {
     /// Returns a human-readable plan explanation for the `explain` flag.
     #[must_use]
     pub fn explain(&self) -> String {
-        let ops: Vec<&str> = self
-            .operators
-            .iter()
-            .map(|op| format!("{op:?}").leak() as &str)
-            .collect();
+        let ops: Vec<&str> = self.operators.iter().map(|op| op.as_str()).collect();
         format!(
             "plan: [{}] depth={} rows<={} traversal<={} cost~={}",
             ops.join(" -> "),
