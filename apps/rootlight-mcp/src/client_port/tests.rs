@@ -9,11 +9,12 @@ use rootlight_client::{
     AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview, ChangeImpact,
     ChangeImpactRiskSummary, ClientError, CodeDead, CodeDeadEntryPointSummary, CodeLocate,
     CoverageStatus, CycleProjection, FlowTrace, FlowTraceFrontier, FlowTraceProjection,
-    GenerationSelector, LocateMode, OperationKind, OperationStage, OperationState, QueryContext,
-    QueryUsage, RecoveryClass, RepositoryCoverageEntry, RepositoryIndex, RepositoryList,
-    RepositoryListEntry, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
-    RequestTimeout, SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
-    TestsSelect, TestsSelectCoverageStrategy,
+    GenerationSelector, LocateMode, OperationKind, OperationStage, OperationState, PlanChange,
+    PlanChangeContextPack, PlanChangeImpactSummary, QueryContext, QueryUsage, RecoveryClass,
+    RepositoryCoverageEntry, RepositoryIndex, RepositoryList, RepositoryListEntry,
+    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, RequestTimeout,
+    SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
+    TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -146,6 +147,16 @@ enum Call {
         min_confidence: Option<u16>,
         include_tests: Option<bool>,
         max_dependents: Option<u16>,
+        timeout: RequestTimeout,
+    },
+    PlanChange {
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        objective: String,
+        objective_text: String,
+        target_symbols: Vec<SymbolId>,
+        target_files: Vec<FileId>,
+        max_steps: Option<u8>,
         timeout: RequestTimeout,
     },
 }
@@ -625,6 +636,47 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     breaking_surface: false,
                     fanout: 0,
                     dynamic_blind_spots: true,
+                },
+            })
+        })
+    }
+
+    fn plan_change(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        objective: String,
+        objective_text: String,
+        target_symbols: Vec<SymbolId>,
+        target_files: Vec<FileId>,
+        max_steps: Option<u8>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<PlanChange> {
+        self.record(Call::PlanChange {
+            repository,
+            generation,
+            objective,
+            objective_text,
+            target_symbols,
+            target_files,
+            max_steps,
+            timeout,
+        });
+        Box::pin(async move {
+            Ok(PlanChange {
+                context: query_context(repository, generation, true),
+                plan: Vec::new(),
+                affected_scope: PlanChangeImpactSummary {
+                    affected_symbols: 0,
+                    affected_files: 0,
+                    risk_level: "none".to_owned(),
+                    touches_public_surface: false,
+                },
+                test_plan: Vec::new(),
+                open_decisions: Vec::new(),
+                context_pack_request: PlanChangeContextPack {
+                    symbols: Vec::new(),
+                    files: Vec::new(),
                 },
             })
         })

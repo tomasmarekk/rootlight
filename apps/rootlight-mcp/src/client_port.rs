@@ -8,11 +8,11 @@ use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time:
 use rootlight_client::{
     AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview, ChangeImpact,
     Client, ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace, GenerationSelector,
-    LocateMode, RepositoryIndex, RepositoryList, RepositoryOperationAction,
+    LocateMode, PlanChange, RepositoryIndex, RepositoryList, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceRead, SourceReference,
     SymbolExplain, SymbolRelationships, TestsSelect,
 };
-use rootlight_ids::{OperationId, RepositoryId, SymbolId};
+use rootlight_ids::{FileId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
 use rootlight_mcp_contract::vertical::{
     AnalysisTier, CacheStatus, Freshness, IndexMode, IndexPlanScope, IndexPlanSummary,
@@ -24,12 +24,12 @@ use crate::{
     ArchitectureOverviewPortResponse, ChangeImpactPortRequest, ChangeImpactPortResponse,
     ClientPortError, ClientPortFuture, CodeDeadPortRequest, CodeDeadPortResponse,
     CodeLocatePortRequest, CodeLocatePortResponse, FirstSliceClientPort, FlowTracePortRequest,
-    FlowTracePortResponse, OperationStatusPortRequest, ReadResponseMetadata,
-    RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
-    RepositoryStatusPortRequest, RequestCancellation, SourceReadPortRequest,
-    SourceReadPortResponse, SymbolExplainPortRequest, SymbolExplainPortResponse,
-    SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse, TestsSelectPortRequest,
-    TestsSelectPortResponse,
+    FlowTracePortResponse, OperationStatusPortRequest, PlanChangePortRequest,
+    PlanChangePortResponse, ReadResponseMetadata, RepositoryIndexPortRequest,
+    RepositoryIndexPortResponse, RepositoryListPortRequest, RepositoryStatusPortRequest,
+    RequestCancellation, SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
+    SymbolExplainPortResponse, SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
+    TestsSelectPortRequest, TestsSelectPortResponse,
 };
 
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -208,6 +208,22 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         max_dependents: Option<u16>,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<ChangeImpact>;
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded plan change dimension"
+    )]
+    fn plan_change(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        objective: String,
+        objective_text: String,
+        target_symbols: Vec<SymbolId>,
+        target_files: Vec<FileId>,
+        max_steps: Option<u8>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<PlanChange>;
 }
 
 struct LiveAsyncFirstSliceClient {
@@ -524,6 +540,34 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     min_confidence,
                     include_tests,
                     max_dependents,
+                    timeout,
+                )
+                .await
+        })
+    }
+
+    fn plan_change(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        objective: String,
+        objective_text: String,
+        target_symbols: Vec<SymbolId>,
+        target_files: Vec<FileId>,
+        max_steps: Option<u8>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<PlanChange> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .plan_change_async(
+                    repository,
+                    generation,
+                    &objective,
+                    &objective_text,
+                    &target_symbols,
+                    &target_files,
+                    max_steps,
                     timeout,
                 )
                 .await
@@ -906,6 +950,31 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
             Ok(ChangeImpactPortResponse::new(result, metadata))
         })
     }
+
+    fn plan_change(
+        &self,
+        request: PlanChangePortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<PlanChangePortResponse> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let result = client
+                .plan_change(
+                    request.repository(),
+                    request.generation(),
+                    request.objective().to_owned(),
+                    request.objective_text().to_owned(),
+                    request.target_symbols().to_vec(),
+                    request.target_files().to_vec(),
+                    request.max_steps(),
+                    request_timeout()?,
+                )
+                .await
+                .map_err(map_client_error)?;
+            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            Ok(PlanChangePortResponse::new(result, metadata))
+        })
+    }
 }
 
 /// Source-free first-slice port used when synchronous daemon setup is unavailable.
@@ -1022,6 +1091,14 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
         _request: ChangeImpactPortRequest,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<ChangeImpactPortResponse> {
+        unavailable()
+    }
+
+    fn plan_change(
+        &self,
+        _request: PlanChangePortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<PlanChangePortResponse> {
         unavailable()
     }
 }

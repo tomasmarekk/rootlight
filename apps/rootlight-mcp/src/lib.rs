@@ -33,12 +33,12 @@ pub use executor::{
     ArchitectureOverviewPortResponse, ChangeImpactPortRequest, ChangeImpactPortResponse,
     ClientPortError, ClientPortFuture, CodeDeadPortRequest, CodeDeadPortResponse,
     CodeLocatePortRequest, CodeLocatePortResponse, FirstSliceClientPort, FirstSliceToolExecutor,
-    FlowTracePortRequest, FlowTracePortResponse, OperationStatusPortRequest, ReadResponseMetadata,
-    RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
-    RepositoryStatusPortRequest, SourceReadPortRequest, SourceReadPortResponse,
-    SymbolExplainPortRequest, SymbolExplainPortResponse, SymbolRelationshipsPortRequest,
-    SymbolRelationshipsPortResponse, TestsSelectPortRequest, TestsSelectPortResponse,
-    ToolExecutorBuildError,
+    FlowTracePortRequest, FlowTracePortResponse, OperationStatusPortRequest, PlanChangePortRequest,
+    PlanChangePortResponse, ReadResponseMetadata, RepositoryIndexPortRequest,
+    RepositoryIndexPortResponse, RepositoryListPortRequest, RepositoryStatusPortRequest,
+    SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
+    SymbolExplainPortResponse, SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
+    TestsSelectPortRequest, TestsSelectPortResponse, ToolExecutorBuildError,
 };
 pub use tools::{
     ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture, ToolExecutor, ToolRegistryError,

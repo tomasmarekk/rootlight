@@ -16,12 +16,14 @@ use rootlight_client::{
     RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, SourceRead,
     SymbolExplain,
 };
-use rootlight_ids::{OperationId, RepositoryId, SymbolId};
+use rootlight_ids::{FileId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{EntityKind as IrEntityKind, LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::change::{
-    ChangeClassification, ChangeImpactData, ChangeImpactInput, ImpactEntry, ImpactGroup,
-    ImpactRiskSummary, RankedTest, RelationPolicy, ResolvedChange, RiskLevel, TestCandidate,
-    TestCoverageStrategy, TestGap, TestKind, TestsSelectData, TestsSelectInput,
+    ChangeClassification, ChangeImpactData, ChangeImpactInput, ChangePlanStep, ContextPackRequest,
+    ImpactEntry, ImpactGroup, ImpactRiskSummary, PlanChangeData, PlanChangeInput, PlanDecision,
+    PlanImpactSummary, PlanObjective, PlanTargetSelector, RankedTest, RelationPolicy,
+    ResolvedChange, RiskLevel, TestCandidate, TestCoverageStrategy, TestGap, TestKind,
+    TestsSelectData, TestsSelectInput,
 };
 use rootlight_mcp_contract::intent::{
     ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesData, ArchitectureCyclesInput,
@@ -197,6 +199,14 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         request: ChangeImpactPortRequest,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<ChangeImpactPortResponse>;
+
+    /// Builds a bounded ordered change plan for an explicit target set over one
+    /// generation.
+    fn plan_change(
+        &self,
+        request: PlanChangePortRequest,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<PlanChangePortResponse>;
 }
 
 /// Source-free failure emitted by an injected daemon client port.
@@ -1006,6 +1016,77 @@ impl ChangeImpactPortResponse {
     }
 }
 
+/// Normalized `plan.change` request ready for the daemon client port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanChangePortRequest {
+    repository: RepositoryId,
+    generation: client::GenerationSelector,
+    objective: String,
+    objective_text: String,
+    target_symbols: Vec<SymbolId>,
+    target_files: Vec<FileId>,
+    max_steps: Option<u8>,
+}
+
+impl PlanChangePortRequest {
+    /// Returns the selected repository.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the active or explicit immutable-generation selector.
+    #[must_use]
+    pub const fn generation(&self) -> client::GenerationSelector {
+        self.generation
+    }
+
+    /// Returns the objective wire label.
+    #[must_use]
+    pub fn objective(&self) -> &str {
+        &self.objective
+    }
+
+    /// Returns the concrete objective description.
+    #[must_use]
+    pub fn objective_text(&self) -> &str {
+        &self.objective_text
+    }
+
+    /// Returns the explicit target symbol identifiers.
+    #[must_use]
+    pub fn target_symbols(&self) -> &[SymbolId] {
+        &self.target_symbols
+    }
+
+    /// Returns the explicit target file identifiers.
+    #[must_use]
+    pub fn target_files(&self) -> &[FileId] {
+        &self.target_files
+    }
+
+    /// Returns the optional step cap.
+    #[must_use]
+    pub const fn max_steps(&self) -> Option<u8> {
+        self.max_steps
+    }
+}
+
+/// Detected daemon change-plan data plus mandatory MCP read metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanChangePortResponse {
+    result: client::PlanChange,
+    metadata: ReadResponseMetadata,
+}
+
+impl PlanChangePortResponse {
+    /// Creates a complete `plan.change` response for MCP mapping.
+    #[must_use]
+    pub const fn new(result: client::PlanChange, metadata: ReadResponseMetadata) -> Self {
+        Self { result, metadata }
+    }
+}
+
 /// Normalized exact-reference `source.read` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceReadPortRequest {
@@ -1189,9 +1270,12 @@ where
                 VerticalTool::ChangeImpact => {
                     execute_change_impact(port, arguments, cancellation, &unsupported).await
                 }
-                VerticalTool::HistoryCompare
-                | VerticalTool::PlanChange
-                | VerticalTool::QueryAdvanced => execute_intent_fallback(&unavailable).await,
+                VerticalTool::PlanChange => {
+                    execute_plan_change(port, arguments, cancellation, &unsupported).await
+                }
+                VerticalTool::HistoryCompare | VerticalTool::QueryAdvanced => {
+                    execute_intent_fallback(&unavailable).await
+                }
                 VerticalTool::SymbolRelationships => {
                     execute_symbol_relationships(port, arguments, cancellation, &unsupported).await
                 }
@@ -3188,6 +3272,136 @@ fn risk_level_from_label(label: &str) -> Result<RiskLevel, ToolExecutionError> {
 fn ir_entity_kind_from_label(label: &str) -> Result<IrEntityKind, ToolExecutionError> {
     serde_json::from_value(Value::String(label.to_owned()))
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+async fn execute_plan_change<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: PlanChangeInput = decode_input(arguments)?;
+    let request = normalize_plan_change(input, unsupported)?;
+    let expected = request.clone();
+    let future = port.plan_change(request, cancellation.clone());
+    let response = await_port(future, cancellation).await?;
+    let output = map_plan_change(response, &expected)?;
+    serialize_success(output)
+}
+
+fn normalize_plan_change(
+    input: PlanChangeInput,
+    unsupported: &PublicError,
+) -> Result<PlanChangePortRequest, ToolExecutionError> {
+    let repository = repository_id(input.repository, unsupported)?;
+    // Change context, user constraints, custom budgets, and non-compact profiles
+    // are not served by this slice.
+    if input.change_context.is_some()
+        || input.constraints.is_some()
+        || input.budget.is_some()
+        || !compact_profile(input.profile)
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    let mut target_symbols = Vec::new();
+    let mut target_files = Vec::new();
+    for target in input.targets {
+        match target {
+            PlanTargetSelector::Symbol(symbol) => target_symbols.push(symbol.symbol_id),
+            PlanTargetSelector::File(file) => target_files.push(file.file_id),
+        }
+    }
+    // An empty target set carries no resolvable target.
+    if target_symbols.is_empty() && target_files.is_empty() {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    Ok(PlanChangePortRequest {
+        repository,
+        generation: client_generation(input.generation),
+        objective: plan_objective_label(input.objective).to_owned(),
+        objective_text: input.objective_text,
+        target_symbols,
+        target_files,
+        max_steps: input.max_steps,
+    })
+}
+
+/// Returns the stable wire label for one typed plan objective.
+const fn plan_objective_label(objective: PlanObjective) -> &'static str {
+    match objective {
+        PlanObjective::BugFix => "bug_fix",
+        PlanObjective::Refactor => "refactor",
+        PlanObjective::Explanation => "explanation",
+        PlanObjective::Migration => "migration",
+        PlanObjective::Review => "review",
+    }
+}
+
+fn map_plan_change(
+    response: PlanChangePortResponse,
+    request: &PlanChangePortRequest,
+) -> Result<ReadEnvelope<PlanChangeData>, ToolExecutionError> {
+    validate_query_context(
+        &response.result.context,
+        request.repository,
+        request.generation,
+    )?;
+    let mut plan = Vec::new();
+    plan.try_reserve_exact(response.result.plan.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for step in response.result.plan {
+        plan.push(ChangePlanStep {
+            step: step.step,
+            action: step.action,
+            targets: step.targets,
+            depends_on: step.depends_on,
+            risks: step.risks,
+            verification: step.verification,
+        });
+    }
+    let scope = response.result.affected_scope;
+    let mut test_plan = Vec::new();
+    test_plan
+        .try_reserve_exact(response.result.test_plan.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for test in response.result.test_plan {
+        test_plan.push(TestCandidate {
+            test_id: test.test_id,
+            relevance: test.relevance,
+            why: test.why,
+            estimated_cost_ms: test.estimated_cost_ms,
+        });
+    }
+    let mut open_decisions = Vec::new();
+    open_decisions
+        .try_reserve_exact(response.result.open_decisions.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for decision in response.result.open_decisions {
+        open_decisions.push(PlanDecision {
+            question: decision.question,
+            recommended_default: decision.recommended_default,
+        });
+    }
+    let pack = response.result.context_pack_request;
+    let data = PlanChangeData {
+        plan,
+        affected_scope: PlanImpactSummary {
+            affected_symbols: scope.affected_symbols,
+            affected_files: scope.affected_files,
+            risk_level: risk_level_from_label(&scope.risk_level)?,
+            touches_public_surface: scope.touches_public_surface,
+        },
+        test_plan,
+        open_decisions,
+        context_pack_request: ContextPackRequest {
+            symbols: pack.symbols,
+            files: pack.files,
+        },
+    };
+    map_read_envelope(response.result.context, response.metadata, data, false)
 }
 
 async fn execute_source_read<P>(

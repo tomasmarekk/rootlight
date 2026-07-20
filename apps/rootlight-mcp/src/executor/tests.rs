@@ -20,22 +20,24 @@ use rootlight_client::{
     ArchitectureOverviewHotspot as ClientArchitectureHotspot, ChangeImpact as ClientChangeImpact,
     ChangeImpactEntry as ClientImpactEntry, ChangeImpactGroup as ClientImpactGroup,
     ChangeImpactResolvedChange as ClientResolvedChange,
-    ChangeImpactRiskSummary as ClientRiskSummary, CodeDead as ClientCodeDead,
-    CodeDeadBlindSpot as ClientBlindSpot, CodeDeadCandidate as ClientDeadCandidate,
-    CodeDeadEntryPointSummary as ClientEntryPointSummary,
+    ChangeImpactRiskSummary as ClientRiskSummary, ChangeImpactTest as ClientChangeImpactTest,
+    CodeDead as ClientCodeDead, CodeDeadBlindSpot as ClientBlindSpot,
+    CodeDeadCandidate as ClientDeadCandidate, CodeDeadEntryPointSummary as ClientEntryPointSummary,
     CodeDeadSuppressionRule as ClientSuppressionRule, CoverageStatus as ClientCoverage,
     Cycle as ClientCycle, CycleBreakCandidate as ClientCycleBreak,
     CycleComponent as ClientCycleComponent, CycleProjection as ClientCycleProjection,
     FlowTrace as ClientFlowTrace, FlowTraceEdge as ClientTraceEdge,
     FlowTraceFrontier as ClientTraceFrontier, FlowTracePath as ClientTracePath,
     FlowTraceProjection as ClientTraceProjection, LocateHit, OperationKind, OperationStage,
-    OperationState as ClientOperationState, QueryContext, QueryUsage, RecoveryClass,
-    RelationshipGroup as ClientRelationshipGroup, RelationshipTarget as ClientRelationshipTarget,
-    RepositoryCoverageEntry, RepositoryList, RepositoryListEntry, RepositoryStatus,
-    SourceChunk as ClientSourceChunk, SymbolExplanation as ClientExplanation,
-    SymbolRelationships as ClientRelationships, TestsSelect as ClientTestsSelect,
-    TestsSelectCoverageStrategy as ClientCoverageStrategy, TestsSelectGap as ClientTestGap,
-    TestsSelectRankedTest as ClientRankedTest,
+    OperationState as ClientOperationState, PlanChange as ClientPlanChange,
+    PlanChangeContextPack as ClientPlanContextPack, PlanChangeDecision as ClientPlanDecision,
+    PlanChangeImpactSummary as ClientPlanImpactSummary, PlanChangeStep as ClientPlanStep,
+    QueryContext, QueryUsage, RecoveryClass, RelationshipGroup as ClientRelationshipGroup,
+    RelationshipTarget as ClientRelationshipTarget, RepositoryCoverageEntry, RepositoryList,
+    RepositoryListEntry, RepositoryStatus, SourceChunk as ClientSourceChunk,
+    SymbolExplanation as ClientExplanation, SymbolRelationships as ClientRelationships,
+    TestsSelect as ClientTestsSelect, TestsSelectCoverageStrategy as ClientCoverageStrategy,
+    TestsSelectGap as ClientTestGap, TestsSelectRankedTest as ClientRankedTest,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{
@@ -44,7 +46,10 @@ use rootlight_ir::{
 use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
     SymbolExplainOutput,
-    change::{ChangeClassification, ChangeImpactOutput, RiskLevel, TestKind, TestsSelectOutput},
+    change::{
+        ChangeClassification, ChangeImpactOutput, PlanChangeOutput, RiskLevel, TestKind,
+        TestsSelectOutput,
+    },
     context::{ContextPackOutput, QueryBatchOutput},
     intent::{
         ArchitectureCyclesOutput, ArchitectureOverviewOutput, ArchitectureView, CodeDeadOutput,
@@ -88,6 +93,7 @@ enum FakeOutcome {
     ArchitectureOverview(Result<ArchitectureOverviewPortResponse, ClientPortError>),
     TestsSelect(Result<TestsSelectPortResponse, ClientPortError>),
     ChangeImpact(Result<ChangeImpactPortResponse, ClientPortError>),
+    PlanChange(Result<PlanChangePortResponse, ClientPortError>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +112,7 @@ enum ObservedCall {
     ArchitectureOverview(ArchitectureOverviewPortRequest),
     TestsSelect(TestsSelectPortRequest),
     ChangeImpact(ChangeImpactPortRequest),
+    PlanChange(PlanChangePortRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -325,6 +332,19 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::ChangeImpact(request));
         let outcome = match &self.outcome {
             FakeOutcome::ChangeImpact(outcome) => outcome.clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { outcome })
+    }
+
+    fn plan_change(
+        &self,
+        request: PlanChangePortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<PlanChangePortResponse> {
+        self.record(ObservedCall::PlanChange(request));
+        let outcome = match &self.outcome {
+            FakeOutcome::PlanChange(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1969,6 +1989,126 @@ async fn change_impact_rejects_a_revision_range_diff() {
     )
     .await
     .expect_err("revision range diffs are rejected before the port");
+    let public = error
+        .public_error()
+        .expect("unsupported option is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn plan_change_maps_steps_impact_summary_decisions_and_context_pack() {
+    let response = PlanChangePortResponse::new(
+        ClientPlanChange {
+            context: context(1, 0),
+            plan: vec![
+                ClientPlanStep {
+                    step: 1,
+                    action: "Inspect the target symbols and reproduce the reported defect."
+                        .to_owned(),
+                    targets: vec![symbol()],
+                    depends_on: Vec::new(),
+                    risks: Vec::new(),
+                    verification: Some("confirm current behavior of the target symbols".to_owned()),
+                },
+                ClientPlanStep {
+                    step: 2,
+                    action: "Apply the minimal fix to the target symbols.".to_owned(),
+                    targets: vec![symbol()],
+                    depends_on: vec![1],
+                    risks: vec!["regression".to_owned()],
+                    verification: None,
+                },
+            ],
+            affected_scope: ClientPlanImpactSummary {
+                affected_symbols: 1,
+                affected_files: 1,
+                risk_level: "low".to_owned(),
+                touches_public_surface: false,
+            },
+            test_plan: vec![ClientChangeImpactTest {
+                test_id: "test-id".to_owned(),
+                relevance: 800,
+                why: vec!["via:calls".to_owned()],
+                estimated_cost_ms: None,
+            }],
+            open_decisions: vec![ClientPlanDecision {
+                question: "confirm_behavior_preservation".to_owned(),
+                recommended_default: "preserve_observable_behavior".to_owned(),
+            }],
+            context_pack_request: ClientPlanContextPack {
+                symbols: vec![symbol()],
+                files: vec![file()],
+            },
+        },
+        metadata("plan-change-1"),
+    );
+    let harness = Harness::new(FakeOutcome::PlanChange(Ok(response)));
+    let output: PlanChangeOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::PlanChange,
+            json!({
+                "repository": {"repository_id": repository()},
+                "objective": "bug_fix",
+                "objective_text": "fix the defect",
+                "targets": [{"symbol_id": symbol()}]
+            }),
+        )
+        .await
+        .expect("plan change maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected plan change success");
+    };
+    assert_eq!(output.data.plan.len(), 2);
+    assert_eq!(output.data.plan[0].step, 1);
+    assert_eq!(output.data.plan[0].targets, vec![symbol()]);
+    assert!(output.data.plan[0].depends_on.is_empty());
+    assert_eq!(output.data.plan[1].step, 2);
+    assert_eq!(output.data.plan[1].depends_on, vec![1]);
+    assert_eq!(output.data.plan[1].risks, vec!["regression".to_owned()]);
+    assert_eq!(output.data.affected_scope.affected_symbols, 1);
+    assert_eq!(output.data.affected_scope.affected_files, 1);
+    assert_eq!(output.data.affected_scope.risk_level, RiskLevel::Low);
+    assert!(!output.data.affected_scope.touches_public_surface);
+    assert_eq!(output.data.test_plan.len(), 1);
+    assert_eq!(output.data.test_plan[0].test_id, "test-id");
+    assert_eq!(output.data.open_decisions.len(), 1);
+    assert_eq!(
+        output.data.open_decisions[0].question,
+        "confirm_behavior_preservation"
+    );
+    assert_eq!(output.data.context_pack_request.symbols, vec![symbol()]);
+    assert_eq!(output.data.context_pack_request.files, vec![file()]);
+    let ObservedCall::PlanChange(request) = harness.only_call() else {
+        panic!("expected plan change call");
+    };
+    assert_eq!(request.repository(), repository());
+    assert_eq!(request.objective(), "bug_fix");
+    assert_eq!(request.objective_text(), "fix the defect");
+    assert_eq!(request.target_symbols(), &[symbol()]);
+    assert_eq!(request.target_files(), &[] as &[FileId]);
+    assert_eq!(request.max_steps(), None);
+}
+
+#[tokio::test]
+async fn plan_change_rejects_a_change_context() {
+    let harness = Harness::new(FakeOutcome::PlanChange(Err(ClientPortError::Executor)));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::PlanChange,
+        json!({
+            "repository": {"repository_id": repository()},
+            "objective": "bug_fix",
+            "objective_text": "fix the defect",
+            "targets": [{"symbol_id": symbol()}],
+            "change_context": {"symbol_ids": [symbol()]}
+        }),
+    )
+    .await
+    .expect_err("change context is rejected before the port");
     let public = error
         .public_error()
         .expect("unsupported option is a checked public error");
