@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod batch;
 mod client_port;
 mod executor;
 mod json;
