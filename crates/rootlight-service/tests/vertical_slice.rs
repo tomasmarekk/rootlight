@@ -678,3 +678,82 @@ fn symbol_relationships_reports_honest_results_for_a_known_symbol() {
         RepositoryDataTrust::UntrustedRepositoryData
     );
 }
+
+#[test]
+fn flow_trace_reports_an_honest_empty_trace_for_a_known_symbol() {
+    // The first-slice oracle records a direct call as a `DispatchCandidate`
+    // occurrence and structural containment as a file-to-entity `Contains`
+    // relation. Neither predicate belongs to a served relation family, so an
+    // honest `flow.trace` from the caller reports no fabricated paths while
+    // still proving the generation-pinned query path, the echoed projection, a
+    // sane frontier bounded to the source node, and mandatory trust labeling.
+    let source =
+        "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+    let caller = service
+        .code_locate(
+            indexed.generation,
+            "caller".to_owned(),
+            LocateMode::Exact,
+            8,
+            &cancellation,
+        )
+        .expect("locate caller")
+        .data
+        .hits
+        .into_iter()
+        .next()
+        .expect("caller is located")
+        .symbol;
+
+    let trace = service
+        .flow_trace(
+            indexed.generation,
+            caller,
+            None,
+            vec![
+                RelationFamily::Calls,
+                RelationFamily::CalledBy,
+                RelationFamily::References,
+                RelationFamily::Types,
+                RelationFamily::Implements,
+                RelationFamily::Imports,
+            ],
+            Some(RelationDirection::Both),
+            0,
+            3,
+            10,
+            &cancellation,
+        )
+        .expect("flow trace query succeeds");
+
+    // The trace is exact and unbudgeted: no served family yields an
+    // entity-to-entity edge for this fixture, so no path is fabricated. The
+    // frontier still honestly reports the single reached source node.
+    assert!(trace.data.paths.is_empty());
+    assert_eq!(trace.data.frontier.reached_nodes, 1);
+    assert_eq!(trace.data.frontier.examined_edges, 0);
+    assert!(!trace.data.frontier.truncated);
+    assert_eq!(trace.data.frontier.unresolved_boundaries, 0);
+    assert_eq!(
+        trace.data.projection.families,
+        vec![
+            RelationFamily::Calls,
+            RelationFamily::CalledBy,
+            RelationFamily::References,
+            RelationFamily::Types,
+            RelationFamily::Implements,
+            RelationFamily::Imports,
+        ]
+    );
+    assert_eq!(trace.data.projection.min_confidence, 0);
+    assert_eq!(
+        trace.data.trust,
+        RepositoryDataTrust::UntrustedRepositoryData
+    );
+}
