@@ -185,7 +185,11 @@ impl AuthenticatedCursor {
         payload.extend_from_slice(&self.context.query_fingerprint);
         payload.extend_from_slice(&self.context.page_size.to_le_bytes());
         payload.extend_from_slice(&self.issued_at_ms.to_le_bytes());
-        payload.extend_from_slice(&u16::try_from(self.last_sort_key.len()).unwrap_or(u16::MAX).to_le_bytes());
+        payload.extend_from_slice(
+            &u16::try_from(self.last_sort_key.len())
+                .unwrap_or(u16::MAX)
+                .to_le_bytes(),
+        );
         payload.extend_from_slice(&self.last_sort_key);
         payload.extend_from_slice(&self.tag);
         payload
@@ -310,7 +314,11 @@ fn compute_tag(
     hasher.update(&context.query_fingerprint);
     hasher.update(&context.page_size.to_le_bytes());
     hasher.update(&issued_at_ms.to_le_bytes());
-    hasher.update(&u16::try_from(last_sort_key.len()).unwrap_or(u16::MAX).to_le_bytes());
+    hasher.update(
+        &u16::try_from(last_sort_key.len())
+            .unwrap_or(u16::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(last_sort_key);
     *hasher.finalize().as_bytes()
 }
