@@ -199,7 +199,7 @@ pub fn optimize_pack(
     candidates: &mut [EvidenceCandidate],
     token_budget: u32,
 ) -> Result<PackResult, PackError> {
-    if token_budget < MIN_PACK_TOKENS || token_budget > MAX_PACK_TOKENS {
+    if !(MIN_PACK_TOKENS..=MAX_PACK_TOKENS).contains(&token_budget) {
         return Err(PackError::InvalidBudget);
     }
 

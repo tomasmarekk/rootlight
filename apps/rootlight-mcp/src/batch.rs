@@ -5,7 +5,6 @@
 //! graph, restricted typed bindings, shared budgets, deterministic request-order
 //! output, per-operation errors, and optional fail-fast behavior.
 
-use std::collections::BTreeSet;
 
 use rootlight_mcp_contract::McpTool;
 

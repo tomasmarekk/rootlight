@@ -16,7 +16,7 @@ const BYTES_PER_TOKEN: usize = 4;
 /// are recorded in benchmark evidence separately.
 #[must_use]
 pub const fn estimate_tokens(bytes: usize) -> u64 {
-    ((bytes + BYTES_PER_TOKEN - 1) / BYTES_PER_TOKEN) as u64
+    bytes.div_ceil(BYTES_PER_TOKEN) as u64
 }
 
 /// Complete accounting for one `tools/list` response under a profile.
