@@ -757,3 +757,62 @@ fn flow_trace_reports_an_honest_empty_trace_for_a_known_symbol() {
         RepositoryDataTrust::UntrustedRepositoryData
     );
 }
+
+#[test]
+fn architecture_cycles_reports_an_honest_empty_result_for_a_known_fixture() {
+    // The first-slice oracle records a direct call as a `DispatchCandidate`
+    // occurrence and structural containment as a file-to-entity `Contains`
+    // relation. Neither predicate belongs to a served relation family, so an
+    // honest `architecture.cycles` over the fixture reports no fabricated
+    // components, cycles, or break candidates while still proving the
+    // generation-pinned query path, the echoed projection, and mandatory trust
+    // labeling.
+    let source =
+        "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    let cycles = service
+        .architecture_cycles(
+            indexed.generation,
+            vec![
+                RelationFamily::Calls,
+                RelationFamily::CalledBy,
+                RelationFamily::References,
+                RelationFamily::Types,
+                RelationFamily::Implements,
+                RelationFamily::Imports,
+            ],
+            2,
+            50,
+            false,
+            &cancellation,
+        )
+        .expect("architecture cycles query succeeds");
+
+    // No served family yields an entity-to-entity edge for this fixture, so no
+    // component, cycle, or break candidate is fabricated.
+    assert!(cycles.data.components.is_empty());
+    assert!(cycles.data.cycles.is_empty());
+    assert!(cycles.data.break_candidates.is_empty());
+    assert_eq!(
+        cycles.data.projection.families,
+        vec![
+            RelationFamily::Calls,
+            RelationFamily::CalledBy,
+            RelationFamily::References,
+            RelationFamily::Types,
+            RelationFamily::Implements,
+            RelationFamily::Imports,
+        ]
+    );
+    assert_eq!(cycles.data.projection.min_confidence, 0);
+    assert_eq!(
+        cycles.data.trust,
+        RepositoryDataTrust::UntrustedRepositoryData
+    );
+}
