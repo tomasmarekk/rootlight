@@ -1,0 +1,448 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/flow.trace/input/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FlowTraceInput",
+  "description": "Strict input for `flow.trace`.",
+  "type": "object",
+  "properties": {
+    "budget": {
+      "description": "Optional response limits.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResponseBudget"
+        }
+      ]
+    },
+    "cross_repository": {
+      "description": "Whether cross-repository traversal is permitted.",
+      "type": "boolean"
+    },
+    "direction": {
+      "description": "Traversal direction.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Direction"
+        }
+      ]
+    },
+    "from": {
+      "description": "Source node for the trace.",
+      "$ref": "#/$defs/NodeSelector"
+    },
+    "generation": {
+      "description": "Immutable generation selector.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationSelector"
+        }
+      ]
+    },
+    "max_depth": {
+      "description": "Maximum traversal depth.",
+      "type": "integer",
+      "format": "uint8",
+      "maximum": 8,
+      "minimum": 1
+    },
+    "max_paths": {
+      "description": "Maximum independently returned paths.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 100,
+      "minimum": 1
+    },
+    "min_confidence": {
+      "description": "Minimum edge confidence threshold.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 1000,
+      "minimum": 0
+    },
+    "path_policy": {
+      "description": "Path selection strategy.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PathPolicy"
+        }
+      ]
+    },
+    "relations": {
+      "description": "Explicit relation allow-list.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RelationKind"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "repository": {
+      "description": "Owning repository.",
+      "$ref": "#/$defs/RepositorySelector"
+    },
+    "response_profile": {
+      "description": "Requested representation.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResponseProfile"
+        }
+      ]
+    },
+    "to": {
+      "description": "Optional target node. Without a target, returns bounded outward traces.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NodeSelector"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "repository",
+    "from",
+    "relations"
+  ],
+  "$defs": {
+    "ActiveGeneration": {
+      "description": "Active-generation keyword.",
+      "oneOf": [
+        {
+          "description": "Select the active generation.",
+          "type": "string",
+          "const": "active"
+        }
+      ]
+    },
+    "Direction": {
+      "description": "Traversal direction for relation queries.",
+      "oneOf": [
+        {
+          "description": "Follow outbound edges from the seed.",
+          "type": "string",
+          "const": "outbound"
+        },
+        {
+          "description": "Follow inbound edges toward the seed.",
+          "type": "string",
+          "const": "inbound"
+        },
+        {
+          "description": "Follow edges in both directions.",
+          "type": "string",
+          "const": "both"
+        }
+      ]
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "GenerationSelector": {
+      "description": "Generation selector shared by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Resolve the currently active immutable generation.",
+          "$ref": "#/$defs/ActiveGeneration"
+        },
+        {
+          "description": "Pin an explicit immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        }
+      ]
+    },
+    "NodeSelector": {
+      "description": "Node selector for trace endpoints.",
+      "type": "object",
+      "properties": {
+        "database_object_id": {
+          "description": "Database object identifier.",
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "route_id": {
+          "description": "Route identifier for service traces.",
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "service_id": {
+          "description": "Service identifier.",
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "symbol_id": {
+          "description": "Stable symbol identity.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SymbolId"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PathPolicy": {
+      "description": "Path selection policy for trace results.",
+      "oneOf": [
+        {
+          "description": "Prefer shortest paths.",
+          "type": "string",
+          "const": "shortest"
+        },
+        {
+          "description": "Prefer diverse paths through different intermediaries.",
+          "type": "string",
+          "const": "diverse"
+        },
+        {
+          "description": "Prefer paths with highest aggregate confidence.",
+          "type": "string",
+          "const": "highest_confidence"
+        }
+      ]
+    },
+    "ProvenanceLevel": {
+      "description": "Provenance detail requested by a read tool.",
+      "oneOf": [
+        {
+          "description": "Omit provenance detail beyond mandatory source identity.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "Return compact provider and confidence evidence.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "Return maximum bounded provenance evidence.",
+          "type": "string",
+          "const": "full"
+        }
+      ]
+    },
+    "RelationKind": {
+      "description": "Typed relation families accepted by intent tools.",
+      "oneOf": [
+        {
+          "description": "Direct outbound call.",
+          "type": "string",
+          "const": "calls"
+        },
+        {
+          "description": "Inbound caller.",
+          "type": "string",
+          "const": "called_by"
+        },
+        {
+          "description": "Symbol reference or usage.",
+          "type": "string",
+          "const": "references"
+        },
+        {
+          "description": "Type dependency or type-of relation.",
+          "type": "string",
+          "const": "types"
+        },
+        {
+          "description": "Trait or interface implementation.",
+          "type": "string",
+          "const": "implements"
+        },
+        {
+          "description": "Import or module dependency.",
+          "type": "string",
+          "const": "imports"
+        },
+        {
+          "description": "Test coverage relation.",
+          "type": "string",
+          "const": "tests"
+        },
+        {
+          "description": "Code ownership or authorship.",
+          "type": "string",
+          "const": "ownership"
+        },
+        {
+          "description": "Service or RPC call.",
+          "type": "string",
+          "const": "service_call"
+        },
+        {
+          "description": "HTTP route invocation.",
+          "type": "string",
+          "const": "calls_route"
+        },
+        {
+          "description": "Message publish or consume.",
+          "type": "string",
+          "const": "messaging"
+        },
+        {
+          "description": "Database table read.",
+          "type": "string",
+          "const": "reads_table"
+        },
+        {
+          "description": "Database table write.",
+          "type": "string",
+          "const": "writes_table"
+        },
+        {
+          "description": "Build or compilation dependency.",
+          "type": "string",
+          "const": "build_dependency"
+        },
+        {
+          "description": "Data flow propagation.",
+          "type": "string",
+          "const": "data_flow"
+        },
+        {
+          "description": "Co-change history signal.",
+          "type": "string",
+          "const": "history"
+        }
+      ]
+    },
+    "RepositoryAliasSelector": {
+      "description": "Registered repository-alias selector.",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "description": "Registered alias, resolved to exactly one repository.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "alias"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RepositoryIdSelector": {
+      "description": "Stable repository-ID selector.",
+      "type": "object",
+      "properties": {
+        "repository_id": {
+          "description": "Repository identity.",
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id"
+      ]
+    },
+    "RepositorySelector": {
+      "description": "Repository selector accepted by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Select by stable repository identifier.",
+          "$ref": "#/$defs/RepositoryIdSelector"
+        },
+        {
+          "description": "Select by a configured local alias.",
+          "$ref": "#/$defs/RepositoryAliasSelector"
+        }
+      ]
+    },
+    "ResponseBudget": {
+      "description": "Optional response limits that can only reduce server hard limits.",
+      "type": "object",
+      "properties": {
+        "evidence_level": {
+          "description": "Requested evidence detail.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProvenanceLevel"
+            }
+          ]
+        },
+        "max_depth": {
+          "description": "Maximum plan depth.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 16,
+          "minimum": 1
+        },
+        "max_paths": {
+          "description": "Maximum independently returned paths.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "max_results": {
+          "description": "Maximum returned result objects.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "max_source_bytes": {
+          "description": "Maximum source bytes before JSON escaping.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 524288,
+          "minimum": 1
+        },
+        "max_tokens": {
+          "description": "Maximum estimated output tokens.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 3200,
+          "minimum": 100
+        },
+        "max_traversal_facts": {
+          "description": "Maximum relationship or traversal facts examined.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 100000,
+          "minimum": 1
+        },
+        "timeout_ms": {
+          "description": "Cooperative request deadline in milliseconds.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 30000,
+          "minimum": 10
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResponseProfile": {
+      "description": "Requested response representation.",
+      "oneOf": [
+        {
+          "description": "Smallest complete correctness-bearing response.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "More explanatory response within the same hard budgets.",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "Maximum bounded provenance and evidence.",
+          "type": "string",
+          "const": "evidence"
+        }
+      ]
+    },
+    "SymbolId": {
+      "type": "string",
+      "pattern": "^sym1_[a-z2-7]{39}$"
+    }
+  }
+}

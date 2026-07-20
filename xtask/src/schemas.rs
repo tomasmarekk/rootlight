@@ -23,6 +23,19 @@ use rootlight_mcp_contract::{
     CodeLocateInput, CodeLocateOutput, ErrorResponse, OperationStatusInput, OperationStatusOutput,
     RepoIndexInput, RepoIndexOutput, ResponseMetadata, SourceReadInput, SourceReadOutput,
     SymbolExplainInput, SymbolExplainOutput,
+    change::{
+        ChangeImpactInput, ChangeImpactOutput, HistoryCompareInput, HistoryCompareOutput,
+        PlanChangeInput, PlanChangeOutput, TestsSelectInput, TestsSelectOutput,
+    },
+    context::{
+        ContextPackInput, ContextPackOutput, QueryAdvancedInput, QueryAdvancedOutput,
+        QueryBatchInput, QueryBatchOutput,
+    },
+    intent::{
+        ArchitectureCyclesInput, ArchitectureCyclesOutput, ArchitectureOverviewInput,
+        ArchitectureOverviewOutput, CodeDeadInput, CodeDeadOutput, FlowTraceInput,
+        FlowTraceOutput, SymbolRelationshipsInput, SymbolRelationshipsOutput,
+    },
     repository::{RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutput},
 };
 use rootlight_protocol::CURRENT_PROTOCOL_MINOR;
@@ -74,7 +87,7 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 4] = [
     ("1.3", "protobuf/1.3/rootlight.desc"),
     ("1.4", "protobuf/1.4/rootlight.desc"),
 ];
-const SCHEMA_PROVENANCE_INPUTS: [&str; 16] = [
+const SCHEMA_PROVENANCE_INPUTS: [&str; 19] = [
     "Cargo.lock",
     "crates/rootlight-config/src/lib.rs",
     "crates/rootlight-error/src/lib.rs",
@@ -84,6 +97,9 @@ const SCHEMA_PROVENANCE_INPUTS: [&str; 16] = [
     "crates/rootlight-ir/src/normalized.rs",
     "crates/rootlight-ir/src/validation.rs",
     "crates/rootlight-mcp-contract/src/lib.rs",
+    "crates/rootlight-mcp-contract/src/change.rs",
+    "crates/rootlight-mcp-contract/src/context.rs",
+    "crates/rootlight-mcp-contract/src/intent.rs",
     "crates/rootlight-mcp-contract/src/repository.rs",
     "crates/rootlight-mcp-contract/src/vertical.rs",
     "tests/fixtures/mcp/1.0/tool-contracts.json",
@@ -811,6 +827,30 @@ fn generate_json_schemas(staged_root: &Path) -> Result<(), SchemaError> {
     write_mcp_tool_schema::<RepoStatusOutput>(&schema_root, "repo.status", "output")?;
     write_mcp_tool_schema::<RepoListInput>(&schema_root, "repo.list", "input")?;
     write_mcp_tool_schema::<RepoListOutput>(&schema_root, "repo.list", "output")?;
+    write_mcp_tool_schema::<SymbolRelationshipsInput>(&schema_root, "symbol.relationships", "input")?;
+    write_mcp_tool_schema::<SymbolRelationshipsOutput>(&schema_root, "symbol.relationships", "output")?;
+    write_mcp_tool_schema::<FlowTraceInput>(&schema_root, "flow.trace", "input")?;
+    write_mcp_tool_schema::<FlowTraceOutput>(&schema_root, "flow.trace", "output")?;
+    write_mcp_tool_schema::<ChangeImpactInput>(&schema_root, "change.impact", "input")?;
+    write_mcp_tool_schema::<ChangeImpactOutput>(&schema_root, "change.impact", "output")?;
+    write_mcp_tool_schema::<TestsSelectInput>(&schema_root, "tests.select", "input")?;
+    write_mcp_tool_schema::<TestsSelectOutput>(&schema_root, "tests.select", "output")?;
+    write_mcp_tool_schema::<ArchitectureOverviewInput>(&schema_root, "architecture.overview", "input")?;
+    write_mcp_tool_schema::<ArchitectureOverviewOutput>(&schema_root, "architecture.overview", "output")?;
+    write_mcp_tool_schema::<ArchitectureCyclesInput>(&schema_root, "architecture.cycles", "input")?;
+    write_mcp_tool_schema::<ArchitectureCyclesOutput>(&schema_root, "architecture.cycles", "output")?;
+    write_mcp_tool_schema::<CodeDeadInput>(&schema_root, "code.dead", "input")?;
+    write_mcp_tool_schema::<CodeDeadOutput>(&schema_root, "code.dead", "output")?;
+    write_mcp_tool_schema::<HistoryCompareInput>(&schema_root, "history.compare", "input")?;
+    write_mcp_tool_schema::<HistoryCompareOutput>(&schema_root, "history.compare", "output")?;
+    write_mcp_tool_schema::<PlanChangeInput>(&schema_root, "plan.change", "input")?;
+    write_mcp_tool_schema::<PlanChangeOutput>(&schema_root, "plan.change", "output")?;
+    write_mcp_tool_schema::<ContextPackInput>(&schema_root, "context.pack", "input")?;
+    write_mcp_tool_schema::<ContextPackOutput>(&schema_root, "context.pack", "output")?;
+    write_mcp_tool_schema::<QueryAdvancedInput>(&schema_root, "query.advanced", "input")?;
+    write_mcp_tool_schema::<QueryAdvancedOutput>(&schema_root, "query.advanced", "output")?;
+    write_mcp_tool_schema::<QueryBatchInput>(&schema_root, "query.batch", "input")?;
+    write_mcp_tool_schema::<QueryBatchOutput>(&schema_root, "query.batch", "output")?;
     Ok(())
 }
 
@@ -1541,6 +1581,16 @@ fn validate_retained_mcp_tool_contracts(
             "mcp-repo-index-output-1.0.schema.json",
         ),
         (
+            "repo.status",
+            "mcp-repo-status-input-1.0.schema.json",
+            "mcp-repo-status-output-1.0.schema.json",
+        ),
+        (
+            "repo.list",
+            "mcp-repo-list-input-1.0.schema.json",
+            "mcp-repo-list-output-1.0.schema.json",
+        ),
+        (
             "operation.status",
             "mcp-operation-status-input-1.0.schema.json",
             "mcp-operation-status-output-1.0.schema.json",
@@ -1841,6 +1891,30 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-repo-status-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-list-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-repo-list-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-relationships-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-symbol-relationships-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-flow-trace-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-flow-trace-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-change-impact-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-change-impact-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-tests-select-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-tests-select-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-architecture-overview-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-architecture-overview-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-architecture-cycles-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-architecture-cycles-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-dead-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-code-dead-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-history-compare-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-history-compare-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-plan-change-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-plan-change-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-context-pack-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-context-pack-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-query-advanced-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-query-advanced-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-query-batch-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-query-batch-output-1.0.schema.json"),
     ]);
     paths.sort();
     paths

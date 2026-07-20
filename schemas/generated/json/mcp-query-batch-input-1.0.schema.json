@@ -1,0 +1,339 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/query.batch/input/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QueryBatchInput",
+  "description": "Strict input for `query.batch`.",
+  "type": "object",
+  "properties": {
+    "budget": {
+      "description": "One shared result, traversal, source-byte, time, and token budget.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResponseBudget"
+        }
+      ]
+    },
+    "fail_fast": {
+      "description": "Whether to stop scheduling new operations after the first runtime failure.\n\nDefaults to false, preserving successful independent results.",
+      "type": "boolean"
+    },
+    "generation": {
+      "description": "One generation selector applied to every operation.\n\nDefaults to the active generation and is resolved once before execution.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationSelector"
+        }
+      ]
+    },
+    "operations": {
+      "description": "One to sixteen operations in request order with unique identifiers.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BatchOperation"
+      },
+      "maxItems": 16,
+      "minItems": 1
+    },
+    "repository": {
+      "description": "One repository for the entire batch.",
+      "$ref": "#/$defs/RepositorySelector"
+    },
+    "response_profile": {
+      "description": "Requested response representation for the aggregate batch response.\n\nIndividual operations cannot widen this profile.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResponseProfile"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "repository",
+    "operations"
+  ],
+  "$defs": {
+    "ActiveGeneration": {
+      "description": "Active-generation keyword.",
+      "oneOf": [
+        {
+          "description": "Select the active generation.",
+          "type": "string",
+          "const": "active"
+        }
+      ]
+    },
+    "BatchOperation": {
+      "description": "One operation inside a `query.batch` request.\n\nThe `arguments` object is validated against the selected tool's strict input\nschema after all bindings are resolved. The `repository`, `generation`,\n`budget`, `cursor`, and `response_profile` fields are omitted from arguments\nbecause they are inherited from the batch envelope.",
+      "type": "object",
+      "properties": {
+        "arguments": {
+          "description": "Strict tool arguments with batch-inherited fields omitted.\n\nLeaf values may be [`BatchBinding`] references that are resolved from\ncompleted dependency responses before schema validation."
+        },
+        "depends_on": {
+          "description": "Zero to eight earlier or later operation identifiers forming a bounded\nacyclic dependency graph with maximum depth eight.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "maxItems": 8
+        },
+        "id": {
+          "description": "Unique operation identifier within this batch.",
+          "type": "string",
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_]+$"
+        },
+        "local_budget": {
+          "description": "Optional per-operation budget cap that may only reduce the allocation\nderived from the shared batch budget.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseBudget"
+            }
+          ]
+        },
+        "tool": {
+          "description": "Tool selected from the closed batch allowlist.",
+          "$ref": "#/$defs/BatchTool"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "tool",
+        "arguments"
+      ]
+    },
+    "BatchTool": {
+      "description": "Closed allowlist of tools composable inside a public `query.batch`.\n\nMutation tools, polling, nested batches, `history.compare`, `query.advanced`,\ncross-generation operations, and unbounded fanout are forbidden.",
+      "oneOf": [
+        {
+          "description": "Bounded structural or lexical code search.",
+          "type": "string",
+          "const": "code_locate"
+        },
+        {
+          "description": "Semantic evidence for stable symbol identifiers.",
+          "type": "string",
+          "const": "symbol_explain"
+        },
+        {
+          "description": "Typed relationship traversal for one or more symbols.",
+          "type": "string",
+          "const": "symbol_relationships"
+        },
+        {
+          "description": "Cross-service or cross-module flow tracing.",
+          "type": "string",
+          "const": "flow_trace"
+        },
+        {
+          "description": "Bounded change-impact analysis.",
+          "type": "string",
+          "const": "change_impact"
+        },
+        {
+          "description": "Test selection for given symbols or paths.",
+          "type": "string",
+          "const": "tests_select"
+        },
+        {
+          "description": "High-level architecture overview.",
+          "type": "string",
+          "const": "architecture_overview"
+        },
+        {
+          "description": "Dependency-cycle detection.",
+          "type": "string",
+          "const": "architecture_cycles"
+        },
+        {
+          "description": "Dead-code detection.",
+          "type": "string",
+          "const": "code_dead"
+        },
+        {
+          "description": "Context pack assembly.",
+          "type": "string",
+          "const": "context_pack"
+        },
+        {
+          "description": "Generation-pinned source range reads.",
+          "type": "string",
+          "const": "source_read"
+        }
+      ]
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "GenerationSelector": {
+      "description": "Generation selector shared by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Resolve the currently active immutable generation.",
+          "$ref": "#/$defs/ActiveGeneration"
+        },
+        {
+          "description": "Pin an explicit immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        }
+      ]
+    },
+    "ProvenanceLevel": {
+      "description": "Provenance detail requested by a read tool.",
+      "oneOf": [
+        {
+          "description": "Omit provenance detail beyond mandatory source identity.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "Return compact provider and confidence evidence.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "Return maximum bounded provenance evidence.",
+          "type": "string",
+          "const": "full"
+        }
+      ]
+    },
+    "RepositoryAliasSelector": {
+      "description": "Registered repository-alias selector.",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "description": "Registered alias, resolved to exactly one repository.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "alias"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RepositoryIdSelector": {
+      "description": "Stable repository-ID selector.",
+      "type": "object",
+      "properties": {
+        "repository_id": {
+          "description": "Repository identity.",
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id"
+      ]
+    },
+    "RepositorySelector": {
+      "description": "Repository selector accepted by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Select by stable repository identifier.",
+          "$ref": "#/$defs/RepositoryIdSelector"
+        },
+        {
+          "description": "Select by a configured local alias.",
+          "$ref": "#/$defs/RepositoryAliasSelector"
+        }
+      ]
+    },
+    "ResponseBudget": {
+      "description": "Optional response limits that can only reduce server hard limits.",
+      "type": "object",
+      "properties": {
+        "evidence_level": {
+          "description": "Requested evidence detail.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProvenanceLevel"
+            }
+          ]
+        },
+        "max_depth": {
+          "description": "Maximum plan depth.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 16,
+          "minimum": 1
+        },
+        "max_paths": {
+          "description": "Maximum independently returned paths.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "max_results": {
+          "description": "Maximum returned result objects.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "max_source_bytes": {
+          "description": "Maximum source bytes before JSON escaping.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 524288,
+          "minimum": 1
+        },
+        "max_tokens": {
+          "description": "Maximum estimated output tokens.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 3200,
+          "minimum": 100
+        },
+        "max_traversal_facts": {
+          "description": "Maximum relationship or traversal facts examined.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 100000,
+          "minimum": 1
+        },
+        "timeout_ms": {
+          "description": "Cooperative request deadline in milliseconds.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 30000,
+          "minimum": 10
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResponseProfile": {
+      "description": "Requested response representation.",
+      "oneOf": [
+        {
+          "description": "Smallest complete correctness-bearing response.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "More explanatory response within the same hard budgets.",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "Maximum bounded provenance and evidence.",
+          "type": "string",
+          "const": "evidence"
+        }
+      ]
+    }
+  }
+}

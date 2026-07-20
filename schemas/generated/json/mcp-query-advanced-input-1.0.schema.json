@@ -1,0 +1,863 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/query.advanced/input/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QueryAdvancedInput",
+  "description": "Strict input for `query.advanced`.",
+  "type": "object",
+  "properties": {
+    "cursor": {
+      "description": "Continuation cursor when the plan is safely pageable.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContinuationCursor"
+        }
+      ]
+    },
+    "explain": {
+      "description": "Return the logical and physical plan without executing the query.",
+      "type": "boolean"
+    },
+    "generation": {
+      "description": "Immutable generation to pin query execution.",
+      "$ref": "#/$defs/GenerationSelector"
+    },
+    "max_depth": {
+      "description": "Maximum traversal or plan depth, hard ceiling five.",
+      "type": "integer",
+      "format": "uint8",
+      "maximum": 5,
+      "minimum": 1
+    },
+    "max_rows": {
+      "description": "Maximum returned rows, default one hundred.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 1000,
+      "minimum": 1
+    },
+    "max_traversal": {
+      "description": "Maximum traversal facts examined.",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 100000,
+      "minimum": 1
+    },
+    "parameters": {
+      "description": "Bound typed values referenced by the AST.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/QueryValue"
+      }
+    },
+    "query_ast": {
+      "description": "Typed declarative AST, never text SQL, Cypher, or shell.",
+      "$ref": "#/$defs/QueryAstNode"
+    },
+    "repository": {
+      "description": "Repository or workspace selector.",
+      "$ref": "#/$defs/RepositorySelector"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "repository",
+    "generation",
+    "query_ast"
+  ],
+  "$defs": {
+    "ActiveGeneration": {
+      "description": "Active-generation keyword.",
+      "oneOf": [
+        {
+          "description": "Select the active generation.",
+          "type": "string",
+          "const": "active"
+        }
+      ]
+    },
+    "AggregateFunction": {
+      "description": "Allow-listed aggregate functions.",
+      "oneOf": [
+        {
+          "description": "Count rows in each group.",
+          "type": "object",
+          "properties": {
+            "fn": {
+              "type": "string",
+              "const": "count"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "fn"
+          ]
+        },
+        {
+          "description": "Sum a numeric field per group.",
+          "type": "object",
+          "properties": {
+            "field": {
+              "description": "Numeric field to sum.",
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "fn": {
+              "type": "string",
+              "const": "sum"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "fn",
+            "field"
+          ]
+        },
+        {
+          "description": "Minimum of a comparable field per group.",
+          "type": "object",
+          "properties": {
+            "field": {
+              "description": "Field to minimize.",
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "fn": {
+              "type": "string",
+              "const": "min"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "fn",
+            "field"
+          ]
+        },
+        {
+          "description": "Maximum of a comparable field per group.",
+          "type": "object",
+          "properties": {
+            "field": {
+              "description": "Field to maximize.",
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "fn": {
+              "type": "string",
+              "const": "max"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "fn",
+            "field"
+          ]
+        }
+      ]
+    },
+    "ContinuationCursor": {
+      "description": "A bounded opaque continuation cursor.",
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1
+    },
+    "EntityKind": {
+      "description": "Entity classes supported by the first locate slice.",
+      "oneOf": [
+        {
+          "description": "Source file.",
+          "type": "string",
+          "const": "file"
+        },
+        {
+          "description": "Namespace or module.",
+          "type": "string",
+          "const": "module"
+        },
+        {
+          "description": "Type declaration.",
+          "type": "string",
+          "const": "type"
+        },
+        {
+          "description": "Function declaration.",
+          "type": "string",
+          "const": "function"
+        },
+        {
+          "description": "Method declaration.",
+          "type": "string",
+          "const": "method"
+        },
+        {
+          "description": "Field declaration.",
+          "type": "string",
+          "const": "field"
+        },
+        {
+          "description": "Constant declaration.",
+          "type": "string",
+          "const": "constant"
+        },
+        {
+          "description": "Variable declaration.",
+          "type": "string",
+          "const": "variable"
+        },
+        {
+          "description": "Configuration record.",
+          "type": "string",
+          "const": "configuration"
+        }
+      ]
+    },
+    "FileId": {
+      "type": "string",
+      "pattern": "^file1_[a-z2-7]{39}$"
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "GenerationSelector": {
+      "description": "Generation selector shared by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Resolve the currently active immutable generation.",
+          "$ref": "#/$defs/ActiveGeneration"
+        },
+        {
+          "description": "Pin an explicit immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        }
+      ]
+    },
+    "QueryAstNode": {
+      "description": "Typed declarative query AST node.\n\nThis is a bounded, allow-listed operator tree. SQL strings, Cypher text,\nshell fragments, arbitrary regex, arbitrary code, and unbounded recursion\nare forbidden. Every node is type-checked and cost-estimated before execution.",
+      "oneOf": [
+        {
+          "description": "Base scan over entities of a given kind.",
+          "type": "object",
+          "properties": {
+            "entity": {
+              "description": "Entity kind to scan.",
+              "$ref": "#/$defs/EntityKind"
+            },
+            "filter": {
+              "description": "Optional filter applied during the scan.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/QueryPredicate"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "scan"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "entity"
+          ]
+        },
+        {
+          "description": "Filter rows from an input node by a bounded predicate.",
+          "type": "object",
+          "properties": {
+            "input": {
+              "description": "Input node producing rows to filter.",
+              "$ref": "#/$defs/QueryAstNode"
+            },
+            "op": {
+              "type": "string",
+              "const": "filter"
+            },
+            "predicate": {
+              "description": "Predicate that rows must satisfy.",
+              "$ref": "#/$defs/QueryPredicate"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "input",
+            "predicate"
+          ]
+        },
+        {
+          "description": "Project a bounded set of columns from an input node.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "Column names to retain.",
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 256,
+                "minLength": 1
+              },
+              "maxItems": 64,
+              "minItems": 1
+            },
+            "input": {
+              "description": "Input node producing rows to project.",
+              "$ref": "#/$defs/QueryAstNode"
+            },
+            "op": {
+              "type": "string",
+              "const": "project"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "input",
+            "columns"
+          ]
+        },
+        {
+          "description": "Join two input nodes on a shared key column.",
+          "type": "object",
+          "properties": {
+            "left": {
+              "description": "Left input node.",
+              "$ref": "#/$defs/QueryAstNode"
+            },
+            "on": {
+              "description": "Column name to join on.",
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "op": {
+              "type": "string",
+              "const": "join"
+            },
+            "right": {
+              "description": "Right input node.",
+              "$ref": "#/$defs/QueryAstNode"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "left",
+            "right",
+            "on"
+          ]
+        },
+        {
+          "description": "Aggregate rows from an input node by grouping keys.",
+          "type": "object",
+          "properties": {
+            "aggregations": {
+              "description": "Aggregate functions to compute per group.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AggregateFunction"
+              },
+              "maxItems": 16,
+              "minItems": 1
+            },
+            "group_by": {
+              "description": "Column names to group by.",
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 256,
+                "minLength": 1
+              },
+              "maxItems": 16
+            },
+            "input": {
+              "description": "Input node producing rows to aggregate.",
+              "$ref": "#/$defs/QueryAstNode"
+            },
+            "op": {
+              "type": "string",
+              "const": "aggregate"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "input",
+            "group_by",
+            "aggregations"
+          ]
+        },
+        {
+          "description": "Traverse graph edges from a seed symbol or bound column.",
+          "type": "object",
+          "properties": {
+            "direction": {
+              "description": "Traversal direction.",
+              "$ref": "#/$defs/TraverseDirection"
+            },
+            "max_depth": {
+              "description": "Maximum traversal depth, hard ceiling five.",
+              "type": "integer",
+              "format": "uint8",
+              "maximum": 5,
+              "minimum": 1
+            },
+            "op": {
+              "type": "string",
+              "const": "traverse"
+            },
+            "relation": {
+              "description": "Relation kind to traverse.",
+              "$ref": "#/$defs/RelationKind"
+            },
+            "seed": {
+              "description": "Seed symbol identifier for the traversal origin.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SymbolId"
+                }
+              ]
+            },
+            "seed_from": {
+              "description": "Column name providing seed identifiers from the input node.",
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "relation",
+            "direction"
+          ]
+        },
+        {
+          "description": "Sort rows from an input node by bounded keys.",
+          "type": "object",
+          "properties": {
+            "by": {
+              "description": "Sort directives applied in order.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SortKey"
+              },
+              "maxItems": 8,
+              "minItems": 1
+            },
+            "input": {
+              "description": "Input node producing rows to sort.",
+              "$ref": "#/$defs/QueryAstNode"
+            },
+            "op": {
+              "type": "string",
+              "const": "sort"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "input",
+            "by"
+          ]
+        },
+        {
+          "description": "Limit the number of rows from an input node.",
+          "type": "object",
+          "properties": {
+            "input": {
+              "description": "Input node producing rows to limit.",
+              "$ref": "#/$defs/QueryAstNode"
+            },
+            "max_rows": {
+              "description": "Maximum rows to return.",
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 1000,
+              "minimum": 1
+            },
+            "op": {
+              "type": "string",
+              "const": "limit"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "input",
+            "max_rows"
+          ]
+        }
+      ]
+    },
+    "QueryPredicate": {
+      "description": "Allow-listed predicate operators for filter expressions.\n\nArbitrary regex, shell fragments, SQL, and Cypher strings are forbidden.",
+      "oneOf": [
+        {
+          "description": "Field equals a bound value.",
+          "type": "object",
+          "properties": {
+            "field": {
+              "description": "Column or field name to test.",
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "pred": {
+              "type": "string",
+              "const": "equals"
+            },
+            "value": {
+              "description": "Expected value.",
+              "$ref": "#/$defs/QueryValue"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "pred",
+            "field",
+            "value"
+          ]
+        },
+        {
+          "description": "Field does not equal a bound value.",
+          "type": "object",
+          "properties": {
+            "field": {
+              "description": "Column or field name to test.",
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "pred": {
+              "type": "string",
+              "const": "not_equals"
+            },
+            "value": {
+              "description": "Value to exclude.",
+              "$ref": "#/$defs/QueryValue"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "pred",
+            "field",
+            "value"
+          ]
+        },
+        {
+          "description": "Field value is contained in a bounded set.",
+          "type": "object",
+          "properties": {
+            "field": {
+              "description": "Column or field name to test.",
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "pred": {
+              "type": "string",
+              "const": "in"
+            },
+            "values": {
+              "description": "Bounded set of allowed values.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/QueryValue"
+              },
+              "maxItems": 256,
+              "minItems": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "pred",
+            "field",
+            "values"
+          ]
+        },
+        {
+          "description": "Logical conjunction of bounded predicates.",
+          "type": "object",
+          "properties": {
+            "pred": {
+              "type": "string",
+              "const": "and"
+            },
+            "predicates": {
+              "description": "Predicates that must all hold.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/QueryPredicate"
+              },
+              "maxItems": 16,
+              "minItems": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "pred",
+            "predicates"
+          ]
+        },
+        {
+          "description": "Logical disjunction of bounded predicates.",
+          "type": "object",
+          "properties": {
+            "pred": {
+              "type": "string",
+              "const": "or"
+            },
+            "predicates": {
+              "description": "Predicates of which at least one must hold.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/QueryPredicate"
+              },
+              "maxItems": 16,
+              "minItems": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "pred",
+            "predicates"
+          ]
+        }
+      ]
+    },
+    "QueryValue": {
+      "description": "Typed scalar or identifier value bound as a query parameter or predicate operand.",
+      "oneOf": [
+        {
+          "description": "UTF-8 text literal.",
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "maxLength": 4096,
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "text"
+          ]
+        },
+        {
+          "description": "Signed 64-bit integer literal.",
+          "type": "object",
+          "properties": {
+            "integer": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "integer"
+          ]
+        },
+        {
+          "description": "Boolean literal.",
+          "type": "object",
+          "properties": {
+            "boolean": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "boolean"
+          ]
+        },
+        {
+          "description": "Stable symbol identifier.",
+          "type": "object",
+          "properties": {
+            "symbol": {
+              "$ref": "#/$defs/SymbolId"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "symbol"
+          ]
+        },
+        {
+          "description": "Stable file identifier.",
+          "type": "object",
+          "properties": {
+            "file": {
+              "$ref": "#/$defs/FileId"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "file"
+          ]
+        }
+      ]
+    },
+    "RelationKind": {
+      "description": "Traversal relation kinds permitted by the safe query AST.",
+      "oneOf": [
+        {
+          "description": "Direct call edges.",
+          "type": "string",
+          "const": "calls"
+        },
+        {
+          "description": "Reverse call edges.",
+          "type": "string",
+          "const": "called_by"
+        },
+        {
+          "description": "Import or use edges.",
+          "type": "string",
+          "const": "imports"
+        },
+        {
+          "description": "Reverse import edges.",
+          "type": "string",
+          "const": "imported_by"
+        },
+        {
+          "description": "Test-to-subject edges.",
+          "type": "string",
+          "const": "tests"
+        },
+        {
+          "description": "Subject-to-test edges.",
+          "type": "string",
+          "const": "tested_by"
+        },
+        {
+          "description": "Containment or module membership.",
+          "type": "string",
+          "const": "contains"
+        },
+        {
+          "description": "Reverse containment.",
+          "type": "string",
+          "const": "contained_by"
+        },
+        {
+          "description": "Trait or interface implementation edges.",
+          "type": "string",
+          "const": "implements"
+        },
+        {
+          "description": "Reverse implementation edges.",
+          "type": "string",
+          "const": "implemented_by"
+        },
+        {
+          "description": "General reference edges.",
+          "type": "string",
+          "const": "references"
+        },
+        {
+          "description": "Reverse reference edges.",
+          "type": "string",
+          "const": "referenced_by"
+        }
+      ]
+    },
+    "RepositoryAliasSelector": {
+      "description": "Registered repository-alias selector.",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "description": "Registered alias, resolved to exactly one repository.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "alias"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RepositoryIdSelector": {
+      "description": "Stable repository-ID selector.",
+      "type": "object",
+      "properties": {
+        "repository_id": {
+          "description": "Repository identity.",
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id"
+      ]
+    },
+    "RepositorySelector": {
+      "description": "Repository selector accepted by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Select by stable repository identifier.",
+          "$ref": "#/$defs/RepositoryIdSelector"
+        },
+        {
+          "description": "Select by a configured local alias.",
+          "$ref": "#/$defs/RepositoryAliasSelector"
+        }
+      ]
+    },
+    "SortKey": {
+      "description": "One sort directive for the sort operator.",
+      "type": "object",
+      "properties": {
+        "descending": {
+          "description": "Whether to sort ascending or descending.",
+          "type": "boolean"
+        },
+        "field": {
+          "description": "Column or field name to sort by.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "descending"
+      ]
+    },
+    "SymbolId": {
+      "type": "string",
+      "pattern": "^sym1_[a-z2-7]{39}$"
+    },
+    "TraverseDirection": {
+      "description": "Traversal direction for graph navigation.",
+      "oneOf": [
+        {
+          "description": "Follow edges toward callers or importers.",
+          "type": "string",
+          "const": "inbound"
+        },
+        {
+          "description": "Follow edges toward callees or dependencies.",
+          "type": "string",
+          "const": "outbound"
+        },
+        {
+          "description": "Follow edges in both directions.",
+          "type": "string",
+          "const": "both"
+        }
+      ]
+    }
+  }
+}

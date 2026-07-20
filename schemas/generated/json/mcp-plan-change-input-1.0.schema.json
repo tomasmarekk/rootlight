@@ -1,0 +1,409 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/plan.change/input/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlanChangeInput",
+  "description": "Strict input for `plan.change`.",
+  "type": "object",
+  "properties": {
+    "budget": {
+      "description": "Response budget overrides.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResponseBudget"
+        }
+      ]
+    },
+    "change_context": {
+      "description": "Existing working-tree or hypothetical change context.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChangeSelector"
+        }
+      ]
+    },
+    "constraints": {
+      "description": "User-provided constraints.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 1024,
+        "minLength": 1
+      },
+      "maxItems": 32,
+      "minItems": 1
+    },
+    "generation": {
+      "description": "Generation to plan against.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationSelector"
+        }
+      ]
+    },
+    "max_steps": {
+      "description": "Maximum plan steps.",
+      "type": "integer",
+      "format": "uint8",
+      "maximum": 100,
+      "minimum": 1
+    },
+    "objective": {
+      "description": "Typed objective class.",
+      "$ref": "#/$defs/PlanObjective"
+    },
+    "objective_text": {
+      "description": "Concrete objective description, treated as user instruction.",
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1
+    },
+    "profile": {
+      "description": "Requested response profile.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResponseProfile"
+        }
+      ]
+    },
+    "repository": {
+      "description": "Repository or workspace selector.",
+      "$ref": "#/$defs/RepositorySelector"
+    },
+    "targets": {
+      "description": "Target symbols or files.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PlanTargetSelector"
+      },
+      "maxItems": 64,
+      "minItems": 1
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "repository",
+    "objective",
+    "objective_text",
+    "targets"
+  ],
+  "$defs": {
+    "ActiveGeneration": {
+      "description": "Active-generation keyword.",
+      "oneOf": [
+        {
+          "description": "Select the active generation.",
+          "type": "string",
+          "const": "active"
+        }
+      ]
+    },
+    "ChangeSelector": {
+      "description": "Selector for the change set to analyze.",
+      "type": "object",
+      "properties": {
+        "paths": {
+          "description": "Explicit file paths known to be changed.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 8192,
+            "minLength": 1
+          },
+          "maxItems": 1000,
+          "minItems": 1
+        },
+        "revision_range": {
+          "description": "Explicit Git revision range.",
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "symbol_ids": {
+          "description": "Explicit symbol identifiers known to be changed.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SymbolId"
+          },
+          "maxItems": 256,
+          "minItems": 1
+        },
+        "working_tree": {
+          "description": "Working-tree state to diff.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkingTreeState"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "FileId": {
+      "type": "string",
+      "pattern": "^file1_[a-z2-7]{39}$"
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "GenerationSelector": {
+      "description": "Generation selector shared by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Resolve the currently active immutable generation.",
+          "$ref": "#/$defs/ActiveGeneration"
+        },
+        {
+          "description": "Pin an explicit immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        }
+      ]
+    },
+    "PlanFileTarget": {
+      "description": "File-based plan target.",
+      "type": "object",
+      "properties": {
+        "file_id": {
+          "description": "Stable file identity.",
+          "$ref": "#/$defs/FileId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "file_id"
+      ]
+    },
+    "PlanObjective": {
+      "description": "Objective class for a change plan.",
+      "oneOf": [
+        {
+          "description": "Fix a defect.",
+          "type": "string",
+          "const": "bug_fix"
+        },
+        {
+          "description": "Restructure without behavior change.",
+          "type": "string",
+          "const": "refactor"
+        },
+        {
+          "description": "Explain or document existing behavior.",
+          "type": "string",
+          "const": "explanation"
+        },
+        {
+          "description": "Migrate to a new API, platform, or dependency.",
+          "type": "string",
+          "const": "migration"
+        },
+        {
+          "description": "Review and assess existing code.",
+          "type": "string",
+          "const": "review"
+        }
+      ]
+    },
+    "PlanSymbolTarget": {
+      "description": "Symbol-based plan target.",
+      "type": "object",
+      "properties": {
+        "symbol_id": {
+          "description": "Stable symbol identity.",
+          "$ref": "#/$defs/SymbolId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "symbol_id"
+      ]
+    },
+    "PlanTargetSelector": {
+      "description": "Target selector for a change plan.",
+      "anyOf": [
+        {
+          "description": "Select by symbol identity.",
+          "$ref": "#/$defs/PlanSymbolTarget"
+        },
+        {
+          "description": "Select by file identity.",
+          "$ref": "#/$defs/PlanFileTarget"
+        }
+      ]
+    },
+    "ProvenanceLevel": {
+      "description": "Provenance detail requested by a read tool.",
+      "oneOf": [
+        {
+          "description": "Omit provenance detail beyond mandatory source identity.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "Return compact provider and confidence evidence.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "Return maximum bounded provenance evidence.",
+          "type": "string",
+          "const": "full"
+        }
+      ]
+    },
+    "RepositoryAliasSelector": {
+      "description": "Registered repository-alias selector.",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "description": "Registered alias, resolved to exactly one repository.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "alias"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RepositoryIdSelector": {
+      "description": "Stable repository-ID selector.",
+      "type": "object",
+      "properties": {
+        "repository_id": {
+          "description": "Repository identity.",
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id"
+      ]
+    },
+    "RepositorySelector": {
+      "description": "Repository selector accepted by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Select by stable repository identifier.",
+          "$ref": "#/$defs/RepositoryIdSelector"
+        },
+        {
+          "description": "Select by a configured local alias.",
+          "$ref": "#/$defs/RepositoryAliasSelector"
+        }
+      ]
+    },
+    "ResponseBudget": {
+      "description": "Optional response limits that can only reduce server hard limits.",
+      "type": "object",
+      "properties": {
+        "evidence_level": {
+          "description": "Requested evidence detail.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProvenanceLevel"
+            }
+          ]
+        },
+        "max_depth": {
+          "description": "Maximum plan depth.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 16,
+          "minimum": 1
+        },
+        "max_paths": {
+          "description": "Maximum independently returned paths.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "max_results": {
+          "description": "Maximum returned result objects.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "max_source_bytes": {
+          "description": "Maximum source bytes before JSON escaping.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 524288,
+          "minimum": 1
+        },
+        "max_tokens": {
+          "description": "Maximum estimated output tokens.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 3200,
+          "minimum": 100
+        },
+        "max_traversal_facts": {
+          "description": "Maximum relationship or traversal facts examined.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 100000,
+          "minimum": 1
+        },
+        "timeout_ms": {
+          "description": "Cooperative request deadline in milliseconds.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 30000,
+          "minimum": 10
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResponseProfile": {
+      "description": "Requested response representation.",
+      "oneOf": [
+        {
+          "description": "Smallest complete correctness-bearing response.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "More explanatory response within the same hard budgets.",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "Maximum bounded provenance and evidence.",
+          "type": "string",
+          "const": "evidence"
+        }
+      ]
+    },
+    "SymbolId": {
+      "type": "string",
+      "pattern": "^sym1_[a-z2-7]{39}$"
+    },
+    "WorkingTreeState": {
+      "description": "Working-tree diff state.",
+      "oneOf": [
+        {
+          "description": "Unstaged changes only.",
+          "type": "string",
+          "const": "unstaged"
+        },
+        {
+          "description": "Staged changes only.",
+          "type": "string",
+          "const": "staged"
+        },
+        {
+          "description": "All working-tree changes including staged.",
+          "type": "string",
+          "const": "all"
+        }
+      ]
+    }
+  }
+}

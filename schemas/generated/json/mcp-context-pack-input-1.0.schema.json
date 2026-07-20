@@ -1,0 +1,174 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/context.pack/input/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ContextPackInput",
+  "description": "Strict input for `context.pack`.",
+  "type": "object",
+  "properties": {
+    "continuation_cursor": {
+      "description": "Progressive detail handle from a prior pack response.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContinuationCursor"
+        }
+      ]
+    },
+    "generation": {
+      "description": "Immutable generation to pin evidence resolution.",
+      "$ref": "#/$defs/GenerationSelector"
+    },
+    "include_source": {
+      "description": "Whether to include bounded source snippets alongside structural evidence.",
+      "type": "boolean"
+    },
+    "objective": {
+      "description": "Task objective that drives evidence selection.",
+      "$ref": "#/$defs/ContextPackObjective"
+    },
+    "repository": {
+      "description": "Repository or workspace selector.",
+      "$ref": "#/$defs/RepositorySelector"
+    },
+    "target_symbols": {
+      "description": "Stable symbol identifiers to anchor the evidence pack.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SymbolId"
+      },
+      "maxItems": 32,
+      "minItems": 1
+    },
+    "token_budget": {
+      "description": "Maximum estimated output tokens for the assembled pack.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 32000,
+      "minimum": 100
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "repository",
+    "generation",
+    "objective",
+    "target_symbols",
+    "token_budget",
+    "include_source"
+  ],
+  "$defs": {
+    "ActiveGeneration": {
+      "description": "Active-generation keyword.",
+      "oneOf": [
+        {
+          "description": "Select the active generation.",
+          "type": "string",
+          "const": "active"
+        }
+      ]
+    },
+    "ContextPackObjective": {
+      "description": "Task objective that guides evidence selection and ranking.",
+      "oneOf": [
+        {
+          "description": "Fix a known or suspected defect.",
+          "type": "string",
+          "const": "bug_fix"
+        },
+        {
+          "description": "Restructure existing code without changing external behavior.",
+          "type": "string",
+          "const": "refactor"
+        },
+        {
+          "description": "Explain how code works or why it exists.",
+          "type": "string",
+          "const": "explanation"
+        },
+        {
+          "description": "Move code from one API, framework, or platform to another.",
+          "type": "string",
+          "const": "migration"
+        },
+        {
+          "description": "Review code for correctness, style, or security.",
+          "type": "string",
+          "const": "review"
+        }
+      ]
+    },
+    "ContinuationCursor": {
+      "description": "A bounded opaque continuation cursor.",
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "GenerationSelector": {
+      "description": "Generation selector shared by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Resolve the currently active immutable generation.",
+          "$ref": "#/$defs/ActiveGeneration"
+        },
+        {
+          "description": "Pin an explicit immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        }
+      ]
+    },
+    "RepositoryAliasSelector": {
+      "description": "Registered repository-alias selector.",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "description": "Registered alias, resolved to exactly one repository.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "alias"
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RepositoryIdSelector": {
+      "description": "Stable repository-ID selector.",
+      "type": "object",
+      "properties": {
+        "repository_id": {
+          "description": "Repository identity.",
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id"
+      ]
+    },
+    "RepositorySelector": {
+      "description": "Repository selector accepted by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Select by stable repository identifier.",
+          "$ref": "#/$defs/RepositoryIdSelector"
+        },
+        {
+          "description": "Select by a configured local alias.",
+          "$ref": "#/$defs/RepositoryAliasSelector"
+        }
+      ]
+    },
+    "SymbolId": {
+      "type": "string",
+      "pattern": "^sym1_[a-z2-7]{39}$"
+    }
+  }
+}
