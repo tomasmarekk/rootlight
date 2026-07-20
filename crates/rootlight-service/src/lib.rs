@@ -2000,6 +2000,10 @@ impl FirstSliceService {
     ///
     /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
     /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded code dead dimension"
+    )]
     pub fn code_dead(
         &self,
         generation: GenerationId,

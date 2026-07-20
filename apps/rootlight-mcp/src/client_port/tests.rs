@@ -459,10 +459,6 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         })
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "each argument is one bounded code dead dimension"
-    )]
     fn code_dead(
         &self,
         repository: RepositoryId,
