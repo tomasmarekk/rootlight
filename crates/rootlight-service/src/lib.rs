@@ -46,9 +46,9 @@ use rootlight_ir::{
     NormalizedIrDocument, ProducerIdentity, SourceRef, SourceSpan,
 };
 pub use rootlight_query::{
-    ArchitectureCyclesResult, CodeLocateResult, FlowTraceResult, LocateMode, QueryResponse,
-    RelationDirection, RelationFamily, SourceReadQueryResult, SymbolExplainResult,
-    SymbolRelationshipsResult,
+    ArchitectureCyclesResult, CodeDeadEntryPointPolicy, CodeDeadResult, CodeLocateResult,
+    FlowTraceResult, LocateMode, QueryResponse, RelationDirection, RelationFamily,
+    SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult,
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
 use rootlight_resolve::{
@@ -1986,6 +1986,47 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_architecture_cycles(&plan, cancellation)
+            .map_err(|error| map_query_error(error, cancellation))
+    }
+
+    /// Executes a generation-pinned bounded `code.dead` query.
+    ///
+    /// The entry-point policy, exported and test inclusion flags, confidence
+    /// floor, and candidate cap are validated by the query plan. The result
+    /// carries deterministic ranked dead-code candidates, the partial
+    /// entry-point model summary, blind spots, and applied suppression rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    pub fn code_dead(
+        &self,
+        generation: GenerationId,
+        entry_point_policy: CodeDeadEntryPointPolicy,
+        include_exported: bool,
+        include_tests: bool,
+        min_confidence: u16,
+        max_candidates: usize,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<CodeDeadResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let service = self
+            .generations
+            .query(generation)
+            .map_err(|_| FirstSliceError::Query)?;
+        let plan = service
+            .plan_code_dead(
+                entry_point_policy,
+                include_exported,
+                include_tests,
+                min_confidence,
+                max_candidates,
+                QueryBudget::new(),
+            )
+            .map_err(|error| map_query_error(error, cancellation))?;
+        service
+            .execute_code_dead(&plan, cancellation)
             .map_err(|error| map_query_error(error, cancellation))
     }
 
