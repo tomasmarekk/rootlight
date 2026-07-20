@@ -1275,6 +1275,88 @@ pub struct PlanChange {
     pub context_pack_request: PlanChangeContextPack,
 }
 
+/// Resolved state pair for a history comparison.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HistoryMatchedStates {
+    /// Resolved base generation.
+    pub base_generation: GenerationId,
+    /// Resolved head generation.
+    pub head_generation: GenerationId,
+    /// Coverage label of the comparison, such as `complete` or `bounded`.
+    pub coverage: String,
+}
+
+/// One semantic change between two revisions.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HistorySemanticChange {
+    /// Semantic change kind label, such as `added` or `removed`.
+    pub kind: String,
+    /// Affected symbol identity.
+    pub symbol_id: SymbolId,
+    /// Entity kind label of the affected symbol.
+    pub entity_kind: String,
+    /// Whether this change is a breaking candidate.
+    pub breaking_candidate: bool,
+    /// Significance rank, 0 through 1000.
+    pub significance: u16,
+}
+
+/// Aggregate architecture delta between two revisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct HistoryArchitectureDelta {
+    /// Number of new cross-service edges; always zero in this slice.
+    pub new_cross_service_edges: u32,
+    /// Number of removed cross-service edges; always zero in this slice.
+    pub removed_cross_service_edges: u32,
+    /// Number of new component boundaries; always zero in this slice.
+    pub new_boundaries: u32,
+    /// Number of removed component boundaries; always zero in this slice.
+    pub removed_boundaries: u32,
+}
+
+/// One breaking-change candidate with consumer evidence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HistoryBreakingCandidate {
+    /// Affected symbol identity.
+    pub symbol_id: SymbolId,
+    /// Number of known consumers in the base generation.
+    pub consumer_count: u32,
+    /// Whether the symbol is part of a public API surface.
+    pub is_public_surface: bool,
+    /// Source-free reason code.
+    pub reason: String,
+}
+
+/// One lineage match between base and head entities.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HistoryLineageMatch {
+    /// Base symbol identity.
+    pub base_symbol_id: SymbolId,
+    /// Head symbol identity.
+    pub head_symbol_id: SymbolId,
+    /// Match confidence, 0 through 1000.
+    pub confidence: u16,
+    /// Whether this is a rename rather than identity preservation.
+    pub is_rename: bool,
+}
+
+/// Bounded semantic comparison between two revisions or generations.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HistoryCompare {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Resolved state pair.
+    pub matched_states: HistoryMatchedStates,
+    /// Semantic changes in significance order.
+    pub changes: Vec<HistorySemanticChange>,
+    /// Aggregate architecture delta.
+    pub architecture_delta: HistoryArchitectureDelta,
+    /// Breaking-change candidates in significance order.
+    pub breaking_candidates: Vec<HistoryBreakingCandidate>,
+    /// Entity lineage matches in deterministic identity order.
+    pub lineage: Vec<HistoryLineageMatch>,
+}
+
 /// Validated total deadline budget for one asynchronous daemon request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestTimeout(Duration);
@@ -2844,6 +2926,73 @@ impl Client {
         }
     }
 
+    /// Compares two explicit generations for bounded semantic changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for an invalid endpoint, an oversized change-kind
+    /// filter, an out-of-range result cap, unavailable protocol support,
+    /// transport failure, or a malformed or uncorrelated response.
+    pub fn history_compare(
+        &self,
+        repository: RepositoryId,
+        base: GenerationId,
+        head: GenerationId,
+        change_kinds: &[&str],
+        max_results: Option<u16>,
+    ) -> Result<HistoryCompare, ClientError> {
+        match self.request(build_history_compare_request(
+            repository,
+            base,
+            head,
+            change_kinds,
+            max_results,
+        )?)? {
+            daemon::response_envelope::Response::HistoryCompare(response) => {
+                parse_history_compare(response, repository, head)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously compares two explicit generations for bounded semantic
+    /// changes.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached analysis.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for an invalid endpoint, an oversized change-kind
+    /// filter, an out-of-range result cap, unavailable protocol support,
+    /// transport failure, timeout, or a malformed or uncorrelated response.
+    pub async fn history_compare_async(
+        &self,
+        repository: RepositoryId,
+        base: GenerationId,
+        head: GenerationId,
+        change_kinds: &[&str],
+        max_results: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> Result<HistoryCompare, ClientError> {
+        match self
+            .request_async(
+                build_history_compare_request(repository, base, head, change_kinds, max_results)?,
+                timeout,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::HistoryCompare(response) => {
+                parse_history_compare(response, repository, head)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     fn request(
         &self,
         request: daemon::request_envelope::Request,
@@ -3446,7 +3595,8 @@ fn ensure_request_supported(
         | daemon::request_envelope::Request::ArchitectureOverview(_)
         | daemon::request_envelope::Request::TestsSelect(_)
         | daemon::request_envelope::Request::ChangeImpact(_)
-        | daemon::request_envelope::Request::PlanChange(_) => 5,
+        | daemon::request_envelope::Request::PlanChange(_)
+        | daemon::request_envelope::Request::HistoryCompare(_) => 5,
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
         daemon::request_envelope::Request::OperationLeaseRenew(_) => {
@@ -5635,6 +5785,162 @@ fn parse_plan_change(
         test_plan,
         open_decisions,
         context_pack_request: PlanChangeContextPack { symbols, files },
+    })
+}
+
+fn build_history_compare_request(
+    repository: RepositoryId,
+    base: GenerationId,
+    head: GenerationId,
+    change_kinds: &[&str],
+    max_results: Option<u16>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if change_kinds.len() > 8 {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    for kind in change_kinds {
+        if kind.is_empty() || kind.len() > 32 {
+            return Err(ClientError::InvalidFirstSliceRequest);
+        }
+    }
+    if max_results.is_some_and(|results| !(1..=1_000).contains(&results)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::HistoryCompare(
+        daemon::HistoryCompareRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            base: Some(revision_selector_to_wire(base)),
+            head: Some(revision_selector_to_wire(head)),
+            change_kinds: change_kinds.iter().map(|kind| (*kind).to_owned()).collect(),
+            max_results: max_results.map(u32::from),
+        },
+    ))
+}
+
+fn revision_selector_to_wire(generation: GenerationId) -> daemon::FirstSliceRevisionSelector {
+    daemon::FirstSliceRevisionSelector {
+        selector: Some(daemon::first_slice_revision_selector::Selector::Generation(
+            generation_to_wire(generation),
+        )),
+    }
+}
+
+fn parse_history_compare(
+    response: daemon::HistoryCompareResponse,
+    repository: RepositoryId,
+    head: GenerationId,
+) -> Result<HistoryCompare, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(
+        response.context,
+        repository,
+        GenerationSelector::Generation(head),
+    )?;
+    let wire_states = response
+        .matched_states
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    let wire_delta = response
+        .architecture_delta
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    if response.changes.len() > 1_000
+        || response.breaking_candidates.len() > 256
+        || response.lineage.len() > 1_000
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    if wire_states.coverage.is_empty() || wire_states.coverage.len() > 32 {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let base_generation = parse_generation(
+        wire_states
+            .base_generation
+            .ok_or(ClientError::InvalidResponseCorrelation)?,
+    )?;
+    let head_generation = parse_generation(
+        wire_states
+            .head_generation
+            .ok_or(ClientError::InvalidResponseCorrelation)?,
+    )?;
+    let mut changes = Vec::new();
+    changes
+        .try_reserve_exact(response.changes.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for change in response.changes {
+        if change.kind.is_empty()
+            || change.kind.len() > 32
+            || change.entity_kind.is_empty()
+            || change.entity_kind.len() > 32
+            || change.significance > 1_000
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        changes.push(HistorySemanticChange {
+            kind: change.kind,
+            symbol_id: parse_symbol(change.symbol_id)?,
+            entity_kind: change.entity_kind,
+            breaking_candidate: change.breaking_candidate,
+            significance: u16::try_from(change.significance)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+        });
+    }
+    if wire_delta.new_cross_service_edges > 10_000
+        || wire_delta.removed_cross_service_edges > 10_000
+        || wire_delta.new_boundaries > 10_000
+        || wire_delta.removed_boundaries > 10_000
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut breaking_candidates = Vec::new();
+    breaking_candidates
+        .try_reserve_exact(response.breaking_candidates.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for candidate in response.breaking_candidates {
+        if candidate.consumer_count > 100_000
+            || candidate.reason.is_empty()
+            || candidate.reason.len() > 128
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        breaking_candidates.push(HistoryBreakingCandidate {
+            symbol_id: parse_symbol(candidate.symbol_id)?,
+            consumer_count: candidate.consumer_count,
+            is_public_surface: candidate.is_public_surface,
+            reason: candidate.reason,
+        });
+    }
+    let mut lineage = Vec::new();
+    lineage
+        .try_reserve_exact(response.lineage.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for lineage_match in response.lineage {
+        if lineage_match.confidence > 1_000 {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        lineage.push(HistoryLineageMatch {
+            base_symbol_id: parse_symbol(lineage_match.base_symbol_id)?,
+            head_symbol_id: parse_symbol(lineage_match.head_symbol_id)?,
+            confidence: u16::try_from(lineage_match.confidence)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            is_rename: lineage_match.is_rename,
+        });
+    }
+    Ok(HistoryCompare {
+        context,
+        matched_states: HistoryMatchedStates {
+            base_generation,
+            head_generation,
+            coverage: wire_states.coverage,
+        },
+        changes,
+        architecture_delta: HistoryArchitectureDelta {
+            new_cross_service_edges: wire_delta.new_cross_service_edges,
+            removed_cross_service_edges: wire_delta.removed_cross_service_edges,
+            new_boundaries: wire_delta.new_boundaries,
+            removed_boundaries: wire_delta.removed_boundaries,
+        },
+        breaking_candidates,
+        lineage,
     })
 }
 
