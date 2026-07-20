@@ -524,7 +524,7 @@ async fn assert_source_reference_composes_with_read(
         expected.clone(),
     ))));
     let calls = Arc::clone(&harness.calls);
-    let router = ToolRouter::new(harness.executor).expect("tool catalog compiles");
+    let router = ToolRouter::new(harness.executor, rootlight_mcp_contract::ExposureProfile::Developer).expect("tool catalog compiles");
     let response = router
         .handle(
             operating_request(json!({
@@ -1237,7 +1237,7 @@ async fn executor_rejects_semantically_invalid_arguments_before_the_port() {
 async fn router_returns_invalid_argument_for_semantically_invalid_inputs() {
     let harness = Harness::new(FakeOutcome::RepositoryIndex(Err(ClientPortError::Executor)));
     let call_count = Arc::clone(&harness.call_count);
-    let router = ToolRouter::new(harness.executor).expect("router compiles");
+    let router = ToolRouter::new(harness.executor, rootlight_mcp_contract::ExposureProfile::Developer).expect("router compiles");
 
     for (tool, arguments) in schema_valid_invalid_inputs() {
         let response = router
@@ -1271,6 +1271,7 @@ async fn router_keeps_public_failures_typed_and_internal_failures_static() {
             Box::new(not_found),
         ))))
         .executor,
+        rootlight_mcp_contract::ExposureProfile::Developer,
     )
     .expect("router compiles");
     let public_response = public_router
@@ -1297,7 +1298,7 @@ async fn router_keeps_public_failures_typed_and_internal_failures_static() {
         (ClientPortError::Executor, "tool executor failed"),
     ] {
         let router =
-            ToolRouter::new(Harness::new(FakeOutcome::RepositoryIndex(Err(error))).executor)
+            ToolRouter::new(Harness::new(FakeOutcome::RepositoryIndex(Err(error))).executor, rootlight_mcp_contract::ExposureProfile::Developer)
                 .expect("router compiles");
         let response = router
             .handle(
@@ -1326,6 +1327,7 @@ async fn cancellation_drops_a_pending_client_port_future() {
             dropped: Arc::clone(&dropped),
         })
         .executor,
+        rootlight_mcp_contract::ExposureProfile::Developer,
     )
     .expect("router compiles");
     let (sender, receiver) = watch::channel(false);

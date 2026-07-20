@@ -7,6 +7,7 @@ use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 
 use jsonschema::Validator;
 use rootlight_mcp_contract::{
+    ExposureProfile,
     CodeLocateInput, CodeLocateOutput, DetailKey, ErrorCode, ErrorResponse, GenerationSelector,
     NextAction, OperationStatusInput, OperationStatusOutput, PublicError, RepoIndexInput,
     RepoIndexOutput, RepositorySelector, SchemaVersion, SourceReadInput, SourceReadOutput,
@@ -134,6 +135,7 @@ pub struct ToolRouter<E> {
     executor: Arc<E>,
     contracts: Arc<[ToolContract]>,
     list_result: Map<String, Value>,
+    profile: ExposureProfile,
     invalid_arguments: PublicError,
     resource_exhausted: PublicError,
 }
@@ -148,7 +150,16 @@ where
     ///
     /// Returns [`ToolRegistryError`] when a checked server-owned schema cannot
     /// be parsed, compiled, or represented as an MCP tool definition.
-    pub fn new(executor: E) -> Result<Self, ToolRegistryError> {
+    /// Compiles every checked input and output schema before the session starts.
+    ///
+    /// The exposure profile filters which tools appear in ``tools/list``
+    /// discovery. It does not change tool semantics, limits, or authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolRegistryError`] when a checked server-owned schema cannot
+    /// be parsed, compiled, or represented as an MCP tool definition.
+    pub fn new(executor: E, profile: ExposureProfile) -> Result<Self, ToolRegistryError> {
         let invalid_arguments = checked_public_error(
             ErrorCode::InvalidArgument,
             INVALID_ARGUMENT_MESSAGE,
@@ -172,10 +183,12 @@ where
             .try_reserve_exact(contracts.len())
             .map_err(|_| ToolRegistryError::MemoryUnavailable)?;
         for contract in &contracts {
-            definitions.push(
-                serde_json::to_value(&contract.definition)
-                    .map_err(ToolRegistryError::SerializeDefinition)?,
-            );
+            if profile_exposes_tool(profile, contract.tool.name()) {
+                definitions.push(
+                    serde_json::to_value(&contract.definition)
+                        .map_err(ToolRegistryError::SerializeDefinition)?,
+                );
+            }
         }
         let list_result = Map::from_iter([("tools".to_owned(), Value::Array(definitions))]);
 
@@ -183,6 +196,7 @@ where
             executor: Arc::new(executor),
             contracts: contracts.into(),
             list_result,
+            profile,
             invalid_arguments,
             resource_exhausted,
         })
@@ -198,6 +212,7 @@ where
     async fn call_tool(
         executor: Arc<E>,
         contracts: Arc<[ToolContract]>,
+        profile: ExposureProfile,
         invalid_arguments: PublicError,
         resource_exhausted: PublicError,
         params: Option<Value>,
@@ -236,6 +251,12 @@ where
                 HandlerResponse::error(INVALID_PARAMS, "tool is not available"),
             );
         };
+        if !profile_exposes_tool(profile, &name) {
+            return cancel_or(
+                &cancellation,
+                HandlerResponse::error(INVALID_PARAMS, "tool is not available"),
+            );
+        }
         let arguments_value = Value::Object(arguments);
         if !tool_argument_bytes_are_valid(contract.tool, &arguments_value)
             || !contract.input_validator.is_valid(&arguments_value)
@@ -346,12 +367,14 @@ where
             "tools/call" => {
                 let executor = Arc::clone(&self.executor);
                 let contracts = Arc::clone(&self.contracts);
+                let profile = self.profile;
                 let invalid_arguments = self.invalid_arguments.clone();
                 let resource_exhausted = self.resource_exhausted.clone();
                 Box::pin(async move {
                     Self::call_tool(
                         executor,
                         contracts,
+                        profile,
                         invalid_arguments,
                         resource_exhausted,
                         params,
@@ -495,6 +518,14 @@ fn decode_typed_input(tool: VerticalTool, input: &Value) -> Result<TypedInput, (
             .map(TypedInput::SourceRead)
             .map_err(|_| ()),
     }
+}
+
+/// Reports whether a tool name is exposed by the given profile.
+///
+/// Profile filtering applies only to discovery and invocation authorization.
+/// It never changes tool semantics, limits, trust, or permission policy.
+fn profile_exposes_tool(profile: ExposureProfile, tool_name: &str) -> bool {
+    profile.tools().iter().any(|tool| tool.name() == tool_name)
 }
 
 fn tool_argument_bytes_are_valid(tool: VerticalTool, input: &Value) -> bool {
@@ -928,7 +959,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_list_is_fixed_strict_and_truthfully_annotated() {
-        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer).expect("registry compiles");
         assert_eq!(router.capabilities(), HandlerCapabilities::tools());
 
         let response = router
@@ -958,7 +989,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_call_validates_output_and_mirrors_exact_structured_content() {
-        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer).expect("registry compiles");
         let response = router
             .handle(
                 request(
@@ -979,7 +1010,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_tool_arguments_are_model_visible_without_execution() {
-        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer).expect("registry compiles");
         let response = router
             .handle(
                 request(
@@ -1016,7 +1047,7 @@ mod tests {
     async fn executor_domain_errors_use_the_checked_advertised_contract() {
         let router = ToolRouter::new(StaticExecutor {
             result: Err(ToolExecutionError::new(checked_not_found())),
-        })
+        }, ExposureProfile::Developer)
         .expect("registry compiles");
         let response = router
             .handle(
@@ -1049,7 +1080,7 @@ mod tests {
 
     #[tokio::test]
     async fn semantic_source_range_failure_does_not_reach_the_executor() {
-        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer).expect("registry compiles");
         let response = router
             .handle(
                 request(
@@ -1086,7 +1117,7 @@ mod tests {
 
     #[tokio::test]
     async fn inverted_direct_file_range_does_not_reach_the_executor() {
-        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer).expect("registry compiles");
         let response = router
             .handle(
                 request(
@@ -1115,7 +1146,7 @@ mod tests {
 
     #[tokio::test]
     async fn utf8_byte_limit_failures_do_not_reach_the_executor() {
-        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer).expect("registry compiles");
         let oversized_root = router
             .handle(
                 request(
@@ -1153,7 +1184,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_configuration_patch_does_not_reach_the_executor() {
-        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer).expect("registry compiles");
         let response = router
             .handle(
                 request(
@@ -1200,7 +1231,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_tool_is_an_invalid_params_protocol_error_without_execution() {
-        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer).expect("registry compiles");
         let response = router
             .handle(
                 request(
@@ -1223,7 +1254,7 @@ mod tests {
 
     #[tokio::test]
     async fn progress_tokens_and_forbidden_tasks_share_transport_validation() {
-        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer).expect("registry compiles");
         let list = router
             .handle(
                 request(
@@ -1281,7 +1312,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_wins_entry_and_post_execution_early_responses() {
-        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer).expect("registry compiles");
         let response = router
             .handle(request("tools/call", Value::Null), cancelled())
             .await;
@@ -1292,7 +1323,7 @@ mod tests {
         let router = ToolRouter::new(CancellingExecutor {
             sender,
             error: ToolExecutionError::new(checked_not_found()),
-        })
+        }, ExposureProfile::Developer)
         .expect("registry compiles");
         let response = router
             .handle(
@@ -1377,7 +1408,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_server_output_fails_as_a_protocol_internal_error() {
-        let router = ToolRouter::new(FixtureExecutor::default()).expect("registry compiles");
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer).expect("registry compiles");
         let response = router
             .handle(
                 request(
@@ -1411,7 +1442,7 @@ mod tests {
         let mut output = retained_output("source.read");
         output["data"]["total_source_bytes"] = json!(9);
         let router =
-            ToolRouter::new(StaticExecutor { result: Ok(output) }).expect("registry compiles");
+            ToolRouter::new(StaticExecutor { result: Ok(output) }, ExposureProfile::Developer).expect("registry compiles");
         let response = router
             .handle(
                 request(
@@ -1459,7 +1490,7 @@ mod tests {
             .expect("oversized fixture remains a valid typed source response");
 
         let router =
-            ToolRouter::new(StaticExecutor { result: Ok(output) }).expect("registry compiles");
+            ToolRouter::new(StaticExecutor { result: Ok(output) }, ExposureProfile::Developer).expect("registry compiles");
         let response = router
             .handle(
                 request(

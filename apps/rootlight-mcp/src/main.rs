@@ -110,7 +110,7 @@ where
     P: FirstSliceClientPort,
 {
     let executor = FirstSliceToolExecutor::new(port)?;
-    Ok(Arc::new(ToolRouter::new(executor)?))
+    Ok(Arc::new(ToolRouter::new(executor, rootlight_mcp_contract::ExposureProfile::Developer)?))
 }
 
 async fn serve_stdio(handler: Arc<dyn RequestHandler>) -> Result<(), rootlight_mcp::SessionError> {
