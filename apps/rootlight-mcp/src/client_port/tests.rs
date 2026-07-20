@@ -6,11 +6,12 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use rootlight_client::{
-    AnalysisTier as ClientAnalysisTier, ClientError, CodeLocate, CoverageStatus,
-    GenerationSelector, LocateMode, OperationKind, OperationStage, OperationState, QueryContext,
-    QueryUsage, RecoveryClass, RepositoryCoverageEntry, RepositoryIndex, RepositoryList,
-    RepositoryListEntry, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
-    RequestTimeout, SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
+    AnalysisTier as ClientAnalysisTier, ClientError, CodeLocate, CoverageStatus, FlowTrace,
+    FlowTraceFrontier, FlowTraceProjection, GenerationSelector, LocateMode, OperationKind,
+    OperationStage, OperationState, QueryContext, QueryUsage, RecoveryClass,
+    RepositoryCoverageEntry, RepositoryIndex, RepositoryList, RepositoryListEntry,
+    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, RequestTimeout,
+    SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -83,6 +84,18 @@ enum Call {
         direction: Option<String>,
         min_confidence: Option<u16>,
         max_results: Option<u16>,
+        timeout: RequestTimeout,
+    },
+    FlowTrace {
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        relations: Vec<String>,
+        direction: Option<String>,
+        max_depth: Option<u8>,
+        max_paths: Option<u16>,
+        min_confidence: Option<u16>,
         timeout: RequestTimeout,
     },
 }
@@ -346,6 +359,49 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 total_edges: 0,
                 exact: true,
                 truncated: false,
+            })
+        })
+    }
+
+    fn flow_trace(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        relations: Vec<String>,
+        direction: Option<String>,
+        max_depth: Option<u8>,
+        max_paths: Option<u16>,
+        min_confidence: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<FlowTrace> {
+        self.record(Call::FlowTrace {
+            repository,
+            generation,
+            from,
+            to,
+            relations: relations.clone(),
+            direction,
+            max_depth,
+            max_paths,
+            min_confidence,
+            timeout,
+        });
+        Box::pin(async move {
+            Ok(FlowTrace {
+                context: query_context(repository, generation, true),
+                paths: Vec::new(),
+                frontier: FlowTraceFrontier {
+                    reached_nodes: 1,
+                    examined_edges: 0,
+                    truncated: false,
+                    unresolved_boundaries: 0,
+                },
+                projection: FlowTraceProjection {
+                    relations,
+                    min_confidence: min_confidence.unwrap_or(0),
+                },
             })
         })
     }

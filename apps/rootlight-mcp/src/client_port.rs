@@ -6,7 +6,7 @@
 use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use rootlight_client::{
-    AnalysisTier as ClientAnalysisTier, Client, ClientError, CodeLocate, CoverageStatus,
+    AnalysisTier as ClientAnalysisTier, Client, ClientError, CodeLocate, CoverageStatus, FlowTrace,
     GenerationSelector, LocateMode, RepositoryIndex, RepositoryList, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceRead, SourceReference,
     SymbolExplain, SymbolRelationships,
@@ -20,11 +20,11 @@ use rootlight_mcp_contract::vertical::{
 
 use crate::{
     ClientPortError, ClientPortFuture, CodeLocatePortRequest, CodeLocatePortResponse,
-    FirstSliceClientPort, OperationStatusPortRequest, ReadResponseMetadata,
-    RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
-    RepositoryStatusPortRequest, RequestCancellation, SourceReadPortRequest,
-    SourceReadPortResponse, SymbolExplainPortRequest, SymbolExplainPortResponse,
-    SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
+    FirstSliceClientPort, FlowTracePortRequest, FlowTracePortResponse, OperationStatusPortRequest,
+    ReadResponseMetadata, RepositoryIndexPortRequest, RepositoryIndexPortResponse,
+    RepositoryListPortRequest, RepositoryStatusPortRequest, RequestCancellation,
+    SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
+    SymbolExplainPortResponse, SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
 };
 
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -107,6 +107,24 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         max_results: Option<u16>,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<SymbolRelationships>;
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded flow trace dimension"
+    )]
+    fn flow_trace(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        relations: Vec<String>,
+        direction: Option<String>,
+        max_depth: Option<u8>,
+        max_paths: Option<u16>,
+        min_confidence: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<FlowTrace>;
 }
 
 struct LiveAsyncFirstSliceClient {
@@ -255,6 +273,38 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     direction.as_deref(),
                     min_confidence,
                     max_results,
+                    timeout,
+                )
+                .await
+        })
+    }
+
+    fn flow_trace(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        relations: Vec<String>,
+        direction: Option<String>,
+        max_depth: Option<u8>,
+        max_paths: Option<u16>,
+        min_confidence: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<FlowTrace> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .flow_trace_async(
+                    repository,
+                    generation,
+                    from,
+                    to,
+                    &relations,
+                    direction.as_deref(),
+                    max_depth,
+                    max_paths,
+                    min_confidence,
                     timeout,
                 )
                 .await
@@ -487,6 +537,33 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
             Ok(SymbolRelationshipsPortResponse::new(result, metadata))
         })
     }
+
+    fn flow_trace(
+        &self,
+        request: FlowTracePortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<FlowTracePortResponse> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let result = client
+                .flow_trace(
+                    request.repository(),
+                    request.generation(),
+                    request.from(),
+                    request.to(),
+                    request.relations().to_vec(),
+                    request.direction().map(str::to_owned),
+                    request.max_depth(),
+                    request.max_paths(),
+                    request.min_confidence(),
+                    request_timeout()?,
+                )
+                .await
+                .map_err(map_client_error)?;
+            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            Ok(FlowTracePortResponse::new(result, metadata))
+        })
+    }
 }
 
 /// Source-free first-slice port used when synchronous daemon setup is unavailable.
@@ -555,6 +632,14 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
         _request: SymbolRelationshipsPortRequest,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SymbolRelationshipsPortResponse> {
+        unavailable()
+    }
+
+    fn flow_trace(
+        &self,
+        _request: FlowTracePortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<FlowTracePortResponse> {
         unavailable()
     }
 }

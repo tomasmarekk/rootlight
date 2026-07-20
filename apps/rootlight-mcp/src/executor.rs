@@ -19,8 +19,9 @@ use rootlight_client::{
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::intent::{
-    Direction, RelationKind, RelationshipGroup, RelationshipTarget, RelationshipTotals,
-    SymbolRelationshipsData, SymbolRelationshipsInput,
+    Direction, FlowTraceData, FlowTraceInput, FrontierSummary, RelationKind, RelationProjection,
+    RelationshipGroup, RelationshipTarget, RelationshipTotals, SymbolRelationshipsData,
+    SymbolRelationshipsInput, TraceEdge, TracePath,
 };
 use rootlight_mcp_contract::{
     DetailKey, ErrorCode, GenerationSelector, McpTool, NextAction, PublicError,
@@ -143,6 +144,13 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         request: SymbolRelationshipsPortRequest,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<SymbolRelationshipsPortResponse>;
+
+    /// Traces bounded directed paths between stable symbols.
+    fn flow_trace(
+        &self,
+        request: FlowTracePortRequest,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<FlowTracePortResponse>;
 }
 
 /// Source-free failure emitted by an injected daemon client port.
@@ -525,6 +533,91 @@ impl SymbolRelationshipsPortResponse {
     }
 }
 
+/// Normalized `flow.trace` request supported by the current daemon protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowTracePortRequest {
+    repository: RepositoryId,
+    generation: client::GenerationSelector,
+    from: SymbolId,
+    to: Option<SymbolId>,
+    relations: Vec<String>,
+    direction: Option<String>,
+    max_depth: Option<u8>,
+    max_paths: Option<u16>,
+    min_confidence: Option<u16>,
+}
+
+impl FlowTracePortRequest {
+    /// Returns the selected repository.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the active or explicit immutable-generation selector.
+    #[must_use]
+    pub const fn generation(&self) -> client::GenerationSelector {
+        self.generation
+    }
+
+    /// Returns the trace source symbol.
+    #[must_use]
+    pub const fn from(&self) -> SymbolId {
+        self.from
+    }
+
+    /// Returns the optional trace target symbol.
+    #[must_use]
+    pub const fn to(&self) -> Option<SymbolId> {
+        self.to
+    }
+
+    /// Returns requested relation family labels.
+    #[must_use]
+    pub fn relations(&self) -> &[String] {
+        &self.relations
+    }
+
+    /// Returns the optional direction label.
+    #[must_use]
+    pub fn direction(&self) -> Option<&str> {
+        self.direction.as_deref()
+    }
+
+    /// Returns the optional depth bound.
+    #[must_use]
+    pub const fn max_depth(&self) -> Option<u8> {
+        self.max_depth
+    }
+
+    /// Returns the optional path bound.
+    #[must_use]
+    pub const fn max_paths(&self) -> Option<u16> {
+        self.max_paths
+    }
+
+    /// Returns the optional confidence floor.
+    #[must_use]
+    pub const fn min_confidence(&self) -> Option<u16> {
+        self.min_confidence
+    }
+}
+
+/// Traced daemon data plus mandatory MCP read metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowTracePortResponse {
+    result: client::FlowTrace,
+    metadata: ReadResponseMetadata,
+}
+
+impl FlowTracePortResponse {
+    /// Creates a complete `flow.trace` response for MCP mapping.
+    #[must_use]
+    pub const fn new(result: client::FlowTrace, metadata: ReadResponseMetadata) -> Self {
+        Self { result, metadata }
+    }
+}
+
 /// Normalized exact-reference `source.read` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceReadPortRequest {
@@ -705,8 +798,7 @@ where
                 VerticalTool::RepoList => {
                     execute_repo_list(port, arguments, cancellation, &unsupported).await
                 }
-                VerticalTool::FlowTrace
-                | VerticalTool::ChangeImpact
+                VerticalTool::ChangeImpact
                 | VerticalTool::TestsSelect
                 | VerticalTool::ArchitectureOverview
                 | VerticalTool::ArchitectureCycles
@@ -716,6 +808,9 @@ where
                 | VerticalTool::QueryAdvanced => execute_intent_fallback(&unavailable).await,
                 VerticalTool::SymbolRelationships => {
                     execute_symbol_relationships(port, arguments, cancellation, &unsupported).await
+                }
+                VerticalTool::FlowTrace => {
+                    execute_flow_trace(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::ContextPack => {
                     execute_context_pack(port, arguments, cancellation, &unsupported).await
@@ -1866,6 +1961,144 @@ fn direction_label(direction: Direction) -> Result<String, ToolExecutionError> {
 fn direction_from_label(label: &str) -> Result<Direction, ToolExecutionError> {
     serde_json::from_value(Value::String(label.to_owned()))
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+async fn execute_flow_trace<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: FlowTraceInput = decode_input(arguments)?;
+    let request = normalize_flow_trace(input, unsupported)?;
+    let expected = request.clone();
+    let future = port.flow_trace(request, cancellation.clone());
+    let response = await_port(future, cancellation).await?;
+    let output = map_flow_trace(response, &expected)?;
+    serialize_success(output)
+}
+
+fn normalize_flow_trace(
+    input: FlowTraceInput,
+    unsupported: &PublicError,
+) -> Result<FlowTracePortRequest, ToolExecutionError> {
+    let repository = repository_id(input.repository, unsupported)?;
+    // Cross-repository traversal, explicit path policies, custom budgets, and
+    // non-compact profiles are not served by this slice.
+    if input.cross_repository == Some(true)
+        || input.path_policy.is_some()
+        || input.budget.is_some()
+        || !compact_profile(input.response_profile)
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    // The first slice resolves only stable symbol endpoints; route, service,
+    // and database selectors have no oracle data yet.
+    let from = input
+        .from
+        .symbol_id
+        .ok_or_else(|| ToolExecutionError::new(unsupported.clone()))?;
+    let to = match input.to {
+        Some(selector) => Some(
+            selector
+                .symbol_id
+                .ok_or_else(|| ToolExecutionError::new(unsupported.clone()))?,
+        ),
+        None => None,
+    };
+    let mut relations = Vec::new();
+    relations
+        .try_reserve_exact(input.relations.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for kind in &input.relations {
+        relations.push(relation_kind_label(*kind)?);
+    }
+    let direction = match input.direction {
+        Some(direction) => Some(direction_label(direction)?),
+        None => None,
+    };
+    Ok(FlowTracePortRequest {
+        repository,
+        generation: client_generation(input.generation),
+        from,
+        to,
+        relations,
+        direction,
+        max_depth: input.max_depth,
+        max_paths: input.max_paths,
+        min_confidence: input.min_confidence,
+    })
+}
+
+fn map_flow_trace(
+    response: FlowTracePortResponse,
+    request: &FlowTracePortRequest,
+) -> Result<ReadEnvelope<FlowTraceData>, ToolExecutionError> {
+    validate_query_context(
+        &response.result.context,
+        request.repository,
+        request.generation,
+    )?;
+    let frontier = response.result.frontier;
+    let projection = response.result.projection;
+    let mut paths = Vec::new();
+    paths
+        .try_reserve_exact(response.result.paths.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for path in response.result.paths {
+        let mut edges = Vec::new();
+        edges
+            .try_reserve_exact(path.edges.len())
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        for edge in path.edges {
+            let kind = relation_kind_from_label(&edge.kind)?;
+            let mut source_refs = Vec::new();
+            source_refs
+                .try_reserve_exact(edge.source_refs.len())
+                .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+            for source in &edge.source_refs {
+                source_refs.push(client_source_ref(source)?);
+            }
+            edges.push(TraceEdge {
+                kind,
+                confidence: edge.confidence,
+                source_refs,
+                trust: TrustClassification::UntrustedRepositoryData,
+            });
+        }
+        paths.push(TracePath {
+            confidence: path.confidence,
+            nodes: path.nodes,
+            edges,
+            cyclic: path.cyclic,
+        });
+    }
+    let mut relations = BTreeSet::new();
+    for relation in &projection.relations {
+        relations.insert(relation_kind_from_label(relation)?);
+    }
+    let data = FlowTraceData {
+        paths,
+        frontier: FrontierSummary {
+            reached_nodes: frontier.reached_nodes,
+            examined_edges: frontier.examined_edges,
+            truncated: frontier.truncated,
+            unresolved_boundaries: frontier.unresolved_boundaries,
+        },
+        projection: RelationProjection {
+            relations,
+            min_confidence: projection.min_confidence,
+        },
+    };
+    map_read_envelope(
+        response.result.context,
+        response.metadata,
+        data,
+        frontier.truncated,
+    )
 }
 
 async fn execute_source_read<P>(

@@ -12,9 +12,11 @@ use std::{
 };
 
 use rootlight_client::{
-    AnalysisTier as ClientTier, CoverageStatus as ClientCoverage, LocateHit, OperationKind,
-    OperationStage, OperationState as ClientOperationState, QueryContext, QueryUsage,
-    RecoveryClass, RelationshipGroup as ClientRelationshipGroup,
+    AnalysisTier as ClientTier, CoverageStatus as ClientCoverage, FlowTrace as ClientFlowTrace,
+    FlowTraceEdge as ClientTraceEdge, FlowTraceFrontier as ClientTraceFrontier,
+    FlowTracePath as ClientTracePath, FlowTraceProjection as ClientTraceProjection, LocateHit,
+    OperationKind, OperationStage, OperationState as ClientOperationState, QueryContext,
+    QueryUsage, RecoveryClass, RelationshipGroup as ClientRelationshipGroup,
     RelationshipTarget as ClientRelationshipTarget, RepositoryCoverageEntry, RepositoryList,
     RepositoryListEntry, RepositoryStatus, SourceChunk as ClientSourceChunk,
     SymbolExplanation as ClientExplanation, SymbolRelationships as ClientRelationships,
@@ -25,7 +27,7 @@ use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
     SymbolExplainOutput,
     context::{ContextPackOutput, QueryBatchOutput},
-    intent::SymbolRelationshipsOutput,
+    intent::{FlowTraceOutput, SymbolRelationshipsOutput},
     repository::{RepoListOutput, RepoStatusOutput, RepositoryState},
     vertical::{
         AnalysisTier, CacheStatus, Freshness, IndexMode, IndexPlanScope, IndexPlanSummary,
@@ -58,6 +60,7 @@ enum FakeOutcome {
     RepositoryList(Result<RepositoryList, ClientPortError>),
     RepositoryStatus(Result<RepositoryStatus, ClientPortError>),
     SymbolRelationships(Result<SymbolRelationshipsPortResponse, ClientPortError>),
+    FlowTrace(Result<FlowTracePortResponse, ClientPortError>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +73,7 @@ enum ObservedCall {
     RepositoryList(RepositoryListPortRequest),
     RepositoryStatus(RepositoryStatusPortRequest),
     SymbolRelationships(SymbolRelationshipsPortRequest),
+    FlowTrace(FlowTracePortRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +215,19 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::SymbolRelationships(request));
         let outcome = match &self.outcome {
             FakeOutcome::SymbolRelationships(outcome) => outcome.clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { outcome })
+    }
+
+    fn flow_trace(
+        &self,
+        request: FlowTracePortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<FlowTracePortResponse> {
+        self.record(ObservedCall::FlowTrace(request));
+        let outcome = match &self.outcome {
+            FakeOutcome::FlowTrace(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1260,6 +1277,82 @@ async fn symbol_relationships_maps_groups_and_totals() {
     };
     assert_eq!(request.repository(), repository());
     assert_eq!(request.seeds(), &[symbol()]);
+    assert_eq!(request.relations(), &["calls".to_owned()]);
+}
+
+#[tokio::test]
+async fn flow_trace_maps_paths_frontier_and_projection() {
+    let response = FlowTracePortResponse::new(
+        ClientFlowTrace {
+            context: context(1, 0),
+            paths: vec![ClientTracePath {
+                confidence: 800,
+                nodes: vec![symbol(), missing_symbol()],
+                edges: vec![ClientTraceEdge {
+                    kind: "calls".to_owned(),
+                    confidence: 800,
+                    source_refs: vec![source_reference(0, 10, 1, 1)],
+                }],
+                cyclic: false,
+            }],
+            frontier: ClientTraceFrontier {
+                reached_nodes: 2,
+                examined_edges: 1,
+                truncated: false,
+                unresolved_boundaries: 0,
+            },
+            projection: ClientTraceProjection {
+                relations: vec!["calls".to_owned()],
+                min_confidence: 0,
+            },
+        },
+        metadata("trace-flow-1"),
+    );
+    let harness = Harness::new(FakeOutcome::FlowTrace(Ok(response)));
+    let output: FlowTraceOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::FlowTrace,
+            json!({
+                "repository": {"repository_id": repository()},
+                "from": {"symbol_id": symbol()},
+                "relations": ["calls"]
+            }),
+        )
+        .await
+        .expect("flow trace maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected flow trace success");
+    };
+    assert_eq!(output.data.paths.len(), 1);
+    let path = &output.data.paths[0];
+    assert_eq!(path.confidence, 800);
+    assert_eq!(path.nodes, vec![symbol(), missing_symbol()]);
+    assert_eq!(path.edges.len(), 1);
+    assert_eq!(path.edges[0].kind, RelationKind::Calls);
+    assert_eq!(path.edges[0].confidence, 800);
+    assert_eq!(path.edges[0].source_refs.len(), 1);
+    assert!(!path.cyclic);
+    assert_eq!(output.data.frontier.reached_nodes, 2);
+    assert_eq!(output.data.frontier.examined_edges, 1);
+    assert!(!output.data.frontier.truncated);
+    assert_eq!(output.data.frontier.unresolved_boundaries, 0);
+    assert_eq!(output.data.projection.relations.len(), 1);
+    assert!(
+        output
+            .data
+            .projection
+            .relations
+            .contains(&RelationKind::Calls)
+    );
+    assert_eq!(output.data.projection.min_confidence, 0);
+    let ObservedCall::FlowTrace(request) = harness.only_call() else {
+        panic!("expected flow trace call");
+    };
+    assert_eq!(request.repository(), repository());
+    assert_eq!(request.from(), symbol());
+    assert_eq!(request.to(), None);
     assert_eq!(request.relations(), &["calls".to_owned()]);
 }
 
