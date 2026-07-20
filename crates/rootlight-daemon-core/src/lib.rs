@@ -162,6 +162,8 @@ pub enum FirstSliceIpcRequest {
     ArchitectureOverview(daemon::ArchitectureOverviewRequest),
     /// Select bounded relevant tests for a seed set.
     TestsSelect(daemon::TestsSelectRequest),
+    /// Map bounded change impact for an explicit change set.
+    ChangeImpact(daemon::ChangeImpactRequest),
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -193,6 +195,8 @@ pub enum FirstSliceIpcResponse {
     ArchitectureOverview(daemon::ArchitectureOverviewResponse),
     /// Bounded test selection for a seed set.
     TestsSelect(daemon::TestsSelectResponse),
+    /// Bounded change impact for an explicit change set.
+    ChangeImpact(daemon::ChangeImpactResponse),
 }
 
 impl FirstSliceIpcResponse {
@@ -228,6 +232,9 @@ impl FirstSliceIpcResponse {
             }
             Self::TestsSelect(response) => {
                 daemon::response_envelope::Response::TestsSelect(response)
+            }
+            Self::ChangeImpact(response) => {
+                daemon::response_envelope::Response::ChangeImpact(response)
             }
         }
     }
@@ -5457,6 +5464,9 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::TestsSelect(request)) => {
             Ok(Some(FirstSliceIpcRequest::TestsSelect(request)))
         }
+        Some(daemon::request_envelope::Request::ChangeImpact(request)) => {
+            Ok(Some(FirstSliceIpcRequest::ChangeImpact(request)))
+        }
         Some(request) => Err(request),
         None => Ok(None),
     }
@@ -6106,6 +6116,96 @@ fn first_slice_response_correlates(
                         && gap.reason.len() <= 128
                 })
         }
+        (
+            FirstSliceIpcRequest::ChangeImpact(request),
+            FirstSliceIpcResponse::ChangeImpact(response),
+        ) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            let Some(risk_summary) = response.risk_summary.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    request.generation.as_ref(),
+                )
+                && (!request.changed_symbols.is_empty() || !request.changed_paths.is_empty())
+                && request.changed_symbols.len() <= 256
+                && request
+                    .changed_symbols
+                    .iter()
+                    .all(|symbol| symbol.value.len() == 20)
+                && request.changed_paths.len() <= 1_000
+                && request
+                    .changed_paths
+                    .iter()
+                    .all(|path| !path.is_empty() && path.len() <= 8_192)
+                && request
+                    .max_depth
+                    .is_none_or(|depth| (1..=8).contains(&depth))
+                && request
+                    .min_confidence
+                    .is_none_or(|confidence| confidence <= 1_000)
+                && request
+                    .max_dependents
+                    .is_none_or(|max| (1..=500).contains(&max))
+                && !response.resolved_changes.is_empty()
+                && response.resolved_changes.len() <= 1_256
+                && response.impacted.len() <= 1_256
+                && response.tests.len() <= 500
+                && response.resolved_changes.iter().all(|change| {
+                    optional_wire_id_has_len(change.symbol_id.as_ref().map(|id| &id.value), 20)
+                        && optional_wire_id_has_len(change.file_id.as_ref().map(|id| &id.value), 20)
+                        && !change.classification.is_empty()
+                        && change.classification.len() <= 32
+                        && change
+                            .kind
+                            .as_ref()
+                            .is_none_or(|kind| !kind.is_empty() && kind.len() <= 32)
+                })
+                && response.impacted.iter().all(|group| {
+                    group.dependents.len() <= 500
+                        && group.dependents.iter().all(|entry| {
+                            entry
+                                .symbol_id
+                                .as_ref()
+                                .is_some_and(|symbol| symbol.value.len() == 20)
+                                && !entry.kind.is_empty()
+                                && entry.kind.len() <= 32
+                                && (1..=8).contains(&entry.distance)
+                                && entry.confidence <= 1_000
+                                && !entry.via.is_empty()
+                                && entry.via.len() <= 16
+                                && entry.via.iter().all(|predicate| {
+                                    !predicate.is_empty() && predicate.len() <= 128
+                                })
+                        })
+                })
+                && response.tests.iter().all(|test| {
+                    !test.test_id.is_empty()
+                        && test.test_id.len() <= 512
+                        && test.relevance <= 1_000
+                        && !test.why.is_empty()
+                        && test.why.len() <= 8
+                        && test
+                            .why
+                            .iter()
+                            .all(|reason| !reason.is_empty() && reason.len() <= 128)
+                })
+                && !risk_summary.level.is_empty()
+                && risk_summary.level.len() <= 32
+                && risk_summary.reasons.len() <= 16
+                && risk_summary
+                    .reasons
+                    .iter()
+                    .all(|reason| !reason.is_empty() && reason.len() <= 128)
+                && !risk_summary.coverage.is_empty()
+                && risk_summary.coverage.len() <= 32
+                && risk_summary.fanout <= 100_000
+        }
         _ => false,
     }
 }
@@ -6750,6 +6850,66 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 )));
             }
         }
+        FirstSliceIpcRequest::ChangeImpact(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_generation_selector(request.generation.as_ref())?;
+            if request.changed_symbols.is_empty() && request.changed_paths.is_empty() {
+                return Err(Box::new(invalid_argument(
+                    "change impact request requires an explicit change set",
+                )));
+            }
+            if request.changed_symbols.len() > 256 {
+                return Err(Box::new(invalid_argument(
+                    "change impact request is invalid",
+                )));
+            }
+            let mut observed = std::collections::BTreeSet::new();
+            for symbol in &request.changed_symbols {
+                require_wire_id(Some(symbol.value.as_slice()), 20)?;
+                if !observed.insert(symbol.value.as_slice()) {
+                    return Err(Box::new(invalid_argument(
+                        "change symbol identifiers must be distinct",
+                    )));
+                }
+            }
+            if request.changed_paths.len() > 1_000
+                || request.changed_paths.iter().any(|path| {
+                    path.is_empty() || path.len() > 8_192 || path.as_bytes().contains(&0)
+                })
+            {
+                return Err(Box::new(invalid_argument(
+                    "change impact request is invalid",
+                )));
+            }
+            if request
+                .max_depth
+                .is_some_and(|depth| !(1..=8).contains(&depth))
+            {
+                return Err(Box::new(invalid_argument(
+                    "change impact request is invalid",
+                )));
+            }
+            if request
+                .min_confidence
+                .is_some_and(|confidence| confidence > 1_000)
+            {
+                return Err(Box::new(invalid_argument(
+                    "change impact request is invalid",
+                )));
+            }
+            if request
+                .max_dependents
+                .is_some_and(|max| !(1..=500).contains(&max))
+            {
+                return Err(Box::new(invalid_argument(
+                    "change impact request is invalid",
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -6873,6 +7033,7 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
             ControlMethod::ArchitectureOverview
         }
         Some(daemon::request_envelope::Request::TestsSelect(_)) => ControlMethod::TestsSelect,
+        Some(daemon::request_envelope::Request::ChangeImpact(_)) => ControlMethod::ChangeImpact,
         None => ControlMethod::Unknown,
     }
 }
@@ -7328,6 +7489,9 @@ fn request_from_wire(
             Err(Box::new(first_slice_unavailable()))
         }
         Some(daemon::request_envelope::Request::TestsSelect(_)) => {
+            Err(Box::new(first_slice_unavailable()))
+        }
+        Some(daemon::request_envelope::Request::ChangeImpact(_)) => {
             Err(Box::new(first_slice_unavailable()))
         }
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
