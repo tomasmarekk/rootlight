@@ -942,3 +942,61 @@ fn architecture_overview_reports_an_honest_file_granularity_result_for_a_known_f
         RepositoryDataTrust::UntrustedRepositoryData
     );
 }
+
+#[test]
+fn tests_select_reports_an_honest_partial_result_for_a_known_fixture() {
+    // The first-slice oracle records a direct call as a `DispatchCandidate`
+    // occurrence and structural containment as a file-to-entity `Contains`
+    // relation, and it marks no test entity for this fixture. An honest
+    // `tests.select` over the fixture therefore selects no fabricated tests:
+    // every coverage signal stays unused and the seed scope is reported as an
+    // honest gap, while still proving the generation-pinned query path and
+    // mandatory trust labeling.
+    let source =
+        "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    let located = service
+        .code_locate(
+            indexed.generation,
+            "caller".to_owned(),
+            LocateMode::Exact,
+            8,
+            &cancellation,
+        )
+        .expect("locate query succeeds");
+    assert_eq!(located.data.hits.len(), 1);
+    let seed = located.data.hits[0].symbol;
+
+    let selection = service
+        .tests_select(
+            indexed.generation,
+            BTreeSet::from([seed]),
+            Vec::new(),
+            20,
+            false,
+            &cancellation,
+        )
+        .expect("tests select query succeeds");
+
+    // The fixture marks no test entity, so no test is fabricated and no
+    // coverage signal is reported used.
+    assert!(selection.data.tests.is_empty());
+    assert!(!selection.data.coverage_strategy.direct_edges);
+    assert!(!selection.data.coverage_strategy.transitive_signals);
+    assert!(!selection.data.coverage_strategy.history_signals);
+    assert!(!selection.data.coverage_strategy.build_target_signals);
+    // The seed scope has no related test, so it is reported as an honest gap.
+    assert_eq!(selection.data.gaps.len(), 1);
+    assert_eq!(selection.data.gaps[0].scope, seed.to_string());
+    assert_eq!(selection.data.gaps[0].reason, "no_related_test");
+    assert_eq!(
+        selection.data.trust,
+        RepositoryDataTrust::UntrustedRepositoryData
+    );
+}
