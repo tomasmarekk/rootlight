@@ -49,7 +49,7 @@ pub struct RequestEnvelope {
     pub timeout_ms: ::core::option::Option<u32>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -122,6 +122,9 @@ pub mod request_envelope {
         #[prost(message, tag = "43")]
         #[allow(missing_docs)]
         ChangeImpact(super::ChangeImpactRequest),
+        #[prost(message, tag = "44")]
+        #[allow(missing_docs)]
+        PlanChange(super::PlanChangeRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -132,7 +135,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -205,6 +208,9 @@ pub mod response_envelope {
         #[prost(message, tag = "43")]
         #[allow(missing_docs)]
         ChangeImpact(super::ChangeImpactResponse),
+        #[prost(message, tag = "44")]
+        #[allow(missing_docs)]
+        PlanChange(super::PlanChangeResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -1795,6 +1801,122 @@ pub struct ChangeImpactResponse {
     #[prost(message, optional, tag = "6")]
     #[allow(missing_docs)]
     pub risk_summary: ::core::option::Option<FirstSliceImpactRiskSummary>,
+}
+/// Requests a bounded ordered change plan for one generation and target set.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PlanChangeRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(string, tag = "4")]
+    #[allow(missing_docs)]
+    pub objective: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    #[allow(missing_docs)]
+    pub objective_text: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "6")]
+    #[allow(missing_docs)]
+    pub target_symbols: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+    #[prost(message, repeated, tag = "7")]
+    #[allow(missing_docs)]
+    pub target_files: ::prost::alloc::vec::Vec<super::super::common::v1::FileId>,
+    #[prost(uint32, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub max_steps: ::core::option::Option<u32>,
+}
+/// One ordered step in a change plan.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceChangePlanStep {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub step: u32,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub action: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub targets: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+    #[prost(uint32, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub depends_on: ::prost::alloc::vec::Vec<u32>,
+    #[prost(string, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub risks: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub verification: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Compact impact and ownership summary for a change plan.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSlicePlanImpactSummary {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub affected_symbols: u32,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub affected_files: u32,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub risk_level: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    #[allow(missing_docs)]
+    pub touches_public_surface: bool,
+}
+/// One open decision that cannot be safely inferred.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSlicePlanDecision {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub question: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub recommended_default: ::prost::alloc::string::String,
+}
+/// Ready follow-up context-pack arguments for a change plan.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceContextPackRequest {
+    #[prost(message, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub symbols: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+    #[prost(message, repeated, tag = "2")]
+    #[allow(missing_docs)]
+    pub files: ::prost::alloc::vec::Vec<super::super::common::v1::FileId>,
+}
+/// Returns bounded ordered steps, an impact summary, a test plan, decisions, and
+/// a ready context-pack request.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PlanChangeResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub plan: ::prost::alloc::vec::Vec<FirstSliceChangePlanStep>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub affected_scope: ::core::option::Option<FirstSlicePlanImpactSummary>,
+    #[prost(message, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub test_plan: ::prost::alloc::vec::Vec<FirstSliceChangeImpactTest>,
+    #[prost(message, repeated, tag = "6")]
+    #[allow(missing_docs)]
+    pub open_decisions: ::prost::alloc::vec::Vec<FirstSlicePlanDecision>,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub context_pack_request: ::core::option::Option<FirstSliceContextPackRequest>,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]

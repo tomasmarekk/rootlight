@@ -47,6 +47,7 @@ message RequestEnvelope {
     ArchitectureOverviewRequest architecture_overview = 41;
     TestsSelectRequest tests_select = 42;
     ChangeImpactRequest change_impact = 43;
+    PlanChangeRequest plan_change = 44;
   }
 }
 
@@ -75,6 +76,7 @@ message ResponseEnvelope {
     ArchitectureOverviewResponse architecture_overview = 41;
     TestsSelectResponse tests_select = 42;
     ChangeImpactResponse change_impact = 43;
+    PlanChangeResponse plan_change = 44;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -907,4 +909,58 @@ message ChangeImpactResponse {
   repeated FirstSliceImpactGroup impacted = 4;
   repeated FirstSliceChangeImpactTest tests = 5;
   FirstSliceImpactRiskSummary risk_summary = 6;
+}
+
+// Requests a bounded ordered change plan for one generation and target set.
+message PlanChangeRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  string objective = 4;
+  string objective_text = 5;
+  repeated rootlight.common.v1.SymbolId target_symbols = 6;
+  repeated rootlight.common.v1.FileId target_files = 7;
+  optional uint32 max_steps = 8;
+}
+
+// One ordered step in a change plan.
+message FirstSliceChangePlanStep {
+  uint32 step = 1;
+  string action = 2;
+  repeated rootlight.common.v1.SymbolId targets = 3;
+  repeated uint32 depends_on = 4;
+  repeated string risks = 5;
+  optional string verification = 6;
+}
+
+// Compact impact and ownership summary for a change plan.
+message FirstSlicePlanImpactSummary {
+  uint32 affected_symbols = 1;
+  uint32 affected_files = 2;
+  string risk_level = 3;
+  bool touches_public_surface = 4;
+}
+
+// One open decision that cannot be safely inferred.
+message FirstSlicePlanDecision {
+  string question = 1;
+  string recommended_default = 2;
+}
+
+// Ready follow-up context-pack arguments for a change plan.
+message FirstSliceContextPackRequest {
+  repeated rootlight.common.v1.SymbolId symbols = 1;
+  repeated rootlight.common.v1.FileId files = 2;
+}
+
+// Returns bounded ordered steps, an impact summary, a test plan, decisions, and
+// a ready context-pack request.
+message PlanChangeResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  repeated FirstSliceChangePlanStep plan = 3;
+  FirstSlicePlanImpactSummary affected_scope = 4;
+  repeated FirstSliceChangeImpactTest test_plan = 5;
+  repeated FirstSlicePlanDecision open_decisions = 6;
+  FirstSliceContextPackRequest context_pack_request = 7;
 }
