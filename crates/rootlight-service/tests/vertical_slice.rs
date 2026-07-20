@@ -16,7 +16,7 @@ use rootlight_service::{
     CodeDeadEntryPointPolicy, FileChangeKind, FirstSliceBuildStrategy, FirstSliceError,
     FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence, FirstSliceObservedFreshness,
     FirstSlicePublicationMode, FirstSliceService, FirstSliceTwoStageAvailability,
-    RelationDirection, RelationFamily,
+    PlanChangeObjective, RelationDirection, RelationFamily,
 };
 use tempfile::TempDir;
 
@@ -1095,6 +1095,103 @@ fn change_impact_requires_an_explicit_change_set() {
         0,
         false,
         100,
+        &cancellation,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn plan_change_reports_an_honest_result_for_a_known_fixture() {
+    // The first-slice oracle records a direct call as a `DispatchCandidate`
+    // occurrence and containment as a file-to-entity `Contains` relation, and it
+    // resolves no public visibility for this fixture, so no served relation
+    // family yields an entity-to-entity impact edge and no public surface is
+    // proven. An honest `plan.change` over an explicit symbol target therefore
+    // builds its ordered steps from the target alone: the impact closure stays
+    // empty, the affected scope counts only the target symbol and its declaring
+    // file, no public surface is touched, the risk level is none, the
+    // verification test plan is empty, and no open decision is fabricated, while
+    // still proving the generation-pinned query path and mandatory trust
+    // labeling.
+    let source =
+        "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    let located = service
+        .code_locate(
+            indexed.generation,
+            "callee".to_owned(),
+            LocateMode::Exact,
+            8,
+            &cancellation,
+        )
+        .expect("locate query succeeds");
+    assert_eq!(located.data.hits.len(), 1);
+    let target = located.data.hits[0].symbol;
+
+    let plan = service
+        .plan_change(
+            indexed.generation,
+            PlanChangeObjective::BugFix,
+            BTreeSet::from([target]),
+            BTreeSet::new(),
+            6,
+            &cancellation,
+        )
+        .expect("plan change query succeeds");
+
+    // A modification objective emits its ordered source-free steps from the
+    // target; the lexical oracle serves no impact edge, so no dependent is
+    // fabricated and every dependency references an earlier ordinal.
+    assert!(!plan.data.plan.is_empty());
+    assert_eq!(plan.data.plan[0].targets, vec![target]);
+    for step in &plan.data.plan {
+        assert!(!step.action.is_empty());
+        assert!(step.depends_on.iter().all(|dep| *dep < step.step));
+    }
+    // The honest affected scope counts only the target symbol and its declaring
+    // file; no public surface is proven for this fixture.
+    assert_eq!(plan.data.affected_scope.affected_symbols, 1);
+    assert_eq!(plan.data.affected_scope.affected_files, 1);
+    assert!(!plan.data.affected_scope.touches_public_surface);
+    assert_eq!(
+        plan.data.affected_scope.risk_level,
+        ChangeImpactRiskLevel::None
+    );
+    // No related test entity and no fabricated open decision.
+    assert!(plan.data.test_plan.is_empty());
+    assert!(plan.data.open_decisions.is_empty());
+    // The context pack carries the target symbol.
+    assert_eq!(plan.data.context_pack_request.symbols, vec![target]);
+    assert_eq!(
+        plan.data.trust,
+        RepositoryDataTrust::UntrustedRepositoryData
+    );
+}
+
+#[test]
+fn plan_change_requires_an_explicit_target_set() {
+    // The first slice plans only an explicit target set; an empty selector
+    // carries no resolvable target and is rejected by the bounded query plan.
+    let source = "pub fn answer() -> u32 {\n    42\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    let result = service.plan_change(
+        indexed.generation,
+        PlanChangeObjective::BugFix,
+        BTreeSet::new(),
+        BTreeSet::new(),
+        6,
         &cancellation,
     );
     assert!(result.is_err());
