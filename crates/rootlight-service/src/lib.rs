@@ -46,9 +46,11 @@ use rootlight_ir::{
     NormalizedIrDocument, ProducerIdentity, SourceRef, SourceSpan,
 };
 pub use rootlight_query::{
-    ArchitectureCyclesResult, CodeDeadEntryPointPolicy, CodeDeadResult, CodeLocateResult,
-    FlowTraceResult, LocateMode, QueryResponse, RelationDirection, RelationFamily,
-    SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult,
+    ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesResult, ArchitectureHotspot,
+    ArchitectureOverviewDerivedView, ArchitectureOverviewResult, ArchitectureOverviewView,
+    CodeDeadEntryPointPolicy, CodeDeadResult, CodeLocateResult, FlowTraceResult, LocateMode,
+    QueryResponse, RelationDirection, RelationFamily, SourceReadQueryResult, SymbolExplainResult,
+    SymbolRelationshipsResult,
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
 use rootlight_resolve::{
@@ -2031,6 +2033,45 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_code_dead(&plan, cancellation)
+            .map_err(|error| map_query_error(error, cancellation))
+    }
+
+    /// Executes a generation-pinned bounded `architecture.overview` query.
+    ///
+    /// The requested derived views, confidence floor, component cap, and edge
+    /// inclusion are validated by the query plan. The result carries
+    /// deterministic file-granularity components, aggregated typed connections,
+    /// hotspot rankings, and derived-view metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    pub fn architecture_overview(
+        &self,
+        generation: GenerationId,
+        views: Vec<ArchitectureOverviewView>,
+        min_confidence: u16,
+        max_components: usize,
+        include_edges: bool,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<ArchitectureOverviewResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let service = self
+            .generations
+            .query(generation)
+            .map_err(|_| FirstSliceError::Query)?;
+        let plan = service
+            .plan_architecture_overview(
+                views,
+                min_confidence,
+                max_components,
+                include_edges,
+                QueryBudget::new(),
+            )
+            .map_err(|error| map_query_error(error, cancellation))?;
+        service
+            .execute_architecture_overview(&plan, cancellation)
             .map_err(|error| map_query_error(error, cancellation))
     }
 
