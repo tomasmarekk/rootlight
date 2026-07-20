@@ -192,6 +192,8 @@ pub enum PlanKind {
     ArchitectureCycles,
     /// Detect bounded dead-code candidates among stable symbols.
     CodeDead,
+    /// Aggregate a bounded file-granularity architecture overview.
+    ArchitectureOverview,
     /// Read generation-bound source.
     SourceRead,
 }
@@ -870,6 +872,133 @@ pub struct ArchitectureCyclesResult {
     pub break_candidates: Vec<CycleBreak>,
     /// Actual relation projection used.
     pub projection: ArchitectureCyclesProjection,
+    /// Resource limits that stopped work, in deterministic execution order.
+    pub limiting_resources: Vec<QueryResource>,
+    /// Mandatory trust marker for repository-controlled values.
+    pub trust: RepositoryDataTrust,
+}
+
+/// Architecture derived-view categories served by an `architecture.overview`.
+///
+/// The first slice serves only the structural hotspot ranking as a derived
+/// view; the base component and connection model is always file-granularity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ArchitectureOverviewView {
+    /// Structural hotspot ranking derived view.
+    Hotspots,
+}
+
+impl ArchitectureOverviewView {
+    /// Returns the stable wire label shared with the MCP view contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hotspots => "hotspots",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "hotspots" => Some(Self::Hotspots),
+            _ => None,
+        }
+    }
+}
+
+/// Prevalidated `architecture.overview` plan.
+#[derive(Debug, Clone)]
+pub struct ArchitectureOverviewPlan {
+    pub(crate) views: Vec<ArchitectureOverviewView>,
+    pub(crate) min_confidence: u16,
+    pub(crate) max_components: usize,
+    pub(crate) include_edges: bool,
+    pub(crate) budget: QueryBudget,
+    pub(crate) explanation: PlanExplanation,
+}
+
+impl ArchitectureOverviewPlan {
+    /// Returns the deterministic plan explanation.
+    #[must_use]
+    pub const fn explanation(&self) -> &PlanExplanation {
+        &self.explanation
+    }
+}
+
+/// One aggregated architecture component keyed by its containing file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArchitectureComponent {
+    /// Stable component identity derived from the containing file identity.
+    pub id: String,
+    /// Component kind label; always `file` for this slice.
+    pub kind: String,
+    /// Repository-controlled display path; always untrusted data.
+    pub name: String,
+    /// Number of contained symbols.
+    pub symbol_count: u32,
+    /// Source-free evidence categories supporting the responsibility claim.
+    pub responsibility_evidence: Vec<String>,
+    /// Aggregate containment confidence from 0 through 1000.
+    pub confidence: u16,
+}
+
+/// One aggregated typed connection between two architecture components.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArchitectureConnection {
+    /// Source component identity.
+    pub from: String,
+    /// Target component identity.
+    pub to: String,
+    /// Relation family admitting the aggregated edges.
+    pub kind: RelationFamily,
+    /// Aggregated edge count.
+    pub weight: u32,
+    /// Strongest aggregated edge confidence from 0 through 1000.
+    pub confidence: u16,
+}
+
+/// One structural hotspot ranking entry for a component.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArchitectureHotspot {
+    /// Component identity.
+    pub component_id: String,
+    /// Number of incoming connections from distinct components.
+    pub fan_in: u32,
+    /// Number of outgoing connections to distinct components.
+    pub fan_out: u32,
+    /// Change-frequency signal; always absent in this slice.
+    pub change_frequency: Option<u32>,
+    /// Complexity signal; always absent in this slice.
+    pub complexity: Option<u32>,
+    /// Aggregate hotspot score from 0 through 1000.
+    pub score: u16,
+}
+
+/// Derived-view algorithm metadata reported by an `architecture.overview`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArchitectureOverviewDerivedView {
+    /// Derived-view category.
+    pub view: ArchitectureOverviewView,
+    /// Algorithm version identifier.
+    pub algorithm_version: String,
+}
+
+/// Data returned by an `architecture.overview` plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArchitectureOverviewResult {
+    /// Immutable generation that served the query.
+    pub generation: GenerationId,
+    /// Aggregated file-granularity components in deterministic order.
+    pub components: Vec<ArchitectureComponent>,
+    /// Aggregated typed connections between distinct components.
+    pub connections: Vec<ArchitectureConnection>,
+    /// Structural hotspot rankings in deterministic order.
+    pub hotspots: Vec<ArchitectureHotspot>,
+    /// Derived-view algorithm metadata in deterministic order.
+    pub views: Vec<ArchitectureOverviewDerivedView>,
     /// Resource limits that stopped work, in deterministic execution order.
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.

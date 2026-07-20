@@ -16,17 +16,20 @@ use rootlight_storage::GenerationSnapshot;
 use serde::Serialize;
 
 use crate::model::{
-    ArchitectureCyclesPlan, ArchitectureCyclesProjection, ArchitectureCyclesResult,
-    CodeDeadBlindSpot, CodeDeadEntryPointPolicy, CodeDeadEntryPointSummary, CodeDeadPlan,
-    CodeDeadResult, CodeDeadSuppressionRule, CodeLocatePlan, CodeLocateResult, CycleBreak,
-    CycleComponent, CyclePath, DeadCodeCandidate, DeadCodeClassification, FlowTraceEdge,
-    FlowTraceFrontier, FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult,
-    LocateHit, LocateMode, PlanEstimate, PlanExplanation, PlanKind, QueryBudget, QueryError,
-    QueryOperator, QueryResource, QueryResponse, QueryUsage, RelationDirection, RelationFamily,
-    RelationshipEdgeTarget, RelationshipGroup, RepositoryDataTrust, SourceChunkResult,
-    SourceReadPlan, SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult,
-    SymbolRelationshipsPlan, SymbolRelationshipsResult, TokenAccountingProfile, checked_add,
-    checked_u128_to_u64, checked_usize_to_u64, ensure_estimate, search_mode,
+    ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesPlan,
+    ArchitectureCyclesProjection, ArchitectureCyclesResult, ArchitectureHotspot,
+    ArchitectureOverviewDerivedView, ArchitectureOverviewPlan, ArchitectureOverviewResult,
+    ArchitectureOverviewView, CodeDeadBlindSpot, CodeDeadEntryPointPolicy,
+    CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult, CodeDeadSuppressionRule,
+    CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent, CyclePath, DeadCodeCandidate,
+    DeadCodeClassification, FlowTraceEdge, FlowTraceFrontier, FlowTracePath, FlowTracePlan,
+    FlowTraceProjection, FlowTraceResult, LocateHit, LocateMode, PlanEstimate, PlanExplanation,
+    PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage,
+    RelationDirection, RelationFamily, RelationshipEdgeTarget, RelationshipGroup,
+    RepositoryDataTrust, SourceChunkResult, SourceReadPlan, SourceReadQueryResult,
+    SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult,
+    TokenAccountingProfile, checked_add, checked_u128_to_u64, checked_usize_to_u64,
+    ensure_estimate, search_mode,
 };
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
@@ -1027,6 +1030,126 @@ where
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
     }
 
+    /// Builds a deterministic bounded `architecture.overview` plan.
+    ///
+    /// A fixed served relation family set drives component-to-component
+    /// connection aggregation, the requested views select derived-view
+    /// metadata, and the confidence floor and component cap bound the
+    /// aggregation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid budget, out-of-range confidence or
+    /// component bounds, too many views, arithmetic overflow, or a conservative
+    /// estimate that cannot be admitted.
+    pub fn plan_architecture_overview(
+        &self,
+        mut views: Vec<ArchitectureOverviewView>,
+        min_confidence: u16,
+        max_components: usize,
+        include_edges: bool,
+        budget: QueryBudget,
+    ) -> Result<ArchitectureOverviewPlan, QueryError> {
+        budget.validate()?;
+        if views.len() > 8 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if min_confidence > 1_000 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if max_components == 0
+            || max_components > 250
+            || checked_usize_to_u64(max_components)? > budget.max_results
+        {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        views.sort();
+        views.dedup();
+        let estimate = PlanEstimate {
+            rows: budget.max_rows,
+            edges: budget.max_edges,
+            results: budget.max_results,
+            source_bytes: 0,
+            // The normalized generation bounds every record, while the query
+            // memory budget remains the conservative aggregate ceiling.
+            memory_bytes: budget.max_memory_bytes,
+            json_bytes: budget.max_json_bytes,
+            estimated_tokens: budget.max_tokens,
+            duration_micros: duration_micros(budget.max_duration),
+        };
+        ensure_estimate(estimate, budget)?;
+        let explanation = PlanExplanation {
+            generation: self.generation.metadata().generation(),
+            kind: PlanKind::ArchitectureOverview,
+            operators: vec![
+                QueryOperator::GenerationPin,
+                QueryOperator::RelationScan,
+                QueryOperator::EntityLookup,
+                QueryOperator::OutputBudget,
+            ],
+            estimate,
+        };
+        Ok(ArchitectureOverviewPlan {
+            views,
+            min_confidence,
+            max_components,
+            include_edges,
+            budget,
+            explanation,
+        })
+    }
+
+    /// Executes a prevalidated `architecture.overview` plan.
+    ///
+    /// The scan groups symbols into file-granularity components from recorded
+    /// containment and source evidence, aggregates served entity-level
+    /// relations into typed component-to-component connections, and ranks
+    /// components by structural fan-in and fan-out. Rows, edges, results, and
+    /// memory are measured exactly like `architecture.cycles`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
+    /// resource exhaustion.
+    pub fn execute_architecture_overview(
+        &self,
+        plan: &ArchitectureOverviewPlan,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<ArchitectureOverviewResult>, QueryError> {
+        self.require_generation(plan.explanation.generation)?;
+        let started = Instant::now();
+        let control = QueryControl::new(cancellation, plan.budget.max_duration);
+        control.check()?;
+        let document = self.generation.document();
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+
+        let overview = build_architecture_overview(
+            document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )?;
+
+        let data = ArchitectureOverviewResult {
+            generation: self.generation.metadata().generation(),
+            components: overview.components,
+            connections: overview.connections,
+            hotspots: overview.hotspots,
+            views: overview.views,
+            limiting_resources,
+            trust: RepositoryDataTrust::UntrustedRepositoryData,
+        };
+        finish_response(plan.explanation.clone(), data, tracker, started, &control)
+    }
+
     /// Builds a deterministic generation-bound `source.read` plan.
     ///
     /// # Errors
@@ -1624,6 +1747,300 @@ struct CycleAdjEdge {
     family: RelationFamily,
     confidence: u16,
     source_refs: Vec<SourceRef>,
+}
+
+/// Served relation families aggregated into architecture connections.
+///
+/// Each family maps to a disjoint IR predicate set, so a served relation
+/// contributes to exactly one connection kind. `CalledBy` is intentionally
+/// omitted because it shares the `Calls` predicate and would double-count the
+/// same directed edge.
+const ARCHITECTURE_OVERVIEW_FAMILIES: &[RelationFamily] = &[
+    RelationFamily::Calls,
+    RelationFamily::References,
+    RelationFamily::Types,
+    RelationFamily::Implements,
+    RelationFamily::Imports,
+];
+
+/// Aggregated architecture overview assembled before bounded result emission.
+struct ArchitectureOverviewAnalysis {
+    components: Vec<ArchitectureComponent>,
+    connections: Vec<ArchitectureConnection>,
+    hotspots: Vec<ArchitectureHotspot>,
+    views: Vec<ArchitectureOverviewDerivedView>,
+}
+
+/// Returns the stable algorithm-version label for one derived view.
+const fn architecture_overview_algorithm_version(view: ArchitectureOverviewView) -> &'static str {
+    match view {
+        ArchitectureOverviewView::Hotspots => "fan_in_out_v1",
+    }
+}
+
+/// Returns the repository-controlled display path for one file, falling back to
+/// the stable file identity when the file record is not served.
+fn architecture_file_name(document: &NormalizedIrDocument, file: FileId) -> String {
+    find_file(document, file)
+        .map(|record| record.path.clone())
+        .unwrap_or_else(|| file.to_string())
+}
+
+/// Builds a bounded file-granularity architecture overview.
+///
+/// Symbols are grouped into one component per containing file, resolved from
+/// recorded `Contains` relations with a source-evidence fallback. Served
+/// entity-level relations are aggregated into typed connections between
+/// distinct components, and components are ranked by structural fan-in and
+/// fan-out. The component list is capped deterministically by symbol count and
+/// identity; connections and hotspots reference only reported components.
+fn build_architecture_overview(
+    document: &NormalizedIrDocument,
+    plan: &ArchitectureOverviewPlan,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<ArchitectureOverviewAnalysis, QueryError> {
+    // Assign each entity to its declaring file from immutable source evidence
+    // and record its closed kind label for responsibility evidence.
+    let mut entity_evidence_file: BTreeMap<SymbolId, FileId> = BTreeMap::new();
+    let mut entity_kind: BTreeMap<SymbolId, String> = BTreeMap::new();
+    for entity in &document.entities {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
+        tracker.add_rows(1)?;
+        if let Some(source) = entity.evidence.source.as_ref() {
+            entity_evidence_file.insert(entity.id, source.span().file());
+        }
+        entity_kind.insert(entity.id, serialized_label(&entity.kind)?);
+    }
+
+    // Single bounded relation scan: `Contains` relations confirm the owning
+    // file of each entity and supply containment confidence, while served
+    // family relations contribute raw entity-to-entity edges for aggregation.
+    let allowed: BTreeSet<RelationPredicate> = ARCHITECTURE_OVERVIEW_FAMILIES
+        .iter()
+        .flat_map(|family| family.predicates().iter().copied())
+        .collect();
+    let mut entity_contains_file: BTreeMap<SymbolId, FileId> = BTreeMap::new();
+    let mut file_confidence: BTreeMap<FileId, u16> = BTreeMap::new();
+    let mut raw_edges: Vec<(SymbolId, SymbolId, RelationFamily, u16)> = Vec::new();
+    for relation in &document.relations {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
+        tracker.add_rows(1)?;
+        if relation.predicate == RelationPredicate::Contains {
+            if let (RelationEndpoint::File(file), RelationEndpoint::Entity(symbol)) =
+                (relation.subject, relation.object)
+            {
+                entity_contains_file.insert(symbol, file);
+                let confidence = relation.confidence.get();
+                let slot = file_confidence.entry(file).or_insert(0);
+                if confidence > *slot {
+                    *slot = confidence;
+                }
+            }
+            continue;
+        }
+        if !plan.include_edges || !allowed.contains(&relation.predicate) {
+            continue;
+        }
+        let confidence = relation.confidence.get();
+        if confidence < plan.min_confidence {
+            continue;
+        }
+        let Some(family) = predicate_family(ARCHITECTURE_OVERVIEW_FAMILIES, relation.predicate)
+        else {
+            continue;
+        };
+        let Some(subject) = endpoint_entity(document, relation.subject) else {
+            continue;
+        };
+        let Some(object) = endpoint_entity(document, relation.object) else {
+            continue;
+        };
+        if subject == object {
+            continue;
+        }
+        if !tracker.can_add(QueryResource::Edges, 1) {
+            record_limit(limiting_resources, QueryResource::Edges)?;
+            break;
+        }
+        tracker.add_edges(1)?;
+        try_push(&mut raw_edges, (subject, object, family, confidence))?;
+    }
+
+    // Resolve the authoritative entity-to-file assignment, preferring an
+    // explicit `Contains` relation and falling back to source evidence.
+    let mut entity_file: BTreeMap<SymbolId, FileId> = entity_evidence_file;
+    for (symbol, file) in entity_contains_file {
+        entity_file.insert(symbol, file);
+    }
+
+    // Group symbols into file-granularity components.
+    let mut file_members: BTreeMap<FileId, BTreeSet<SymbolId>> = BTreeMap::new();
+    for (symbol, file) in &entity_file {
+        file_members.entry(*file).or_default().insert(*symbol);
+    }
+
+    // Order components deterministically by symbol count then file identity and
+    // apply the requested component cap.
+    let mut component_files: Vec<FileId> = file_members.keys().copied().collect();
+    component_files.sort_by(|left, right| {
+        let left_count = file_members.get(left).map_or(0, BTreeSet::len);
+        let right_count = file_members.get(right).map_or(0, BTreeSet::len);
+        right_count.cmp(&left_count).then_with(|| left.cmp(right))
+    });
+    component_files.truncate(plan.max_components);
+    let reported: BTreeSet<FileId> = component_files.iter().copied().collect();
+
+    let mut components: Vec<ArchitectureComponent> = Vec::new();
+    for file in &component_files {
+        let Some(members) = file_members.get(file) else {
+            continue;
+        };
+        let mut kinds: BTreeSet<String> = BTreeSet::new();
+        for symbol in members {
+            if let Some(kind) = entity_kind.get(symbol) {
+                kinds.insert(kind.clone());
+            }
+        }
+        let mut responsibility_evidence: Vec<String> = Vec::new();
+        responsibility_evidence.push("contains_symbols".to_owned());
+        for kind in &kinds {
+            responsibility_evidence.push(format!("entity_kind:{kind}"));
+        }
+        responsibility_evidence.truncate(16);
+        let component = ArchitectureComponent {
+            id: file.to_string(),
+            kind: "file".to_owned(),
+            name: architecture_file_name(document, *file),
+            symbol_count: u32::try_from(members.len()).unwrap_or(u32::MAX),
+            responsibility_evidence,
+            confidence: file_confidence.get(file).copied().unwrap_or(0),
+        };
+        emit_cycle_value(
+            &mut components,
+            component,
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+
+    // Aggregate served entity edges into connections between distinct reported
+    // components, keyed by source file, target file, and relation family.
+    let mut aggregated: BTreeMap<(FileId, FileId, RelationFamily), (u32, u16)> = BTreeMap::new();
+    for (subject, object, family, confidence) in &raw_edges {
+        let (Some(from), Some(to)) = (entity_file.get(subject), entity_file.get(object)) else {
+            continue;
+        };
+        if from == to || !reported.contains(from) || !reported.contains(to) {
+            continue;
+        }
+        let entry = aggregated.entry((*from, *to, *family)).or_insert((0, 0));
+        entry.0 = entry.0.saturating_add(1);
+        if *confidence > entry.1 {
+            entry.1 = *confidence;
+        }
+    }
+
+    let mut connections: Vec<ArchitectureConnection> = Vec::new();
+    for ((from, to, family), (weight, confidence)) in &aggregated {
+        let connection = ArchitectureConnection {
+            from: from.to_string(),
+            to: to.to_string(),
+            kind: *family,
+            weight: *weight,
+            confidence: *confidence,
+        };
+        emit_cycle_value(
+            &mut connections,
+            connection,
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+
+    // Rank reported components by structural fan-in and fan-out, normalizing
+    // the score so the busiest component scores 1000.
+    let mut fan_in: BTreeMap<FileId, u32> = BTreeMap::new();
+    let mut fan_out: BTreeMap<FileId, u32> = BTreeMap::new();
+    for (from, to, _family) in aggregated.keys() {
+        let outbound = fan_out.entry(*from).or_insert(0);
+        *outbound = outbound.saturating_add(1);
+        let inbound = fan_in.entry(*to).or_insert(0);
+        *inbound = inbound.saturating_add(1);
+    }
+    let max_total = component_files
+        .iter()
+        .map(|file| {
+            fan_in
+                .get(file)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(fan_out.get(file).copied().unwrap_or(0))
+        })
+        .max()
+        .unwrap_or(0);
+    let mut ranked: Vec<(FileId, u32, u32, u16)> = Vec::new();
+    for file in &component_files {
+        let inbound = fan_in.get(file).copied().unwrap_or(0);
+        let outbound = fan_out.get(file).copied().unwrap_or(0);
+        let total = inbound.saturating_add(outbound);
+        if total == 0 {
+            continue;
+        }
+        let score = if max_total == 0 {
+            0
+        } else {
+            u16::try_from(u64::from(total) * 1_000 / u64::from(max_total)).unwrap_or(1_000)
+        };
+        ranked.push((*file, inbound, outbound, score));
+    }
+    ranked.sort_by(|left, right| {
+        right
+            .3
+            .cmp(&left.3)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let mut hotspots: Vec<ArchitectureHotspot> = Vec::new();
+    for (file, inbound, outbound, score) in ranked {
+        let hotspot = ArchitectureHotspot {
+            component_id: file.to_string(),
+            fan_in: inbound,
+            fan_out: outbound,
+            change_frequency: None,
+            complexity: None,
+            score,
+        };
+        emit_cycle_value(&mut hotspots, hotspot, tracker, limiting_resources, control)?;
+    }
+
+    let mut views: Vec<ArchitectureOverviewDerivedView> = Vec::new();
+    for view in &plan.views {
+        let derived = ArchitectureOverviewDerivedView {
+            view: *view,
+            algorithm_version: architecture_overview_algorithm_version(*view).to_owned(),
+        };
+        emit_cycle_value(&mut views, derived, tracker, limiting_resources, control)?;
+    }
+
+    Ok(ArchitectureOverviewAnalysis {
+        components,
+        connections,
+        hotspots,
+        views,
+    })
 }
 
 /// Builds a directed outbound adjacency view over the requested projection.
@@ -3479,5 +3896,433 @@ mod tests {
         let mut sorted = ids.clone();
         sorted.sort();
         assert_eq!(ids, sorted);
+    }
+
+    // -----------------------------------------------------------------
+    // architecture.overview synthetic-document proofs
+    // -----------------------------------------------------------------
+
+    use crate::model::{ArchitectureOverviewPlan, ArchitectureOverviewView};
+    use rootlight_ids::{ContentHash, FactId, FileId};
+    use rootlight_ir::{
+        AnalysisTier, Confidence, EntityKind, EntityRecord, EntityVisibility, EvidenceKind,
+        FactEvidence, FileRecord, RelationEndpoint, RelationRecord, SourceRef, SourceSpan,
+    };
+
+    fn file_id(byte: u8) -> FileId {
+        FileId::from_bytes([byte; 20])
+    }
+
+    fn overview_document() -> NormalizedIrDocument {
+        NormalizedIrDocument::empty(
+            RepositoryId::from_bytes([7; 16]),
+            GenerationId::from_bytes([0; 20]),
+        )
+    }
+
+    fn add_file(document: &mut NormalizedIrDocument, byte: u8, path: &str) {
+        document.files.push(FileRecord {
+            id: file_id(byte),
+            repository: document.repository,
+            generation: document.generation,
+            path: path.to_owned(),
+            path_locator: None,
+            content_hash: ContentHash::from_bytes([byte; 32]),
+            byte_length: 100,
+            language: "rust".to_owned(),
+            encoding: "utf-8".to_owned(),
+            generated: false,
+            provenance: FactId::from_bytes([byte; 20]),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        });
+    }
+
+    fn add_entity(document: &mut NormalizedIrDocument, byte: u8, file_byte: u8, kind: EntityKind) {
+        let source = SourceRef::new(
+            document.repository,
+            document.generation,
+            SourceSpan::new(file_id(file_byte), 0, 10).expect("test span is ordered"),
+            ContentHash::from_bytes([file_byte; 32]),
+            None,
+        );
+        document.entities.push(EntityRecord {
+            id: symbol(byte),
+            repository: document.repository,
+            generation: document.generation,
+            kind,
+            language: "rust".to_owned(),
+            tier: AnalysisTier::TierD,
+            canonical_name: format!("sym_{byte}"),
+            display_name: format!("sym_{byte}"),
+            qualified_name: format!("sym_{byte}"),
+            container: None,
+            visibility: EntityVisibility::Private,
+            flags: Vec::new(),
+            provenance: FactId::from_bytes([byte; 20]),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        });
+    }
+
+    fn add_relation(
+        document: &mut NormalizedIrDocument,
+        byte: u8,
+        subject: RelationEndpoint,
+        predicate: RelationPredicate,
+        object: RelationEndpoint,
+        confidence: u16,
+    ) {
+        document.relations.push(RelationRecord {
+            id: FactId::from_bytes([byte; 20]),
+            repository: document.repository,
+            generation: document.generation,
+            subject,
+            predicate,
+            object,
+            confidence: Confidence::new(confidence).expect("test confidence is in range"),
+            evidence_kind: EvidenceKind::Syntax,
+            provenance: FactId::from_bytes([byte; 20]),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        });
+    }
+
+    fn add_contains(
+        document: &mut NormalizedIrDocument,
+        byte: u8,
+        file_byte: u8,
+        entity_byte: u8,
+        confidence: u16,
+    ) {
+        add_relation(
+            document,
+            byte,
+            RelationEndpoint::File(file_id(file_byte)),
+            RelationPredicate::Contains,
+            RelationEndpoint::Entity(symbol(entity_byte)),
+            confidence,
+        );
+    }
+
+    fn add_calls(
+        document: &mut NormalizedIrDocument,
+        byte: u8,
+        from_byte: u8,
+        to_byte: u8,
+        confidence: u16,
+    ) {
+        add_relation(
+            document,
+            byte,
+            RelationEndpoint::Entity(symbol(from_byte)),
+            RelationPredicate::Calls,
+            RelationEndpoint::Entity(symbol(to_byte)),
+            confidence,
+        );
+    }
+
+    fn add_refers(
+        document: &mut NormalizedIrDocument,
+        byte: u8,
+        from_byte: u8,
+        to_byte: u8,
+        confidence: u16,
+    ) {
+        add_relation(
+            document,
+            byte,
+            RelationEndpoint::Entity(symbol(from_byte)),
+            RelationPredicate::RefersTo,
+            RelationEndpoint::Entity(symbol(to_byte)),
+            confidence,
+        );
+    }
+
+    fn overview_plan(
+        max_components: usize,
+        include_edges: bool,
+        min_confidence: u16,
+        views: Vec<ArchitectureOverviewView>,
+    ) -> ArchitectureOverviewPlan {
+        ArchitectureOverviewPlan {
+            views,
+            min_confidence,
+            max_components,
+            include_edges,
+            budget: QueryBudget::new(),
+            explanation: PlanExplanation {
+                generation: GenerationId::from_bytes([0; 20]),
+                kind: PlanKind::ArchitectureOverview,
+                operators: Vec::new(),
+                estimate: PlanEstimate {
+                    rows: 0,
+                    edges: 0,
+                    results: 0,
+                    source_bytes: 0,
+                    memory_bytes: 0,
+                    json_bytes: 0,
+                    estimated_tokens: 0,
+                    duration_micros: 0,
+                },
+            },
+        }
+    }
+
+    fn run_overview(
+        document: &NormalizedIrDocument,
+        plan: &ArchitectureOverviewPlan,
+    ) -> ArchitectureOverviewAnalysis {
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+        build_architecture_overview(
+            document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("bounded architecture overview succeeds")
+    }
+
+    #[test]
+    fn architecture_overview_groups_symbols_into_file_components() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/b.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Struct);
+        add_entity(&mut document, 13, 2, EntityKind::Function);
+        add_contains(&mut document, 100, 1, 11, 800);
+        add_contains(&mut document, 101, 1, 12, 600);
+        add_contains(&mut document, 102, 2, 13, 700);
+
+        let plan = overview_plan(50, true, 0, Vec::new());
+        let overview = run_overview(&document, &plan);
+
+        // Components are ordered by symbol count descending, so the two-symbol
+        // file precedes the one-symbol file.
+        assert_eq!(overview.components.len(), 2);
+        assert_eq!(overview.components[0].id, file_id(1).to_string());
+        assert_eq!(overview.components[0].kind, "file");
+        assert_eq!(overview.components[0].name, "src/a.rs");
+        assert_eq!(overview.components[0].symbol_count, 2);
+        // Containment confidence is the strongest recorded `Contains` edge.
+        assert_eq!(overview.components[0].confidence, 800);
+        assert!(
+            overview.components[0]
+                .responsibility_evidence
+                .contains(&"contains_symbols".to_owned())
+        );
+        assert_eq!(overview.components[1].id, file_id(2).to_string());
+        assert_eq!(overview.components[1].name, "src/b.rs");
+        assert_eq!(overview.components[1].symbol_count, 1);
+        assert_eq!(overview.components[1].confidence, 700);
+
+        assert!(overview.connections.is_empty());
+        assert!(overview.hotspots.is_empty());
+        assert!(overview.views.is_empty());
+    }
+
+    #[test]
+    fn architecture_overview_aggregates_connections_between_components() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/b.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Function);
+        add_entity(&mut document, 13, 2, EntityKind::Function);
+        add_contains(&mut document, 100, 1, 11, 800);
+        add_contains(&mut document, 101, 1, 12, 600);
+        add_contains(&mut document, 102, 2, 13, 700);
+        add_calls(&mut document, 110, 11, 13, 900);
+        add_calls(&mut document, 111, 12, 13, 700);
+
+        let plan = overview_plan(50, true, 0, Vec::new());
+        let overview = run_overview(&document, &plan);
+
+        // Both call edges aggregate into one typed connection from file 1 to
+        // file 2 with the strongest confidence.
+        assert_eq!(overview.connections.len(), 1);
+        let connection = &overview.connections[0];
+        assert_eq!(connection.from, file_id(1).to_string());
+        assert_eq!(connection.to, file_id(2).to_string());
+        assert_eq!(connection.kind, RelationFamily::Calls);
+        assert_eq!(connection.weight, 2);
+        assert_eq!(connection.confidence, 900);
+
+        // Fan-in and fan-out rank the target above the source on tie-break.
+        assert_eq!(overview.hotspots.len(), 2);
+        assert_eq!(overview.hotspots[0].component_id, file_id(2).to_string());
+        assert_eq!(overview.hotspots[0].fan_in, 1);
+        assert_eq!(overview.hotspots[0].fan_out, 0);
+        assert_eq!(overview.hotspots[0].score, 1_000);
+        assert_eq!(overview.hotspots[1].component_id, file_id(1).to_string());
+        assert_eq!(overview.hotspots[1].fan_in, 0);
+        assert_eq!(overview.hotspots[1].fan_out, 1);
+        assert_eq!(overview.hotspots[1].change_frequency, None);
+        assert_eq!(overview.hotspots[1].complexity, None);
+    }
+
+    #[test]
+    fn architecture_overview_separates_connections_by_relation_family() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/b.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 13, 2, EntityKind::Function);
+        add_contains(&mut document, 100, 1, 11, 800);
+        add_contains(&mut document, 102, 2, 13, 700);
+        add_calls(&mut document, 110, 11, 13, 900);
+        add_refers(&mut document, 111, 11, 13, 500);
+
+        let plan = overview_plan(50, true, 0, Vec::new());
+        let overview = run_overview(&document, &plan);
+
+        // The call and reference edges form two distinct typed connections.
+        assert_eq!(overview.connections.len(), 2);
+        assert_eq!(overview.connections[0].kind, RelationFamily::Calls);
+        assert_eq!(overview.connections[0].confidence, 900);
+        assert_eq!(overview.connections[1].kind, RelationFamily::References);
+        assert_eq!(overview.connections[1].confidence, 500);
+    }
+
+    #[test]
+    fn architecture_overview_ranks_a_high_fan_in_hub_first() {
+        let mut document = overview_document();
+        for byte in 1..=4 {
+            add_file(&mut document, byte, &format!("src/f{byte}.rs"));
+            add_entity(&mut document, 10 + byte, byte, EntityKind::Function);
+            add_contains(&mut document, 100 + byte, byte, 10 + byte, 800);
+        }
+        // Files 1, 3, and 4 all call into file 2, making file 2 a fan-in hub.
+        add_calls(&mut document, 110, 11, 12, 900);
+        add_calls(&mut document, 111, 13, 12, 900);
+        add_calls(&mut document, 112, 14, 12, 900);
+
+        let plan = overview_plan(50, true, 0, Vec::new());
+        let overview = run_overview(&document, &plan);
+
+        assert_eq!(overview.hotspots[0].component_id, file_id(2).to_string());
+        assert_eq!(overview.hotspots[0].fan_in, 3);
+        assert_eq!(overview.hotspots[0].fan_out, 0);
+        assert_eq!(overview.hotspots[0].score, 1_000);
+        // The three callers share the remaining score and order by identity.
+        assert_eq!(overview.hotspots.len(), 4);
+        assert_eq!(overview.hotspots[1].component_id, file_id(1).to_string());
+        assert_eq!(overview.hotspots[2].component_id, file_id(3).to_string());
+        assert_eq!(overview.hotspots[3].component_id, file_id(4).to_string());
+        assert_eq!(overview.hotspots[1].score, 333);
+    }
+
+    #[test]
+    fn architecture_overview_honors_the_max_components_cap() {
+        let mut document = overview_document();
+        for byte in 1..=3 {
+            add_file(&mut document, byte, &format!("src/f{byte}.rs"));
+            add_entity(&mut document, 10 + byte, byte, EntityKind::Function);
+            add_contains(&mut document, 100 + byte, byte, 10 + byte, 800);
+        }
+        // A connection from the dropped file 3 must not survive the cap.
+        add_calls(&mut document, 110, 13, 11, 900);
+
+        let plan = overview_plan(2, true, 0, Vec::new());
+        let overview = run_overview(&document, &plan);
+
+        assert_eq!(overview.components.len(), 2);
+        assert_eq!(overview.components[0].id, file_id(1).to_string());
+        assert_eq!(overview.components[1].id, file_id(2).to_string());
+        // File 3 is unreported, so its connection is excluded.
+        assert!(overview.connections.is_empty());
+        assert!(overview.hotspots.is_empty());
+    }
+
+    #[test]
+    fn architecture_overview_omits_edges_when_disabled() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/b.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 13, 2, EntityKind::Function);
+        add_contains(&mut document, 100, 1, 11, 800);
+        add_contains(&mut document, 102, 2, 13, 700);
+        add_calls(&mut document, 110, 11, 13, 900);
+
+        let plan = overview_plan(50, false, 0, Vec::new());
+        let overview = run_overview(&document, &plan);
+
+        assert_eq!(overview.components.len(), 2);
+        assert!(overview.connections.is_empty());
+        assert!(overview.hotspots.is_empty());
+    }
+
+    #[test]
+    fn architecture_overview_honors_the_min_confidence_floor() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/b.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 13, 2, EntityKind::Function);
+        add_contains(&mut document, 100, 1, 11, 800);
+        add_contains(&mut document, 102, 2, 13, 700);
+        add_calls(&mut document, 110, 11, 13, 400);
+
+        let plan = overview_plan(50, true, 500, Vec::new());
+        let overview = run_overview(&document, &plan);
+
+        // The 400-confidence edge falls below the 500 floor.
+        assert!(overview.connections.is_empty());
+        assert!(overview.hotspots.is_empty());
+    }
+
+    #[test]
+    fn architecture_overview_reports_requested_derived_view_metadata() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_contains(&mut document, 100, 1, 11, 800);
+
+        let plan = overview_plan(50, true, 0, vec![ArchitectureOverviewView::Hotspots]);
+        let overview = run_overview(&document, &plan);
+
+        assert_eq!(overview.views.len(), 1);
+        assert_eq!(overview.views[0].view, ArchitectureOverviewView::Hotspots);
+        assert_eq!(overview.views[0].algorithm_version, "fan_in_out_v1");
+    }
+
+    #[test]
+    fn architecture_overview_is_deterministic() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/b.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Struct);
+        add_entity(&mut document, 13, 2, EntityKind::Function);
+        add_contains(&mut document, 100, 1, 11, 800);
+        add_contains(&mut document, 101, 1, 12, 600);
+        add_contains(&mut document, 102, 2, 13, 700);
+        add_calls(&mut document, 110, 11, 13, 900);
+        add_calls(&mut document, 111, 12, 13, 700);
+
+        let plan = overview_plan(50, true, 0, vec![ArchitectureOverviewView::Hotspots]);
+        let first = run_overview(&document, &plan);
+        let second = run_overview(&document, &plan);
+
+        assert_eq!(first.components, second.components);
+        assert_eq!(first.connections, second.connections);
+        assert_eq!(first.hotspots, second.hotspots);
+        assert_eq!(first.views, second.views);
     }
 }
