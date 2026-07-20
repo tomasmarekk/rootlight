@@ -188,6 +188,8 @@ pub enum PlanKind {
     SymbolRelationships,
     /// Trace bounded directed paths between stable symbols.
     FlowTrace,
+    /// Detect bounded architecture cycles among stable symbols.
+    ArchitectureCycles,
     /// Read generation-bound source.
     SourceRead,
 }
@@ -581,6 +583,26 @@ impl FlowTracePlan {
     }
 }
 
+/// Prevalidated `architecture.cycles` plan.
+#[derive(Debug, Clone)]
+pub struct ArchitectureCyclesPlan {
+    pub(crate) families: Vec<RelationFamily>,
+    pub(crate) min_confidence: u16,
+    pub(crate) min_size: u8,
+    pub(crate) max_cycles: usize,
+    pub(crate) include_self_cycles: bool,
+    pub(crate) budget: QueryBudget,
+    pub(crate) explanation: PlanExplanation,
+}
+
+impl ArchitectureCyclesPlan {
+    /// Returns the deterministic plan explanation.
+    #[must_use]
+    pub const fn explanation(&self) -> &PlanExplanation {
+        &self.explanation
+    }
+}
+
 /// Prevalidated source-read plan.
 #[derive(Debug, Clone)]
 pub struct SourceReadPlan {
@@ -781,6 +803,71 @@ pub struct FlowTraceResult {
     pub frontier: FlowTraceFrontier,
     /// Actual relation projection used.
     pub projection: FlowTraceProjection,
+    /// Resource limits that stopped work, in deterministic execution order.
+    pub limiting_resources: Vec<QueryResource>,
+    /// Mandatory trust marker for repository-controlled values.
+    pub trust: RepositoryDataTrust,
+}
+
+/// One strongly connected component detected in the served relation graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CycleComponent {
+    /// Number of member symbols in the component.
+    pub size: u32,
+    /// Member symbol identifiers in deterministic order.
+    pub members: Vec<SymbolId>,
+    /// Count of served edges whose endpoints both lie in the component.
+    pub internal_edges: u32,
+}
+
+/// One bounded representative minimal cycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CyclePath {
+    /// Ordered node identifiers forming the cycle, first repeated at the end.
+    pub nodes: Vec<SymbolId>,
+    /// Aggregate weakest-edge confidence from 0 through 1000.
+    pub confidence: u16,
+    /// Direct immutable source evidence for the cycle edges.
+    pub edge_evidence: Vec<SourceRef>,
+}
+
+/// One candidate edge for breaking a reported cycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CycleBreak {
+    /// Source symbol of the break edge.
+    pub from: SymbolId,
+    /// Target symbol of the break edge.
+    pub to: SymbolId,
+    /// Relation family that admitted the break edge.
+    pub family: RelationFamily,
+    /// Heuristic break cost from 0 through 1000; lower confidence is cheaper.
+    pub break_cost: u16,
+    /// Direct immutable source evidence for the break edge.
+    pub source_refs: Vec<SourceRef>,
+}
+
+/// Relation projection actually used by an `architecture.cycles` query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArchitectureCyclesProjection {
+    /// Relation families included in the detection, in deterministic order.
+    pub families: Vec<RelationFamily>,
+    /// Minimum confidence threshold applied.
+    pub min_confidence: u16,
+}
+
+/// Data returned by an `architecture.cycles` plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArchitectureCyclesResult {
+    /// Immutable generation that served the query.
+    pub generation: GenerationId,
+    /// Strongly connected components containing cycles, in deterministic order.
+    pub components: Vec<CycleComponent>,
+    /// Bounded representative minimal cycles, in deterministic order.
+    pub cycles: Vec<CyclePath>,
+    /// Ranked candidate break points, in deterministic order.
+    pub break_candidates: Vec<CycleBreak>,
+    /// Actual relation projection used.
+    pub projection: ArchitectureCyclesProjection,
     /// Resource limits that stopped work, in deterministic execution order.
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.

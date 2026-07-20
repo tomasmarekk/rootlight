@@ -12,9 +12,10 @@ mod service;
 mod store;
 
 pub use model::{
-    CodeLocatePlan, CodeLocateResult, FlowTraceEdge, FlowTraceFrontier, FlowTracePath,
-    FlowTracePlan, FlowTraceProjection, FlowTraceResult, LocateHit, LocateMode, PlanEstimate,
-    PlanExplanation, PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource,
+    ArchitectureCyclesPlan, ArchitectureCyclesProjection, ArchitectureCyclesResult, CodeLocatePlan,
+    CodeLocateResult, CycleBreak, CycleComponent, CyclePath, FlowTraceEdge, FlowTraceFrontier,
+    FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult, LocateHit, LocateMode,
+    PlanEstimate, PlanExplanation, PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource,
     QueryResponse, QueryUsage, RelationDirection, RelationFamily, RelationshipEdgeTarget,
     RelationshipGroup, RepositoryDataTrust, SourceChunkResult, SourceReadPlan,
     SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
