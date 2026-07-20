@@ -7,6 +7,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+blake3.workspace = true
 rootlight-error = { path = "../rootlight-error", features = ["schema"] }
 rootlight-ids = { path = "../rootlight-ids", features = ["schema"] }
 rootlight-ir = { path = "../rootlight-ir", features = ["schema"] }
