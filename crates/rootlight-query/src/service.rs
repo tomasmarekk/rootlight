@@ -7,8 +7,8 @@ use std::{
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{FactId, FileId, GenerationId, SymbolId};
 use rootlight_ir::{
-    CoverageRecord, CoverageScope, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint,
-    RelationPredicate, SourceRef,
+    AnalysisTier, CoverageRecord, CoverageScope, EntityFlag, EntityKind, EntityVisibility,
+    NormalizedIrDocument, OccurrenceTarget, RelationEndpoint, RelationPredicate, SourceRef,
 };
 use rootlight_search::{LexicalSearch, SearchBudget, SearchRequest, validate_search_request};
 use rootlight_source::{SourceBudget, SourceError, SourceReadOptions, SourceService};
@@ -16,15 +16,17 @@ use rootlight_storage::GenerationSnapshot;
 use serde::Serialize;
 
 use crate::model::{
-    ArchitectureCyclesPlan, ArchitectureCyclesProjection, ArchitectureCyclesResult, CodeLocatePlan,
-    CodeLocateResult, CycleBreak, CycleComponent, CyclePath, FlowTraceEdge, FlowTraceFrontier,
-    FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult, LocateHit, LocateMode,
-    PlanEstimate, PlanExplanation, PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource,
-    QueryResponse, QueryUsage, RelationDirection, RelationFamily, RelationshipEdgeTarget,
-    RelationshipGroup, RepositoryDataTrust, SourceChunkResult, SourceReadPlan,
-    SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
-    SymbolRelationshipsResult, TokenAccountingProfile, checked_add, checked_u128_to_u64,
-    checked_usize_to_u64, ensure_estimate, search_mode,
+    ArchitectureCyclesPlan, ArchitectureCyclesProjection, ArchitectureCyclesResult,
+    CodeDeadBlindSpot, CodeDeadEntryPointPolicy, CodeDeadEntryPointSummary, CodeDeadPlan,
+    CodeDeadResult, CodeDeadSuppressionRule, CodeLocatePlan, CodeLocateResult, CycleBreak,
+    CycleComponent, CyclePath, DeadCodeCandidate, DeadCodeClassification, FlowTraceEdge,
+    FlowTraceFrontier, FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult,
+    LocateHit, LocateMode, PlanEstimate, PlanExplanation, PlanKind, QueryBudget, QueryError,
+    QueryOperator, QueryResource, QueryResponse, QueryUsage, RelationDirection, RelationFamily,
+    RelationshipEdgeTarget, RelationshipGroup, RepositoryDataTrust, SourceChunkResult,
+    SourceReadPlan, SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult,
+    SymbolRelationshipsPlan, SymbolRelationshipsResult, TokenAccountingProfile, checked_add,
+    checked_u128_to_u64, checked_usize_to_u64, ensure_estimate, search_mode,
 };
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
@@ -900,6 +902,125 @@ where
                 families: plan.families.clone(),
                 min_confidence: plan.min_confidence,
             },
+            limiting_resources,
+            trust: RepositoryDataTrust::UntrustedRepositoryData,
+        };
+        finish_response(plan.explanation.clone(), data, tracker, started, &control)
+    }
+
+    /// Builds a deterministic bounded `code.dead` plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid budget, out-of-range confidence or
+    /// candidate bounds, arithmetic overflow, or a conservative estimate that
+    /// cannot be admitted.
+    pub fn plan_code_dead(
+        &self,
+        entry_point_policy: CodeDeadEntryPointPolicy,
+        include_exported: bool,
+        include_tests: bool,
+        min_confidence: u16,
+        max_candidates: usize,
+        budget: QueryBudget,
+    ) -> Result<CodeDeadPlan, QueryError> {
+        budget.validate()?;
+        if min_confidence > 1_000 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if max_candidates == 0
+            || max_candidates > 500
+            || checked_usize_to_u64(max_candidates)? > budget.max_results
+        {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        let estimate = PlanEstimate {
+            rows: budget.max_rows,
+            edges: budget.max_edges,
+            results: budget.max_results,
+            source_bytes: 0,
+            // The normalized generation bounds every record, while the query
+            // memory budget remains the conservative aggregate ceiling.
+            memory_bytes: budget.max_memory_bytes,
+            json_bytes: budget.max_json_bytes,
+            estimated_tokens: budget.max_tokens,
+            duration_micros: duration_micros(budget.max_duration),
+        };
+        ensure_estimate(estimate, budget)?;
+        let explanation = PlanExplanation {
+            generation: self.generation.metadata().generation(),
+            kind: PlanKind::CodeDead,
+            operators: vec![
+                QueryOperator::GenerationPin,
+                QueryOperator::RelationScan,
+                QueryOperator::EntityLookup,
+                QueryOperator::OutputBudget,
+            ],
+            estimate,
+        };
+        Ok(CodeDeadPlan {
+            entry_point_policy,
+            include_exported,
+            include_tests,
+            min_confidence,
+            max_candidates,
+            budget,
+            explanation,
+        })
+    }
+
+    /// Executes a prevalidated `code.dead` plan.
+    ///
+    /// The scan builds a directed call/use adjacency view over the served
+    /// reachability predicates, resolves an honest partial entry-point model
+    /// from exported and test symbols, runs a forward reachability closure from
+    /// the entry points, and classifies every unreached graph symbol. Rows,
+    /// edges, results, and memory are measured exactly like
+    /// `architecture.cycles`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
+    /// resource exhaustion.
+    pub fn execute_code_dead(
+        &self,
+        plan: &CodeDeadPlan,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<CodeDeadResult>, QueryError> {
+        self.require_generation(plan.explanation.generation)?;
+        let started = Instant::now();
+        let control = QueryControl::new(cancellation, plan.budget.max_duration);
+        control.check()?;
+        let document = self.generation.document();
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+
+        let graph = build_dead_graph(
+            document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )?;
+        let analysis = analyze_dead_code(
+            document,
+            &graph,
+            plan,
+            &mut tracker,
+            &mut limiting_resources,
+            &control,
+        )?;
+
+        let data = CodeDeadResult {
+            generation: self.generation.metadata().generation(),
+            candidates: analysis.candidates,
+            entry_points: analysis.entry_points,
+            blind_spots: analysis.blind_spots,
+            suppression_rules: analysis.suppression_rules,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
@@ -1922,6 +2043,462 @@ fn break_candidate(
     })
 }
 
+/// Relation families whose served predicates back the dead-code call/use graph.
+///
+/// The first-slice oracle records direct calls as `DispatchCandidate`
+/// occurrences rather than entity-to-entity relations, so the reachability scan
+/// also admits the `DispatchCandidate` predicate explicitly below. On a purely
+/// lexical fixture no served predicate yields an entity-to-entity edge, so the
+/// graph stays empty and `code.dead` honestly reports no proven candidates.
+const CODE_DEAD_FAMILIES: &[RelationFamily] = &[
+    RelationFamily::Calls,
+    RelationFamily::References,
+    RelationFamily::Imports,
+];
+
+/// One directed adjacency edge used by a `code.dead` reachability scan.
+#[derive(Debug, Clone)]
+struct DeadAdjEdge {
+    target: SymbolId,
+    confidence: u16,
+}
+
+/// Directed call/use graph plus per-symbol incoming statistics.
+#[derive(Debug, Default)]
+struct DeadGraph {
+    /// Outbound adjacency from a subject symbol to its served targets.
+    adjacency: BTreeMap<SymbolId, Vec<DeadAdjEdge>>,
+    /// Every symbol appearing as a served relation endpoint.
+    nodes: BTreeSet<SymbolId>,
+    /// Incoming served-edge count per symbol.
+    incoming_count: BTreeMap<SymbolId, u32>,
+    /// Strongest incoming served-edge confidence per symbol.
+    incoming_max_confidence: BTreeMap<SymbolId, u16>,
+    /// Whether the relation scan was cut short by a row or edge budget.
+    truncated: bool,
+}
+
+/// Honest result of the bounded dead-code reachability analysis.
+struct DeadAnalysis {
+    candidates: Vec<DeadCodeCandidate>,
+    entry_points: CodeDeadEntryPointSummary,
+    blind_spots: Vec<CodeDeadBlindSpot>,
+    suppression_rules: Vec<CodeDeadSuppressionRule>,
+}
+
+/// Builds a directed call/use graph over the served reachability predicates.
+///
+/// Each served relation whose predicate is admitted and whose confidence clears
+/// the threshold contributes a subject-to-object entity edge. Repository and
+/// file endpoints and occurrence-less endpoints contribute nothing. The scan is
+/// bounded by the same row and edge budgets as `architecture.cycles`.
+fn build_dead_graph(
+    document: &NormalizedIrDocument,
+    plan: &CodeDeadPlan,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<DeadGraph, QueryError> {
+    let mut allowed: BTreeSet<RelationPredicate> = CODE_DEAD_FAMILIES
+        .iter()
+        .flat_map(|family| family.predicates().iter().copied())
+        .collect();
+    // The first-slice oracle records direct calls as dispatch candidates; admit
+    // them explicitly so a served call graph can form when the oracle provides
+    // entity-to-entity dispatch relations.
+    allowed.insert(RelationPredicate::DispatchCandidate);
+
+    let mut graph = DeadGraph::default();
+    for relation in &document.relations {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            graph.truncated = true;
+            break;
+        }
+        if !tracker.can_add(QueryResource::Edges, 1) {
+            record_limit(limiting_resources, QueryResource::Edges)?;
+            graph.truncated = true;
+            break;
+        }
+        tracker.add_rows(1)?;
+        tracker.add_edges(1)?;
+        if !allowed.contains(&relation.predicate) {
+            continue;
+        }
+        let confidence = relation.confidence.get();
+        if confidence < plan.min_confidence {
+            continue;
+        }
+        let Some(subject) = endpoint_entity(document, relation.subject) else {
+            continue;
+        };
+        let Some(object) = endpoint_entity(document, relation.object) else {
+            continue;
+        };
+        graph.nodes.insert(subject);
+        graph.nodes.insert(object);
+        graph
+            .adjacency
+            .entry(subject)
+            .or_default()
+            .push(DeadAdjEdge {
+                target: object,
+                confidence,
+            });
+        let count = graph.incoming_count.entry(object).or_insert(0);
+        *count = count.saturating_add(1);
+        let max_confidence = graph.incoming_max_confidence.entry(object).or_insert(0);
+        if confidence > *max_confidence {
+            *max_confidence = confidence;
+        }
+    }
+    for edges in graph.adjacency.values_mut() {
+        edges.sort_by(|left, right| {
+            left.target
+                .cmp(&right.target)
+                .then_with(|| right.confidence.cmp(&left.confidence))
+        });
+    }
+    Ok(graph)
+}
+
+/// Resolves the entry-point model and classifies every unreached graph symbol.
+///
+/// Exported and test symbols are resolved from normalized entities and served
+/// `Exports` relations under the row budget. By default those symbols are
+/// protected as reachability roots; the include flags lift that protection so
+/// the symbols can themselves be reported. The forward closure from the roots
+/// marks every reachable symbol, and each remaining graph symbol is classified
+/// by its incoming-edge evidence.
+fn analyze_dead_code(
+    document: &NormalizedIrDocument,
+    graph: &DeadGraph,
+    plan: &CodeDeadPlan,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+    control: &QueryControl<'_>,
+) -> Result<DeadAnalysis, QueryError> {
+    let mut exported: BTreeSet<SymbolId> = BTreeSet::new();
+    let mut tests: BTreeSet<SymbolId> = BTreeSet::new();
+    for entity in &document.entities {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
+        tracker.add_rows(1)?;
+        if entity_is_exported(entity) {
+            exported.insert(entity.id);
+        }
+        if entity_is_test(entity) {
+            tests.insert(entity.id);
+        }
+    }
+    for relation in &document.relations {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
+        tracker.add_rows(1)?;
+        if relation.predicate != RelationPredicate::Exports {
+            continue;
+        }
+        if let Some(symbol) = endpoint_entity(document, relation.object) {
+            exported.insert(symbol);
+        }
+    }
+
+    let mut entry_points: BTreeSet<SymbolId> = BTreeSet::new();
+    let mut exported_suppressed = 0_u32;
+    let mut test_suppressed = 0_u32;
+    if !plan.include_exported {
+        for symbol in &exported {
+            if entry_points.insert(*symbol) {
+                exported_suppressed = exported_suppressed.saturating_add(1);
+            }
+        }
+    }
+    if !plan.include_tests {
+        for symbol in &tests {
+            if entry_points.insert(*symbol) {
+                test_suppressed = test_suppressed.saturating_add(1);
+            }
+        }
+    }
+
+    let candidates = detect_dead_candidates(
+        document,
+        graph,
+        &entry_points,
+        &exported,
+        &tests,
+        plan.max_candidates,
+        tracker,
+        limiting_resources,
+        control,
+    )?;
+
+    let entry_point_count = u32::try_from(entry_points.len()).unwrap_or(u32::MAX);
+    let analysis = DeadAnalysis {
+        candidates,
+        entry_points: CodeDeadEntryPointSummary {
+            policy: plan.entry_point_policy,
+            entry_point_count,
+            // The first-slice entry-point model is always partial: dynamic
+            // dispatch, reflection, and unindexed entry points are not provably
+            // resolved.
+            complete: false,
+        },
+        blind_spots: dead_blind_spots(plan, document, graph.truncated),
+        suppression_rules: dead_suppression_rules(
+            exported_suppressed,
+            test_suppressed,
+            entry_point_count,
+        ),
+    };
+    Ok(analysis)
+}
+
+/// Runs a forward breadth-first reachability closure from the entry points.
+fn reachability_closure(
+    graph: &DeadGraph,
+    entry_points: &BTreeSet<SymbolId>,
+    control: &QueryControl<'_>,
+) -> Result<BTreeSet<SymbolId>, QueryError> {
+    let mut reached: BTreeSet<SymbolId> = BTreeSet::new();
+    let mut queue: VecDeque<SymbolId> = VecDeque::new();
+    for symbol in entry_points {
+        if reached.insert(*symbol) {
+            queue.push_back(*symbol);
+        }
+    }
+    while let Some(node) = queue.pop_front() {
+        control.check()?;
+        let Some(edges) = graph.adjacency.get(&node) else {
+            continue;
+        };
+        for edge in edges {
+            if reached.insert(edge.target) {
+                queue.push_back(edge.target);
+            }
+        }
+    }
+    Ok(reached)
+}
+
+/// Classifies every graph symbol unreached from the entry points.
+///
+/// The forward closure marks every symbol reachable from the protected roots;
+/// each remaining graph symbol becomes a candidate ordered by stable identity
+/// and capped at `max_candidates`. A symbol with no incoming served edges is
+/// proven dead; an unreached symbol with incoming edges is probable or
+/// suspected dead based on its strongest incoming confidence.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the detection entry point carries its bounded budget and control state"
+)]
+fn detect_dead_candidates(
+    document: &NormalizedIrDocument,
+    graph: &DeadGraph,
+    entry_points: &BTreeSet<SymbolId>,
+    exported: &BTreeSet<SymbolId>,
+    tests: &BTreeSet<SymbolId>,
+    max_candidates: usize,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+    control: &QueryControl<'_>,
+) -> Result<Vec<DeadCodeCandidate>, QueryError> {
+    let reached = reachability_closure(graph, entry_points, control)?;
+    let mut candidate_symbols: Vec<SymbolId> = graph
+        .nodes
+        .iter()
+        .copied()
+        .filter(|symbol| !reached.contains(symbol) && !entry_points.contains(symbol))
+        .collect();
+    candidate_symbols.sort();
+
+    let mut candidates: Vec<DeadCodeCandidate> = Vec::new();
+    for symbol in candidate_symbols {
+        control.check()?;
+        if candidates.len() >= max_candidates {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            break;
+        }
+        let incoming = graph.incoming_count.get(&symbol).copied().unwrap_or(0);
+        let max_confidence = graph
+            .incoming_max_confidence
+            .get(&symbol)
+            .copied()
+            .unwrap_or(0);
+        let classification = if incoming == 0 {
+            DeadCodeClassification::ProvenDead
+        } else if max_confidence >= 500 {
+            DeadCodeClassification::ProbableDead
+        } else {
+            DeadCodeClassification::SuspectedDead
+        };
+        let confidence = match classification {
+            DeadCodeClassification::ProvenDead => 1_000,
+            DeadCodeClassification::ProbableDead => 700,
+            DeadCodeClassification::SuspectedDead => 400,
+        };
+        let mut why = Vec::new();
+        if incoming == 0 {
+            why.push("no_incoming_references".to_owned());
+        }
+        why.push("unreachable_from_entry_points".to_owned());
+        let candidate = DeadCodeCandidate {
+            symbol_id: symbol,
+            classification,
+            confidence,
+            why,
+            suppressions_checked: suppressions_checked_for(symbol, exported, tests),
+            source_refs: entity_source_refs(document, symbol),
+        };
+        emit_dead_candidate(
+            &mut candidates,
+            candidate,
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+    Ok(candidates)
+}
+
+/// Returns whether one normalized entity belongs to the exported surface.
+fn entity_is_exported(entity: &rootlight_ir::EntityRecord) -> bool {
+    matches!(entity.kind, EntityKind::Export)
+        || matches!(entity.visibility, EntityVisibility::Public)
+        || entity.flags.contains(&EntityFlag::Exported)
+}
+
+/// Returns whether one normalized entity is test-only or test-related.
+fn entity_is_test(entity: &rootlight_ir::EntityRecord) -> bool {
+    matches!(entity.kind, EntityKind::Test) || entity.flags.contains(&EntityFlag::Test)
+}
+
+/// Returns bounded direct source evidence for one entity definition.
+fn entity_source_refs(document: &NormalizedIrDocument, symbol: SymbolId) -> Vec<SourceRef> {
+    const MAX_DEAD_SOURCE_REFS: usize = 8;
+    find_entity(document, symbol)
+        .and_then(|entity| entity.evidence.source.clone())
+        .into_iter()
+        .take(MAX_DEAD_SOURCE_REFS)
+        .collect()
+}
+
+/// Returns the deterministic suppression rules checked for one candidate.
+fn suppressions_checked_for(
+    symbol: SymbolId,
+    exported: &BTreeSet<SymbolId>,
+    tests: &BTreeSet<SymbolId>,
+) -> Vec<String> {
+    let mut checked = Vec::new();
+    checked.push("entry_point".to_owned());
+    if exported.contains(&symbol) {
+        checked.push("exported".to_owned());
+    }
+    if tests.contains(&symbol) {
+        checked.push("test".to_owned());
+    }
+    checked
+}
+
+/// Builds the deterministic source-free blind-spot caveats for the analysis.
+fn dead_blind_spots(
+    plan: &CodeDeadPlan,
+    document: &NormalizedIrDocument,
+    scan_truncated: bool,
+) -> Vec<CodeDeadBlindSpot> {
+    let mut blind_spots = Vec::new();
+    // Dynamic dispatch and reflection can reach symbols the static call graph
+    // does not record, so an unreachable symbol may still be live at runtime.
+    blind_spots.push(CodeDeadBlindSpot {
+        category: "dynamic_dispatch".to_owned(),
+        affected_count: 0,
+    });
+    let incomplete_coverage = u32::try_from(
+        document
+            .entities
+            .iter()
+            .filter(|entity| matches!(entity.tier, AnalysisTier::TierD))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    blind_spots.push(CodeDeadBlindSpot {
+        category: "incomplete_language_coverage".to_owned(),
+        affected_count: incomplete_coverage,
+    });
+    blind_spots.push(CodeDeadBlindSpot {
+        category: "partial_entry_point_model".to_owned(),
+        affected_count: 0,
+    });
+    if matches!(
+        plan.entry_point_policy,
+        CodeDeadEntryPointPolicy::Application
+    ) {
+        blind_spots.push(CodeDeadBlindSpot {
+            category: "application_entry_points".to_owned(),
+            affected_count: 0,
+        });
+    }
+    if scan_truncated {
+        blind_spots.push(CodeDeadBlindSpot {
+            category: "budget_truncated_scan".to_owned(),
+            affected_count: 0,
+        });
+    }
+    blind_spots
+}
+
+/// Builds the deterministic applied suppression-rule summary.
+fn dead_suppression_rules(
+    exported_suppressed: u32,
+    test_suppressed: u32,
+    entry_point_count: u32,
+) -> Vec<CodeDeadSuppressionRule> {
+    vec![
+        CodeDeadSuppressionRule {
+            rule: "entry_point".to_owned(),
+            suppressed_count: entry_point_count,
+        },
+        CodeDeadSuppressionRule {
+            rule: "exported".to_owned(),
+            suppressed_count: exported_suppressed,
+        },
+        CodeDeadSuppressionRule {
+            rule: "test".to_owned(),
+            suppressed_count: test_suppressed,
+        },
+    ]
+}
+
+/// Records one emitted dead-code candidate under the result and memory budgets.
+fn emit_dead_candidate(
+    candidates: &mut Vec<DeadCodeCandidate>,
+    candidate: DeadCodeCandidate,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+    control: &QueryControl<'_>,
+) -> Result<(), QueryError> {
+    if !tracker.can_add(QueryResource::Results, 1) {
+        record_limit(limiting_resources, QueryResource::Results)?;
+        return Ok(());
+    }
+    let bytes = serialized_size(&candidate, u64::MAX, control)?;
+    if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
+        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        return Ok(());
+    }
+    tracker.add_results(1)?;
+    tracker.add_memory(bytes)?;
+    try_push(candidates, candidate)?;
+    Ok(())
+}
+
 fn occurrence_matches(occurrence: &rootlight_ir::OccurrenceRecord, symbol: SymbolId) -> bool {
     if occurrence.enclosing == Some(symbol) {
         return true;
@@ -2714,5 +3291,193 @@ mod tests {
         assert_eq!(components.len(), 1);
         assert_eq!(cycles.len(), 1);
         assert_eq!(breaks.len(), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // code.dead synthetic-graph proofs
+    // -----------------------------------------------------------------
+
+    use crate::model::{DeadCodeCandidate, DeadCodeClassification};
+    use rootlight_ids::RepositoryId;
+    use rootlight_ir::NormalizedIrDocument;
+
+    /// Builds a directed dead-code graph from `(subject, object, confidence)`.
+    fn dead_graph(edges: &[(SymbolId, SymbolId, u16)]) -> DeadGraph {
+        let mut graph = DeadGraph::default();
+        for &(subject, object, confidence) in edges {
+            graph.nodes.insert(subject);
+            graph.nodes.insert(object);
+            graph
+                .adjacency
+                .entry(subject)
+                .or_default()
+                .push(DeadAdjEdge {
+                    target: object,
+                    confidence,
+                });
+            let count = graph.incoming_count.entry(object).or_insert(0);
+            *count = count.saturating_add(1);
+            let max_confidence = graph.incoming_max_confidence.entry(object).or_insert(0);
+            if confidence > *max_confidence {
+                *max_confidence = confidence;
+            }
+        }
+        for outbound in graph.adjacency.values_mut() {
+            outbound.sort_by(|left, right| {
+                left.target
+                    .cmp(&right.target)
+                    .then_with(|| right.confidence.cmp(&left.confidence))
+            });
+        }
+        graph
+    }
+
+    fn run_dead(
+        graph: &DeadGraph,
+        entry_points: &BTreeSet<SymbolId>,
+        max_candidates: usize,
+    ) -> Vec<DeadCodeCandidate> {
+        let document = NormalizedIrDocument::empty(
+            RepositoryId::from_bytes([0; 16]),
+            GenerationId::from_bytes([0; 20]),
+        );
+        let exported = BTreeSet::new();
+        let tests = BTreeSet::new();
+        let budget = QueryBudget::new();
+        let mut tracker = UsageTracker::new(budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let control = QueryControl::new(&cancellation, budget.max_duration);
+        detect_dead_candidates(
+            &document,
+            graph,
+            entry_points,
+            &exported,
+            &tests,
+            max_candidates,
+            &mut tracker,
+            &mut limiting_resources,
+            &control,
+        )
+        .expect("bounded dead-code detection succeeds")
+    }
+
+    #[test]
+    fn code_dead_separates_reachable_from_unreachable_symbols() {
+        let (entry, a, b, c, d) = (symbol(1), symbol(2), symbol(3), symbol(4), symbol(5));
+        // entry -> a -> b is reachable; c -> d is an unreachable island.
+        let graph = dead_graph(&[(entry, a, 900), (a, b, 900), (c, d, 900)]);
+        let entry_points = BTreeSet::from([entry]);
+        let candidates = run_dead(&graph, &entry_points, 50);
+
+        let ids: Vec<SymbolId> = candidates.iter().map(|c| c.symbol_id).collect();
+        assert_eq!(ids, vec![c, d]);
+        assert_eq!(
+            candidates[0].classification,
+            DeadCodeClassification::ProvenDead
+        );
+        assert_eq!(
+            candidates[1].classification,
+            DeadCodeClassification::ProbableDead
+        );
+    }
+
+    #[test]
+    fn code_dead_marks_a_no_incoming_symbol_proven_dead() {
+        let (entry, a, b, c) = (symbol(1), symbol(2), symbol(3), symbol(4));
+        // entry -> a is reachable; b -> c is unreachable and b has no incoming.
+        let graph = dead_graph(&[(entry, a, 900), (b, c, 900)]);
+        let entry_points = BTreeSet::from([entry]);
+        let candidates = run_dead(&graph, &entry_points, 50);
+
+        let proven = candidates
+            .iter()
+            .find(|candidate| candidate.symbol_id == b)
+            .expect("the no-incoming symbol is reported");
+        assert_eq!(proven.classification, DeadCodeClassification::ProvenDead);
+        assert_eq!(proven.confidence, 1_000);
+        assert!(proven.why.contains(&"no_incoming_references".to_owned()));
+        assert!(
+            proven
+                .why
+                .contains(&"unreachable_from_entry_points".to_owned())
+        );
+    }
+
+    #[test]
+    fn code_dead_classifies_weak_incoming_edges_as_suspected() {
+        let (entry, a, b, c) = (symbol(1), symbol(2), symbol(3), symbol(4));
+        // entry -> a is reachable; b -> c is an unreachable island where c is
+        // referenced only by a weak (low-confidence) edge from dead b.
+        let graph = dead_graph(&[(entry, a, 900), (b, c, 100)]);
+        let entry_points = BTreeSet::from([entry]);
+        let candidates = run_dead(&graph, &entry_points, 50);
+
+        let suspected = candidates
+            .iter()
+            .find(|candidate| candidate.symbol_id == c)
+            .expect("the weakly referenced symbol is reported");
+        assert_eq!(
+            suspected.classification,
+            DeadCodeClassification::SuspectedDead
+        );
+        assert_eq!(suspected.confidence, 400);
+    }
+
+    #[test]
+    fn code_dead_excludes_entry_point_symbols_and_their_callees() {
+        let (a, b, d, e) = (symbol(1), symbol(2), symbol(4), symbol(5));
+        let graph = dead_graph(&[(a, b, 900), (d, e, 900)]);
+
+        // With only `a` protected, the d -> e island is dead.
+        let without = run_dead(&graph, &BTreeSet::from([a]), 50);
+        let ids: Vec<SymbolId> = without.iter().map(|c| c.symbol_id).collect();
+        assert_eq!(ids, vec![d, e]);
+
+        // Protecting `d` as an entry point reaches both d and its callee e.
+        let with = run_dead(&graph, &BTreeSet::from([a, d]), 50);
+        assert!(with.is_empty());
+    }
+
+    #[test]
+    fn code_dead_honors_the_max_candidates_cap() {
+        let (a, b, c, d, e, f) = (
+            symbol(1),
+            symbol(2),
+            symbol(3),
+            symbol(4),
+            symbol(5),
+            symbol(6),
+        );
+        let graph = dead_graph(&[(a, b, 900), (c, d, 900), (e, f, 900)]);
+        let entry_points = BTreeSet::from([a]);
+        let candidates = run_dead(&graph, &entry_points, 1);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].symbol_id, c);
+    }
+
+    #[test]
+    fn code_dead_orders_candidates_deterministically() {
+        let (a, b, c, d, e, f) = (
+            symbol(1),
+            symbol(2),
+            symbol(3),
+            symbol(4),
+            symbol(5),
+            symbol(6),
+        );
+        let graph = dead_graph(&[(e, f, 900), (c, d, 900), (a, b, 900)]);
+        let entry_points = BTreeSet::from([a]);
+        let first = run_dead(&graph, &entry_points, 50);
+        let second = run_dead(&graph, &entry_points, 50);
+        assert_eq!(first, second);
+        let ids: Vec<SymbolId> = first.iter().map(|candidate| candidate.symbol_id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids, sorted);
     }
 }

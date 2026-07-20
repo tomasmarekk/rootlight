@@ -12,14 +12,16 @@ mod service;
 mod store;
 
 pub use model::{
-    ArchitectureCyclesPlan, ArchitectureCyclesProjection, ArchitectureCyclesResult, CodeLocatePlan,
-    CodeLocateResult, CycleBreak, CycleComponent, CyclePath, FlowTraceEdge, FlowTraceFrontier,
-    FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult, LocateHit, LocateMode,
-    PlanEstimate, PlanExplanation, PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource,
-    QueryResponse, QueryUsage, RelationDirection, RelationFamily, RelationshipEdgeTarget,
-    RelationshipGroup, RepositoryDataTrust, SourceChunkResult, SourceReadPlan,
-    SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
-    SymbolRelationshipsResult, TokenAccountingProfile,
+    ArchitectureCyclesPlan, ArchitectureCyclesProjection, ArchitectureCyclesResult,
+    CodeDeadBlindSpot, CodeDeadEntryPointPolicy, CodeDeadEntryPointSummary, CodeDeadPlan,
+    CodeDeadResult, CodeDeadSuppressionRule, CodeLocatePlan, CodeLocateResult, CycleBreak,
+    CycleComponent, CyclePath, DeadCodeCandidate, DeadCodeClassification, FlowTraceEdge,
+    FlowTraceFrontier, FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult,
+    LocateHit, LocateMode, PlanEstimate, PlanExplanation, PlanKind, QueryBudget, QueryError,
+    QueryOperator, QueryResource, QueryResponse, QueryUsage, RelationDirection, RelationFamily,
+    RelationshipEdgeTarget, RelationshipGroup, RepositoryDataTrust, SourceChunkResult,
+    SourceReadPlan, SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult,
+    SymbolRelationshipsPlan, SymbolRelationshipsResult, TokenAccountingProfile,
 };
 pub use projection::project_lexical_documents;
 pub use service::QueryService;

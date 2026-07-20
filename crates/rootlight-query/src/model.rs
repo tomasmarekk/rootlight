@@ -190,6 +190,8 @@ pub enum PlanKind {
     FlowTrace,
     /// Detect bounded architecture cycles among stable symbols.
     ArchitectureCycles,
+    /// Detect bounded dead-code candidates among stable symbols.
+    CodeDead,
     /// Read generation-bound source.
     SourceRead,
 }
@@ -868,6 +870,163 @@ pub struct ArchitectureCyclesResult {
     pub break_candidates: Vec<CycleBreak>,
     /// Actual relation projection used.
     pub projection: ArchitectureCyclesProjection,
+    /// Resource limits that stopped work, in deterministic execution order.
+    pub limiting_resources: Vec<QueryResource>,
+    /// Mandatory trust marker for repository-controlled values.
+    pub trust: RepositoryDataTrust,
+}
+
+/// Entry-point model policy for a `code.dead` reachability query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CodeDeadEntryPointPolicy {
+    /// Standard mixed entry-point model.
+    Standard,
+    /// Library export surface as entry points.
+    Library,
+    /// Application main and registered handlers as entry points.
+    Application,
+}
+
+impl CodeDeadEntryPointPolicy {
+    /// Returns the stable wire label shared with the MCP policy contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Library => "library",
+            Self::Application => "application",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "standard" => Some(Self::Standard),
+            "library" => Some(Self::Library),
+            "application" => Some(Self::Application),
+            _ => None,
+        }
+    }
+}
+
+/// Reachability classification for one dead-code candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DeadCodeClassification {
+    /// Proven unreachable under the entry-point model: no incoming edges.
+    ProvenDead,
+    /// Probable dead code: unreached with confident incoming edges.
+    ProbableDead,
+    /// Suspected dead code: unreached with weak incoming edges.
+    SuspectedDead,
+}
+
+impl DeadCodeClassification {
+    /// Returns the stable wire label shared with the MCP classification contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProvenDead => "proven_dead",
+            Self::ProbableDead => "probable_dead",
+            Self::SuspectedDead => "suspected_dead",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "proven_dead" => Some(Self::ProvenDead),
+            "probable_dead" => Some(Self::ProbableDead),
+            "suspected_dead" => Some(Self::SuspectedDead),
+            _ => None,
+        }
+    }
+}
+
+/// Prevalidated `code.dead` plan.
+#[derive(Debug, Clone)]
+pub struct CodeDeadPlan {
+    pub(crate) entry_point_policy: CodeDeadEntryPointPolicy,
+    pub(crate) include_exported: bool,
+    pub(crate) include_tests: bool,
+    pub(crate) min_confidence: u16,
+    pub(crate) max_candidates: usize,
+    pub(crate) budget: QueryBudget,
+    pub(crate) explanation: PlanExplanation,
+}
+
+impl CodeDeadPlan {
+    /// Returns the deterministic plan explanation.
+    #[must_use]
+    pub const fn explanation(&self) -> &PlanExplanation {
+        &self.explanation
+    }
+}
+
+/// One dead-code candidate detected by reachability analysis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeadCodeCandidate {
+    /// Stable symbol identity of the candidate.
+    pub symbol_id: SymbolId,
+    /// Reachability classification.
+    pub classification: DeadCodeClassification,
+    /// Classification confidence from 0 through 1000.
+    pub confidence: u16,
+    /// Source-free reasons supporting the classification, in deterministic order.
+    pub why: Vec<String>,
+    /// Suppression rules checked for this candidate, in deterministic order.
+    pub suppressions_checked: Vec<String>,
+    /// Direct immutable source evidence for the candidate definition.
+    pub source_refs: Vec<SourceRef>,
+}
+
+/// Summary of the entry-point model used for reachability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CodeDeadEntryPointSummary {
+    /// Policy used for entry-point resolution.
+    pub policy: CodeDeadEntryPointPolicy,
+    /// Number of resolved entry points.
+    pub entry_point_count: u32,
+    /// Whether the model is complete for the scope.
+    pub complete: bool,
+}
+
+/// One known blind spot in the reachability analysis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodeDeadBlindSpot {
+    /// Source-free blind-spot category label.
+    pub category: String,
+    /// Number of symbols potentially affected.
+    pub affected_count: u32,
+}
+
+/// One applied false-positive suppression rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodeDeadSuppressionRule {
+    /// Rule identifier or annotation pattern.
+    pub rule: String,
+    /// Number of symbols suppressed by this rule.
+    pub suppressed_count: u32,
+}
+
+/// Data returned by a `code.dead` plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodeDeadResult {
+    /// Immutable generation that served the query.
+    pub generation: GenerationId,
+    /// Ranked dead-code candidates in deterministic order.
+    pub candidates: Vec<DeadCodeCandidate>,
+    /// Entry-point model summary.
+    pub entry_points: CodeDeadEntryPointSummary,
+    /// Known analysis blind spots in deterministic order.
+    pub blind_spots: Vec<CodeDeadBlindSpot>,
+    /// Applied false-positive suppression rules in deterministic order.
+    pub suppression_rules: Vec<CodeDeadSuppressionRule>,
     /// Resource limits that stopped work, in deterministic execution order.
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.
