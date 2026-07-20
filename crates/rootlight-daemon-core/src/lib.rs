@@ -160,6 +160,8 @@ pub enum FirstSliceIpcRequest {
     CodeDead(daemon::CodeDeadRequest),
     /// Aggregate a bounded file-granularity architecture overview.
     ArchitectureOverview(daemon::ArchitectureOverviewRequest),
+    /// Select bounded relevant tests for a seed set.
+    TestsSelect(daemon::TestsSelectRequest),
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -189,6 +191,8 @@ pub enum FirstSliceIpcResponse {
     CodeDead(daemon::CodeDeadResponse),
     /// Bounded file-granularity architecture overview.
     ArchitectureOverview(daemon::ArchitectureOverviewResponse),
+    /// Bounded test selection for a seed set.
+    TestsSelect(daemon::TestsSelectResponse),
 }
 
 impl FirstSliceIpcResponse {
@@ -221,6 +225,9 @@ impl FirstSliceIpcResponse {
             Self::CodeDead(response) => daemon::response_envelope::Response::CodeDead(response),
             Self::ArchitectureOverview(response) => {
                 daemon::response_envelope::Response::ArchitectureOverview(response)
+            }
+            Self::TestsSelect(response) => {
+                daemon::response_envelope::Response::TestsSelect(response)
             }
         }
     }
@@ -5447,6 +5454,9 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::ArchitectureOverview(request)) => {
             Ok(Some(FirstSliceIpcRequest::ArchitectureOverview(request)))
         }
+        Some(daemon::request_envelope::Request::TestsSelect(request)) => {
+            Ok(Some(FirstSliceIpcRequest::TestsSelect(request)))
+        }
         Some(request) => Err(request),
         None => Ok(None),
     }
@@ -6042,6 +6052,58 @@ fn first_slice_response_correlates(
                         && view.view.len() <= 32
                         && !view.algorithm_version.is_empty()
                         && view.algorithm_version.len() <= 128
+                })
+        }
+        (
+            FirstSliceIpcRequest::TestsSelect(request),
+            FirstSliceIpcResponse::TestsSelect(response),
+        ) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && response.coverage_strategy.is_some()
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    request.generation.as_ref(),
+                )
+                && !request.seeds.is_empty()
+                && request.seeds.len() <= 64
+                && request.seeds.iter().all(|seed| seed.value.len() == 20)
+                && request
+                    .test_kinds
+                    .iter()
+                    .all(|kind| !kind.is_empty() && kind.len() <= 32)
+                && request.max_tests.is_none_or(|max| (1..=500).contains(&max))
+                && response.tests.len() <= 500
+                && response.gaps.len() <= 128
+                && response.tests.iter().all(|test| {
+                    !test.test_id.is_empty()
+                        && test.test_id.len() <= 512
+                        && !test.kind.is_empty()
+                        && test.kind.len() <= 32
+                        && test
+                            .path
+                            .as_ref()
+                            .is_none_or(|path| !path.is_empty() && path.len() <= 8_192)
+                        && test.score <= 1_000
+                        && !test.why.is_empty()
+                        && test.why.len() <= 8
+                        && test
+                            .why
+                            .iter()
+                            .all(|reason| !reason.is_empty() && reason.len() <= 128)
+                        && test
+                            .command_hint
+                            .as_ref()
+                            .is_none_or(|hint| !hint.is_empty() && hint.len() <= 1_024)
+                })
+                && response.gaps.iter().all(|gap| {
+                    !gap.scope.is_empty()
+                        && gap.scope.len() <= 512
+                        && !gap.reason.is_empty()
+                        && gap.reason.len() <= 128
                 })
         }
         _ => false,
@@ -6648,6 +6710,46 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 )));
             }
         }
+        FirstSliceIpcRequest::TestsSelect(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_generation_selector(request.generation.as_ref())?;
+            if request.seeds.is_empty() || request.seeds.len() > 64 {
+                return Err(Box::new(invalid_argument(
+                    "tests select request is invalid",
+                )));
+            }
+            let mut observed = std::collections::BTreeSet::new();
+            for seed in &request.seeds {
+                require_wire_id(Some(seed.value.as_slice()), 20)?;
+                if !observed.insert(seed.value.as_slice()) {
+                    return Err(Box::new(invalid_argument(
+                        "seed identifiers must be distinct",
+                    )));
+                }
+            }
+            if request.test_kinds.len() > 6
+                || request
+                    .test_kinds
+                    .iter()
+                    .any(|kind| kind.is_empty() || kind.len() > 32 || kind.as_bytes().contains(&0))
+            {
+                return Err(Box::new(invalid_argument(
+                    "tests select request is invalid",
+                )));
+            }
+            if request
+                .max_tests
+                .is_some_and(|max| !(1..=500).contains(&max))
+            {
+                return Err(Box::new(invalid_argument(
+                    "tests select request is invalid",
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -6770,6 +6872,7 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         Some(daemon::request_envelope::Request::ArchitectureOverview(_)) => {
             ControlMethod::ArchitectureOverview
         }
+        Some(daemon::request_envelope::Request::TestsSelect(_)) => ControlMethod::TestsSelect,
         None => ControlMethod::Unknown,
     }
 }
@@ -7222,6 +7325,9 @@ fn request_from_wire(
             Err(Box::new(first_slice_unavailable()))
         }
         Some(daemon::request_envelope::Request::ArchitectureOverview(_)) => {
+            Err(Box::new(first_slice_unavailable()))
+        }
+        Some(daemon::request_envelope::Request::TestsSelect(_)) => {
             Err(Box::new(first_slice_unavailable()))
         }
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
