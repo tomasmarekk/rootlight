@@ -11,10 +11,10 @@ use rootlight_ids::{GenerationId, RepositoryId};
 use rootlight_incremental::{FactDomain, FactDomainSet};
 use rootlight_query::{LocateMode, RepositoryDataTrust};
 use rootlight_service::{
-    ChangeClass, CodeDeadEntryPointPolicy, FileChangeKind, FirstSliceBuildStrategy,
-    FirstSliceError, FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence,
-    FirstSliceObservedFreshness, FirstSlicePublicationMode, FirstSliceService,
-    FirstSliceTwoStageAvailability, RelationDirection, RelationFamily,
+    ArchitectureOverviewView, ChangeClass, CodeDeadEntryPointPolicy, FileChangeKind,
+    FirstSliceBuildStrategy, FirstSliceError, FirstSliceFreshnessStatus,
+    FirstSliceIncrementalEvidence, FirstSliceObservedFreshness, FirstSlicePublicationMode,
+    FirstSliceService, FirstSliceTwoStageAvailability, RelationDirection, RelationFamily,
 };
 use tempfile::TempDir;
 
@@ -880,6 +880,65 @@ fn code_dead_reports_an_honest_partial_result_for_a_known_fixture() {
     // The first-slice entry-point model is honest about being partial.
     assert_eq!(
         dead.data.trust,
+        RepositoryDataTrust::UntrustedRepositoryData
+    );
+}
+
+#[test]
+fn architecture_overview_reports_an_honest_file_granularity_result_for_a_known_fixture() {
+    // The first-slice oracle records structural containment as a file-to-entity
+    // `Contains` relation and a direct call as a `DispatchCandidate` occurrence.
+    // Containment yields a genuine file-granularity component model, but no
+    // served relation family yields an entity-to-entity edge for this fixture,
+    // so an honest `architecture.overview` reports components per file with
+    // their contained symbol counts and no fabricated connections, hotspots, or
+    // service/module structure, while still proving the generation-pinned query
+    // path, derived-view metadata, and mandatory trust labeling.
+    let source =
+        "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    let overview = service
+        .architecture_overview(
+            indexed.generation,
+            vec![ArchitectureOverviewView::Hotspots],
+            0,
+            50,
+            true,
+            &cancellation,
+        )
+        .expect("architecture overview query succeeds");
+
+    // Containment gives at least one file-granularity component; every component
+    // is a well-formed file component with a nonzero contained symbol count.
+    assert!(!overview.data.components.is_empty());
+    for component in &overview.data.components {
+        assert_eq!(component.kind, "file");
+        assert!(!component.id.is_empty());
+        assert!(!component.name.is_empty());
+        assert!(component.symbol_count >= 1);
+        assert!(component.confidence <= 1_000);
+        assert!(!component.responsibility_evidence.is_empty());
+        assert!(component.responsibility_evidence.len() <= 16);
+    }
+    // No served relation family yields an entity-to-entity edge for this
+    // fixture, so no connection or hotspot is fabricated.
+    assert!(overview.data.connections.is_empty());
+    assert!(overview.data.hotspots.is_empty());
+    // The requested hotspot derived view is reported honestly.
+    assert_eq!(overview.data.views.len(), 1);
+    assert_eq!(
+        overview.data.views[0].view,
+        ArchitectureOverviewView::Hotspots
+    );
+    assert!(!overview.data.views[0].algorithm_version.is_empty());
+    assert_eq!(
+        overview.data.trust,
         RepositoryDataTrust::UntrustedRepositoryData
     );
 }
