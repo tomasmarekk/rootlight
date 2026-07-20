@@ -17,7 +17,10 @@ use rootlight_client::{
     ArchitectureOverviewComponent as ClientArchitectureComponent,
     ArchitectureOverviewConnection as ClientArchitectureConnection,
     ArchitectureOverviewDerivedView as ClientDerivedView,
-    ArchitectureOverviewHotspot as ClientArchitectureHotspot, CodeDead as ClientCodeDead,
+    ArchitectureOverviewHotspot as ClientArchitectureHotspot, ChangeImpact as ClientChangeImpact,
+    ChangeImpactEntry as ClientImpactEntry, ChangeImpactGroup as ClientImpactGroup,
+    ChangeImpactResolvedChange as ClientResolvedChange,
+    ChangeImpactRiskSummary as ClientRiskSummary, CodeDead as ClientCodeDead,
     CodeDeadBlindSpot as ClientBlindSpot, CodeDeadCandidate as ClientDeadCandidate,
     CodeDeadEntryPointSummary as ClientEntryPointSummary,
     CodeDeadSuppressionRule as ClientSuppressionRule, CoverageStatus as ClientCoverage,
@@ -35,11 +38,13 @@ use rootlight_client::{
     TestsSelectRankedTest as ClientRankedTest,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
-use rootlight_ir::{CoverageStatus as IrCoverage, LineRange, SourceRef, SourceSpan};
+use rootlight_ir::{
+    CoverageStatus as IrCoverage, EntityKind as IrEntityKind, LineRange, SourceRef, SourceSpan,
+};
 use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
     SymbolExplainOutput,
-    change::{TestKind, TestsSelectOutput},
+    change::{ChangeClassification, ChangeImpactOutput, RiskLevel, TestKind, TestsSelectOutput},
     context::{ContextPackOutput, QueryBatchOutput},
     intent::{
         ArchitectureCyclesOutput, ArchitectureOverviewOutput, ArchitectureView, CodeDeadOutput,
@@ -82,6 +87,7 @@ enum FakeOutcome {
     CodeDead(Result<CodeDeadPortResponse, ClientPortError>),
     ArchitectureOverview(Result<ArchitectureOverviewPortResponse, ClientPortError>),
     TestsSelect(Result<TestsSelectPortResponse, ClientPortError>),
+    ChangeImpact(Result<ChangeImpactPortResponse, ClientPortError>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +105,7 @@ enum ObservedCall {
     CodeDead(CodeDeadPortRequest),
     ArchitectureOverview(ArchitectureOverviewPortRequest),
     TestsSelect(TestsSelectPortRequest),
+    ChangeImpact(ChangeImpactPortRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +312,19 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::TestsSelect(request));
         let outcome = match &self.outcome {
             FakeOutcome::TestsSelect(outcome) => outcome.clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { outcome })
+    }
+
+    fn change_impact(
+        &self,
+        request: ChangeImpactPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<ChangeImpactPortResponse> {
+        self.record(ObservedCall::ChangeImpact(request));
+        let outcome = match &self.outcome {
+            FakeOutcome::ChangeImpact(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1841,6 +1861,114 @@ async fn tests_select_rejects_unsupported_frameworks() {
     )
     .await
     .expect_err("unsupported frameworks are rejected before the port");
+    let public = error
+        .public_error()
+        .expect("unsupported option is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn change_impact_maps_resolved_changes_impact_groups_and_risk() {
+    let response = ChangeImpactPortResponse::new(
+        ClientChangeImpact {
+            context: context(1, 0),
+            resolved_changes: vec![ClientResolvedChange {
+                symbol_id: Some(symbol()),
+                file_id: Some(file()),
+                classification: "body".to_owned(),
+                kind: Some("function".to_owned()),
+            }],
+            impacted: vec![ClientImpactGroup {
+                source_index: 0,
+                dependents: vec![ClientImpactEntry {
+                    symbol_id: missing_symbol(),
+                    kind: "function".to_owned(),
+                    distance: 1,
+                    confidence: 900,
+                    via: vec!["calls".to_owned()],
+                    is_public: false,
+                }],
+            }],
+            tests: Vec::new(),
+            risk_summary: ClientRiskSummary {
+                level: "low".to_owned(),
+                reasons: vec![
+                    "transitive_fanout".to_owned(),
+                    "dynamic_dispatch_blind_spot".to_owned(),
+                ],
+                coverage: "unknown".to_owned(),
+                breaking_surface: false,
+                fanout: 1,
+                dynamic_blind_spots: true,
+            },
+        },
+        metadata("change-impact-1"),
+    );
+    let harness = Harness::new(FakeOutcome::ChangeImpact(Ok(response)));
+    let output: ChangeImpactOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::ChangeImpact,
+            json!({
+                "repository": {"repository_id": repository()},
+                "change": {"symbol_ids": [symbol()]}
+            }),
+        )
+        .await
+        .expect("change impact maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected change impact success");
+    };
+    assert_eq!(output.data.resolved_changes.len(), 1);
+    let change = &output.data.resolved_changes[0];
+    assert_eq!(change.symbol_id, RequiredNullable(Some(symbol())));
+    assert_eq!(change.file_id, RequiredNullable(Some(file())));
+    assert_eq!(change.classification, ChangeClassification::Body);
+    assert_eq!(change.kind, Some(IrEntityKind::Function));
+    assert_eq!(output.data.impacted.len(), 1);
+    let group = &output.data.impacted[0];
+    assert_eq!(group.source_index, 0);
+    assert_eq!(group.dependents.len(), 1);
+    let dependent = &group.dependents[0];
+    assert_eq!(dependent.symbol_id, missing_symbol());
+    assert_eq!(dependent.kind, IrEntityKind::Function);
+    assert_eq!(dependent.distance, 1);
+    assert_eq!(dependent.confidence, 900);
+    assert_eq!(dependent.via, vec!["calls".to_owned()]);
+    assert!(!dependent.is_public);
+    assert!(output.data.service_impacts.is_empty());
+    assert!(output.data.tests.is_empty());
+    assert_eq!(output.data.risk_summary.level, RiskLevel::Low);
+    assert_eq!(output.data.risk_summary.coverage, IrCoverage::Unknown);
+    assert!(!output.data.risk_summary.breaking_surface);
+    assert_eq!(output.data.risk_summary.fanout, 1);
+    assert!(output.data.risk_summary.dynamic_blind_spots);
+    let ObservedCall::ChangeImpact(request) = harness.only_call() else {
+        panic!("expected change impact call");
+    };
+    assert_eq!(request.repository(), repository());
+    assert_eq!(request.changed_symbols(), &[symbol()]);
+    assert_eq!(request.changed_paths(), &[] as &[String]);
+    assert_eq!(request.max_depth(), None);
+    assert_eq!(request.include_tests(), None);
+}
+
+#[tokio::test]
+async fn change_impact_rejects_a_revision_range_diff() {
+    let harness = Harness::new(FakeOutcome::ChangeImpact(Err(ClientPortError::Executor)));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::ChangeImpact,
+        json!({
+            "repository": {"repository_id": repository()},
+            "change": {"revision_range": "HEAD~1..HEAD"}
+        }),
+    )
+    .await
+    .expect_err("revision range diffs are rejected before the port");
     let public = error
         .public_error()
         .expect("unsupported option is a checked public error");

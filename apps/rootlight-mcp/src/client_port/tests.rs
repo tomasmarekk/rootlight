@@ -6,14 +6,14 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use rootlight_client::{
-    AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview, ClientError,
-    CodeDead, CodeDeadEntryPointSummary, CodeLocate, CoverageStatus, CycleProjection, FlowTrace,
-    FlowTraceFrontier, FlowTraceProjection, GenerationSelector, LocateMode, OperationKind,
-    OperationStage, OperationState, QueryContext, QueryUsage, RecoveryClass,
-    RepositoryCoverageEntry, RepositoryIndex, RepositoryList, RepositoryListEntry,
-    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, RequestTimeout,
-    SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
-    TestsSelectCoverageStrategy,
+    AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview, ChangeImpact,
+    ChangeImpactRiskSummary, ClientError, CodeDead, CodeDeadEntryPointSummary, CodeLocate,
+    CoverageStatus, CycleProjection, FlowTrace, FlowTraceFrontier, FlowTraceProjection,
+    GenerationSelector, LocateMode, OperationKind, OperationStage, OperationState, QueryContext,
+    QueryUsage, RecoveryClass, RepositoryCoverageEntry, RepositoryIndex, RepositoryList,
+    RepositoryListEntry, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
+    RequestTimeout, SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
+    TestsSelect, TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -135,6 +135,17 @@ enum Call {
         test_kinds: Vec<String>,
         max_tests: Option<u16>,
         include_commands: Option<bool>,
+        timeout: RequestTimeout,
+    },
+    ChangeImpact {
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        changed_symbols: Vec<SymbolId>,
+        changed_paths: Vec<String>,
+        max_depth: Option<u8>,
+        min_confidence: Option<u16>,
+        include_tests: Option<bool>,
+        max_dependents: Option<u16>,
         timeout: RequestTimeout,
     },
 }
@@ -574,6 +585,47 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     build_target_signals: false,
                 },
                 gaps: Vec::new(),
+            })
+        })
+    }
+
+    fn change_impact(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        changed_symbols: Vec<SymbolId>,
+        changed_paths: Vec<String>,
+        max_depth: Option<u8>,
+        min_confidence: Option<u16>,
+        include_tests: Option<bool>,
+        max_dependents: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<ChangeImpact> {
+        self.record(Call::ChangeImpact {
+            repository,
+            generation,
+            changed_symbols,
+            changed_paths,
+            max_depth,
+            min_confidence,
+            include_tests,
+            max_dependents,
+            timeout,
+        });
+        Box::pin(async move {
+            Ok(ChangeImpact {
+                context: query_context(repository, generation, true),
+                resolved_changes: Vec::new(),
+                impacted: Vec::new(),
+                tests: Vec::new(),
+                risk_summary: ChangeImpactRiskSummary {
+                    level: "none".to_owned(),
+                    reasons: Vec::new(),
+                    coverage: "unknown".to_owned(),
+                    breaking_surface: false,
+                    fanout: 0,
+                    dynamic_blind_spots: true,
+                },
             })
         })
     }

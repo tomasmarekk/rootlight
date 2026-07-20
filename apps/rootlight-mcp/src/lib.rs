@@ -30,14 +30,15 @@ use tokio::{
 pub use client_port::{NativeFirstSliceClientPort, UnavailableFirstSliceClientPort};
 pub use executor::{
     ArchitectureCyclesPortRequest, ArchitectureCyclesPortResponse, ArchitectureOverviewPortRequest,
-    ArchitectureOverviewPortResponse, ClientPortError, ClientPortFuture, CodeDeadPortRequest,
-    CodeDeadPortResponse, CodeLocatePortRequest, CodeLocatePortResponse, FirstSliceClientPort,
-    FirstSliceToolExecutor, FlowTracePortRequest, FlowTracePortResponse,
-    OperationStatusPortRequest, ReadResponseMetadata, RepositoryIndexPortRequest,
-    RepositoryIndexPortResponse, RepositoryListPortRequest, RepositoryStatusPortRequest,
-    SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
-    SymbolExplainPortResponse, SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
-    TestsSelectPortRequest, TestsSelectPortResponse, ToolExecutorBuildError,
+    ArchitectureOverviewPortResponse, ChangeImpactPortRequest, ChangeImpactPortResponse,
+    ClientPortError, ClientPortFuture, CodeDeadPortRequest, CodeDeadPortResponse,
+    CodeLocatePortRequest, CodeLocatePortResponse, FirstSliceClientPort, FirstSliceToolExecutor,
+    FlowTracePortRequest, FlowTracePortResponse, OperationStatusPortRequest, ReadResponseMetadata,
+    RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
+    RepositoryStatusPortRequest, SourceReadPortRequest, SourceReadPortResponse,
+    SymbolExplainPortRequest, SymbolExplainPortResponse, SymbolRelationshipsPortRequest,
+    SymbolRelationshipsPortResponse, TestsSelectPortRequest, TestsSelectPortResponse,
+    ToolExecutorBuildError,
 };
 pub use tools::{
     ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture, ToolExecutor, ToolRegistryError,

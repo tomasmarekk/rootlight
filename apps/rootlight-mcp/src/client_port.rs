@@ -6,11 +6,11 @@
 use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use rootlight_client::{
-    AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview, Client,
-    ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace, GenerationSelector, LocateMode,
-    RepositoryIndex, RepositoryList, RepositoryOperationAction, RepositoryOperationStatus,
-    RepositoryStatus, RequestTimeout, SourceRead, SourceReference, SymbolExplain,
-    SymbolRelationships, TestsSelect,
+    AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview, ChangeImpact,
+    Client, ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace, GenerationSelector,
+    LocateMode, RepositoryIndex, RepositoryList, RepositoryOperationAction,
+    RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceRead, SourceReference,
+    SymbolExplain, SymbolRelationships, TestsSelect,
 };
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
@@ -21,9 +21,10 @@ use rootlight_mcp_contract::vertical::{
 
 use crate::{
     ArchitectureCyclesPortRequest, ArchitectureCyclesPortResponse, ArchitectureOverviewPortRequest,
-    ArchitectureOverviewPortResponse, ClientPortError, ClientPortFuture, CodeDeadPortRequest,
-    CodeDeadPortResponse, CodeLocatePortRequest, CodeLocatePortResponse, FirstSliceClientPort,
-    FlowTracePortRequest, FlowTracePortResponse, OperationStatusPortRequest, ReadResponseMetadata,
+    ArchitectureOverviewPortResponse, ChangeImpactPortRequest, ChangeImpactPortResponse,
+    ClientPortError, ClientPortFuture, CodeDeadPortRequest, CodeDeadPortResponse,
+    CodeLocatePortRequest, CodeLocatePortResponse, FirstSliceClientPort, FlowTracePortRequest,
+    FlowTracePortResponse, OperationStatusPortRequest, ReadResponseMetadata,
     RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
     RepositoryStatusPortRequest, RequestCancellation, SourceReadPortRequest,
     SourceReadPortResponse, SymbolExplainPortRequest, SymbolExplainPortResponse,
@@ -190,6 +191,23 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         include_commands: Option<bool>,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<TestsSelect>;
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded change impact dimension"
+    )]
+    fn change_impact(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        changed_symbols: Vec<SymbolId>,
+        changed_paths: Vec<String>,
+        max_depth: Option<u8>,
+        min_confidence: Option<u16>,
+        include_tests: Option<bool>,
+        max_dependents: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<ChangeImpact>;
 }
 
 struct LiveAsyncFirstSliceClient {
@@ -476,6 +494,36 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     &test_kinds,
                     max_tests,
                     include_commands,
+                    timeout,
+                )
+                .await
+        })
+    }
+
+    fn change_impact(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        changed_symbols: Vec<SymbolId>,
+        changed_paths: Vec<String>,
+        max_depth: Option<u8>,
+        min_confidence: Option<u16>,
+        include_tests: Option<bool>,
+        max_dependents: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<ChangeImpact> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .change_impact_async(
+                    repository,
+                    generation,
+                    &changed_symbols,
+                    &changed_paths,
+                    max_depth,
+                    min_confidence,
+                    include_tests,
+                    max_dependents,
                     timeout,
                 )
                 .await
@@ -832,6 +880,32 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
             Ok(TestsSelectPortResponse::new(result, metadata))
         })
     }
+
+    fn change_impact(
+        &self,
+        request: ChangeImpactPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<ChangeImpactPortResponse> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let result = client
+                .change_impact(
+                    request.repository(),
+                    request.generation(),
+                    request.changed_symbols().to_vec(),
+                    request.changed_paths().to_vec(),
+                    request.max_depth(),
+                    request.min_confidence(),
+                    request.include_tests(),
+                    request.max_dependents(),
+                    request_timeout()?,
+                )
+                .await
+                .map_err(map_client_error)?;
+            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            Ok(ChangeImpactPortResponse::new(result, metadata))
+        })
+    }
 }
 
 /// Source-free first-slice port used when synchronous daemon setup is unavailable.
@@ -940,6 +1014,14 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
         _request: TestsSelectPortRequest,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<TestsSelectPortResponse> {
+        unavailable()
+    }
+
+    fn change_impact(
+        &self,
+        _request: ChangeImpactPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<ChangeImpactPortResponse> {
         unavailable()
     }
 }

@@ -17,9 +17,11 @@ use rootlight_client::{
     SymbolExplain,
 };
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
-use rootlight_ir::{LineRange, SourceRef, SourceSpan};
+use rootlight_ir::{EntityKind as IrEntityKind, LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::change::{
-    RankedTest, TestCoverageStrategy, TestGap, TestKind, TestsSelectData, TestsSelectInput,
+    ChangeClassification, ChangeImpactData, ChangeImpactInput, ImpactEntry, ImpactGroup,
+    ImpactRiskSummary, RankedTest, RelationPolicy, ResolvedChange, RiskLevel, TestCandidate,
+    TestCoverageStrategy, TestGap, TestKind, TestsSelectData, TestsSelectInput,
 };
 use rootlight_mcp_contract::intent::{
     ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesData, ArchitectureCyclesInput,
@@ -187,6 +189,14 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         request: TestsSelectPortRequest,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<TestsSelectPortResponse>;
+
+    /// Maps bounded change impact for an explicit change set over one
+    /// generation.
+    fn change_impact(
+        &self,
+        request: ChangeImpactPortRequest,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<ChangeImpactPortResponse>;
 }
 
 /// Source-free failure emitted by an injected daemon client port.
@@ -918,6 +928,84 @@ impl TestsSelectPortResponse {
     }
 }
 
+/// Normalized `change.impact` request ready for the daemon client port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeImpactPortRequest {
+    repository: RepositoryId,
+    generation: client::GenerationSelector,
+    changed_symbols: Vec<SymbolId>,
+    changed_paths: Vec<String>,
+    max_depth: Option<u8>,
+    min_confidence: Option<u16>,
+    include_tests: Option<bool>,
+    max_dependents: Option<u16>,
+}
+
+impl ChangeImpactPortRequest {
+    /// Returns the selected repository.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the active or explicit immutable-generation selector.
+    #[must_use]
+    pub const fn generation(&self) -> client::GenerationSelector {
+        self.generation
+    }
+
+    /// Returns the explicit changed symbol identifiers.
+    #[must_use]
+    pub fn changed_symbols(&self) -> &[SymbolId] {
+        &self.changed_symbols
+    }
+
+    /// Returns the explicit changed repository-relative paths.
+    #[must_use]
+    pub fn changed_paths(&self) -> &[String] {
+        &self.changed_paths
+    }
+
+    /// Returns the optional transitive depth bound.
+    #[must_use]
+    pub const fn max_depth(&self) -> Option<u8> {
+        self.max_depth
+    }
+
+    /// Returns the optional minimum propagation confidence.
+    #[must_use]
+    pub const fn min_confidence(&self) -> Option<u16> {
+        self.min_confidence
+    }
+
+    /// Returns the optional test-inclusion flag.
+    #[must_use]
+    pub const fn include_tests(&self) -> Option<bool> {
+        self.include_tests
+    }
+
+    /// Returns the optional dependent cap.
+    #[must_use]
+    pub const fn max_dependents(&self) -> Option<u16> {
+        self.max_dependents
+    }
+}
+
+/// Detected daemon change-impact data plus mandatory MCP read metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeImpactPortResponse {
+    result: client::ChangeImpact,
+    metadata: ReadResponseMetadata,
+}
+
+impl ChangeImpactPortResponse {
+    /// Creates a complete `change.impact` response for MCP mapping.
+    #[must_use]
+    pub const fn new(result: client::ChangeImpact, metadata: ReadResponseMetadata) -> Self {
+        Self { result, metadata }
+    }
+}
+
 /// Normalized exact-reference `source.read` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceReadPortRequest {
@@ -1098,8 +1186,10 @@ where
                 VerticalTool::RepoList => {
                     execute_repo_list(port, arguments, cancellation, &unsupported).await
                 }
-                VerticalTool::ChangeImpact
-                | VerticalTool::HistoryCompare
+                VerticalTool::ChangeImpact => {
+                    execute_change_impact(port, arguments, cancellation, &unsupported).await
+                }
+                VerticalTool::HistoryCompare
                 | VerticalTool::PlanChange
                 | VerticalTool::QueryAdvanced => execute_intent_fallback(&unavailable).await,
                 VerticalTool::SymbolRelationships => {
@@ -2931,6 +3021,171 @@ fn test_kind_label(kind: TestKind) -> Result<String, ToolExecutionError> {
 }
 
 fn test_kind_from_label(label: &str) -> Result<TestKind, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+async fn execute_change_impact<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: ChangeImpactInput = decode_input(arguments)?;
+    let request = normalize_change_impact(input, unsupported)?;
+    let expected = request.clone();
+    let future = port.change_impact(request, cancellation.clone());
+    let response = await_port(future, cancellation).await?;
+    let output = map_change_impact(response, &expected)?;
+    serialize_success(output)
+}
+
+fn normalize_change_impact(
+    input: ChangeImpactInput,
+    unsupported: &PublicError,
+) -> Result<ChangeImpactPortRequest, ToolExecutionError> {
+    let repository = repository_id(input.repository, unsupported)?;
+    // Scope bounding, custom budgets, and non-compact profiles are not served by
+    // this slice.
+    if input.scope.is_some() || input.budget.is_some() || !compact_profile(input.profile) {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    // Working-tree and revision-range changes require a git diff this slice does
+    // not compute.
+    if input.change.working_tree.is_some() || input.change.revision_range.is_some() {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    // History signals are not served by this slice.
+    if input.include_history == Some(true) {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    // The standard and direct-only policies are served; the conservative
+    // over-approximation needs relation families this slice cannot provide.
+    let mut max_depth = input.max_depth;
+    match input.relation_policy {
+        None | Some(RelationPolicy::Standard) => {}
+        Some(RelationPolicy::DirectOnly) => max_depth = Some(1),
+        Some(RelationPolicy::Conservative) => {
+            return Err(ToolExecutionError::new(unsupported.clone()));
+        }
+    }
+    let changed_symbols = input.change.symbol_ids.unwrap_or_default();
+    let changed_paths = input.change.paths.unwrap_or_default();
+    // An empty change set carries no resolvable change.
+    if changed_symbols.is_empty() && changed_paths.is_empty() {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    Ok(ChangeImpactPortRequest {
+        repository,
+        generation: client_generation(input.generation),
+        changed_symbols,
+        changed_paths,
+        max_depth,
+        min_confidence: input.min_confidence,
+        include_tests: input.include_tests,
+        // The MCP contract exposes no dependent cap; the daemon applies its
+        // bounded default.
+        max_dependents: None,
+    })
+}
+
+fn map_change_impact(
+    response: ChangeImpactPortResponse,
+    request: &ChangeImpactPortRequest,
+) -> Result<ReadEnvelope<ChangeImpactData>, ToolExecutionError> {
+    validate_query_context(
+        &response.result.context,
+        request.repository,
+        request.generation,
+    )?;
+    let mut resolved_changes = Vec::new();
+    resolved_changes
+        .try_reserve_exact(response.result.resolved_changes.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for change in response.result.resolved_changes {
+        let classification = change_classification_from_label(&change.classification)?;
+        let kind = match change.kind {
+            Some(label) => Some(ir_entity_kind_from_label(&label)?),
+            None => None,
+        };
+        resolved_changes.push(ResolvedChange {
+            symbol_id: RequiredNullable(change.symbol_id),
+            file_id: RequiredNullable(change.file_id),
+            classification,
+            kind,
+        });
+    }
+    let mut impacted = Vec::new();
+    impacted
+        .try_reserve_exact(response.result.impacted.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for group in response.result.impacted {
+        let mut dependents = Vec::new();
+        dependents
+            .try_reserve_exact(group.dependents.len())
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        for entry in group.dependents {
+            dependents.push(ImpactEntry {
+                symbol_id: entry.symbol_id,
+                kind: ir_entity_kind_from_label(&entry.kind)?,
+                distance: entry.distance,
+                confidence: entry.confidence,
+                via: entry.via,
+                is_public: entry.is_public,
+            });
+        }
+        impacted.push(ImpactGroup {
+            source_index: group.source_index,
+            dependents,
+        });
+    }
+    let mut tests = Vec::new();
+    tests
+        .try_reserve_exact(response.result.tests.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for test in response.result.tests {
+        tests.push(TestCandidate {
+            test_id: test.test_id,
+            relevance: test.relevance,
+            why: test.why,
+            estimated_cost_ms: test.estimated_cost_ms,
+        });
+    }
+    let risk = response.result.risk_summary;
+    let data = ChangeImpactData {
+        resolved_changes,
+        impacted,
+        // This slice models no service or cross-repository boundary.
+        service_impacts: Vec::new(),
+        tests,
+        risk_summary: ImpactRiskSummary {
+            level: risk_level_from_label(&risk.level)?,
+            reasons: risk.reasons,
+            coverage: coverage_status_from_label(&risk.coverage),
+            breaking_surface: risk.breaking_surface,
+            fanout: risk.fanout,
+            dynamic_blind_spots: risk.dynamic_blind_spots,
+        },
+    };
+    map_read_envelope(response.result.context, response.metadata, data, false)
+}
+
+fn change_classification_from_label(
+    label: &str,
+) -> Result<ChangeClassification, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+fn risk_level_from_label(label: &str) -> Result<RiskLevel, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+fn ir_entity_kind_from_label(label: &str) -> Result<IrEntityKind, ToolExecutionError> {
     serde_json::from_value(Value::String(label.to_owned()))
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
