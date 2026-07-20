@@ -279,7 +279,7 @@ pub struct TokenAccounting {
     #[schemars(range(max = 32_000))]
     pub estimated_total: u32,
     /// Estimated tokens broken down by section.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     #[schemars(length(max = 16))]
     pub by_section: BTreeMap<String, u32>,
 }

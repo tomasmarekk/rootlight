@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "17779371aa4fb3708d141b76e9e746992e17c6f7a05afe658d69075b58c03135"
+      "blake3": "8dcf67ae3490f397949ba85852223d473375fc5dd042f5a59c788d54a6711a83"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
@@ -50,7 +50,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/context.rs",
-      "blake3": "80888326a3330dc957d22aac870b4cdb8e3756609d6c94f5655d84f0213b10c3"
+      "blake3": "f3a07a400222206709a8073fcf16a919c8897121a6502ed296cc50988988f912"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/intent.rs",
@@ -256,7 +256,7 @@
     },
     {
       "path": "schemas/generated/json/mcp-context-pack-output-1.0.schema.json",
-      "blake3": "ec8fd41bb193c089655730628bcfd0e99795464967ffb77ca3ab0aed5b98402b"
+      "blake3": "33571e27132a0a24f49f71c23ad303c277e3df940312593db0e635f211780e2c"
     },
     {
       "path": "schemas/generated/json/mcp-error-response-1.0.schema.json",

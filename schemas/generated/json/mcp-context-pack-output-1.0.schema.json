@@ -1149,8 +1149,7 @@
       },
       "additionalProperties": false,
       "required": [
-        "estimated_total",
-        "by_section"
+        "estimated_total"
       ]
     },
     "ToolSuggestion": {
