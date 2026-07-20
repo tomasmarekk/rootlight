@@ -536,8 +536,12 @@ pub struct ResponseBudget {
     #[schemars(range(min = 1, max = 1000))]
     pub max_results: Option<u16>,
     /// Maximum estimated output tokens.
+    ///
+    /// The schema ceiling is the largest aggregate budget any tool accepts
+    /// (`query.batch` allows up to 16000); the server clamps each request to
+    /// the calling tool's own hard limit.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 100, max = 3200))]
+    #[schemars(range(min = 100, max = 16_000))]
     pub max_tokens: Option<u16>,
     /// Maximum source bytes before JSON escaping.
     #[serde(skip_serializing_if = "Option::is_none")]

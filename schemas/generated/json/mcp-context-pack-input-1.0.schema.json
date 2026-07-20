@@ -5,7 +5,7 @@
   "description": "Strict input for `context.pack`.",
   "type": "object",
   "properties": {
-    "continuation_cursor": {
+    "continuation": {
       "description": "Progressive detail handle from a prior pack response.",
       "anyOf": [
         {
@@ -13,47 +13,73 @@
         }
       ]
     },
+    "diversity": {
+      "description": "Diversity bias applied under a tight budget.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Diversity"
+        }
+      ]
+    },
     "generation": {
-      "description": "Immutable generation to pin evidence resolution.",
-      "$ref": "#/$defs/GenerationSelector"
+      "description": "Immutable generation to pin evidence resolution; defaults to active.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationSelector"
+        }
+      ]
     },
-    "include_source": {
-      "description": "Whether to include bounded source snippets alongside structural evidence.",
-      "type": "boolean"
-    },
-    "objective": {
-      "description": "Task objective that drives evidence selection.",
-      "$ref": "#/$defs/ContextPackObjective"
+    "min_confidence": {
+      "description": "Minimum evidence confidence, integer 0 through 1000; defaults to 700.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 1000,
+      "minimum": 0
     },
     "repository": {
       "description": "Repository or workspace selector.",
       "$ref": "#/$defs/RepositorySelector"
     },
-    "target_symbols": {
-      "description": "Stable symbol identifiers to anchor the evidence pack.",
+    "sections": {
+      "description": "Evidence sections to assemble.",
       "type": "array",
       "items": {
-        "$ref": "#/$defs/SymbolId"
+        "$ref": "#/$defs/ContextSection"
       },
-      "maxItems": 32,
-      "minItems": 1
+      "maxItems": 9
+    },
+    "seeds": {
+      "description": "Starting points that anchor the evidence pack.",
+      "$ref": "#/$defs/ContextSeedSelector"
+    },
+    "source_policy": {
+      "description": "How much source detail the pack may include.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourcePolicy"
+        }
+      ]
+    },
+    "task": {
+      "description": "Specific coding, review, debugging, or refactoring objective.",
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1
     },
     "token_budget": {
-      "description": "Maximum estimated output tokens for the assembled pack.",
+      "description": "Maximum estimated output tokens (minimum 500, hard maximum 20000).",
       "type": "integer",
       "format": "uint16",
-      "maximum": 32000,
-      "minimum": 100
+      "maximum": 20000,
+      "minimum": 500
     }
   },
   "additionalProperties": false,
   "required": [
     "repository",
-    "generation",
-    "objective",
-    "target_symbols",
-    "token_budget",
-    "include_source"
+    "task",
+    "seeds",
+    "token_budget"
   ],
   "$defs": {
     "ActiveGeneration": {
@@ -66,41 +92,154 @@
         }
       ]
     },
-    "ContextPackObjective": {
-      "description": "Task objective that guides evidence selection and ranking.",
+    "ContextSection": {
+      "description": "Evidence sections a pack may assemble.",
       "oneOf": [
         {
-          "description": "Fix a known or suspected defect.",
+          "description": "Module, layer, or service boundaries.",
           "type": "string",
-          "const": "bug_fix"
+          "const": "architecture"
         },
         {
-          "description": "Restructure existing code without changing external behavior.",
+          "description": "Primary symbol definitions.",
           "type": "string",
-          "const": "refactor"
+          "const": "definitions"
         },
         {
-          "description": "Explain how code works or why it exists.",
+          "description": "Caller evidence.",
           "type": "string",
-          "const": "explanation"
+          "const": "callers"
         },
         {
-          "description": "Move code from one API, framework, or platform to another.",
+          "description": "Callee evidence.",
           "type": "string",
-          "const": "migration"
+          "const": "callees"
         },
         {
-          "description": "Review code for correctness, style, or security.",
+          "description": "Type and signature evidence.",
           "type": "string",
-          "const": "review"
+          "const": "types"
+        },
+        {
+          "description": "Covering tests.",
+          "type": "string",
+          "const": "tests"
+        },
+        {
+          "description": "Recent change history.",
+          "type": "string",
+          "const": "history"
+        },
+        {
+          "description": "Source snippets.",
+          "type": "string",
+          "const": "source"
+        },
+        {
+          "description": "Risk signals.",
+          "type": "string",
+          "const": "risks"
         }
       ]
+    },
+    "ContextSeedSelector": {
+      "description": "Seed selector that anchors a context pack to one or more starting points.\n\nAt least one seed kind must be supplied; the router rejects an empty\nselector. Handles refer to prior bounded results and stay opaque.",
+      "type": "object",
+      "properties": {
+        "change": {
+          "description": "Revision or change-set descriptor.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "located": {
+          "description": "Opaque handle to a prior located result set.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContinuationCursor"
+            }
+          ]
+        },
+        "paths": {
+          "description": "Repository-relative paths to anchor the pack.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096,
+            "minLength": 1
+          },
+          "maxItems": 32
+        },
+        "plan": {
+          "description": "Opaque handle to a prior change plan.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "routes": {
+          "description": "Service or route names to anchor the pack.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096,
+            "minLength": 1
+          },
+          "maxItems": 32
+        },
+        "symbols": {
+          "description": "Stable symbol identifiers to anchor the pack.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SymbolId"
+          },
+          "maxItems": 32
+        },
+        "tests": {
+          "description": "Stable test symbol identifiers to anchor the pack.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SymbolId"
+          },
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false
     },
     "ContinuationCursor": {
       "description": "A bounded opaque continuation cursor.",
       "type": "string",
       "maxLength": 4096,
       "minLength": 1
+    },
+    "Diversity": {
+      "description": "Diversity bias applied when ranking evidence under a tight budget.",
+      "oneOf": [
+        {
+          "description": "Balance across all relevant roles.",
+          "type": "string",
+          "const": "balanced"
+        },
+        {
+          "description": "Favor implementation evidence.",
+          "type": "string",
+          "const": "implementation"
+        },
+        {
+          "description": "Favor test evidence.",
+          "type": "string",
+          "const": "tests"
+        },
+        {
+          "description": "Favor change-impact evidence.",
+          "type": "string",
+          "const": "impact"
+        },
+        {
+          "description": "Favor architecture evidence.",
+          "type": "string",
+          "const": "architecture"
+        }
+      ]
     },
     "GenerationId": {
       "type": "string",
@@ -163,6 +302,31 @@
         {
           "description": "Select by a configured local alias.",
           "$ref": "#/$defs/RepositoryAliasSelector"
+        }
+      ]
+    },
+    "SourcePolicy": {
+      "description": "How much source detail the assembled pack may include.",
+      "oneOf": [
+        {
+          "description": "Only stable references, no source text.",
+          "type": "string",
+          "const": "references_only"
+        },
+        {
+          "description": "Symbol signatures without bodies.",
+          "type": "string",
+          "const": "signatures"
+        },
+        {
+          "description": "Small focused snippets around the evidence.",
+          "type": "string",
+          "const": "focused_snippets"
+        },
+        {
+          "description": "Fuller evidence snippets up to the source budget.",
+          "type": "string",
+          "const": "evidence_heavy"
         }
       ]
     },

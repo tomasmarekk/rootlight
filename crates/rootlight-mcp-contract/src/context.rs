@@ -1,17 +1,18 @@
 //! Strict typed schemas for context assembly, batch queries, and advanced queries.
 //!
-//! These types define the bounded MCP contract for `context.pack`, `query.batch`,
-//! and `query.advanced`. All repository-derived content is classified as untrusted
-//! data; server-generated guidance is kept structurally separate.
+//! These types define the bounded public MCP contract for `context.pack`,
+//! `query.batch`, and `query.advanced`, matching the normative agent interface
+//! specification. All repository-derived content is classified as untrusted
+//! data; server-generated guidance is kept structurally separate and source-free.
 
 use std::collections::BTreeMap;
 
-use rootlight_error::{PublicError, SafeLabel};
+use rootlight_error::SafeLabel;
 use rootlight_ids::{FileId, GenerationId, SymbolId};
 use rootlight_ir::SourceRef;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::TrustClassification;
 use crate::vertical::{
@@ -24,20 +25,94 @@ use crate::vertical::{
 // context.pack
 // ---------------------------------------------------------------------------
 
-/// Task objective that guides evidence selection and ranking.
+/// Seed selector that anchors a context pack to one or more starting points.
+///
+/// At least one seed kind must be supplied; the router rejects an empty
+/// selector. Handles refer to prior bounded results and stay opaque.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSeedSelector {
+    /// Stable symbol identifiers to anchor the pack.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 32))]
+    pub symbols: Option<Vec<SymbolId>>,
+    /// Repository-relative paths to anchor the pack.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 32), inner(length(min = 1, max = 4096)))]
+    pub paths: Option<Vec<String>>,
+    /// Service or route names to anchor the pack.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 32), inner(length(min = 1, max = 4096)))]
+    pub routes: Option<Vec<String>>,
+    /// Stable test symbol identifiers to anchor the pack.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 32))]
+    pub tests: Option<Vec<SymbolId>>,
+    /// Opaque handle to a prior located result set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub located: Option<ContinuationCursor>,
+    /// Revision or change-set descriptor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub change: Option<String>,
+    /// Opaque handle to a prior change plan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub plan: Option<String>,
+}
+
+/// How much source detail the assembled pack may include.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum ContextPackObjective {
-    /// Fix a known or suspected defect.
-    BugFix,
-    /// Restructure existing code without changing external behavior.
-    Refactor,
-    /// Explain how code works or why it exists.
-    Explanation,
-    /// Move code from one API, framework, or platform to another.
-    Migration,
-    /// Review code for correctness, style, or security.
-    Review,
+pub enum SourcePolicy {
+    /// Only stable references, no source text.
+    ReferencesOnly,
+    /// Symbol signatures without bodies.
+    Signatures,
+    /// Small focused snippets around the evidence.
+    FocusedSnippets,
+    /// Fuller evidence snippets up to the source budget.
+    EvidenceHeavy,
+}
+
+/// Evidence sections a pack may assemble.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSection {
+    /// Module, layer, or service boundaries.
+    Architecture,
+    /// Primary symbol definitions.
+    Definitions,
+    /// Caller evidence.
+    Callers,
+    /// Callee evidence.
+    Callees,
+    /// Type and signature evidence.
+    Types,
+    /// Covering tests.
+    Tests,
+    /// Recent change history.
+    History,
+    /// Source snippets.
+    Source,
+    /// Risk signals.
+    Risks,
+}
+
+/// Diversity bias applied when ranking evidence under a tight budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Diversity {
+    /// Balance across all relevant roles.
+    Balanced,
+    /// Favor implementation evidence.
+    Implementation,
+    /// Favor test evidence.
+    Tests,
+    /// Favor change-impact evidence.
+    Impact,
+    /// Favor architecture evidence.
+    Architecture,
 }
 
 /// Strict input for `context.pack`.
@@ -46,21 +121,34 @@ pub enum ContextPackObjective {
 pub struct ContextPackInput {
     /// Repository or workspace selector.
     pub repository: RepositorySelector,
-    /// Immutable generation to pin evidence resolution.
-    pub generation: GenerationSelector,
-    /// Task objective that drives evidence selection.
-    pub objective: ContextPackObjective,
-    /// Stable symbol identifiers to anchor the evidence pack.
-    #[schemars(length(min = 1, max = 32))]
-    pub target_symbols: Vec<SymbolId>,
-    /// Maximum estimated output tokens for the assembled pack.
-    #[schemars(range(min = 100, max = 32_000))]
+    /// Immutable generation to pin evidence resolution; defaults to active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<GenerationSelector>,
+    /// Specific coding, review, debugging, or refactoring objective.
+    #[schemars(length(min = 1, max = 4096))]
+    pub task: String,
+    /// Starting points that anchor the evidence pack.
+    pub seeds: ContextSeedSelector,
+    /// Maximum estimated output tokens (minimum 500, hard maximum 20000).
+    #[schemars(range(min = 500, max = 20_000))]
     pub token_budget: u16,
-    /// Whether to include bounded source snippets alongside structural evidence.
-    pub include_source: bool,
+    /// How much source detail the pack may include.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_policy: Option<SourcePolicy>,
+    /// Evidence sections to assemble.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 9))]
+    pub sections: Option<Vec<ContextSection>>,
+    /// Diversity bias applied under a tight budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diversity: Option<Diversity>,
+    /// Minimum evidence confidence, integer 0 through 1000; defaults to 700.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(max = 1_000))]
+    pub min_confidence: Option<u16>,
     /// Progressive detail handle from a prior pack response.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub continuation_cursor: Option<ContinuationCursor>,
+    pub continuation: Option<ContinuationCursor>,
 }
 
 /// Role of one evidence item within the assembled context pack.
@@ -96,10 +184,32 @@ pub struct RepositorySnippet {
     pub trust: TrustClassification,
 }
 
+/// Stable identifier for a context pack.
+///
+/// Deterministic for the exact generation, normalized request, and planner
+/// version so a repeated request yields the same pack identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct ContextPackId(#[schemars(length(min = 1, max = 128))] String);
+
+impl ContextPackId {
+    /// Wraps an already-validated pack identifier.
+    #[must_use]
+    pub fn new(id: String) -> Self {
+        Self(id)
+    }
+
+    /// Borrows the identifier text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// One ordered evidence item in a context pack.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ContextEvidenceItem {
+pub struct ContextItem {
     /// Evidence role used for ranking and reading-order decisions.
     pub role: EvidenceRole,
     /// Stable symbol this item describes, when applicable.
@@ -108,33 +218,35 @@ pub struct ContextEvidenceItem {
     /// Generation-pinned source reference for the evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<SourceRef>,
+    /// Relevance score, integer 0 through 1000.
+    #[schemars(range(max = 1_000))]
+    pub score: u16,
     /// Estimated token cost of this item.
     #[schemars(range(max = 32_000))]
     pub tokens: u32,
-    /// Evidence confidence, integer 0 through 1000.
-    #[schemars(range(max = 1_000))]
-    pub confidence: u16,
+    /// Trust classification for repository-derived content in this item.
+    pub trust: TrustClassification,
     /// Bounded source snippet, present only when source inclusion is requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<RepositorySnippet>,
 }
 
-/// Rootlight-generated guidance that never contains repository content.
+/// Rootlight-generated structure guidance that never contains repository content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ServerGuidance {
+pub struct ContextStructure {
     /// Suggested reading or prompt order for the evidence items.
     #[schemars(length(max = 64))]
     pub reading_order: Vec<SourceFreeMessage>,
-    /// Source-free caveats about coverage, staleness, or confidence.
-    #[schemars(length(max = 32))]
-    pub caveats: Vec<SourceFreeMessage>,
+    /// Source-free notes on dependencies between evidence items.
+    #[schemars(length(max = 64))]
+    pub dependencies: Vec<SourceFreeMessage>,
 }
 
 /// One category of omitted evidence with an optional continuation handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct OmissionEntry {
+pub struct OmissionSummary {
     /// Source-free reason code for the omission.
     pub reason: SafeLabel,
     /// Number of evidence items excluded for this reason.
@@ -142,7 +254,21 @@ pub struct OmissionEntry {
     pub count: u32,
     /// Continuation handle to retrieve omitted items, when pageable.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub continuation_cursor: Option<ContinuationCursor>,
+    pub continuation: Option<ContinuationCursor>,
+}
+
+/// A precise suggested next step that never contains repository content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSuggestion {
+    /// Dotted tool name recommended for the next step.
+    #[schemars(length(min = 1, max = 64))]
+    pub tool: String,
+    /// Source-free rationale for the suggestion.
+    pub reason: SourceFreeMessage,
+    /// Continuation handle for the suggested call, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<ContinuationCursor>,
 }
 
 /// Estimated token accounting for the assembled pack.
@@ -152,24 +278,30 @@ pub struct TokenAccounting {
     /// Total estimated tokens across all included items.
     #[schemars(range(max = 32_000))]
     pub estimated_total: u32,
-    /// Per-role estimated token breakdown.
+    /// Estimated tokens broken down by section.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     #[schemars(length(max = 16))]
-    pub by_role: BTreeMap<String, u32>,
+    pub by_section: BTreeMap<String, u32>,
 }
 
 /// `context.pack` result data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ContextPackData {
+    /// Stable pack identifier for the exact generation, request, and planner.
+    pub pack_id: ContextPackId,
     /// Ordered, deduplicated evidence items in deterministic rank order.
     #[schemars(length(max = 200))]
-    pub items: Vec<ContextEvidenceItem>,
-    /// Rootlight-generated reading order and caveats, never repository content.
-    pub server_guidance: ServerGuidance,
-    /// Summarized evidence excluded by budget, confidence, or diversity constraints.
+    pub items: Vec<ContextItem>,
+    /// Rootlight-generated reading order and dependency notes.
+    pub structure: ContextStructure,
+    /// Summarized evidence excluded by budget, confidence, or diversity.
     #[schemars(length(max = 32))]
-    pub omission_summary: Vec<OmissionEntry>,
-    /// Estimated token usage by role and total.
+    pub omitted: Vec<OmissionSummary>,
+    /// Precise continuation or source-read suggestions.
+    #[schemars(length(max = 32))]
+    pub followups: Vec<ToolSuggestion>,
+    /// Estimated token usage by section and total.
     pub token_accounting: TokenAccounting,
 }
 
@@ -180,34 +312,60 @@ pub type ContextPackOutput = ToolResponse<ReadEnvelope<ContextPackData>>;
 // query.batch
 // ---------------------------------------------------------------------------
 
-/// Closed allowlist of tools composable inside a public `query.batch`.
-///
-/// Mutation tools, polling, nested batches, `history.compare`, `query.advanced`,
-/// cross-generation operations, and unbounded fanout are forbidden.
+/// How a batch treats independent operations after a runtime failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+pub enum FailurePolicy {
+    /// Continue scheduling operations that do not depend on a failed one.
+    ///
+    /// This is the default: successful independent results are preserved.
+    ContinueIndependent,
+    /// Stop scheduling new operations after the first runtime failure.
+    FailFast,
+}
+
+/// Closed allowlist of tools composable inside a public `query.batch`.
+///
+/// Serialized with dotted public tool names. Mutation tools, polling, nested
+/// batches, `history.compare`, `query.advanced`, cross-generation operations,
+/// and unbounded fanout are forbidden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum BatchTool {
     /// Bounded structural or lexical code search.
+    #[serde(rename = "code.locate")]
     CodeLocate,
     /// Semantic evidence for stable symbol identifiers.
+    #[serde(rename = "symbol.explain")]
     SymbolExplain,
     /// Typed relationship traversal for one or more symbols.
+    #[serde(rename = "symbol.relationships")]
     SymbolRelationships,
     /// Cross-service or cross-module flow tracing.
+    #[serde(rename = "flow.trace")]
     FlowTrace,
     /// Bounded change-impact analysis.
+    #[serde(rename = "change.impact")]
     ChangeImpact,
     /// Test selection for given symbols or paths.
+    #[serde(rename = "tests.select")]
     TestsSelect,
     /// High-level architecture overview.
+    #[serde(rename = "architecture.overview")]
     ArchitectureOverview,
     /// Dependency-cycle detection.
+    #[serde(rename = "architecture.cycles")]
     ArchitectureCycles,
     /// Dead-code detection.
+    #[serde(rename = "code.dead")]
     CodeDead,
+    /// Ordered change planning.
+    #[serde(rename = "plan.change")]
+    PlanChange,
     /// Context pack assembly.
+    #[serde(rename = "context.pack")]
     ContextPack,
     /// Generation-pinned source range reads.
+    #[serde(rename = "source.read")]
     SourceRead,
 }
 
@@ -247,11 +405,11 @@ pub struct BatchOperation {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 8), inner(length(min = 1, max = 32)))]
     pub depends_on: Option<Vec<String>>,
-    /// Strict tool arguments with batch-inherited fields omitted.
+    /// Strict tool arguments as an object with batch-inherited fields omitted.
     ///
     /// Leaf values may be [`BatchBinding`] references that are resolved from
     /// completed dependency responses before schema validation.
-    pub arguments: Value,
+    pub arguments: Map<String, Value>,
     /// Optional per-operation budget cap that may only reduce the allocation
     /// derived from the shared batch budget.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -272,12 +430,15 @@ pub struct QueryBatchInput {
     /// One to sixteen operations in request order with unique identifiers.
     #[schemars(length(min = 1, max = 16))]
     pub operations: Vec<BatchOperation>,
-    /// Whether to stop scheduling new operations after the first runtime failure.
+    /// How to treat independent operations after a runtime failure.
     ///
-    /// Defaults to false, preserving successful independent results.
+    /// Defaults to continue-independent, preserving successful results.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub fail_fast: Option<bool>,
+    pub failure_policy: Option<FailurePolicy>,
     /// One shared result, traversal, source-byte, time, and token budget.
+    ///
+    /// The aggregate output budget defaults to 3000 tokens with a hard maximum
+    /// of 16000 tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget: Option<ResponseBudget>,
     /// Requested response representation for the aggregate batch response.
@@ -329,7 +490,7 @@ pub struct BatchOperationResult {
     pub data: Option<Value>,
     /// Structured error, present when status is error.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<PublicError>,
+    pub error: Option<rootlight_error::PublicError>,
     /// Whether a hard or requested limit stopped this operation.
     pub truncated: bool,
     /// Safe continuation cursor when the operation result is pageable.
@@ -654,10 +815,11 @@ pub enum QueryCompleteness {
 pub struct QueryAdvancedInput {
     /// Repository or workspace selector.
     pub repository: RepositorySelector,
-    /// Immutable generation to pin query execution.
-    pub generation: GenerationSelector,
+    /// Immutable generation to pin query execution; defaults to active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<GenerationSelector>,
     /// Typed declarative AST, never text SQL, Cypher, or shell.
-    pub query_ast: QueryAstNode,
+    pub query: QueryAstNode,
     /// Bound typed values referenced by the AST.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 64))]
@@ -668,15 +830,15 @@ pub struct QueryAdvancedInput {
     /// Maximum returned rows, default one hundred.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 1000))]
-    pub max_rows: Option<u16>,
-    /// Maximum traversal or plan depth, hard ceiling five.
+    pub max_results: Option<u16>,
+    /// Maximum traversal or plan depth, default three, hard ceiling five.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 5))]
     pub max_depth: Option<u8>,
-    /// Maximum traversal facts examined.
+    /// Maximum estimated plan cost the client is willing to pay.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 100_000))]
-    pub max_traversal: Option<u32>,
+    #[schemars(range(min = 1, max = 10_000_000))]
+    pub cost_limit: Option<u64>,
     /// Continuation cursor when the plan is safely pageable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<ContinuationCursor>,

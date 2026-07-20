@@ -65,20 +65,20 @@
       "type": "string",
       "pattern": "^b3_[a-z2-7]{58}$"
     },
-    "ContextEvidenceItem": {
+    "ContextItem": {
       "description": "One ordered evidence item in a context pack.",
       "type": "object",
       "properties": {
-        "confidence": {
-          "description": "Evidence confidence, integer 0 through 1000.",
+        "role": {
+          "description": "Evidence role used for ranking and reading-order decisions.",
+          "$ref": "#/$defs/EvidenceRole"
+        },
+        "score": {
+          "description": "Relevance score, integer 0 through 1000.",
           "type": "integer",
           "format": "uint16",
           "maximum": 1000,
           "minimum": 0
-        },
-        "role": {
-          "description": "Evidence role used for ranking and reading-order decisions.",
-          "$ref": "#/$defs/EvidenceRole"
         },
         "snippet": {
           "description": "Bounded source snippet, present only when source inclusion is requested.",
@@ -119,50 +119,102 @@
           "format": "uint32",
           "maximum": 32000,
           "minimum": 0
+        },
+        "trust": {
+          "description": "Trust classification for repository-derived content in this item.",
+          "$ref": "#/$defs/TrustClassification"
         }
       },
       "additionalProperties": false,
       "required": [
         "role",
+        "score",
         "tokens",
-        "confidence"
+        "trust"
       ]
     },
     "ContextPackData": {
       "description": "`context.pack` result data.",
       "type": "object",
       "properties": {
+        "followups": {
+          "description": "Precise continuation or source-read suggestions.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolSuggestion"
+          },
+          "maxItems": 32
+        },
         "items": {
           "description": "Ordered, deduplicated evidence items in deterministic rank order.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/ContextEvidenceItem"
+            "$ref": "#/$defs/ContextItem"
           },
           "maxItems": 200
         },
-        "omission_summary": {
-          "description": "Summarized evidence excluded by budget, confidence, or diversity constraints.",
+        "omitted": {
+          "description": "Summarized evidence excluded by budget, confidence, or diversity.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/OmissionEntry"
+            "$ref": "#/$defs/OmissionSummary"
           },
           "maxItems": 32
         },
-        "server_guidance": {
-          "description": "Rootlight-generated reading order and caveats, never repository content.",
-          "$ref": "#/$defs/ServerGuidance"
+        "pack_id": {
+          "description": "Stable pack identifier for the exact generation, request, and planner.",
+          "$ref": "#/$defs/ContextPackId"
+        },
+        "structure": {
+          "description": "Rootlight-generated reading order and dependency notes.",
+          "$ref": "#/$defs/ContextStructure"
         },
         "token_accounting": {
-          "description": "Estimated token usage by role and total.",
+          "description": "Estimated token usage by section and total.",
           "$ref": "#/$defs/TokenAccounting"
         }
       },
       "additionalProperties": false,
       "required": [
+        "pack_id",
         "items",
-        "server_guidance",
-        "omission_summary",
+        "structure",
+        "omitted",
+        "followups",
         "token_accounting"
+      ]
+    },
+    "ContextPackId": {
+      "description": "Stable identifier for a context pack.\n\nDeterministic for the exact generation, normalized request, and planner\nversion so a repeated request yields the same pack identity.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1
+    },
+    "ContextStructure": {
+      "description": "Rootlight-generated structure guidance that never contains repository content.",
+      "type": "object",
+      "properties": {
+        "dependencies": {
+          "description": "Source-free notes on dependencies between evidence items.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceFreeMessage"
+          },
+          "maxItems": 64
+        },
+        "reading_order": {
+          "description": "Suggested reading or prompt order for the evidence items.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceFreeMessage"
+          },
+          "maxItems": 64
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "reading_order",
+        "dependencies"
       ]
     },
     "ContinuationCursor": {
@@ -578,11 +630,11 @@
         }
       ]
     },
-    "OmissionEntry": {
+    "OmissionSummary": {
       "description": "One category of omitted evidence with an optional continuation handle.",
       "type": "object",
       "properties": {
-        "continuation_cursor": {
+        "continuation": {
           "description": "Continuation handle to retrieve omitted items, when pageable.",
           "anyOf": [
             {
@@ -1001,33 +1053,6 @@
         }
       ]
     },
-    "ServerGuidance": {
-      "description": "Rootlight-generated guidance that never contains repository content.",
-      "type": "object",
-      "properties": {
-        "caveats": {
-          "description": "Source-free caveats about coverage, staleness, or confidence.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SourceFreeMessage"
-          },
-          "maxItems": 32
-        },
-        "reading_order": {
-          "description": "Suggested reading or prompt order for the evidence items.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SourceFreeMessage"
-          },
-          "maxItems": 64
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "reading_order",
-        "caveats"
-      ]
-    },
     "SourceFreeMessage": {
       "description": "A checked Rootlight-generated message that cannot contain paths or source.",
       "type": "string",
@@ -1105,8 +1130,8 @@
       "description": "Estimated token accounting for the assembled pack.",
       "type": "object",
       "properties": {
-        "by_role": {
-          "description": "Per-role estimated token breakdown.",
+        "by_section": {
+          "description": "Estimated tokens broken down by section.",
           "type": "object",
           "additionalProperties": {
             "type": "integer",
@@ -1125,7 +1150,39 @@
       "additionalProperties": false,
       "required": [
         "estimated_total",
-        "by_role"
+        "by_section"
+      ]
+    },
+    "ToolSuggestion": {
+      "description": "A precise suggested next step that never contains repository content.",
+      "type": "object",
+      "properties": {
+        "continuation": {
+          "description": "Continuation handle for the suggested call, when applicable.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContinuationCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "description": "Source-free rationale for the suggestion.",
+          "$ref": "#/$defs/SourceFreeMessage"
+        },
+        "tool": {
+          "description": "Dotted tool name recommended for the next step.",
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "reason"
       ]
     },
     "TrustClassification": {

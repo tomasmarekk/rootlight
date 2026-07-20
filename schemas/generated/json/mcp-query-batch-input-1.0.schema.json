@@ -6,16 +6,20 @@
   "type": "object",
   "properties": {
     "budget": {
-      "description": "One shared result, traversal, source-byte, time, and token budget.",
+      "description": "One shared result, traversal, source-byte, time, and token budget.\n\nThe aggregate output budget defaults to 3000 tokens with a hard maximum\nof 16000 tokens.",
       "anyOf": [
         {
           "$ref": "#/$defs/ResponseBudget"
         }
       ]
     },
-    "fail_fast": {
-      "description": "Whether to stop scheduling new operations after the first runtime failure.\n\nDefaults to false, preserving successful independent results.",
-      "type": "boolean"
+    "failure_policy": {
+      "description": "How to treat independent operations after a runtime failure.\n\nDefaults to continue-independent, preserving successful results.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FailurePolicy"
+        }
+      ]
     },
     "generation": {
       "description": "One generation selector applied to every operation.\n\nDefaults to the active generation and is resolved once before execution.",
@@ -68,7 +72,9 @@
       "type": "object",
       "properties": {
         "arguments": {
-          "description": "Strict tool arguments with batch-inherited fields omitted.\n\nLeaf values may be [`BatchBinding`] references that are resolved from\ncompleted dependency responses before schema validation."
+          "description": "Strict tool arguments as an object with batch-inherited fields omitted.\n\nLeaf values may be [`BatchBinding`] references that are resolved from\ncompleted dependency responses before schema validation.",
+          "type": "object",
+          "additionalProperties": true
         },
         "depends_on": {
           "description": "Zero to eight earlier or later operation identifiers forming a bounded\nacyclic dependency graph with maximum depth eight.",
@@ -108,62 +114,82 @@
       ]
     },
     "BatchTool": {
-      "description": "Closed allowlist of tools composable inside a public `query.batch`.\n\nMutation tools, polling, nested batches, `history.compare`, `query.advanced`,\ncross-generation operations, and unbounded fanout are forbidden.",
+      "description": "Closed allowlist of tools composable inside a public `query.batch`.\n\nSerialized with dotted public tool names. Mutation tools, polling, nested\nbatches, `history.compare`, `query.advanced`, cross-generation operations,\nand unbounded fanout are forbidden.",
       "oneOf": [
         {
           "description": "Bounded structural or lexical code search.",
           "type": "string",
-          "const": "code_locate"
+          "const": "code.locate"
         },
         {
           "description": "Semantic evidence for stable symbol identifiers.",
           "type": "string",
-          "const": "symbol_explain"
+          "const": "symbol.explain"
         },
         {
           "description": "Typed relationship traversal for one or more symbols.",
           "type": "string",
-          "const": "symbol_relationships"
+          "const": "symbol.relationships"
         },
         {
           "description": "Cross-service or cross-module flow tracing.",
           "type": "string",
-          "const": "flow_trace"
+          "const": "flow.trace"
         },
         {
           "description": "Bounded change-impact analysis.",
           "type": "string",
-          "const": "change_impact"
+          "const": "change.impact"
         },
         {
           "description": "Test selection for given symbols or paths.",
           "type": "string",
-          "const": "tests_select"
+          "const": "tests.select"
         },
         {
           "description": "High-level architecture overview.",
           "type": "string",
-          "const": "architecture_overview"
+          "const": "architecture.overview"
         },
         {
           "description": "Dependency-cycle detection.",
           "type": "string",
-          "const": "architecture_cycles"
+          "const": "architecture.cycles"
         },
         {
           "description": "Dead-code detection.",
           "type": "string",
-          "const": "code_dead"
+          "const": "code.dead"
+        },
+        {
+          "description": "Ordered change planning.",
+          "type": "string",
+          "const": "plan.change"
         },
         {
           "description": "Context pack assembly.",
           "type": "string",
-          "const": "context_pack"
+          "const": "context.pack"
         },
         {
           "description": "Generation-pinned source range reads.",
           "type": "string",
-          "const": "source_read"
+          "const": "source.read"
+        }
+      ]
+    },
+    "FailurePolicy": {
+      "description": "How a batch treats independent operations after a runtime failure.",
+      "oneOf": [
+        {
+          "description": "Continue scheduling operations that do not depend on a failed one.\n\nThis is the default: successful independent results are preserved.",
+          "type": "string",
+          "const": "continue_independent"
+        },
+        {
+          "description": "Stop scheduling new operations after the first runtime failure.",
+          "type": "string",
+          "const": "fail_fast"
         }
       ]
     },
@@ -292,10 +318,10 @@
           "minimum": 1
         },
         "max_tokens": {
-          "description": "Maximum estimated output tokens.",
+          "description": "Maximum estimated output tokens.\n\nThe schema ceiling is the largest aggregate budget any tool accepts\n(`query.batch` allows up to 16000); the server clamps each request to\nthe calling tool's own hard limit.",
           "type": "integer",
           "format": "uint16",
-          "maximum": 3200,
+          "maximum": 16000,
           "minimum": 100
         },
         "max_traversal_facts": {

@@ -280,10 +280,10 @@
           "minimum": 1
         },
         "max_tokens": {
-          "description": "Maximum estimated output tokens.",
+          "description": "Maximum estimated output tokens.\n\nThe schema ceiling is the largest aggregate budget any tool accepts\n(`query.batch` allows up to 16000); the server clamps each request to\nthe calling tool's own hard limit.",
           "type": "integer",
           "format": "uint16",
-          "maximum": 3200,
+          "maximum": 16000,
           "minimum": 100
         },
         "max_traversal_facts": {

@@ -5,6 +5,13 @@
   "description": "Strict input for `query.advanced`.",
   "type": "object",
   "properties": {
+    "cost_limit": {
+      "description": "Maximum estimated plan cost the client is willing to pay.",
+      "type": "integer",
+      "format": "uint64",
+      "maximum": 10000000,
+      "minimum": 1
+    },
     "cursor": {
       "description": "Continuation cursor when the plan is safely pageable.",
       "anyOf": [
@@ -18,28 +25,25 @@
       "type": "boolean"
     },
     "generation": {
-      "description": "Immutable generation to pin query execution.",
-      "$ref": "#/$defs/GenerationSelector"
+      "description": "Immutable generation to pin query execution; defaults to active.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationSelector"
+        }
+      ]
     },
     "max_depth": {
-      "description": "Maximum traversal or plan depth, hard ceiling five.",
+      "description": "Maximum traversal or plan depth, default three, hard ceiling five.",
       "type": "integer",
       "format": "uint8",
       "maximum": 5,
       "minimum": 1
     },
-    "max_rows": {
+    "max_results": {
       "description": "Maximum returned rows, default one hundred.",
       "type": "integer",
       "format": "uint16",
       "maximum": 1000,
-      "minimum": 1
-    },
-    "max_traversal": {
-      "description": "Maximum traversal facts examined.",
-      "type": "integer",
-      "format": "uint32",
-      "maximum": 100000,
       "minimum": 1
     },
     "parameters": {
@@ -49,7 +53,7 @@
         "$ref": "#/$defs/QueryValue"
       }
     },
-    "query_ast": {
+    "query": {
       "description": "Typed declarative AST, never text SQL, Cypher, or shell.",
       "$ref": "#/$defs/QueryAstNode"
     },
@@ -61,8 +65,7 @@
   "additionalProperties": false,
   "required": [
     "repository",
-    "generation",
-    "query_ast"
+    "query"
   ],
   "$defs": {
     "ActiveGeneration": {
