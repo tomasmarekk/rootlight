@@ -257,6 +257,39 @@ impl ExposureProfile {
         }
     }
 
+    /// Parses the stable profile identifier used in configuration and
+    /// negotiation.
+    ///
+    /// Returns `None` for any name outside the documented set so callers can
+    /// reject unknown configuration instead of guessing a privilege level.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "scout" => Some(Self::Scout),
+            "analysis" => Some(Self::Analysis),
+            "developer" => Some(Self::Developer),
+            _ => None,
+        }
+    }
+
+    /// Enforces a server policy ceiling on a client-selected profile.
+    ///
+    /// A client-selected profile cannot exceed the server policy ceiling, so
+    /// this returns the lesser of the two profiles. Because [`Ord`] ranks
+    /// profiles in ascending privilege order, the result is equivalent to
+    /// `self.min(ceiling)`: a higher request is clamped down to the ceiling
+    /// while a lower or equal request is left unchanged.
+    #[must_use]
+    pub const fn clamped_to(self, ceiling: Self) -> Self {
+        // `Ord::min` and derived ordering comparisons are not usable in a
+        // `const fn`, so the ceiling comparison is spelled out explicitly.
+        match (self, ceiling) {
+            (Self::Developer, Self::Scout | Self::Analysis) => ceiling,
+            (Self::Analysis, Self::Scout) => ceiling,
+            _ => self,
+        }
+    }
+
     /// Exact tool allowlist exposed by `tools/list` under this profile.
     ///
     /// The returned slice is deterministically ordered by [McpTool::ALL]
@@ -462,5 +495,45 @@ mod tests {
         // history.compare and query.advanced are developer-only.
         assert!(!scout.exposes(McpTool::HistoryCompare));
         assert!(!scout.exposes(McpTool::QueryAdvanced));
+    }
+
+    #[test]
+    fn profile_names_round_trip_through_from_name() {
+        for profile in ExposureProfile::ALL {
+            assert_eq!(ExposureProfile::from_name(profile.name()), Some(profile));
+        }
+        assert_eq!(ExposureProfile::from_name(""), None);
+        assert_eq!(ExposureProfile::from_name("Scout"), None);
+        assert_eq!(ExposureProfile::from_name("admin"), None);
+    }
+
+    #[test]
+    fn clamped_to_enforces_the_server_ceiling() {
+        // A higher request is clamped down to the ceiling.
+        assert_eq!(
+            ExposureProfile::Developer.clamped_to(ExposureProfile::Scout),
+            ExposureProfile::Scout
+        );
+        assert_eq!(
+            ExposureProfile::Developer.clamped_to(ExposureProfile::Analysis),
+            ExposureProfile::Analysis
+        );
+        assert_eq!(
+            ExposureProfile::Analysis.clamped_to(ExposureProfile::Scout),
+            ExposureProfile::Scout
+        );
+        // A lower request is left unchanged.
+        assert_eq!(
+            ExposureProfile::Scout.clamped_to(ExposureProfile::Developer),
+            ExposureProfile::Scout
+        );
+        assert_eq!(
+            ExposureProfile::Analysis.clamped_to(ExposureProfile::Developer),
+            ExposureProfile::Analysis
+        );
+        // An equal request is unchanged for every profile.
+        for profile in ExposureProfile::ALL {
+            assert_eq!(profile.clamped_to(profile), profile);
+        }
     }
 }

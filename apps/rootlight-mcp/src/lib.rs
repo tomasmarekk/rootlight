@@ -17,7 +17,7 @@ mod tools;
 use std::{cmp::Ordering, collections::BTreeMap, fmt, future::Future, io, pin::Pin, sync::Arc};
 
 use json::{JsonIssue, JsonLimits, ParseFailure, parse_bounded};
-use rootlight_mcp_contract::MCP_SPECIFICATION_DATE;
+use rootlight_mcp_contract::{ExposureProfile, MCP_SPECIFICATION_DATE};
 use serde::Serialize;
 use serde_json::{Map, Number, Value};
 use thiserror::Error;
@@ -313,15 +313,46 @@ impl PartialOrd for RequestId {
 pub struct Session {
     state: LifecycleState,
     capabilities: HandlerCapabilities,
+    /// Server policy ceiling a client-selected profile cannot exceed.
+    profile_ceiling: ExposureProfile,
+    /// Write handle for the profile negotiated during `initialize`.
+    profile_sender: watch::Sender<ExposureProfile>,
 }
 
 impl Session {
     /// Creates Rootlight's lifecycle session with no unimplemented capability.
+    ///
+    /// The session defaults to a fully permissive [`ExposureProfile::Developer`]
+    /// ceiling and an unobserved profile channel, which preserves the historical
+    /// behavior for the synchronous fixture entry point and transport-only mode.
+    /// Use [`Session::with_profile`] to negotiate under a server policy ceiling.
     #[must_use]
-    pub const fn rootlight() -> Self {
+    pub fn rootlight() -> Self {
+        let (profile_sender, _profile_receiver) = watch::channel(ExposureProfile::Developer);
         Self {
             state: LifecycleState::AwaitInitialize,
             capabilities: HandlerCapabilities::none(),
+            profile_ceiling: ExposureProfile::Developer,
+            profile_sender,
+        }
+    }
+
+    /// Creates a lifecycle session that negotiates the exposure profile under a
+    /// server policy ceiling.
+    ///
+    /// `initialize` writes the resolved profile (a client request clamped to
+    /// `ceiling`) through `profile_sender` so the tool router serving `tools/*`
+    /// observes the same negotiated profile.
+    #[must_use]
+    pub fn with_profile(
+        ceiling: ExposureProfile,
+        profile_sender: watch::Sender<ExposureProfile>,
+    ) -> Self {
+        Self {
+            state: LifecycleState::AwaitInitialize,
+            capabilities: HandlerCapabilities::none(),
+            profile_ceiling: ceiling,
+            profile_sender,
         }
     }
 
@@ -540,12 +571,28 @@ impl Session {
             .map(Dispatch::Immediate);
         }
 
+        // The exposure profile is negotiated once here, before any tools/list.
+        // A client-selected profile is clamped to the server policy ceiling
+        // ("cannot exceed" is enforced by clamping, not rejection). When the
+        // client makes no request, the server-configured default already held by
+        // the channel is left untouched.
+        if let Some(requested) = requested_exposure_profile(params.as_ref()) {
+            let resolved = requested.clamped_to(self.profile_ceiling);
+            let _previous = self.profile_sender.send_replace(resolved);
+        }
+
         // The server returns its supported revision when the requested revision
         // differs; the client then decides whether it can continue.
         let result = InitializeResult {
             protocol_version: MCP_SPECIFICATION_DATE,
             capabilities: ServerCapabilities {
                 tools: self.capabilities.tools.then_some(ToolsCapability {
+                    // The profile is negotiated once during initialize, before any
+                    // tools/list, so the advertised tool list never changes
+                    // mid-session. A future mid-session profile-change feature
+                    // would set this to true and emit
+                    // notifications/tools/list_changed when the negotiated MCP
+                    // revision supports it.
                     list_changed: false,
                 }),
             },
@@ -1348,7 +1395,7 @@ fn initialize_params_are_valid(params: Option<&Value>) -> bool {
     if params.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "_meta" | "protocolVersion" | "capabilities" | "clientInfo"
+            "_meta" | "protocolVersion" | "capabilities" | "clientInfo" | "initializationOptions"
         )
     }) || params
         .get("_meta")
@@ -1363,10 +1410,44 @@ fn initialize_params_are_valid(params: Option<&Value>) -> bool {
         || protocol_version.len() > MAX_IMPLEMENTATION_VERSION_BYTES
         || !client_capabilities_are_valid(params.get("capabilities"))
         || !client_implementation_is_valid(params.get("clientInfo"))
+        || params
+            .get("initializationOptions")
+            .is_some_and(|options| !initialization_options_are_valid(options))
     {
         return false;
     }
     true
+}
+
+/// Validates Rootlight's `initializationOptions` profile negotiation payload.
+///
+/// The object must carry exactly one documented key,
+/// `rootlight_exposure_profile`, whose value is a known profile name. Any other
+/// key or value is rejected so a client cannot smuggle unsupported negotiation
+/// fields past the boundary.
+fn initialization_options_are_valid(value: &Value) -> bool {
+    let Some(options) = value.as_object() else {
+        return false;
+    };
+    options.len() == 1
+        && options
+            .get("rootlight_exposure_profile")
+            .and_then(Value::as_str)
+            .and_then(ExposureProfile::from_name)
+            .is_some()
+}
+
+/// Extracts the client-requested exposure profile from `initialize` params.
+///
+/// Returns `None` when the client makes no request; callers then keep the
+/// server-configured default. Assumes [`initialize_params_are_valid`] already
+/// accepted the payload.
+fn requested_exposure_profile(params: Option<&Value>) -> Option<ExposureProfile> {
+    let options = params?.get("initializationOptions")?.as_object()?;
+    options
+        .get("rootlight_exposure_profile")?
+        .as_str()
+        .and_then(ExposureProfile::from_name)
 }
 
 fn client_capabilities_are_valid(capabilities: Option<&Value>) -> bool {
@@ -1721,6 +1802,92 @@ fn flatten_writer_result(
     result: Result<Result<(), SessionError>, tokio::task::JoinError>,
 ) -> Result<(), SessionError> {
     result.map_err(|_| SessionError::WriterTaskFailed)?
+}
+
+#[cfg(test)]
+mod profile_negotiation_tests {
+    use super::*;
+
+    fn initialize_frame(profile_options: &str) -> Vec<u8> {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-11-25","capabilities":{{}},"clientInfo":{{"name":"fixture","version":"1.0"}}{profile_options}}}}}"#
+        )
+        .into_bytes()
+    }
+
+    fn negotiated_profile_after_initialize(
+        ceiling: ExposureProfile,
+        default_profile: ExposureProfile,
+        profile_options: &str,
+    ) -> ExposureProfile {
+        let (sender, receiver) = watch::channel(default_profile);
+        let mut session = Session::with_profile(ceiling, sender);
+        let frame = initialize_frame(profile_options);
+        session
+            .handle_frame(&frame, StdioLimits::default())
+            .expect("initialize is handled")
+            .expect("initialize has a response");
+        *receiver.borrow()
+    }
+
+    #[test]
+    fn initialize_clamps_a_client_profile_to_the_server_ceiling() {
+        // The client requests developer but the server ceiling is scout, so the
+        // negotiated profile is clamped down to scout.
+        let resolved = negotiated_profile_after_initialize(
+            ExposureProfile::Scout,
+            ExposureProfile::Scout,
+            r#","initializationOptions":{"rootlight_exposure_profile":"developer"}"#,
+        );
+        assert_eq!(resolved, ExposureProfile::Scout);
+    }
+
+    #[test]
+    fn initialize_accepts_a_client_profile_below_the_ceiling() {
+        let resolved = negotiated_profile_after_initialize(
+            ExposureProfile::Developer,
+            ExposureProfile::Developer,
+            r#","initializationOptions":{"rootlight_exposure_profile":"analysis"}"#,
+        );
+        assert_eq!(resolved, ExposureProfile::Analysis);
+    }
+
+    #[test]
+    fn initialize_without_a_profile_request_keeps_the_server_default() {
+        let resolved = negotiated_profile_after_initialize(
+            ExposureProfile::Developer,
+            ExposureProfile::Analysis,
+            "",
+        );
+        assert_eq!(resolved, ExposureProfile::Analysis);
+    }
+
+    #[test]
+    fn initialize_rejects_an_unknown_initialization_options_key() {
+        let (sender, _receiver) = watch::channel(ExposureProfile::Developer);
+        let mut session = Session::with_profile(ExposureProfile::Developer, sender);
+        let frame = initialize_frame(r#","initializationOptions":{"unexpected":true}"#);
+        let response = session
+            .handle_frame(&frame, StdioLimits::default())
+            .expect("invalid initialize is handled")
+            .expect("invalid initialize has a response");
+        let value: serde_json::Value = serde_json::from_slice(&response).expect("response is JSON");
+        assert_eq!(value["error"]["code"], serde_json::json!(INVALID_PARAMS));
+    }
+
+    #[test]
+    fn initialize_rejects_an_unknown_profile_name() {
+        let (sender, _receiver) = watch::channel(ExposureProfile::Developer);
+        let mut session = Session::with_profile(ExposureProfile::Developer, sender);
+        let frame =
+            initialize_frame(r#","initializationOptions":{"rootlight_exposure_profile":"admin"}"#);
+        let response = session
+            .handle_frame(&frame, StdioLimits::default())
+            .expect("invalid initialize is handled")
+            .expect("invalid initialize has a response");
+        let value: serde_json::Value = serde_json::from_slice(&response).expect("response is JSON");
+        assert_eq!(value["error"]["code"], serde_json::json!(INVALID_PARAMS));
+    }
 }
 
 #[cfg(test)]

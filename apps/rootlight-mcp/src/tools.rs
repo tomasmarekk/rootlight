@@ -16,6 +16,7 @@ use rootlight_mcp_contract::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
+use tokio::sync::watch;
 
 use super::{
     DEFAULT_MAX_RESPONSE_BYTES, HandlerCapabilities, HandlerFuture, HandlerResponse,
@@ -134,8 +135,14 @@ impl ToolExecutionFailure {
 pub struct ToolRouter<E> {
     executor: Arc<E>,
     contracts: Arc<[ToolContract]>,
-    list_result: Map<String, Value>,
-    profile: ExposureProfile,
+    /// Precomputed `tools/list` payloads, one per profile, indexed by
+    /// [`profile_index`]. Building all three once keeps per-request discovery
+    /// allocation-free while the negotiated profile stays dynamic.
+    list_results: [Map<String, Value>; 3],
+    /// Server policy ceiling; the negotiated profile is never served above it.
+    ceiling: ExposureProfile,
+    /// Read handle to the session-negotiated current profile.
+    profile: watch::Receiver<ExposureProfile>,
     invalid_arguments: PublicError,
     resource_exhausted: PublicError,
 }
@@ -144,22 +151,42 @@ impl<E> ToolRouter<E>
 where
     E: ToolExecutor,
 {
-    /// Compiles every checked input and output schema before the session starts.
+    /// Compiles every checked input and output schema before the session starts
+    /// and serves a single fixed exposure profile.
     ///
-    /// # Errors
-    ///
-    /// Returns [`ToolRegistryError`] when a checked server-owned schema cannot
-    /// be parsed, compiled, or represented as an MCP tool definition.
-    /// Compiles every checked input and output schema before the session starts.
-    ///
-    /// The exposure profile filters which tools appear in ``tools/list``
-    /// discovery. It does not change tool semantics, limits, or authorization.
+    /// This convenience constructor is for transports that do not negotiate a
+    /// profile dynamically; it fixes the current profile to `profile` under a
+    /// fully permissive [`ExposureProfile::Developer`] ceiling. Use
+    /// [`ToolRouter::with_shared_profile`] to serve a session-negotiated profile
+    /// under a server policy ceiling.
     ///
     /// # Errors
     ///
     /// Returns [`ToolRegistryError`] when a checked server-owned schema cannot
     /// be parsed, compiled, or represented as an MCP tool definition.
     pub fn new(executor: E, profile: ExposureProfile) -> Result<Self, ToolRegistryError> {
+        let (_sender, receiver) = watch::channel(profile);
+        Self::with_shared_profile(executor, receiver, ExposureProfile::Developer)
+    }
+
+    /// Compiles every checked input and output schema before the session starts.
+    ///
+    /// The router serves the profile currently held by `profile`, re-clamped to
+    /// the server policy `ceiling` on every request. The exposure profile
+    /// filters which tools appear in `tools/list` discovery and which calls are
+    /// authorized; it never changes tool semantics, limits, or permission
+    /// policy. Discovery payloads for all three profiles are precomputed once so
+    /// a negotiated profile change does not recompile contracts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolRegistryError`] when a checked server-owned schema cannot
+    /// be parsed, compiled, or represented as an MCP tool definition.
+    pub fn with_shared_profile(
+        executor: E,
+        profile: watch::Receiver<ExposureProfile>,
+        ceiling: ExposureProfile,
+    ) -> Result<Self, ToolRegistryError> {
         let invalid_arguments = checked_public_error(
             ErrorCode::InvalidArgument,
             INVALID_ARGUMENT_MESSAGE,
@@ -178,35 +205,58 @@ where
             contracts.push(ToolContract::compile(tool)?);
         }
 
-        let mut definitions = Vec::new();
-        definitions
-            .try_reserve_exact(contracts.len())
+        // Precompute one discovery payload per profile so a negotiated profile
+        // change never recompiles contracts or reallocates definitions.
+        let mut list_results = Vec::new();
+        list_results
+            .try_reserve_exact(ExposureProfile::ALL.len())
             .map_err(|_| ToolRegistryError::MemoryUnavailable)?;
-        for contract in &contracts {
-            if profile_exposes_tool(profile, contract.tool.name()) {
-                definitions.push(
-                    serde_json::to_value(&contract.definition)
-                        .map_err(ToolRegistryError::SerializeDefinition)?,
-                );
+        for candidate in ExposureProfile::ALL {
+            let mut definitions = Vec::new();
+            definitions
+                .try_reserve_exact(contracts.len())
+                .map_err(|_| ToolRegistryError::MemoryUnavailable)?;
+            for contract in &contracts {
+                if profile_exposes_tool(candidate, contract.tool.name()) {
+                    definitions.push(
+                        serde_json::to_value(&contract.definition)
+                            .map_err(ToolRegistryError::SerializeDefinition)?,
+                    );
+                }
             }
+            list_results.push(Map::from_iter([(
+                "tools".to_owned(),
+                Value::Array(definitions),
+            )]));
         }
-        let list_result = Map::from_iter([("tools".to_owned(), Value::Array(definitions))]);
+        let list_results: [Map<String, Value>; 3] = list_results
+            .try_into()
+            .map_err(|_| ToolRegistryError::MemoryUnavailable)?;
 
         Ok(Self {
             executor: Arc::new(executor),
             contracts: contracts.into(),
-            list_result,
+            list_results,
+            ceiling,
             profile,
             invalid_arguments,
             resource_exhausted,
         })
     }
 
+    /// Reads the negotiated profile, defensively re-clamping to the ceiling so a
+    /// stale or out-of-band write can never widen discovery past server policy.
+    fn current_profile(&self) -> ExposureProfile {
+        let current = *self.profile.borrow();
+        current.clamped_to(self.ceiling)
+    }
+
     fn list_tools(&self, params: Option<Value>) -> HandlerResponse {
         if !list_params_are_valid(params.as_ref()) {
             return HandlerResponse::error(INVALID_PARAMS, "invalid tools/list parameters");
         }
-        HandlerResponse::Success(self.list_result.clone())
+        let index = profile_index(self.current_profile());
+        HandlerResponse::Success(self.list_results[index].clone())
     }
 
     async fn call_tool(
@@ -367,7 +417,7 @@ where
             "tools/call" => {
                 let executor = Arc::clone(&self.executor);
                 let contracts = Arc::clone(&self.contracts);
-                let profile = self.profile;
+                let profile = self.current_profile();
                 let invalid_arguments = self.invalid_arguments.clone();
                 let resource_exhausted = self.resource_exhausted.clone();
                 Box::pin(async move {
@@ -540,6 +590,18 @@ fn decode_typed_input(tool: VerticalTool, input: &Value) -> Result<TypedInput, (
 /// It never changes tool semantics, limits, trust, or permission policy.
 fn profile_exposes_tool(profile: ExposureProfile, tool_name: &str) -> bool {
     profile.tools().iter().any(|tool| tool.name() == tool_name)
+}
+
+/// Indexes the precomputed discovery payloads by profile privilege rank.
+///
+/// The order matches [`ExposureProfile::ALL`], so the payload built for each
+/// profile lines up with its rank.
+const fn profile_index(profile: ExposureProfile) -> usize {
+    match profile {
+        ExposureProfile::Scout => 0,
+        ExposureProfile::Analysis => 1,
+        ExposureProfile::Developer => 2,
+    }
 }
 
 fn tool_argument_bytes_are_valid(tool: VerticalTool, input: &Value) -> bool {
@@ -1608,5 +1670,97 @@ mod tests {
         )
         .expect("tool error mirror is JSON");
         assert_eq!(mirror, result["structuredContent"]);
+    }
+
+    fn listed_tool_names(result: &Map<String, Value>) -> Vec<&str> {
+        result["tools"]
+            .as_array()
+            .expect("tools/list returns an array")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool has a name"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn scout_session_tools_list_exposes_exactly_the_six_scout_tools() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Scout)
+            .expect("registry compiles");
+        let response = router
+            .handle(request("tools/list", json!({})), cancellation())
+            .await;
+        assert_eq!(
+            listed_tool_names(&success(response)),
+            [
+                "repo.status",
+                "code.locate",
+                "symbol.explain",
+                "context.pack",
+                "source.read",
+                "query.batch",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn scout_session_rejects_a_developer_only_call() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Scout)
+            .expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({"name": "query.advanced", "arguments": {}}),
+                ),
+                cancellation(),
+            )
+            .await;
+        assert!(matches!(
+            response,
+            HandlerResponse::Error {
+                code: INVALID_PARAMS,
+                ..
+            }
+        ));
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn negotiated_profile_change_updates_tools_list() {
+        let (sender, receiver) = watch::channel(ExposureProfile::Developer);
+        let router = ToolRouter::with_shared_profile(
+            FixtureExecutor::default(),
+            receiver,
+            ExposureProfile::Developer,
+        )
+        .expect("registry compiles");
+
+        let developer = router
+            .handle(request("tools/list", json!({})), cancellation())
+            .await;
+        assert_eq!(listed_tool_names(&success(developer)).len(), 19);
+
+        // A negotiated profile change is observed without recompiling contracts.
+        sender.send_replace(ExposureProfile::Scout);
+        let scout = router
+            .handle(request("tools/list", json!({})), cancellation())
+            .await;
+        assert_eq!(listed_tool_names(&success(scout)).len(), 6);
+    }
+
+    #[tokio::test]
+    async fn ceiling_clamps_a_higher_negotiated_profile() {
+        // The shared state holds Developer, but the server policy ceiling is
+        // Scout; discovery must never widen past the ceiling.
+        let (_sender, receiver) = watch::channel(ExposureProfile::Developer);
+        let router = ToolRouter::with_shared_profile(
+            FixtureExecutor::default(),
+            receiver,
+            ExposureProfile::Scout,
+        )
+        .expect("registry compiles");
+        let response = router
+            .handle(request("tools/list", json!({})), cancellation())
+            .await;
+        assert_eq!(listed_tool_names(&success(response)).len(), 6);
     }
 }
