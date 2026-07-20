@@ -54,6 +54,8 @@ const LIFECYCLE_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
 const DEFAULT_RELATIONSHIP_RESULTS: u32 = 100;
 const DEFAULT_FLOW_DEPTH: u32 = 3;
 const DEFAULT_FLOW_PATHS: u32 = 10;
+const DEFAULT_CYCLE_MIN_SIZE: u32 = 2;
+const DEFAULT_CYCLE_MAX_CYCLES: u32 = 50;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
 
@@ -525,6 +527,10 @@ fn execute_service_request(
         }
         FirstSliceIpcRequest::FlowTrace(request) => {
             flow_trace(service, request, &context).map(FirstSliceIpcResponse::FlowTrace)
+        }
+        FirstSliceIpcRequest::ArchitectureCycles(request) => {
+            architecture_cycles(service, request, &context)
+                .map(FirstSliceIpcResponse::ArchitectureCycles)
         }
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
     }
@@ -1224,6 +1230,103 @@ fn flow_trace(
             unresolved_boundaries: frontier.unresolved_boundaries,
         }),
         projection: Some(daemon::FirstSliceTraceProjection {
+            relations: projection
+                .families
+                .iter()
+                .map(|family| family.as_str().to_owned())
+                .collect(),
+            min_confidence: u32::from(projection.min_confidence),
+        }),
+    })
+}
+
+fn architecture_cycles(
+    service: &FirstSliceService,
+    request: daemon::ArchitectureCyclesRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::ArchitectureCyclesResponse, PublicError> {
+    let repository = parse_repository(request.repository.as_ref())?;
+    let selected = parse_generation_selector(request.generation.as_ref())?;
+    let generation = service
+        .resolve_generation(repository, selected)
+        .map_err(service_error)?;
+    let mut families = Vec::new();
+    families
+        .try_reserve_exact(request.relations.len())
+        .map_err(|_| resource_exhausted())?;
+    for relation in &request.relations {
+        let family = RelationFamily::from_label(relation).ok_or_else(invalid_argument)?;
+        if !families.contains(&family) {
+            families.push(family);
+        }
+    }
+    let min_size = u8::try_from(request.min_size.unwrap_or(DEFAULT_CYCLE_MIN_SIZE))
+        .map_err(|_| invalid_argument())?;
+    let max_cycles = usize::try_from(request.max_cycles.unwrap_or(DEFAULT_CYCLE_MAX_CYCLES))
+        .map_err(|_| invalid_argument())?;
+    let include_self_cycles = request.include_self_cycles.unwrap_or(false);
+    let response = service
+        .architecture_cycles(
+            generation.generation,
+            families,
+            min_size,
+            max_cycles,
+            include_self_cycles,
+            &context.cancellation,
+        )
+        .map_err(service_error)?;
+    let mut components = Vec::new();
+    components
+        .try_reserve_exact(response.data.components.len())
+        .map_err(|_| resource_exhausted())?;
+    for component in response.data.components {
+        components.push(daemon::FirstSliceCycleComponent {
+            size: component.size,
+            members: component
+                .members
+                .iter()
+                .copied()
+                .map(symbol_to_wire)
+                .collect(),
+            internal_edges: component.internal_edges,
+        });
+    }
+    let mut cycles = Vec::new();
+    cycles
+        .try_reserve_exact(response.data.cycles.len())
+        .map_err(|_| resource_exhausted())?;
+    for cycle in response.data.cycles {
+        cycles.push(daemon::FirstSliceCycle {
+            nodes: cycle.nodes.iter().copied().map(symbol_to_wire).collect(),
+            edge_evidence: cycle.edge_evidence.iter().map(source_ref_to_wire).collect(),
+            confidence: u32::from(cycle.confidence),
+        });
+    }
+    let mut break_candidates = Vec::new();
+    break_candidates
+        .try_reserve_exact(response.data.break_candidates.len())
+        .map_err(|_| resource_exhausted())?;
+    for candidate in response.data.break_candidates {
+        break_candidates.push(daemon::FirstSliceCycleBreak {
+            from: Some(symbol_to_wire(candidate.from)),
+            to: Some(symbol_to_wire(candidate.to)),
+            kind: candidate.family.as_str().to_owned(),
+            break_cost: u32::from(candidate.break_cost),
+            source_refs: candidate
+                .source_refs
+                .iter()
+                .map(source_ref_to_wire)
+                .collect(),
+        });
+    }
+    let projection = response.data.projection;
+    Ok(daemon::ArchitectureCyclesResponse {
+        schema_version: Some(schema_version()),
+        context: Some(query_context(generation, &response.usage, &[])),
+        components,
+        cycles,
+        break_candidates,
+        projection: Some(daemon::FirstSliceCycleProjection {
             relations: projection
                 .families
                 .iter()

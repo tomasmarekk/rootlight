@@ -154,6 +154,8 @@ pub enum FirstSliceIpcRequest {
     SymbolRelationships(daemon::SymbolRelationshipsRequest),
     /// Trace bounded directed paths between stable symbols.
     FlowTrace(daemon::FlowTraceRequest),
+    /// Detect bounded architecture cycles among stable symbols.
+    ArchitectureCycles(daemon::ArchitectureCyclesRequest),
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -177,6 +179,8 @@ pub enum FirstSliceIpcResponse {
     SymbolRelationships(daemon::SymbolRelationshipsResponse),
     /// Bounded directed paths between stable symbols.
     FlowTrace(daemon::FlowTraceResponse),
+    /// Bounded architecture cycles among stable symbols.
+    ArchitectureCycles(daemon::ArchitectureCyclesResponse),
 }
 
 impl FirstSliceIpcResponse {
@@ -203,6 +207,9 @@ impl FirstSliceIpcResponse {
                 daemon::response_envelope::Response::SymbolRelationships(response)
             }
             Self::FlowTrace(response) => daemon::response_envelope::Response::FlowTrace(response),
+            Self::ArchitectureCycles(response) => {
+                daemon::response_envelope::Response::ArchitectureCycles(response)
+            }
         }
     }
 }
@@ -5419,6 +5426,9 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::FlowTrace(request)) => {
             Ok(Some(FirstSliceIpcRequest::FlowTrace(request)))
         }
+        Some(daemon::request_envelope::Request::ArchitectureCycles(request)) => {
+            Ok(Some(FirstSliceIpcRequest::ArchitectureCycles(request)))
+        }
         Some(request) => Err(request),
         None => Ok(None),
     }
@@ -5845,6 +5855,66 @@ fn first_slice_response_correlates(
                                     .iter()
                                     .all(|source| source_ref_correlates(source, context))
                         })
+                })
+        }
+        (
+            FirstSliceIpcRequest::ArchitectureCycles(request),
+            FirstSliceIpcResponse::ArchitectureCycles(response),
+        ) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            let Some(projection) = response.projection.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    request.generation.as_ref(),
+                )
+                && !request.relations.is_empty()
+                && request.relations.len() <= 8
+                && projection.min_confidence <= 1_000
+                && !projection.relations.is_empty()
+                && projection.relations.len() <= 8
+                && response.components.len() <= 200
+                && response.cycles.len() <= 200
+                && response.break_candidates.len() <= 200
+                && response.components.iter().all(|component| {
+                    component.size >= 1
+                        && usize::try_from(component.size)
+                            .is_ok_and(|size| component.members.len() == size)
+                        && component
+                            .members
+                            .iter()
+                            .all(|member| wire_id_has_len(Some(&member.value), 20))
+                })
+                && response.cycles.iter().all(|cycle| {
+                    cycle.nodes.len() >= 2
+                        && cycle.confidence <= 1_000
+                        && cycle.nodes.first() == cycle.nodes.last()
+                        && cycle
+                            .nodes
+                            .iter()
+                            .all(|node| wire_id_has_len(Some(&node.value), 20))
+                        && cycle.edge_evidence.len() <= 64
+                        && cycle
+                            .edge_evidence
+                            .iter()
+                            .all(|source| source_ref_correlates(source, context))
+                })
+                && response.break_candidates.iter().all(|candidate| {
+                    wire_id_has_len(candidate.from.as_ref().map(|id| &id.value), 20)
+                        && wire_id_has_len(candidate.to.as_ref().map(|id| &id.value), 20)
+                        && !candidate.kind.is_empty()
+                        && candidate.kind.len() <= 32
+                        && candidate.break_cost <= 1_000
+                        && candidate.source_refs.len() <= 8
+                        && candidate
+                            .source_refs
+                            .iter()
+                            .all(|source| source_ref_correlates(source, context))
                 })
         }
         _ => false,
@@ -6356,6 +6426,42 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 return Err(Box::new(invalid_argument("flow trace request is invalid")));
             }
         }
+        FirstSliceIpcRequest::ArchitectureCycles(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_generation_selector(request.generation.as_ref())?;
+            if request.relations.is_empty() || request.relations.len() > 8 {
+                return Err(Box::new(invalid_argument(
+                    "architecture cycles request is invalid",
+                )));
+            }
+            for relation in &request.relations {
+                if relation.is_empty() || relation.len() > 32 || relation.as_bytes().contains(&0) {
+                    return Err(Box::new(invalid_argument(
+                        "architecture cycles request is invalid",
+                    )));
+                }
+            }
+            if request
+                .min_size
+                .is_some_and(|size| !(2..=64).contains(&size))
+            {
+                return Err(Box::new(invalid_argument(
+                    "architecture cycles request is invalid",
+                )));
+            }
+            if request
+                .max_cycles
+                .is_some_and(|max| !(1..=200).contains(&max))
+            {
+                return Err(Box::new(invalid_argument(
+                    "architecture cycles request is invalid",
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -6471,6 +6577,9 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
             ControlMethod::SymbolRelationships
         }
         Some(daemon::request_envelope::Request::FlowTrace(_)) => ControlMethod::FlowTrace,
+        Some(daemon::request_envelope::Request::ArchitectureCycles(_)) => {
+            ControlMethod::ArchitectureCycles
+        }
         None => ControlMethod::Unknown,
     }
 }
@@ -6916,7 +7025,8 @@ fn request_from_wire(
             daemon::request_envelope::Request::RepositoryList(_)
             | daemon::request_envelope::Request::RepositoryStatus(_)
             | daemon::request_envelope::Request::SymbolRelationships(_)
-            | daemon::request_envelope::Request::FlowTrace(_),
+            | daemon::request_envelope::Request::FlowTrace(_)
+            | daemon::request_envelope::Request::ArchitectureCycles(_),
         ) => Err(Box::new(first_slice_unavailable())),
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
     }

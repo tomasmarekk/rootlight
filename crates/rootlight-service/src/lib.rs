@@ -46,8 +46,9 @@ use rootlight_ir::{
     NormalizedIrDocument, ProducerIdentity, SourceRef, SourceSpan,
 };
 pub use rootlight_query::{
-    CodeLocateResult, FlowTraceResult, LocateMode, QueryResponse, RelationDirection,
-    RelationFamily, SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult,
+    ArchitectureCyclesResult, CodeLocateResult, FlowTraceResult, LocateMode, QueryResponse,
+    RelationDirection, RelationFamily, SourceReadQueryResult, SymbolExplainResult,
+    SymbolRelationshipsResult,
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
 use rootlight_resolve::{
@@ -1945,6 +1946,46 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_flow_trace(&plan, cancellation)
+            .map_err(|error| map_query_error(error, cancellation))
+    }
+
+    /// Executes a generation-pinned bounded `architecture.cycles` query.
+    ///
+    /// The relation families, component-size floor, cycle cap, and self-cycle
+    /// opt-in are validated by the query plan. The result carries deterministic
+    /// strongly connected components, bounded representative minimal cycles,
+    /// ranked break candidates, and the relation projection actually used.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    pub fn architecture_cycles(
+        &self,
+        generation: GenerationId,
+        families: Vec<RelationFamily>,
+        min_size: u8,
+        max_cycles: usize,
+        include_self_cycles: bool,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<ArchitectureCyclesResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let service = self
+            .generations
+            .query(generation)
+            .map_err(|_| FirstSliceError::Query)?;
+        let plan = service
+            .plan_architecture_cycles(
+                families,
+                0,
+                min_size,
+                max_cycles,
+                include_self_cycles,
+                QueryBudget::new(),
+            )
+            .map_err(|error| map_query_error(error, cancellation))?;
+        service
+            .execute_architecture_cycles(&plan, cancellation)
             .map_err(|error| map_query_error(error, cancellation))
     }
 

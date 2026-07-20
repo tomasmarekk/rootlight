@@ -877,6 +877,67 @@ pub struct FlowTrace {
     pub projection: FlowTraceProjection,
 }
 
+/// One strongly connected component containing cycles.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CycleComponent {
+    /// Number of member symbols in the component.
+    pub size: u32,
+    /// Member symbol identifiers in deterministic order.
+    pub members: Vec<SymbolId>,
+    /// Count of served edges whose endpoints both lie in the component.
+    pub internal_edges: u32,
+}
+
+/// One bounded representative minimal cycle with evidence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Cycle {
+    /// Ordered node identifiers forming the cycle, first repeated at the end.
+    pub nodes: Vec<SymbolId>,
+    /// Direct immutable source evidence for the cycle edges.
+    pub edge_evidence: Vec<SourceReference>,
+    /// Aggregate weakest-edge confidence from 0 through 1000.
+    pub confidence: u16,
+}
+
+/// One candidate edge for breaking a reported cycle.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CycleBreakCandidate {
+    /// Source symbol of the break edge.
+    pub from: SymbolId,
+    /// Target symbol of the break edge.
+    pub to: SymbolId,
+    /// Relation family label, such as `calls`.
+    pub kind: String,
+    /// Heuristic break cost from 0 through 1000; lower confidence is cheaper.
+    pub break_cost: u16,
+    /// Direct immutable source evidence for the break edge.
+    pub source_refs: Vec<SourceReference>,
+}
+
+/// Relation projection actually used by an architecture cycles query.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CycleProjection {
+    /// Relation family labels included in the detection.
+    pub relations: Vec<String>,
+    /// Minimum confidence threshold applied.
+    pub min_confidence: u16,
+}
+
+/// Bounded architecture cycles among stable symbols for one generation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ArchitectureCycles {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Strongly connected components containing cycles, in deterministic order.
+    pub components: Vec<CycleComponent>,
+    /// Bounded representative minimal cycles, in deterministic order.
+    pub cycles: Vec<Cycle>,
+    /// Ranked candidate break points, in deterministic order.
+    pub break_candidates: Vec<CycleBreakCandidate>,
+    /// Actual relation projection used.
+    pub projection: CycleProjection,
+}
+
 /// Validated total deadline budget for one asynchronous daemon request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestTimeout(Duration);
@@ -1927,6 +1988,86 @@ impl Client {
         }
     }
 
+    /// Detects bounded architecture cycles over a relation projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid endpoint, relation, component-size,
+    /// or cycle bounds, unavailable protocol support, transport failure,
+    /// timeout, or a malformed or uncorrelated response.
+    pub fn architecture_cycles(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        relations: &[String],
+        min_size: Option<u8>,
+        max_cycles: Option<u16>,
+        include_self_cycles: Option<bool>,
+    ) -> Result<ArchitectureCycles, ClientError> {
+        match self.request(build_architecture_cycles_request(
+            repository,
+            generation,
+            relations,
+            min_size,
+            max_cycles,
+            include_self_cycles,
+        )?)? {
+            daemon::response_envelope::Response::ArchitectureCycles(response) => {
+                parse_architecture_cycles(response, repository, generation, relations)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously detects bounded architecture cycles over a projection.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached detection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid endpoint, relation, component-size,
+    /// or cycle bounds, unavailable protocol support, transport failure,
+    /// timeout, or a malformed or uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded architecture cycles dimension"
+    )]
+    pub async fn architecture_cycles_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        relations: &[String],
+        min_size: Option<u8>,
+        max_cycles: Option<u16>,
+        include_self_cycles: Option<bool>,
+        timeout: RequestTimeout,
+    ) -> Result<ArchitectureCycles, ClientError> {
+        match self
+            .request_async(
+                build_architecture_cycles_request(
+                    repository,
+                    generation,
+                    relations,
+                    min_size,
+                    max_cycles,
+                    include_self_cycles,
+                )?,
+                timeout,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::ArchitectureCycles(response) => {
+                parse_architecture_cycles(response, repository, generation, relations)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     fn request(
         &self,
         request: daemon::request_envelope::Request,
@@ -2523,7 +2664,8 @@ fn ensure_request_supported(
         | daemon::request_envelope::Request::RepositoryList(_)
         | daemon::request_envelope::Request::RepositoryStatus(_)
         | daemon::request_envelope::Request::SymbolRelationships(_)
-        | daemon::request_envelope::Request::FlowTrace(_) => 5,
+        | daemon::request_envelope::Request::FlowTrace(_)
+        | daemon::request_envelope::Request::ArchitectureCycles(_) => 5,
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
         daemon::request_envelope::Request::OperationLeaseRenew(_) => {
@@ -3767,6 +3909,183 @@ fn parse_flow_trace(
         },
         projection: FlowTraceProjection {
             relations,
+            min_confidence: u16::try_from(wire_projection.min_confidence)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+        },
+    })
+}
+
+fn build_architecture_cycles_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    relations: &[String],
+    min_size: Option<u8>,
+    max_cycles: Option<u16>,
+    include_self_cycles: Option<bool>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if relations.is_empty()
+        || relations.len() > 8
+        || relations.iter().any(|relation| {
+            relation.is_empty() || relation.len() > 32 || relation.as_bytes().contains(&0)
+        })
+        || relations
+            .iter()
+            .enumerate()
+            .any(|(index, relation)| relations[..index].contains(relation))
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if min_size.is_some_and(|size| !(2..=64).contains(&size)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if max_cycles.is_some_and(|max| !(1..=200).contains(&max)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::ArchitectureCycles(
+        daemon::ArchitectureCyclesRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            relations: relations.to_vec(),
+            min_size: min_size.map(u32::from),
+            max_cycles: max_cycles.map(u32::from),
+            include_self_cycles,
+        },
+    ))
+}
+
+fn parse_architecture_cycles(
+    response: daemon::ArchitectureCyclesResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+    relations: &[String],
+) -> Result<ArchitectureCycles, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(response.context, repository, selector)?;
+    let wire_projection = response
+        .projection
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    if response.components.len() > 200
+        || response.cycles.len() > 200
+        || response.break_candidates.len() > 200
+        || wire_projection.relations.is_empty()
+        || wire_projection.relations.len() > 8
+        || wire_projection.min_confidence > 1_000
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    // The served projection must echo exactly the requested relation families,
+    // independent of ordering.
+    if wire_projection.relations.len() != relations.len()
+        || wire_projection
+            .relations
+            .iter()
+            .any(|relation| !relations.contains(relation))
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut components = Vec::new();
+    components
+        .try_reserve_exact(response.components.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for component in response.components {
+        if component.size < 1
+            || usize::try_from(component.size).is_ok_and(|size| component.members.len() != size)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let mut members = Vec::new();
+        members
+            .try_reserve_exact(component.members.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for member in component.members {
+            members.push(parse_symbol(Some(member))?);
+        }
+        components.push(CycleComponent {
+            size: component.size,
+            members,
+            internal_edges: component.internal_edges,
+        });
+    }
+    let mut cycles = Vec::new();
+    cycles
+        .try_reserve_exact(response.cycles.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for cycle in response.cycles {
+        if cycle.nodes.len() < 2 || cycle.confidence > 1_000 || cycle.edge_evidence.len() > 64 {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let mut nodes = Vec::new();
+        nodes
+            .try_reserve_exact(cycle.nodes.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for node in cycle.nodes {
+            nodes.push(parse_symbol(Some(node))?);
+        }
+        if nodes.first() != nodes.last() {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let mut edge_evidence = Vec::new();
+        edge_evidence
+            .try_reserve_exact(cycle.edge_evidence.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for source in cycle.edge_evidence {
+            edge_evidence.push(parse_source_reference(source, &context)?);
+        }
+        cycles.push(Cycle {
+            nodes,
+            edge_evidence,
+            confidence: u16::try_from(cycle.confidence)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+        });
+    }
+    let mut break_candidates = Vec::new();
+    break_candidates
+        .try_reserve_exact(response.break_candidates.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for candidate in response.break_candidates {
+        if candidate.kind.is_empty()
+            || candidate.kind.len() > 32
+            || candidate.break_cost > 1_000
+            || candidate.source_refs.len() > 8
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let from = parse_symbol(candidate.from)?;
+        let to = parse_symbol(candidate.to)?;
+        let mut source_refs = Vec::new();
+        source_refs
+            .try_reserve_exact(candidate.source_refs.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for source in candidate.source_refs {
+            source_refs.push(parse_source_reference(source, &context)?);
+        }
+        break_candidates.push(CycleBreakCandidate {
+            from,
+            to,
+            kind: candidate.kind,
+            break_cost: u16::try_from(candidate.break_cost)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            source_refs,
+        });
+    }
+    let mut projection_relations = Vec::new();
+    projection_relations
+        .try_reserve_exact(wire_projection.relations.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for relation in wire_projection.relations {
+        if relation.is_empty() || relation.len() > 32 {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        projection_relations.push(relation);
+    }
+    Ok(ArchitectureCycles {
+        context,
+        components,
+        cycles,
+        break_candidates,
+        projection: CycleProjection {
+            relations: projection_relations,
             min_confidence: u16::try_from(wire_projection.min_confidence)
                 .map_err(|_| ClientError::InvalidResponseCorrelation)?,
         },

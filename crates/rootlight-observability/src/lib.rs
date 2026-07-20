@@ -50,7 +50,7 @@ const SUPPORT_ENTRY_COUNT_V1: usize = 5;
 const SUPPORT_ENTRY_COUNT_V2: usize = 6;
 const SUPPORT_ENTRY_COUNT_V3: usize = 6;
 const CONTROL_METHOD_COUNT_V2: usize = 8;
-const CONTROL_METHOD_COUNT: usize = 17;
+const CONTROL_METHOD_COUNT: usize = 18;
 const TELEMETRY_OUTCOME_COUNT: usize = 6;
 /// Ordered allow-list for the frozen support archive schema.
 pub const SUPPORT_ENTRY_NAMES: [&str; SUPPORT_ENTRY_COUNT_V1] = [
@@ -394,6 +394,8 @@ pub enum ControlMethod {
     SymbolRelationships,
     /// Generation-pinned bounded flow trace.
     FlowTrace,
+    /// Generation-pinned bounded architecture cycle detection.
+    ArchitectureCycles,
 }
 
 impl ControlMethod {
@@ -416,6 +418,7 @@ impl ControlMethod {
         Self::RepositoryStatus,
         Self::SymbolRelationships,
         Self::FlowTrace,
+        Self::ArchitectureCycles,
     ];
 
     const fn index(self) -> usize {
@@ -437,6 +440,7 @@ impl ControlMethod {
             Self::RepositoryStatus => 14,
             Self::SymbolRelationships => 15,
             Self::FlowTrace => 16,
+            Self::ArchitectureCycles => 17,
         }
     }
 }
