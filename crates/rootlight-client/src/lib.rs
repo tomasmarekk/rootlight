@@ -1072,6 +1072,60 @@ pub struct ArchitectureOverview {
     pub views: Vec<ArchitectureOverviewDerivedView>,
 }
 
+/// One ranked test selected for relevance to a seed set.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TestsSelectRankedTest {
+    /// Stable test identity.
+    pub test_id: String,
+    /// Test granularity label, such as `unit`.
+    pub kind: String,
+    /// Repository-controlled display path to the test, when served.
+    pub path: Option<String>,
+    /// Relevance score from 0 through 1000.
+    pub score: u16,
+    /// Source-free rationale codes in deterministic order.
+    pub why: Vec<String>,
+    /// Estimated execution cost in milliseconds, when available.
+    pub estimated_cost_ms: Option<u32>,
+    /// Inert declarative command hint, when requested.
+    pub command_hint: Option<String>,
+}
+
+/// Coverage signals actually used by a test selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct TestsSelectCoverageStrategy {
+    /// Whether direct test-to-seed edges were used.
+    pub direct_edges: bool,
+    /// Whether transitive dependency signals were used.
+    pub transitive_signals: bool,
+    /// Whether historical co-change signals were used.
+    pub history_signals: bool,
+    /// Whether file co-location with a seed was used.
+    pub build_target_signals: bool,
+}
+
+/// One honest gap where a seed scope has no related test.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TestsSelectGap {
+    /// Seed scope identifier with no related test.
+    pub scope: String,
+    /// Source-free reason code.
+    pub reason: String,
+}
+
+/// Bounded test selection for one generation and seed set.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TestsSelect {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Ranked tests in deterministic order.
+    pub tests: Vec<TestsSelectRankedTest>,
+    /// Coverage signals actually used by the ranking.
+    pub coverage_strategy: TestsSelectCoverageStrategy,
+    /// Honest coverage gaps in deterministic order.
+    pub gaps: Vec<TestsSelectGap>,
+}
+
 /// Validated total deadline budget for one asynchronous daemon request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestTimeout(Duration);
@@ -2372,6 +2426,87 @@ impl Client {
         }
     }
 
+    /// Selects bounded relevant tests for a seed set over one generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid endpoint, seed, test-kind, or test
+    /// bounds, unavailable protocol support, transport failure, timeout, or a
+    /// malformed or uncorrelated response.
+    pub fn tests_select(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: &[SymbolId],
+        test_kinds: &[String],
+        max_tests: Option<u16>,
+        include_commands: Option<bool>,
+    ) -> Result<TestsSelect, ClientError> {
+        match self.request(build_tests_select_request(
+            repository,
+            generation,
+            seeds,
+            test_kinds,
+            max_tests,
+            include_commands,
+        )?)? {
+            daemon::response_envelope::Response::TestsSelect(response) => {
+                parse_tests_select(response, repository, generation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously selects bounded relevant tests for a seed set over one
+    /// generation.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached selection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid endpoint, seed, test-kind, or test
+    /// bounds, unavailable protocol support, transport failure, timeout, or a
+    /// malformed or uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded tests select dimension"
+    )]
+    pub async fn tests_select_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: &[SymbolId],
+        test_kinds: &[String],
+        max_tests: Option<u16>,
+        include_commands: Option<bool>,
+        timeout: RequestTimeout,
+    ) -> Result<TestsSelect, ClientError> {
+        match self
+            .request_async(
+                build_tests_select_request(
+                    repository,
+                    generation,
+                    seeds,
+                    test_kinds,
+                    max_tests,
+                    include_commands,
+                )?,
+                timeout,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::TestsSelect(response) => {
+                parse_tests_select(response, repository, generation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     fn request(
         &self,
         request: daemon::request_envelope::Request,
@@ -2971,7 +3106,8 @@ fn ensure_request_supported(
         | daemon::request_envelope::Request::FlowTrace(_)
         | daemon::request_envelope::Request::ArchitectureCycles(_)
         | daemon::request_envelope::Request::CodeDead(_)
-        | daemon::request_envelope::Request::ArchitectureOverview(_) => 5,
+        | daemon::request_envelope::Request::ArchitectureOverview(_)
+        | daemon::request_envelope::Request::TestsSelect(_) => 5,
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
         daemon::request_envelope::Request::OperationLeaseRenew(_) => {
@@ -4664,6 +4800,120 @@ fn parse_architecture_overview(
         connections,
         hotspots,
         views,
+    })
+}
+
+fn build_tests_select_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    seeds: &[SymbolId],
+    test_kinds: &[String],
+    max_tests: Option<u16>,
+    include_commands: Option<bool>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if seeds.is_empty() || seeds.len() > 64 {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if test_kinds.len() > 6
+        || test_kinds
+            .iter()
+            .any(|kind| kind.is_empty() || kind.len() > 32 || kind.as_bytes().contains(&0))
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if max_tests.is_some_and(|max| !(1..=500).contains(&max)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::TestsSelect(
+        daemon::TestsSelectRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            seeds: seeds.iter().copied().map(symbol_to_wire).collect(),
+            test_kinds: test_kinds.to_vec(),
+            max_tests: max_tests.map(u32::from),
+            include_commands,
+        },
+    ))
+}
+
+fn parse_tests_select(
+    response: daemon::TestsSelectResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+) -> Result<TestsSelect, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(response.context, repository, selector)?;
+    let Some(strategy) = response.coverage_strategy else {
+        return Err(ClientError::InvalidResponseCorrelation);
+    };
+    if response.tests.len() > 500 || response.gaps.len() > 128 {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut tests = Vec::new();
+    tests
+        .try_reserve_exact(response.tests.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for test in response.tests {
+        if test.test_id.is_empty()
+            || test.test_id.len() > 512
+            || test.kind.is_empty()
+            || test.kind.len() > 32
+            || test
+                .path
+                .as_ref()
+                .is_some_and(|path| path.is_empty() || path.len() > 8_192)
+            || test.score > 1_000
+            || test.why.is_empty()
+            || test.why.len() > 8
+            || test
+                .why
+                .iter()
+                .any(|reason| reason.is_empty() || reason.len() > 128)
+            || test
+                .command_hint
+                .as_ref()
+                .is_some_and(|hint| hint.is_empty() || hint.len() > 1_024)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        tests.push(TestsSelectRankedTest {
+            test_id: test.test_id,
+            kind: test.kind,
+            path: test.path,
+            score: u16::try_from(test.score)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            why: test.why,
+            estimated_cost_ms: test.estimated_cost_ms,
+            command_hint: test.command_hint,
+        });
+    }
+    let mut gaps = Vec::new();
+    gaps.try_reserve_exact(response.gaps.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for gap in response.gaps {
+        if gap.scope.is_empty()
+            || gap.scope.len() > 512
+            || gap.reason.is_empty()
+            || gap.reason.len() > 128
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        gaps.push(TestsSelectGap {
+            scope: gap.scope,
+            reason: gap.reason,
+        });
+    }
+    Ok(TestsSelect {
+        context,
+        tests,
+        coverage_strategy: TestsSelectCoverageStrategy {
+            direct_edges: strategy.direct_edges,
+            transitive_signals: strategy.transitive_signals,
+            history_signals: strategy.history_signals,
+            build_target_signals: strategy.build_target_signals,
+        },
+        gaps,
     })
 }
 
