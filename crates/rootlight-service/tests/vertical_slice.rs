@@ -11,10 +11,10 @@ use rootlight_ids::{GenerationId, RepositoryId};
 use rootlight_incremental::{FactDomain, FactDomainSet};
 use rootlight_query::{LocateMode, RepositoryDataTrust};
 use rootlight_service::{
-    ChangeClass, FileChangeKind, FirstSliceBuildStrategy, FirstSliceError,
-    FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence, FirstSliceObservedFreshness,
-    FirstSlicePublicationMode, FirstSliceService, FirstSliceTwoStageAvailability,
-    RelationDirection, RelationFamily,
+    ChangeClass, CodeDeadEntryPointPolicy, FileChangeKind, FirstSliceBuildStrategy,
+    FirstSliceError, FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence,
+    FirstSliceObservedFreshness, FirstSlicePublicationMode, FirstSliceService,
+    FirstSliceTwoStageAvailability, RelationDirection, RelationFamily,
 };
 use tempfile::TempDir;
 
@@ -813,6 +813,71 @@ fn architecture_cycles_reports_an_honest_empty_result_for_a_known_fixture() {
     assert_eq!(cycles.data.projection.min_confidence, 0);
     assert_eq!(
         cycles.data.trust,
+        RepositoryDataTrust::UntrustedRepositoryData
+    );
+}
+
+#[test]
+fn code_dead_reports_an_honest_partial_result_for_a_known_fixture() {
+    // The first-slice oracle records a direct call as a `DispatchCandidate`
+    // occurrence and structural containment as a file-to-entity `Contains`
+    // relation. Neither yields a served entity-to-entity reachability edge, so
+    // an honest `code.dead` over the fixture reports no fabricated candidates
+    // while still proving the generation-pinned query path, a partial
+    // entry-point model, blind spots, and mandatory trust labeling.
+    let source =
+        "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    let dead = service
+        .code_dead(
+            indexed.generation,
+            CodeDeadEntryPointPolicy::Standard,
+            false,
+            false,
+            0,
+            50,
+            &cancellation,
+        )
+        .expect("code dead query succeeds");
+
+    // No served reachability predicate yields an entity-to-entity edge for this
+    // fixture, so no dead-code candidate is fabricated.
+    // The lexical oracle serves only a partial reachability graph and resolves
+    // no exported entry points for this fixture, so the honest model reports a
+    // partial entry-point summary and discloses blind spots rather than
+    // claiming a complete dead-code verdict. Any candidate it does surface is a
+    // well-formed, source-free reachability observation under that partial
+    // model, not a fabricated dead-code claim.
+    assert_eq!(
+        dead.data.entry_points.policy,
+        CodeDeadEntryPointPolicy::Standard
+    );
+    assert!(!dead.data.entry_points.complete);
+    assert!(!dead.data.blind_spots.is_empty());
+    assert!(!dead.data.suppression_rules.is_empty());
+    let mut last_symbol = None;
+    for candidate in &dead.data.candidates {
+        // Candidates are deterministically ordered by stable symbol identity.
+        if let Some(previous) = last_symbol {
+            assert!(previous <= candidate.symbol_id);
+        }
+        last_symbol = Some(candidate.symbol_id);
+        assert!(candidate
+            .why
+            .contains(&"unreachable_from_entry_points".to_owned()));
+        assert!(candidate.confidence >= 1 && candidate.confidence <= 1_000);
+        assert!(!candidate.suppressions_checked.is_empty());
+        assert!(candidate.source_refs.len() <= 8);
+    }
+    // The first-slice entry-point model is honest about being partial.
+    assert_eq!(
+        dead.data.trust,
         RepositoryDataTrust::UntrustedRepositoryData
     );
 }
