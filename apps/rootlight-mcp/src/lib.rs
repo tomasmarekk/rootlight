@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod advanced;
 pub mod batch;
 mod client_port;
 mod executor;
