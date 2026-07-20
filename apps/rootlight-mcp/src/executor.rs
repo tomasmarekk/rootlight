@@ -3,12 +3,19 @@
 //! The port supplies facts absent from the current client DTOs so this layer
 //! never fabricates index-plan, freshness, coverage, cache, or trace metadata.
 
-use std::{collections::BTreeSet, fmt, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+};
 
 use rootlight_client::{
     self as client, CodeLocate, LocateMode, RepositoryIndex, RepositoryOperationAction,
     RepositoryOperationStatus, SourceRead, SymbolExplain,
 };
+use rootlight_error::SafeLabel;
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
@@ -17,7 +24,9 @@ use rootlight_mcp_contract::{
     SymbolExplainInput, ToolResponse, TrustClassification, VerticalTool,
     context::{
         BatchOperation, BatchOperationResult, BatchOperationStatus, BatchStatus, BatchTool,
-        FailurePolicy, QueryBatchData, QueryBatchInput,
+        ContextItem, ContextPackData, ContextPackId, ContextPackInput, ContextStructure,
+        EvidenceRole as ContextEvidenceRole, FailurePolicy, OmissionSummary, QueryBatchData,
+        QueryBatchInput, TokenAccounting, ToolSuggestion,
     },
     vertical::{
         ActiveGeneration, CacheStatus, CodeLocateData, CodeLocateInput, CoverageSummary,
@@ -28,8 +37,8 @@ use rootlight_mcp_contract::{
         ProvenanceSummary, QueryInterpretation, ReadEnvelope, RepoIndexData, RepoIndexSuccess,
         RequiredNullable, ResolvedRepository, ResponseBudget, ResponseProfile, ResponseWarning,
         SearchMode, SourceChunk, SourceElision, SourceEncoding, SourceEncodingRequest,
-        SourceReadData, SourceReadSelector, StaleSourceReference, SymbolExplainData,
-        SymbolExplanation, UsageSummary,
+        SourceFreeMessage, SourceReadData, SourceReadSelector, StaleSourceReference,
+        SymbolExplainData, SymbolExplanation, UsageSummary,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -37,6 +46,10 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::batch::BatchPlan;
+use crate::context_pack::{
+    EvidenceCandidate as PackEvidenceCandidate, EvidenceRole as PackEvidenceRole, PackObjective,
+    PackResult, optimize_pack,
+};
 use crate::tools::mcp_tool_for_batch;
 use crate::{
     RequestCancellation, ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture,
@@ -540,8 +553,10 @@ where
                 | VerticalTool::CodeDead
                 | VerticalTool::HistoryCompare
                 | VerticalTool::PlanChange
-                | VerticalTool::ContextPack
                 | VerticalTool::QueryAdvanced => execute_intent_fallback(&unavailable).await,
+                VerticalTool::ContextPack => {
+                    execute_context_pack(port, arguments, cancellation, &unsupported).await
+                }
                 VerticalTool::QueryBatch => {
                     execute_query_batch(
                         port,
@@ -968,6 +983,255 @@ fn aggregate_batch_usage(envelopes: &[Option<ReadEnvelope<Value>>]) -> UsageSumm
         usage.wall_time_ms = usage.wall_time_ms.max(envelope.usage.wall_time_ms);
     }
     usage
+}
+
+/// Assembles a bounded `context.pack` from seed-symbol definition evidence.
+///
+/// Retrieval is served through `symbol.explain`; the deterministic pack
+/// optimizer ranks the evidence and enforces minimum representation for the
+/// objective-derived required roles under the requested token budget. Source
+/// snippets are not included in this slice. Repository-derived content is
+/// labeled untrusted and the guidance stays source-free.
+async fn execute_context_pack<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: ContextPackInput = decode_input(arguments)?;
+    // Alias selectors cannot be resolved behind this bridge.
+    repository_id(input.repository.clone(), unsupported)?;
+
+    let mut seed_symbols: BTreeSet<SymbolId> = BTreeSet::new();
+    if let Some(symbols) = &input.seeds.symbols {
+        seed_symbols.extend(symbols.iter().copied());
+    }
+    if let Some(tests) = &input.seeds.tests {
+        seed_symbols.extend(tests.iter().copied());
+    }
+    if seed_symbols.is_empty() {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    // symbol.explain bounds a single request to sixteen symbols.
+    let seed_symbols: BTreeSet<SymbolId> = seed_symbols.into_iter().take(16).collect();
+
+    let mut explain_arguments = Map::new();
+    explain_arguments.insert("repository".to_owned(), serialize_json(&input.repository)?);
+    if let Some(generation) = &input.generation {
+        explain_arguments.insert("generation".to_owned(), serialize_json(generation)?);
+    }
+    explain_arguments.insert("symbol_ids".to_owned(), serialize_json(&seed_symbols)?);
+
+    let explain_output =
+        execute_symbol_explain(port, explain_arguments, cancellation, unsupported).await?;
+    let explain_envelope: ReadEnvelope<SymbolExplainData> =
+        serde_json::from_value(Value::Object(explain_output))
+            .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+
+    let mut definitions: BTreeMap<String, SourceRef> = BTreeMap::new();
+    let mut candidates: Vec<PackEvidenceCandidate> = Vec::new();
+    for explanation in &explain_envelope.data.symbols {
+        definitions.insert(
+            explanation.symbol_id.to_string(),
+            explanation.definition.clone(),
+        );
+        let signature_bytes = explanation.signature.as_ref().map_or(0, String::len);
+        let estimated_tokens =
+            u32::try_from((signature_bytes + explanation.display_name.len()).div_ceil(4))
+                .unwrap_or(u32::MAX);
+        candidates.push(PackEvidenceCandidate {
+            identity: explanation.symbol_id.to_string(),
+            role: PackEvidenceRole::Definition,
+            relevance: explanation.confidence,
+            confidence: explanation.confidence,
+            estimated_tokens,
+            source_path: explanation.definition.span().file().to_string(),
+        });
+    }
+
+    let objective = objective_for_task(&input.task);
+    let pack = optimize_pack(objective, &mut candidates, u32::from(input.token_budget))
+        .map_err(|_| ToolExecutionError::new(unsupported.clone()))?;
+
+    let data = context_pack_data(&input, &pack, &definitions, &explain_envelope);
+    let envelope = ReadEnvelope {
+        schema_version: SchemaVersion::V1_0,
+        repository: explain_envelope.repository.clone(),
+        generation: explain_envelope.generation.clone(),
+        coverage: explain_envelope.coverage.clone(),
+        data,
+        truncated: pack.truncated,
+        next_cursor: RequiredNullable(None),
+        usage: explain_envelope.usage.clone(),
+        warnings: explain_envelope.warnings.clone(),
+        trust: TrustClassification::UntrustedRepositoryData,
+    };
+    serialize_success(envelope)
+}
+
+fn serialize_json<T: Serialize>(value: &T) -> Result<Value, ToolExecutionError> {
+    serde_json::to_value(value).map_err(|_| internal(ToolExecutionFailure::Executor))
+}
+
+/// Classifies a free-text task objective into the pack planner's objective set.
+///
+/// The task is user-supplied guidance, not repository content, so keyword
+/// classification stays source-free.
+fn objective_for_task(task: &str) -> PackObjective {
+    let task = task.to_lowercase();
+    if task.contains("fix")
+        || task.contains("bug")
+        || task.contains("error")
+        || task.contains("crash")
+        || task.contains("broken")
+    {
+        PackObjective::BugFix
+    } else if task.contains("refactor")
+        || task.contains("restructure")
+        || task.contains("simplify")
+        || task.contains("clean")
+    {
+        PackObjective::Refactor
+    } else if task.contains("migrat")
+        || task.contains("upgrade")
+        || task.contains("port to")
+        || task.contains("move to")
+    {
+        PackObjective::Migration
+    } else if task.contains("review") || task.contains("audit") || task.contains("security") {
+        PackObjective::Review
+    } else {
+        PackObjective::Explanation
+    }
+}
+
+fn context_pack_data(
+    input: &ContextPackInput,
+    pack: &PackResult,
+    definitions: &BTreeMap<String, SourceRef>,
+    explain_envelope: &ReadEnvelope<SymbolExplainData>,
+) -> ContextPackData {
+    let items: Vec<ContextItem> = pack
+        .items
+        .iter()
+        .map(|item| ContextItem {
+            role: context_role(item.candidate.role),
+            symbol_id: item.candidate.identity.parse::<SymbolId>().ok(),
+            source_ref: definitions.get(&item.candidate.identity).cloned(),
+            score: item.candidate.relevance,
+            tokens: item.candidate.estimated_tokens,
+            trust: TrustClassification::UntrustedRepositoryData,
+            snippet: None,
+        })
+        .collect();
+
+    let reading_order: Vec<SourceFreeMessage> = pack
+        .items
+        .iter()
+        .filter_map(|item| {
+            SourceFreeMessage::parse(&format!(
+                "review {}",
+                context_role_label(context_role(item.candidate.role))
+            ))
+            .ok()
+        })
+        .collect();
+    let structure = ContextStructure {
+        reading_order,
+        dependencies: Vec::new(),
+    };
+
+    let omitted: Vec<OmissionSummary> = pack
+        .omissions
+        .iter()
+        .filter_map(|omission| {
+            Some(OmissionSummary {
+                reason: SafeLabel::parse(context_role_label(context_role(omission.role))).ok()?,
+                count: u32::try_from(omission.count).unwrap_or(u32::MAX),
+                continuation: None,
+            })
+        })
+        .collect();
+
+    let mut followups: Vec<ToolSuggestion> = Vec::new();
+    if let Ok(reason) =
+        SourceFreeMessage::parse("expand callers and callees for the target symbols")
+    {
+        followups.push(ToolSuggestion {
+            tool: "symbol.relationships".to_owned(),
+            reason,
+            continuation: None,
+        });
+    }
+    if !items.is_empty()
+        && let Ok(reason) =
+            SourceFreeMessage::parse("read full definitions for the included evidence")
+    {
+        followups.push(ToolSuggestion {
+            tool: "source.read".to_owned(),
+            reason,
+            continuation: None,
+        });
+    }
+
+    ContextPackData {
+        pack_id: pack_id(input, explain_envelope),
+        items,
+        structure,
+        omitted,
+        followups,
+        token_accounting: TokenAccounting {
+            estimated_total: pack.total_tokens,
+            by_section: BTreeMap::new(),
+        },
+    }
+}
+
+/// Derives a deterministic pack identity from the pinned generation, task, and
+/// seeds so an identical request yields the same pack identifier.
+fn pack_id(input: &ContextPackInput, envelope: &ReadEnvelope<SymbolExplainData>) -> ContextPackId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(envelope.generation.generation_id.to_string().as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(input.task.as_bytes());
+    hasher.update(b"\x00");
+    if let Some(symbols) = &input.seeds.symbols {
+        for symbol in symbols {
+            hasher.update(symbol.to_string().as_bytes());
+            hasher.update(b",");
+        }
+    }
+    hasher.update(b"\x00planner-v1");
+    let hex = hasher.finalize().to_hex();
+    let short: String = hex.chars().take(32).collect();
+    ContextPackId::new(format!("pack1_{short}"))
+}
+
+const fn context_role(role: PackEvidenceRole) -> ContextEvidenceRole {
+    match role {
+        PackEvidenceRole::Definition => ContextEvidenceRole::Definition,
+        PackEvidenceRole::Implementation => ContextEvidenceRole::Implementation,
+        PackEvidenceRole::Caller => ContextEvidenceRole::Caller,
+        PackEvidenceRole::Test => ContextEvidenceRole::Test,
+        PackEvidenceRole::Risk => ContextEvidenceRole::Risk,
+        PackEvidenceRole::Architecture => ContextEvidenceRole::Architecture,
+        PackEvidenceRole::Change => ContextEvidenceRole::Change,
+    }
+}
+
+const fn context_role_label(role: ContextEvidenceRole) -> &'static str {
+    match role {
+        ContextEvidenceRole::Definition => "definition",
+        ContextEvidenceRole::Implementation => "implementation",
+        ContextEvidenceRole::Caller => "caller",
+        ContextEvidenceRole::Test => "test",
+        ContextEvidenceRole::Risk => "risk",
+        ContextEvidenceRole::Architecture => "architecture",
+        ContextEvidenceRole::Change => "change",
+    }
 }
 
 async fn execute_repository_index<P>(

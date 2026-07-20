@@ -21,7 +21,7 @@ use rootlight_ir::{CoverageStatus as IrCoverage, LineRange, SourceRef, SourceSpa
 use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
     SymbolExplainOutput,
-    context::QueryBatchOutput,
+    context::{ContextPackOutput, QueryBatchOutput},
     vertical::{
         AnalysisTier, CacheStatus, Freshness, IndexMode, IndexPlanScope, IndexPlanSummary,
         LanguageCoverage, OperationState, RequiredNullable,
@@ -1028,6 +1028,50 @@ async fn maps_symbol_explain_with_compact_provenance_and_unresolved_ids() {
     };
     assert!(request.include_provenance);
     assert_eq!(request.symbols, [symbol(), missing_symbol()]);
+}
+
+#[tokio::test]
+async fn context_pack_assembles_definition_evidence_under_budget() {
+    let response = explain_response(source_reference(4, 12, 2, 2));
+    let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
+    let arguments = json!({
+        "repository": {"repository_id": repository()},
+        "task": "fix the duplicate payment bug",
+        "seeds": {"symbols": [symbol()]},
+        "token_budget": 4500
+    });
+    let first: ContextPackOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::ContextPack,
+            arguments.clone(),
+        )
+        .await
+        .expect("context pack maps"),
+    );
+    let second: ContextPackOutput = decode(
+        execute(&harness.executor, VerticalTool::ContextPack, arguments)
+            .await
+            .expect("context pack maps again"),
+    );
+
+    let ToolResponse::Success(pack) = first else {
+        panic!("expected context pack success");
+    };
+    assert_eq!(pack.generation.generation_id, generation());
+    assert!(
+        !pack.data.items.is_empty(),
+        "pack includes definition evidence"
+    );
+    assert_eq!(pack.data.items[0].symbol_id, Some(symbol()));
+    assert!(pack.data.pack_id.as_str().starts_with("pack1_"));
+    assert!(!pack.data.followups.is_empty());
+
+    // The pack identity is deterministic for the same generation and request.
+    let ToolResponse::Success(second) = second else {
+        panic!("expected context pack success");
+    };
+    assert_eq!(pack.data.pack_id, second.data.pack_id);
 }
 
 #[tokio::test]

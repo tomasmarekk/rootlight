@@ -7,9 +7,11 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+blake3.workspace = true
 getrandom.workspace = true
 jsonschema.workspace = true
 rootlight-client = { path = "../../crates/rootlight-client" }
+rootlight-error = { path = "../../crates/rootlight-error" }
 rootlight-ids = { path = "../../crates/rootlight-ids" }
 rootlight-ir = { path = "../../crates/rootlight-ir" }
 rootlight-mcp-contract = { path = "../../crates/rootlight-mcp-contract" }
