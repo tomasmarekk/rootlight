@@ -50,7 +50,7 @@ const SUPPORT_ENTRY_COUNT_V1: usize = 5;
 const SUPPORT_ENTRY_COUNT_V2: usize = 6;
 const SUPPORT_ENTRY_COUNT_V3: usize = 6;
 const CONTROL_METHOD_COUNT_V2: usize = 8;
-const CONTROL_METHOD_COUNT: usize = 20;
+const CONTROL_METHOD_COUNT: usize = 21;
 const TELEMETRY_OUTCOME_COUNT: usize = 6;
 /// Ordered allow-list for the frozen support archive schema.
 pub const SUPPORT_ENTRY_NAMES: [&str; SUPPORT_ENTRY_COUNT_V1] = [
@@ -400,6 +400,8 @@ pub enum ControlMethod {
     CodeDead,
     /// Generation-pinned bounded architecture overview aggregation.
     ArchitectureOverview,
+    /// Generation-pinned bounded test selection.
+    TestsSelect,
 }
 
 impl ControlMethod {
@@ -425,6 +427,7 @@ impl ControlMethod {
         Self::ArchitectureCycles,
         Self::CodeDead,
         Self::ArchitectureOverview,
+        Self::TestsSelect,
     ];
 
     const fn index(self) -> usize {
@@ -449,6 +452,7 @@ impl ControlMethod {
             Self::ArchitectureCycles => 17,
             Self::CodeDead => 18,
             Self::ArchitectureOverview => 19,
+            Self::TestsSelect => 20,
         }
     }
 }
