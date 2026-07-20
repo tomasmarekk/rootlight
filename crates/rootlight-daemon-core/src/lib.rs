@@ -166,6 +166,8 @@ pub enum FirstSliceIpcRequest {
     ChangeImpact(daemon::ChangeImpactRequest),
     /// Build a bounded ordered change plan for explicit targets.
     PlanChange(daemon::PlanChangeRequest),
+    /// Compare two revisions or generations for bounded semantic changes.
+    HistoryCompare(daemon::HistoryCompareRequest),
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -201,6 +203,8 @@ pub enum FirstSliceIpcResponse {
     ChangeImpact(daemon::ChangeImpactResponse),
     /// Bounded ordered change plan for explicit targets.
     PlanChange(daemon::PlanChangeResponse),
+    /// Bounded semantic comparison between two revisions or generations.
+    HistoryCompare(daemon::HistoryCompareResponse),
 }
 
 impl FirstSliceIpcResponse {
@@ -241,6 +245,9 @@ impl FirstSliceIpcResponse {
                 daemon::response_envelope::Response::ChangeImpact(response)
             }
             Self::PlanChange(response) => daemon::response_envelope::Response::PlanChange(response),
+            Self::HistoryCompare(response) => {
+                daemon::response_envelope::Response::HistoryCompare(response)
+            }
         }
     }
 }
@@ -5475,6 +5482,9 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::PlanChange(request)) => {
             Ok(Some(FirstSliceIpcRequest::PlanChange(request)))
         }
+        Some(daemon::request_envelope::Request::HistoryCompare(request)) => {
+            Ok(Some(FirstSliceIpcRequest::HistoryCompare(request)))
+        }
         Some(request) => Err(request),
         None => Ok(None),
     }
@@ -6302,6 +6312,93 @@ fn first_slice_response_correlates(
                 && context_pack.files.len() <= 64
                 && context_pack.files.iter().all(|file| file.value.len() == 20)
         }
+        (
+            FirstSliceIpcRequest::HistoryCompare(request),
+            FirstSliceIpcResponse::HistoryCompare(response),
+        ) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            let Some(matched_states) = response.matched_states.as_ref() else {
+                return false;
+            };
+            let Some(architecture_delta) = response.architecture_delta.as_ref() else {
+                return false;
+            };
+            let Some(head_selector) = revision_generation_selector(request.head.as_ref()) else {
+                return false;
+            };
+            let Some(request_base) = revision_generation_id(request.base.as_ref()) else {
+                return false;
+            };
+            let Some(base_generation) = matched_states.base_generation.as_ref() else {
+                return false;
+            };
+            let Some(head_generation) = matched_states.head_generation.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    Some(&head_selector),
+                )
+                && wire_id_equals(
+                    Some(&head_generation.value),
+                    context.generation.as_ref().map(|id| &id.value),
+                )
+                && wire_id_equals(Some(&base_generation.value), Some(&request_base.value))
+                && wire_id_has_len(Some(&base_generation.value), 20)
+                && wire_id_has_len(Some(&head_generation.value), 20)
+                && !matched_states.coverage.is_empty()
+                && matched_states.coverage.len() <= 32
+                && request.change_kinds.len() <= 8
+                && request
+                    .change_kinds
+                    .iter()
+                    .all(|kind| !kind.is_empty() && kind.len() <= 32)
+                && request
+                    .max_results
+                    .is_none_or(|results| (1..=1_000).contains(&results))
+                && response.changes.len() <= 1_000
+                && response.changes.iter().all(|change| {
+                    !change.kind.is_empty()
+                        && change.kind.len() <= 32
+                        && change
+                            .symbol_id
+                            .as_ref()
+                            .is_some_and(|symbol| symbol.value.len() == 20)
+                        && !change.entity_kind.is_empty()
+                        && change.entity_kind.len() <= 32
+                        && change.significance <= 1_000
+                })
+                && architecture_delta.new_cross_service_edges <= 10_000
+                && architecture_delta.removed_cross_service_edges <= 10_000
+                && architecture_delta.new_boundaries <= 10_000
+                && architecture_delta.removed_boundaries <= 10_000
+                && response.breaking_candidates.len() <= 256
+                && response.breaking_candidates.iter().all(|candidate| {
+                    candidate
+                        .symbol_id
+                        .as_ref()
+                        .is_some_and(|symbol| symbol.value.len() == 20)
+                        && candidate.consumer_count <= 100_000
+                        && !candidate.reason.is_empty()
+                        && candidate.reason.len() <= 128
+                })
+                && response.lineage.len() <= 1_000
+                && response.lineage.iter().all(|lineage| {
+                    lineage
+                        .base_symbol_id
+                        .as_ref()
+                        .is_some_and(|symbol| symbol.value.len() == 20)
+                        && lineage
+                            .head_symbol_id
+                            .as_ref()
+                            .is_some_and(|symbol| symbol.value.len() == 20)
+                        && lineage.confidence <= 1_000
+                })
+        }
         _ => false,
     }
 }
@@ -6320,6 +6417,35 @@ fn optional_wire_id_has_len(value: Option<&Vec<u8>>, expected: usize) -> bool {
 
 fn wire_id_equals(left: Option<&Vec<u8>>, right: Option<&Vec<u8>>) -> bool {
     left.is_some() && left == right
+}
+
+/// Builds a generation selector from a revision selector naming a generation.
+///
+/// Git revision selectors return `None` because the first-slice daemon maps no
+/// git ref to a retained generation.
+fn revision_generation_selector(
+    selector: Option<&daemon::FirstSliceRevisionSelector>,
+) -> Option<daemon::GenerationSelector> {
+    match selector.and_then(|selector| selector.selector.as_ref())? {
+        daemon::first_slice_revision_selector::Selector::Generation(generation) => {
+            Some(daemon::GenerationSelector {
+                selector: Some(daemon::generation_selector::Selector::Generation(
+                    generation.clone(),
+                )),
+            })
+        }
+        daemon::first_slice_revision_selector::Selector::Git(_) => None,
+    }
+}
+
+/// Returns the generation identity named by a revision selector, if any.
+fn revision_generation_id(
+    selector: Option<&daemon::FirstSliceRevisionSelector>,
+) -> Option<&common::GenerationId> {
+    match selector.and_then(|selector| selector.selector.as_ref())? {
+        daemon::first_slice_revision_selector::Selector::Generation(generation) => Some(generation),
+        daemon::first_slice_revision_selector::Selector::Git(_) => None,
+    }
 }
 
 fn valid_repository_operation_status(operation: &daemon::OperationStatus) -> bool {
@@ -7059,6 +7185,35 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 return Err(Box::new(invalid_argument("plan change request is invalid")));
             }
         }
+        FirstSliceIpcRequest::HistoryCompare(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_revision_selector(request.base.as_ref())?;
+            validate_revision_selector(request.head.as_ref())?;
+            if request.change_kinds.len() > 8 {
+                return Err(Box::new(invalid_argument(
+                    "history compare request is invalid",
+                )));
+            }
+            for kind in &request.change_kinds {
+                if kind.is_empty() || kind.len() > 32 {
+                    return Err(Box::new(invalid_argument(
+                        "history compare request is invalid",
+                    )));
+                }
+            }
+            if request
+                .max_results
+                .is_some_and(|results| !(1..=1_000).contains(&results))
+            {
+                return Err(Box::new(invalid_argument(
+                    "history compare request is invalid",
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -7103,6 +7258,32 @@ fn explicit_generation_bytes(selector: Option<&daemon::GenerationSelector>) -> O
             Some(generation.value.as_slice())
         }
         _ => None,
+    }
+}
+
+/// Validates a history-compare revision selector wire shape.
+///
+/// Both a generation identity and a git ref expression are well-formed here; the
+/// daemon application rejects git refs as unsupported because it maps no git ref
+/// to a retained generation.
+fn validate_revision_selector(
+    selector: Option<&daemon::FirstSliceRevisionSelector>,
+) -> Result<(), Box<PublicError>> {
+    match selector.and_then(|selector| selector.selector.as_ref()) {
+        Some(daemon::first_slice_revision_selector::Selector::Generation(generation)) => {
+            require_wire_id(Some(generation.value.as_slice()), 20)
+        }
+        Some(daemon::first_slice_revision_selector::Selector::Git(git)) => {
+            if git.is_empty() || git.len() > 512 {
+                return Err(Box::new(invalid_argument(
+                    "history compare git revision is invalid",
+                )));
+            }
+            Ok(())
+        }
+        None => Err(Box::new(invalid_argument(
+            "history compare request requires a revision selector",
+        ))),
     }
 }
 
@@ -7184,6 +7365,7 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         Some(daemon::request_envelope::Request::TestsSelect(_)) => ControlMethod::TestsSelect,
         Some(daemon::request_envelope::Request::ChangeImpact(_)) => ControlMethod::ChangeImpact,
         Some(daemon::request_envelope::Request::PlanChange(_)) => ControlMethod::PlanChange,
+        Some(daemon::request_envelope::Request::HistoryCompare(_)) => ControlMethod::HistoryCompare,
         None => ControlMethod::Unknown,
     }
 }
@@ -7645,6 +7827,9 @@ fn request_from_wire(
             Err(Box::new(first_slice_unavailable()))
         }
         Some(daemon::request_envelope::Request::PlanChange(_)) => {
+            Err(Box::new(first_slice_unavailable()))
+        }
+        Some(daemon::request_envelope::Request::HistoryCompare(_)) => {
             Err(Box::new(first_slice_unavailable()))
         }
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
