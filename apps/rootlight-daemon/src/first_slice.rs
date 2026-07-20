@@ -40,7 +40,7 @@ use rootlight_operations::{
 use rootlight_protocol::generated::{common::v1 as common, daemon::v1 as daemon};
 use rootlight_query::{
     ArchitectureOverviewView, CodeDeadEntryPointPolicy, LocateMode, QueryUsage, RelationDirection,
-    RelationFamily,
+    RelationFamily, TestsSelectKind,
 };
 use rootlight_service::{
     FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexReceipt, FirstSliceService,
@@ -61,6 +61,7 @@ const DEFAULT_CYCLE_MIN_SIZE: u32 = 2;
 const DEFAULT_CYCLE_MAX_CYCLES: u32 = 50;
 const DEFAULT_CODE_DEAD_MAX_CANDIDATES: u32 = 50;
 const DEFAULT_ARCHITECTURE_OVERVIEW_MAX_COMPONENTS: u32 = 50;
+const DEFAULT_TESTS_SELECT_MAX_TESTS: u32 = 20;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
 
@@ -543,6 +544,9 @@ fn execute_service_request(
         FirstSliceIpcRequest::ArchitectureOverview(request) => {
             architecture_overview(service, request, &context)
                 .map(FirstSliceIpcResponse::ArchitectureOverview)
+        }
+        FirstSliceIpcRequest::TestsSelect(request) => {
+            tests_select(service, request, &context).map(FirstSliceIpcResponse::TestsSelect)
         }
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
     }
@@ -1532,6 +1536,82 @@ fn architecture_overview(
         connections,
         hotspots,
         views: wire_views,
+    })
+}
+
+fn tests_select(
+    service: &FirstSliceService,
+    request: daemon::TestsSelectRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::TestsSelectResponse, PublicError> {
+    let repository = parse_repository(request.repository.as_ref())?;
+    let selected = parse_generation_selector(request.generation.as_ref())?;
+    let generation = service
+        .resolve_generation(repository, selected)
+        .map_err(service_error)?;
+    let mut seeds = BTreeSet::new();
+    for seed in &request.seeds {
+        seeds.insert(parse_symbol(Some(seed))?);
+    }
+    let mut test_kinds = Vec::new();
+    test_kinds
+        .try_reserve_exact(request.test_kinds.len())
+        .map_err(|_| resource_exhausted())?;
+    for label in &request.test_kinds {
+        let kind = TestsSelectKind::from_label(label).ok_or_else(invalid_argument)?;
+        if !test_kinds.contains(&kind) {
+            test_kinds.push(kind);
+        }
+    }
+    let max_tests = usize::try_from(request.max_tests.unwrap_or(DEFAULT_TESTS_SELECT_MAX_TESTS))
+        .map_err(|_| invalid_argument())?;
+    let include_commands = request.include_commands.unwrap_or(false);
+    let response = service
+        .tests_select(
+            generation.generation,
+            seeds,
+            test_kinds,
+            max_tests,
+            include_commands,
+            &context.cancellation,
+        )
+        .map_err(service_error)?;
+    let strategy = response.data.coverage_strategy;
+    let mut tests = Vec::new();
+    tests
+        .try_reserve_exact(response.data.tests.len())
+        .map_err(|_| resource_exhausted())?;
+    for test in response.data.tests {
+        tests.push(daemon::FirstSliceRankedTest {
+            test_id: test.test_id.to_string(),
+            kind: test.kind.as_str().to_owned(),
+            path: test.path,
+            score: u32::from(test.score),
+            why: test.why,
+            estimated_cost_ms: test.estimated_cost_ms,
+            command_hint: test.command_hint,
+        });
+    }
+    let mut gaps = Vec::new();
+    gaps.try_reserve_exact(response.data.gaps.len())
+        .map_err(|_| resource_exhausted())?;
+    for gap in response.data.gaps {
+        gaps.push(daemon::FirstSliceTestGap {
+            scope: gap.scope,
+            reason: gap.reason,
+        });
+    }
+    Ok(daemon::TestsSelectResponse {
+        schema_version: Some(schema_version()),
+        context: Some(query_context(generation, &response.usage, &[])),
+        tests,
+        coverage_strategy: Some(daemon::FirstSliceTestCoverageStrategy {
+            direct_edges: strategy.direct_edges,
+            transitive_signals: strategy.transitive_signals,
+            history_signals: strategy.history_signals,
+            build_target_signals: strategy.build_target_signals,
+        }),
+        gaps,
     })
 }
 
