@@ -33,20 +33,56 @@ pub enum VerticalTool {
     CodeLocate,
     /// Explains one or more stable symbols.
     SymbolExplain,
+    /// Gets bounded typed relationships around symbols.
+    SymbolRelationships,
+    /// Traces bounded paths through relation graphs.
+    FlowTrace,
+    /// Maps changes to affected symbols, dependents, and risks.
+    ChangeImpact,
+    /// Ranks tests relevant to symbols or changes.
+    TestsSelect,
+    /// Produces a scoped architecture map.
+    ArchitectureOverview,
+    /// Finds dependency cycles in a relation projection.
+    ArchitectureCycles,
+    /// Finds dead or unreachable code candidates.
+    CodeDead,
+    /// Compares two revisions or generations structurally.
+    HistoryCompare,
+    /// Produces an ordered change plan.
+    PlanChange,
+    /// Assembles task-specific evidence under a token budget.
+    ContextPack,
     /// Reads generation-pinned source ranges.
     SourceRead,
+    /// Executes a bounded expert query over the safe AST.
+    QueryAdvanced,
+    /// Executes up to sixteen read operations under one generation.
+    QueryBatch,
 }
 
 impl VerticalTool {
     /// Complete deterministic first-slice tool catalog.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 19] = [
         Self::RepoIndex,
         Self::RepoStatus,
         Self::RepoList,
         Self::OperationStatus,
         Self::CodeLocate,
         Self::SymbolExplain,
+        Self::SymbolRelationships,
+        Self::FlowTrace,
+        Self::ChangeImpact,
+        Self::TestsSelect,
+        Self::ArchitectureOverview,
+        Self::ArchitectureCycles,
+        Self::CodeDead,
+        Self::HistoryCompare,
+        Self::PlanChange,
+        Self::ContextPack,
         Self::SourceRead,
+        Self::QueryAdvanced,
+        Self::QueryBatch,
     ];
 
     /// Stable tool name advertised through MCP.
@@ -59,7 +95,19 @@ impl VerticalTool {
             Self::OperationStatus => "operation.status",
             Self::CodeLocate => "code.locate",
             Self::SymbolExplain => "symbol.explain",
+            Self::SymbolRelationships => "symbol.relationships",
+            Self::FlowTrace => "flow.trace",
+            Self::ChangeImpact => "change.impact",
+            Self::TestsSelect => "tests.select",
+            Self::ArchitectureOverview => "architecture.overview",
+            Self::ArchitectureCycles => "architecture.cycles",
+            Self::CodeDead => "code.dead",
+            Self::HistoryCompare => "history.compare",
+            Self::PlanChange => "plan.change",
+            Self::ContextPack => "context.pack",
             Self::SourceRead => "source.read",
+            Self::QueryAdvanced => "query.advanced",
+            Self::QueryBatch => "query.batch",
         }
     }
 
@@ -73,7 +121,19 @@ impl VerticalTool {
             Self::OperationStatus => "Inspect operation",
             Self::CodeLocate => "Locate code",
             Self::SymbolExplain => "Explain symbol",
+            Self::SymbolRelationships => "Symbol relationships",
+            Self::FlowTrace => "Trace flow",
+            Self::ChangeImpact => "Change impact",
+            Self::TestsSelect => "Select tests",
+            Self::ArchitectureOverview => "Architecture overview",
+            Self::ArchitectureCycles => "Architecture cycles",
+            Self::CodeDead => "Dead code",
+            Self::HistoryCompare => "Compare history",
+            Self::PlanChange => "Plan change",
+            Self::ContextPack => "Context pack",
             Self::SourceRead => "Read source",
+            Self::QueryAdvanced => "Advanced query",
+            Self::QueryBatch => "Batch query",
         }
     }
 
@@ -95,8 +155,44 @@ impl VerticalTool {
             Self::SymbolExplain => {
                 "Return bounded semantic evidence for stable symbol identifiers."
             }
+            Self::SymbolRelationships => {
+                "Get bounded typed callers, callees, references, types, implementations, dependencies, tests, or ownership around symbols."
+            }
+            Self::FlowTrace => {
+                "Trace bounded paths through calls, data flow, services, messaging, build, or dependency relations."
+            }
+            Self::ChangeImpact => {
+                "Map a working-tree or Git change set to affected symbols, dependents, services, risks, and tests."
+            }
+            Self::TestsSelect => {
+                "Rank tests relevant to symbols or changes with rationale and uncertainty."
+            }
+            Self::ArchitectureOverview => {
+                "Produce a scoped architecture map of modules, packages, services, data stores, routes, ownership, and hotspots."
+            }
+            Self::ArchitectureCycles => {
+                "Find and explain dependency cycles in a selected relation projection."
+            }
+            Self::CodeDead => {
+                "Find dead or unreachable candidates with entry-point and coverage caveats."
+            }
+            Self::HistoryCompare => {
+                "Compare two revisions or generations structurally and semantically."
+            }
+            Self::PlanChange => {
+                "Produce an ordered change plan with affected symbols, files, tests, risks, and verification steps."
+            }
+            Self::ContextPack => {
+                "Assemble minimal task-specific evidence and source snippets under a token budget."
+            }
             Self::SourceRead => {
                 "Read exact bounded ranges from a pinned source snapshot as untrusted repository data."
+            }
+            Self::QueryAdvanced => {
+                "Execute a bounded expert query over the documented safe query AST."
+            }
+            Self::QueryBatch => {
+                "Execute up to sixteen independent or dependency-linked read operations under one pinned generation and one shared budget."
             }
         }
     }
@@ -123,8 +219,44 @@ impl VerticalTool {
             Self::SymbolExplain => include_str!(
                 "../../../schemas/generated/json/mcp-symbol-explain-input-1.0.schema.json"
             ),
+            Self::SymbolRelationships => include_str!(
+                "../../../schemas/generated/json/mcp-symbol-relationships-input-1.0.schema.json"
+            ),
+            Self::FlowTrace => include_str!(
+                "../../../schemas/generated/json/mcp-flow-trace-input-1.0.schema.json"
+            ),
+            Self::ChangeImpact => include_str!(
+                "../../../schemas/generated/json/mcp-change-impact-input-1.0.schema.json"
+            ),
+            Self::TestsSelect => include_str!(
+                "../../../schemas/generated/json/mcp-tests-select-input-1.0.schema.json"
+            ),
+            Self::ArchitectureOverview => include_str!(
+                "../../../schemas/generated/json/mcp-architecture-overview-input-1.0.schema.json"
+            ),
+            Self::ArchitectureCycles => include_str!(
+                "../../../schemas/generated/json/mcp-architecture-cycles-input-1.0.schema.json"
+            ),
+            Self::CodeDead => include_str!(
+                "../../../schemas/generated/json/mcp-code-dead-input-1.0.schema.json"
+            ),
+            Self::HistoryCompare => include_str!(
+                "../../../schemas/generated/json/mcp-history-compare-input-1.0.schema.json"
+            ),
+            Self::PlanChange => include_str!(
+                "../../../schemas/generated/json/mcp-plan-change-input-1.0.schema.json"
+            ),
+            Self::ContextPack => include_str!(
+                "../../../schemas/generated/json/mcp-context-pack-input-1.0.schema.json"
+            ),
             Self::SourceRead => include_str!(
                 "../../../schemas/generated/json/mcp-source-read-input-1.0.schema.json"
+            ),
+            Self::QueryAdvanced => include_str!(
+                "../../../schemas/generated/json/mcp-query-advanced-input-1.0.schema.json"
+            ),
+            Self::QueryBatch => include_str!(
+                "../../../schemas/generated/json/mcp-query-batch-input-1.0.schema.json"
             ),
         }
     }
@@ -151,8 +283,44 @@ impl VerticalTool {
             Self::SymbolExplain => include_str!(
                 "../../../schemas/generated/json/mcp-symbol-explain-output-1.0.schema.json"
             ),
+            Self::SymbolRelationships => include_str!(
+                "../../../schemas/generated/json/mcp-symbol-relationships-output-1.0.schema.json"
+            ),
+            Self::FlowTrace => include_str!(
+                "../../../schemas/generated/json/mcp-flow-trace-output-1.0.schema.json"
+            ),
+            Self::ChangeImpact => include_str!(
+                "../../../schemas/generated/json/mcp-change-impact-output-1.0.schema.json"
+            ),
+            Self::TestsSelect => include_str!(
+                "../../../schemas/generated/json/mcp-tests-select-output-1.0.schema.json"
+            ),
+            Self::ArchitectureOverview => include_str!(
+                "../../../schemas/generated/json/mcp-architecture-overview-output-1.0.schema.json"
+            ),
+            Self::ArchitectureCycles => include_str!(
+                "../../../schemas/generated/json/mcp-architecture-cycles-output-1.0.schema.json"
+            ),
+            Self::CodeDead => include_str!(
+                "../../../schemas/generated/json/mcp-code-dead-output-1.0.schema.json"
+            ),
+            Self::HistoryCompare => include_str!(
+                "../../../schemas/generated/json/mcp-history-compare-output-1.0.schema.json"
+            ),
+            Self::PlanChange => include_str!(
+                "../../../schemas/generated/json/mcp-plan-change-output-1.0.schema.json"
+            ),
+            Self::ContextPack => include_str!(
+                "../../../schemas/generated/json/mcp-context-pack-output-1.0.schema.json"
+            ),
             Self::SourceRead => include_str!(
                 "../../../schemas/generated/json/mcp-source-read-output-1.0.schema.json"
+            ),
+            Self::QueryAdvanced => include_str!(
+                "../../../schemas/generated/json/mcp-query-advanced-output-1.0.schema.json"
+            ),
+            Self::QueryBatch => include_str!(
+                "../../../schemas/generated/json/mcp-query-batch-output-1.0.schema.json"
             ),
         }
     }
@@ -160,14 +328,7 @@ impl VerticalTool {
     /// Whether the tool only reads already published state.
     #[must_use]
     pub const fn read_only(self) -> bool {
-        matches!(
-            self,
-            Self::RepoStatus
-                | Self::RepoList
-                | Self::CodeLocate
-                | Self::SymbolExplain
-                | Self::SourceRead
-        )
+        !matches!(self, Self::RepoIndex)
     }
 
     /// Whether repeating the same admitted request has the same intended effect.

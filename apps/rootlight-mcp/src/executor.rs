@@ -514,7 +514,20 @@ where
                     )
                     .await
                 }
-                VerticalTool::RepoStatus | VerticalTool::RepoList => {
+                VerticalTool::RepoStatus
+                | VerticalTool::RepoList
+                | VerticalTool::SymbolRelationships
+                | VerticalTool::FlowTrace
+                | VerticalTool::ChangeImpact
+                | VerticalTool::TestsSelect
+                | VerticalTool::ArchitectureOverview
+                | VerticalTool::ArchitectureCycles
+                | VerticalTool::CodeDead
+                | VerticalTool::HistoryCompare
+                | VerticalTool::PlanChange
+                | VerticalTool::ContextPack
+                | VerticalTool::QueryAdvanced
+                | VerticalTool::QueryBatch => {
                     Err(ToolExecutionError::new(unsupported.clone()))
                 }
                 VerticalTool::OperationStatus => {

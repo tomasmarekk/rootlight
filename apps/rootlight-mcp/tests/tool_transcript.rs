@@ -104,7 +104,7 @@ async fn retained_tool_transcript_preserves_protocol_and_contract_outcomes() {
             .as_array()
             .unwrap()
             .len(),
-        7
+        19
     );
     assert!(
         response("list")["result"]["tools"]
