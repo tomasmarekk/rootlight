@@ -8,6 +8,7 @@
 
 pub mod advanced;
 pub mod batch;
+pub mod context_pack;
 mod client_port;
 mod executor;
 mod json;
