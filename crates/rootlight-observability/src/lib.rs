@@ -50,7 +50,7 @@ const SUPPORT_ENTRY_COUNT_V1: usize = 5;
 const SUPPORT_ENTRY_COUNT_V2: usize = 6;
 const SUPPORT_ENTRY_COUNT_V3: usize = 6;
 const CONTROL_METHOD_COUNT_V2: usize = 8;
-const CONTROL_METHOD_COUNT: usize = 22;
+const CONTROL_METHOD_COUNT: usize = 23;
 const TELEMETRY_OUTCOME_COUNT: usize = 6;
 /// Ordered allow-list for the frozen support archive schema.
 pub const SUPPORT_ENTRY_NAMES: [&str; SUPPORT_ENTRY_COUNT_V1] = [
@@ -404,6 +404,8 @@ pub enum ControlMethod {
     TestsSelect,
     /// Generation-pinned bounded change impact.
     ChangeImpact,
+    /// Generation-pinned bounded change planning.
+    PlanChange,
 }
 
 impl ControlMethod {
@@ -431,6 +433,7 @@ impl ControlMethod {
         Self::ArchitectureOverview,
         Self::TestsSelect,
         Self::ChangeImpact,
+        Self::PlanChange,
     ];
 
     const fn index(self) -> usize {
@@ -457,6 +460,7 @@ impl ControlMethod {
             Self::ArchitectureOverview => 19,
             Self::TestsSelect => 20,
             Self::ChangeImpact => 21,
+            Self::PlanChange => 22,
         }
     }
 }
