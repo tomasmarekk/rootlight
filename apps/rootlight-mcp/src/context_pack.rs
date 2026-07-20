@@ -7,7 +7,9 @@
 //! summarized with continuation handles.
 
 /// Maximum evidence items in one context pack.
-pub const MAX_PACK_ITEMS: usize = 128;
+///
+/// Matches the public `context.pack` item ceiling.
+pub const MAX_PACK_ITEMS: usize = 200;
 
 /// Maximum source snippet bytes per item.
 pub const MAX_SNIPPET_BYTES: usize = 8_192;
@@ -16,10 +18,14 @@ pub const MAX_SNIPPET_BYTES: usize = 8_192;
 pub const MAX_OMISSIONS: usize = 32;
 
 /// Token budget hard ceiling for context packs.
-pub const MAX_PACK_TOKENS: u32 = 32_000;
+///
+/// Matches the public `context.pack` token budget ceiling.
+pub const MAX_PACK_TOKENS: u32 = 20_000;
 
 /// Token budget minimum for a useful pack.
-pub const MIN_PACK_TOKENS: u32 = 100;
+///
+/// Matches the public `context.pack` token budget minimum.
+pub const MIN_PACK_TOKENS: u32 = 500;
 
 /// Evidence role classification for pack items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -209,6 +215,10 @@ pub fn optimize_pack(
     // 3. Confidence descending
     // 4. Identity ascending (stable tie-break)
     let required = objective.required_roles();
+    // Deterministic global ranking: required roles first, then role priority,
+    // relevance, confidence, and a stable identity tie-break. Within one role
+    // this orders candidates best-first, so the first unreserved candidate of
+    // a role is also its best representative.
     candidates.sort_by(|a, b| {
         let a_required = required.contains(&a.role);
         let b_required = required.contains(&b.role);
@@ -220,29 +230,59 @@ pub fn optimize_pack(
             .then_with(|| a.identity.cmp(&b.identity))
     });
 
-    let mut items = Vec::new();
+    // Minimum representation: reserve one fitting candidate per required role
+    // before the remaining budget is handed to greedy filling. Without this
+    // reservation a run of high-relevance items from the first required role
+    // can consume the whole budget and starve the other required roles even
+    // though one item per role would have fit. Candidates are visited in ranked
+    // order, so roles are reserved in role-priority order and each role keeps
+    // its best candidate that still fits.
+    let mut reserved = vec![false; candidates.len()];
+    let mut reserved_tokens = 0u32;
+    let mut reserved_paths: Vec<&str> = Vec::new();
+    let mut represented: Vec<EvidenceRole> = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if represented.len() == required.len() {
+            break;
+        }
+        if !required.contains(&candidate.role) || represented.contains(&candidate.role) {
+            continue;
+        }
+        if reserved_tokens.saturating_add(candidate.estimated_tokens) <= token_budget
+            && path_count(&reserved_paths, &candidate.source_path) < 2
+        {
+            reserved[index] = true;
+            reserved_tokens = reserved_tokens.saturating_add(candidate.estimated_tokens);
+            reserved_paths.push(candidate.source_path.as_str());
+            represented.push(candidate.role);
+        }
+    }
+
+    // Emit in deterministic ranked order. Reserved candidates are always
+    // included so every represented required role stays present; the remaining
+    // budget is filled greedily under the per-source diversity bound. Greedy
+    // spending is capped at the budget left over after reservation so greedy
+    // items can never displace a reserved required-role representative.
+    let greedy_budget = token_budget.saturating_sub(reserved_tokens);
+    let mut greedy_spent = 0u32;
+    let mut items: Vec<PackItem> = Vec::new();
     let mut omissions = Vec::new();
     let mut total_tokens = 0u32;
     let mut truncated = false;
     let mut seen_paths: Vec<&str> = Vec::new();
 
-    for candidate in candidates.iter().take(MAX_PACK_ITEMS) {
-        // Deduplication: skip items from the same source path if we already
-        // have two items from it (diversity constraint).
-        let path_count = seen_paths
-            .iter()
-            .filter(|p| **p == candidate.source_path.as_str())
-            .count();
-        if path_count >= 2 {
-            record_omission(&mut omissions, candidate);
-            truncated = true;
-            continue;
-        }
-
-        if total_tokens.saturating_add(candidate.estimated_tokens) > token_budget {
-            record_omission(&mut omissions, candidate);
-            truncated = true;
-            continue;
+    for (index, candidate) in candidates.iter().enumerate().take(MAX_PACK_ITEMS) {
+        if !reserved[index] {
+            // Deduplication: skip items from the same source path if we already
+            // have two items from it (diversity constraint).
+            if path_count(&seen_paths, &candidate.source_path) >= 2
+                || greedy_spent.saturating_add(candidate.estimated_tokens) > greedy_budget
+            {
+                record_omission(&mut omissions, candidate);
+                truncated = true;
+                continue;
+            }
+            greedy_spent = greedy_spent.saturating_add(candidate.estimated_tokens);
         }
 
         let position = items.len();
@@ -267,6 +307,11 @@ pub fn optimize_pack(
         total_tokens,
         truncated,
     })
+}
+
+/// Counts how many selected items came from one source path.
+fn path_count(seen_paths: &[&str], path: &str) -> usize {
+    seen_paths.iter().filter(|p| **p == path).count()
 }
 
 fn record_omission(omissions: &mut Vec<OmissionEntry>, candidate: &EvidenceCandidate) {
@@ -340,6 +385,36 @@ mod tests {
             def_pos < arch_pos,
             "required Definition must come before non-required Architecture"
         );
+    }
+
+    #[test]
+    fn required_roles_get_minimum_representation_under_tight_budget() {
+        // A run of high-relevance Definition candidates could greedily consume
+        // the whole budget and starve the other required roles. The optimizer
+        // must reserve one item per required role first, so every required role
+        // stays represented whenever one item per role fits the budget.
+        let mut candidates = vec![
+            candidate("def1", EvidenceRole::Definition, 950, 300),
+            candidate("def2", EvidenceRole::Definition, 940, 300),
+            candidate("def3", EvidenceRole::Definition, 930, 300),
+            candidate("impl1", EvidenceRole::Implementation, 500, 300),
+            candidate("test1", EvidenceRole::Test, 400, 300),
+        ];
+        // Budget fits exactly one of each required role (3 * 300) but not all
+        // five candidates.
+        let result =
+            optimize_pack(PackObjective::BugFix, &mut candidates, 900).expect("valid pack");
+        let roles: Vec<EvidenceRole> = result.items.iter().map(|i| i.candidate.role).collect();
+        assert!(
+            roles.contains(&EvidenceRole::Definition),
+            "definition represented"
+        );
+        assert!(
+            roles.contains(&EvidenceRole::Implementation),
+            "implementation represented"
+        );
+        assert!(roles.contains(&EvidenceRole::Test), "test represented");
+        assert!(result.total_tokens <= 900, "budget respected");
     }
 
     #[test]
