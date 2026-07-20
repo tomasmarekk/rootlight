@@ -43,6 +43,7 @@ message RequestEnvelope {
     SymbolRelationshipsRequest symbol_relationships = 37;
     FlowTraceRequest flow_trace = 38;
     ArchitectureCyclesRequest architecture_cycles = 39;
+    CodeDeadRequest code_dead = 40;
   }
 }
 
@@ -67,6 +68,7 @@ message ResponseEnvelope {
     SymbolRelationshipsResponse symbol_relationships = 37;
     FlowTraceResponse flow_trace = 38;
     ArchitectureCyclesResponse architecture_cycles = 39;
+    CodeDeadResponse code_dead = 40;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -682,4 +684,55 @@ message ArchitectureCyclesResponse {
   repeated FirstSliceCycle cycles = 4;
   repeated FirstSliceCycleBreak break_candidates = 5;
   FirstSliceCycleProjection projection = 6;
+}
+
+// Requests bounded dead-code reachability analysis over one generation.
+message CodeDeadRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  optional string entry_point_policy = 4;
+  optional bool include_exported = 5;
+  optional bool include_tests = 6;
+  optional uint32 min_confidence = 7;
+  optional uint32 max_candidates = 8;
+}
+
+// One dead-code candidate with classification and source-free evidence.
+message FirstSliceDeadCandidate {
+  rootlight.common.v1.SymbolId symbol_id = 1;
+  string classification = 2;
+  uint32 confidence = 3;
+  repeated string why = 4;
+  repeated string suppressions_checked = 5;
+  repeated FirstSliceSourceRef source_refs = 6;
+}
+
+// Summary of the entry-point model used for reachability.
+message FirstSliceEntryPointSummary {
+  string policy = 1;
+  uint32 entry_point_count = 2;
+  bool complete = 3;
+}
+
+// One known blind spot in the reachability analysis.
+message FirstSliceBlindSpot {
+  string category = 1;
+  uint32 affected_count = 2;
+}
+
+// One applied false-positive suppression rule.
+message FirstSliceSuppressionRule {
+  string rule = 1;
+  uint32 suppressed_count = 2;
+}
+
+// Returns bounded dead-code candidates and generation correlation.
+message CodeDeadResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  repeated FirstSliceDeadCandidate candidates = 3;
+  FirstSliceEntryPointSummary entry_points = 4;
+  repeated FirstSliceBlindSpot blind_spots = 5;
+  repeated FirstSliceSuppressionRule false_positive_controls = 6;
 }

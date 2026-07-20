@@ -49,7 +49,7 @@ pub struct RequestEnvelope {
     pub timeout_ms: ::core::option::Option<u32>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -110,6 +110,9 @@ pub mod request_envelope {
         #[prost(message, tag = "39")]
         #[allow(missing_docs)]
         ArchitectureCycles(super::ArchitectureCyclesRequest),
+        #[prost(message, tag = "40")]
+        #[allow(missing_docs)]
+        CodeDead(super::CodeDeadRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -120,7 +123,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -181,6 +184,9 @@ pub mod response_envelope {
         #[prost(message, tag = "39")]
         #[allow(missing_docs)]
         ArchitectureCycles(super::ArchitectureCyclesResponse),
+        #[prost(message, tag = "40")]
+        #[allow(missing_docs)]
+        CodeDead(super::CodeDeadResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -1294,6 +1300,115 @@ pub struct ArchitectureCyclesResponse {
     #[prost(message, optional, tag = "6")]
     #[allow(missing_docs)]
     pub projection: ::core::option::Option<FirstSliceCycleProjection>,
+}
+/// Requests bounded dead-code reachability analysis over one generation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CodeDeadRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(string, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub entry_point_policy: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub include_exported: ::core::option::Option<bool>,
+    #[prost(bool, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub include_tests: ::core::option::Option<bool>,
+    #[prost(uint32, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub min_confidence: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub max_candidates: ::core::option::Option<u32>,
+}
+/// One dead-code candidate with classification and source-free evidence.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceDeadCandidate {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub symbol_id: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub classification: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub confidence: u32,
+    #[prost(string, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub why: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub suppressions_checked: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "6")]
+    #[allow(missing_docs)]
+    pub source_refs: ::prost::alloc::vec::Vec<FirstSliceSourceRef>,
+}
+/// Summary of the entry-point model used for reachability.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceEntryPointSummary {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub policy: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub entry_point_count: u32,
+    #[prost(bool, tag = "3")]
+    #[allow(missing_docs)]
+    pub complete: bool,
+}
+/// One known blind spot in the reachability analysis.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceBlindSpot {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub category: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub affected_count: u32,
+}
+/// One applied false-positive suppression rule.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceSuppressionRule {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub rule: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub suppressed_count: u32,
+}
+/// Returns bounded dead-code candidates and generation correlation.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CodeDeadResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub candidates: ::prost::alloc::vec::Vec<FirstSliceDeadCandidate>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub entry_points: ::core::option::Option<FirstSliceEntryPointSummary>,
+    #[prost(message, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub blind_spots: ::prost::alloc::vec::Vec<FirstSliceBlindSpot>,
+    #[prost(message, repeated, tag = "6")]
+    #[allow(missing_docs)]
+    pub false_positive_controls: ::prost::alloc::vec::Vec<FirstSliceSuppressionRule>,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]
