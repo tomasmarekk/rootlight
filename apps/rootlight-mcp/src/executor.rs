@@ -514,6 +514,9 @@ where
                     )
                     .await
                 }
+                VerticalTool::RepoStatus | VerticalTool::RepoList => {
+                    Err(ToolExecutionError::new(unsupported.clone()))
+                }
                 VerticalTool::OperationStatus => {
                     execute_operation_status(port, arguments, cancellation).await
                 }

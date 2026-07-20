@@ -505,6 +505,9 @@ fn decode_typed_input(tool: VerticalTool, input: &Value) -> Result<TypedInput, (
         VerticalTool::RepoIndex => RepoIndexInput::deserialize(input)
             .map(|_| TypedInput::Other)
             .map_err(|_| ()),
+        VerticalTool::RepoStatus | VerticalTool::RepoList => {
+            Ok(TypedInput::Other)
+        }
         VerticalTool::OperationStatus => OperationStatusInput::deserialize(input)
             .map(|_| TypedInput::Other)
             .map_err(|_| ()),
@@ -531,6 +534,7 @@ fn profile_exposes_tool(profile: ExposureProfile, tool_name: &str) -> bool {
 fn tool_argument_bytes_are_valid(tool: VerticalTool, input: &Value) -> bool {
     let maximum = match tool {
         VerticalTool::RepoIndex => MAX_REPO_INDEX_ARGUMENT_BYTES,
+        VerticalTool::RepoStatus | VerticalTool::RepoList => MAX_OPERATION_STATUS_ARGUMENT_BYTES,
         VerticalTool::OperationStatus => MAX_OPERATION_STATUS_ARGUMENT_BYTES,
         VerticalTool::CodeLocate => MAX_CODE_LOCATE_ARGUMENT_BYTES,
         VerticalTool::SymbolExplain => MAX_SYMBOL_EXPLAIN_ARGUMENT_BYTES,
@@ -557,9 +561,11 @@ fn tool_specific_input_limits_are_valid(tool: VerticalTool, input: &Value) -> bo
             .get("query")
             .and_then(Value::as_str)
             .is_some_and(|query| query.len() <= MAX_LOCATE_QUERY_BYTES),
-        VerticalTool::OperationStatus | VerticalTool::SymbolExplain | VerticalTool::SourceRead => {
-            true
-        }
+        VerticalTool::RepoStatus
+        | VerticalTool::RepoList
+        | VerticalTool::OperationStatus
+        | VerticalTool::SymbolExplain
+        | VerticalTool::SourceRead => true
     }
 }
 
@@ -593,6 +599,7 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
     // that intentionally cannot be represented by generated JSON Schema.
     match tool {
         VerticalTool::RepoIndex => RepoIndexOutput::deserialize(output).is_ok(),
+        VerticalTool::RepoStatus | VerticalTool::RepoList => true,
         VerticalTool::OperationStatus => OperationStatusOutput::deserialize(output).is_ok(),
         VerticalTool::CodeLocate => CodeLocateOutput::deserialize(output).is_ok(),
         VerticalTool::SymbolExplain => SymbolExplainOutput::deserialize(output).is_ok(),
@@ -731,6 +738,7 @@ fn tool_error(
 fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
     match tool {
         VerticalTool::RepoIndex => RepoIndexOutput::deserialize(output).is_ok(),
+        VerticalTool::RepoStatus | VerticalTool::RepoList => true,
         VerticalTool::OperationStatus => OperationStatusOutput::deserialize(output).is_ok(),
         VerticalTool::CodeLocate => CodeLocateOutput::deserialize(output).is_ok(),
         VerticalTool::SymbolExplain => SymbolExplainOutput::deserialize(output).is_ok(),
@@ -975,7 +983,7 @@ mod tests {
         let tools = result["tools"].as_array().expect("tools is an array");
         assert_eq!(tools.len(), VerticalTool::ALL.len());
         assert_eq!(tools[0]["name"], "repo.index");
-        assert_eq!(tools[4]["name"], "source.read");
+        assert_eq!(tools[6]["name"], "source.read");
         for tool in tools {
             assert_eq!(tool["inputSchema"]["type"], "object");
             assert_eq!(tool["outputSchema"]["type"], "object");

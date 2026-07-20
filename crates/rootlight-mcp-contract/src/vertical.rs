@@ -23,6 +23,10 @@ const MAX_SOURCE_READ_BYTES: u64 = 524_288;
 pub enum VerticalTool {
     /// Registers or rebuilds one repository.
     RepoIndex,
+    /// Inspects repository state, generation, coverage, and operations.
+    RepoStatus,
+    /// Lists registered repositories.
+    RepoList,
     /// Reads or cancels one operation.
     OperationStatus,
     /// Locates bounded structural or lexical matches.
@@ -35,8 +39,10 @@ pub enum VerticalTool {
 
 impl VerticalTool {
     /// Complete deterministic first-slice tool catalog.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::RepoIndex,
+        Self::RepoStatus,
+        Self::RepoList,
         Self::OperationStatus,
         Self::CodeLocate,
         Self::SymbolExplain,
@@ -48,6 +54,8 @@ impl VerticalTool {
     pub const fn name(self) -> &'static str {
         match self {
             Self::RepoIndex => "repo.index",
+            Self::RepoStatus => "repo.status",
+            Self::RepoList => "repo.list",
             Self::OperationStatus => "operation.status",
             Self::CodeLocate => "code.locate",
             Self::SymbolExplain => "symbol.explain",
@@ -60,6 +68,8 @@ impl VerticalTool {
     pub const fn title(self) -> &'static str {
         match self {
             Self::RepoIndex => "Index repository",
+            Self::RepoStatus => "Inspect repository",
+            Self::RepoList => "List repositories",
             Self::OperationStatus => "Inspect operation",
             Self::CodeLocate => "Locate code",
             Self::SymbolExplain => "Explain symbol",
@@ -74,6 +84,10 @@ impl VerticalTool {
             Self::RepoIndex => {
                 "Create or update one local repository generation and return its operation handle."
             }
+            Self::RepoStatus => {
+                "Inspect repository state, generation freshness, coverage, and active operations."
+            }
+            Self::RepoList => "List registered repositories and workspaces.",
             Self::OperationStatus => "Read or cancel one known long-running Rootlight operation.",
             Self::CodeLocate => {
                 "Find bounded, generation-pinned code and file matches by identifier, text, path, or structure."
@@ -94,6 +108,12 @@ impl VerticalTool {
             Self::RepoIndex => {
                 include_str!("../../../schemas/generated/json/mcp-repo-index-input-1.0.schema.json")
             }
+            Self::RepoStatus => include_str!(
+                "../../../schemas/generated/json/mcp-repo-status-input-1.0.schema.json"
+            ),
+            Self::RepoList => include_str!(
+                "../../../schemas/generated/json/mcp-repo-list-input-1.0.schema.json"
+            ),
             Self::OperationStatus => include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-input-1.0.schema.json"
             ),
@@ -116,6 +136,12 @@ impl VerticalTool {
             Self::RepoIndex => include_str!(
                 "../../../schemas/generated/json/mcp-repo-index-output-1.0.schema.json"
             ),
+            Self::RepoStatus => include_str!(
+                "../../../schemas/generated/json/mcp-repo-status-output-1.0.schema.json"
+            ),
+            Self::RepoList => include_str!(
+                "../../../schemas/generated/json/mcp-repo-list-output-1.0.schema.json"
+            ),
             Self::OperationStatus => include_str!(
                 "../../../schemas/generated/json/mcp-operation-status-output-1.0.schema.json"
             ),
@@ -136,7 +162,11 @@ impl VerticalTool {
     pub const fn read_only(self) -> bool {
         matches!(
             self,
-            Self::CodeLocate | Self::SymbolExplain | Self::SourceRead
+            Self::RepoStatus
+                | Self::RepoList
+                | Self::CodeLocate
+                | Self::SymbolExplain
+                | Self::SourceRead
         )
     }
 
