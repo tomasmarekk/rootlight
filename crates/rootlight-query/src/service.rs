@@ -25,11 +25,12 @@ use crate::model::{
     DeadCodeClassification, FlowTraceEdge, FlowTraceFrontier, FlowTracePath, FlowTracePlan,
     FlowTraceProjection, FlowTraceResult, LocateHit, LocateMode, PlanEstimate, PlanExplanation,
     PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage,
-    RelationDirection, RelationFamily, RelationshipEdgeTarget, RelationshipGroup,
-    RepositoryDataTrust, SourceChunkResult, SourceReadPlan, SourceReadQueryResult,
-    SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult,
-    TokenAccountingProfile, checked_add, checked_u128_to_u64, checked_usize_to_u64,
-    ensure_estimate, search_mode,
+    RankedTestSelection, RelationDirection, RelationFamily, RelationshipEdgeTarget,
+    RelationshipGroup, RepositoryDataTrust, SourceChunkResult, SourceReadPlan,
+    SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
+    SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap, TestsSelectKind,
+    TestsSelectPlan, TestsSelectResult, TokenAccountingProfile, checked_add, checked_u128_to_u64,
+    checked_usize_to_u64, ensure_estimate, search_mode,
 };
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
@@ -1150,6 +1151,123 @@ where
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
     }
 
+    /// Builds a deterministic bounded `tests.select` plan.
+    ///
+    /// A non-empty seed set drives relevance ranking, the optional test-kind
+    /// filter restricts the candidates, and the test cap bounds the ranking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid budget, an empty or oversized seed
+    /// set, too many test kinds, out-of-range test bounds, arithmetic overflow,
+    /// or a conservative estimate that cannot be admitted.
+    pub fn plan_tests_select(
+        &self,
+        seeds: BTreeSet<SymbolId>,
+        mut test_kinds: Vec<TestsSelectKind>,
+        max_tests: usize,
+        include_commands: bool,
+        budget: QueryBudget,
+    ) -> Result<TestsSelectPlan, QueryError> {
+        budget.validate()?;
+        if seeds.is_empty() || seeds.len() > 64 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if test_kinds.len() > 6 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if max_tests == 0
+            || max_tests > 500
+            || checked_usize_to_u64(max_tests)? > budget.max_results
+        {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        test_kinds.sort();
+        test_kinds.dedup();
+        let estimate = PlanEstimate {
+            rows: budget.max_rows,
+            edges: budget.max_edges,
+            results: budget.max_results,
+            source_bytes: 0,
+            // The normalized generation bounds every record, while the query
+            // memory budget remains the conservative aggregate ceiling.
+            memory_bytes: budget.max_memory_bytes,
+            json_bytes: budget.max_json_bytes,
+            estimated_tokens: budget.max_tokens,
+            duration_micros: duration_micros(budget.max_duration),
+        };
+        ensure_estimate(estimate, budget)?;
+        let explanation = PlanExplanation {
+            generation: self.generation.metadata().generation(),
+            kind: PlanKind::TestsSelect,
+            operators: vec![
+                QueryOperator::GenerationPin,
+                QueryOperator::RelationScan,
+                QueryOperator::EntityLookup,
+                QueryOperator::OutputBudget,
+            ],
+            estimate,
+        };
+        Ok(TestsSelectPlan {
+            seeds,
+            test_kinds,
+            max_tests,
+            include_commands,
+            budget,
+            explanation,
+        })
+    }
+
+    /// Executes a prevalidated `tests.select` plan.
+    ///
+    /// The scan identifies test entities, relates them to the seed set through
+    /// served direct edges, bounded transitive paths, and file co-location,
+    /// ranks them by a confidence-weighted signal score, and reports honest
+    /// gaps for seeds with no related test. Rows, edges, results, and memory
+    /// are measured exactly like `architecture.overview`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
+    /// resource exhaustion.
+    pub fn execute_tests_select(
+        &self,
+        plan: &TestsSelectPlan,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<TestsSelectResult>, QueryError> {
+        self.require_generation(plan.explanation.generation)?;
+        let started = Instant::now();
+        let control = QueryControl::new(cancellation, plan.budget.max_duration);
+        control.check()?;
+        let document = self.generation.document();
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+
+        let selection = build_tests_select(
+            document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )?;
+
+        let data = TestsSelectResult {
+            generation: self.generation.metadata().generation(),
+            tests: selection.tests,
+            coverage_strategy: selection.coverage_strategy,
+            gaps: selection.gaps,
+            limiting_resources,
+            trust: RepositoryDataTrust::UntrustedRepositoryData,
+        };
+        finish_response(plan.explanation.clone(), data, tracker, started, &control)
+    }
+
     /// Builds a deterministic generation-bound `source.read` plan.
     ///
     /// # Errors
@@ -2040,6 +2158,323 @@ fn build_architecture_overview(
         connections,
         hotspots,
         views,
+    })
+}
+
+/// Served relation families used to relate tests to seed symbols.
+///
+/// Each family maps to a disjoint IR predicate set, so a served relation
+/// contributes to exactly one direct-edge rationale. `CalledBy` is intentionally
+/// omitted because it shares the `Calls` predicate and would double-count the
+/// same directed edge.
+const TESTS_SELECT_FAMILIES: &[RelationFamily] = &[
+    RelationFamily::Calls,
+    RelationFamily::References,
+    RelationFamily::Types,
+    RelationFamily::Implements,
+    RelationFamily::Imports,
+];
+
+/// Maximum honest coverage gaps reported by one `tests.select`.
+const TESTS_SELECT_MAX_GAPS: usize = 128;
+
+/// Test selection assembled before bounded result emission.
+struct TestsSelectAnalysis {
+    tests: Vec<RankedTestSelection>,
+    coverage_strategy: TestsSelectCoverage,
+    gaps: Vec<TestsSelectGap>,
+}
+
+/// One scored test candidate ordered before the bounded result cap.
+struct TestsSelectScored {
+    test_id: SymbolId,
+    kind: TestsSelectKind,
+    score: u16,
+    why: Vec<String>,
+}
+
+/// Returns the honest test granularity for one normalized test entity.
+///
+/// The first-slice lexical oracle records a test as an entity kind or flag but
+/// cannot distinguish integration, end-to-end, or contract tests, so every
+/// detected test entity is reported as unit-level.
+fn test_kind_for_entity(_entity: &rootlight_ir::EntityRecord) -> TestsSelectKind {
+    TestsSelectKind::Unit
+}
+
+/// Computes a deterministic relevance score from the served signals.
+///
+/// Direct edges rank above transitive paths, which rank above file co-location,
+/// and each served signal is confidence-weighted within its disjoint band so the
+/// ordering direct > transitive > co-location always holds.
+fn tests_select_score(direct_confidence: u16, transitive_confidence: u16, colocated: bool) -> u16 {
+    if direct_confidence > 0 {
+        // Direct band: 700 through 1000.
+        return 700 + u16::try_from(u32::from(direct_confidence) * 300 / 1_000).unwrap_or(300);
+    }
+    if transitive_confidence > 0 {
+        // Transitive band: 400 through 600.
+        return 400 + u16::try_from(u32::from(transitive_confidence) * 200 / 1_000).unwrap_or(200);
+    }
+    if colocated {
+        // Co-location band: a fixed honest floor.
+        return 150;
+    }
+    0
+}
+
+/// Builds a bounded test selection for the requested seed set.
+///
+/// Test entities are identified from normalized entity kinds and flags and
+/// related to the seeds through three honest signals: a direct served edge into
+/// a seed, a bounded two-hop transitive path to a seed, and file co-location
+/// with a seed. Candidates are ranked by a confidence-weighted score, capped
+/// deterministically, and seeds with no related test are reported as gaps.
+fn build_tests_select(
+    document: &NormalizedIrDocument,
+    plan: &TestsSelectPlan,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<TestsSelectAnalysis, QueryError> {
+    // Identify test entities and resolve each entity's declaring file from
+    // immutable source evidence.
+    let mut entity_file: BTreeMap<SymbolId, FileId> = BTreeMap::new();
+    let mut tests: BTreeMap<SymbolId, TestsSelectKind> = BTreeMap::new();
+    for entity in &document.entities {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
+        tracker.add_rows(1)?;
+        if let Some(source) = entity.evidence.source.as_ref() {
+            entity_file.insert(entity.id, source.span().file());
+        }
+        if entity_is_test(entity) {
+            tests.insert(entity.id, test_kind_for_entity(entity));
+        }
+    }
+
+    // Single bounded relation scan: `Contains` relations confirm the owning file
+    // of each entity, while served family relations contribute the outbound
+    // adjacency used for the direct and transitive signals.
+    let allowed: BTreeSet<RelationPredicate> = TESTS_SELECT_FAMILIES
+        .iter()
+        .flat_map(|family| family.predicates().iter().copied())
+        .collect();
+    let mut out_adj: BTreeMap<SymbolId, Vec<(SymbolId, RelationFamily, u16)>> = BTreeMap::new();
+    for relation in &document.relations {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
+        tracker.add_rows(1)?;
+        if relation.predicate == RelationPredicate::Contains {
+            if let (RelationEndpoint::File(file), RelationEndpoint::Entity(symbol)) =
+                (relation.subject, relation.object)
+            {
+                entity_file.insert(symbol, file);
+            }
+            continue;
+        }
+        if !allowed.contains(&relation.predicate) {
+            continue;
+        }
+        let Some(family) = predicate_family(TESTS_SELECT_FAMILIES, relation.predicate) else {
+            continue;
+        };
+        let Some(subject) = endpoint_entity(document, relation.subject) else {
+            continue;
+        };
+        let Some(object) = endpoint_entity(document, relation.object) else {
+            continue;
+        };
+        if subject == object {
+            continue;
+        }
+        let confidence = relation.confidence.get();
+        if !tracker.can_add(QueryResource::Edges, 1) {
+            record_limit(limiting_resources, QueryResource::Edges)?;
+            break;
+        }
+        tracker.add_edges(1)?;
+        out_adj
+            .entry(subject)
+            .or_default()
+            .push((object, family, confidence));
+    }
+
+    // Resolve the file set occupied by the seeds for the co-location signal.
+    let mut seed_files: BTreeSet<FileId> = BTreeSet::new();
+    for seed in &plan.seeds {
+        if let Some(file) = entity_file.get(seed) {
+            seed_files.insert(*file);
+        }
+    }
+
+    let requested_kinds: BTreeSet<TestsSelectKind> = plan.test_kinds.iter().copied().collect();
+
+    // Score every test entity that matches the requested kind filter.
+    let mut scored: Vec<TestsSelectScored> = Vec::new();
+    let mut any_direct = false;
+    let mut any_transitive = false;
+    let mut any_colocated = false;
+    let mut covered_seeds: BTreeSet<SymbolId> = BTreeSet::new();
+    for (test_id, kind) in &tests {
+        control.check()?;
+        if !requested_kinds.is_empty() && !requested_kinds.contains(kind) {
+            continue;
+        }
+        let edges = out_adj.get(test_id).map(Vec::as_slice).unwrap_or(&[]);
+        // Direct signal: strongest outbound edge into a seed.
+        let mut direct_confidence = 0_u16;
+        let mut direct_family: Option<RelationFamily> = None;
+        for (target, family, confidence) in edges {
+            if plan.seeds.contains(target) && *confidence > direct_confidence {
+                direct_confidence = *confidence;
+                direct_family = Some(*family);
+                covered_seeds.insert(*target);
+            }
+        }
+        // Transitive signal: strongest two-hop path test -> node -> seed,
+        // weighted by the weakest edge on the path.
+        let mut transitive_confidence = 0_u16;
+        if direct_confidence == 0 {
+            for (mid, _family, first_confidence) in edges {
+                if plan.seeds.contains(mid) {
+                    continue;
+                }
+                let Some(second_hop) = out_adj.get(mid) else {
+                    continue;
+                };
+                for (target, _second_family, second_confidence) in second_hop {
+                    if !plan.seeds.contains(target) {
+                        continue;
+                    }
+                    let path_confidence = (*first_confidence).min(*second_confidence);
+                    if path_confidence > transitive_confidence {
+                        transitive_confidence = path_confidence;
+                        covered_seeds.insert(*target);
+                    }
+                }
+            }
+        }
+        // Co-location signal: the test shares a declaring file with a seed.
+        let colocated = entity_file
+            .get(test_id)
+            .is_some_and(|file| seed_files.contains(file));
+        if colocated && let Some(test_file) = entity_file.get(test_id) {
+            for seed in &plan.seeds {
+                if entity_file.get(seed) == Some(test_file) {
+                    covered_seeds.insert(*seed);
+                }
+            }
+        }
+
+        let direct = direct_confidence > 0;
+        let transitive = transitive_confidence > 0 && !direct;
+        if direct {
+            any_direct = true;
+        }
+        if transitive {
+            any_transitive = true;
+        }
+        if colocated {
+            any_colocated = true;
+        }
+        if !direct && !transitive && !colocated {
+            continue;
+        }
+
+        let score = tests_select_score(direct_confidence, transitive_confidence, colocated);
+        let mut why = Vec::new();
+        if direct {
+            why.push("direct_test_edge".to_owned());
+            if let Some(family) = direct_family {
+                why.push(format!("via:{}", family.as_str()));
+            }
+        }
+        if transitive {
+            why.push("transitive_dependency".to_owned());
+        }
+        if colocated {
+            why.push("shared_file_with_seed".to_owned());
+        }
+        why.truncate(8);
+        scored.push(TestsSelectScored {
+            test_id: *test_id,
+            kind: *kind,
+            score,
+            why,
+        });
+    }
+
+    // Rank deterministically by score then identity and apply the test cap.
+    scored.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.test_id.cmp(&right.test_id))
+    });
+    let mut ranked_tests: Vec<RankedTestSelection> = Vec::new();
+    for entry in scored {
+        if ranked_tests.len() >= plan.max_tests {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            break;
+        }
+        let path = entity_file
+            .get(&entry.test_id)
+            .and_then(|file| find_file(document, *file))
+            .map(|record| record.path.clone());
+        let command_hint = plan
+            .include_commands
+            .then(|| format!("test:{}", entry.kind.as_str()));
+        let ranked = RankedTestSelection {
+            test_id: entry.test_id,
+            kind: entry.kind,
+            path,
+            score: entry.score,
+            why: entry.why,
+            estimated_cost_ms: None,
+            command_hint,
+        };
+        emit_cycle_value(
+            &mut ranked_tests,
+            ranked,
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+    }
+
+    // Report an honest gap for every seed scope with no related test.
+    let mut gaps: Vec<TestsSelectGap> = Vec::new();
+    for seed in &plan.seeds {
+        if covered_seeds.contains(seed) {
+            continue;
+        }
+        if gaps.len() >= TESTS_SELECT_MAX_GAPS {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            break;
+        }
+        let gap = TestsSelectGap {
+            scope: seed.to_string(),
+            reason: "no_related_test".to_owned(),
+        };
+        emit_cycle_value(&mut gaps, gap, tracker, limiting_resources, control)?;
+    }
+
+    Ok(TestsSelectAnalysis {
+        tests: ranked_tests,
+        coverage_strategy: TestsSelectCoverage {
+            direct_edges: any_direct,
+            transitive_signals: any_transitive,
+            history_signals: false,
+            build_target_signals: any_colocated,
+        },
+        gaps,
     })
 }
 
@@ -4324,5 +4759,246 @@ mod tests {
         assert_eq!(first.connections, second.connections);
         assert_eq!(first.hotspots, second.hotspots);
         assert_eq!(first.views, second.views);
+    }
+
+    // -----------------------------------------------------------------
+    // tests.select synthetic-document proofs
+    // -----------------------------------------------------------------
+
+    use crate::model::{TestsSelectKind, TestsSelectPlan};
+
+    fn tests_select_plan(
+        seeds: BTreeSet<SymbolId>,
+        test_kinds: Vec<TestsSelectKind>,
+        max_tests: usize,
+        include_commands: bool,
+    ) -> TestsSelectPlan {
+        TestsSelectPlan {
+            seeds,
+            test_kinds,
+            max_tests,
+            include_commands,
+            budget: QueryBudget::new(),
+            explanation: PlanExplanation {
+                generation: GenerationId::from_bytes([0; 20]),
+                kind: PlanKind::TestsSelect,
+                operators: Vec::new(),
+                estimate: PlanEstimate {
+                    rows: 0,
+                    edges: 0,
+                    results: 0,
+                    source_bytes: 0,
+                    memory_bytes: 0,
+                    json_bytes: 0,
+                    estimated_tokens: 0,
+                    duration_micros: 0,
+                },
+            },
+        }
+    }
+
+    fn run_tests_select(
+        document: &NormalizedIrDocument,
+        plan: &TestsSelectPlan,
+    ) -> TestsSelectAnalysis {
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+        build_tests_select(
+            document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("bounded tests select succeeds")
+    }
+
+    #[test]
+    fn tests_select_ranks_a_direct_edge_test_above_colocation() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/seed.rs");
+        add_file(&mut document, 2, "src/test.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 21, 2, EntityKind::Test);
+        add_entity(&mut document, 22, 1, EntityKind::Test);
+        // Test 21 calls the seed directly; test 22 only shares the seed's file.
+        add_calls(&mut document, 110, 21, 11, 900);
+
+        let plan = tests_select_plan(BTreeSet::from([symbol(11)]), Vec::new(), 20, true);
+        let selection = run_tests_select(&document, &plan);
+
+        assert_eq!(selection.tests.len(), 2);
+        // The direct-edge test ranks first with a confidence-weighted score.
+        assert_eq!(selection.tests[0].test_id, symbol(21));
+        assert_eq!(selection.tests[0].kind, TestsSelectKind::Unit);
+        assert_eq!(selection.tests[0].score, 970);
+        assert_eq!(selection.tests[0].path.as_deref(), Some("src/test.rs"));
+        assert!(
+            selection.tests[0]
+                .why
+                .contains(&"direct_test_edge".to_owned())
+        );
+        assert!(selection.tests[0].why.contains(&"via:calls".to_owned()));
+        assert_eq!(
+            selection.tests[0].command_hint.as_deref(),
+            Some("test:unit")
+        );
+        assert_eq!(selection.tests[0].estimated_cost_ms, None);
+        // The co-located test ranks second on the fixed co-location floor.
+        assert_eq!(selection.tests[1].test_id, symbol(22));
+        assert_eq!(selection.tests[1].score, 150);
+        assert_eq!(selection.tests[1].path.as_deref(), Some("src/seed.rs"));
+        assert!(
+            selection.tests[1]
+                .why
+                .contains(&"shared_file_with_seed".to_owned())
+        );
+        // Both signals are reported used; history is never served in this slice.
+        assert!(selection.coverage_strategy.direct_edges);
+        assert!(selection.coverage_strategy.build_target_signals);
+        assert!(!selection.coverage_strategy.transitive_signals);
+        assert!(!selection.coverage_strategy.history_signals);
+        // The seed is covered, so no gap is reported.
+        assert!(selection.gaps.is_empty());
+    }
+
+    #[test]
+    fn tests_select_uses_a_bounded_transitive_signal() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/t.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Function);
+        add_entity(&mut document, 21, 2, EntityKind::Test);
+        // test 21 -> intermediate 12 -> seed 11; weakest edge weights the path.
+        add_calls(&mut document, 110, 21, 12, 800);
+        add_calls(&mut document, 111, 12, 11, 600);
+
+        let plan = tests_select_plan(BTreeSet::from([symbol(11)]), Vec::new(), 20, false);
+        let selection = run_tests_select(&document, &plan);
+
+        assert_eq!(selection.tests.len(), 1);
+        assert_eq!(selection.tests[0].test_id, symbol(21));
+        // Transitive band: 400 + 600 * 200 / 1000 = 520.
+        assert_eq!(selection.tests[0].score, 520);
+        assert!(
+            selection.tests[0]
+                .why
+                .contains(&"transitive_dependency".to_owned())
+        );
+        assert_eq!(selection.tests[0].command_hint, None);
+        assert!(!selection.coverage_strategy.direct_edges);
+        assert!(selection.coverage_strategy.transitive_signals);
+        assert!(!selection.coverage_strategy.build_target_signals);
+        assert!(selection.gaps.is_empty());
+    }
+
+    #[test]
+    fn tests_select_honors_the_max_tests_cap() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 21, 1, EntityKind::Test);
+        add_entity(&mut document, 22, 1, EntityKind::Test);
+        add_entity(&mut document, 23, 1, EntityKind::Test);
+
+        let plan = tests_select_plan(BTreeSet::from([symbol(11)]), Vec::new(), 2, false);
+        let selection = run_tests_select(&document, &plan);
+
+        // All three tests are co-located; the cap keeps the lowest identities.
+        assert_eq!(selection.tests.len(), 2);
+        assert_eq!(selection.tests[0].test_id, symbol(21));
+        assert_eq!(selection.tests[1].test_id, symbol(22));
+    }
+
+    #[test]
+    fn tests_select_reports_gaps_for_untested_seeds() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/b.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 2, EntityKind::Function);
+        add_entity(&mut document, 21, 1, EntityKind::Test);
+        add_calls(&mut document, 110, 21, 11, 900);
+
+        let plan = tests_select_plan(
+            BTreeSet::from([symbol(11), symbol(12)]),
+            Vec::new(),
+            20,
+            false,
+        );
+        let selection = run_tests_select(&document, &plan);
+
+        assert_eq!(selection.tests.len(), 1);
+        assert_eq!(selection.tests[0].test_id, symbol(21));
+        // Seed 12 has no related test, so it is reported as an honest gap.
+        assert_eq!(selection.gaps.len(), 1);
+        assert_eq!(selection.gaps[0].scope, symbol(12).to_string());
+        assert_eq!(selection.gaps[0].reason, "no_related_test");
+    }
+
+    #[test]
+    fn tests_select_filters_by_test_kind() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 21, 1, EntityKind::Test);
+        add_calls(&mut document, 110, 21, 11, 900);
+
+        // The lexical oracle reports every test as unit-level, so a unit filter
+        // keeps it while an integration filter honestly selects nothing and
+        // leaves the seed uncovered.
+        let unit_plan = tests_select_plan(
+            BTreeSet::from([symbol(11)]),
+            vec![TestsSelectKind::Unit],
+            20,
+            false,
+        );
+        let unit_selection = run_tests_select(&document, &unit_plan);
+        assert_eq!(unit_selection.tests.len(), 1);
+        assert!(unit_selection.gaps.is_empty());
+
+        let integration_plan = tests_select_plan(
+            BTreeSet::from([symbol(11)]),
+            vec![TestsSelectKind::Integration],
+            20,
+            false,
+        );
+        let integration_selection = run_tests_select(&document, &integration_plan);
+        assert!(integration_selection.tests.is_empty());
+        assert_eq!(integration_selection.gaps.len(), 1);
+        assert_eq!(integration_selection.gaps[0].scope, symbol(11).to_string());
+    }
+
+    #[test]
+    fn tests_select_is_deterministic() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/seed.rs");
+        add_file(&mut document, 2, "src/test.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 2, EntityKind::Function);
+        add_entity(&mut document, 21, 2, EntityKind::Test);
+        add_entity(&mut document, 22, 1, EntityKind::Test);
+        add_calls(&mut document, 110, 21, 11, 900);
+        add_calls(&mut document, 111, 21, 12, 700);
+
+        let plan = tests_select_plan(
+            BTreeSet::from([symbol(11), symbol(12)]),
+            Vec::new(),
+            20,
+            true,
+        );
+        let first = run_tests_select(&document, &plan);
+        let second = run_tests_select(&document, &plan);
+
+        assert_eq!(first.tests, second.tests);
+        assert_eq!(first.gaps, second.gaps);
+        assert_eq!(first.coverage_strategy, second.coverage_strategy);
     }
 }

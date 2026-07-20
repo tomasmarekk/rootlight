@@ -194,6 +194,8 @@ pub enum PlanKind {
     CodeDead,
     /// Aggregate a bounded file-granularity architecture overview.
     ArchitectureOverview,
+    /// Select bounded relevant tests for a seed set.
+    TestsSelect,
     /// Read generation-bound source.
     SourceRead,
 }
@@ -999,6 +1001,135 @@ pub struct ArchitectureOverviewResult {
     pub hotspots: Vec<ArchitectureHotspot>,
     /// Derived-view algorithm metadata in deterministic order.
     pub views: Vec<ArchitectureOverviewDerivedView>,
+    /// Resource limits that stopped work, in deterministic execution order.
+    pub limiting_resources: Vec<QueryResource>,
+    /// Mandatory trust marker for repository-controlled values.
+    pub trust: RepositoryDataTrust,
+}
+
+/// Test granularity category served by a `tests.select` query.
+///
+/// The first-slice lexical oracle records a test as an entity kind or flag but
+/// cannot distinguish integration, end-to-end, or contract tests, so every
+/// detected test entity is honestly reported as a unit-level test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TestsSelectKind {
+    /// Unit-level test.
+    Unit,
+    /// Integration test spanning components.
+    Integration,
+    /// End-to-end test.
+    E2e,
+    /// Contract or schema compatibility test.
+    Contract,
+    /// Static analysis or lint check.
+    Static,
+    /// Build or compilation verification.
+    Build,
+}
+
+impl TestsSelectKind {
+    /// Returns the stable wire label shared with the MCP test-kind contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unit => "unit",
+            Self::Integration => "integration",
+            Self::E2e => "e2e",
+            Self::Contract => "contract",
+            Self::Static => "static",
+            Self::Build => "build",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "unit" => Some(Self::Unit),
+            "integration" => Some(Self::Integration),
+            "e2e" => Some(Self::E2e),
+            "contract" => Some(Self::Contract),
+            "static" => Some(Self::Static),
+            "build" => Some(Self::Build),
+            _ => None,
+        }
+    }
+}
+
+/// Prevalidated `tests.select` plan.
+#[derive(Debug, Clone)]
+pub struct TestsSelectPlan {
+    pub(crate) seeds: BTreeSet<SymbolId>,
+    pub(crate) test_kinds: Vec<TestsSelectKind>,
+    pub(crate) max_tests: usize,
+    pub(crate) include_commands: bool,
+    pub(crate) budget: QueryBudget,
+    pub(crate) explanation: PlanExplanation,
+}
+
+impl TestsSelectPlan {
+    /// Returns the deterministic plan explanation.
+    #[must_use]
+    pub const fn explanation(&self) -> &PlanExplanation {
+        &self.explanation
+    }
+}
+
+/// One ranked test selected for relevance to the seed set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RankedTestSelection {
+    /// Stable symbol identity of the test.
+    pub test_id: SymbolId,
+    /// Test granularity category.
+    pub kind: TestsSelectKind,
+    /// Repository-controlled display path to the test, when served.
+    pub path: Option<String>,
+    /// Relevance score from 0 through 1000.
+    pub score: u16,
+    /// Source-free rationale codes, in deterministic order.
+    pub why: Vec<String>,
+    /// Estimated execution cost in milliseconds; always absent in this slice.
+    pub estimated_cost_ms: Option<u32>,
+    /// Inert declarative command hint; only present when requested.
+    pub command_hint: Option<String>,
+}
+
+/// Coverage signals actually used by a `tests.select` ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TestsSelectCoverage {
+    /// Whether direct test-to-seed edges were used.
+    pub direct_edges: bool,
+    /// Whether transitive dependency signals were used.
+    pub transitive_signals: bool,
+    /// Whether historical co-change signals were used; always false here.
+    pub history_signals: bool,
+    /// Whether file co-location with a seed was used.
+    pub build_target_signals: bool,
+}
+
+/// One honest gap where a seed scope has no related test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TestsSelectGap {
+    /// Seed scope identifier with no related test.
+    pub scope: String,
+    /// Source-free reason code.
+    pub reason: String,
+}
+
+/// Data returned by a `tests.select` plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TestsSelectResult {
+    /// Immutable generation that served the query.
+    pub generation: GenerationId,
+    /// Ranked tests in deterministic order.
+    pub tests: Vec<RankedTestSelection>,
+    /// Coverage signals actually used by the ranking.
+    pub coverage_strategy: TestsSelectCoverage,
+    /// Honest coverage gaps in deterministic order.
+    pub gaps: Vec<TestsSelectGap>,
     /// Resource limits that stopped work, in deterministic execution order.
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.

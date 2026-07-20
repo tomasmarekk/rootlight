@@ -21,10 +21,11 @@ pub use model::{
     DeadCodeClassification, FlowTraceEdge, FlowTraceFrontier, FlowTracePath, FlowTracePlan,
     FlowTraceProjection, FlowTraceResult, LocateHit, LocateMode, PlanEstimate, PlanExplanation,
     PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage,
-    RelationDirection, RelationFamily, RelationshipEdgeTarget, RelationshipGroup,
-    RepositoryDataTrust, SourceChunkResult, SourceReadPlan, SourceReadQueryResult,
-    SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult,
-    TokenAccountingProfile,
+    RankedTestSelection, RelationDirection, RelationFamily, RelationshipEdgeTarget,
+    RelationshipGroup, RepositoryDataTrust, SourceChunkResult, SourceReadPlan,
+    SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
+    SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap, TestsSelectKind,
+    TestsSelectPlan, TestsSelectResult, TokenAccountingProfile,
 };
 pub use projection::project_lexical_documents;
 pub use service::QueryService;
