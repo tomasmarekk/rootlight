@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod accounting;
 pub mod catalog;
 pub mod change;
 pub mod context;
