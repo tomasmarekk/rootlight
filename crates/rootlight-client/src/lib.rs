@@ -1126,6 +1126,90 @@ pub struct TestsSelect {
     pub gaps: Vec<TestsSelectGap>,
 }
 
+/// One resolved change from the input change set.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChangeImpactResolvedChange {
+    /// Stable symbol identity, when the change maps to a known symbol.
+    pub symbol_id: Option<SymbolId>,
+    /// File identity for the changed span, when resolved.
+    pub file_id: Option<FileId>,
+    /// Classification label, such as `surface` or `body`.
+    pub classification: String,
+    /// Entity kind label of the affected symbol, when resolved.
+    pub kind: Option<String>,
+}
+
+/// One impacted dependent with path rationale.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChangeImpactEntry {
+    /// Affected symbol identity.
+    pub symbol_id: SymbolId,
+    /// Entity kind label of the affected symbol.
+    pub kind: String,
+    /// Transitive distance from the change, 1 through 8.
+    pub distance: u8,
+    /// Confidence in the impact path, 0 through 1000.
+    pub confidence: u16,
+    /// Relation predicate labels forming the impact path.
+    pub via: Vec<String>,
+    /// Whether this dependent is a public surface.
+    pub is_public: bool,
+}
+
+/// One grouped set of impacted dependents for a resolved change.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChangeImpactGroup {
+    /// Index of the originating resolved change.
+    pub source_index: u16,
+    /// Ranked dependents in deterministic order.
+    pub dependents: Vec<ChangeImpactEntry>,
+}
+
+/// One test candidate relevant to the change.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChangeImpactTest {
+    /// Stable test identity.
+    pub test_id: String,
+    /// Relevance score, 0 through 1000.
+    pub relevance: u16,
+    /// Source-free rationale codes in deterministic order.
+    pub why: Vec<String>,
+    /// Estimated execution cost in milliseconds, when available.
+    pub estimated_cost_ms: Option<u32>,
+}
+
+/// Aggregate risk summary for a change-impact result.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChangeImpactRiskSummary {
+    /// Aggregate risk level label, such as `low` or `high`.
+    pub level: String,
+    /// Source-free reason codes in deterministic order.
+    pub reasons: Vec<String>,
+    /// Coverage status label, such as `unknown`.
+    pub coverage: String,
+    /// Whether public surface was changed.
+    pub breaking_surface: bool,
+    /// Total transitive fanout count.
+    pub fanout: u32,
+    /// Whether dynamic or reflection-based relations create blind spots.
+    pub dynamic_blind_spots: bool,
+}
+
+/// Bounded change impact for one generation and explicit change set.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChangeImpact {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Resolved changes from the input change set.
+    pub resolved_changes: Vec<ChangeImpactResolvedChange>,
+    /// Ranked impact groups, one per resolved change.
+    pub impacted: Vec<ChangeImpactGroup>,
+    /// Test candidates when requested.
+    pub tests: Vec<ChangeImpactTest>,
+    /// Aggregate risk summary.
+    pub risk_summary: ChangeImpactRiskSummary,
+}
+
 /// Validated total deadline budget for one asynchronous daemon request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestTimeout(Duration);
@@ -2507,6 +2591,102 @@ impl Client {
         }
     }
 
+    /// Maps bounded change impact for an explicit change set over one
+    /// generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for an invalid endpoint, an empty or oversized
+    /// change set, out-of-range depth, confidence, or dependent bounds,
+    /// unavailable protocol support, transport failure, or a malformed or
+    /// uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded change impact dimension"
+    )]
+    pub fn change_impact(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        changed_symbols: &[SymbolId],
+        changed_paths: &[String],
+        max_depth: Option<u8>,
+        min_confidence: Option<u16>,
+        include_tests: Option<bool>,
+        max_dependents: Option<u16>,
+    ) -> Result<ChangeImpact, ClientError> {
+        match self.request(build_change_impact_request(
+            repository,
+            generation,
+            changed_symbols,
+            changed_paths,
+            max_depth,
+            min_confidence,
+            include_tests,
+            max_dependents,
+        )?)? {
+            daemon::response_envelope::Response::ChangeImpact(response) => {
+                parse_change_impact(response, repository, generation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously maps bounded change impact for an explicit change set over
+    /// one generation.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached analysis.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for an invalid endpoint, an empty or oversized
+    /// change set, out-of-range depth, confidence, or dependent bounds,
+    /// unavailable protocol support, transport failure, timeout, or a malformed
+    /// or uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded change impact dimension"
+    )]
+    pub async fn change_impact_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        changed_symbols: &[SymbolId],
+        changed_paths: &[String],
+        max_depth: Option<u8>,
+        min_confidence: Option<u16>,
+        include_tests: Option<bool>,
+        max_dependents: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> Result<ChangeImpact, ClientError> {
+        match self
+            .request_async(
+                build_change_impact_request(
+                    repository,
+                    generation,
+                    changed_symbols,
+                    changed_paths,
+                    max_depth,
+                    min_confidence,
+                    include_tests,
+                    max_dependents,
+                )?,
+                timeout,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::ChangeImpact(response) => {
+                parse_change_impact(response, repository, generation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     fn request(
         &self,
         request: daemon::request_envelope::Request,
@@ -3107,7 +3287,8 @@ fn ensure_request_supported(
         | daemon::request_envelope::Request::ArchitectureCycles(_)
         | daemon::request_envelope::Request::CodeDead(_)
         | daemon::request_envelope::Request::ArchitectureOverview(_)
-        | daemon::request_envelope::Request::TestsSelect(_) => 5,
+        | daemon::request_envelope::Request::TestsSelect(_)
+        | daemon::request_envelope::Request::ChangeImpact(_) => 5,
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
         daemon::request_envelope::Request::OperationLeaseRenew(_) => {
@@ -4914,6 +5095,203 @@ fn parse_tests_select(
             build_target_signals: strategy.build_target_signals,
         },
         gaps,
+    })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one bounded change impact dimension"
+)]
+fn build_change_impact_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    changed_symbols: &[SymbolId],
+    changed_paths: &[String],
+    max_depth: Option<u8>,
+    min_confidence: Option<u16>,
+    include_tests: Option<bool>,
+    max_dependents: Option<u16>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if changed_symbols.is_empty() && changed_paths.is_empty() {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if changed_symbols.len() > 256 || changed_paths.len() > 1_000 {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if changed_paths
+        .iter()
+        .any(|path| path.is_empty() || path.len() > 8_192 || path.as_bytes().contains(&0))
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if max_depth.is_some_and(|depth| !(1..=8).contains(&depth)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if min_confidence.is_some_and(|confidence| confidence > 1_000) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if max_dependents.is_some_and(|max| !(1..=500).contains(&max)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::ChangeImpact(
+        daemon::ChangeImpactRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            changed_symbols: changed_symbols
+                .iter()
+                .copied()
+                .map(symbol_to_wire)
+                .collect(),
+            changed_paths: changed_paths.to_vec(),
+            max_depth: max_depth.map(u32::from),
+            min_confidence: min_confidence.map(u32::from),
+            include_tests,
+            max_dependents: max_dependents.map(u32::from),
+        },
+    ))
+}
+
+fn parse_change_impact(
+    response: daemon::ChangeImpactResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+) -> Result<ChangeImpact, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(response.context, repository, selector)?;
+    let wire_risk = response
+        .risk_summary
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    if response.resolved_changes.is_empty()
+        || response.resolved_changes.len() > 1_256
+        || response.impacted.len() > 1_256
+        || response.tests.len() > 500
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut resolved_changes = Vec::new();
+    resolved_changes
+        .try_reserve_exact(response.resolved_changes.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for change in response.resolved_changes {
+        if change.classification.is_empty()
+            || change.classification.len() > 32
+            || change
+                .kind
+                .as_ref()
+                .is_some_and(|kind| kind.is_empty() || kind.len() > 32)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let symbol_id = match change.symbol_id {
+            Some(symbol) => Some(parse_symbol(Some(symbol))?),
+            None => None,
+        };
+        let file_id = match change.file_id {
+            Some(file) => Some(parse_file(Some(file))?),
+            None => None,
+        };
+        resolved_changes.push(ChangeImpactResolvedChange {
+            symbol_id,
+            file_id,
+            classification: change.classification,
+            kind: change.kind,
+        });
+    }
+    let mut impacted = Vec::new();
+    impacted
+        .try_reserve_exact(response.impacted.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for group in response.impacted {
+        if group.dependents.len() > 500 {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let mut dependents = Vec::new();
+        dependents
+            .try_reserve_exact(group.dependents.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for entry in group.dependents {
+            if entry.kind.is_empty()
+                || entry.kind.len() > 32
+                || !(1..=8).contains(&entry.distance)
+                || entry.confidence > 1_000
+                || entry.via.is_empty()
+                || entry.via.len() > 16
+                || entry
+                    .via
+                    .iter()
+                    .any(|predicate| predicate.is_empty() || predicate.len() > 128)
+            {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+            dependents.push(ChangeImpactEntry {
+                symbol_id: parse_symbol(entry.symbol_id)?,
+                kind: entry.kind,
+                distance: u8::try_from(entry.distance)
+                    .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+                confidence: u16::try_from(entry.confidence)
+                    .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+                via: entry.via,
+                is_public: entry.is_public,
+            });
+        }
+        impacted.push(ChangeImpactGroup {
+            source_index: u16::try_from(group.source_index)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            dependents,
+        });
+    }
+    let mut tests = Vec::new();
+    tests
+        .try_reserve_exact(response.tests.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for test in response.tests {
+        if test.test_id.is_empty()
+            || test.test_id.len() > 512
+            || test.relevance > 1_000
+            || test.why.is_empty()
+            || test.why.len() > 8
+            || test
+                .why
+                .iter()
+                .any(|reason| reason.is_empty() || reason.len() > 128)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        tests.push(ChangeImpactTest {
+            test_id: test.test_id,
+            relevance: u16::try_from(test.relevance)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            why: test.why,
+            estimated_cost_ms: test.estimated_cost_ms,
+        });
+    }
+    if wire_risk.level.is_empty()
+        || wire_risk.level.len() > 32
+        || wire_risk.reasons.len() > 16
+        || wire_risk
+            .reasons
+            .iter()
+            .any(|reason| reason.is_empty() || reason.len() > 128)
+        || wire_risk.coverage.is_empty()
+        || wire_risk.coverage.len() > 32
+        || wire_risk.fanout > 100_000
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(ChangeImpact {
+        context,
+        resolved_changes,
+        impacted,
+        tests,
+        risk_summary: ChangeImpactRiskSummary {
+            level: wire_risk.level,
+            reasons: wire_risk.reasons,
+            coverage: wire_risk.coverage,
+            breaking_surface: wire_risk.breaking_surface,
+            fanout: wire_risk.fanout,
+            dynamic_blind_spots: wire_risk.dynamic_blind_spots,
+        },
     })
 }
 
