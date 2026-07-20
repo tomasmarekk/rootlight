@@ -8,7 +8,7 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{FactId, FileId, GenerationId, SymbolId};
 use rootlight_ir::{
     CoverageRecord, CoverageScope, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint,
-    SourceRef,
+    RelationPredicate, SourceRef,
 };
 use rootlight_search::{LexicalSearch, SearchBudget, SearchRequest, validate_search_request};
 use rootlight_source::{SourceBudget, SourceError, SourceReadOptions, SourceService};
@@ -16,13 +16,14 @@ use rootlight_storage::GenerationSnapshot;
 use serde::Serialize;
 
 use crate::model::{
-    CodeLocatePlan, CodeLocateResult, LocateHit, LocateMode, PlanEstimate, PlanExplanation,
-    PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage,
-    RelationDirection, RelationFamily, RelationshipEdgeTarget, RelationshipGroup,
-    RepositoryDataTrust, SourceChunkResult, SourceReadPlan, SourceReadQueryResult,
-    SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult,
-    TokenAccountingProfile, checked_add, checked_u128_to_u64, checked_usize_to_u64,
-    ensure_estimate, search_mode,
+    CodeLocatePlan, CodeLocateResult, FlowTraceEdge, FlowTraceFrontier, FlowTracePath,
+    FlowTracePlan, FlowTraceProjection, FlowTraceResult, LocateHit, LocateMode, PlanEstimate,
+    PlanExplanation, PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource,
+    QueryResponse, QueryUsage, RelationDirection, RelationFamily, RelationshipEdgeTarget,
+    RelationshipGroup, RepositoryDataTrust, SourceChunkResult, SourceReadPlan,
+    SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
+    SymbolRelationshipsResult, TokenAccountingProfile, checked_add, checked_u128_to_u64,
+    checked_usize_to_u64, ensure_estimate, search_mode,
 };
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
@@ -626,6 +627,151 @@ where
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
     }
 
+    /// Builds a deterministic bounded `flow.trace` plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid budget, empty or oversized
+    /// relation-family set, out-of-range confidence, depth, or path bounds,
+    /// arithmetic overflow, or a conservative estimate that cannot be admitted.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded flow trace dimension"
+    )]
+    pub fn plan_flow_trace(
+        &self,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        direction: Option<RelationDirection>,
+        mut families: Vec<RelationFamily>,
+        min_confidence: u16,
+        max_depth: u8,
+        max_paths: usize,
+        budget: QueryBudget,
+    ) -> Result<FlowTracePlan, QueryError> {
+        budget.validate()?;
+        if families.is_empty() || families.len() > 16 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if min_confidence > 1_000 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if max_depth == 0 || max_depth > 8 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if max_paths == 0
+            || max_paths > 100
+            || checked_usize_to_u64(max_paths)? > budget.max_results
+        {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        families.sort();
+        families.dedup();
+        let estimate = PlanEstimate {
+            rows: budget.max_rows,
+            edges: budget.max_edges,
+            results: budget.max_results,
+            source_bytes: 0,
+            // The normalized generation bounds every record, while the query
+            // memory budget remains the conservative aggregate ceiling.
+            memory_bytes: budget.max_memory_bytes,
+            json_bytes: budget.max_json_bytes,
+            estimated_tokens: budget.max_tokens,
+            duration_micros: duration_micros(budget.max_duration),
+        };
+        ensure_estimate(estimate, budget)?;
+        let explanation = PlanExplanation {
+            generation: self.generation.metadata().generation(),
+            kind: PlanKind::FlowTrace,
+            operators: vec![
+                QueryOperator::GenerationPin,
+                QueryOperator::RelationScan,
+                QueryOperator::OutputBudget,
+            ],
+            estimate,
+        };
+        Ok(FlowTracePlan {
+            from,
+            to,
+            direction: direction.unwrap_or(RelationDirection::Outbound),
+            families,
+            min_confidence,
+            max_depth,
+            max_paths,
+            budget,
+            explanation,
+        })
+    }
+
+    /// Executes a prevalidated `flow.trace` plan.
+    ///
+    /// The scan builds a directed adjacency view over the requested relation
+    /// projection, then enumerates bounded paths from the source node up to the
+    /// configured depth and path cap, measuring rows, edges, results, and
+    /// memory exactly like `symbol.relationships`. Without a target the trace
+    /// reports bounded outward paths to every reached node; with a target it
+    /// reports only paths that reach it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
+    /// resource exhaustion.
+    pub fn execute_flow_trace(
+        &self,
+        plan: &FlowTracePlan,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<FlowTraceResult>, QueryError> {
+        self.require_generation(plan.explanation.generation)?;
+        let started = Instant::now();
+        let control = QueryControl::new(cancellation, plan.budget.max_duration);
+        control.check()?;
+        let document = self.generation.document();
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+
+        let (adjacency, scan_truncated) = build_flow_adjacency(
+            document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )?;
+        let (paths, mut frontier) = trace_flow(
+            &adjacency,
+            plan.from,
+            plan.to,
+            plan.max_depth,
+            plan.max_paths,
+            &mut tracker,
+            &mut limiting_resources,
+            &control,
+        )?;
+        if scan_truncated {
+            frontier.truncated = true;
+        }
+
+        let data = FlowTraceResult {
+            generation: self.generation.metadata().generation(),
+            paths,
+            frontier,
+            projection: FlowTraceProjection {
+                families: plan.families.clone(),
+                min_confidence: plan.min_confidence,
+            },
+            limiting_resources,
+            trust: RepositoryDataTrust::UntrustedRepositoryData,
+        };
+        finish_response(plan.explanation.clone(), data, tracker, started, &control)
+    }
+
     /// Builds a deterministic generation-bound `source.read` plan.
     ///
     /// # Errors
@@ -892,6 +1038,328 @@ fn occurrence_enclosing(document: &NormalizedIrDocument, occurrence: FactId) -> 
         .ok()
         .and_then(|index| document.occurrences.get(index))
         .and_then(|record| record.enclosing)
+}
+
+/// One directed adjacency edge used by a `flow.trace` traversal.
+#[derive(Debug, Clone)]
+struct FlowAdjEdge {
+    target: SymbolId,
+    family: RelationFamily,
+    confidence: u16,
+    source_refs: Vec<SourceRef>,
+}
+
+/// Returns the first requested family admitting a predicate, in plan order.
+///
+/// The plan families are sorted and deduplicated, so the first match is
+/// deterministic even when several requested families share a predicate (for
+/// example `calls` and `called_by` both admit the `Calls` predicate).
+fn predicate_family(
+    families: &[RelationFamily],
+    predicate: RelationPredicate,
+) -> Option<RelationFamily> {
+    families
+        .iter()
+        .copied()
+        .find(|family| family.predicates().contains(&predicate))
+}
+
+/// Builds a directed adjacency view over the requested relation projection.
+///
+/// Each relation whose predicate is admitted by the projection and whose
+/// confidence clears the threshold contributes entity-to-entity edges honoring
+/// the traversal direction. Repository and file endpoints and occurrence-less
+/// endpoints contribute nothing. The returned flag reports whether the relation
+/// scan was cut short by a row or edge budget.
+fn build_flow_adjacency(
+    document: &NormalizedIrDocument,
+    plan: &FlowTracePlan,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<(BTreeMap<SymbolId, Vec<FlowAdjEdge>>, bool), QueryError> {
+    let allowed: BTreeSet<RelationPredicate> = plan
+        .families
+        .iter()
+        .flat_map(|family| family.predicates().iter().copied())
+        .collect();
+    let mut adjacency: BTreeMap<SymbolId, Vec<FlowAdjEdge>> = BTreeMap::new();
+    if allowed.is_empty() {
+        return Ok((adjacency, false));
+    }
+    let mut scan_truncated = false;
+    for relation in &document.relations {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            scan_truncated = true;
+            break;
+        }
+        if !tracker.can_add(QueryResource::Edges, 1) {
+            record_limit(limiting_resources, QueryResource::Edges)?;
+            scan_truncated = true;
+            break;
+        }
+        tracker.add_rows(1)?;
+        tracker.add_edges(1)?;
+        if !allowed.contains(&relation.predicate) {
+            continue;
+        }
+        let confidence = relation.confidence.get();
+        if confidence < plan.min_confidence {
+            continue;
+        }
+        let Some(family) = predicate_family(&plan.families, relation.predicate) else {
+            continue;
+        };
+        let Some(subject) = endpoint_entity(document, relation.subject) else {
+            continue;
+        };
+        let Some(object) = endpoint_entity(document, relation.object) else {
+            continue;
+        };
+        let source_refs: Vec<SourceRef> = relation.evidence.source.iter().cloned().collect();
+        match plan.direction {
+            RelationDirection::Outbound => {
+                adjacency.entry(subject).or_default().push(FlowAdjEdge {
+                    target: object,
+                    family,
+                    confidence,
+                    source_refs,
+                })
+            }
+            RelationDirection::Inbound => adjacency.entry(object).or_default().push(FlowAdjEdge {
+                target: subject,
+                family,
+                confidence,
+                source_refs,
+            }),
+            RelationDirection::Both => {
+                adjacency.entry(subject).or_default().push(FlowAdjEdge {
+                    target: object,
+                    family,
+                    confidence,
+                    source_refs: source_refs.clone(),
+                });
+                adjacency.entry(object).or_default().push(FlowAdjEdge {
+                    target: subject,
+                    family,
+                    confidence,
+                    source_refs,
+                });
+            }
+        }
+    }
+    for edges in adjacency.values_mut() {
+        edges.sort_by(|left, right| {
+            left.target
+                .cmp(&right.target)
+                .then_with(|| left.family.as_str().cmp(right.family.as_str()))
+                .then_with(|| right.confidence.cmp(&left.confidence))
+        });
+    }
+    Ok((adjacency, scan_truncated))
+}
+
+/// Mutable state threaded through the bounded `flow.trace` depth-first walk.
+struct FlowWalkState<'tracker, 'limits> {
+    tracker: &'tracker mut UsageTracker,
+    limiting_resources: &'limits mut Vec<QueryResource>,
+    paths: Vec<FlowTracePath>,
+    reached: BTreeSet<SymbolId>,
+    examined_edges: u64,
+    truncated: bool,
+    depth_cut: bool,
+}
+
+/// Enumerates bounded paths from `from` over the adjacency view.
+///
+/// Without a target, every prefix path from the source to a reached node is
+/// reported; with a target, only paths that reach it are reported. Branches
+/// stop at the depth bound, the path cap, a budget limit, or a cycle (the
+/// cycle-closing path is still reported with `cyclic` set).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the trace entry point carries its bounded budget and control state"
+)]
+fn trace_flow(
+    adjacency: &BTreeMap<SymbolId, Vec<FlowAdjEdge>>,
+    from: SymbolId,
+    to: Option<SymbolId>,
+    max_depth: u8,
+    max_paths: usize,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+    control: &QueryControl<'_>,
+) -> Result<(Vec<FlowTracePath>, FlowTraceFrontier), QueryError> {
+    let mut state = FlowWalkState {
+        tracker,
+        limiting_resources,
+        paths: Vec::new(),
+        reached: BTreeSet::new(),
+        examined_edges: 0,
+        truncated: false,
+        depth_cut: false,
+    };
+    let mut path_nodes = vec![from];
+    let mut path_edges = Vec::new();
+    walk_flow(
+        adjacency,
+        to,
+        max_depth,
+        max_paths,
+        from,
+        &mut path_nodes,
+        &mut path_edges,
+        false,
+        &mut state,
+        control,
+    )?;
+
+    state.paths.sort_by(|left, right| {
+        left.nodes.cmp(&right.nodes).then_with(|| {
+            let left_key: Vec<(&str, u16)> = left
+                .edges
+                .iter()
+                .map(|edge| (edge.family.as_str(), edge.confidence))
+                .collect();
+            let right_key: Vec<(&str, u16)> = right
+                .edges
+                .iter()
+                .map(|edge| (edge.family.as_str(), edge.confidence))
+                .collect();
+            left_key.cmp(&right_key)
+        })
+    });
+
+    let mut unresolved_boundaries: usize = 0;
+    for node in &state.reached {
+        if let Some(edges) = adjacency.get(node)
+            && edges
+                .iter()
+                .any(|edge| !state.reached.contains(&edge.target))
+        {
+            unresolved_boundaries = unresolved_boundaries.saturating_add(1);
+        }
+    }
+
+    let frontier = FlowTraceFrontier {
+        reached_nodes: u32::try_from(state.reached.len()).unwrap_or(u32::MAX),
+        examined_edges: u32::try_from(state.examined_edges).unwrap_or(u32::MAX),
+        truncated: state.truncated || state.depth_cut,
+        unresolved_boundaries: u32::try_from(unresolved_boundaries).unwrap_or(u32::MAX),
+    };
+    Ok((state.paths, frontier))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the recursive walk carries its bounded path and budget state"
+)]
+fn walk_flow(
+    adjacency: &BTreeMap<SymbolId, Vec<FlowAdjEdge>>,
+    to: Option<SymbolId>,
+    max_depth: u8,
+    max_paths: usize,
+    node: SymbolId,
+    path_nodes: &mut Vec<SymbolId>,
+    path_edges: &mut Vec<FlowTraceEdge>,
+    cyclic: bool,
+    state: &mut FlowWalkState<'_, '_>,
+    control: &QueryControl<'_>,
+) -> Result<(), QueryError> {
+    state.reached.insert(node);
+    control.check()?;
+
+    let at_target = to.is_some_and(|target| target == node);
+    if path_nodes.len() >= 2 && (at_target || to.is_none()) {
+        emit_flow_path(state, path_nodes, path_edges, cyclic, control)?;
+    }
+
+    if cyclic || at_target {
+        return Ok(());
+    }
+    if path_edges.len() >= usize::from(max_depth) {
+        if adjacency.get(&node).is_some_and(|edges| !edges.is_empty()) {
+            state.depth_cut = true;
+        }
+        return Ok(());
+    }
+
+    let Some(neighbors) = adjacency.get(&node) else {
+        return Ok(());
+    };
+    for edge in neighbors {
+        if state.paths.len() >= max_paths {
+            state.truncated = true;
+            return Ok(());
+        }
+        if !state.tracker.can_add(QueryResource::Edges, 1) {
+            record_limit(state.limiting_resources, QueryResource::Edges)?;
+            state.truncated = true;
+            return Ok(());
+        }
+        state.tracker.add_edges(1)?;
+        state.examined_edges = state.examined_edges.saturating_add(1);
+
+        let next_cyclic = path_nodes.contains(&edge.target);
+        path_nodes.push(edge.target);
+        path_edges.push(FlowTraceEdge {
+            family: edge.family,
+            confidence: edge.confidence,
+            source_refs: edge.source_refs.clone(),
+        });
+        walk_flow(
+            adjacency,
+            to,
+            max_depth,
+            max_paths,
+            edge.target,
+            path_nodes,
+            path_edges,
+            next_cyclic,
+            state,
+            control,
+        )?;
+        path_nodes.pop();
+        path_edges.pop();
+    }
+    Ok(())
+}
+
+/// Records one emitted path under the result and memory budgets.
+fn emit_flow_path(
+    state: &mut FlowWalkState<'_, '_>,
+    path_nodes: &[SymbolId],
+    path_edges: &[FlowTraceEdge],
+    cyclic: bool,
+    control: &QueryControl<'_>,
+) -> Result<(), QueryError> {
+    if !state.tracker.can_add(QueryResource::Results, 1) {
+        record_limit(state.limiting_resources, QueryResource::Results)?;
+        state.truncated = true;
+        return Ok(());
+    }
+    let path = FlowTracePath {
+        confidence: path_edges
+            .iter()
+            .map(|edge| edge.confidence)
+            .min()
+            .unwrap_or_default(),
+        nodes: path_nodes.to_vec(),
+        edges: path_edges.to_vec(),
+        cyclic,
+    };
+    let bytes = serialized_size(&path, u64::MAX, control)?;
+    if !state.tracker.can_add(QueryResource::MemoryBytes, bytes) {
+        record_limit(state.limiting_resources, QueryResource::MemoryBytes)?;
+        state.truncated = true;
+        return Ok(());
+    }
+    state.tracker.add_results(1)?;
+    state.tracker.add_memory(bytes)?;
+    state.paths.push(path);
+    Ok(())
 }
 
 fn occurrence_matches(occurrence: &rootlight_ir::OccurrenceRecord, symbol: SymbolId) -> bool {
@@ -1290,4 +1758,181 @@ fn try_push<T>(values: &mut Vec<T>, value: T) -> Result<(), QueryError> {
     }
     values.push(value);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Synthetic-graph proofs for the bounded `flow.trace` traversal.
+    //!
+    //! The first-slice oracle records calls as `DispatchCandidate` occurrences
+    //! and containment as file-to-entity `Contains` relations, so no served
+    //! relation family yields entity-to-entity edges for a lexical fixture.
+    //! These tests exercise the traversal directly against hand-built adjacency
+    //! views to prove path enumeration, targeting, cycle safety, and the depth
+    //! and path caps independent of the oracle.
+
+    use std::time::{Duration, Instant};
+
+    use rootlight_cancel::Cancellation;
+    use rootlight_ids::SymbolId;
+    use rootlight_ir::RelationPredicate;
+
+    use super::*;
+    use crate::model::{FlowTraceFrontier, FlowTracePath, QueryBudget, RelationFamily};
+
+    fn symbol(byte: u8) -> SymbolId {
+        SymbolId::from_bytes([byte; 20])
+    }
+
+    fn edge(target: SymbolId, family: RelationFamily, confidence: u16) -> FlowAdjEdge {
+        FlowAdjEdge {
+            target,
+            family,
+            confidence,
+            source_refs: Vec::new(),
+        }
+    }
+
+    fn run_trace(
+        adjacency: &BTreeMap<SymbolId, Vec<FlowAdjEdge>>,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        max_depth: u8,
+        max_paths: usize,
+    ) -> (Vec<FlowTracePath>, FlowTraceFrontier) {
+        let budget = QueryBudget::new();
+        let mut tracker = UsageTracker::new(budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let control = QueryControl::new(&cancellation, budget.max_duration);
+        trace_flow(
+            adjacency,
+            from,
+            to,
+            max_depth,
+            max_paths,
+            &mut tracker,
+            &mut limiting_resources,
+            &control,
+        )
+        .expect("bounded trace succeeds")
+    }
+
+    #[test]
+    fn flow_trace_enumerates_outward_paths_with_correct_nodes_and_edges() {
+        let (a, b, c) = (symbol(1), symbol(2), symbol(3));
+        let adjacency = BTreeMap::from([
+            (a, vec![edge(b, RelationFamily::Calls, 900)]),
+            (b, vec![edge(c, RelationFamily::Calls, 800)]),
+        ]);
+        let (paths, frontier) = run_trace(&adjacency, a, None, 3, 10);
+
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].nodes, vec![a, b]);
+        assert_eq!(paths[0].edges.len(), 1);
+        assert_eq!(paths[0].edges[0].family, RelationFamily::Calls);
+        assert_eq!(paths[0].confidence, 900);
+        assert!(!paths[0].cyclic);
+        assert_eq!(paths[1].nodes, vec![a, b, c]);
+        assert_eq!(paths[1].edges.len(), 2);
+        // Aggregate confidence is the weakest link along the path.
+        assert_eq!(paths[1].confidence, 800);
+
+        assert_eq!(frontier.reached_nodes, 3);
+        assert_eq!(frontier.examined_edges, 2);
+        assert!(!frontier.truncated);
+        assert_eq!(frontier.unresolved_boundaries, 0);
+    }
+
+    #[test]
+    fn flow_trace_returns_only_paths_that_reach_the_target() {
+        let (a, b, c) = (symbol(1), symbol(2), symbol(3));
+        let adjacency = BTreeMap::from([
+            (a, vec![edge(b, RelationFamily::Calls, 900)]),
+            (b, vec![edge(c, RelationFamily::Calls, 800)]),
+        ]);
+        let (paths, _) = run_trace(&adjacency, a, Some(c), 3, 10);
+
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].nodes, vec![a, b, c]);
+        assert!(
+            paths
+                .iter()
+                .all(|path| *path.nodes.last().expect("path has nodes") == c)
+        );
+    }
+
+    #[test]
+    fn flow_trace_marks_cycles_and_terminates() {
+        let (a, b) = (symbol(1), symbol(2));
+        let adjacency = BTreeMap::from([
+            (a, vec![edge(b, RelationFamily::Calls, 500)]),
+            (b, vec![edge(a, RelationFamily::Calls, 500)]),
+        ]);
+        let (paths, frontier) = run_trace(&adjacency, a, None, 8, 100);
+
+        assert_eq!(paths.len(), 2);
+        let cyclic = paths
+            .iter()
+            .find(|path| path.cyclic)
+            .expect("one cyclic path");
+        assert_eq!(cyclic.nodes, vec![a, b, a]);
+        assert!(paths.iter().any(|path| !path.cyclic));
+        assert_eq!(frontier.reached_nodes, 2);
+        assert!(!frontier.truncated);
+    }
+
+    #[test]
+    fn flow_trace_honors_the_depth_bound_and_reports_a_boundary() {
+        let (a, b, c, d) = (symbol(1), symbol(2), symbol(3), symbol(4));
+        let adjacency = BTreeMap::from([
+            (a, vec![edge(b, RelationFamily::Calls, 900)]),
+            (b, vec![edge(c, RelationFamily::Calls, 900)]),
+            (c, vec![edge(d, RelationFamily::Calls, 900)]),
+        ]);
+        let (paths, frontier) = run_trace(&adjacency, a, None, 2, 100);
+
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().all(|path| path.nodes.len() <= 3));
+        assert!(frontier.truncated);
+        assert_eq!(frontier.reached_nodes, 3);
+        assert_eq!(frontier.unresolved_boundaries, 1);
+    }
+
+    #[test]
+    fn flow_trace_honors_the_path_cap() {
+        let (a, b, c) = (symbol(1), symbol(2), symbol(3));
+        let adjacency = BTreeMap::from([(
+            a,
+            vec![
+                edge(b, RelationFamily::Calls, 900),
+                edge(c, RelationFamily::Calls, 900),
+            ],
+        )]);
+        let (paths, frontier) = run_trace(&adjacency, a, None, 3, 1);
+
+        assert_eq!(paths.len(), 1);
+        assert!(frontier.truncated);
+    }
+
+    #[test]
+    fn predicate_family_picks_the_first_admitting_family_deterministically() {
+        let ordered = vec![RelationFamily::Calls, RelationFamily::CalledBy];
+        assert_eq!(
+            predicate_family(&ordered, RelationPredicate::Calls),
+            Some(RelationFamily::Calls)
+        );
+        assert_eq!(
+            predicate_family(&[RelationFamily::CalledBy], RelationPredicate::Calls),
+            Some(RelationFamily::CalledBy)
+        );
+        assert_eq!(
+            predicate_family(&[RelationFamily::Imports], RelationPredicate::Calls),
+            None
+        );
+    }
 }

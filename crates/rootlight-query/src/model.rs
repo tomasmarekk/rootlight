@@ -186,6 +186,8 @@ pub enum PlanKind {
     SymbolExplain,
     /// Expand typed relation neighborhoods for stable symbols.
     SymbolRelationships,
+    /// Trace bounded directed paths between stable symbols.
+    FlowTrace,
     /// Read generation-bound source.
     SourceRead,
 }
@@ -557,6 +559,28 @@ impl SymbolRelationshipsPlan {
     }
 }
 
+/// Prevalidated `flow.trace` plan.
+#[derive(Debug, Clone)]
+pub struct FlowTracePlan {
+    pub(crate) from: SymbolId,
+    pub(crate) to: Option<SymbolId>,
+    pub(crate) direction: RelationDirection,
+    pub(crate) families: Vec<RelationFamily>,
+    pub(crate) min_confidence: u16,
+    pub(crate) max_depth: u8,
+    pub(crate) max_paths: usize,
+    pub(crate) budget: QueryBudget,
+    pub(crate) explanation: PlanExplanation,
+}
+
+impl FlowTracePlan {
+    /// Returns the deterministic plan explanation.
+    #[must_use]
+    pub const fn explanation(&self) -> &PlanExplanation {
+        &self.explanation
+    }
+}
+
 /// Prevalidated source-read plan.
 #[derive(Debug, Clone)]
 pub struct SourceReadPlan {
@@ -694,6 +718,69 @@ pub struct SymbolRelationshipsResult {
     pub exact: bool,
     /// Whether a resource limit stopped complete materialization.
     pub truncated: bool,
+    /// Resource limits that stopped work, in deterministic execution order.
+    pub limiting_resources: Vec<QueryResource>,
+    /// Mandatory trust marker for repository-controlled values.
+    pub trust: RepositoryDataTrust,
+}
+
+/// One evidence-bearing edge within a traced path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FlowTraceEdge {
+    /// Relation family that admitted this hop.
+    pub family: RelationFamily,
+    /// Fixed-point edge confidence from 0 through 1000.
+    pub confidence: u16,
+    /// Direct immutable source evidence for the edge.
+    pub source_refs: Vec<SourceRef>,
+}
+
+/// One complete traced path from the source toward a reached node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FlowTracePath {
+    /// Aggregate weakest-link edge confidence from 0 through 1000.
+    pub confidence: u16,
+    /// Ordered node identifiers along the path.
+    pub nodes: Vec<SymbolId>,
+    /// Evidence-bearing edges between consecutive nodes.
+    pub edges: Vec<FlowTraceEdge>,
+    /// Whether this path revisits a node.
+    pub cyclic: bool,
+}
+
+/// Traversal boundary summary for a `flow.trace` query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct FlowTraceFrontier {
+    /// Distinct nodes entered during traversal.
+    pub reached_nodes: u32,
+    /// Adjacency edges examined during traversal.
+    pub examined_edges: u32,
+    /// Whether budget, path cap, or depth stopped complete exploration.
+    pub truncated: bool,
+    /// Reached nodes with an admissible edge leaving the reached set.
+    pub unresolved_boundaries: u32,
+}
+
+/// Relation projection actually used by a `flow.trace` query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FlowTraceProjection {
+    /// Relation families included in the traversal, in deterministic order.
+    pub families: Vec<RelationFamily>,
+    /// Minimum confidence threshold applied.
+    pub min_confidence: u16,
+}
+
+/// Data returned by a `flow.trace` plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FlowTraceResult {
+    /// Immutable generation that served the query.
+    pub generation: GenerationId,
+    /// Bounded traced paths in deterministic order.
+    pub paths: Vec<FlowTracePath>,
+    /// Traversal frontier and boundary summary.
+    pub frontier: FlowTraceFrontier,
+    /// Actual relation projection used.
+    pub projection: FlowTraceProjection,
     /// Resource limits that stopped work, in deterministic execution order.
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.
