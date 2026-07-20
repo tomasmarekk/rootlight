@@ -7,8 +7,9 @@ use std::{
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{FactId, FileId, GenerationId, SymbolId};
 use rootlight_ir::{
-    AnalysisTier, CoverageRecord, CoverageScope, EntityFlag, EntityKind, EntityVisibility,
-    NormalizedIrDocument, OccurrenceTarget, RelationEndpoint, RelationPredicate, SourceRef,
+    AnalysisTier, CoverageRecord, CoverageScope, CoverageStatus, EntityFlag, EntityKind,
+    EntityVisibility, NormalizedIrDocument, OccurrenceTarget, RelationEndpoint, RelationPredicate,
+    SourceRef,
 };
 use rootlight_search::{LexicalSearch, SearchBudget, SearchRequest, validate_search_request};
 use rootlight_source::{SourceBudget, SourceError, SourceReadOptions, SourceService};
@@ -19,14 +20,16 @@ use crate::model::{
     ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesPlan,
     ArchitectureCyclesProjection, ArchitectureCyclesResult, ArchitectureHotspot,
     ArchitectureOverviewDerivedView, ArchitectureOverviewPlan, ArchitectureOverviewResult,
-    ArchitectureOverviewView, CodeDeadBlindSpot, CodeDeadEntryPointPolicy,
-    CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult, CodeDeadSuppressionRule,
-    CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent, CyclePath, DeadCodeCandidate,
-    DeadCodeClassification, FlowTraceEdge, FlowTraceFrontier, FlowTracePath, FlowTracePlan,
-    FlowTraceProjection, FlowTraceResult, LocateHit, LocateMode, PlanEstimate, PlanExplanation,
-    PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage,
-    RankedTestSelection, RelationDirection, RelationFamily, RelationshipEdgeTarget,
-    RelationshipGroup, RepositoryDataTrust, SourceChunkResult, SourceReadPlan,
+    ArchitectureOverviewView, ChangeImpactClassification, ChangeImpactPlan, ChangeImpactResult,
+    ChangeImpactRiskLevel, ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadBlindSpot,
+    CodeDeadEntryPointPolicy, CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult,
+    CodeDeadSuppressionRule, CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent,
+    CyclePath, DeadCodeCandidate, DeadCodeClassification, FlowTraceEdge, FlowTraceFrontier,
+    FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult, ImpactEntryRecord,
+    ImpactGroupRecord, LocateHit, LocateMode, PlanEstimate, PlanExplanation, PlanKind, QueryBudget,
+    QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage, RankedTestSelection,
+    RelationDirection, RelationFamily, RelationshipEdgeTarget, RelationshipGroup,
+    RepositoryDataTrust, ResolvedChangeRecord, SourceChunkResult, SourceReadPlan,
     SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
     SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap, TestsSelectKind,
     TestsSelectPlan, TestsSelectResult, TokenAccountingProfile, checked_add, checked_u128_to_u64,
@@ -1268,6 +1271,147 @@ where
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
     }
 
+    /// Builds a deterministic bounded `change.impact` plan.
+    ///
+    /// An explicit change set of stable symbols and repository-relative paths
+    /// drives the analysis; the depth and confidence bounds and the dependent
+    /// cap bound the transitive closure. Working-tree and revision-range diffs
+    /// are not modeled here and must be rejected by the caller before planning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid budget, an empty or oversized
+    /// change set, out-of-range depth, confidence, or dependent bounds,
+    /// arithmetic overflow, or a conservative estimate that cannot be admitted.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the plan carries the explicit change set plus its bounded propagation options"
+    )]
+    pub fn plan_change_impact(
+        &self,
+        changed_symbols: BTreeSet<SymbolId>,
+        mut changed_paths: Vec<String>,
+        max_depth: u8,
+        min_confidence: u16,
+        include_tests: bool,
+        max_dependents: usize,
+        budget: QueryBudget,
+    ) -> Result<ChangeImpactPlan, QueryError> {
+        budget.validate()?;
+        // The first slice maps only an explicit change set; an empty selector
+        // carries no resolvable change.
+        if changed_symbols.is_empty() && changed_paths.is_empty() {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if changed_symbols.len() > 256 || changed_paths.len() > 1_000 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if max_depth == 0 || max_depth > 8 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if min_confidence > 1_000 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if max_dependents == 0
+            || max_dependents > 500
+            || checked_usize_to_u64(max_dependents)? > budget.max_results
+        {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        changed_paths.sort();
+        changed_paths.dedup();
+        let estimate = PlanEstimate {
+            rows: budget.max_rows,
+            edges: budget.max_edges,
+            results: budget.max_results,
+            source_bytes: 0,
+            // The normalized generation bounds every record, while the query
+            // memory budget remains the conservative aggregate ceiling.
+            memory_bytes: budget.max_memory_bytes,
+            json_bytes: budget.max_json_bytes,
+            estimated_tokens: budget.max_tokens,
+            duration_micros: duration_micros(budget.max_duration),
+        };
+        ensure_estimate(estimate, budget)?;
+        let explanation = PlanExplanation {
+            generation: self.generation.metadata().generation(),
+            kind: PlanKind::ChangeImpact,
+            operators: vec![
+                QueryOperator::GenerationPin,
+                QueryOperator::RelationScan,
+                QueryOperator::EntityLookup,
+                QueryOperator::OutputBudget,
+            ],
+            estimate,
+        };
+        Ok(ChangeImpactPlan {
+            changed_symbols,
+            changed_paths,
+            max_depth,
+            min_confidence,
+            include_tests,
+            max_dependents,
+            budget,
+            explanation,
+        })
+    }
+
+    /// Executes a prevalidated `change.impact` plan.
+    ///
+    /// The scan resolves the explicit change set to symbols and files, builds a
+    /// directed dependent graph over the served relation families, runs a
+    /// bounded forward impact closure from each resolved change, optionally
+    /// relates test entities to the impacted symbols, and aggregates an honest
+    /// risk summary. Rows, edges, results, and memory are measured exactly like
+    /// `tests.select`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
+    /// resource exhaustion.
+    pub fn execute_change_impact(
+        &self,
+        plan: &ChangeImpactPlan,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<ChangeImpactResult>, QueryError> {
+        self.require_generation(plan.explanation.generation)?;
+        let started = Instant::now();
+        let control = QueryControl::new(cancellation, plan.budget.max_duration);
+        control.check()?;
+        let document = self.generation.document();
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+
+        let analysis = build_change_impact(
+            document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )?;
+
+        let data = ChangeImpactResult {
+            generation: self.generation.metadata().generation(),
+            resolved_changes: analysis.resolved_changes,
+            impacted: analysis.impacted,
+            tests: analysis.tests,
+            risk_summary: analysis.risk_summary,
+            limiting_resources,
+            trust: RepositoryDataTrust::UntrustedRepositoryData,
+        };
+        finish_response(plan.explanation.clone(), data, tracker, started, &control)
+    }
+
     /// Builds a deterministic generation-bound `source.read` plan.
     ///
     /// # Errors
@@ -2476,6 +2620,517 @@ fn build_tests_select(
         },
         gaps,
     })
+}
+
+/// Served relation families used to propagate change impact to dependents.
+///
+/// Each family maps to a disjoint IR predicate set, so a served relation
+/// contributes to exactly one impact-path predicate. `CalledBy` is intentionally
+/// omitted because it shares the `Calls` predicate and would double-count the
+/// same directed edge.
+const CHANGE_IMPACT_FAMILIES: &[RelationFamily] = &[
+    RelationFamily::Calls,
+    RelationFamily::References,
+    RelationFamily::Types,
+    RelationFamily::Implements,
+    RelationFamily::Imports,
+];
+
+/// Maximum resolved changes reported by one `change.impact`.
+const CHANGE_IMPACT_MAX_RESOLVED: usize = 1_256;
+
+/// Maximum test candidates reported by one `change.impact`.
+const CHANGE_IMPACT_MAX_TESTS: usize = 500;
+
+/// Change impact assembled before bounded result emission.
+struct ChangeImpactAnalysis {
+    resolved_changes: Vec<ResolvedChangeRecord>,
+    impacted: Vec<ImpactGroupRecord>,
+    tests: Vec<ChangeImpactTestCandidate>,
+    risk_summary: ChangeImpactRiskSummary,
+}
+
+/// Builds a bounded change-impact analysis for the explicit change set.
+///
+/// The explicit symbols and paths are resolved to concrete changes, a reverse
+/// dependent graph is built over the served relation families, a bounded
+/// forward closure propagates each change to its dependents, test entities are
+/// optionally related to the impacted symbols, and an honest risk summary is
+/// aggregated. Rows, edges, results, and memory are bounded exactly like
+/// `tests.select`.
+fn build_change_impact(
+    document: &NormalizedIrDocument,
+    plan: &ChangeImpactPlan,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<ChangeImpactAnalysis, QueryError> {
+    // Resolve per-entity metadata: declaring file, kind label, and public
+    // surface membership, plus the path-to-file map used to resolve explicit
+    // path changes.
+    let mut entity_file: BTreeMap<SymbolId, FileId> = BTreeMap::new();
+    let mut entity_kind: BTreeMap<SymbolId, String> = BTreeMap::new();
+    let mut entity_public: BTreeSet<SymbolId> = BTreeSet::new();
+    for entity in &document.entities {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
+        tracker.add_rows(1)?;
+        if let Some(source) = entity.evidence.source.as_ref() {
+            entity_file.insert(entity.id, source.span().file());
+        }
+        entity_kind.insert(entity.id, serialized_label(&entity.kind)?);
+        if entity_is_exported(entity) {
+            entity_public.insert(entity.id);
+        }
+    }
+
+    let mut path_to_file: BTreeMap<String, FileId> = BTreeMap::new();
+    for file in &document.files {
+        path_to_file.insert(file.path.clone(), file.id);
+    }
+
+    // Single bounded relation scan: `Contains` relations confirm the owning file
+    // of each entity, while served family relations contribute the reverse
+    // dependent adjacency (a subject edge into an object makes the subject a
+    // dependent of the object).
+    let allowed: BTreeSet<RelationPredicate> = CHANGE_IMPACT_FAMILIES
+        .iter()
+        .flat_map(|family| family.predicates().iter().copied())
+        .collect();
+    let mut dependents: BTreeMap<SymbolId, Vec<(SymbolId, RelationFamily, u16)>> = BTreeMap::new();
+    for relation in &document.relations {
+        control.check()?;
+        if !tracker.can_add(QueryResource::Rows, 1) {
+            record_limit(limiting_resources, QueryResource::Rows)?;
+            break;
+        }
+        tracker.add_rows(1)?;
+        if relation.predicate == RelationPredicate::Contains {
+            if let (RelationEndpoint::File(file), RelationEndpoint::Entity(symbol)) =
+                (relation.subject, relation.object)
+            {
+                entity_file.insert(symbol, file);
+            }
+            continue;
+        }
+        if !allowed.contains(&relation.predicate) {
+            continue;
+        }
+        let confidence = relation.confidence.get();
+        if confidence < plan.min_confidence {
+            continue;
+        }
+        let Some(family) = predicate_family(CHANGE_IMPACT_FAMILIES, relation.predicate) else {
+            continue;
+        };
+        let Some(subject) = endpoint_entity(document, relation.subject) else {
+            continue;
+        };
+        let Some(object) = endpoint_entity(document, relation.object) else {
+            continue;
+        };
+        if subject == object {
+            continue;
+        }
+        if !tracker.can_add(QueryResource::Edges, 1) {
+            record_limit(limiting_resources, QueryResource::Edges)?;
+            break;
+        }
+        tracker.add_edges(1)?;
+        dependents
+            .entry(object)
+            .or_default()
+            .push((subject, family, confidence));
+    }
+    for edges in dependents.values_mut() {
+        edges.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.as_str().cmp(right.1.as_str()))
+                .then_with(|| right.2.cmp(&left.2))
+        });
+    }
+
+    // Build the file-to-entity map after containment is fully resolved.
+    let mut file_entities: BTreeMap<FileId, BTreeSet<SymbolId>> = BTreeMap::new();
+    for (symbol, file) in &entity_file {
+        file_entities.entry(*file).or_default().insert(*symbol);
+    }
+
+    // Resolve the explicit change set to concrete resolved changes.
+    let resolved_changes = resolve_changed_set(
+        plan,
+        &entity_file,
+        &entity_kind,
+        &entity_public,
+        &file_entities,
+        &path_to_file,
+        tracker,
+        limiting_resources,
+        control,
+    )?;
+
+    // Run a bounded forward impact closure from each resolved change.
+    let mut impacted: Vec<ImpactGroupRecord> = Vec::new();
+    for (index, change) in resolved_changes.iter().enumerate() {
+        control.check()?;
+        let source_index = u16::try_from(index).unwrap_or(u16::MAX);
+        let Some(symbol) = change.symbol_id else {
+            // A file-only or unresolved change has no symbol to propagate from;
+            // report an honest empty group.
+            let group = ImpactGroupRecord {
+                source_index,
+                dependents: Vec::new(),
+            };
+            emit_cycle_value(&mut impacted, group, tracker, limiting_resources, control)?;
+            continue;
+        };
+        let roots = BTreeSet::from([symbol]);
+        let dependents_for_change = impact_closure(
+            &dependents,
+            &roots,
+            plan.max_depth,
+            &entity_kind,
+            &entity_public,
+            plan.max_dependents,
+            tracker,
+            limiting_resources,
+            control,
+        )?;
+        let group = ImpactGroupRecord {
+            source_index,
+            dependents: dependents_for_change,
+        };
+        emit_cycle_value(&mut impacted, group, tracker, limiting_resources, control)?;
+    }
+
+    // Relate test entities to the impacted symbols when requested.
+    let tests = if plan.include_tests {
+        build_change_impact_tests(
+            document,
+            plan,
+            &resolved_changes,
+            &impacted,
+            control,
+            tracker,
+            limiting_resources,
+        )?
+    } else {
+        Vec::new()
+    };
+
+    let risk_summary = change_impact_risk_summary(&resolved_changes, &impacted);
+
+    Ok(ChangeImpactAnalysis {
+        resolved_changes,
+        impacted,
+        tests,
+        risk_summary,
+    })
+}
+
+/// Resolves the explicit change set to concrete resolved changes.
+///
+/// Each explicit symbol maps to one resolved change classified by its public
+/// surface membership; an unknown symbol still resolves to a body-classified
+/// change so the caller's asserted change is not silently dropped. Each explicit
+/// path maps to the entities declared in the matching file, to a file-only
+/// change when the file is known but declares no served entity, or to a
+/// fully-unresolved change when the path is unknown.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the resolver carries the resolved entity maps plus bounded budget and control state"
+)]
+fn resolve_changed_set(
+    plan: &ChangeImpactPlan,
+    entity_file: &BTreeMap<SymbolId, FileId>,
+    entity_kind: &BTreeMap<SymbolId, String>,
+    entity_public: &BTreeSet<SymbolId>,
+    file_entities: &BTreeMap<FileId, BTreeSet<SymbolId>>,
+    path_to_file: &BTreeMap<String, FileId>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+    control: &QueryControl<'_>,
+) -> Result<Vec<ResolvedChangeRecord>, QueryError> {
+    let mut resolved: Vec<ResolvedChangeRecord> = Vec::new();
+    // Explicit symbols first, in deterministic identity order.
+    for symbol in &plan.changed_symbols {
+        control.check()?;
+        if resolved.len() >= CHANGE_IMPACT_MAX_RESOLVED {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            break;
+        }
+        let classification = if entity_public.contains(symbol) {
+            ChangeImpactClassification::Surface
+        } else {
+            ChangeImpactClassification::Body
+        };
+        let record = ResolvedChangeRecord {
+            symbol_id: Some(*symbol),
+            file_id: entity_file.get(symbol).copied(),
+            classification,
+            kind: entity_kind.get(symbol).cloned(),
+        };
+        emit_cycle_value(&mut resolved, record, tracker, limiting_resources, control)?;
+    }
+    // Explicit paths, in deterministic sorted order.
+    for path in &plan.changed_paths {
+        control.check()?;
+        if resolved.len() >= CHANGE_IMPACT_MAX_RESOLVED {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            break;
+        }
+        let Some(file) = path_to_file.get(path).copied() else {
+            // The path is not part of the indexed generation; report an honest
+            // fully-unresolved change rather than dropping the caller's input.
+            let record = ResolvedChangeRecord {
+                symbol_id: None,
+                file_id: None,
+                classification: ChangeImpactClassification::Body,
+                kind: None,
+            };
+            emit_cycle_value(&mut resolved, record, tracker, limiting_resources, control)?;
+            continue;
+        };
+        let declared = file_entities.get(&file).cloned().unwrap_or_default();
+        if declared.is_empty() {
+            let record = ResolvedChangeRecord {
+                symbol_id: None,
+                file_id: Some(file),
+                classification: ChangeImpactClassification::Body,
+                kind: None,
+            };
+            emit_cycle_value(&mut resolved, record, tracker, limiting_resources, control)?;
+            continue;
+        }
+        for symbol in declared {
+            control.check()?;
+            if resolved.len() >= CHANGE_IMPACT_MAX_RESOLVED {
+                record_limit(limiting_resources, QueryResource::Results)?;
+                break;
+            }
+            let classification = if entity_public.contains(&symbol) {
+                ChangeImpactClassification::Surface
+            } else {
+                ChangeImpactClassification::Body
+            };
+            let record = ResolvedChangeRecord {
+                symbol_id: Some(symbol),
+                file_id: Some(file),
+                classification,
+                kind: entity_kind.get(&symbol).cloned(),
+            };
+            emit_cycle_value(&mut resolved, record, tracker, limiting_resources, control)?;
+        }
+    }
+    Ok(resolved)
+}
+
+/// Runs a bounded forward impact closure from the changed roots.
+///
+/// The reverse dependent adjacency maps each symbol to the symbols that depend
+/// on it; a breadth-first traversal from the roots records each reached
+/// dependent's shortest distance, weakest-edge confidence, and predicate path.
+/// Dependents are emitted ordered by distance then identity under the dependent
+/// cap.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closure carries the dependent graph plus resolved entity maps and bounded budget state"
+)]
+fn impact_closure(
+    dependents: &BTreeMap<SymbolId, Vec<(SymbolId, RelationFamily, u16)>>,
+    roots: &BTreeSet<SymbolId>,
+    max_depth: u8,
+    entity_kind: &BTreeMap<SymbolId, String>,
+    entity_public: &BTreeSet<SymbolId>,
+    max_dependents: usize,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+    control: &QueryControl<'_>,
+) -> Result<Vec<ImpactEntryRecord>, QueryError> {
+    // First-visit wins under breadth-first order, so each dependent records its
+    // shortest distance and the predicate path that reached it.
+    let mut visited: BTreeMap<SymbolId, (u8, u16, Vec<String>)> = BTreeMap::new();
+    let mut queue: VecDeque<(SymbolId, u8, u16, Vec<String>)> = VecDeque::new();
+    for root in roots {
+        queue.push_back((*root, 0, 1_000, Vec::new()));
+    }
+    while let Some((node, distance, confidence, via)) = queue.pop_front() {
+        control.check()?;
+        if distance >= max_depth {
+            continue;
+        }
+        let next_distance = distance.saturating_add(1);
+        let Some(edges) = dependents.get(&node) else {
+            continue;
+        };
+        for (subject, family, edge_confidence) in edges {
+            if roots.contains(subject) || visited.contains_key(subject) {
+                continue;
+            }
+            let path_confidence = confidence.min(*edge_confidence);
+            let mut path = via.clone();
+            path.push(family.as_str().to_owned());
+            path.truncate(16);
+            visited.insert(*subject, (next_distance, path_confidence, path.clone()));
+            queue.push_back((*subject, next_distance, path_confidence, path));
+        }
+    }
+
+    let mut reached: Vec<(SymbolId, u8, u16, Vec<String>)> = visited
+        .into_iter()
+        .map(|(symbol, (distance, confidence, via))| (symbol, distance, confidence, via))
+        .collect();
+    reached.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+
+    let mut entries: Vec<ImpactEntryRecord> = Vec::new();
+    for (symbol, distance, confidence, via) in reached {
+        if entries.len() >= max_dependents {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            break;
+        }
+        let kind = entity_kind
+            .get(&symbol)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_owned());
+        let entry = ImpactEntryRecord {
+            symbol_id: symbol,
+            kind,
+            distance,
+            confidence,
+            via,
+            is_public: entity_public.contains(&symbol),
+        };
+        emit_cycle_value(&mut entries, entry, tracker, limiting_resources, control)?;
+    }
+    Ok(entries)
+}
+
+/// Relates test entities to the changed and impacted symbols.
+///
+/// The reused `tests.select` ranking is seeded from the resolved change symbols
+/// and every impacted dependent, so a test related to either is surfaced with
+/// the same honest direct, transitive, and co-location signals.
+fn build_change_impact_tests(
+    document: &NormalizedIrDocument,
+    plan: &ChangeImpactPlan,
+    resolved_changes: &[ResolvedChangeRecord],
+    impacted: &[ImpactGroupRecord],
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<Vec<ChangeImpactTestCandidate>, QueryError> {
+    let mut seeds: BTreeSet<SymbolId> = BTreeSet::new();
+    for change in resolved_changes {
+        if let Some(symbol) = change.symbol_id {
+            seeds.insert(symbol);
+        }
+    }
+    for group in impacted {
+        for entry in &group.dependents {
+            seeds.insert(entry.symbol_id);
+        }
+    }
+    if seeds.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The reused selection admits a bounded seed set; keep the smallest
+    // identities deterministically when the impacted surface is larger.
+    if seeds.len() > 64 {
+        seeds = seeds.into_iter().take(64).collect();
+    }
+    let selection_plan = TestsSelectPlan {
+        seeds,
+        test_kinds: Vec::new(),
+        max_tests: CHANGE_IMPACT_MAX_TESTS,
+        include_commands: false,
+        budget: plan.budget,
+        explanation: plan.explanation.clone(),
+    };
+    let selection = build_tests_select(
+        document,
+        &selection_plan,
+        control,
+        tracker,
+        limiting_resources,
+    )?;
+    let mut tests: Vec<ChangeImpactTestCandidate> = Vec::new();
+    for ranked in selection.tests {
+        if tests.len() >= CHANGE_IMPACT_MAX_TESTS {
+            record_limit(limiting_resources, QueryResource::Results)?;
+            break;
+        }
+        let candidate = ChangeImpactTestCandidate {
+            test_id: ranked.test_id.to_string(),
+            relevance: ranked.score,
+            why: ranked.why,
+            estimated_cost_ms: ranked.estimated_cost_ms,
+        };
+        emit_cycle_value(&mut tests, candidate, tracker, limiting_resources, control)?;
+    }
+    Ok(tests)
+}
+
+/// Aggregates an honest risk summary from the resolved changes and impact groups.
+///
+/// The fanout counts every reported dependent, the breaking surface records
+/// whether any public symbol was changed or impacted, and the level orders local
+/// changes below cross-module fanout below public-surface effects. Coverage is
+/// always unknown because the lexical oracle cannot establish completeness, and
+/// dynamic blind spots are always reported.
+fn change_impact_risk_summary(
+    resolved_changes: &[ResolvedChangeRecord],
+    impacted: &[ImpactGroupRecord],
+) -> ChangeImpactRiskSummary {
+    let fanout = u32::try_from(
+        impacted
+            .iter()
+            .map(|group| group.dependents.len())
+            .sum::<usize>(),
+    )
+    .unwrap_or(u32::MAX)
+    .min(100_000);
+    let breaking_surface = resolved_changes
+        .iter()
+        .any(|change| matches!(change.classification, ChangeImpactClassification::Surface))
+        || impacted
+            .iter()
+            .any(|group| group.dependents.iter().any(|entry| entry.is_public));
+    let level = if breaking_surface && fanout >= 20 {
+        ChangeImpactRiskLevel::Critical
+    } else if breaking_surface {
+        ChangeImpactRiskLevel::High
+    } else if fanout >= 20 {
+        ChangeImpactRiskLevel::Medium
+    } else if fanout > 0 {
+        ChangeImpactRiskLevel::Low
+    } else {
+        ChangeImpactRiskLevel::None
+    };
+    let mut reasons: Vec<String> = Vec::new();
+    if breaking_surface {
+        reasons.push("public_surface_affected".to_owned());
+    }
+    if fanout > 0 {
+        reasons.push("transitive_fanout".to_owned());
+    } else {
+        reasons.push("no_measured_impact".to_owned());
+    }
+    // The lexical oracle never resolves dynamic dispatch or reflection, so every
+    // result carries an honest blind-spot caveat.
+    reasons.push("dynamic_dispatch_blind_spot".to_owned());
+    reasons.truncate(16);
+    ChangeImpactRiskSummary {
+        level,
+        reasons,
+        coverage: CoverageStatus::Unknown,
+        breaking_surface,
+        fanout,
+        dynamic_blind_spots: true,
+    }
 }
 
 /// Builds a directed outbound adjacency view over the requested projection.
@@ -5000,5 +5655,268 @@ mod tests {
         assert_eq!(first.tests, second.tests);
         assert_eq!(first.gaps, second.gaps);
         assert_eq!(first.coverage_strategy, second.coverage_strategy);
+    }
+
+    fn add_public_entity(
+        document: &mut NormalizedIrDocument,
+        byte: u8,
+        file_byte: u8,
+        kind: EntityKind,
+    ) {
+        add_entity(document, byte, file_byte, kind);
+        document
+            .entities
+            .last_mut()
+            .expect("entity was just pushed")
+            .visibility = EntityVisibility::Public;
+    }
+
+    fn change_impact_plan(
+        changed_symbols: BTreeSet<SymbolId>,
+        changed_paths: Vec<String>,
+        max_depth: u8,
+        min_confidence: u16,
+        include_tests: bool,
+        max_dependents: usize,
+    ) -> ChangeImpactPlan {
+        ChangeImpactPlan {
+            changed_symbols,
+            changed_paths,
+            max_depth,
+            min_confidence,
+            include_tests,
+            max_dependents,
+            budget: QueryBudget::new(),
+            explanation: PlanExplanation {
+                generation: GenerationId::from_bytes([0; 20]),
+                kind: PlanKind::ChangeImpact,
+                operators: Vec::new(),
+                estimate: PlanEstimate {
+                    rows: 0,
+                    edges: 0,
+                    results: 0,
+                    source_bytes: 0,
+                    memory_bytes: 0,
+                    json_bytes: 0,
+                    estimated_tokens: 0,
+                    duration_micros: 0,
+                },
+            },
+        }
+    }
+
+    fn run_change_impact(
+        document: &NormalizedIrDocument,
+        plan: &ChangeImpactPlan,
+    ) -> ChangeImpactAnalysis {
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+        build_change_impact(
+            document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("bounded change impact succeeds")
+    }
+
+    #[test]
+    fn change_impact_propagates_a_changed_symbol_to_dependents() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Function);
+        add_entity(&mut document, 13, 1, EntityKind::Function);
+        // 12 calls the changed 11 (distance 1); 13 calls 12 (distance 2).
+        add_calls(&mut document, 110, 12, 11, 900);
+        add_calls(&mut document, 111, 13, 12, 800);
+
+        let plan = change_impact_plan(BTreeSet::from([symbol(11)]), Vec::new(), 3, 0, false, 500);
+        let analysis = run_change_impact(&document, &plan);
+
+        assert_eq!(analysis.resolved_changes.len(), 1);
+        assert_eq!(analysis.resolved_changes[0].symbol_id, Some(symbol(11)));
+        assert_eq!(
+            analysis.resolved_changes[0].classification,
+            ChangeImpactClassification::Body
+        );
+
+        assert_eq!(analysis.impacted.len(), 1);
+        assert_eq!(analysis.impacted[0].source_index, 0);
+        let dependents = &analysis.impacted[0].dependents;
+        assert_eq!(dependents.len(), 2);
+        // The direct caller ranks first at distance one with the edge confidence.
+        assert_eq!(dependents[0].symbol_id, symbol(12));
+        assert_eq!(dependents[0].distance, 1);
+        assert_eq!(dependents[0].confidence, 900);
+        assert_eq!(dependents[0].via, vec!["calls".to_owned()]);
+        assert!(!dependents[0].is_public);
+        // The transitive caller ranks second; confidence is the weakest edge.
+        assert_eq!(dependents[1].symbol_id, symbol(13));
+        assert_eq!(dependents[1].distance, 2);
+        assert_eq!(dependents[1].confidence, 800);
+        assert_eq!(
+            dependents[1].via,
+            vec!["calls".to_owned(), "calls".to_owned()]
+        );
+
+        // No public surface is touched, so the risk stays low with an honest fanout.
+        assert_eq!(analysis.risk_summary.fanout, 2);
+        assert!(!analysis.risk_summary.breaking_surface);
+        assert_eq!(analysis.risk_summary.level, ChangeImpactRiskLevel::Low);
+        assert!(analysis.risk_summary.dynamic_blind_spots);
+        assert_eq!(analysis.risk_summary.coverage, CoverageStatus::Unknown);
+        assert!(analysis.tests.is_empty());
+    }
+
+    #[test]
+    fn change_impact_honors_the_max_depth_cap() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Function);
+        add_entity(&mut document, 13, 1, EntityKind::Function);
+        add_calls(&mut document, 110, 12, 11, 900);
+        add_calls(&mut document, 111, 13, 12, 800);
+
+        // A depth of one admits only the direct caller.
+        let plan = change_impact_plan(BTreeSet::from([symbol(11)]), Vec::new(), 1, 0, false, 500);
+        let analysis = run_change_impact(&document, &plan);
+
+        let dependents = &analysis.impacted[0].dependents;
+        assert_eq!(dependents.len(), 1);
+        assert_eq!(dependents[0].symbol_id, symbol(12));
+        assert_eq!(dependents[0].distance, 1);
+        assert_eq!(analysis.risk_summary.fanout, 1);
+    }
+
+    #[test]
+    fn change_impact_honors_the_min_confidence_floor() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Function);
+        // The only edge falls below the 500 confidence floor.
+        add_calls(&mut document, 110, 12, 11, 400);
+
+        let plan = change_impact_plan(BTreeSet::from([symbol(11)]), Vec::new(), 3, 500, false, 500);
+        let analysis = run_change_impact(&document, &plan);
+
+        assert_eq!(analysis.impacted.len(), 1);
+        assert!(analysis.impacted[0].dependents.is_empty());
+        assert_eq!(analysis.risk_summary.fanout, 0);
+        assert_eq!(analysis.risk_summary.level, ChangeImpactRiskLevel::None);
+        assert!(
+            analysis
+                .risk_summary
+                .reasons
+                .contains(&"no_measured_impact".to_owned())
+        );
+    }
+
+    #[test]
+    fn change_impact_resolves_an_explicit_path_to_its_declared_entities() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_contains(&mut document, 100, 1, 11, 800);
+
+        let plan = change_impact_plan(
+            BTreeSet::new(),
+            vec!["src/a.rs".to_owned()],
+            3,
+            0,
+            false,
+            500,
+        );
+        let analysis = run_change_impact(&document, &plan);
+
+        assert_eq!(analysis.resolved_changes.len(), 1);
+        assert_eq!(analysis.resolved_changes[0].symbol_id, Some(symbol(11)));
+        assert_eq!(analysis.resolved_changes[0].file_id, Some(file_id(1)));
+        assert_eq!(
+            analysis.resolved_changes[0].kind.as_deref(),
+            Some("function")
+        );
+    }
+
+    #[test]
+    fn change_impact_reports_an_unknown_path_as_a_fully_unresolved_change() {
+        let document = overview_document();
+        let plan = change_impact_plan(
+            BTreeSet::new(),
+            vec!["src/missing.rs".to_owned()],
+            3,
+            0,
+            false,
+            500,
+        );
+        let analysis = run_change_impact(&document, &plan);
+
+        // The unknown path still resolves to one honest fully-null change so the
+        // caller's asserted change is not silently dropped.
+        assert_eq!(analysis.resolved_changes.len(), 1);
+        assert_eq!(analysis.resolved_changes[0].symbol_id, None);
+        assert_eq!(analysis.resolved_changes[0].file_id, None);
+        assert_eq!(
+            analysis.resolved_changes[0].classification,
+            ChangeImpactClassification::Body
+        );
+        // A file-only change has no symbol to propagate from.
+        assert_eq!(analysis.impacted.len(), 1);
+        assert!(analysis.impacted[0].dependents.is_empty());
+    }
+
+    #[test]
+    fn change_impact_flags_a_public_dependent_as_breaking_surface() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_public_entity(&mut document, 12, 1, EntityKind::Function);
+        add_calls(&mut document, 110, 12, 11, 900);
+
+        let plan = change_impact_plan(BTreeSet::from([symbol(11)]), Vec::new(), 3, 0, false, 500);
+        let analysis = run_change_impact(&document, &plan);
+
+        let dependents = &analysis.impacted[0].dependents;
+        assert_eq!(dependents.len(), 1);
+        assert!(dependents[0].is_public);
+        assert!(analysis.risk_summary.breaking_surface);
+        assert_eq!(analysis.risk_summary.level, ChangeImpactRiskLevel::High);
+        assert!(
+            analysis
+                .risk_summary
+                .reasons
+                .contains(&"public_surface_affected".to_owned())
+        );
+    }
+
+    #[test]
+    fn change_impact_is_deterministic() {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/b.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Function);
+        add_entity(&mut document, 13, 2, EntityKind::Function);
+        add_entity(&mut document, 14, 2, EntityKind::Function);
+        add_calls(&mut document, 110, 12, 11, 900);
+        add_calls(&mut document, 111, 13, 11, 700);
+        add_refers(&mut document, 112, 14, 13, 600);
+
+        let plan = change_impact_plan(BTreeSet::from([symbol(11)]), Vec::new(), 3, 0, false, 500);
+        let first = run_change_impact(&document, &plan);
+        let second = run_change_impact(&document, &plan);
+
+        assert_eq!(first.resolved_changes, second.resolved_changes);
+        assert_eq!(first.impacted, second.impacted);
+        assert_eq!(first.risk_summary, second.risk_summary);
     }
 }

@@ -4,8 +4,8 @@ use std::time::Duration;
 use rootlight_cancel::CancellationReason;
 use rootlight_ids::{ContentHash, FileId, GenerationId, SymbolId};
 use rootlight_ir::{
-    CoverageRecord, EntityRecord, OccurrenceRecord, ProvenanceRecord, RelationPredicate,
-    RelationRecord, SourceRef,
+    CoverageRecord, CoverageStatus, EntityRecord, OccurrenceRecord, ProvenanceRecord,
+    RelationPredicate, RelationRecord, SourceRef,
 };
 use rootlight_search::{SearchBudget, SearchError, SearchMode};
 use rootlight_source::{SourceBudget, SourceError, SourceReadOptions};
@@ -196,6 +196,8 @@ pub enum PlanKind {
     ArchitectureOverview,
     /// Select bounded relevant tests for a seed set.
     TestsSelect,
+    /// Map bounded change impact for an explicit change set.
+    ChangeImpact,
     /// Read generation-bound source.
     SourceRead,
 }
@@ -1130,6 +1132,203 @@ pub struct TestsSelectResult {
     pub coverage_strategy: TestsSelectCoverage,
     /// Honest coverage gaps in deterministic order.
     pub gaps: Vec<TestsSelectGap>,
+    /// Resource limits that stopped work, in deterministic execution order.
+    pub limiting_resources: Vec<QueryResource>,
+    /// Mandatory trust marker for repository-controlled values.
+    pub trust: RepositoryDataTrust,
+}
+
+/// Classification of one resolved change span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ChangeImpactClassification {
+    /// A public API surface was modified.
+    Surface,
+    /// An internal implementation body was modified.
+    Body,
+    /// A new entity was added.
+    Added,
+    /// An entity was removed.
+    Removed,
+    /// An entity was renamed or moved.
+    Renamed,
+}
+
+impl ChangeImpactClassification {
+    /// Returns the stable wire label shared with the MCP classification contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Surface => "surface",
+            Self::Body => "body",
+            Self::Added => "added",
+            Self::Removed => "removed",
+            Self::Renamed => "renamed",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "surface" => Some(Self::Surface),
+            "body" => Some(Self::Body),
+            "added" => Some(Self::Added),
+            "removed" => Some(Self::Removed),
+            "renamed" => Some(Self::Renamed),
+            _ => None,
+        }
+    }
+}
+
+/// Aggregate risk level for a `change.impact` result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ChangeImpactRiskLevel {
+    /// No measurable risk.
+    None,
+    /// Low risk, local changes only.
+    Low,
+    /// Medium risk, some cross-module effects.
+    Medium,
+    /// High risk, public surface affected.
+    High,
+    /// Critical risk, public surface with wide fanout.
+    Critical,
+}
+
+impl ChangeImpactRiskLevel {
+    /// Returns the stable wire label shared with the MCP risk-level contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "critical" => Some(Self::Critical),
+            _ => None,
+        }
+    }
+}
+
+/// Prevalidated `change.impact` plan.
+#[derive(Debug, Clone)]
+pub struct ChangeImpactPlan {
+    pub(crate) changed_symbols: BTreeSet<SymbolId>,
+    pub(crate) changed_paths: Vec<String>,
+    pub(crate) max_depth: u8,
+    pub(crate) min_confidence: u16,
+    pub(crate) include_tests: bool,
+    pub(crate) max_dependents: usize,
+    pub(crate) budget: QueryBudget,
+    pub(crate) explanation: PlanExplanation,
+}
+
+impl ChangeImpactPlan {
+    /// Returns the deterministic plan explanation.
+    #[must_use]
+    pub const fn explanation(&self) -> &PlanExplanation {
+        &self.explanation
+    }
+}
+
+/// One resolved change from the input change set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedChangeRecord {
+    /// Stable symbol identity, when the change maps to a known symbol.
+    pub symbol_id: Option<SymbolId>,
+    /// File identity for the changed span, when resolved.
+    pub file_id: Option<FileId>,
+    /// Classification of the change.
+    pub classification: ChangeImpactClassification,
+    /// Entity kind label of the affected symbol, when resolved.
+    pub kind: Option<String>,
+}
+
+/// One impacted dependent with path rationale.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImpactEntryRecord {
+    /// Affected symbol identity.
+    pub symbol_id: SymbolId,
+    /// Entity kind label of the affected symbol.
+    pub kind: String,
+    /// Transitive distance from the change, 1 through 8.
+    pub distance: u8,
+    /// Confidence in the impact path, 0 through 1000.
+    pub confidence: u16,
+    /// Relation predicate labels forming the impact path, in deterministic order.
+    pub via: Vec<String>,
+    /// Whether this dependent is a public surface.
+    pub is_public: bool,
+}
+
+/// One grouped set of impacted dependents for a resolved change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImpactGroupRecord {
+    /// Index of the originating resolved change.
+    pub source_index: u16,
+    /// Ranked dependents in deterministic order.
+    pub dependents: Vec<ImpactEntryRecord>,
+}
+
+/// One test candidate relevant to the change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChangeImpactTestCandidate {
+    /// Stable test identity label.
+    pub test_id: String,
+    /// Relevance score, 0 through 1000.
+    pub relevance: u16,
+    /// Source-free rationale codes, in deterministic order.
+    pub why: Vec<String>,
+    /// Estimated execution cost in milliseconds; always absent in this slice.
+    pub estimated_cost_ms: Option<u32>,
+}
+
+/// Aggregate risk summary for a `change.impact` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChangeImpactRiskSummary {
+    /// Aggregate risk level.
+    pub level: ChangeImpactRiskLevel,
+    /// Source-free reason codes, in deterministic order.
+    pub reasons: Vec<String>,
+    /// Coverage status of the impact analysis.
+    pub coverage: CoverageStatus,
+    /// Whether public surface was changed.
+    pub breaking_surface: bool,
+    /// Total transitive fanout count.
+    pub fanout: u32,
+    /// Whether dynamic or reflection-based relations create blind spots.
+    pub dynamic_blind_spots: bool,
+}
+
+/// Data returned by a `change.impact` plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChangeImpactResult {
+    /// Immutable generation that served the query.
+    pub generation: GenerationId,
+    /// Resolved changes from the input change set, in deterministic order.
+    pub resolved_changes: Vec<ResolvedChangeRecord>,
+    /// Ranked impact groups, one per resolved change.
+    pub impacted: Vec<ImpactGroupRecord>,
+    /// Test candidates when requested, in deterministic order.
+    pub tests: Vec<ChangeImpactTestCandidate>,
+    /// Aggregate risk summary.
+    pub risk_summary: ChangeImpactRiskSummary,
     /// Resource limits that stopped work, in deterministic execution order.
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.
