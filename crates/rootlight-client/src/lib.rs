@@ -999,6 +999,79 @@ pub struct CodeDead {
     pub false_positive_controls: Vec<CodeDeadSuppressionRule>,
 }
 
+/// One aggregated architecture component keyed by its containing file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ArchitectureOverviewComponent {
+    /// Stable component identity derived from the containing file identity.
+    pub id: String,
+    /// Component kind label, such as `file`.
+    pub kind: String,
+    /// Repository-controlled display path; always untrusted data.
+    pub name: String,
+    /// Number of contained symbols.
+    pub symbol_count: u32,
+    /// Source-free evidence categories supporting the responsibility claim.
+    pub responsibility_evidence: Vec<String>,
+    /// Aggregate containment confidence from 0 through 1000.
+    pub confidence: u16,
+}
+
+/// One aggregated typed connection between two architecture components.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ArchitectureOverviewConnection {
+    /// Source component identity.
+    pub from: String,
+    /// Target component identity.
+    pub to: String,
+    /// Relation kind label, such as `calls`.
+    pub kind: String,
+    /// Aggregated edge count.
+    pub weight: u32,
+    /// Strongest aggregated edge confidence from 0 through 1000.
+    pub confidence: u16,
+}
+
+/// One structural hotspot ranking entry for a component.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ArchitectureOverviewHotspot {
+    /// Component identity.
+    pub component_id: String,
+    /// Number of incoming connections from distinct components.
+    pub fan_in: u32,
+    /// Number of outgoing connections to distinct components.
+    pub fan_out: u32,
+    /// Change-frequency signal when available.
+    pub change_frequency: Option<u32>,
+    /// Complexity signal when available.
+    pub complexity: Option<u32>,
+    /// Aggregate hotspot score from 0 through 1000.
+    pub score: u16,
+}
+
+/// Derived-view algorithm metadata reported by an architecture overview.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ArchitectureOverviewDerivedView {
+    /// Derived-view category label, such as `hotspots`.
+    pub view: String,
+    /// Algorithm version identifier.
+    pub algorithm_version: String,
+}
+
+/// Bounded file-granularity architecture overview for one generation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ArchitectureOverview {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Aggregated file-granularity components in deterministic order.
+    pub components: Vec<ArchitectureOverviewComponent>,
+    /// Aggregated typed connections between distinct components.
+    pub connections: Vec<ArchitectureOverviewConnection>,
+    /// Structural hotspot rankings in deterministic order.
+    pub hotspots: Vec<ArchitectureOverviewHotspot>,
+    /// Derived-view algorithm metadata in deterministic order.
+    pub views: Vec<ArchitectureOverviewDerivedView>,
+}
+
 /// Validated total deadline budget for one asynchronous daemon request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestTimeout(Duration);
@@ -2217,6 +2290,88 @@ impl Client {
         }
     }
 
+    /// Aggregates a bounded file-granularity architecture overview over one
+    /// generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid endpoint, view, confidence, or
+    /// component bounds, unavailable protocol support, transport failure,
+    /// timeout, or a malformed or uncorrelated response.
+    pub fn architecture_overview(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        views: &[String],
+        max_components: Option<u16>,
+        include_edges: Option<bool>,
+        min_confidence: Option<u16>,
+    ) -> Result<ArchitectureOverview, ClientError> {
+        match self.request(build_architecture_overview_request(
+            repository,
+            generation,
+            views,
+            max_components,
+            include_edges,
+            min_confidence,
+        )?)? {
+            daemon::response_envelope::Response::ArchitectureOverview(response) => {
+                parse_architecture_overview(response, repository, generation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously aggregates a bounded file-granularity architecture
+    /// overview over one generation.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached aggregation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid endpoint, view, confidence, or
+    /// component bounds, unavailable protocol support, transport failure,
+    /// timeout, or a malformed or uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded architecture overview dimension"
+    )]
+    pub async fn architecture_overview_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        views: &[String],
+        max_components: Option<u16>,
+        include_edges: Option<bool>,
+        min_confidence: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> Result<ArchitectureOverview, ClientError> {
+        match self
+            .request_async(
+                build_architecture_overview_request(
+                    repository,
+                    generation,
+                    views,
+                    max_components,
+                    include_edges,
+                    min_confidence,
+                )?,
+                timeout,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::ArchitectureOverview(response) => {
+                parse_architecture_overview(response, repository, generation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     fn request(
         &self,
         request: daemon::request_envelope::Request,
@@ -2815,7 +2970,8 @@ fn ensure_request_supported(
         | daemon::request_envelope::Request::SymbolRelationships(_)
         | daemon::request_envelope::Request::FlowTrace(_)
         | daemon::request_envelope::Request::ArchitectureCycles(_)
-        | daemon::request_envelope::Request::CodeDead(_) => 5,
+        | daemon::request_envelope::Request::CodeDead(_)
+        | daemon::request_envelope::Request::ArchitectureOverview(_) => 5,
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
         daemon::request_envelope::Request::OperationLeaseRenew(_) => {
@@ -4363,6 +4519,151 @@ fn parse_code_dead(
         },
         blind_spots,
         false_positive_controls,
+    })
+}
+
+fn build_architecture_overview_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    views: &[String],
+    max_components: Option<u16>,
+    include_edges: Option<bool>,
+    min_confidence: Option<u16>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if views.len() > 8
+        || views
+            .iter()
+            .any(|view| view.is_empty() || view.len() > 32 || view.as_bytes().contains(&0))
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if min_confidence.is_some_and(|confidence| confidence > 1_000) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if max_components.is_some_and(|max| !(1..=250).contains(&max)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::ArchitectureOverview(
+        daemon::ArchitectureOverviewRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            views: views.to_vec(),
+            max_components: max_components.map(u32::from),
+            include_edges,
+            min_confidence: min_confidence.map(u32::from),
+        },
+    ))
+}
+
+fn parse_architecture_overview(
+    response: daemon::ArchitectureOverviewResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+) -> Result<ArchitectureOverview, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(response.context, repository, selector)?;
+    if response.components.len() > 250
+        || response.connections.len() > 1_000
+        || response.hotspots.len() > 250
+        || response.views.len() > 8
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut components = Vec::new();
+    components
+        .try_reserve_exact(response.components.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for component in response.components {
+        if component.id.is_empty()
+            || component.id.len() > 512
+            || component.kind.is_empty()
+            || component.kind.len() > 64
+            || component.name.is_empty()
+            || component.name.len() > 1_024
+            || component.responsibility_evidence.len() > 16
+            || component.confidence > 1_000
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        components.push(ArchitectureOverviewComponent {
+            id: component.id,
+            kind: component.kind,
+            name: component.name,
+            symbol_count: component.symbol_count,
+            responsibility_evidence: component.responsibility_evidence,
+            confidence: u16::try_from(component.confidence)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+        });
+    }
+    let mut connections = Vec::new();
+    connections
+        .try_reserve_exact(response.connections.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for connection in response.connections {
+        if connection.from.is_empty()
+            || connection.from.len() > 512
+            || connection.to.is_empty()
+            || connection.to.len() > 512
+            || connection.kind.is_empty()
+            || connection.kind.len() > 32
+            || connection.confidence > 1_000
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        connections.push(ArchitectureOverviewConnection {
+            from: connection.from,
+            to: connection.to,
+            kind: connection.kind,
+            weight: connection.weight,
+            confidence: u16::try_from(connection.confidence)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+        });
+    }
+    let mut hotspots = Vec::new();
+    hotspots
+        .try_reserve_exact(response.hotspots.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for hotspot in response.hotspots {
+        if hotspot.component_id.is_empty()
+            || hotspot.component_id.len() > 512
+            || hotspot.score > 1_000
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        hotspots.push(ArchitectureOverviewHotspot {
+            component_id: hotspot.component_id,
+            fan_in: hotspot.fan_in,
+            fan_out: hotspot.fan_out,
+            change_frequency: hotspot.change_frequency,
+            complexity: hotspot.complexity,
+            score: u16::try_from(hotspot.score)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+        });
+    }
+    let mut views = Vec::new();
+    views
+        .try_reserve_exact(response.views.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for view in response.views {
+        if view.view.is_empty()
+            || view.view.len() > 32
+            || view.algorithm_version.is_empty()
+            || view.algorithm_version.len() > 128
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        views.push(ArchitectureOverviewDerivedView {
+            view: view.view,
+            algorithm_version: view.algorithm_version,
+        });
+    }
+    Ok(ArchitectureOverview {
+        context,
+        components,
+        connections,
+        hotspots,
+        views,
     })
 }
 
