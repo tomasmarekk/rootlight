@@ -6003,8 +6003,12 @@ fn first_slice_response_correlates(
                     .views
                     .iter()
                     .all(|view| !view.is_empty() && view.len() <= 32)
-                && request.max_components.is_none_or(|max| (1..=250).contains(&max))
-                && request.min_confidence.is_none_or(|confidence| confidence <= 1_000)
+                && request
+                    .max_components
+                    .is_none_or(|max| (1..=250).contains(&max))
+                && request
+                    .min_confidence
+                    .is_none_or(|confidence| confidence <= 1_000)
                 && response.components.len() <= 250
                 && response.connections.len() <= 1_000
                 && response.hotspots.len() <= 250
