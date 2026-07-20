@@ -2415,10 +2415,7 @@ fn normalize_code_dead(
     let repository = repository_id(input.repository, unsupported)?;
     // Structural scope, custom budgets, and non-compact profiles are not served
     // by this slice.
-    if input.scope.is_some()
-        || input.budget.is_some()
-        || !compact_profile(input.response_profile)
-    {
+    if input.scope.is_some() || input.budget.is_some() || !compact_profile(input.response_profile) {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let entry_point_policy = match input.entry_point_policy {
@@ -2506,7 +2503,8 @@ fn map_code_dead(
 }
 
 fn entry_point_policy_label(policy: EntryPointPolicy) -> Result<String, ToolExecutionError> {
-    match serde_json::to_value(policy).map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?
+    match serde_json::to_value(policy)
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?
     {
         Value::String(label) => Ok(label),
         _ => Err(internal(ToolExecutionFailure::InvalidResponse)),

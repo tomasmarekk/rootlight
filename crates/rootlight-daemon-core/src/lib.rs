@@ -5942,7 +5942,9 @@ fn first_slice_response_correlates(
                     .entry_point_policy
                     .as_ref()
                     .is_none_or(|policy| !policy.is_empty() && policy.len() <= 32)
-                && request.min_confidence.is_none_or(|confidence| confidence <= 1_000)
+                && request
+                    .min_confidence
+                    .is_none_or(|confidence| confidence <= 1_000)
                 && request
                     .max_candidates
                     .is_none_or(|max| (1..=500).contains(&max))

@@ -1361,9 +1361,12 @@ fn code_dead(
     let include_tests = request.include_tests.unwrap_or(false);
     let min_confidence =
         u16::try_from(request.min_confidence.unwrap_or(0)).map_err(|_| invalid_argument())?;
-    let max_candidates =
-        usize::try_from(request.max_candidates.unwrap_or(DEFAULT_CODE_DEAD_MAX_CANDIDATES))
-            .map_err(|_| invalid_argument())?;
+    let max_candidates = usize::try_from(
+        request
+            .max_candidates
+            .unwrap_or(DEFAULT_CODE_DEAD_MAX_CANDIDATES),
+    )
+    .map_err(|_| invalid_argument())?;
     let response = service
         .code_dead(
             generation.generation,
@@ -1386,7 +1389,11 @@ fn code_dead(
             confidence: u32::from(candidate.confidence),
             why: candidate.why,
             suppressions_checked: candidate.suppressions_checked,
-            source_refs: candidate.source_refs.iter().map(source_ref_to_wire).collect(),
+            source_refs: candidate
+                .source_refs
+                .iter()
+                .map(source_ref_to_wire)
+                .collect(),
         });
     }
     let mut blind_spots = Vec::new();

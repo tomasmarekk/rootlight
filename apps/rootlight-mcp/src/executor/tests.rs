@@ -1559,7 +1559,10 @@ async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
             "unreachable_from_entry_points".to_owned()
         ]
     );
-    assert_eq!(candidate.suppressions_checked, vec!["entry_point".to_owned()]);
+    assert_eq!(
+        candidate.suppressions_checked,
+        vec!["entry_point".to_owned()]
+    );
     assert_eq!(candidate.source_refs.len(), 1);
     assert_eq!(output.data.entry_points.policy, EntryPointPolicy::Standard);
     assert_eq!(output.data.entry_points.entry_point_count, 2);

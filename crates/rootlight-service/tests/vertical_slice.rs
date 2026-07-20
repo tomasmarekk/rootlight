@@ -868,9 +868,11 @@ fn code_dead_reports_an_honest_partial_result_for_a_known_fixture() {
             assert!(previous <= candidate.symbol_id);
         }
         last_symbol = Some(candidate.symbol_id);
-        assert!(candidate
-            .why
-            .contains(&"unreachable_from_entry_points".to_owned()));
+        assert!(
+            candidate
+                .why
+                .contains(&"unreachable_from_entry_points".to_owned())
+        );
         assert!(candidate.confidence >= 1 && candidate.confidence <= 1_000);
         assert!(!candidate.suppressions_checked.is_empty());
         assert!(candidate.source_refs.len() <= 8);
