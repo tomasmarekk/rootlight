@@ -2088,6 +2088,7 @@ dependencies = [
 name = "rootlight-mcp-contract"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "jsonschema",
  "rootlight-error",
  "rootlight-ids",
