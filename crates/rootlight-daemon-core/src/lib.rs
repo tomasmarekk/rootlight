@@ -5763,7 +5763,7 @@ fn first_slice_response_correlates(
                     .all(|seed| wire_id_has_len(Some(&seed.value), 20))
                 && response.returned_edges == returned_items
                 && response.returned_edges <= response.total_edges
-                && response.exact == !response.truncated
+                && response.exact != response.truncated
                 && (response.truncated || response.returned_edges == response.total_edges)
                 && response.groups.iter().all(|group| {
                     wire_id_has_len(group.seed.as_ref().map(|id| &id.value), 20)
