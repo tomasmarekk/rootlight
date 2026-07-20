@@ -66,7 +66,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "2ae0f1b0050897f884003f96186140f178c70a2c104aa8b8b4d344d08ead187d"
+      "blake3": "d9e8bc8ced44edfe7337a8c4e4adb7f5fc0ac7dae54b8429d141905bd1b9faca"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
@@ -154,7 +154,7 @@
     },
     {
       "path": "tests/fixtures/mcp/1.0/tool-contracts.json",
-      "blake3": "d364da81b9fd4304e01cac0d724614804ed9f219a8e96e37029317d49a06344b"
+      "blake3": "95b156a2227a04235d4bdcf10981f94fc4d637409e40a766a38e49913f556858"
     },
     {
       "path": "tests/fixtures/mcp/1.0/tool-transcript.jsonl",
@@ -170,7 +170,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "b11bee38bbb53021706a0d5d85d2c57f8dd435720a1911c5053a4c48024cea85"
+      "blake3": "5d2627c9a4241acef15340edf1025ac164082a8aa4683e73e480ca4670fe02f4"
     }
   ],
   "artifacts": [

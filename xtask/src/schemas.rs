@@ -1630,6 +1630,66 @@ fn validate_retained_mcp_tool_contracts(
             "mcp-source-read-input-1.0.schema.json",
             "mcp-source-read-output-1.0.schema.json",
         ),
+        (
+            "symbol.relationships",
+            "mcp-symbol-relationships-input-1.0.schema.json",
+            "mcp-symbol-relationships-output-1.0.schema.json",
+        ),
+        (
+            "flow.trace",
+            "mcp-flow-trace-input-1.0.schema.json",
+            "mcp-flow-trace-output-1.0.schema.json",
+        ),
+        (
+            "architecture.overview",
+            "mcp-architecture-overview-input-1.0.schema.json",
+            "mcp-architecture-overview-output-1.0.schema.json",
+        ),
+        (
+            "architecture.cycles",
+            "mcp-architecture-cycles-input-1.0.schema.json",
+            "mcp-architecture-cycles-output-1.0.schema.json",
+        ),
+        (
+            "code.dead",
+            "mcp-code-dead-input-1.0.schema.json",
+            "mcp-code-dead-output-1.0.schema.json",
+        ),
+        (
+            "change.impact",
+            "mcp-change-impact-input-1.0.schema.json",
+            "mcp-change-impact-output-1.0.schema.json",
+        ),
+        (
+            "tests.select",
+            "mcp-tests-select-input-1.0.schema.json",
+            "mcp-tests-select-output-1.0.schema.json",
+        ),
+        (
+            "history.compare",
+            "mcp-history-compare-input-1.0.schema.json",
+            "mcp-history-compare-output-1.0.schema.json",
+        ),
+        (
+            "plan.change",
+            "mcp-plan-change-input-1.0.schema.json",
+            "mcp-plan-change-output-1.0.schema.json",
+        ),
+        (
+            "context.pack",
+            "mcp-context-pack-input-1.0.schema.json",
+            "mcp-context-pack-output-1.0.schema.json",
+        ),
+        (
+            "query.advanced",
+            "mcp-query-advanced-input-1.0.schema.json",
+            "mcp-query-advanced-output-1.0.schema.json",
+        ),
+        (
+            "query.batch",
+            "mcp-query-batch-input-1.0.schema.json",
+            "mcp-query-batch-output-1.0.schema.json",
+        ),
     ];
 
     if tools.len() != schema_names.len() {

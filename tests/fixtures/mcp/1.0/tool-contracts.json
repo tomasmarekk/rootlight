@@ -372,7 +372,699 @@
           "estimated_tokens": 0,
           "wall_time_ms": 1,
           "cache_status": "not_applicable",
-          "trace_id": "trace-source-1"
+         "trace_id": "trace-source-1"
+       },
+       "warnings": [],
+       "trust": "untrusted_repository_data"
+     }
+    },
+    {
+      "tool": "symbol.relationships",
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "symbol_ids": [
+          "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+        ],
+        "relations": [
+          "calls"
+        ]
+      },
+      "output": {
+        "schema_version": "1.0",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "display_name": "fixture"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "structural_freshness": "current",
+          "semantic_freshness": "current"
+        },
+        "coverage": {
+          "status": "complete",
+          "languages": [],
+          "skipped_inputs": 0
+        },
+        "data": {
+          "groups": [],
+          "unresolved": [],
+          "totals": {
+            "returned_edges": 0,
+            "total_edges": 0,
+            "exact": true
+          }
+        },
+        "truncated": false,
+        "next_cursor": null,
+        "usage": {
+          "rows": 1,
+          "edges": 0,
+          "source_bytes": 0,
+          "json_bytes": 0,
+          "estimated_tokens": 0,
+          "wall_time_ms": 1,
+          "cache_status": "miss",
+          "trace_id": "trace-symbol-relationships-1"
+        },
+        "warnings": [],
+        "trust": "untrusted_repository_data"
+      }
+    },
+    {
+      "tool": "flow.trace",
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "from": {
+          "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+        },
+        "relations": [
+          "calls"
+        ]
+      },
+      "output": {
+        "schema_version": "1.0",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "display_name": "fixture"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "structural_freshness": "current",
+          "semantic_freshness": "current"
+        },
+        "coverage": {
+          "status": "complete",
+          "languages": [],
+          "skipped_inputs": 0
+        },
+        "data": {
+          "paths": [],
+          "frontier": {
+            "reached_nodes": 0,
+            "examined_edges": 0,
+            "truncated": false,
+            "unresolved_boundaries": 0
+          },
+          "projection": {
+            "relations": [
+              "calls"
+            ],
+            "min_confidence": 0
+          }
+        },
+        "truncated": false,
+        "next_cursor": null,
+        "usage": {
+          "rows": 1,
+          "edges": 0,
+          "source_bytes": 0,
+          "json_bytes": 0,
+          "estimated_tokens": 0,
+          "wall_time_ms": 1,
+          "cache_status": "miss",
+          "trace_id": "trace-flow-trace-1"
+        },
+        "warnings": [],
+        "trust": "untrusted_repository_data"
+      }
+    },
+    {
+      "tool": "architecture.overview",
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "schema_version": "1.0",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "display_name": "fixture"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "structural_freshness": "current",
+          "semantic_freshness": "current"
+        },
+        "coverage": {
+          "status": "complete",
+          "languages": [],
+          "skipped_inputs": 0
+        },
+        "data": {
+          "components": [],
+          "connections": [],
+          "hotspots": [],
+          "views": []
+        },
+        "truncated": false,
+        "next_cursor": null,
+        "usage": {
+          "rows": 1,
+          "edges": 0,
+          "source_bytes": 0,
+          "json_bytes": 0,
+          "estimated_tokens": 0,
+          "wall_time_ms": 1,
+          "cache_status": "miss",
+          "trace_id": "trace-architecture-overview-1"
+        },
+        "warnings": [],
+        "trust": "untrusted_repository_data"
+      }
+    },
+    {
+      "tool": "architecture.cycles",
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "projection": {
+          "relations": [
+            "calls"
+          ],
+          "level": "module"
+        }
+      },
+      "output": {
+        "schema_version": "1.0",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "display_name": "fixture"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "structural_freshness": "current",
+          "semantic_freshness": "current"
+        },
+        "coverage": {
+          "status": "complete",
+          "languages": [],
+          "skipped_inputs": 0
+        },
+        "data": {
+          "components": [],
+          "cycles": [],
+          "break_candidates": []
+        },
+        "truncated": false,
+        "next_cursor": null,
+        "usage": {
+          "rows": 1,
+          "edges": 0,
+          "source_bytes": 0,
+          "json_bytes": 0,
+          "estimated_tokens": 0,
+          "wall_time_ms": 1,
+          "cache_status": "miss",
+          "trace_id": "trace-architecture-cycles-1"
+        },
+        "warnings": [],
+        "trust": "untrusted_repository_data"
+      }
+    },
+    {
+      "tool": "code.dead",
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "schema_version": "1.0",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "display_name": "fixture"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "structural_freshness": "current",
+          "semantic_freshness": "current"
+        },
+        "coverage": {
+          "status": "complete",
+          "languages": [],
+          "skipped_inputs": 0
+        },
+        "data": {
+          "candidates": [],
+          "entry_points": {
+            "policy": "standard",
+            "entry_point_count": 0,
+            "complete": true
+          },
+          "blind_spots": [],
+          "false_positive_controls": []
+        },
+        "truncated": false,
+        "next_cursor": null,
+        "usage": {
+          "rows": 1,
+          "edges": 0,
+          "source_bytes": 0,
+          "json_bytes": 0,
+          "estimated_tokens": 0,
+          "wall_time_ms": 1,
+          "cache_status": "miss",
+          "trace_id": "trace-code-dead-1"
+        },
+        "warnings": [],
+        "trust": "untrusted_repository_data"
+      }
+    },
+    {
+      "tool": "change.impact",
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "change": {
+          "revision_range": "main"
+        }
+      },
+      "output": {
+        "schema_version": "1.0",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "display_name": "fixture"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "structural_freshness": "current",
+          "semantic_freshness": "current"
+        },
+        "coverage": {
+          "status": "complete",
+          "languages": [],
+          "skipped_inputs": 0
+        },
+        "data": {
+          "resolved_changes": [
+            {
+              "symbol_id": null,
+              "file_id": null,
+              "classification": "added"
+            }
+          ],
+          "impacted": [],
+          "service_impacts": [],
+          "tests": [],
+          "risk_summary": {
+            "level": "none",
+            "reasons": [],
+            "coverage": "complete",
+            "breaking_surface": false,
+            "fanout": 0,
+            "dynamic_blind_spots": false
+          }
+        },
+        "truncated": false,
+        "next_cursor": null,
+        "usage": {
+          "rows": 1,
+          "edges": 0,
+          "source_bytes": 0,
+          "json_bytes": 0,
+          "estimated_tokens": 0,
+          "wall_time_ms": 1,
+          "cache_status": "miss",
+          "trace_id": "trace-change-impact-1"
+        },
+        "warnings": [],
+        "trust": "untrusted_repository_data"
+      }
+    },
+    {
+      "tool": "tests.select",
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "seeds": {
+          "symbols": [
+            "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+          ]
+        }
+      },
+      "output": {
+        "schema_version": "1.0",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "display_name": "fixture"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "structural_freshness": "current",
+          "semantic_freshness": "current"
+        },
+        "coverage": {
+          "status": "complete",
+          "languages": [],
+          "skipped_inputs": 0
+        },
+        "data": {
+          "tests": [],
+          "coverage_strategy": {
+            "direct_edges": false,
+            "transitive_signals": false,
+            "history_signals": false,
+            "build_target_signals": false
+          },
+          "gaps": []
+        },
+        "truncated": false,
+        "next_cursor": null,
+        "usage": {
+          "rows": 1,
+          "edges": 0,
+          "source_bytes": 0,
+          "json_bytes": 0,
+          "estimated_tokens": 0,
+          "wall_time_ms": 1,
+          "cache_status": "miss",
+          "trace_id": "trace-tests-select-1"
+        },
+        "warnings": [],
+        "trust": "untrusted_repository_data"
+      }
+    },
+    {
+      "tool": "history.compare",
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "base": {
+          "git": "v1"
+        },
+        "head": {
+          "git": "v2"
+        }
+      },
+      "output": {
+        "schema_version": "1.0",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "display_name": "fixture"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "structural_freshness": "current",
+          "semantic_freshness": "current"
+        },
+        "coverage": {
+          "status": "complete",
+          "languages": [],
+          "skipped_inputs": 0
+        },
+        "data": {
+          "matched_states": {
+            "base_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+            "head_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+            "coverage": "complete"
+          },
+          "changes": [],
+          "architecture_delta": {
+            "new_cross_service_edges": 0,
+            "removed_cross_service_edges": 0,
+            "new_boundaries": 0,
+            "removed_boundaries": 0
+          },
+          "breaking_candidates": [],
+          "lineage": []
+        },
+        "truncated": false,
+        "next_cursor": null,
+        "usage": {
+          "rows": 1,
+          "edges": 0,
+          "source_bytes": 0,
+          "json_bytes": 0,
+          "estimated_tokens": 0,
+          "wall_time_ms": 1,
+          "cache_status": "miss",
+          "trace_id": "trace-history-compare-1"
+        },
+        "warnings": [],
+        "trust": "untrusted_repository_data"
+      }
+    },
+    {
+      "tool": "plan.change",
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "objective": "bug_fix",
+        "objective_text": "fix the defect",
+        "targets": [
+          {
+            "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+          }
+        ]
+      },
+      "output": {
+        "schema_version": "1.0",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "display_name": "fixture"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "structural_freshness": "current",
+          "semantic_freshness": "current"
+        },
+        "coverage": {
+          "status": "complete",
+          "languages": [],
+          "skipped_inputs": 0
+        },
+        "data": {
+          "plan": [
+            {
+              "step": 1,
+              "action": "reproduce the defect",
+              "targets": [],
+              "depends_on": [],
+              "risks": []
+            }
+          ],
+          "affected_scope": {
+            "affected_symbols": 0,
+            "affected_files": 0,
+            "risk_level": "none",
+            "touches_public_surface": false
+          },
+          "test_plan": [],
+          "open_decisions": [],
+          "context_pack_request": {
+            "symbols": [],
+            "files": []
+          }
+        },
+        "truncated": false,
+        "next_cursor": null,
+        "usage": {
+          "rows": 1,
+          "edges": 0,
+          "source_bytes": 0,
+          "json_bytes": 0,
+          "estimated_tokens": 0,
+          "wall_time_ms": 1,
+          "cache_status": "miss",
+          "trace_id": "trace-plan-change-1"
+        },
+        "warnings": [],
+        "trust": "untrusted_repository_data"
+      }
+    },
+    {
+      "tool": "context.pack",
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "task": "explain the publish path",
+        "seeds": {
+          "symbols": [
+            "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+          ]
+        },
+        "token_budget": 2000
+      },
+      "output": {
+        "schema_version": "1.0",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "display_name": "fixture"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "structural_freshness": "current",
+          "semantic_freshness": "current"
+        },
+        "coverage": {
+          "status": "complete",
+          "languages": [],
+          "skipped_inputs": 0
+        },
+        "data": {
+          "pack_id": "pack-1",
+          "items": [],
+          "structure": {
+            "reading_order": [],
+            "dependencies": []
+          },
+          "omitted": [],
+         "followups": [],
+         "token_accounting": {
+            "estimated_total": 120,
+            "by_section": {
+              "definitions": 120
+            }
+         }
+        },
+        "truncated": false,
+        "next_cursor": null,
+        "usage": {
+          "rows": 1,
+          "edges": 0,
+          "source_bytes": 0,
+          "json_bytes": 0,
+          "estimated_tokens": 0,
+          "wall_time_ms": 1,
+          "cache_status": "miss",
+          "trace_id": "trace-context-pack-1"
+        },
+        "warnings": [],
+        "trust": "untrusted_repository_data"
+      }
+    },
+    {
+      "tool": "query.advanced",
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "query": {
+          "op": "scan",
+          "entity": "function"
+        }
+      },
+      "output": {
+        "schema_version": "1.0",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "display_name": "fixture"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "structural_freshness": "current",
+          "semantic_freshness": "current"
+        },
+        "coverage": {
+          "status": "complete",
+          "languages": [],
+          "skipped_inputs": 0
+        },
+        "data": {
+          "columns": [
+            {
+              "name": "symbol",
+              "column_type": "symbol_id"
+            }
+          ],
+          "rows": [],
+          "plan": null,
+          "completeness": "complete"
+        },
+        "truncated": false,
+        "next_cursor": null,
+        "usage": {
+          "rows": 1,
+          "edges": 0,
+          "source_bytes": 0,
+          "json_bytes": 0,
+          "estimated_tokens": 0,
+          "wall_time_ms": 1,
+          "cache_status": "miss",
+          "trace_id": "trace-query-advanced-1"
+        },
+        "warnings": [],
+        "trust": "untrusted_repository_data"
+      }
+    },
+    {
+      "tool": "query.batch",
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "operations": [
+          {
+            "id": "op_1",
+            "tool": "code.locate",
+            "arguments": {}
+          }
+        ]
+      },
+      "output": {
+        "schema_version": "1.0",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "display_name": "fixture"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "structural_freshness": "current",
+          "semantic_freshness": "current"
+        },
+        "coverage": {
+          "status": "complete",
+          "languages": [],
+          "skipped_inputs": 0
+        },
+        "data": {
+          "batch_status": "ok",
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "operation_results": [
+            {
+              "id": "op_1",
+              "tool": "code.locate",
+              "status": "ok",
+              "truncated": false,
+              "next_cursor": null,
+              "warnings": []
+            }
+          ]
+        },
+        "truncated": false,
+        "next_cursor": null,
+        "usage": {
+          "rows": 1,
+          "edges": 0,
+          "source_bytes": 0,
+          "json_bytes": 0,
+          "estimated_tokens": 0,
+          "wall_time_ms": 1,
+          "cache_status": "miss",
+          "trace_id": "trace-query-batch-1"
         },
         "warnings": [],
         "trust": "untrusted_repository_data"

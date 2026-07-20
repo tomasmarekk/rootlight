@@ -1800,6 +1800,19 @@ mod tests {
         RepoIndexInput, RepoIndexOutput, SourceReadInput, SourceReadOutput, SymbolExplainInput,
         SymbolExplainOutput, VerticalTool,
     };
+    use crate::change::{
+        ChangeImpactInput, ChangeImpactOutput, HistoryCompareInput, HistoryCompareOutput,
+        PlanChangeInput, PlanChangeOutput, TestsSelectInput, TestsSelectOutput,
+    };
+    use crate::context::{
+        ContextPackInput, ContextPackOutput, QueryAdvancedInput, QueryAdvancedOutput,
+        QueryBatchInput, QueryBatchOutput,
+    };
+    use crate::intent::{
+        ArchitectureCyclesInput, ArchitectureCyclesOutput, ArchitectureOverviewInput,
+        ArchitectureOverviewOutput, CodeDeadInput, CodeDeadOutput, FlowTraceInput, FlowTraceOutput,
+        SymbolRelationshipsInput, SymbolRelationshipsOutput,
+    };
     use crate::repository::{RepoListInput, RepoListOutput, RepoStatusInput, RepoStatusOutput};
 
     #[test]
@@ -1961,6 +1974,110 @@ mod tests {
                 "source.read" => {
                     assert_round_trip::<SourceReadInput>(VerticalTool::SourceRead, &input, true);
                     assert_round_trip::<SourceReadOutput>(VerticalTool::SourceRead, &output, false);
+                }
+                "symbol.relationships" => {
+                    assert_round_trip::<SymbolRelationshipsInput>(
+                        VerticalTool::SymbolRelationships,
+                        &input,
+                        true,
+                    );
+                    assert_round_trip::<SymbolRelationshipsOutput>(
+                        VerticalTool::SymbolRelationships,
+                        &output,
+                        false,
+                    );
+                }
+                "flow.trace" => {
+                    assert_round_trip::<FlowTraceInput>(VerticalTool::FlowTrace, &input, true);
+                    assert_round_trip::<FlowTraceOutput>(VerticalTool::FlowTrace, &output, false);
+                }
+                "architecture.overview" => {
+                    assert_round_trip::<ArchitectureOverviewInput>(
+                        VerticalTool::ArchitectureOverview,
+                        &input,
+                        true,
+                    );
+                    assert_round_trip::<ArchitectureOverviewOutput>(
+                        VerticalTool::ArchitectureOverview,
+                        &output,
+                        false,
+                    );
+                }
+                "architecture.cycles" => {
+                    assert_round_trip::<ArchitectureCyclesInput>(
+                        VerticalTool::ArchitectureCycles,
+                        &input,
+                        true,
+                    );
+                    assert_round_trip::<ArchitectureCyclesOutput>(
+                        VerticalTool::ArchitectureCycles,
+                        &output,
+                        false,
+                    );
+                }
+                "code.dead" => {
+                    assert_round_trip::<CodeDeadInput>(VerticalTool::CodeDead, &input, true);
+                    assert_round_trip::<CodeDeadOutput>(VerticalTool::CodeDead, &output, false);
+                }
+                "change.impact" => {
+                    assert_round_trip::<ChangeImpactInput>(
+                        VerticalTool::ChangeImpact,
+                        &input,
+                        true,
+                    );
+                    assert_round_trip::<ChangeImpactOutput>(
+                        VerticalTool::ChangeImpact,
+                        &output,
+                        false,
+                    );
+                }
+                "tests.select" => {
+                    assert_round_trip::<TestsSelectInput>(VerticalTool::TestsSelect, &input, true);
+                    assert_round_trip::<TestsSelectOutput>(
+                        VerticalTool::TestsSelect,
+                        &output,
+                        false,
+                    );
+                }
+                "history.compare" => {
+                    assert_round_trip::<HistoryCompareInput>(
+                        VerticalTool::HistoryCompare,
+                        &input,
+                        true,
+                    );
+                    assert_round_trip::<HistoryCompareOutput>(
+                        VerticalTool::HistoryCompare,
+                        &output,
+                        false,
+                    );
+                }
+                "plan.change" => {
+                    assert_round_trip::<PlanChangeInput>(VerticalTool::PlanChange, &input, true);
+                    assert_round_trip::<PlanChangeOutput>(VerticalTool::PlanChange, &output, false);
+                }
+                "context.pack" => {
+                    assert_round_trip::<ContextPackInput>(VerticalTool::ContextPack, &input, true);
+                    assert_round_trip::<ContextPackOutput>(
+                        VerticalTool::ContextPack,
+                        &output,
+                        false,
+                    );
+                }
+                "query.advanced" => {
+                    assert_round_trip::<QueryAdvancedInput>(
+                        VerticalTool::QueryAdvanced,
+                        &input,
+                        true,
+                    );
+                    assert_round_trip::<QueryAdvancedOutput>(
+                        VerticalTool::QueryAdvanced,
+                        &output,
+                        false,
+                    );
+                }
+                "query.batch" => {
+                    assert_round_trip::<QueryBatchInput>(VerticalTool::QueryBatch, &input, true);
+                    assert_round_trip::<QueryBatchOutput>(VerticalTool::QueryBatch, &output, false);
                 }
                 other => panic!("unexpected retained tool contract {other}"),
             }
