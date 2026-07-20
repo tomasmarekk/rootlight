@@ -10,7 +10,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     path::PathBuf,
     sync::{
@@ -38,7 +38,7 @@ use rootlight_operations::{
     OperationSubmission, PlanHash,
 };
 use rootlight_protocol::generated::{common::v1 as common, daemon::v1 as daemon};
-use rootlight_query::{LocateMode, QueryUsage};
+use rootlight_query::{LocateMode, QueryUsage, RelationDirection, RelationFamily};
 use rootlight_service::{
     FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexReceipt, FirstSliceService,
 };
@@ -51,6 +51,7 @@ const DEFAULT_CONTROL_QUEUE: usize = 32;
 const DEFAULT_OPERATION_METADATA: usize = 256;
 const RETRY_AFTER_MS: u32 = 100;
 const LIFECYCLE_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
+const DEFAULT_RELATIONSHIP_RESULTS: u32 = 100;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
 
@@ -515,6 +516,10 @@ fn execute_service_request(
         }
         FirstSliceIpcRequest::RepositoryStatus(request) => {
             repository_status(service, request).map(FirstSliceIpcResponse::RepositoryStatus)
+        }
+        FirstSliceIpcRequest::SymbolRelationships(request) => {
+            symbol_relationships(service, request, &context)
+                .map(FirstSliceIpcResponse::SymbolRelationships)
         }
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
     }
@@ -1051,6 +1056,82 @@ fn symbol_explain(
         symbols,
         unresolved_symbols: Vec::new(),
         truncated: false,
+    })
+}
+
+fn symbol_relationships(
+    service: &FirstSliceService,
+    request: daemon::SymbolRelationshipsRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::SymbolRelationshipsResponse, PublicError> {
+    let repository = parse_repository(request.repository.as_ref())?;
+    let selected = parse_generation_selector(request.generation.as_ref())?;
+    let generation = service
+        .resolve_generation(repository, selected)
+        .map_err(service_error)?;
+    let mut seeds = BTreeSet::new();
+    for seed in &request.seeds {
+        seeds.insert(parse_symbol(Some(seed))?);
+    }
+    let mut families = Vec::new();
+    families
+        .try_reserve_exact(request.relations.len())
+        .map_err(|_| resource_exhausted())?;
+    for relation in &request.relations {
+        let family = RelationFamily::from_label(relation).ok_or_else(invalid_argument)?;
+        if !families.contains(&family) {
+            families.push(family);
+        }
+    }
+    let direction = match request.direction.as_deref() {
+        Some(label) => Some(RelationDirection::from_label(label).ok_or_else(invalid_argument)?),
+        None => None,
+    };
+    let min_confidence =
+        u16::try_from(request.min_confidence.unwrap_or(0)).map_err(|_| invalid_argument())?;
+    let max_results = usize::try_from(request.max_results.unwrap_or(DEFAULT_RELATIONSHIP_RESULTS))
+        .map_err(|_| invalid_argument())?;
+    let response = service
+        .symbol_relationships(
+            generation.generation,
+            seeds,
+            families,
+            direction,
+            min_confidence,
+            max_results,
+            &context.cancellation,
+        )
+        .map_err(service_error)?;
+    let mut groups = Vec::new();
+    groups
+        .try_reserve_exact(response.data.groups.len())
+        .map_err(|_| resource_exhausted())?;
+    for group in response.data.groups {
+        let items = group
+            .items
+            .iter()
+            .map(|item| daemon::FirstSliceRelationshipTarget {
+                symbol: Some(symbol_to_wire(item.symbol)),
+                confidence: u32::from(item.confidence),
+                source_refs: item.source_refs.iter().map(source_ref_to_wire).collect(),
+            })
+            .collect();
+        groups.push(daemon::FirstSliceRelationshipGroup {
+            seed: Some(symbol_to_wire(group.seed)),
+            relation: group.family.as_str().to_owned(),
+            direction: group.direction.as_str().to_owned(),
+            items,
+            total_count: u64::from(group.total_count),
+        });
+    }
+    Ok(daemon::SymbolRelationshipsResponse {
+        schema_version: Some(schema_version()),
+        context: Some(query_context(generation, &response.usage, &[])),
+        groups,
+        returned_edges: u64::from(response.data.returned_edges),
+        total_edges: u64::from(response.data.total_edges),
+        exact: response.data.exact,
+        truncated: response.data.truncated,
     })
 }
 

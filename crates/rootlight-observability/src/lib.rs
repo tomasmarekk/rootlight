@@ -50,7 +50,7 @@ const SUPPORT_ENTRY_COUNT_V1: usize = 5;
 const SUPPORT_ENTRY_COUNT_V2: usize = 6;
 const SUPPORT_ENTRY_COUNT_V3: usize = 6;
 const CONTROL_METHOD_COUNT_V2: usize = 8;
-const CONTROL_METHOD_COUNT: usize = 15;
+const CONTROL_METHOD_COUNT: usize = 16;
 const TELEMETRY_OUTCOME_COUNT: usize = 6;
 /// Ordered allow-list for the frozen support archive schema.
 pub const SUPPORT_ENTRY_NAMES: [&str; SUPPORT_ENTRY_COUNT_V1] = [
@@ -390,6 +390,8 @@ pub enum ControlMethod {
     RepositoryList,
     /// One repository status.
     RepositoryStatus,
+    /// Generation-pinned symbol relationship expansion.
+    SymbolRelationships,
 }
 
 impl ControlMethod {
@@ -410,6 +412,7 @@ impl ControlMethod {
         Self::SourceRead,
         Self::RepositoryList,
         Self::RepositoryStatus,
+        Self::SymbolRelationships,
     ];
 
     const fn index(self) -> usize {
@@ -429,6 +432,7 @@ impl ControlMethod {
             Self::SourceRead => 12,
             Self::RepositoryList => 13,
             Self::RepositoryStatus => 14,
+            Self::SymbolRelationships => 15,
         }
     }
 }

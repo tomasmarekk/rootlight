@@ -1,6 +1,7 @@
 //! Public-boundary proof for the daemon-independent first slice.
 
 use std::{
+    collections::BTreeSet,
     fs,
     time::{Duration, Instant},
 };
@@ -13,6 +14,7 @@ use rootlight_service::{
     ChangeClass, FileChangeKind, FirstSliceBuildStrategy, FirstSliceError,
     FirstSliceFreshnessStatus, FirstSliceIncrementalEvidence, FirstSliceObservedFreshness,
     FirstSlicePublicationMode, FirstSliceService, FirstSliceTwoStageAvailability,
+    RelationDirection, RelationFamily,
 };
 use tempfile::TempDir;
 
@@ -610,4 +612,69 @@ fn repository_list_and_status_report_the_active_generation() {
         service.repository_status(unknown),
         Err(FirstSliceError::RepositoryNotFound)
     ));
+}
+
+#[test]
+fn symbol_relationships_reports_honest_results_for_a_known_symbol() {
+    // The first-slice oracle records a direct call as a `DispatchCandidate`
+    // occurrence (not a resolved `Calls` relation) and structural containment
+    // as a file-to-entity `Contains` relation. Neither predicate belongs to a
+    // served relation family, so an honest `symbol.relationships` expansion of
+    // the caller reports no fabricated call edges while still proving the
+    // generation-pinned query path, exact counts, and mandatory trust labeling.
+    let source =
+        "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+    let caller = service
+        .code_locate(
+            indexed.generation,
+            "caller".to_owned(),
+            LocateMode::Exact,
+            8,
+            &cancellation,
+        )
+        .expect("locate caller")
+        .data
+        .hits
+        .into_iter()
+        .next()
+        .expect("caller is located")
+        .symbol;
+
+    let relationships = service
+        .symbol_relationships(
+            indexed.generation,
+            BTreeSet::from([caller]),
+            vec![
+                RelationFamily::Calls,
+                RelationFamily::CalledBy,
+                RelationFamily::References,
+                RelationFamily::Types,
+                RelationFamily::Implements,
+                RelationFamily::Imports,
+            ],
+            Some(RelationDirection::Both),
+            0,
+            100,
+            &cancellation,
+        )
+        .expect("symbol relationships query succeeds");
+
+    // The expansion is exact and unbudgeted: every served family is honestly
+    // empty for this fixture, so returned and total edge counts agree at zero
+    // and no candidate or containment edge leaks into a served family.
+    assert!(relationships.data.exact);
+    assert!(!relationships.data.truncated);
+    assert_eq!(relationships.data.returned_edges, 0);
+    assert_eq!(relationships.data.total_edges, 0);
+    assert!(relationships.data.groups.is_empty());
+    assert_eq!(
+        relationships.data.trust,
+        RepositoryDataTrust::UntrustedRepositoryData
+    );
 }

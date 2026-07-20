@@ -40,6 +40,7 @@ message RequestEnvelope {
     SourceReadRequest source_read = 34;
     RepositoryListRequest repository_list = 35;
     RepositoryStatusRequest repository_status = 36;
+    SymbolRelationshipsRequest symbol_relationships = 37;
   }
 }
 
@@ -61,6 +62,7 @@ message ResponseEnvelope {
     SourceReadResponse source_read = 34;
     RepositoryListResponse repository_list = 35;
     RepositoryStatusResponse repository_status = 36;
+    SymbolRelationshipsResponse symbol_relationships = 37;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -535,4 +537,43 @@ message RepositoryStatusResponse {
   string semantic_freshness = 5;
   string state = 6;
   repeated RepositoryCoverageEntry coverage = 7;
+}
+
+// Requests bounded typed relation neighborhoods for stable symbols.
+message SymbolRelationshipsRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  repeated rootlight.common.v1.SymbolId seeds = 4;
+  repeated string relations = 5;
+  optional string direction = 6;
+  optional uint32 min_confidence = 7;
+  optional uint32 max_results = 8;
+}
+
+// One typed relationship target within a seed-relation group.
+message FirstSliceRelationshipTarget {
+  rootlight.common.v1.SymbolId symbol = 1;
+  uint32 confidence = 2;
+  repeated FirstSliceSourceRef source_refs = 3;
+}
+
+// One seed-relation group in the relationship response.
+message FirstSliceRelationshipGroup {
+  rootlight.common.v1.SymbolId seed = 1;
+  string relation = 2;
+  string direction = 3;
+  repeated FirstSliceRelationshipTarget items = 4;
+  uint64 total_count = 5;
+}
+
+// Returns bounded typed relation neighborhoods and generation correlation.
+message SymbolRelationshipsResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  repeated FirstSliceRelationshipGroup groups = 3;
+  uint64 returned_edges = 4;
+  uint64 total_edges = 5;
+  bool exact = 6;
+  bool truncated = 7;
 }

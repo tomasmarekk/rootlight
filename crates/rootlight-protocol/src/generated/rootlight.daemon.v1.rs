@@ -49,7 +49,7 @@ pub struct RequestEnvelope {
     pub timeout_ms: ::core::option::Option<u32>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -101,6 +101,9 @@ pub mod request_envelope {
         #[prost(message, tag = "36")]
         #[allow(missing_docs)]
         RepositoryStatus(super::RepositoryStatusRequest),
+        #[prost(message, tag = "37")]
+        #[allow(missing_docs)]
+        SymbolRelationships(super::SymbolRelationshipsRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -111,7 +114,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -163,6 +166,9 @@ pub mod response_envelope {
         #[prost(message, tag = "36")]
         #[allow(missing_docs)]
         RepositoryStatus(super::RepositoryStatusResponse),
+        #[prost(message, tag = "37")]
+        #[allow(missing_docs)]
+        SymbolRelationships(super::SymbolRelationshipsResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -969,6 +975,95 @@ pub struct RepositoryStatusResponse {
     #[prost(message, repeated, tag = "7")]
     #[allow(missing_docs)]
     pub coverage: ::prost::alloc::vec::Vec<RepositoryCoverageEntry>,
+}
+/// Requests bounded typed relation neighborhoods for stable symbols.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SymbolRelationshipsRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub seeds: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+    #[prost(string, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub relations: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub direction: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub min_confidence: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub max_results: ::core::option::Option<u32>,
+}
+/// One typed relationship target within a seed-relation group.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceRelationshipTarget {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub symbol: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub confidence: u32,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub source_refs: ::prost::alloc::vec::Vec<FirstSliceSourceRef>,
+}
+/// One seed-relation group in the relationship response.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceRelationshipGroup {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub seed: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub relation: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub direction: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub items: ::prost::alloc::vec::Vec<FirstSliceRelationshipTarget>,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub total_count: u64,
+}
+/// Returns bounded typed relation neighborhoods and generation correlation.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SymbolRelationshipsResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub groups: ::prost::alloc::vec::Vec<FirstSliceRelationshipGroup>,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub returned_edges: u64,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub total_edges: u64,
+    #[prost(bool, tag = "6")]
+    #[allow(missing_docs)]
+    pub exact: bool,
+    #[prost(bool, tag = "7")]
+    #[allow(missing_docs)]
+    pub truncated: bool,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]

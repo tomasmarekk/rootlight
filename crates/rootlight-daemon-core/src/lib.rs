@@ -150,6 +150,8 @@ pub enum FirstSliceIpcRequest {
     RepositoryList(daemon::RepositoryListRequest),
     /// Read one repository's active generation status.
     RepositoryStatus(daemon::RepositoryStatusRequest),
+    /// Expand typed relation neighborhoods for stable symbols.
+    SymbolRelationships(daemon::SymbolRelationshipsRequest),
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -169,6 +171,8 @@ pub enum FirstSliceIpcResponse {
     RepositoryList(daemon::RepositoryListResponse),
     /// One repository status.
     RepositoryStatus(daemon::RepositoryStatusResponse),
+    /// Bounded typed relation neighborhoods.
+    SymbolRelationships(daemon::SymbolRelationshipsResponse),
 }
 
 impl FirstSliceIpcResponse {
@@ -190,6 +194,9 @@ impl FirstSliceIpcResponse {
             }
             Self::RepositoryStatus(response) => {
                 daemon::response_envelope::Response::RepositoryStatus(response)
+            }
+            Self::SymbolRelationships(response) => {
+                daemon::response_envelope::Response::SymbolRelationships(response)
             }
         }
     }
@@ -5372,6 +5379,10 @@ async fn dispatch_async(
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "the unrecognized request is returned by value to the caller"
+)]
 fn first_slice_request_from_wire(
     request: Option<daemon::request_envelope::Request>,
 ) -> Result<Option<FirstSliceIpcRequest>, daemon::request_envelope::Request> {
@@ -5396,6 +5407,9 @@ fn first_slice_request_from_wire(
         }
         Some(daemon::request_envelope::Request::RepositoryStatus(request)) => {
             Ok(Some(FirstSliceIpcRequest::RepositoryStatus(request)))
+        }
+        Some(daemon::request_envelope::Request::SymbolRelationships(request)) => {
+            Ok(Some(FirstSliceIpcRequest::SymbolRelationships(request)))
         }
         Some(request) => Err(request),
         None => Ok(None),
@@ -5720,6 +5734,51 @@ fn first_slice_response_correlates(
                         && !entry.tier.is_empty()
                         && !entry.status.is_empty()
                         && entry.indexed_files <= entry.discovered_files
+                })
+        }
+        (
+            FirstSliceIpcRequest::SymbolRelationships(request),
+            FirstSliceIpcResponse::SymbolRelationships(response),
+        ) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            let returned_items = response
+                .groups
+                .iter()
+                .try_fold(0_u64, |total, group| {
+                    total.checked_add(u64::try_from(group.items.len()).ok()?)
+                })
+                .unwrap_or(u64::MAX);
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    request.generation.as_ref(),
+                )
+                && !request.seeds.is_empty()
+                && request
+                    .seeds
+                    .iter()
+                    .all(|seed| wire_id_has_len(Some(&seed.value), 20))
+                && response.returned_edges == returned_items
+                && response.returned_edges <= response.total_edges
+                && response.exact == !response.truncated
+                && (response.truncated || response.returned_edges == response.total_edges)
+                && response.groups.iter().all(|group| {
+                    wire_id_has_len(group.seed.as_ref().map(|id| &id.value), 20)
+                        && !group.relation.is_empty()
+                        && !group.direction.is_empty()
+                        && u64::try_from(group.items.len())
+                            .is_ok_and(|returned| group.total_count >= returned)
+                        && group.items.iter().all(|item| {
+                            wire_id_has_len(item.symbol.as_ref().map(|id| &id.value), 20)
+                                && item.confidence <= 1_000
+                                && item
+                                    .source_refs
+                                    .iter()
+                                    .all(|source| source_ref_correlates(source, context))
+                        })
                 })
         }
         _ => false,
@@ -6131,6 +6190,63 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
             )?;
             validate_generation_selector(request.generation.as_ref())?;
         }
+        FirstSliceIpcRequest::SymbolRelationships(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_generation_selector(request.generation.as_ref())?;
+            if request.seeds.is_empty() || request.seeds.len() > 64 {
+                return Err(Box::new(invalid_argument(
+                    "symbol relationships request is invalid",
+                )));
+            }
+            let mut observed = std::collections::BTreeSet::new();
+            for seed in &request.seeds {
+                require_wire_id(Some(seed.value.as_slice()), 20)?;
+                if !observed.insert(seed.value.as_slice()) {
+                    return Err(Box::new(invalid_argument(
+                        "seed identifiers must be distinct",
+                    )));
+                }
+            }
+            if request.relations.is_empty() || request.relations.len() > 16 {
+                return Err(Box::new(invalid_argument(
+                    "symbol relationships request is invalid",
+                )));
+            }
+            for relation in &request.relations {
+                if relation.is_empty() || relation.len() > 32 || relation.as_bytes().contains(&0) {
+                    return Err(Box::new(invalid_argument(
+                        "symbol relationships request is invalid",
+                    )));
+                }
+            }
+            if request.direction.as_ref().is_some_and(|direction| {
+                direction.is_empty() || direction.len() > 16 || direction.as_bytes().contains(&0)
+            }) {
+                return Err(Box::new(invalid_argument(
+                    "symbol relationships request is invalid",
+                )));
+            }
+            if request
+                .min_confidence
+                .is_some_and(|confidence| confidence > 1_000)
+            {
+                return Err(Box::new(invalid_argument(
+                    "symbol relationships request is invalid",
+                )));
+            }
+            if request
+                .max_results
+                .is_some_and(|max| !(1..=500).contains(&max))
+            {
+                return Err(Box::new(invalid_argument(
+                    "symbol relationships request is invalid",
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -6241,6 +6357,9 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         Some(daemon::request_envelope::Request::RepositoryList(_)) => ControlMethod::RepositoryList,
         Some(daemon::request_envelope::Request::RepositoryStatus(_)) => {
             ControlMethod::RepositoryStatus
+        }
+        Some(daemon::request_envelope::Request::SymbolRelationships(_)) => {
+            ControlMethod::SymbolRelationships
         }
         None => ControlMethod::Unknown,
     }
@@ -6685,7 +6804,8 @@ fn request_from_wire(
         ) => Err(Box::new(first_slice_unavailable())),
         Some(
             daemon::request_envelope::Request::RepositoryList(_)
-            | daemon::request_envelope::Request::RepositoryStatus(_),
+            | daemon::request_envelope::Request::RepositoryStatus(_)
+            | daemon::request_envelope::Request::SymbolRelationships(_),
         ) => Err(Box::new(first_slice_unavailable())),
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
     }

@@ -775,6 +775,49 @@ pub struct RepositoryStatus {
     pub coverage: Vec<RepositoryCoverageEntry>,
 }
 
+/// One typed relationship target within a seed-relation group.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RelationshipTarget {
+    /// Stable identity of the related entity.
+    pub symbol: SymbolId,
+    /// Fixed-point edge confidence from 0 through 1000.
+    pub confidence: u16,
+    /// Direct immutable source evidence for the edge.
+    pub source_refs: Vec<SourceReference>,
+}
+
+/// One seed-relation group in a relationships response.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RelationshipGroup {
+    /// Seed symbol that was expanded.
+    pub seed: SymbolId,
+    /// Relation family label, such as `calls`.
+    pub relation: String,
+    /// Effective direction label, such as `outbound`.
+    pub direction: String,
+    /// Bounded relationship targets in deterministic order.
+    pub items: Vec<RelationshipTarget>,
+    /// Qualifying edges known for this group before truncation.
+    pub total_count: u64,
+}
+
+/// Bounded typed relation neighborhoods for one generation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SymbolRelationships {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Seed-relation groups in deterministic order.
+    pub groups: Vec<RelationshipGroup>,
+    /// Total edges returned across all groups.
+    pub returned_edges: u64,
+    /// Qualifying edges known before budget limits.
+    pub total_edges: u64,
+    /// Whether the counts are exact or lower bounds.
+    pub exact: bool,
+    /// Whether the response was cut by a bound.
+    pub truncated: bool,
+}
+
 /// Validated total deadline budget for one asynchronous daemon request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestTimeout(Duration);
@@ -1632,6 +1675,98 @@ impl Client {
         }
     }
 
+    /// Expands bounded typed relation neighborhoods for stable symbols.
+    ///
+    /// The `relations` labels and optional `direction` label use the stable
+    /// snake_case spellings shared with the daemon protocol. `min_confidence`
+    /// floors edge confidence and `max_results` bounds returned edges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid seed, relation, confidence, or
+    /// result bounds, unavailable protocol support, transport failure, or a
+    /// malformed or uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded relationships query dimension"
+    )]
+    pub fn symbol_relationships(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: &[SymbolId],
+        relations: &[String],
+        direction: Option<&str>,
+        min_confidence: Option<u16>,
+        max_results: Option<u16>,
+    ) -> Result<SymbolRelationships, ClientError> {
+        match self.request(build_symbol_relationships_request(
+            repository,
+            generation,
+            seeds,
+            relations,
+            direction,
+            min_confidence,
+            max_results,
+        )?)? {
+            daemon::response_envelope::Response::SymbolRelationships(response) => {
+                parse_symbol_relationships(response, repository, generation, seeds)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously expands bounded typed relation neighborhoods for symbols.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached expansion.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid seed, relation, confidence, or
+    /// result bounds, unavailable protocol support, transport failure, timeout,
+    /// or a malformed or uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded relationships query dimension"
+    )]
+    pub async fn symbol_relationships_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: &[SymbolId],
+        relations: &[String],
+        direction: Option<&str>,
+        min_confidence: Option<u16>,
+        max_results: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> Result<SymbolRelationships, ClientError> {
+        match self
+            .request_async(
+                build_symbol_relationships_request(
+                    repository,
+                    generation,
+                    seeds,
+                    relations,
+                    direction,
+                    min_confidence,
+                    max_results,
+                )?,
+                timeout,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::SymbolRelationships(response) => {
+                parse_symbol_relationships(response, repository, generation, seeds)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     fn request(
         &self,
         request: daemon::request_envelope::Request,
@@ -2226,7 +2361,8 @@ fn ensure_request_supported(
         | daemon::request_envelope::Request::SymbolExplain(_)
         | daemon::request_envelope::Request::SourceRead(_)
         | daemon::request_envelope::Request::RepositoryList(_)
-        | daemon::request_envelope::Request::RepositoryStatus(_) => 5,
+        | daemon::request_envelope::Request::RepositoryStatus(_)
+        | daemon::request_envelope::Request::SymbolRelationships(_) => 5,
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
         daemon::request_envelope::Request::OperationLeaseRenew(_) => {
@@ -2958,6 +3094,61 @@ fn build_repository_status_request(
     ))
 }
 
+fn build_symbol_relationships_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    seeds: &[SymbolId],
+    relations: &[String],
+    direction: Option<&str>,
+    min_confidence: Option<u16>,
+    max_results: Option<u16>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if seeds.is_empty()
+        || seeds.len() > 64
+        || seeds
+            .iter()
+            .enumerate()
+            .any(|(index, seed)| seeds[..index].contains(seed))
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if relations.is_empty()
+        || relations.len() > 16
+        || relations.iter().any(|relation| {
+            relation.is_empty() || relation.len() > 32 || relation.as_bytes().contains(&0)
+        })
+        || relations
+            .iter()
+            .enumerate()
+            .any(|(index, relation)| relations[..index].contains(relation))
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if direction.is_some_and(|direction| {
+        direction.is_empty() || direction.len() > 16 || direction.as_bytes().contains(&0)
+    }) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if min_confidence.is_some_and(|confidence| confidence > 1_000) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if max_results.is_some_and(|max| !(1..=500).contains(&max)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::SymbolRelationships(
+        daemon::SymbolRelationshipsRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            seeds: seeds.iter().copied().map(symbol_to_wire).collect(),
+            relations: relations.to_vec(),
+            direction: direction.map(str::to_owned),
+            min_confidence: min_confidence.map(u32::from),
+            max_results: max_results.map(u32::from),
+        },
+    ))
+}
+
 fn repository_to_wire(repository: RepositoryId) -> common::RepositoryId {
     common::RepositoryId {
         value: repository.as_bytes().to_vec(),
@@ -3176,6 +3367,85 @@ fn parse_repository_status(
         semantic_freshness: response.semantic_freshness,
         state: response.state,
         coverage,
+    })
+}
+
+fn parse_symbol_relationships(
+    response: daemon::SymbolRelationshipsResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+    seeds: &[SymbolId],
+) -> Result<SymbolRelationships, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(response.context, repository, selector)?;
+    let mut groups = Vec::new();
+    groups
+        .try_reserve_exact(response.groups.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    let mut returned_edges = 0_u64;
+    for group in response.groups {
+        let seed = parse_symbol(group.seed)?;
+        if !seeds.contains(&seed)
+            || group.relation.is_empty()
+            || group.relation.len() > 32
+            || group.direction.is_empty()
+            || group.direction.len() > 16
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let mut items = Vec::new();
+        items
+            .try_reserve_exact(group.items.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for item in group.items {
+            let symbol = parse_symbol(item.symbol)?;
+            if item.confidence > 1_000 {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+            let mut source_refs = Vec::new();
+            source_refs
+                .try_reserve_exact(item.source_refs.len())
+                .map_err(|_| ClientError::ResponseAllocationFailed)?;
+            for source in item.source_refs {
+                source_refs.push(parse_source_reference(source, &context)?);
+            }
+            items.push(RelationshipTarget {
+                symbol,
+                confidence: u16::try_from(item.confidence)
+                    .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+                source_refs,
+            });
+        }
+        let item_count =
+            u64::try_from(items.len()).map_err(|_| ClientError::InvalidResponseCorrelation)?;
+        if item_count > group.total_count {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        returned_edges = returned_edges
+            .checked_add(item_count)
+            .ok_or(ClientError::InvalidResponseCorrelation)?;
+        groups.push(RelationshipGroup {
+            seed,
+            relation: group.relation,
+            direction: group.direction,
+            items,
+            total_count: group.total_count,
+        });
+    }
+    if returned_edges != response.returned_edges
+        || response.returned_edges > response.total_edges
+        || response.exact == response.truncated
+        || (!response.truncated && response.returned_edges != response.total_edges)
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(SymbolRelationships {
+        context,
+        groups,
+        returned_edges: response.returned_edges,
+        total_edges: response.total_edges,
+        exact: response.exact,
+        truncated: response.truncated,
     })
 }
 

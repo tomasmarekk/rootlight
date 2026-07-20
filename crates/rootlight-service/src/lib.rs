@@ -46,7 +46,8 @@ use rootlight_ir::{
     NormalizedIrDocument, ProducerIdentity, SourceRef, SourceSpan,
 };
 pub use rootlight_query::{
-    CodeLocateResult, LocateMode, QueryResponse, SourceReadQueryResult, SymbolExplainResult,
+    CodeLocateResult, LocateMode, QueryResponse, RelationDirection, RelationFamily,
+    SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult,
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
 use rootlight_resolve::{
@@ -1850,6 +1851,51 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_symbol_explain(&plan, cancellation)
+            .map_err(|error| map_query_error(error, cancellation))
+    }
+
+    /// Executes a generation-pinned bounded `symbol.relationships` query.
+    ///
+    /// The seed symbols, relation families, optional direction override,
+    /// confidence floor, and result bound are validated by the query plan. The
+    /// result carries deterministic seed-relation groups plus aggregate edge
+    /// counts and truncation evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded relationships query dimension"
+    )]
+    pub fn symbol_relationships(
+        &self,
+        generation: GenerationId,
+        seeds: BTreeSet<SymbolId>,
+        families: Vec<RelationFamily>,
+        direction: Option<RelationDirection>,
+        min_confidence: u16,
+        max_results: usize,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<SymbolRelationshipsResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let service = self
+            .generations
+            .query(generation)
+            .map_err(|_| FirstSliceError::Query)?;
+        let plan = service
+            .plan_symbol_relationships(
+                seeds,
+                families,
+                direction,
+                min_confidence,
+                max_results,
+                QueryBudget::new(),
+            )
+            .map_err(|error| map_query_error(error, cancellation))?;
+        service
+            .execute_symbol_relationships(&plan, cancellation)
             .map_err(|error| map_query_error(error, cancellation))
     }
 
