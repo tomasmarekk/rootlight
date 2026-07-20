@@ -269,6 +269,14 @@ impl AuthenticatedCursor {
             .ok_or(CursorError::Malformed)?
             .try_into()
             .map_err(|_| CursorError::Malformed)?;
+        offset += 32;
+
+        // The authenticated envelope must end exactly at the tag. Trailing
+        // bytes after a valid tag would otherwise be accepted silently,
+        // defeating the canonical-envelope tamper detection.
+        if offset != payload.len() {
+            return Err(CursorError::Malformed);
+        }
 
         let repository = RepositoryId::from_bytes(repo_bytes);
         let generation = GenerationId::from_bytes(gen_bytes);
@@ -498,6 +506,27 @@ mod tests {
         );
         assert_eq!(
             AuthenticatedCursor::from_wire("c2.AAAA"),
+            Err(CursorError::Malformed)
+        );
+    }
+
+    #[test]
+    fn wire_cursor_with_trailing_bytes_after_tag_is_rejected() {
+        let key = [42; 32];
+        let context = test_context();
+        let cursor = AuthenticatedCursor::create(context, vec![1, 2, 3], 1_000_000, &key);
+        let wire = cursor.to_wire();
+        let body = wire.strip_prefix("c1.").expect("version prefix present");
+
+        // Append one raw byte after the authenticated tag and re-encode. The
+        // canonical envelope must be rejected even though the tag itself is
+        // intact, because trailing bytes are not covered by the parse.
+        let mut payload = super::base64url_decode(body).expect("valid payload decodes");
+        payload.push(0xFF);
+        let tampered = format!("c1.{}", super::base64url_encode(&payload));
+
+        assert_eq!(
+            AuthenticatedCursor::from_wire(&tampered),
             Err(CursorError::Malformed)
         );
     }
