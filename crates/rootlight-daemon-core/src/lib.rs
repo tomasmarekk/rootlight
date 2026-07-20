@@ -164,6 +164,8 @@ pub enum FirstSliceIpcRequest {
     TestsSelect(daemon::TestsSelectRequest),
     /// Map bounded change impact for an explicit change set.
     ChangeImpact(daemon::ChangeImpactRequest),
+    /// Build a bounded ordered change plan for explicit targets.
+    PlanChange(daemon::PlanChangeRequest),
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -197,6 +199,8 @@ pub enum FirstSliceIpcResponse {
     TestsSelect(daemon::TestsSelectResponse),
     /// Bounded change impact for an explicit change set.
     ChangeImpact(daemon::ChangeImpactResponse),
+    /// Bounded ordered change plan for explicit targets.
+    PlanChange(daemon::PlanChangeResponse),
 }
 
 impl FirstSliceIpcResponse {
@@ -236,6 +240,7 @@ impl FirstSliceIpcResponse {
             Self::ChangeImpact(response) => {
                 daemon::response_envelope::Response::ChangeImpact(response)
             }
+            Self::PlanChange(response) => daemon::response_envelope::Response::PlanChange(response),
         }
     }
 }
@@ -5467,6 +5472,9 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::ChangeImpact(request)) => {
             Ok(Some(FirstSliceIpcRequest::ChangeImpact(request)))
         }
+        Some(daemon::request_envelope::Request::PlanChange(request)) => {
+            Ok(Some(FirstSliceIpcRequest::PlanChange(request)))
+        }
         Some(request) => Err(request),
         None => Ok(None),
     }
@@ -6206,6 +6214,94 @@ fn first_slice_response_correlates(
                 && risk_summary.coverage.len() <= 32
                 && risk_summary.fanout <= 100_000
         }
+        (
+            FirstSliceIpcRequest::PlanChange(request),
+            FirstSliceIpcResponse::PlanChange(response),
+        ) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            let Some(affected_scope) = response.affected_scope.as_ref() else {
+                return false;
+            };
+            let Some(context_pack) = response.context_pack_request.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    request.generation.as_ref(),
+                )
+                && (!request.target_symbols.is_empty() || !request.target_files.is_empty())
+                && request.target_symbols.len() <= 64
+                && request
+                    .target_symbols
+                    .iter()
+                    .all(|symbol| symbol.value.len() == 20)
+                && request.target_files.len() <= 64
+                && request
+                    .target_files
+                    .iter()
+                    .all(|file| file.value.len() == 20)
+                && !request.objective.is_empty()
+                && request.objective.len() <= 32
+                && !request.objective_text.is_empty()
+                && request.objective_text.len() <= 4_096
+                && request
+                    .max_steps
+                    .is_none_or(|steps| (1..=100).contains(&steps))
+                && !response.plan.is_empty()
+                && response.plan.len() <= 100
+                && response.plan.iter().all(|step| {
+                    (1..=100).contains(&step.step)
+                        && !step.action.is_empty()
+                        && step.action.len() <= 1_024
+                        && step.targets.len() <= 32
+                        && step.targets.iter().all(|symbol| symbol.value.len() == 20)
+                        && step.depends_on.len() <= 32
+                        && step.depends_on.iter().all(|dep| (1..=100).contains(dep))
+                        && step.risks.len() <= 8
+                        && step
+                            .risks
+                            .iter()
+                            .all(|risk| !risk.is_empty() && risk.len() <= 128)
+                        && step
+                            .verification
+                            .as_ref()
+                            .is_none_or(|hint| !hint.is_empty() && hint.len() <= 1_024)
+                })
+                && affected_scope.affected_symbols <= 100_000
+                && affected_scope.affected_files <= 100_000
+                && !affected_scope.risk_level.is_empty()
+                && affected_scope.risk_level.len() <= 32
+                && response.test_plan.len() <= 500
+                && response.test_plan.iter().all(|test| {
+                    !test.test_id.is_empty()
+                        && test.test_id.len() <= 512
+                        && test.relevance <= 1_000
+                        && !test.why.is_empty()
+                        && test.why.len() <= 8
+                        && test
+                            .why
+                            .iter()
+                            .all(|reason| !reason.is_empty() && reason.len() <= 128)
+                })
+                && response.open_decisions.len() <= 16
+                && response.open_decisions.iter().all(|decision| {
+                    !decision.question.is_empty()
+                        && decision.question.len() <= 512
+                        && !decision.recommended_default.is_empty()
+                        && decision.recommended_default.len() <= 512
+                })
+                && context_pack.symbols.len() <= 64
+                && context_pack
+                    .symbols
+                    .iter()
+                    .all(|symbol| symbol.value.len() == 20)
+                && context_pack.files.len() <= 64
+                && context_pack.files.iter().all(|file| file.value.len() == 20)
+        }
         _ => false,
     }
 }
@@ -6910,6 +7006,59 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 )));
             }
         }
+        FirstSliceIpcRequest::PlanChange(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_generation_selector(request.generation.as_ref())?;
+            if request.objective.is_empty() || request.objective.len() > 32 {
+                return Err(Box::new(invalid_argument(
+                    "plan change request requires an objective",
+                )));
+            }
+            if request.objective_text.is_empty() || request.objective_text.len() > 4_096 {
+                return Err(Box::new(invalid_argument(
+                    "plan change request requires objective text",
+                )));
+            }
+            if request.target_symbols.is_empty() && request.target_files.is_empty() {
+                return Err(Box::new(invalid_argument(
+                    "plan change request requires an explicit target set",
+                )));
+            }
+            if request.target_symbols.len() > 64 {
+                return Err(Box::new(invalid_argument("plan change request is invalid")));
+            }
+            let mut observed_symbols = std::collections::BTreeSet::new();
+            for symbol in &request.target_symbols {
+                require_wire_id(Some(symbol.value.as_slice()), 20)?;
+                if !observed_symbols.insert(symbol.value.as_slice()) {
+                    return Err(Box::new(invalid_argument(
+                        "plan target symbol identifiers must be distinct",
+                    )));
+                }
+            }
+            if request.target_files.len() > 64 {
+                return Err(Box::new(invalid_argument("plan change request is invalid")));
+            }
+            let mut observed_files = std::collections::BTreeSet::new();
+            for file in &request.target_files {
+                require_wire_id(Some(file.value.as_slice()), 20)?;
+                if !observed_files.insert(file.value.as_slice()) {
+                    return Err(Box::new(invalid_argument(
+                        "plan target file identifiers must be distinct",
+                    )));
+                }
+            }
+            if request
+                .max_steps
+                .is_some_and(|steps| !(1..=100).contains(&steps))
+            {
+                return Err(Box::new(invalid_argument("plan change request is invalid")));
+            }
+        }
     }
     Ok(())
 }
@@ -7034,6 +7183,7 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         }
         Some(daemon::request_envelope::Request::TestsSelect(_)) => ControlMethod::TestsSelect,
         Some(daemon::request_envelope::Request::ChangeImpact(_)) => ControlMethod::ChangeImpact,
+        Some(daemon::request_envelope::Request::PlanChange(_)) => ControlMethod::PlanChange,
         None => ControlMethod::Unknown,
     }
 }
@@ -7492,6 +7642,9 @@ fn request_from_wire(
             Err(Box::new(first_slice_unavailable()))
         }
         Some(daemon::request_envelope::Request::ChangeImpact(_)) => {
+            Err(Box::new(first_slice_unavailable()))
+        }
+        Some(daemon::request_envelope::Request::PlanChange(_)) => {
             Err(Box::new(first_slice_unavailable()))
         }
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
