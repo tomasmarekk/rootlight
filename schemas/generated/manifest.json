@@ -46,11 +46,11 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/change.rs",
-      "blake3": "4a16473b407d82b6e1bb4b9de06504743025971a845df723f642070c61a717fa"
+      "blake3": "c6c6634f0f3a6e92f1063b7beed11f50de0792cf27425c5538217e156f526007"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/context.rs",
-      "blake3": "9eca52588cbaf0fb18f8a3ba59ed748f18adfd99022828047e04999de898f192"
+      "blake3": "209f507c788192ca5e1bfe9692105500e664bd3db93db19caeedb2d04a61a66d"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/intent.rs",
@@ -58,15 +58,15 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/lib.rs",
-      "blake3": "810febfcc7eda656434fb913348a097f6893caf679e1af004828b06e52e4321f"
+      "blake3": "7f40c6a9c8102e4056104a9d173cf298ae15ca96b39f28f47393804f8522e4cd"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/repository.rs",
-      "blake3": "45d7181caa75eadb05bfa5fae50d91a0de7194907a6fe9ef6754e98a10410e1d"
+      "blake3": "611d6db46c938a7909b03e7b1507629a938153b8c0e83c683cf1af5a30205ef5"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "9686641776d24e4a5e04a41bdda1a6736b42d52d8cb52f252367bc1e36a840d5"
+      "blake3": "93cb4e7bdb12220a29d4c140a13d8d5c68278c318cb949bcd4fb619706f115c0"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
@@ -170,7 +170,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "859f5165b9d57ccdb2417fda96462d75e8875d45006552b8db34a820961e77ef"
+      "blake3": "b11bee38bbb53021706a0d5d85d2c57f8dd435720a1911c5053a4c48024cea85"
     }
   ],
   "artifacts": [
