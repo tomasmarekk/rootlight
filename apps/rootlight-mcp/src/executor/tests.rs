@@ -21,6 +21,7 @@ use rootlight_ir::{CoverageStatus as IrCoverage, LineRange, SourceRef, SourceSpa
 use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
     SymbolExplainOutput,
+    context::QueryBatchOutput,
     vertical::{
         AnalysisTier, CacheStatus, Freshness, IndexMode, IndexPlanScope, IndexPlanSummary,
         LanguageCoverage, OperationState, RequiredNullable,
@@ -831,6 +832,108 @@ async fn maps_code_locate_with_trust_generation_and_deterministic_output() {
     let request_debug = format!("{request:?}");
     assert!(!request_debug.contains("publish"));
     assert!(request_debug.contains("query_bytes: 7"));
+}
+
+#[tokio::test]
+async fn query_batch_composes_locate_subtools_under_one_pinned_generation() {
+    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+    let arguments = json!({
+        "repository": {"repository_id": repository()},
+        "generation": "active",
+        "operations": [
+            {"id": "find_a", "tool": "code.locate", "arguments": {"query": "publish", "max_results": 5}},
+            {"id": "find_b", "tool": "code.locate", "arguments": {"query": "stage", "max_results": 5}}
+        ]
+    });
+    let output = execute(&harness.executor, VerticalTool::QueryBatch, arguments)
+        .await
+        .expect("batch executes");
+    let output: QueryBatchOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch success");
+    };
+    assert_eq!(output.data.batch_status, BatchStatus::Ok);
+    assert_eq!(output.data.generation_id, generation());
+    assert_eq!(output.generation.generation_id, generation());
+    assert_eq!(output.data.operation_results.len(), 2);
+    assert!(
+        output
+            .data
+            .operation_results
+            .iter()
+            .all(|result| result.status == BatchOperationStatus::Ok)
+    );
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn query_batch_resolves_typed_bindings_between_operations() {
+    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+    let arguments = json!({
+        "repository": {"repository_id": repository()},
+        "generation": "active",
+        "operations": [
+            {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
+            {"id": "refine", "tool": "code.locate", "depends_on": ["find"], "arguments": {
+                "query": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
+            }}
+        ]
+    });
+    let output = execute(&harness.executor, VerticalTool::QueryBatch, arguments)
+        .await
+        .expect("batch executes");
+    let output: QueryBatchOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch success");
+    };
+    // The dependent operation succeeds only if its binding resolved against the
+    // completed dependency response.
+    assert_eq!(output.data.batch_status, BatchStatus::Ok);
+    assert!(
+        output
+            .data
+            .operation_results
+            .iter()
+            .all(|result| result.status == BatchOperationStatus::Ok)
+    );
+}
+
+#[tokio::test]
+async fn query_batch_skips_dependents_of_an_unavailable_subtool() {
+    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+    let arguments = json!({
+        "repository": {"repository_id": repository()},
+        "generation": "active",
+        "operations": [
+            {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
+            {"id": "rels", "tool": "symbol.relationships", "arguments": {}},
+            {"id": "after", "tool": "code.locate", "depends_on": ["rels"], "arguments": {"query": "stage"}}
+        ]
+    });
+    let output = execute(&harness.executor, VerticalTool::QueryBatch, arguments)
+        .await
+        .expect("batch executes");
+    let output: QueryBatchOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch success");
+    };
+    assert_eq!(output.data.batch_status, BatchStatus::Partial);
+    let by_id = |id: &str| {
+        output
+            .data
+            .operation_results
+            .iter()
+            .find(|result| result.id == id)
+            .map(|result| result.status)
+    };
+    assert_eq!(by_id("find"), Some(BatchOperationStatus::Ok));
+    assert_eq!(by_id("rels"), Some(BatchOperationStatus::Error));
+    assert_eq!(
+        by_id("after"),
+        Some(BatchOperationStatus::SkippedDependency)
+    );
+    // Only the code.locate operation reaches the port.
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

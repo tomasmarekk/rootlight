@@ -12,9 +12,13 @@ use rootlight_client::{
 use rootlight_ids::{OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
-    DetailKey, ErrorCode, GenerationSelector, NextAction, PublicError, PublicErrorBuildError,
-    RepoIndexInput, RepositorySelector, SchemaVersion, SourceReadInput, SymbolExplainInput,
-    ToolResponse, TrustClassification, VerticalTool,
+    DetailKey, ErrorCode, GenerationSelector, McpTool, NextAction, PublicError,
+    PublicErrorBuildError, RepoIndexInput, RepositorySelector, SchemaVersion, SourceReadInput,
+    SymbolExplainInput, ToolResponse, TrustClassification, VerticalTool,
+    context::{
+        BatchOperation, BatchOperationResult, BatchOperationStatus, BatchStatus, BatchTool,
+        FailurePolicy, QueryBatchData, QueryBatchInput,
+    },
     vertical::{
         ActiveGeneration, CacheStatus, CodeLocateData, CodeLocateInput, CoverageSummary,
         DetailHandle, Diagnostic, EntityKind, Freshness, GenerationSummary, IndexMode,
@@ -22,16 +26,18 @@ use rootlight_mcp_contract::{
         OperationAction, OperationDetail, OperationProgress, OperationResources, OperationState,
         OperationStatusData, OperationStatusInput, OperationStatusSuccess, ProvenanceLevel,
         ProvenanceSummary, QueryInterpretation, ReadEnvelope, RepoIndexData, RepoIndexSuccess,
-        RequiredNullable, ResponseBudget, ResponseProfile, ResponseWarning, SearchMode,
-        SourceChunk, SourceElision, SourceEncoding, SourceEncodingRequest, SourceReadData,
-        SourceReadSelector, StaleSourceReference, SymbolExplainData, SymbolExplanation,
-        UsageSummary,
+        RequiredNullable, ResolvedRepository, ResponseBudget, ResponseProfile, ResponseWarning,
+        SearchMode, SourceChunk, SourceElision, SourceEncoding, SourceEncodingRequest,
+        SourceReadData, SourceReadSelector, StaleSourceReference, SymbolExplainData,
+        SymbolExplanation, UsageSummary,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::batch::BatchPlan;
+use crate::tools::mcp_tool_for_batch;
 use crate::{
     RequestCancellation, ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture,
     ToolExecutor,
@@ -42,6 +48,7 @@ const CURRENT_SOURCE_CONTEXT_LINES: u8 = 2;
 const INVALID_ARGUMENT_MESSAGE: &str = "tool arguments are invalid";
 const UNSUPPORTED_MESSAGE: &str = "requested option is not supported";
 const UNAVAILABLE_MESSAGE: &str = "tool is not yet available through this bridge";
+const BATCH_OPERATION_FAILED_MESSAGE: &str = "batch operation failed";
 
 /// Future returned by one injected first-slice client-port operation.
 pub type ClientPortFuture<T> =
@@ -534,8 +541,17 @@ where
                 | VerticalTool::HistoryCompare
                 | VerticalTool::PlanChange
                 | VerticalTool::ContextPack
-                | VerticalTool::QueryAdvanced
-                | VerticalTool::QueryBatch => execute_intent_fallback(&unavailable).await,
+                | VerticalTool::QueryAdvanced => execute_intent_fallback(&unavailable).await,
+                VerticalTool::QueryBatch => {
+                    execute_query_batch(
+                        port,
+                        arguments,
+                        cancellation,
+                        &unsupported,
+                        &invalid_arguments,
+                    )
+                    .await
+                }
                 VerticalTool::OperationStatus => {
                     execute_operation_status(port, arguments, cancellation).await
                 }
@@ -580,6 +596,378 @@ async fn execute_intent_fallback(
     unavailable: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError> {
     Err(ToolExecutionError::new(unavailable.clone()))
+}
+
+/// Executes a bounded `query.batch` by composing the read tools that already
+/// have a production engine behind this bridge.
+///
+/// Operations run in dependency order under one pinned generation. Subtools
+/// without an engine fail locally with a checked capability error and their
+/// dependents are skipped. The batch pins its generation from the first
+/// successful operation; when nothing succeeds the batch itself fails rather
+/// than fabricating an identity.
+async fn execute_query_batch<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+    invalid_arguments: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: QueryBatchInput = decode_input(arguments)?;
+    let repository = repository_id(input.repository.clone(), unsupported)?;
+    let operation_failed =
+        PublicError::builder(ErrorCode::Internal, BATCH_OPERATION_FAILED_MESSAGE)
+            .build()
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+
+    let tools: Vec<McpTool> = input
+        .operations
+        .iter()
+        .map(|operation| mcp_tool_for_batch(operation.tool))
+        .collect();
+    let dependencies = resolve_batch_dependencies(&input.operations)
+        .ok_or_else(|| ToolExecutionError::new(invalid_arguments.clone()))?;
+    let plan = BatchPlan::validate(&tools, &dependencies)
+        .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
+
+    let fail_fast = matches!(input.failure_policy, Some(FailurePolicy::FailFast));
+    let count = input.operations.len();
+    let mut results: Vec<Option<BatchOperationResult>> = vec![None; count];
+    let mut envelopes: Vec<Option<ReadEnvelope<Value>>> = vec![None; count];
+    let mut stop_scheduling = false;
+
+    for index in plan.execution_order.clone() {
+        let operation = &input.operations[index];
+        if dependency_failed(&dependencies[index], &results) {
+            results[index] = Some(terminal_result(
+                operation,
+                BatchOperationStatus::SkippedDependency,
+            ));
+            continue;
+        }
+        if stop_scheduling {
+            results[index] = Some(terminal_result(
+                operation,
+                BatchOperationStatus::NotRunFailFast,
+            ));
+            continue;
+        }
+        let sub_arguments =
+            resolve_batch_arguments(operation, &envelopes, &input, &dependencies[index]);
+        let sub_arguments = match sub_arguments {
+            Ok(arguments) => arguments,
+            Err(()) => {
+                results[index] = Some(error_result(operation, invalid_arguments));
+                stop_scheduling |= fail_fast;
+                continue;
+            }
+        };
+        match execute_batch_subtool(
+            operation.tool,
+            port.clone(),
+            sub_arguments,
+            cancellation.clone(),
+            unsupported,
+            invalid_arguments,
+        )
+        .await
+        {
+            Ok(response) => {
+                let envelope: ReadEnvelope<Value> = serde_json::from_value(Value::Object(response))
+                    .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+                results[index] = Some(success_result(operation, &envelope));
+                envelopes[index] = Some(envelope);
+            }
+            Err(error) => {
+                let fallback = error
+                    .public_error()
+                    .cloned()
+                    .unwrap_or_else(|| operation_failed.clone());
+                results[index] = Some(error_result(operation, &fallback));
+                stop_scheduling |= fail_fast;
+            }
+        }
+    }
+
+    let operation_results: Vec<BatchOperationResult> = results.into_iter().flatten().collect();
+    let Some(source) = envelopes.iter().flatten().next() else {
+        let first_error = operation_results
+            .iter()
+            .find_map(|result| result.error.clone())
+            .unwrap_or(operation_failed);
+        return Err(ToolExecutionError::new(first_error));
+    };
+
+    let truncated = operation_results.iter().any(|result| result.truncated);
+    let batch_status = aggregate_batch_status(&operation_results);
+    let usage = aggregate_batch_usage(&envelopes);
+    let data = QueryBatchData {
+        batch_status,
+        generation_id: source.generation.generation_id,
+        operation_results,
+    };
+    let envelope = ReadEnvelope {
+        schema_version: SchemaVersion::V1_0,
+        repository: ResolvedRepository {
+            repository_id: repository,
+            display_name: source.repository.display_name.clone(),
+        },
+        generation: source.generation.clone(),
+        coverage: CoverageSummary {
+            status: rootlight_ir::CoverageStatus::Bounded,
+            languages: source.coverage.languages.clone(),
+            skipped_inputs: source.coverage.skipped_inputs,
+        },
+        data,
+        truncated,
+        next_cursor: RequiredNullable(None),
+        usage,
+        warnings: source.warnings.clone(),
+        trust: TrustClassification::UntrustedRepositoryData,
+    };
+    serialize_success(envelope)
+}
+
+/// Resolves batch operation dependencies to indices, rejecting duplicate
+/// operation ids and references to unknown operations.
+fn resolve_batch_dependencies(operations: &[BatchOperation]) -> Option<Vec<Vec<usize>>> {
+    let mut seen = BTreeSet::new();
+    for operation in operations {
+        if !seen.insert(operation.id.clone()) {
+            return None;
+        }
+    }
+    let mut dependencies = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let mut resolved = Vec::new();
+        if let Some(declared) = &operation.depends_on {
+            for name in declared {
+                let index = operations.iter().position(|other| other.id == *name)?;
+                resolved.push(index);
+            }
+        }
+        dependencies.push(resolved);
+    }
+    Some(dependencies)
+}
+
+/// Reports whether any declared dependency did not complete successfully.
+fn dependency_failed(dependencies: &[usize], results: &[Option<BatchOperationResult>]) -> bool {
+    dependencies.iter().any(|index| {
+        matches!(
+            results[*index].as_ref().map(|result| result.status),
+            Some(
+                BatchOperationStatus::Error
+                    | BatchOperationStatus::SkippedDependency
+                    | BatchOperationStatus::NotRunFailFast
+            )
+        )
+    })
+}
+
+/// Builds subtool arguments by resolving typed bindings and injecting the
+/// batch-inherited repository and generation.
+fn resolve_batch_arguments(
+    operation: &BatchOperation,
+    envelopes: &[Option<ReadEnvelope<Value>>],
+    input: &QueryBatchInput,
+    declared: &[usize],
+) -> Result<Map<String, Value>, ()> {
+    let mut arguments = Map::new();
+    for (key, value) in &operation.arguments {
+        let resolved = resolve_batch_binding(value, envelopes, &input.operations, declared)?;
+        arguments.insert(key.clone(), resolved);
+    }
+    arguments.insert(
+        "repository".to_owned(),
+        serde_json::to_value(&input.repository).map_err(|_| ())?,
+    );
+    if let Some(generation) = &input.generation {
+        arguments.insert(
+            "generation".to_owned(),
+            serde_json::to_value(generation).map_err(|_| ())?,
+        );
+    }
+    Ok(arguments)
+}
+
+/// Recursively replaces `{"$from", "pointer"}` binding leaves with the value at
+/// the referenced JSON pointer in the completed dependency response.
+fn resolve_batch_binding(
+    value: &Value,
+    envelopes: &[Option<ReadEnvelope<Value>>],
+    operations: &[BatchOperation],
+    declared: &[usize],
+) -> Result<Value, ()> {
+    match value {
+        Value::Object(map) => {
+            if let Some(from) = map.get("$from") {
+                let from_name = from.as_str().ok_or(())?;
+                let pointer = map.get("pointer").and_then(Value::as_str).ok_or(())?;
+                let dependency = declared
+                    .iter()
+                    .find(|&&index| operations[index].id == from_name)
+                    .ok_or(())?;
+                let envelope = envelopes[*dependency].as_ref().ok_or(())?;
+                let encoded = serde_json::to_value(envelope).map_err(|_| ())?;
+                encoded.pointer(pointer).cloned().ok_or(())
+            } else {
+                let mut resolved = Map::new();
+                for (key, inner) in map {
+                    resolved.insert(
+                        key.clone(),
+                        resolve_batch_binding(inner, envelopes, operations, declared)?,
+                    );
+                }
+                Ok(Value::Object(resolved))
+            }
+        }
+        Value::Array(items) => {
+            let mut resolved = Vec::with_capacity(items.len());
+            for inner in items {
+                resolved.push(resolve_batch_binding(
+                    inner, envelopes, operations, declared,
+                )?);
+            }
+            Ok(Value::Array(resolved))
+        }
+        scalar => Ok(scalar.clone()),
+    }
+}
+
+/// Dispatches one batch subtool to its production handler, failing with a
+/// checked capability error for subtools that have no engine yet.
+async fn execute_batch_subtool<P>(
+    tool: BatchTool,
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+    invalid_arguments: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    match tool {
+        BatchTool::CodeLocate => {
+            execute_code_locate(port, arguments, cancellation, unsupported).await
+        }
+        BatchTool::SymbolExplain => {
+            execute_symbol_explain(port, arguments, cancellation, unsupported).await
+        }
+        BatchTool::SourceRead => {
+            execute_source_read(
+                port,
+                arguments,
+                cancellation,
+                unsupported,
+                invalid_arguments,
+            )
+            .await
+        }
+        BatchTool::SymbolRelationships
+        | BatchTool::FlowTrace
+        | BatchTool::ChangeImpact
+        | BatchTool::TestsSelect
+        | BatchTool::ArchitectureOverview
+        | BatchTool::ArchitectureCycles
+        | BatchTool::CodeDead
+        | BatchTool::PlanChange
+        | BatchTool::ContextPack => Err(ToolExecutionError::new(unsupported.clone())),
+    }
+}
+
+fn success_result(
+    operation: &BatchOperation,
+    envelope: &ReadEnvelope<Value>,
+) -> BatchOperationResult {
+    BatchOperationResult {
+        id: operation.id.clone(),
+        tool: operation.tool,
+        status: BatchOperationStatus::Ok,
+        data: Some(envelope.data.clone()),
+        error: None,
+        truncated: envelope.truncated,
+        next_cursor: envelope.next_cursor.clone(),
+        usage: Some(envelope.usage.clone()),
+        warnings: envelope.warnings.clone(),
+    }
+}
+
+fn error_result(operation: &BatchOperation, error: &PublicError) -> BatchOperationResult {
+    BatchOperationResult {
+        id: operation.id.clone(),
+        tool: operation.tool,
+        status: BatchOperationStatus::Error,
+        data: None,
+        error: Some(error.clone()),
+        truncated: false,
+        next_cursor: RequiredNullable(None),
+        usage: None,
+        warnings: Vec::new(),
+    }
+}
+
+fn terminal_result(
+    operation: &BatchOperation,
+    status: BatchOperationStatus,
+) -> BatchOperationResult {
+    BatchOperationResult {
+        id: operation.id.clone(),
+        tool: operation.tool,
+        status,
+        data: None,
+        error: None,
+        truncated: false,
+        next_cursor: RequiredNullable(None),
+        usage: None,
+        warnings: Vec::new(),
+    }
+}
+
+fn aggregate_batch_status(results: &[BatchOperationResult]) -> BatchStatus {
+    let any_ok = results
+        .iter()
+        .any(|result| result.status == BatchOperationStatus::Ok);
+    let all_ok = results
+        .iter()
+        .all(|result| result.status == BatchOperationStatus::Ok);
+    if all_ok {
+        BatchStatus::Ok
+    } else if any_ok {
+        BatchStatus::Partial
+    } else {
+        BatchStatus::Error
+    }
+}
+
+fn aggregate_batch_usage(envelopes: &[Option<ReadEnvelope<Value>>]) -> UsageSummary {
+    let mut usage = UsageSummary {
+        rows: 0,
+        edges: 0,
+        source_bytes: 0,
+        json_bytes: 0,
+        estimated_tokens: 0,
+        wall_time_ms: 0,
+        cache_status: CacheStatus::Miss,
+        trace_id: "batch".to_owned(),
+    };
+    for envelope in envelopes.iter().flatten() {
+        usage.rows = usage.rows.saturating_add(envelope.usage.rows);
+        usage.edges = usage.edges.saturating_add(envelope.usage.edges);
+        usage.source_bytes = usage
+            .source_bytes
+            .saturating_add(envelope.usage.source_bytes);
+        usage.json_bytes = usage.json_bytes.saturating_add(envelope.usage.json_bytes);
+        usage.estimated_tokens = usage
+            .estimated_tokens
+            .saturating_add(envelope.usage.estimated_tokens);
+        usage.wall_time_ms = usage.wall_time_ms.max(envelope.usage.wall_time_ms);
+    }
+    usage
 }
 
 async fn execute_repository_index<P>(

@@ -697,7 +697,7 @@ fn collect_ast_operators(
 }
 
 /// Maps a public batch subtool to its catalog counterpart.
-const fn mcp_tool_for_batch(tool: BatchTool) -> McpTool {
+pub(crate) const fn mcp_tool_for_batch(tool: BatchTool) -> McpTool {
     match tool {
         BatchTool::CodeLocate => McpTool::CodeLocate,
         BatchTool::SymbolExplain => McpTool::SymbolExplain,
