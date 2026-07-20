@@ -52,6 +52,8 @@ const DEFAULT_OPERATION_METADATA: usize = 256;
 const RETRY_AFTER_MS: u32 = 100;
 const LIFECYCLE_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
 const DEFAULT_RELATIONSHIP_RESULTS: u32 = 100;
+const DEFAULT_FLOW_DEPTH: u32 = 3;
+const DEFAULT_FLOW_PATHS: u32 = 10;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
 
@@ -520,6 +522,9 @@ fn execute_service_request(
         FirstSliceIpcRequest::SymbolRelationships(request) => {
             symbol_relationships(service, request, &context)
                 .map(FirstSliceIpcResponse::SymbolRelationships)
+        }
+        FirstSliceIpcRequest::FlowTrace(request) => {
+            flow_trace(service, request, &context).map(FirstSliceIpcResponse::FlowTrace)
         }
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
     }
@@ -1132,6 +1137,100 @@ fn symbol_relationships(
         total_edges: u64::from(response.data.total_edges),
         exact: response.data.exact,
         truncated: response.data.truncated,
+    })
+}
+
+fn flow_trace(
+    service: &FirstSliceService,
+    request: daemon::FlowTraceRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::FlowTraceResponse, PublicError> {
+    let repository = parse_repository(request.repository.as_ref())?;
+    let selected = parse_generation_selector(request.generation.as_ref())?;
+    let generation = service
+        .resolve_generation(repository, selected)
+        .map_err(service_error)?;
+    let from = parse_symbol(request.from.as_ref())?;
+    let to = match request.to.as_ref() {
+        Some(to) => Some(parse_symbol(Some(to))?),
+        None => None,
+    };
+    let mut families = Vec::new();
+    families
+        .try_reserve_exact(request.relations.len())
+        .map_err(|_| resource_exhausted())?;
+    for relation in &request.relations {
+        let family = RelationFamily::from_label(relation).ok_or_else(invalid_argument)?;
+        if !families.contains(&family) {
+            families.push(family);
+        }
+    }
+    let direction = match request.direction.as_deref() {
+        Some(label) => Some(RelationDirection::from_label(label).ok_or_else(invalid_argument)?),
+        None => None,
+    };
+    let min_confidence =
+        u16::try_from(request.min_confidence.unwrap_or(0)).map_err(|_| invalid_argument())?;
+    let max_depth = u8::try_from(request.max_depth.unwrap_or(DEFAULT_FLOW_DEPTH))
+        .map_err(|_| invalid_argument())?;
+    let max_paths = usize::try_from(request.max_paths.unwrap_or(DEFAULT_FLOW_PATHS))
+        .map_err(|_| invalid_argument())?;
+    let response = service
+        .flow_trace(
+            generation.generation,
+            from,
+            to,
+            families,
+            direction,
+            min_confidence,
+            max_depth,
+            max_paths,
+            &context.cancellation,
+        )
+        .map_err(service_error)?;
+    let mut paths = Vec::new();
+    paths
+        .try_reserve_exact(response.data.paths.len())
+        .map_err(|_| resource_exhausted())?;
+    for path in response.data.paths {
+        let mut edges = Vec::new();
+        edges
+            .try_reserve_exact(path.edges.len())
+            .map_err(|_| resource_exhausted())?;
+        for edge in path.edges {
+            edges.push(daemon::FirstSliceTraceEdge {
+                kind: edge.family.as_str().to_owned(),
+                confidence: u32::from(edge.confidence),
+                source_refs: edge.source_refs.iter().map(source_ref_to_wire).collect(),
+            });
+        }
+        paths.push(daemon::FirstSliceTracePath {
+            confidence: u32::from(path.confidence),
+            nodes: path.nodes.iter().copied().map(symbol_to_wire).collect(),
+            edges,
+            cyclic: path.cyclic,
+        });
+    }
+    let frontier = response.data.frontier;
+    let projection = response.data.projection;
+    Ok(daemon::FlowTraceResponse {
+        schema_version: Some(schema_version()),
+        context: Some(query_context(generation, &response.usage, &[])),
+        paths,
+        frontier: Some(daemon::FirstSliceTraceFrontier {
+            reached_nodes: frontier.reached_nodes,
+            examined_edges: frontier.examined_edges,
+            truncated: frontier.truncated,
+            unresolved_boundaries: frontier.unresolved_boundaries,
+        }),
+        projection: Some(daemon::FirstSliceTraceProjection {
+            relations: projection
+                .families
+                .iter()
+                .map(|family| family.as_str().to_owned())
+                .collect(),
+            min_confidence: u32::from(projection.min_confidence),
+        }),
     })
 }
 

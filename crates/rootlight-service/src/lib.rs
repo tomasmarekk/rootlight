@@ -46,8 +46,8 @@ use rootlight_ir::{
     NormalizedIrDocument, ProducerIdentity, SourceRef, SourceSpan,
 };
 pub use rootlight_query::{
-    CodeLocateResult, LocateMode, QueryResponse, RelationDirection, RelationFamily,
-    SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult,
+    CodeLocateResult, FlowTraceResult, LocateMode, QueryResponse, RelationDirection,
+    RelationFamily, SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult,
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
 use rootlight_resolve::{
@@ -1896,6 +1896,55 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_symbol_relationships(&plan, cancellation)
+            .map_err(|error| map_query_error(error, cancellation))
+    }
+
+    /// Executes a generation-pinned bounded `flow.trace` query.
+    ///
+    /// The source and optional target symbols, relation families, direction,
+    /// confidence floor, depth, and path cap are validated by the query plan.
+    /// The result carries deterministic bounded paths plus a traversal frontier
+    /// and the relation projection actually used.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded flow trace dimension"
+    )]
+    pub fn flow_trace(
+        &self,
+        generation: GenerationId,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        families: Vec<RelationFamily>,
+        direction: Option<RelationDirection>,
+        min_confidence: u16,
+        max_depth: u8,
+        max_paths: usize,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<FlowTraceResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let service = self
+            .generations
+            .query(generation)
+            .map_err(|_| FirstSliceError::Query)?;
+        let plan = service
+            .plan_flow_trace(
+                from,
+                to,
+                direction,
+                families,
+                min_confidence,
+                max_depth,
+                max_paths,
+                QueryBudget::new(),
+            )
+            .map_err(|error| map_query_error(error, cancellation))?;
+        service
+            .execute_flow_trace(&plan, cancellation)
             .map_err(|error| map_query_error(error, cancellation))
     }
 

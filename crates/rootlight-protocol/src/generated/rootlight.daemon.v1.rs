@@ -49,7 +49,7 @@ pub struct RequestEnvelope {
     pub timeout_ms: ::core::option::Option<u32>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -104,6 +104,9 @@ pub mod request_envelope {
         #[prost(message, tag = "37")]
         #[allow(missing_docs)]
         SymbolRelationships(super::SymbolRelationshipsRequest),
+        #[prost(message, tag = "38")]
+        #[allow(missing_docs)]
+        FlowTrace(super::FlowTraceRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -114,7 +117,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -169,6 +172,9 @@ pub mod response_envelope {
         #[prost(message, tag = "37")]
         #[allow(missing_docs)]
         SymbolRelationships(super::SymbolRelationshipsResponse),
+        #[prost(message, tag = "38")]
+        #[allow(missing_docs)]
+        FlowTrace(super::FlowTraceResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -1064,6 +1070,118 @@ pub struct SymbolRelationshipsResponse {
     #[prost(bool, tag = "7")]
     #[allow(missing_docs)]
     pub truncated: bool,
+}
+/// Requests bounded directed paths between stable symbols.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FlowTraceRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub from: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub to: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(string, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub direction: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "7")]
+    #[allow(missing_docs)]
+    pub relations: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub max_depth: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "9")]
+    #[allow(missing_docs)]
+    pub max_paths: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "10")]
+    #[allow(missing_docs)]
+    pub min_confidence: ::core::option::Option<u32>,
+}
+/// One evidence-bearing edge within a traced path.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceTraceEdge {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub confidence: u32,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub source_refs: ::prost::alloc::vec::Vec<FirstSliceSourceRef>,
+}
+/// One complete traced path from the source toward a reached node.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceTracePath {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub confidence: u32,
+    #[prost(message, repeated, tag = "2")]
+    #[allow(missing_docs)]
+    pub nodes: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub edges: ::prost::alloc::vec::Vec<FirstSliceTraceEdge>,
+    #[prost(bool, tag = "4")]
+    #[allow(missing_docs)]
+    pub cyclic: bool,
+}
+/// Traversal boundary summary for a flow trace.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceTraceFrontier {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub reached_nodes: u32,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub examined_edges: u32,
+    #[prost(bool, tag = "3")]
+    #[allow(missing_docs)]
+    pub truncated: bool,
+    #[prost(uint32, tag = "4")]
+    #[allow(missing_docs)]
+    pub unresolved_boundaries: u32,
+}
+/// Relation projection actually used by a flow trace.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceTraceProjection {
+    #[prost(string, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub relations: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub min_confidence: u32,
+}
+/// Returns bounded directed paths and generation correlation.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FlowTraceResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub paths: ::prost::alloc::vec::Vec<FirstSliceTracePath>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub frontier: ::core::option::Option<FirstSliceTraceFrontier>,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub projection: ::core::option::Option<FirstSliceTraceProjection>,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]

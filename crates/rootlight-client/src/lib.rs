@@ -818,6 +818,65 @@ pub struct SymbolRelationships {
     pub truncated: bool,
 }
 
+/// One evidence-bearing edge within a traced path.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FlowTraceEdge {
+    /// Relation family label, such as `calls`.
+    pub kind: String,
+    /// Fixed-point edge confidence from 0 through 1000.
+    pub confidence: u16,
+    /// Direct immutable source evidence for the edge.
+    pub source_refs: Vec<SourceReference>,
+}
+
+/// One complete traced path from the source toward a reached node.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FlowTracePath {
+    /// Aggregate weakest-link edge confidence from 0 through 1000.
+    pub confidence: u16,
+    /// Ordered node identifiers along the path.
+    pub nodes: Vec<SymbolId>,
+    /// Evidence-bearing edges between consecutive nodes.
+    pub edges: Vec<FlowTraceEdge>,
+    /// Whether this path revisits a node.
+    pub cyclic: bool,
+}
+
+/// Traversal boundary summary for a flow trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct FlowTraceFrontier {
+    /// Distinct nodes entered during traversal.
+    pub reached_nodes: u32,
+    /// Adjacency edges examined during traversal.
+    pub examined_edges: u32,
+    /// Whether budget, path cap, or depth stopped complete exploration.
+    pub truncated: bool,
+    /// Reached nodes with an admissible edge leaving the reached set.
+    pub unresolved_boundaries: u32,
+}
+
+/// Relation projection actually used by a flow trace.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FlowTraceProjection {
+    /// Relation family labels included in the traversal.
+    pub relations: Vec<String>,
+    /// Minimum confidence threshold applied.
+    pub min_confidence: u16,
+}
+
+/// Bounded directed paths between stable symbols for one generation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FlowTrace {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Bounded traced paths in deterministic order.
+    pub paths: Vec<FlowTracePath>,
+    /// Traversal frontier and boundary summary.
+    pub frontier: FlowTraceFrontier,
+    /// Actual relation projection used.
+    pub projection: FlowTraceProjection,
+}
+
 /// Validated total deadline budget for one asynchronous daemon request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestTimeout(Duration);
@@ -1767,6 +1826,107 @@ impl Client {
         }
     }
 
+    /// Traces bounded directed paths between stable symbols.
+    ///
+    /// The `relations` labels and optional `direction` label use the stable
+    /// snake_case spellings shared with the daemon protocol. `min_confidence`
+    /// floors edge confidence, `max_depth` bounds traversal depth, and
+    /// `max_paths` bounds independently returned paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid endpoint, relation, confidence,
+    /// depth, or path bounds, unavailable protocol support, transport failure,
+    /// or a malformed or uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded flow trace dimension"
+    )]
+    pub fn flow_trace(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        relations: &[String],
+        direction: Option<&str>,
+        max_depth: Option<u8>,
+        max_paths: Option<u16>,
+        min_confidence: Option<u16>,
+    ) -> Result<FlowTrace, ClientError> {
+        match self.request(build_flow_trace_request(
+            repository,
+            generation,
+            from,
+            to,
+            relations,
+            direction,
+            max_depth,
+            max_paths,
+            min_confidence,
+        )?)? {
+            daemon::response_envelope::Response::FlowTrace(response) => {
+                parse_flow_trace(response, repository, generation, from, to)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously traces bounded directed paths between stable symbols.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached trace.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid endpoint, relation, confidence,
+    /// depth, or path bounds, unavailable protocol support, transport failure,
+    /// timeout, or a malformed or uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded flow trace dimension"
+    )]
+    pub async fn flow_trace_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        relations: &[String],
+        direction: Option<&str>,
+        max_depth: Option<u8>,
+        max_paths: Option<u16>,
+        min_confidence: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> Result<FlowTrace, ClientError> {
+        match self
+            .request_async(
+                build_flow_trace_request(
+                    repository,
+                    generation,
+                    from,
+                    to,
+                    relations,
+                    direction,
+                    max_depth,
+                    max_paths,
+                    min_confidence,
+                )?,
+                timeout,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::FlowTrace(response) => {
+                parse_flow_trace(response, repository, generation, from, to)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     fn request(
         &self,
         request: daemon::request_envelope::Request,
@@ -2362,7 +2522,8 @@ fn ensure_request_supported(
         | daemon::request_envelope::Request::SourceRead(_)
         | daemon::request_envelope::Request::RepositoryList(_)
         | daemon::request_envelope::Request::RepositoryStatus(_)
-        | daemon::request_envelope::Request::SymbolRelationships(_) => 5,
+        | daemon::request_envelope::Request::SymbolRelationships(_)
+        | daemon::request_envelope::Request::FlowTrace(_) => 5,
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
         daemon::request_envelope::Request::OperationLeaseRenew(_) => {
@@ -3446,6 +3607,169 @@ fn parse_symbol_relationships(
         total_edges: response.total_edges,
         exact: response.exact,
         truncated: response.truncated,
+    })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one bounded flow trace dimension"
+)]
+fn build_flow_trace_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    from: SymbolId,
+    to: Option<SymbolId>,
+    relations: &[String],
+    direction: Option<&str>,
+    max_depth: Option<u8>,
+    max_paths: Option<u16>,
+    min_confidence: Option<u16>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if relations.is_empty()
+        || relations.len() > 16
+        || relations.iter().any(|relation| {
+            relation.is_empty() || relation.len() > 32 || relation.as_bytes().contains(&0)
+        })
+        || relations
+            .iter()
+            .enumerate()
+            .any(|(index, relation)| relations[..index].contains(relation))
+    {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if direction.is_some_and(|direction| {
+        direction.is_empty() || direction.len() > 16 || direction.as_bytes().contains(&0)
+    }) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if max_depth.is_some_and(|depth| !(1..=8).contains(&depth)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if max_paths.is_some_and(|paths| !(1..=100).contains(&paths)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if min_confidence.is_some_and(|confidence| confidence > 1_000) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::FlowTrace(
+        daemon::FlowTraceRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            from: Some(symbol_to_wire(from)),
+            to: to.map(symbol_to_wire),
+            relations: relations.to_vec(),
+            direction: direction.map(str::to_owned),
+            max_depth: max_depth.map(u32::from),
+            max_paths: max_paths.map(u32::from),
+            min_confidence: min_confidence.map(u32::from),
+        },
+    ))
+}
+
+fn parse_flow_trace(
+    response: daemon::FlowTraceResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+    from: SymbolId,
+    to: Option<SymbolId>,
+) -> Result<FlowTrace, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(response.context, repository, selector)?;
+    let wire_frontier = response
+        .frontier
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    let wire_projection = response
+        .projection
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
+    if response.paths.len() > 100
+        || wire_projection.relations.is_empty()
+        || wire_projection.relations.len() > 16
+        || wire_projection.min_confidence > 1_000
+        || wire_frontier.reached_nodes < 1
+        || wire_frontier.unresolved_boundaries > wire_frontier.reached_nodes
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut paths = Vec::new();
+    paths
+        .try_reserve_exact(response.paths.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for path in response.paths {
+        if !(2..=9).contains(&path.nodes.len())
+            || !(1..=8).contains(&path.edges.len())
+            || path.nodes.len() != path.edges.len() + 1
+            || path.confidence > 1_000
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let mut nodes = Vec::new();
+        nodes
+            .try_reserve_exact(path.nodes.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for node in path.nodes {
+            nodes.push(parse_symbol(Some(node))?);
+        }
+        if nodes.first() != Some(&from) {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        if to.is_some_and(|target| nodes.last() != Some(&target)) {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        let mut edges = Vec::new();
+        edges
+            .try_reserve_exact(path.edges.len())
+            .map_err(|_| ClientError::ResponseAllocationFailed)?;
+        for edge in path.edges {
+            if edge.kind.is_empty() || edge.kind.len() > 32 || edge.confidence > 1_000 {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+            let mut source_refs = Vec::new();
+            source_refs
+                .try_reserve_exact(edge.source_refs.len())
+                .map_err(|_| ClientError::ResponseAllocationFailed)?;
+            for source in edge.source_refs {
+                source_refs.push(parse_source_reference(source, &context)?);
+            }
+            edges.push(FlowTraceEdge {
+                kind: edge.kind,
+                confidence: u16::try_from(edge.confidence)
+                    .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+                source_refs,
+            });
+        }
+        paths.push(FlowTracePath {
+            confidence: u16::try_from(path.confidence)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+            nodes,
+            edges,
+            cyclic: path.cyclic,
+        });
+    }
+    let mut relations = Vec::new();
+    relations
+        .try_reserve_exact(wire_projection.relations.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for relation in wire_projection.relations {
+        if relation.is_empty() || relation.len() > 32 {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        relations.push(relation);
+    }
+    Ok(FlowTrace {
+        context,
+        paths,
+        frontier: FlowTraceFrontier {
+            reached_nodes: wire_frontier.reached_nodes,
+            examined_edges: wire_frontier.examined_edges,
+            truncated: wire_frontier.truncated,
+            unresolved_boundaries: wire_frontier.unresolved_boundaries,
+        },
+        projection: FlowTraceProjection {
+            relations,
+            min_confidence: u16::try_from(wire_projection.min_confidence)
+                .map_err(|_| ClientError::InvalidResponseCorrelation)?,
+        },
     })
 }
 

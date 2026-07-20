@@ -152,6 +152,8 @@ pub enum FirstSliceIpcRequest {
     RepositoryStatus(daemon::RepositoryStatusRequest),
     /// Expand typed relation neighborhoods for stable symbols.
     SymbolRelationships(daemon::SymbolRelationshipsRequest),
+    /// Trace bounded directed paths between stable symbols.
+    FlowTrace(daemon::FlowTraceRequest),
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -173,6 +175,8 @@ pub enum FirstSliceIpcResponse {
     RepositoryStatus(daemon::RepositoryStatusResponse),
     /// Bounded typed relation neighborhoods.
     SymbolRelationships(daemon::SymbolRelationshipsResponse),
+    /// Bounded directed paths between stable symbols.
+    FlowTrace(daemon::FlowTraceResponse),
 }
 
 impl FirstSliceIpcResponse {
@@ -198,6 +202,7 @@ impl FirstSliceIpcResponse {
             Self::SymbolRelationships(response) => {
                 daemon::response_envelope::Response::SymbolRelationships(response)
             }
+            Self::FlowTrace(response) => daemon::response_envelope::Response::FlowTrace(response),
         }
     }
 }
@@ -5411,6 +5416,9 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::SymbolRelationships(request)) => {
             Ok(Some(FirstSliceIpcRequest::SymbolRelationships(request)))
         }
+        Some(daemon::request_envelope::Request::FlowTrace(request)) => {
+            Ok(Some(FirstSliceIpcRequest::FlowTrace(request)))
+        }
         Some(request) => Err(request),
         None => Ok(None),
     }
@@ -5775,6 +5783,64 @@ fn first_slice_response_correlates(
                             wire_id_has_len(item.symbol.as_ref().map(|id| &id.value), 20)
                                 && item.confidence <= 1_000
                                 && item
+                                    .source_refs
+                                    .iter()
+                                    .all(|source| source_ref_correlates(source, context))
+                        })
+                })
+        }
+        (FirstSliceIpcRequest::FlowTrace(request), FirstSliceIpcResponse::FlowTrace(response)) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            let Some(frontier) = response.frontier.as_ref() else {
+                return false;
+            };
+            let Some(projection) = response.projection.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    request.generation.as_ref(),
+                )
+                && request
+                    .from
+                    .as_ref()
+                    .is_some_and(|from| wire_id_has_len(Some(&from.value), 20))
+                && !request.relations.is_empty()
+                && request.relations.len() <= 16
+                && projection.min_confidence <= 1_000
+                && projection.min_confidence == request.min_confidence.unwrap_or(0)
+                && !projection.relations.is_empty()
+                && projection.relations.len() <= 16
+                && frontier.reached_nodes >= 1
+                && frontier.unresolved_boundaries <= frontier.reached_nodes
+                && response.paths.len() <= 100
+                && response.paths.iter().all(|path| {
+                    (2..=9).contains(&path.nodes.len())
+                        && (1..=8).contains(&path.edges.len())
+                        && path.nodes.len() == path.edges.len() + 1
+                        && path.confidence <= 1_000
+                        && path
+                            .nodes
+                            .iter()
+                            .all(|node| wire_id_has_len(Some(&node.value), 20))
+                        && path.nodes.first().is_some_and(|node| {
+                            request
+                                .from
+                                .as_ref()
+                                .is_some_and(|from| from.value == node.value)
+                        })
+                        && request.to.as_ref().is_none_or(|to| {
+                            path.nodes.last().is_some_and(|node| node.value == to.value)
+                        })
+                        && path.edges.iter().all(|edge| {
+                            !edge.kind.is_empty()
+                                && edge.kind.len() <= 32
+                                && edge.confidence <= 1_000
+                                && edge
                                     .source_refs
                                     .iter()
                                     .all(|source| source_ref_correlates(source, context))
@@ -6247,6 +6313,49 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 )));
             }
         }
+        FirstSliceIpcRequest::FlowTrace(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_generation_selector(request.generation.as_ref())?;
+            require_wire_id(request.from.as_ref().map(|id| id.value.as_slice()), 20)?;
+            if let Some(to) = request.to.as_ref() {
+                require_wire_id(Some(to.value.as_slice()), 20)?;
+            }
+            if request.relations.is_empty() || request.relations.len() > 16 {
+                return Err(Box::new(invalid_argument("flow trace request is invalid")));
+            }
+            for relation in &request.relations {
+                if relation.is_empty() || relation.len() > 32 || relation.as_bytes().contains(&0) {
+                    return Err(Box::new(invalid_argument("flow trace request is invalid")));
+                }
+            }
+            if request.direction.as_ref().is_some_and(|direction| {
+                direction.is_empty() || direction.len() > 16 || direction.as_bytes().contains(&0)
+            }) {
+                return Err(Box::new(invalid_argument("flow trace request is invalid")));
+            }
+            if request
+                .max_depth
+                .is_some_and(|depth| !(1..=8).contains(&depth))
+            {
+                return Err(Box::new(invalid_argument("flow trace request is invalid")));
+            }
+            if request
+                .max_paths
+                .is_some_and(|paths| !(1..=100).contains(&paths))
+            {
+                return Err(Box::new(invalid_argument("flow trace request is invalid")));
+            }
+            if request
+                .min_confidence
+                .is_some_and(|confidence| confidence > 1_000)
+            {
+                return Err(Box::new(invalid_argument("flow trace request is invalid")));
+            }
+        }
     }
     Ok(())
 }
@@ -6361,6 +6470,7 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         Some(daemon::request_envelope::Request::SymbolRelationships(_)) => {
             ControlMethod::SymbolRelationships
         }
+        Some(daemon::request_envelope::Request::FlowTrace(_)) => ControlMethod::FlowTrace,
         None => ControlMethod::Unknown,
     }
 }
@@ -6805,7 +6915,8 @@ fn request_from_wire(
         Some(
             daemon::request_envelope::Request::RepositoryList(_)
             | daemon::request_envelope::Request::RepositoryStatus(_)
-            | daemon::request_envelope::Request::SymbolRelationships(_),
+            | daemon::request_envelope::Request::SymbolRelationships(_)
+            | daemon::request_envelope::Request::FlowTrace(_),
         ) => Err(Box::new(first_slice_unavailable())),
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
     }

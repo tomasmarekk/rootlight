@@ -41,6 +41,7 @@ message RequestEnvelope {
     RepositoryListRequest repository_list = 35;
     RepositoryStatusRequest repository_status = 36;
     SymbolRelationshipsRequest symbol_relationships = 37;
+    FlowTraceRequest flow_trace = 38;
   }
 }
 
@@ -63,6 +64,7 @@ message ResponseEnvelope {
     RepositoryListResponse repository_list = 35;
     RepositoryStatusResponse repository_status = 36;
     SymbolRelationshipsResponse symbol_relationships = 37;
+    FlowTraceResponse flow_trace = 38;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -576,4 +578,56 @@ message SymbolRelationshipsResponse {
   uint64 total_edges = 5;
   bool exact = 6;
   bool truncated = 7;
+}
+
+// Requests bounded directed paths between stable symbols.
+message FlowTraceRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  rootlight.common.v1.SymbolId from = 4;
+  rootlight.common.v1.SymbolId to = 5;
+  optional string direction = 6;
+  repeated string relations = 7;
+  optional uint32 max_depth = 8;
+  optional uint32 max_paths = 9;
+  optional uint32 min_confidence = 10;
+}
+
+// One evidence-bearing edge within a traced path.
+message FirstSliceTraceEdge {
+  string kind = 1;
+  uint32 confidence = 2;
+  repeated FirstSliceSourceRef source_refs = 3;
+}
+
+// One complete traced path from the source toward a reached node.
+message FirstSliceTracePath {
+  uint32 confidence = 1;
+  repeated rootlight.common.v1.SymbolId nodes = 2;
+  repeated FirstSliceTraceEdge edges = 3;
+  bool cyclic = 4;
+}
+
+// Traversal boundary summary for a flow trace.
+message FirstSliceTraceFrontier {
+  uint32 reached_nodes = 1;
+  uint32 examined_edges = 2;
+  bool truncated = 3;
+  uint32 unresolved_boundaries = 4;
+}
+
+// Relation projection actually used by a flow trace.
+message FirstSliceTraceProjection {
+  repeated string relations = 1;
+  uint32 min_confidence = 2;
+}
+
+// Returns bounded directed paths and generation correlation.
+message FlowTraceResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  repeated FirstSliceTracePath paths = 3;
+  FirstSliceTraceFrontier frontier = 4;
+  FirstSliceTraceProjection projection = 5;
 }
