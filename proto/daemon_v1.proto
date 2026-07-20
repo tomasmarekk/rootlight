@@ -45,6 +45,7 @@ message RequestEnvelope {
     ArchitectureCyclesRequest architecture_cycles = 39;
     CodeDeadRequest code_dead = 40;
     ArchitectureOverviewRequest architecture_overview = 41;
+    TestsSelectRequest tests_select = 42;
   }
 }
 
@@ -71,6 +72,7 @@ message ResponseEnvelope {
     ArchitectureCyclesResponse architecture_cycles = 39;
     CodeDeadResponse code_dead = 40;
     ArchitectureOverviewResponse architecture_overview = 41;
+    TestsSelectResponse tests_select = 42;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -793,4 +795,49 @@ message ArchitectureOverviewResponse {
   repeated FirstSliceArchitectureConnection connections = 4;
   repeated FirstSliceHotspot hotspots = 5;
   repeated FirstSliceDerivedView views = 6;
+}
+
+// Requests a bounded test selection for one generation and seed set.
+message TestsSelectRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  repeated rootlight.common.v1.SymbolId seeds = 4;
+  repeated string test_kinds = 5;
+  optional uint32 max_tests = 6;
+  optional bool include_commands = 7;
+}
+
+// One ranked test selected for relevance to the seed set.
+message FirstSliceRankedTest {
+  string test_id = 1;
+  string kind = 2;
+  optional string path = 3;
+  uint32 score = 4;
+  repeated string why = 5;
+  optional uint32 estimated_cost_ms = 6;
+  optional string command_hint = 7;
+}
+
+// Coverage signals actually used by a test selection.
+message FirstSliceTestCoverageStrategy {
+  bool direct_edges = 1;
+  bool transitive_signals = 2;
+  bool history_signals = 3;
+  bool build_target_signals = 4;
+}
+
+// One honest gap where a seed scope has no related test.
+message FirstSliceTestGap {
+  string scope = 1;
+  string reason = 2;
+}
+
+// Returns bounded ranked tests, the coverage strategy, and honest gaps.
+message TestsSelectResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  repeated FirstSliceRankedTest tests = 3;
+  FirstSliceTestCoverageStrategy coverage_strategy = 4;
+  repeated FirstSliceTestGap gaps = 5;
 }

@@ -49,7 +49,7 @@ pub struct RequestEnvelope {
     pub timeout_ms: ::core::option::Option<u32>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -116,6 +116,9 @@ pub mod request_envelope {
         #[prost(message, tag = "41")]
         #[allow(missing_docs)]
         ArchitectureOverview(super::ArchitectureOverviewRequest),
+        #[prost(message, tag = "42")]
+        #[allow(missing_docs)]
+        TestsSelect(super::TestsSelectRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -126,7 +129,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -193,6 +196,9 @@ pub mod response_envelope {
         #[prost(message, tag = "41")]
         #[allow(missing_docs)]
         ArchitectureOverview(super::ArchitectureOverviewResponse),
+        #[prost(message, tag = "42")]
+        #[allow(missing_docs)]
+        TestsSelect(super::TestsSelectResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -1541,6 +1547,105 @@ pub struct ArchitectureOverviewResponse {
     #[prost(message, repeated, tag = "6")]
     #[allow(missing_docs)]
     pub views: ::prost::alloc::vec::Vec<FirstSliceDerivedView>,
+}
+/// Requests a bounded test selection for one generation and seed set.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TestsSelectRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub seeds: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+    #[prost(string, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub test_kinds: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub max_tests: ::core::option::Option<u32>,
+    #[prost(bool, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub include_commands: ::core::option::Option<bool>,
+}
+/// One ranked test selected for relevance to the seed set.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceRankedTest {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub test_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub path: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, tag = "4")]
+    #[allow(missing_docs)]
+    pub score: u32,
+    #[prost(string, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub why: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub estimated_cost_ms: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub command_hint: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Coverage signals actually used by a test selection.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceTestCoverageStrategy {
+    #[prost(bool, tag = "1")]
+    #[allow(missing_docs)]
+    pub direct_edges: bool,
+    #[prost(bool, tag = "2")]
+    #[allow(missing_docs)]
+    pub transitive_signals: bool,
+    #[prost(bool, tag = "3")]
+    #[allow(missing_docs)]
+    pub history_signals: bool,
+    #[prost(bool, tag = "4")]
+    #[allow(missing_docs)]
+    pub build_target_signals: bool,
+}
+/// One honest gap where a seed scope has no related test.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceTestGap {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub scope: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub reason: ::prost::alloc::string::String,
+}
+/// Returns bounded ranked tests, the coverage strategy, and honest gaps.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TestsSelectResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub tests: ::prost::alloc::vec::Vec<FirstSliceRankedTest>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub coverage_strategy: ::core::option::Option<FirstSliceTestCoverageStrategy>,
+    #[prost(message, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub gaps: ::prost::alloc::vec::Vec<FirstSliceTestGap>,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]
