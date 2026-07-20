@@ -49,7 +49,7 @@ pub struct RequestEnvelope {
     pub timeout_ms: ::core::option::Option<u32>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -125,6 +125,9 @@ pub mod request_envelope {
         #[prost(message, tag = "44")]
         #[allow(missing_docs)]
         PlanChange(super::PlanChangeRequest),
+        #[prost(message, tag = "45")]
+        #[allow(missing_docs)]
+        HistoryCompare(super::HistoryCompareRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -135,7 +138,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -211,6 +214,9 @@ pub mod response_envelope {
         #[prost(message, tag = "44")]
         #[allow(missing_docs)]
         PlanChange(super::PlanChangeResponse),
+        #[prost(message, tag = "45")]
+        #[allow(missing_docs)]
+        HistoryCompare(super::HistoryCompareResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -1917,6 +1923,158 @@ pub struct PlanChangeResponse {
     #[prost(message, optional, tag = "7")]
     #[allow(missing_docs)]
     pub context_pack_request: ::core::option::Option<FirstSliceContextPackRequest>,
+}
+/// Selects a revision by Git ref expression or immutable generation identity.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceRevisionSelector {
+    #[prost(oneof = "first_slice_revision_selector::Selector", tags = "1, 2")]
+    #[allow(missing_docs)]
+    pub selector: ::core::option::Option<first_slice_revision_selector::Selector>,
+}
+/// Nested message and enum types in `FirstSliceRevisionSelector`.
+pub mod first_slice_revision_selector {
+    #[allow(missing_docs)]
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Selector {
+        #[prost(string, tag = "1")]
+        #[allow(missing_docs)]
+        Git(::prost::alloc::string::String),
+        #[prost(message, tag = "2")]
+        #[allow(missing_docs)]
+        Generation(super::super::super::common::v1::GenerationId),
+    }
+}
+/// Requests a bounded semantic comparison between two revisions or generations.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HistoryCompareRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub base: ::core::option::Option<FirstSliceRevisionSelector>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub head: ::core::option::Option<FirstSliceRevisionSelector>,
+    #[prost(string, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub change_kinds: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub max_results: ::core::option::Option<u32>,
+}
+/// Resolved state pair for the comparison.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceMatchedStates {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub base_generation: ::core::option::Option<super::super::common::v1::GenerationId>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub head_generation: ::core::option::Option<super::super::common::v1::GenerationId>,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub coverage: ::prost::alloc::string::String,
+}
+/// One semantic change between revisions.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceSemanticChange {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub symbol_id: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub entity_kind: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    #[allow(missing_docs)]
+    pub breaking_candidate: bool,
+    #[prost(uint32, tag = "5")]
+    #[allow(missing_docs)]
+    pub significance: u32,
+}
+/// Aggregate architecture delta between revisions.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceArchitectureDelta {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub new_cross_service_edges: u32,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub removed_cross_service_edges: u32,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub new_boundaries: u32,
+    #[prost(uint32, tag = "4")]
+    #[allow(missing_docs)]
+    pub removed_boundaries: u32,
+}
+/// One breaking-change candidate with consumer evidence.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceBreakingCandidate {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub symbol_id: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub consumer_count: u32,
+    #[prost(bool, tag = "3")]
+    #[allow(missing_docs)]
+    pub is_public_surface: bool,
+    #[prost(string, tag = "4")]
+    #[allow(missing_docs)]
+    pub reason: ::prost::alloc::string::String,
+}
+/// One lineage match between base and head entities.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceLineageMatch {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub base_symbol_id: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub head_symbol_id: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub confidence: u32,
+    #[prost(bool, tag = "4")]
+    #[allow(missing_docs)]
+    pub is_rename: bool,
+}
+/// Returns bounded semantic changes, an architecture delta, breaking candidates,
+/// and lineage matches for the resolved state pair.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HistoryCompareResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub matched_states: ::core::option::Option<FirstSliceMatchedStates>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub changes: ::prost::alloc::vec::Vec<FirstSliceSemanticChange>,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub architecture_delta: ::core::option::Option<FirstSliceArchitectureDelta>,
+    #[prost(message, repeated, tag = "6")]
+    #[allow(missing_docs)]
+    pub breaking_candidates: ::prost::alloc::vec::Vec<FirstSliceBreakingCandidate>,
+    #[prost(message, repeated, tag = "7")]
+    #[allow(missing_docs)]
+    pub lineage: ::prost::alloc::vec::Vec<FirstSliceLineageMatch>,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]

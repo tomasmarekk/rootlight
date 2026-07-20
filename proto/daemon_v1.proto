@@ -48,6 +48,7 @@ message RequestEnvelope {
     TestsSelectRequest tests_select = 42;
     ChangeImpactRequest change_impact = 43;
     PlanChangeRequest plan_change = 44;
+    HistoryCompareRequest history_compare = 45;
   }
 }
 
@@ -77,6 +78,7 @@ message ResponseEnvelope {
     TestsSelectResponse tests_select = 42;
     ChangeImpactResponse change_impact = 43;
     PlanChangeResponse plan_change = 44;
+    HistoryCompareResponse history_compare = 45;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -963,4 +965,74 @@ message PlanChangeResponse {
   repeated FirstSliceChangeImpactTest test_plan = 5;
   repeated FirstSlicePlanDecision open_decisions = 6;
   FirstSliceContextPackRequest context_pack_request = 7;
+}
+
+// Selects a revision by Git ref expression or immutable generation identity.
+message FirstSliceRevisionSelector {
+  oneof selector {
+    string git = 1;
+    rootlight.common.v1.GenerationId generation = 2;
+  }
+}
+
+// Requests a bounded semantic comparison between two revisions or generations.
+message HistoryCompareRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  FirstSliceRevisionSelector base = 3;
+  FirstSliceRevisionSelector head = 4;
+  repeated string change_kinds = 5;
+  optional uint32 max_results = 6;
+}
+
+// Resolved state pair for the comparison.
+message FirstSliceMatchedStates {
+  rootlight.common.v1.GenerationId base_generation = 1;
+  rootlight.common.v1.GenerationId head_generation = 2;
+  string coverage = 3;
+}
+
+// One semantic change between revisions.
+message FirstSliceSemanticChange {
+  string kind = 1;
+  rootlight.common.v1.SymbolId symbol_id = 2;
+  string entity_kind = 3;
+  bool breaking_candidate = 4;
+  uint32 significance = 5;
+}
+
+// Aggregate architecture delta between revisions.
+message FirstSliceArchitectureDelta {
+  uint32 new_cross_service_edges = 1;
+  uint32 removed_cross_service_edges = 2;
+  uint32 new_boundaries = 3;
+  uint32 removed_boundaries = 4;
+}
+
+// One breaking-change candidate with consumer evidence.
+message FirstSliceBreakingCandidate {
+  rootlight.common.v1.SymbolId symbol_id = 1;
+  uint32 consumer_count = 2;
+  bool is_public_surface = 3;
+  string reason = 4;
+}
+
+// One lineage match between base and head entities.
+message FirstSliceLineageMatch {
+  rootlight.common.v1.SymbolId base_symbol_id = 1;
+  rootlight.common.v1.SymbolId head_symbol_id = 2;
+  uint32 confidence = 3;
+  bool is_rename = 4;
+}
+
+// Returns bounded semantic changes, an architecture delta, breaking candidates,
+// and lineage matches for the resolved state pair.
+message HistoryCompareResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  FirstSliceMatchedStates matched_states = 3;
+  repeated FirstSliceSemanticChange changes = 4;
+  FirstSliceArchitectureDelta architecture_delta = 5;
+  repeated FirstSliceBreakingCandidate breaking_candidates = 6;
+  repeated FirstSliceLineageMatch lineage = 7;
 }
