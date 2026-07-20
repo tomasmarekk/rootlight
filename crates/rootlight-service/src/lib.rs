@@ -48,12 +48,14 @@ use rootlight_ir::{
 pub use rootlight_query::{
     ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesResult, ArchitectureHotspot,
     ArchitectureOverviewDerivedView, ArchitectureOverviewResult, ArchitectureOverviewView,
-    ChangeImpactClassification, ChangeImpactResult, ChangeImpactRiskLevel, ChangeImpactRiskSummary,
-    ChangeImpactTestCandidate, CodeDeadEntryPointPolicy, CodeDeadResult, CodeLocateResult,
-    FlowTraceResult, ImpactEntryRecord, ImpactGroupRecord, LocateMode, PlanChangeContextPack,
-    PlanChangeDecision, PlanChangeImpactSummary, PlanChangeObjective, PlanChangeResult,
-    PlanChangeStepRecord, QueryResponse, RankedTestSelection, RelationDirection, RelationFamily,
-    ResolvedChangeRecord, SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult,
+    BreakingCandidateRecord, ChangeImpactClassification, ChangeImpactResult, ChangeImpactRiskLevel,
+    ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadEntryPointPolicy, CodeDeadResult,
+    CodeLocateResult, FlowTraceResult, HistoryArchitectureDelta, HistoryChangeKind,
+    HistoryCompareResult, HistorySemanticChangeKind, ImpactEntryRecord, ImpactGroupRecord,
+    LineageMatchRecord, LocateMode, PlanChangeContextPack, PlanChangeDecision,
+    PlanChangeImpactSummary, PlanChangeObjective, PlanChangeResult, PlanChangeStepRecord,
+    QueryResponse, RankedTestSelection, RelationDirection, RelationFamily, ResolvedChangeRecord,
+    SemanticChangeRecord, SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult,
     TestsSelectCoverage, TestsSelectGap, TestsSelectKind, TestsSelectResult,
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
@@ -2201,6 +2203,45 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_plan_change(&plan, cancellation)
+            .map_err(|error| map_query_error(error, cancellation))
+    }
+
+    /// Executes a bounded `history.compare` query between two retained
+    /// generations.
+    ///
+    /// The head generation pins the query service while the base generation
+    /// document is loaded from the generation set and supplied to the executor.
+    /// The change-kind filter and result cap are validated by the query plan.
+    /// The result carries deterministic semantic changes, an honest zero
+    /// architecture delta, breaking candidates, and lineage matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown base or head generation,
+    /// invalid plan, or bounded execution failure.
+    pub fn history_compare(
+        &self,
+        base: GenerationId,
+        head: GenerationId,
+        change_kinds: BTreeSet<HistoryChangeKind>,
+        max_results: usize,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<HistoryCompareResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let service = self
+            .generations
+            .query(head)
+            .map_err(|_| FirstSliceError::Query)?;
+        let base_document = self
+            .generations
+            .generation(base)
+            .map_err(|_| FirstSliceError::Query)?
+            .document();
+        let plan = service
+            .plan_history_compare(base, change_kinds, max_results, QueryBudget::new())
+            .map_err(|error| map_query_error(error, cancellation))?;
+        service
+            .execute_history_compare(&plan, base_document, cancellation)
             .map_err(|error| map_query_error(error, cancellation))
     }
 

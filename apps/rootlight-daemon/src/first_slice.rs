@@ -44,7 +44,7 @@ use rootlight_query::{
 };
 use rootlight_service::{
     FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexReceipt, FirstSliceService,
-    PlanChangeObjective,
+    HistoryChangeKind, PlanChangeObjective,
 };
 
 const FIRST_SLICE_SCHEMA_MAJOR: u32 = 1;
@@ -66,6 +66,7 @@ const DEFAULT_TESTS_SELECT_MAX_TESTS: u32 = 20;
 const DEFAULT_CHANGE_IMPACT_MAX_DEPTH: u32 = 3;
 const DEFAULT_CHANGE_IMPACT_MAX_DEPENDENTS: u32 = 100;
 const DEFAULT_PLAN_CHANGE_MAX_STEPS: u32 = 6;
+const DEFAULT_HISTORY_COMPARE_MAX_RESULTS: u32 = 100;
 
 type Reply = tokio::sync::oneshot::Sender<Result<FirstSliceIpcResponse, PublicError>>;
 
@@ -557,6 +558,9 @@ fn execute_service_request(
         }
         FirstSliceIpcRequest::PlanChange(request) => {
             plan_change(service, request, &context).map(FirstSliceIpcResponse::PlanChange)
+        }
+        FirstSliceIpcRequest::HistoryCompare(request) => {
+            history_compare(service, request, &context).map(FirstSliceIpcResponse::HistoryCompare)
         }
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
     }
@@ -1825,6 +1829,112 @@ fn plan_change(
             files: context_pack.files.into_iter().map(file_to_wire).collect(),
         }),
     })
+}
+
+fn history_compare(
+    service: &FirstSliceService,
+    request: daemon::HistoryCompareRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::HistoryCompareResponse, PublicError> {
+    let repository = parse_repository(request.repository.as_ref())?;
+    let base = parse_revision_generation(request.base.as_ref())?;
+    let head = parse_revision_generation(request.head.as_ref())?;
+    // Resolve both generations against the repository: the head context drives
+    // the query context while the base must also belong to the repository.
+    let head_context = service
+        .resolve_generation(repository, Some(head))
+        .map_err(service_error)?;
+    service
+        .resolve_generation(repository, Some(base))
+        .map_err(service_error)?;
+    let mut change_kinds = BTreeSet::new();
+    for kind in &request.change_kinds {
+        change_kinds.insert(HistoryChangeKind::from_label(kind).ok_or_else(invalid_argument)?);
+    }
+    let max_results = usize::try_from(
+        request
+            .max_results
+            .unwrap_or(DEFAULT_HISTORY_COMPARE_MAX_RESULTS),
+    )
+    .map_err(|_| invalid_argument())?;
+    let response = service
+        .history_compare(base, head, change_kinds, max_results, &context.cancellation)
+        .map_err(service_error)?;
+    let data = response.data;
+    let architecture_delta = data.architecture_delta;
+    let mut changes = Vec::new();
+    changes
+        .try_reserve_exact(data.changes.len())
+        .map_err(|_| resource_exhausted())?;
+    for change in data.changes {
+        changes.push(daemon::FirstSliceSemanticChange {
+            kind: change.kind.as_str().to_owned(),
+            symbol_id: Some(symbol_to_wire(change.symbol_id)),
+            entity_kind: change.entity_kind,
+            breaking_candidate: change.breaking_candidate,
+            significance: u32::from(change.significance),
+        });
+    }
+    let mut breaking_candidates = Vec::new();
+    breaking_candidates
+        .try_reserve_exact(data.breaking_candidates.len())
+        .map_err(|_| resource_exhausted())?;
+    for candidate in data.breaking_candidates {
+        breaking_candidates.push(daemon::FirstSliceBreakingCandidate {
+            symbol_id: Some(symbol_to_wire(candidate.symbol_id)),
+            consumer_count: candidate.consumer_count,
+            is_public_surface: candidate.is_public_surface,
+            reason: candidate.reason,
+        });
+    }
+    let mut lineage = Vec::new();
+    lineage
+        .try_reserve_exact(data.lineage.len())
+        .map_err(|_| resource_exhausted())?;
+    for lineage_match in data.lineage {
+        lineage.push(daemon::FirstSliceLineageMatch {
+            base_symbol_id: Some(symbol_to_wire(lineage_match.base_symbol_id)),
+            head_symbol_id: Some(symbol_to_wire(lineage_match.head_symbol_id)),
+            confidence: u32::from(lineage_match.confidence),
+            is_rename: lineage_match.is_rename,
+        });
+    }
+    Ok(daemon::HistoryCompareResponse {
+        schema_version: Some(schema_version()),
+        context: Some(query_context(head_context, &response.usage, &[])),
+        matched_states: Some(daemon::FirstSliceMatchedStates {
+            base_generation: Some(generation_to_wire(data.base_generation)),
+            head_generation: Some(generation_to_wire(data.head_generation)),
+            coverage: coverage_label(data.coverage).to_owned(),
+        }),
+        changes,
+        architecture_delta: Some(daemon::FirstSliceArchitectureDelta {
+            new_cross_service_edges: architecture_delta.new_cross_service_edges,
+            removed_cross_service_edges: architecture_delta.removed_cross_service_edges,
+            new_boundaries: architecture_delta.new_boundaries,
+            removed_boundaries: architecture_delta.removed_boundaries,
+        }),
+        breaking_candidates,
+        lineage,
+    })
+}
+
+/// Parses a history-compare revision selector into an explicit generation.
+///
+/// Git revision selectors are rejected because the first-slice daemon maps no
+/// git ref to a retained generation.
+fn parse_revision_generation(
+    selector: Option<&daemon::FirstSliceRevisionSelector>,
+) -> Result<GenerationId, PublicError> {
+    match selector.and_then(|selector| selector.selector.as_ref()) {
+        Some(daemon::first_slice_revision_selector::Selector::Generation(generation)) => {
+            parse_generation(Some(generation))
+        }
+        Some(daemon::first_slice_revision_selector::Selector::Git(_)) => {
+            Err(unsupported_capability())
+        }
+        None => Err(invalid_argument()),
+    }
 }
 
 fn source_read(
