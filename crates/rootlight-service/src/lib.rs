@@ -48,10 +48,12 @@ use rootlight_ir::{
 pub use rootlight_query::{
     ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesResult, ArchitectureHotspot,
     ArchitectureOverviewDerivedView, ArchitectureOverviewResult, ArchitectureOverviewView,
-    CodeDeadEntryPointPolicy, CodeDeadResult, CodeLocateResult, FlowTraceResult, LocateMode,
-    QueryResponse, RankedTestSelection, RelationDirection, RelationFamily, SourceReadQueryResult,
-    SymbolExplainResult, SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap,
-    TestsSelectKind, TestsSelectResult,
+    ChangeImpactClassification, ChangeImpactResult, ChangeImpactRiskLevel, ChangeImpactRiskSummary,
+    ChangeImpactTestCandidate, CodeDeadEntryPointPolicy, CodeDeadResult, CodeLocateResult,
+    FlowTraceResult, ImpactEntryRecord, ImpactGroupRecord, LocateMode, QueryResponse,
+    RankedTestSelection, RelationDirection, RelationFamily, ResolvedChangeRecord,
+    SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult, TestsSelectCoverage,
+    TestsSelectGap, TestsSelectKind, TestsSelectResult,
 };
 use rootlight_query::{GenerationSet, QueryBudget, QueryError, project_lexical_documents};
 use rootlight_resolve::{
@@ -2112,6 +2114,53 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_tests_select(&plan, cancellation)
+            .map_err(|error| map_query_error(error, cancellation))
+    }
+
+    /// Executes a generation-pinned bounded `change.impact` query.
+    ///
+    /// The explicit changed symbols and paths, depth and confidence bounds, test
+    /// inclusion, and dependent cap are validated by the query plan. The result
+    /// carries deterministic resolved changes, ranked impact groups, optional
+    /// test candidates, and an honest risk summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the facade forwards the explicit change set plus its bounded propagation options"
+    )]
+    pub fn change_impact(
+        &self,
+        generation: GenerationId,
+        changed_symbols: BTreeSet<SymbolId>,
+        changed_paths: Vec<String>,
+        max_depth: u8,
+        min_confidence: u16,
+        include_tests: bool,
+        max_dependents: usize,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<ChangeImpactResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let service = self
+            .generations
+            .query(generation)
+            .map_err(|_| FirstSliceError::Query)?;
+        let plan = service
+            .plan_change_impact(
+                changed_symbols,
+                changed_paths,
+                max_depth,
+                min_confidence,
+                include_tests,
+                max_dependents,
+                QueryBudget::new(),
+            )
+            .map_err(|error| map_query_error(error, cancellation))?;
+        service
+            .execute_change_impact(&plan, cancellation)
             .map_err(|error| map_query_error(error, cancellation))
     }
 
