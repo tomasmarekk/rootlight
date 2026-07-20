@@ -46,6 +46,7 @@ message RequestEnvelope {
     CodeDeadRequest code_dead = 40;
     ArchitectureOverviewRequest architecture_overview = 41;
     TestsSelectRequest tests_select = 42;
+    ChangeImpactRequest change_impact = 43;
   }
 }
 
@@ -73,6 +74,7 @@ message ResponseEnvelope {
     CodeDeadResponse code_dead = 40;
     ArchitectureOverviewResponse architecture_overview = 41;
     TestsSelectResponse tests_select = 42;
+    ChangeImpactResponse change_impact = 43;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -840,4 +842,69 @@ message TestsSelectResponse {
   repeated FirstSliceRankedTest tests = 3;
   FirstSliceTestCoverageStrategy coverage_strategy = 4;
   repeated FirstSliceTestGap gaps = 5;
+}
+
+// Requests a bounded change-impact analysis for one generation and change set.
+message ChangeImpactRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  repeated rootlight.common.v1.SymbolId changed_symbols = 4;
+  repeated string changed_paths = 5;
+  optional uint32 max_depth = 6;
+  optional uint32 min_confidence = 7;
+  optional bool include_tests = 8;
+  optional uint32 max_dependents = 9;
+}
+
+// One resolved change from the input change set.
+message FirstSliceResolvedChange {
+  optional rootlight.common.v1.SymbolId symbol_id = 1;
+  optional rootlight.common.v1.FileId file_id = 2;
+  string classification = 3;
+  optional string kind = 4;
+}
+
+// One impacted dependent with path rationale.
+message FirstSliceImpactEntry {
+  rootlight.common.v1.SymbolId symbol_id = 1;
+  string kind = 2;
+  uint32 distance = 3;
+  uint32 confidence = 4;
+  repeated string via = 5;
+  bool is_public = 6;
+}
+
+// One grouped set of impacted dependents for a resolved change.
+message FirstSliceImpactGroup {
+  uint32 source_index = 1;
+  repeated FirstSliceImpactEntry dependents = 2;
+}
+
+// One test candidate relevant to the change.
+message FirstSliceChangeImpactTest {
+  string test_id = 1;
+  uint32 relevance = 2;
+  repeated string why = 3;
+  optional uint32 estimated_cost_ms = 4;
+}
+
+// Aggregate risk summary for a change-impact result.
+message FirstSliceImpactRiskSummary {
+  string level = 1;
+  repeated string reasons = 2;
+  string coverage = 3;
+  bool breaking_surface = 4;
+  uint32 fanout = 5;
+  bool dynamic_blind_spots = 6;
+}
+
+// Returns bounded resolved changes, impact groups, tests, and a risk summary.
+message ChangeImpactResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  repeated FirstSliceResolvedChange resolved_changes = 3;
+  repeated FirstSliceImpactGroup impacted = 4;
+  repeated FirstSliceChangeImpactTest tests = 5;
+  FirstSliceImpactRiskSummary risk_summary = 6;
 }

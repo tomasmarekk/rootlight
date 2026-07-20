@@ -49,7 +49,7 @@ pub struct RequestEnvelope {
     pub timeout_ms: ::core::option::Option<u32>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -119,6 +119,9 @@ pub mod request_envelope {
         #[prost(message, tag = "42")]
         #[allow(missing_docs)]
         TestsSelect(super::TestsSelectRequest),
+        #[prost(message, tag = "43")]
+        #[allow(missing_docs)]
+        ChangeImpact(super::ChangeImpactRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -129,7 +132,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -199,6 +202,9 @@ pub mod response_envelope {
         #[prost(message, tag = "42")]
         #[allow(missing_docs)]
         TestsSelect(super::TestsSelectResponse),
+        #[prost(message, tag = "43")]
+        #[allow(missing_docs)]
+        ChangeImpact(super::ChangeImpactResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -1646,6 +1652,149 @@ pub struct TestsSelectResponse {
     #[prost(message, repeated, tag = "5")]
     #[allow(missing_docs)]
     pub gaps: ::prost::alloc::vec::Vec<FirstSliceTestGap>,
+}
+/// Requests a bounded change-impact analysis for one generation and change set.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChangeImpactRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub changed_symbols: ::prost::alloc::vec::Vec<super::super::common::v1::SymbolId>,
+    #[prost(string, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub changed_paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub max_depth: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub min_confidence: ::core::option::Option<u32>,
+    #[prost(bool, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub include_tests: ::core::option::Option<bool>,
+    #[prost(uint32, optional, tag = "9")]
+    #[allow(missing_docs)]
+    pub max_dependents: ::core::option::Option<u32>,
+}
+/// One resolved change from the input change set.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceResolvedChange {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub symbol_id: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub file_id: ::core::option::Option<super::super::common::v1::FileId>,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub classification: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub kind: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// One impacted dependent with path rationale.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceImpactEntry {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub symbol_id: ::core::option::Option<super::super::common::v1::SymbolId>,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    #[allow(missing_docs)]
+    pub distance: u32,
+    #[prost(uint32, tag = "4")]
+    #[allow(missing_docs)]
+    pub confidence: u32,
+    #[prost(string, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub via: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(bool, tag = "6")]
+    #[allow(missing_docs)]
+    pub is_public: bool,
+}
+/// One grouped set of impacted dependents for a resolved change.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceImpactGroup {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub source_index: u32,
+    #[prost(message, repeated, tag = "2")]
+    #[allow(missing_docs)]
+    pub dependents: ::prost::alloc::vec::Vec<FirstSliceImpactEntry>,
+}
+/// One test candidate relevant to the change.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceChangeImpactTest {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub test_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    #[allow(missing_docs)]
+    pub relevance: u32,
+    #[prost(string, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub why: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub estimated_cost_ms: ::core::option::Option<u32>,
+}
+/// Aggregate risk summary for a change-impact result.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceImpactRiskSummary {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub level: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    #[allow(missing_docs)]
+    pub reasons: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub coverage: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    #[allow(missing_docs)]
+    pub breaking_surface: bool,
+    #[prost(uint32, tag = "5")]
+    #[allow(missing_docs)]
+    pub fanout: u32,
+    #[prost(bool, tag = "6")]
+    #[allow(missing_docs)]
+    pub dynamic_blind_spots: bool,
+}
+/// Returns bounded resolved changes, impact groups, tests, and a risk summary.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChangeImpactResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub resolved_changes: ::prost::alloc::vec::Vec<FirstSliceResolvedChange>,
+    #[prost(message, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub impacted: ::prost::alloc::vec::Vec<FirstSliceImpactGroup>,
+    #[prost(message, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub tests: ::prost::alloc::vec::Vec<FirstSliceChangeImpactTest>,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub risk_summary: ::core::option::Option<FirstSliceImpactRiskSummary>,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]
