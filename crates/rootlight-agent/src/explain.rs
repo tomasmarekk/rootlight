@@ -16,6 +16,9 @@ const EXPLAIN_COST_PER_SYMBOL: u64 = 12;
 /// Estimated cost units per planned source reference for `source.read`.
 const READ_COST_PER_REFERENCE: u64 = 16;
 
+/// Estimated cost units per planned seed for `symbol.relationships`.
+const RELATIONSHIPS_COST_PER_SEED: u64 = 24;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -64,6 +67,26 @@ pub fn source_read_plan(reference_count: usize) -> PlanExplanation {
     }
 }
 
+/// Builds the source-free `symbol.relationships` plan for explain mode.
+///
+/// `seed_count` and `max_results` bound the planned neighborhood expansion and
+/// drive the cost estimate.
+#[must_use]
+pub fn symbol_relationships_plan(seed_count: usize, max_results: Option<u32>) -> PlanExplanation {
+    let cost = u64::try_from(seed_count)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(RELATIONSHIPS_COST_PER_SEED);
+    let mut applied_limits = vec![format!("seeds: {seed_count}")];
+    if let Some(max) = max_results {
+        applied_limits.push(format!("max_results: {max}"));
+    }
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["relationship_expansion".to_owned()],
+        applied_limits,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::code_locate_plan;
@@ -100,5 +123,20 @@ mod tests {
         let plan = source_read_plan(2);
         assert_eq!(plan.operators, vec!["source_read".to_owned()]);
         assert_eq!(plan.applied_limits, vec!["references: 2".to_owned()]);
+    }
+
+    #[test]
+    fn symbol_relationships_plan_is_deterministic_and_bounded() {
+        use super::symbol_relationships_plan;
+        assert_eq!(
+            symbol_relationships_plan(2, Some(100)),
+            symbol_relationships_plan(2, Some(100))
+        );
+        let plan = symbol_relationships_plan(2, Some(100));
+        assert_eq!(plan.operators, vec!["relationship_expansion".to_owned()]);
+        assert_eq!(
+            plan.applied_limits,
+            vec!["seeds: 2".to_owned(), "max_results: 100".to_owned()]
+        );
     }
 }

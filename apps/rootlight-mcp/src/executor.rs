@@ -2751,6 +2751,42 @@ where
     explain_envelope_from_status(status, data)
 }
 
+/// Builds the source-free `symbol.relationships` plan without executing
+/// retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no neighborhood
+/// expansion runs. The plan is deterministic for the normalized request.
+async fn explain_symbol_relationships<P>(
+    port: Arc<P>,
+    request: SymbolRelationshipsPortRequest,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<SymbolRelationshipsData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(request.repository, request.generation);
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let explanation = rootlight_agent::explain::symbol_relationships_plan(
+        request.seeds.len(),
+        request.max_results.map(u32::from),
+    );
+    let data = SymbolRelationshipsData {
+        groups: Vec::new(),
+        unresolved: Vec::new(),
+        totals: RelationshipTotals {
+            returned_edges: 0,
+            total_edges: 0,
+            exact: true,
+        },
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_symbol_explain<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -2784,7 +2820,12 @@ where
     P: FirstSliceClientPort,
 {
     let input: SymbolRelationshipsInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let request = normalize_symbol_relationships(input, unsupported)?;
+    if explain_only {
+        let output = explain_symbol_relationships(port, request, cancellation).await?;
+        return serialize_success(output);
+    }
     let expected = request.clone();
     let future = port.symbol_relationships(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -2887,6 +2928,7 @@ fn map_symbol_relationships(
             total_edges,
             exact: response.result.exact,
         },
+        explanation: None,
     };
     map_read_envelope(
         response.result.context,
