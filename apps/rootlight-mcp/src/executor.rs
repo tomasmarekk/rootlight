@@ -1539,6 +1539,11 @@ where
 {
     let input: QueryBatchInput = decode_input(arguments)?;
     let repository = repository_id(input.repository.clone(), unsupported)?;
+    // Shared budgets and aggregate response profiles are not enforced by this
+    // slice; reject them rather than silently ignoring them.
+    if input.budget.is_some() || !compact_profile(input.response_profile) {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
     let operation_failed =
         PublicError::builder(ErrorCode::Internal, BATCH_OPERATION_FAILED_MESSAGE)
             .build()
@@ -1910,6 +1915,23 @@ where
     let input: ContextPackInput = decode_input(arguments)?;
     // Alias selectors cannot be resolved behind this bridge.
     repository_id(input.repository.clone(), unsupported)?;
+
+    // This slice assembles packs from symbol/test seeds only. The other seed
+    // kinds and the selection controls are not served and are rejected here so
+    // they are never silently ignored.
+    if input.seeds.paths.is_some()
+        || input.seeds.routes.is_some()
+        || input.seeds.located.is_some()
+        || input.seeds.change.is_some()
+        || input.seeds.plan.is_some()
+        || input.source_policy.is_some()
+        || input.sections.is_some()
+        || input.diversity.is_some()
+        || input.min_confidence.is_some()
+        || input.continuation.is_some()
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
 
     let mut seed_symbols: BTreeSet<SymbolId> = BTreeSet::new();
     if let Some(symbols) = &input.seeds.symbols {

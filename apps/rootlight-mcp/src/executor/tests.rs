@@ -2559,6 +2559,30 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
             json!({"response_profile": "standard"}),
         ),
         (
+            VerticalTool::ContextPack,
+            json!({"repository": {"repository_id": repository()}, "task": "fix a bug", "seeds": {"symbols": [symbol()]}, "token_budget": 1000, "min_confidence": 800}),
+        ),
+        (
+            VerticalTool::ContextPack,
+            json!({"repository": {"repository_id": repository()}, "task": "fix a bug", "seeds": {"symbols": [symbol()]}, "token_budget": 1000, "source_policy": "signatures"}),
+        ),
+        (
+            VerticalTool::ContextPack,
+            json!({"repository": {"repository_id": repository()}, "task": "fix a bug", "seeds": {"symbols": [symbol()], "paths": ["src/lib.rs"]}, "token_budget": 1000}),
+        ),
+        (
+            VerticalTool::ContextPack,
+            json!({"repository": {"repository_id": repository()}, "task": "fix a bug", "seeds": {"symbols": [symbol()]}, "token_budget": 1000, "continuation": "opaque"}),
+        ),
+        (
+            VerticalTool::QueryBatch,
+            json!({"repository": {"repository_id": repository()}, "operations": [{"id": "a", "tool": "code.locate", "arguments": {"query": "x"}}], "budget": {}}),
+        ),
+        (
+            VerticalTool::QueryBatch,
+            json!({"repository": {"repository_id": repository()}, "operations": [{"id": "a", "tool": "code.locate", "arguments": {"query": "x"}}], "response_profile": "standard"}),
+        ),
+        (
             VerticalTool::RepoIndex,
             json!({"repository_id": repository()}),
         ),
