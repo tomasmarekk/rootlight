@@ -37,6 +37,9 @@ const CYCLES_COST_PER_CYCLE: u64 = 28;
 /// Estimated cost units per planned dead-code candidate for `code.dead`.
 const DEAD_COST_PER_CANDIDATE: u64 = 18;
 
+/// Estimated cost units per planned comparison result for `history.compare`.
+const HISTORY_COST_PER_RESULT: u64 = 22;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -197,6 +200,20 @@ pub fn code_dead_plan(max_candidates: Option<u16>) -> PlanExplanation {
     }
 }
 
+/// Builds the source-free `history.compare` plan for explain mode.
+///
+/// `max_results` bounds the planned comparison and drives the cost estimate.
+#[must_use]
+pub fn history_compare_plan(max_results: Option<u16>) -> PlanExplanation {
+    let results = u64::from(max_results.unwrap_or(100));
+    let cost = results.saturating_mul(HISTORY_COST_PER_RESULT);
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["revision_comparison".to_owned()],
+        applied_limits: vec![format!("max_results: {results}")],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::code_locate_plan;
@@ -314,5 +331,17 @@ mod tests {
         let plan = code_dead_plan(Some(40));
         assert_eq!(plan.operators, vec!["reachability_analysis".to_owned()]);
         assert_eq!(plan.applied_limits, vec!["max_candidates: 40".to_owned()]);
+    }
+
+    #[test]
+    fn history_compare_plan_is_deterministic_and_bounded() {
+        use super::history_compare_plan;
+        assert_eq!(
+            history_compare_plan(Some(30)),
+            history_compare_plan(Some(30))
+        );
+        let plan = history_compare_plan(Some(30));
+        assert_eq!(plan.operators, vec!["revision_comparison".to_owned()]);
+        assert_eq!(plan.applied_limits, vec!["max_results: 30".to_owned()]);
     }
 }

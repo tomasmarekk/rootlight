@@ -4171,6 +4171,48 @@ fn map_plan_change(
     map_read_envelope(response.result.context, response.metadata, data, false)
 }
 
+/// Builds the source-free `history.compare` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no revision
+/// comparison runs. The plan is deterministic for the normalized request.
+async fn explain_history_compare<P>(
+    port: Arc<P>,
+    request: HistoryComparePortRequest,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<HistoryCompareData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(
+        request.repository,
+        client::GenerationSelector::Generation(request.head),
+    );
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let explanation = rootlight_agent::explain::history_compare_plan(request.max_results);
+    let data = HistoryCompareData {
+        matched_states: MatchedStates {
+            base_generation: request.base,
+            head_generation: request.head,
+            coverage: rootlight_ir::CoverageStatus::Unknown,
+        },
+        changes: Vec::new(),
+        architecture_delta: ArchitectureDelta {
+            new_cross_service_edges: 0,
+            removed_cross_service_edges: 0,
+            new_boundaries: 0,
+            removed_boundaries: 0,
+        },
+        breaking_candidates: Vec::new(),
+        lineage: Vec::new(),
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_history_compare<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -4181,7 +4223,12 @@ where
     P: FirstSliceClientPort,
 {
     let input: HistoryCompareInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let request = normalize_history_compare(input, unsupported)?;
+    if explain_only {
+        let output = explain_history_compare(port, request, cancellation).await?;
+        return serialize_success(output);
+    }
     let expected = request.clone();
     let future = port.history_compare(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -4304,6 +4351,7 @@ fn map_history_compare(
         },
         breaking_candidates,
         lineage,
+        explanation: None,
     };
     map_read_envelope(response.result.context, response.metadata, data, false)
 }

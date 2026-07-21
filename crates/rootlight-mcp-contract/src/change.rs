@@ -611,6 +611,9 @@ pub struct HistoryCompareInput {
     /// Requested response profile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// Resolved state pair for the comparison.
@@ -707,6 +710,9 @@ pub struct HistoryCompareData {
     /// Entity lineage matches.
     #[schemars(length(max = 1000))]
     pub lineage: Vec<LineageMatch>,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 /// Checked success-or-error output for `history.compare`.

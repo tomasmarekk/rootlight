@@ -26,6 +26,10 @@
       "maxItems": 8,
       "minItems": 1
     },
+    "explain": {
+      "description": "Return the bounded plan without executing retrieval.",
+      "type": "boolean"
+    },
     "head": {
       "description": "Head revision or generation.",
       "$ref": "#/$defs/RevisionSelector"
