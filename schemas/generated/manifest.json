@@ -22,7 +22,7 @@
     },
     {
       "path": "crates/rootlight-error/src/lib.rs",
-      "blake3": "41f9aa37a41e0db544528f3f74323599a52e09004233f90282ec0d10a75ba00f"
+      "blake3": "29147d635c260700d614566da1d7f6fa67e0d5a89142140ff19ac3d713bd1d7e"
     },
     {
       "path": "crates/rootlight-ids/src/lib.rs",
