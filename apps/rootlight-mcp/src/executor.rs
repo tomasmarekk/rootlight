@@ -3156,6 +3156,34 @@ fn map_flow_trace(
     )
 }
 
+/// Builds the source-free `architecture.cycles` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no cycle detection
+/// runs. The plan is deterministic for the normalized request.
+async fn explain_architecture_cycles<P>(
+    port: Arc<P>,
+    request: ArchitectureCyclesPortRequest,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<ArchitectureCyclesData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(request.repository, request.generation);
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let explanation = rootlight_agent::explain::architecture_cycles_plan(request.max_cycles);
+    let data = ArchitectureCyclesData {
+        components: Vec::new(),
+        cycles: Vec::new(),
+        break_candidates: Vec::new(),
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_architecture_cycles<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -3166,7 +3194,12 @@ where
     P: FirstSliceClientPort,
 {
     let input: ArchitectureCyclesInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let request = normalize_architecture_cycles(input, unsupported)?;
+    if explain_only {
+        let output = explain_architecture_cycles(port, request, cancellation).await?;
+        return serialize_success(output);
+    }
     let expected = request.clone();
     let future = port.architecture_cycles(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -3283,6 +3316,7 @@ fn map_architecture_cycles(
         components,
         cycles,
         break_candidates,
+        explanation: None,
     };
     // The requested cycle cap is an explicit bound honored by the daemon; this
     // slice does not surface separate budget-truncation through the wire.

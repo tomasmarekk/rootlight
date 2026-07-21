@@ -624,6 +624,9 @@ pub struct ArchitectureCyclesInput {
     /// Requested representation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// One strongly connected component containing cycles.
@@ -687,6 +690,9 @@ pub struct ArchitectureCyclesData {
     /// Ranked candidate break points.
     #[schemars(length(max = 200))]
     pub break_candidates: Vec<CycleBreakCandidate>,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 /// Checked success-or-error output for `architecture.cycles`.

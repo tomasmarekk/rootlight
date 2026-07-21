@@ -31,6 +31,9 @@ const TESTS_COST_PER_TEST: u64 = 6;
 /// Estimated cost units per planned component for `architecture.overview`.
 const OVERVIEW_COST_PER_COMPONENT: u64 = 20;
 
+/// Estimated cost units per planned cycle for `architecture.cycles`.
+const CYCLES_COST_PER_CYCLE: u64 = 28;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -162,6 +165,20 @@ pub fn architecture_overview_plan(max_components: Option<u16>) -> PlanExplanatio
     }
 }
 
+/// Builds the source-free `architecture.cycles` plan for explain mode.
+///
+/// `max_cycles` bounds the planned detection and drives the cost estimate.
+#[must_use]
+pub fn architecture_cycles_plan(max_cycles: Option<u16>) -> PlanExplanation {
+    let cycles = u64::from(max_cycles.unwrap_or(50));
+    let cost = cycles.saturating_mul(CYCLES_COST_PER_CYCLE);
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["cycle_detection".to_owned()],
+        applied_limits: vec![format!("max_cycles: {cycles}")],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::code_locate_plan;
@@ -258,5 +275,17 @@ mod tests {
         let plan = architecture_overview_plan(Some(50));
         assert_eq!(plan.operators, vec!["architecture_mapping".to_owned()]);
         assert_eq!(plan.applied_limits, vec!["max_components: 50".to_owned()]);
+    }
+
+    #[test]
+    fn architecture_cycles_plan_is_deterministic_and_bounded() {
+        use super::architecture_cycles_plan;
+        assert_eq!(
+            architecture_cycles_plan(Some(25)),
+            architecture_cycles_plan(Some(25))
+        );
+        let plan = architecture_cycles_plan(Some(25));
+        assert_eq!(plan.operators, vec!["cycle_detection".to_owned()]);
+        assert_eq!(plan.applied_limits, vec!["max_cycles: 25".to_owned()]);
     }
 }
