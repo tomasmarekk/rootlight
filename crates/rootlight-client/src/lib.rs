@@ -1357,6 +1357,41 @@ pub struct HistoryCompare {
     pub lineage: Vec<HistoryLineageMatch>,
 }
 
+/// One typed column definition in an advanced query result schema.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AdvancedColumn {
+    /// Stable column name.
+    pub name: String,
+    /// Column type label, such as `symbol_id`, `text`, or `path`.
+    pub column_type: String,
+}
+
+/// Operators, estimates, and applied limits for an advanced query plan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AdvancedPlan {
+    /// Estimated total cost units for the query plan.
+    pub estimated_cost: u64,
+    /// Ordered operator names in the physical plan.
+    pub operators: Vec<String>,
+    /// Applied limit descriptions.
+    pub applied_limits: Vec<String>,
+}
+
+/// Bounded advanced query result over a safe typed AST.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct AdvancedQuery {
+    /// Checked query correlation.
+    pub context: QueryContext,
+    /// Stable typed column definitions for the result rows.
+    pub columns: Vec<AdvancedColumn>,
+    /// Typed result rows as JSON objects keyed by column name.
+    pub rows: Vec<serde_json::Value>,
+    /// Operators, estimates, and applied limits when explain was requested.
+    pub plan: Option<AdvancedPlan>,
+    /// Completeness label: `complete`, `paged`, `truncated`, or `unsupported`.
+    pub completeness: String,
+}
+
 /// Validated total deadline budget for one asynchronous daemon request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestTimeout(Duration);
@@ -2993,6 +3028,97 @@ impl Client {
         }
     }
 
+    /// Executes one bounded advanced query over a safe typed AST.
+    ///
+    /// The `query_ast` is the JSON-encoded declarative AST. The optional bounds
+    /// default daemon-side to one hundred rows and a depth of three.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for an invalid AST or bounds, unavailable
+    /// protocol support, transport failure, or a malformed or uncorrelated
+    /// response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded advanced query dimension"
+    )]
+    pub fn advanced_query(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query_ast: &str,
+        explain: Option<bool>,
+        max_results: Option<u16>,
+        max_depth: Option<u8>,
+        cost_limit: Option<u64>,
+    ) -> Result<AdvancedQuery, ClientError> {
+        match self.request(build_advanced_query_request(
+            repository,
+            generation,
+            query_ast,
+            explain,
+            max_results,
+            max_depth,
+            cost_limit,
+        )?)? {
+            daemon::response_envelope::Response::AdvancedQuery(response) => {
+                parse_advanced_query(response, repository, generation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Asynchronously executes one bounded advanced query over a safe typed AST.
+    ///
+    /// Dropping the returned future closes its one-request stream, allowing the
+    /// daemon to cancel the attached query.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for an invalid AST or bounds, unavailable
+    /// protocol support, transport failure, timeout, or a malformed or
+    /// uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded advanced query dimension"
+    )]
+    pub async fn advanced_query_async(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query_ast: &str,
+        explain: Option<bool>,
+        max_results: Option<u16>,
+        max_depth: Option<u8>,
+        cost_limit: Option<u64>,
+        timeout: RequestTimeout,
+    ) -> Result<AdvancedQuery, ClientError> {
+        match self
+            .request_async(
+                build_advanced_query_request(
+                    repository,
+                    generation,
+                    query_ast,
+                    explain,
+                    max_results,
+                    max_depth,
+                    cost_limit,
+                )?,
+                timeout,
+            )
+            .await?
+        {
+            daemon::response_envelope::Response::AdvancedQuery(response) => {
+                parse_advanced_query(response, repository, generation)
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     fn request(
         &self,
         request: daemon::request_envelope::Request,
@@ -3596,7 +3722,8 @@ fn ensure_request_supported(
         | daemon::request_envelope::Request::TestsSelect(_)
         | daemon::request_envelope::Request::ChangeImpact(_)
         | daemon::request_envelope::Request::PlanChange(_)
-        | daemon::request_envelope::Request::HistoryCompare(_) => 5,
+        | daemon::request_envelope::Request::HistoryCompare(_)
+        | daemon::request_envelope::Request::AdvancedQuery(_) => 5,
         daemon::request_envelope::Request::DiagnosticsQuick(_)
         | daemon::request_envelope::Request::SupportBundle(_) => 3,
         daemon::request_envelope::Request::OperationLeaseRenew(_) => {
@@ -5941,6 +6068,104 @@ fn parse_history_compare(
         },
         breaking_candidates,
         lineage,
+    })
+}
+
+fn build_advanced_query_request(
+    repository: RepositoryId,
+    generation: GenerationSelector,
+    query_ast: &str,
+    explain: Option<bool>,
+    max_results: Option<u16>,
+    max_depth: Option<u8>,
+    cost_limit: Option<u64>,
+) -> Result<daemon::request_envelope::Request, ClientError> {
+    if query_ast.is_empty() || query_ast.len() > 65_536 {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if max_results.is_some_and(|results| !(1..=1_000).contains(&results)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    if max_depth.is_some_and(|depth| !(1..=5).contains(&depth)) {
+        return Err(ClientError::InvalidFirstSliceRequest);
+    }
+    Ok(daemon::request_envelope::Request::AdvancedQuery(
+        daemon::AdvancedQueryRequest {
+            schema_version: Some(first_slice_schema()),
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(generation_selector_to_wire(generation)),
+            query_ast: query_ast.to_owned(),
+            explain,
+            max_results: max_results.map(u32::from),
+            max_depth: max_depth.map(u32::from),
+            cost_limit,
+        },
+    ))
+}
+
+fn parse_advanced_query(
+    response: daemon::AdvancedQueryResponse,
+    repository: RepositoryId,
+    selector: GenerationSelector,
+) -> Result<AdvancedQuery, ClientError> {
+    require_first_slice_response_schema(response.schema_version)?;
+    let context = parse_query_context(response.context, repository, selector)?;
+    if response.columns.is_empty() || response.columns.len() > 64 {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut columns = Vec::new();
+    columns
+        .try_reserve_exact(response.columns.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for column in response.columns {
+        if column.name.is_empty()
+            || column.name.len() > 256
+            || column.column_type.is_empty()
+            || column.column_type.len() > 32
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        columns.push(AdvancedColumn {
+            name: column.name,
+            column_type: column.column_type,
+        });
+    }
+    if response.rows.len() > 1_000 {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(response.rows.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for row in response.rows {
+        let value: serde_json::Value =
+            serde_json::from_str(&row).map_err(|_| ClientError::InvalidResponseCorrelation)?;
+        rows.push(value);
+    }
+    let plan = match response.plan {
+        Some(plan) => {
+            if plan.estimated_cost > 10_000_000
+                || plan.operators.len() > 64
+                || plan.applied_limits.len() > 16
+            {
+                return Err(ClientError::InvalidResponseCorrelation);
+            }
+            Some(AdvancedPlan {
+                estimated_cost: plan.estimated_cost,
+                operators: plan.operators,
+                applied_limits: plan.applied_limits,
+            })
+        }
+        None => None,
+    };
+    if response.completeness.is_empty() || response.completeness.len() > 32 {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(AdvancedQuery {
+        context,
+        columns,
+        rows,
+        plan,
+        completeness: response.completeness,
     })
 }
 
