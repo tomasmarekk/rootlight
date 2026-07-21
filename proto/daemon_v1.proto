@@ -49,6 +49,7 @@ message RequestEnvelope {
     ChangeImpactRequest change_impact = 43;
     PlanChangeRequest plan_change = 44;
     HistoryCompareRequest history_compare = 45;
+    AdvancedQueryRequest advanced_query = 46;
   }
 }
 
@@ -79,6 +80,7 @@ message ResponseEnvelope {
     ChangeImpactResponse change_impact = 43;
     PlanChangeResponse plan_change = 44;
     HistoryCompareResponse history_compare = 45;
+    AdvancedQueryResponse advanced_query = 46;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -1035,4 +1037,45 @@ message HistoryCompareResponse {
   FirstSliceArchitectureDelta architecture_delta = 5;
   repeated FirstSliceBreakingCandidate breaking_candidates = 6;
   repeated FirstSliceLineageMatch lineage = 7;
+}
+
+// Requests a bounded advanced query over a safe typed AST.
+//
+// The query is a JSON-encoded declarative AST: a bounded, allow-listed operator
+// tree. SQL strings, Cypher text, shell fragments, arbitrary regex, arbitrary
+// code, and unbounded recursion are forbidden by the AST grammar and rejected
+// before execution.
+message AdvancedQueryRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  string query_ast = 4;
+  optional bool explain = 5;
+  optional uint32 max_results = 6;
+  optional uint32 max_depth = 7;
+  optional uint64 cost_limit = 8;
+}
+
+// One typed column definition in an advanced query result schema.
+message FirstSliceAdvancedColumn {
+  string name = 1;
+  string column_type = 2;
+}
+
+// Operators, estimates, and applied limits for an advanced query plan.
+message FirstSliceAdvancedPlan {
+  uint64 estimated_cost = 1;
+  repeated string operators = 2;
+  repeated string applied_limits = 3;
+}
+
+// Returns typed columns, JSON-encoded rows, an optional plan, and an honest
+// completeness classification for a bounded advanced query.
+message AdvancedQueryResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  FirstSliceQueryContext context = 2;
+  repeated FirstSliceAdvancedColumn columns = 3;
+  repeated string rows = 4;
+  FirstSliceAdvancedPlan plan = 5;
+  string completeness = 6;
 }

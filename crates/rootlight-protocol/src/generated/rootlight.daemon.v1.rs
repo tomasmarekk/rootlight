@@ -49,7 +49,7 @@ pub struct RequestEnvelope {
     pub timeout_ms: ::core::option::Option<u32>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -128,6 +128,9 @@ pub mod request_envelope {
         #[prost(message, tag = "45")]
         #[allow(missing_docs)]
         HistoryCompare(super::HistoryCompareRequest),
+        #[prost(message, tag = "46")]
+        #[allow(missing_docs)]
+        AdvancedQuery(super::AdvancedQueryRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -138,7 +141,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -217,6 +220,9 @@ pub mod response_envelope {
         #[prost(message, tag = "45")]
         #[allow(missing_docs)]
         HistoryCompare(super::HistoryCompareResponse),
+        #[prost(message, tag = "46")]
+        #[allow(missing_docs)]
+        AdvancedQuery(super::AdvancedQueryResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -2075,6 +2081,89 @@ pub struct HistoryCompareResponse {
     #[prost(message, repeated, tag = "7")]
     #[allow(missing_docs)]
     pub lineage: ::prost::alloc::vec::Vec<FirstSliceLineageMatch>,
+}
+/// Requests a bounded advanced query over a safe typed AST.
+///
+/// The query is a JSON-encoded declarative AST: a bounded, allow-listed operator
+/// tree. SQL strings, Cypher text, shell fragments, arbitrary regex, arbitrary
+/// code, and unbounded recursion are forbidden by the AST grammar and rejected
+/// before execution.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AdvancedQueryRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(string, tag = "4")]
+    #[allow(missing_docs)]
+    pub query_ast: ::prost::alloc::string::String,
+    #[prost(bool, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub explain: ::core::option::Option<bool>,
+    #[prost(uint32, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub max_results: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub max_depth: ::core::option::Option<u32>,
+    #[prost(uint64, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub cost_limit: ::core::option::Option<u64>,
+}
+/// One typed column definition in an advanced query result schema.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceAdvancedColumn {
+    #[prost(string, tag = "1")]
+    #[allow(missing_docs)]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub column_type: ::prost::alloc::string::String,
+}
+/// Operators, estimates, and applied limits for an advanced query plan.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceAdvancedPlan {
+    #[prost(uint64, tag = "1")]
+    #[allow(missing_docs)]
+    pub estimated_cost: u64,
+    #[prost(string, repeated, tag = "2")]
+    #[allow(missing_docs)]
+    pub operators: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub applied_limits: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Returns typed columns, JSON-encoded rows, an optional plan, and an honest
+/// completeness classification for a bounded advanced query.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AdvancedQueryResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub context: ::core::option::Option<FirstSliceQueryContext>,
+    #[prost(message, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub columns: ::prost::alloc::vec::Vec<FirstSliceAdvancedColumn>,
+    #[prost(string, repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub rows: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub plan: ::core::option::Option<FirstSliceAdvancedPlan>,
+    #[prost(string, tag = "6")]
+    #[allow(missing_docs)]
+    pub completeness: ::prost::alloc::string::String,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]
