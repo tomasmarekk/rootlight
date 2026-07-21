@@ -34,6 +34,9 @@ const OVERVIEW_COST_PER_COMPONENT: u64 = 20;
 /// Estimated cost units per planned cycle for `architecture.cycles`.
 const CYCLES_COST_PER_CYCLE: u64 = 28;
 
+/// Estimated cost units per planned dead-code candidate for `code.dead`.
+const DEAD_COST_PER_CANDIDATE: u64 = 18;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -179,6 +182,21 @@ pub fn architecture_cycles_plan(max_cycles: Option<u16>) -> PlanExplanation {
     }
 }
 
+/// Builds the source-free `code.dead` plan for explain mode.
+///
+/// `max_candidates` bounds the planned reachability analysis and drives the
+/// cost estimate.
+#[must_use]
+pub fn code_dead_plan(max_candidates: Option<u16>) -> PlanExplanation {
+    let candidates = u64::from(max_candidates.unwrap_or(100));
+    let cost = candidates.saturating_mul(DEAD_COST_PER_CANDIDATE);
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["reachability_analysis".to_owned()],
+        applied_limits: vec![format!("max_candidates: {candidates}")],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::code_locate_plan;
@@ -287,5 +305,14 @@ mod tests {
         let plan = architecture_cycles_plan(Some(25));
         assert_eq!(plan.operators, vec!["cycle_detection".to_owned()]);
         assert_eq!(plan.applied_limits, vec!["max_cycles: 25".to_owned()]);
+    }
+
+    #[test]
+    fn code_dead_plan_is_deterministic_and_bounded() {
+        use super::code_dead_plan;
+        assert_eq!(code_dead_plan(Some(40)), code_dead_plan(Some(40)));
+        let plan = code_dead_plan(Some(40));
+        assert_eq!(plan.operators, vec!["reachability_analysis".to_owned()]);
+        assert_eq!(plan.applied_limits, vec!["max_candidates: 40".to_owned()]);
     }
 }

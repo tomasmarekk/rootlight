@@ -751,6 +751,9 @@ pub struct CodeDeadInput {
     /// Requested representation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// Classification confidence for a dead-code candidate.
@@ -840,6 +843,9 @@ pub struct CodeDeadData {
     /// Applied false-positive suppression rules.
     #[schemars(length(max = 32))]
     pub false_positive_controls: Vec<RuleSummary>,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 /// Checked success-or-error output for `code.dead`.

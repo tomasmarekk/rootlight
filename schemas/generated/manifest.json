@@ -54,7 +54,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/intent.rs",
-      "blake3": "3b9e087d562fcb38b887dd0f3d530703fd94df06e10899ca38a5e28baf566c28"
+      "blake3": "0b657768835704a2de70800c674e19d4eb3555c475a79628122e70d6bcac5cd0"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/lib.rs",
@@ -236,11 +236,11 @@
     },
     {
       "path": "schemas/generated/json/mcp-code-dead-input-1.0.schema.json",
-      "blake3": "8fb57c976007f42ebe79f80492066bdddeec7713951cb554c64fa6ba99531460"
+      "blake3": "5f97ebb263d4c05e4afad7d2b402846c4df61df47ca28059bdad4904c3e8b221"
     },
     {
       "path": "schemas/generated/json/mcp-code-dead-output-1.0.schema.json",
-      "blake3": "0e0110b0b4d6440c19a31f899845d0cdc14b970ca6aaf74290097fe4f226883d"
+      "blake3": "2a498267ce66e8335dc347f6514eb11ff4bc784d66e29ff242fb80be20955238"
     },
     {
       "path": "schemas/generated/json/mcp-code-locate-input-1.0.schema.json",

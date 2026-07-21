@@ -2880,6 +2880,45 @@ async fn unsupported_fields_are_rejected_with_field_specific_actions() {
 }
 
 #[tokio::test]
+async fn code_dead_explain_returns_a_plan_without_retrieval() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
+        repository_id: repository(),
+        active_generation: generation(),
+        parent_generation: None,
+        structural_freshness: "current".to_owned(),
+        semantic_freshness: "current".to_owned(),
+        state: "ready".to_owned(),
+        coverage: vec![],
+    })));
+    let output = execute(
+        &harness.executor,
+        VerticalTool::CodeDead,
+        json!({"repository": {"repository_id": repository()}, "explain": true}),
+    )
+    .await
+    .expect("explain executes");
+    let output: CodeDeadOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected explain success");
+    };
+    assert!(
+        output.data.candidates.is_empty(),
+        "explain performs no retrieval"
+    );
+    assert_eq!(output.data.entry_points.entry_point_count, 0);
+    let explanation = output.data.explanation.expect("explain returns a plan");
+    assert_eq!(
+        explanation.operators,
+        vec!["reachability_analysis".to_owned()]
+    );
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        1,
+        "only the metadata status call runs, no reachability analysis"
+    );
+}
+
+#[tokio::test]
 async fn architecture_cycles_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),

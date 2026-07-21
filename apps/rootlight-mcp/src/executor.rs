@@ -3323,6 +3323,39 @@ fn map_architecture_cycles(
     map_read_envelope(response.result.context, response.metadata, data, false)
 }
 
+/// Builds the source-free `code.dead` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no reachability
+/// analysis runs. The plan is deterministic for the normalized request.
+async fn explain_code_dead<P>(
+    port: Arc<P>,
+    request: CodeDeadPortRequest,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<CodeDeadData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(request.repository, request.generation);
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let explanation = rootlight_agent::explain::code_dead_plan(request.max_candidates);
+    let data = CodeDeadData {
+        candidates: Vec::new(),
+        entry_points: EntryPointSummary {
+            policy: EntryPointPolicy::Standard,
+            entry_point_count: 0,
+            complete: false,
+        },
+        blind_spots: Vec::new(),
+        false_positive_controls: Vec::new(),
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_code_dead<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -3333,7 +3366,12 @@ where
     P: FirstSliceClientPort,
 {
     let input: CodeDeadInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let request = normalize_code_dead(input, unsupported)?;
+    if explain_only {
+        let output = explain_code_dead(port, request, cancellation).await?;
+        return serialize_success(output);
+    }
     let expected = request.clone();
     let future = port.code_dead(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -3429,6 +3467,7 @@ fn map_code_dead(
         },
         blind_spots,
         false_positive_controls,
+        explanation: None,
     };
     // The requested candidate cap is an explicit bound honored by the daemon;
     // this slice does not surface separate budget-truncation through the wire.
