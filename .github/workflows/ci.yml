@@ -49,6 +49,7 @@ jobs:
           cargo run --locked --quiet --package xtask -- compatibility-check
           cargo run --locked --quiet --package xtask -- policy-check
           cargo run --locked --quiet --package xtask -- license-check
+          cargo run --locked --quiet --package xtask -- disposition-check --root tests/fixtures/disposition
           cargo run --locked --quiet --package xtask -- id-vectors > target/id-vectors.actual.json
           cmp tests/fixtures/id-vectors.json target/id-vectors.actual.json
       - name: Daemon lifecycle

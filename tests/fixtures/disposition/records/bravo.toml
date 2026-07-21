@@ -1,0 +1,11 @@
+schema_version = "1.0"
+id = "bravo"
+title = "Blocking gate stage"
+implementation_status = "present"
+acceptance = "fallback"
+gate_outcome = "fallback"
+source_revision = "1111111111111111111111111111111111111111111111111111111111111111"
+evidence = ["evidence/bravo.json"]
+fallback_boundary = "Bounded synthetic fallback used only to exercise the validator."
+dependents = ["charlie"]
+residual_risks = []

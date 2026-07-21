@@ -7,6 +7,7 @@
 
 mod architecture;
 mod daemon_lifecycle;
+mod disposition;
 mod git_metadata;
 mod grammar_lock;
 mod ids;
@@ -61,6 +62,10 @@ fn run() -> Result<(), XtaskError> {
         Some("policy-check") | Some("policy") => policy::check()?,
         Some("license-check") => license::check()?,
         Some("internal-id-check") => git_metadata_command(&mut args)?,
+        Some("disposition-check") => {
+            let root = parse_required_root(&mut args)?;
+            disposition::check(&root)?;
+        }
         Some("unsafe-check") => {
             let fixture_root = parse_required_fixture_root(&mut args)?;
             policy::check_unsafe_fixture(&fixture_root)?;
@@ -116,6 +121,16 @@ fn parse_required_bin_dir(
     }
 }
 
+fn parse_required_root(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<std::path::PathBuf, XtaskError> {
+    match (args.next(), args.next()) {
+        (Some(flag), Some(path)) if flag == "--root" => Ok(std::path::PathBuf::from(path)),
+        (Some(argument), _) => Err(XtaskError::UnexpectedArgument(argument)),
+        (None, _) => Err(XtaskError::MissingRoot),
+    }
+}
+
 fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), XtaskError> {
     let flag = args.next().ok_or(XtaskError::MissingInternalIdMode)?;
     let value = args.next().ok_or(XtaskError::MissingInternalIdValue)?;
@@ -138,7 +153,7 @@ fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), X
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH]|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|policy-check|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|policy-check|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -149,6 +164,8 @@ enum XtaskError {
     MissingFixtureRoot,
     #[error("--bin-dir requires a path")]
     MissingBinDir,
+    #[error("--root requires a path")]
+    MissingRoot,
     #[error("internal-id-check requires --commit-msg-file, --range, or --event")]
     MissingInternalIdMode,
     #[error("internal-id-check flag requires a value")]
@@ -159,6 +176,8 @@ enum XtaskError {
     Architecture(#[from] architecture::ArchitectureError),
     #[error(transparent)]
     DaemonLifecycle(#[from] daemon_lifecycle::LifecycleError),
+    #[error(transparent)]
+    Disposition(#[from] disposition::DispositionError),
     #[error(transparent)]
     GitMetadata(#[from] git_metadata::GitMetadataError),
     #[error(transparent)]
