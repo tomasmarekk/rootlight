@@ -3,8 +3,8 @@
 //! One authoritative, machine-readable entry per tool records the contract
 //! version, batch eligibility, explain support, handler availability, and the
 //! honest runtime disposition. The registry is the single source of truth that
-//! the catalog, the batch allowlist, profile membership, and the GATE-3
-//! execution matrix are validated against, so the schema, router, executor, and
+//! the catalog, the batch allowlist, profile membership, and the agent
+//! acceptance matrix are validated against, so the schema, router, executor, and
 //! fixtures cannot drift independently. It describes what the runtime can
 //! currently do; it is not itself proof that behavior passes acceptance.
 
