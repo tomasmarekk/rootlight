@@ -2964,6 +2964,45 @@ fn direction_from_label(label: &str) -> Result<Direction, ToolExecutionError> {
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
+/// Builds the source-free `flow.trace` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no traversal runs.
+/// The plan is deterministic for the normalized request.
+async fn explain_flow_trace<P>(
+    port: Arc<P>,
+    request: FlowTracePortRequest,
+    relations: BTreeSet<RelationKind>,
+    min_confidence: Option<u16>,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<FlowTraceData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(request.repository, request.generation);
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let explanation =
+        rootlight_agent::explain::flow_trace_plan(request.max_depth, request.max_paths);
+    let data = FlowTraceData {
+        paths: Vec::new(),
+        frontier: FrontierSummary {
+            reached_nodes: 0,
+            examined_edges: 0,
+            truncated: false,
+            unresolved_boundaries: 0,
+        },
+        projection: RelationProjection {
+            relations,
+            min_confidence: min_confidence.unwrap_or(0),
+        },
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_flow_trace<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -2974,7 +3013,21 @@ where
     P: FirstSliceClientPort,
 {
     let input: FlowTraceInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
+    let trace_relations = input.relations.clone();
+    let trace_min_confidence = input.min_confidence;
     let request = normalize_flow_trace(input, unsupported)?;
+    if explain_only {
+        let output = explain_flow_trace(
+            port,
+            request,
+            trace_relations,
+            trace_min_confidence,
+            cancellation,
+        )
+        .await?;
+        return serialize_success(output);
+    }
     let expected = request.clone();
     let future = port.flow_trace(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -3093,6 +3146,7 @@ fn map_flow_trace(
             relations,
             min_confidence: projection.min_confidence,
         },
+        explanation: None,
     };
     map_read_envelope(
         response.result.context,

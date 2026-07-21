@@ -19,6 +19,9 @@ const READ_COST_PER_REFERENCE: u64 = 16;
 /// Estimated cost units per planned seed for `symbol.relationships`.
 const RELATIONSHIPS_COST_PER_SEED: u64 = 24;
 
+/// Estimated cost units per planned traversal depth for `flow.trace`.
+const TRACE_COST_PER_DEPTH: u64 = 32;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -87,6 +90,25 @@ pub fn symbol_relationships_plan(seed_count: usize, max_results: Option<u32>) ->
     }
 }
 
+/// Builds the source-free `flow.trace` plan for explain mode.
+///
+/// `max_depth` and `max_paths` bound the planned traversal and drive the cost
+/// estimate.
+#[must_use]
+pub fn flow_trace_plan(max_depth: Option<u8>, max_paths: Option<u16>) -> PlanExplanation {
+    let depth = u64::from(max_depth.unwrap_or(8));
+    let cost = depth.saturating_mul(TRACE_COST_PER_DEPTH);
+    let mut applied_limits = vec![format!("max_depth: {depth}")];
+    if let Some(paths) = max_paths {
+        applied_limits.push(format!("max_paths: {paths}"));
+    }
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["path_traversal".to_owned()],
+        applied_limits,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::code_locate_plan;
@@ -137,6 +159,21 @@ mod tests {
         assert_eq!(
             plan.applied_limits,
             vec!["seeds: 2".to_owned(), "max_results: 100".to_owned()]
+        );
+    }
+
+    #[test]
+    fn flow_trace_plan_is_deterministic_and_bounded() {
+        use super::flow_trace_plan;
+        assert_eq!(
+            flow_trace_plan(Some(3), Some(10)),
+            flow_trace_plan(Some(3), Some(10))
+        );
+        let plan = flow_trace_plan(Some(3), Some(10));
+        assert_eq!(plan.operators, vec!["path_traversal".to_owned()]);
+        assert_eq!(
+            plan.applied_limits,
+            vec!["max_depth: 3".to_owned(), "max_paths: 10".to_owned()]
         );
     }
 }

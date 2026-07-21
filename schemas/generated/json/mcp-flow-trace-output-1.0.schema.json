@@ -276,6 +276,17 @@
       "description": "`flow.trace` result data.",
       "type": "object",
       "properties": {
+        "explanation": {
+          "description": "Bounded source-free plan present when explain was requested.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanExplanation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "frontier": {
           "description": "Traversal frontier and boundary summary.",
           "$ref": "#/$defs/FrontierSummary"
@@ -548,6 +559,45 @@
     "OperationId": {
       "type": "string",
       "pattern": "^op1_[a-z2-7]{32}$"
+    },
+    "PlanExplanation": {
+      "description": "Explainable cost and plan for an advanced query execution.",
+      "type": "object",
+      "properties": {
+        "applied_limits": {
+          "description": "Applied limit descriptions.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1
+          },
+          "maxItems": 16
+        },
+        "estimated_cost": {
+          "description": "Estimated total cost units for the query plan.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 10000000,
+          "minimum": 0
+        },
+        "operators": {
+          "description": "Ordered operator names in the physical plan.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1
+          },
+          "maxItems": 64
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "estimated_cost",
+        "operators",
+        "applied_limits"
+      ]
     },
     "PublicError": {
       "description": "A stable source-redacted failure safe to serialize across public boundaries.",

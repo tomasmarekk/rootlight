@@ -291,6 +291,9 @@ pub struct FlowTraceInput {
     /// Requested representation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// One edge within a traced path.
@@ -363,6 +366,9 @@ pub struct FlowTraceData {
     pub frontier: FrontierSummary,
     /// Actual relation projection used.
     pub projection: RelationProjection,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 /// Checked success-or-error output for `flow.trace`.
