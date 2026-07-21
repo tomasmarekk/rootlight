@@ -411,6 +411,22 @@ impl Harness {
         }
     }
 
+    fn with_cursor_key(outcome: FakeOutcome, cursor_key: [u8; 32]) -> Self {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let port = FakePort {
+            outcome,
+            calls: Arc::clone(&calls),
+            call_count: Arc::clone(&call_count),
+        };
+        Self {
+            executor: FirstSliceToolExecutor::with_cursor_key(port, cursor_key)
+                .expect("built-in errors are valid"),
+            calls,
+            call_count,
+        }
+    }
+
     fn only_call(&self) -> ObservedCall {
         let calls = self
             .calls
@@ -1380,6 +1396,54 @@ async fn repo_list_paginates_with_authenticated_cursor() {
     assert_eq!(second.data.repositories.len(), 1);
     assert!(!second.truncated);
     assert!(second.next_cursor.0.is_none());
+}
+
+#[tokio::test]
+async fn cursor_signed_with_one_key_is_rejected_under_another() {
+    let entries: Vec<RepositoryListEntry> = (0..3u8)
+        .map(|i| RepositoryListEntry {
+            repository_id: RepositoryId::from_bytes([i + 1; 16]),
+            active_generation: generation(),
+            languages: vec!["rust".to_owned()],
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
+            state: "ready".to_owned(),
+        })
+        .collect();
+    let list = || {
+        FakeOutcome::RepositoryList(Ok(RepositoryList {
+            repositories: entries.clone(),
+        }))
+    };
+    let first: RepoListOutput = decode(
+        execute(
+            &Harness::with_cursor_key(list(), [7_u8; 32]).executor,
+            VerticalTool::RepoList,
+            json!({"max_results": 2}),
+        )
+        .await
+        .expect("first page maps"),
+    );
+    let ToolResponse::Success(first) = first else {
+        panic!("expected first page success");
+    };
+    let cursor = first
+        .next_cursor
+        .0
+        .expect("first page has a continuation cursor");
+
+    // The same cursor under a different signing key must fail as invalid.
+    let error = execute(
+        &Harness::with_cursor_key(list(), [9_u8; 32]).executor,
+        VerticalTool::RepoList,
+        json!({"max_results": 2, "cursor": cursor.as_str()}),
+    )
+    .await
+    .expect_err("cursor signed under another key is rejected");
+    let public = error
+        .public_error()
+        .expect("cursor failure is a checked public error");
+    assert_eq!(public.code(), ErrorCode::InvalidCursor);
 }
 
 #[tokio::test]

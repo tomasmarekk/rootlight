@@ -1336,6 +1336,9 @@ pub enum ToolExecutorBuildError {
     /// The built-in invalid-argument error violated the public contract.
     #[error("built-in invalid argument error is invalid")]
     InvalidArgumentError(#[source] PublicErrorBuildError),
+    /// Secure entropy for the cursor signing key was unavailable.
+    #[error("secure cursor signing key initialization failed")]
+    CursorKeyInitialization,
 }
 
 /// Production MCP executor over an injected asynchronous daemon-client port.
@@ -1360,8 +1363,32 @@ where
     /// # Errors
     ///
     /// Returns [`ToolExecutorBuildError`] if a built-in source-free error
-    /// cannot be represented by the shared public error contract.
+    /// cannot be represented by the shared public error contract, or if secure
+    /// entropy for the cursor signing key is unavailable.
     pub fn new(port: P) -> Result<Self, ToolExecutorBuildError> {
+        // A process-local cursor signing key gives cursors per-process
+        // rotation. Key generation fails closed: when secure entropy is
+        // unavailable, construction fails rather than falling back to a
+        // reproducible all-zero key.
+        let mut cursor_key = [0_u8; 32];
+        getrandom::fill(&mut cursor_key)
+            .map_err(|_| ToolExecutorBuildError::CursorKeyInitialization)?;
+        Self::build(port, cursor_key)
+    }
+
+    /// Creates an executor with a caller-provided cursor key.
+    ///
+    /// Test-only: a deterministic key makes cursor round-trips reproducible.
+    /// Production must use [`Self::new`], which fails closed on missing entropy.
+    #[cfg(test)]
+    pub(crate) fn with_cursor_key(
+        port: P,
+        cursor_key: [u8; 32],
+    ) -> Result<Self, ToolExecutorBuildError> {
+        Self::build(port, cursor_key)
+    }
+
+    fn build(port: P, cursor_key: [u8; 32]) -> Result<Self, ToolExecutorBuildError> {
         let field =
             DetailKey::parse("arguments").map_err(ToolExecutorBuildError::UnsupportedError)?;
         let unsupported =
@@ -1380,11 +1407,6 @@ where
             .next_action(NextAction::RestartEnumeration)
             .build()
             .map_err(ToolExecutorBuildError::InvalidArgumentError)?;
-        // A process-local cursor signing key gives cursors per-process
-        // rotation. If the OS RNG is unavailable the key stays fixed; cursors
-        // remain integrity-checked, only the restart rotation is lost.
-        let mut cursor_key = [0_u8; 32];
-        let _ = getrandom::fill(&mut cursor_key);
         Ok(Self {
             port: Arc::new(port),
             invalid_arguments,
