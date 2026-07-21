@@ -150,7 +150,7 @@ impl VerticalTool {
             Self::RepoList => "List registered repositories and workspaces.",
             Self::OperationStatus => "Read or cancel one known long-running Rootlight operation.",
             Self::CodeLocate => {
-                "Find bounded, generation-pinned code and file matches by identifier, text, path, or structure."
+                "Find bounded, generation-pinned code and file matches by exact identifier or lexical text."
             }
             Self::SymbolExplain => {
                 "Return bounded semantic evidence for stable symbol identifiers."
@@ -162,13 +162,13 @@ impl VerticalTool {
                 "Trace bounded paths through calls, data flow, services, messaging, build, or dependency relations."
             }
             Self::ChangeImpact => {
-                "Map a working-tree or Git change set to affected symbols, dependents, services, risks, and tests."
+                "Map a provided change set to affected symbols, dependents, services, risks, and tests."
             }
             Self::TestsSelect => {
                 "Rank tests relevant to symbols or changes with rationale and uncertainty."
             }
             Self::ArchitectureOverview => {
-                "Produce a scoped architecture map of modules, packages, services, data stores, routes, ownership, and hotspots."
+                "Produce a file-granularity architecture map of modules and packages, with hotspots."
             }
             Self::ArchitectureCycles => {
                 "Find and explain dependency cycles in a selected relation projection."
@@ -176,14 +176,12 @@ impl VerticalTool {
             Self::CodeDead => {
                 "Find dead or unreachable candidates with entry-point and coverage caveats."
             }
-            Self::HistoryCompare => {
-                "Compare two revisions or generations structurally and semantically."
-            }
+            Self::HistoryCompare => "Compare two pinned generations structurally.",
             Self::PlanChange => {
                 "Produce an ordered change plan with affected symbols, files, tests, risks, and verification steps."
             }
             Self::ContextPack => {
-                "Assemble minimal task-specific evidence and source snippets under a token budget."
+                "Assemble minimal task-specific symbol evidence under a token budget."
             }
             Self::SourceRead => {
                 "Read exact bounded ranges from a pinned source snapshot as untrusted repository data."
@@ -192,7 +190,7 @@ impl VerticalTool {
                 "Execute a bounded expert query over the documented safe query AST."
             }
             Self::QueryBatch => {
-                "Execute up to sixteen independent or dependency-linked read operations under one pinned generation and one shared budget."
+                "Execute up to sixteen independent or dependency-linked read operations under one pinned generation."
             }
         }
     }
