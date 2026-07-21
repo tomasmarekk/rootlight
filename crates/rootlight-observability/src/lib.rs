@@ -204,6 +204,18 @@ pub enum ErrorCode {
     Busy,
     /// A failure cannot be safely disclosed.
     Internal,
+    /// A pagination cursor is invalid, expired, forged, or context-mismatched.
+    InvalidCursor,
+    /// A supplied value has the wrong type for its target field.
+    TypeMismatch,
+    /// The request exceeded a cost limit before execution.
+    CostLimit,
+    /// The query uses an operator outside the documented allowlist.
+    OperatorForbidden,
+    /// A batch binding reference is malformed or unresolved.
+    BindingInvalid,
+    /// A batch binding produced a value of the wrong type for its target.
+    BindingTypeMismatch,
 }
 
 /// Closed source-free subsystem status used in operational evidence.

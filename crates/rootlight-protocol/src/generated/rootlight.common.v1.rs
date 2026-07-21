@@ -254,6 +254,18 @@ pub enum ErrorCode {
     Busy = 15,
     #[allow(missing_docs)]
     Internal = 16,
+    #[allow(missing_docs)]
+    InvalidCursor = 17,
+    #[allow(missing_docs)]
+    TypeMismatch = 18,
+    #[allow(missing_docs)]
+    CostLimit = 19,
+    #[allow(missing_docs)]
+    OperatorForbidden = 20,
+    #[allow(missing_docs)]
+    BindingInvalid = 21,
+    #[allow(missing_docs)]
+    BindingTypeMismatch = 22,
 }
 impl ErrorCode {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -279,6 +291,12 @@ impl ErrorCode {
             Self::ProtocolMismatch => "PROTOCOL_MISMATCH",
             Self::Busy => "BUSY",
             Self::Internal => "INTERNAL",
+            Self::InvalidCursor => "INVALID_CURSOR",
+            Self::TypeMismatch => "TYPE_MISMATCH",
+            Self::CostLimit => "COST_LIMIT",
+            Self::OperatorForbidden => "OPERATOR_FORBIDDEN",
+            Self::BindingInvalid => "BINDING_INVALID",
+            Self::BindingTypeMismatch => "BINDING_TYPE_MISMATCH",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -301,6 +319,12 @@ impl ErrorCode {
             "PROTOCOL_MISMATCH" => Some(Self::ProtocolMismatch),
             "BUSY" => Some(Self::Busy),
             "INTERNAL" => Some(Self::Internal),
+            "INVALID_CURSOR" => Some(Self::InvalidCursor),
+            "TYPE_MISMATCH" => Some(Self::TypeMismatch),
+            "COST_LIMIT" => Some(Self::CostLimit),
+            "OPERATOR_FORBIDDEN" => Some(Self::OperatorForbidden),
+            "BINDING_INVALID" => Some(Self::BindingInvalid),
+            "BINDING_TYPE_MISMATCH" => Some(Self::BindingTypeMismatch),
             _ => None,
         }
     }

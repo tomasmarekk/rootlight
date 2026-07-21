@@ -71,6 +71,85 @@ pub enum ErrorCode {
     Busy,
     /// An internal failure cannot be safely disclosed.
     Internal,
+    /// A pagination cursor is invalid, expired, forged, or context-mismatched.
+    InvalidCursor,
+    /// A supplied value has the wrong type for its target field.
+    TypeMismatch,
+    /// The request exceeded a cost limit before execution.
+    CostLimit,
+    /// The query uses an operator outside the documented allowlist.
+    OperatorForbidden,
+    /// A batch binding reference is malformed or unresolved.
+    BindingInvalid,
+    /// A batch binding produced a value of the wrong type for its target.
+    BindingTypeMismatch,
+}
+
+/// Stable recommended remediation class for a public error code.
+///
+/// The class is derived from the code alone so client automation can react
+/// deterministically without parsing free-text messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remediation {
+    /// No client action repairs this request.
+    None,
+    /// Retry the identical request, optionally after the envelope delay.
+    Retry,
+    /// Correct one or more client-supplied input fields.
+    CorrectInput,
+    /// Restart the enumeration or query from the beginning.
+    RestartEnumeration,
+    /// Reduce the requested scope, limit, or budget.
+    ReduceScope,
+    /// Select a supported contract version.
+    SelectSupportedVersion,
+    /// Rebuild the affected repository generation.
+    RebuildRepository,
+    /// Collect a source-free support bundle.
+    CollectSupportBundle,
+}
+
+/// Reports whether a request that failed with this code is safe to retry
+/// unchanged.
+#[must_use]
+pub const fn error_retryable(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::Conflict
+            | ErrorCode::Busy
+            | ErrorCode::ResourceExhausted
+            | ErrorCode::Cancelled
+            | ErrorCode::AdapterFailed
+    )
+}
+
+/// Returns the stable recommended remediation class for a public error code.
+#[must_use]
+pub const fn error_remediation(code: ErrorCode) -> Remediation {
+    match code {
+        ErrorCode::InvalidArgument => Remediation::CorrectInput,
+        ErrorCode::TypeMismatch => Remediation::CorrectInput,
+        ErrorCode::BindingInvalid => Remediation::CorrectInput,
+        ErrorCode::BindingTypeMismatch => Remediation::CorrectInput,
+        ErrorCode::OperatorForbidden => Remediation::CorrectInput,
+        ErrorCode::InvalidCursor => Remediation::RestartEnumeration,
+        ErrorCode::StaleGeneration => Remediation::RestartEnumeration,
+        ErrorCode::NotFound => Remediation::None,
+        ErrorCode::PermissionDenied => Remediation::None,
+        ErrorCode::Conflict => Remediation::Retry,
+        ErrorCode::Busy => Remediation::Retry,
+        ErrorCode::ResourceExhausted => Remediation::Retry,
+        ErrorCode::Cancelled => Remediation::Retry,
+        ErrorCode::AdapterFailed => Remediation::Retry,
+        ErrorCode::UnsupportedCapability => Remediation::ReduceScope,
+        ErrorCode::IncompleteCoverage => Remediation::ReduceScope,
+        ErrorCode::BudgetExceeded => Remediation::ReduceScope,
+        ErrorCode::CostLimit => Remediation::ReduceScope,
+        ErrorCode::IndexCorrupt => Remediation::RebuildRepository,
+        ErrorCode::MigrationRequired => Remediation::RebuildRepository,
+        ErrorCode::ProtocolMismatch => Remediation::SelectSupportedVersion,
+        ErrorCode::Internal => Remediation::CollectSupportBundle,
+    }
 }
 
 /// A validated key for a bounded public error detail.
@@ -648,5 +727,53 @@ mod tests {
             assert!(!debug.contains(forbidden));
             assert!(!json.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn new_error_codes_serialize_to_stable_names() {
+        let cases = [
+            (ErrorCode::InvalidCursor, "\"INVALID_CURSOR\""),
+            (ErrorCode::TypeMismatch, "\"TYPE_MISMATCH\""),
+            (ErrorCode::CostLimit, "\"COST_LIMIT\""),
+            (ErrorCode::OperatorForbidden, "\"OPERATOR_FORBIDDEN\""),
+            (ErrorCode::BindingInvalid, "\"BINDING_INVALID\""),
+            (ErrorCode::BindingTypeMismatch, "\"BINDING_TYPE_MISMATCH\""),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(serde_json::to_string(&code).expect("serializes"), expected);
+            let parsed: ErrorCode = serde_json::from_str(expected).expect("deserializes");
+            assert_eq!(parsed, code, "round trip for {expected}");
+        }
+    }
+
+    #[test]
+    fn remediation_registry_classifies_the_new_codes() {
+        assert_eq!(
+            error_remediation(ErrorCode::InvalidCursor),
+            Remediation::RestartEnumeration
+        );
+        assert_eq!(
+            error_remediation(ErrorCode::TypeMismatch),
+            Remediation::CorrectInput
+        );
+        assert_eq!(
+            error_remediation(ErrorCode::BindingInvalid),
+            Remediation::CorrectInput
+        );
+        assert_eq!(
+            error_remediation(ErrorCode::BindingTypeMismatch),
+            Remediation::CorrectInput
+        );
+        assert_eq!(
+            error_remediation(ErrorCode::OperatorForbidden),
+            Remediation::CorrectInput
+        );
+        assert_eq!(
+            error_remediation(ErrorCode::CostLimit),
+            Remediation::ReduceScope
+        );
+        assert!(!error_retryable(ErrorCode::InvalidCursor));
+        assert!(!error_retryable(ErrorCode::TypeMismatch));
+        assert!(!error_retryable(ErrorCode::CostLimit));
     }
 }

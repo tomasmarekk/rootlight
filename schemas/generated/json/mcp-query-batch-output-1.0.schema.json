@@ -392,6 +392,36 @@
           "description": "An internal failure cannot be safely disclosed.",
           "type": "string",
           "const": "INTERNAL"
+        },
+        {
+          "description": "A pagination cursor is invalid, expired, forged, or context-mismatched.",
+          "type": "string",
+          "const": "INVALID_CURSOR"
+        },
+        {
+          "description": "A supplied value has the wrong type for its target field.",
+          "type": "string",
+          "const": "TYPE_MISMATCH"
+        },
+        {
+          "description": "The request exceeded a cost limit before execution.",
+          "type": "string",
+          "const": "COST_LIMIT"
+        },
+        {
+          "description": "The query uses an operator outside the documented allowlist.",
+          "type": "string",
+          "const": "OPERATOR_FORBIDDEN"
+        },
+        {
+          "description": "A batch binding reference is malformed or unresolved.",
+          "type": "string",
+          "const": "BINDING_INVALID"
+        },
+        {
+          "description": "A batch binding produced a value of the wrong type for its target.",
+          "type": "string",
+          "const": "BINDING_TYPE_MISMATCH"
         }
       ]
     },

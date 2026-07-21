@@ -6594,6 +6594,12 @@ fn checked_public_error_from_wire(error: &common::PublicError) -> Option<PublicE
         common::ErrorCode::ProtocolMismatch => ErrorCode::ProtocolMismatch,
         common::ErrorCode::Busy => ErrorCode::Busy,
         common::ErrorCode::Internal => ErrorCode::Internal,
+        common::ErrorCode::InvalidCursor => ErrorCode::InvalidCursor,
+        common::ErrorCode::TypeMismatch => ErrorCode::TypeMismatch,
+        common::ErrorCode::CostLimit => ErrorCode::CostLimit,
+        common::ErrorCode::OperatorForbidden => ErrorCode::OperatorForbidden,
+        common::ErrorCode::BindingInvalid => ErrorCode::BindingInvalid,
+        common::ErrorCode::BindingTypeMismatch => ErrorCode::BindingTypeMismatch,
         common::ErrorCode::Unspecified => return None,
     };
     let mut builder = PublicError::builder_with_message(code, error.message.clone());
@@ -7496,6 +7502,12 @@ const fn daemon_error_code_to_observability(code: common::ErrorCode) -> Observab
         common::ErrorCode::PermissionDenied => ObservabilityErrorCode::PermissionDenied,
         common::ErrorCode::ProtocolMismatch => ObservabilityErrorCode::ProtocolMismatch,
         common::ErrorCode::Busy => ObservabilityErrorCode::Busy,
+        common::ErrorCode::InvalidCursor => ObservabilityErrorCode::InvalidCursor,
+        common::ErrorCode::TypeMismatch => ObservabilityErrorCode::TypeMismatch,
+        common::ErrorCode::CostLimit => ObservabilityErrorCode::CostLimit,
+        common::ErrorCode::OperatorForbidden => ObservabilityErrorCode::OperatorForbidden,
+        common::ErrorCode::BindingInvalid => ObservabilityErrorCode::BindingInvalid,
+        common::ErrorCode::BindingTypeMismatch => ObservabilityErrorCode::BindingTypeMismatch,
         common::ErrorCode::Internal | common::ErrorCode::Unspecified => {
             ObservabilityErrorCode::Internal
         }
@@ -7736,6 +7748,12 @@ const fn observability_error_code(code: ErrorCode) -> ObservabilityErrorCode {
         ErrorCode::PermissionDenied => ObservabilityErrorCode::PermissionDenied,
         ErrorCode::ProtocolMismatch => ObservabilityErrorCode::ProtocolMismatch,
         ErrorCode::Busy => ObservabilityErrorCode::Busy,
+        ErrorCode::InvalidCursor => ObservabilityErrorCode::InvalidCursor,
+        ErrorCode::TypeMismatch => ObservabilityErrorCode::TypeMismatch,
+        ErrorCode::CostLimit => ObservabilityErrorCode::CostLimit,
+        ErrorCode::OperatorForbidden => ObservabilityErrorCode::OperatorForbidden,
+        ErrorCode::BindingInvalid => ObservabilityErrorCode::BindingInvalid,
+        ErrorCode::BindingTypeMismatch => ObservabilityErrorCode::BindingTypeMismatch,
         ErrorCode::Internal => ObservabilityErrorCode::Internal,
         _ => ObservabilityErrorCode::Internal,
     }
@@ -8601,6 +8619,12 @@ const fn error_code_to_wire(code: ErrorCode) -> Result<common::ErrorCode, Servic
         ErrorCode::ProtocolMismatch => Ok(common::ErrorCode::ProtocolMismatch),
         ErrorCode::Busy => Ok(common::ErrorCode::Busy),
         ErrorCode::Internal => Ok(common::ErrorCode::Internal),
+        ErrorCode::InvalidCursor => Ok(common::ErrorCode::InvalidCursor),
+        ErrorCode::TypeMismatch => Ok(common::ErrorCode::TypeMismatch),
+        ErrorCode::CostLimit => Ok(common::ErrorCode::CostLimit),
+        ErrorCode::OperatorForbidden => Ok(common::ErrorCode::OperatorForbidden),
+        ErrorCode::BindingInvalid => Ok(common::ErrorCode::BindingInvalid),
+        ErrorCode::BindingTypeMismatch => Ok(common::ErrorCode::BindingTypeMismatch),
         _ => Err(ServiceError::UnsupportedPublicErrorVariant),
     }
 }

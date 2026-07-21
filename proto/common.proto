@@ -63,6 +63,12 @@ enum ErrorCode {
   PROTOCOL_MISMATCH = 14;
   BUSY = 15;
   INTERNAL = 16;
+  INVALID_CURSOR = 17;
+  TYPE_MISMATCH = 18;
+  COST_LIMIT = 19;
+  OPERATOR_FORBIDDEN = 20;
+  BINDING_INVALID = 21;
+  BINDING_TYPE_MISMATCH = 22;
 }
 
 // Bounded typed value permitted in a public error detail.

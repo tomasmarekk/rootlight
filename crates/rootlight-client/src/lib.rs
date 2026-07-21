@@ -6658,6 +6658,12 @@ fn parse_public_error(error: common::PublicError) -> Result<PublicError, ClientE
         common::ErrorCode::ProtocolMismatch => ErrorCode::ProtocolMismatch,
         common::ErrorCode::Busy => ErrorCode::Busy,
         common::ErrorCode::Internal => ErrorCode::Internal,
+        common::ErrorCode::InvalidCursor => ErrorCode::InvalidCursor,
+        common::ErrorCode::TypeMismatch => ErrorCode::TypeMismatch,
+        common::ErrorCode::CostLimit => ErrorCode::CostLimit,
+        common::ErrorCode::OperatorForbidden => ErrorCode::OperatorForbidden,
+        common::ErrorCode::BindingInvalid => ErrorCode::BindingInvalid,
+        common::ErrorCode::BindingTypeMismatch => ErrorCode::BindingTypeMismatch,
         common::ErrorCode::Unspecified => return Err(ClientError::InvalidPublicError),
     };
     let mut builder = PublicError::builder_with_message(code, error.message);
