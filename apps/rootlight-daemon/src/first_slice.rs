@@ -43,8 +43,9 @@ use rootlight_query::{
     RelationFamily, TestsSelectKind,
 };
 use rootlight_service::{
-    FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexReceipt, FirstSliceService,
-    HistoryChangeKind, PlanChangeObjective,
+    ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
+    AdvancedAstNode, FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexReceipt,
+    FirstSliceService, HistoryChangeKind, PlanChangeObjective,
 };
 
 const FIRST_SLICE_SCHEMA_MAJOR: u32 = 1;
@@ -561,6 +562,9 @@ fn execute_service_request(
         }
         FirstSliceIpcRequest::HistoryCompare(request) => {
             history_compare(service, request, &context).map(FirstSliceIpcResponse::HistoryCompare)
+        }
+        FirstSliceIpcRequest::QueryAdvanced(request) => {
+            advanced_query(service, request, &context).map(FirstSliceIpcResponse::QueryAdvanced)
         }
         FirstSliceIpcRequest::RepositoryOperationStatus(_) => Err(internal_error()),
     }
@@ -1916,6 +1920,75 @@ fn history_compare(
         }),
         breaking_candidates,
         lineage,
+    })
+}
+
+fn advanced_query(
+    service: &FirstSliceService,
+    request: daemon::AdvancedQueryRequest,
+    context: &FirstSliceIpcContext,
+) -> Result<daemon::AdvancedQueryResponse, PublicError> {
+    let repository = parse_repository(request.repository.as_ref())?;
+    let selected = parse_generation_selector(request.generation.as_ref())?;
+    let generation = service
+        .resolve_generation(repository, selected)
+        .map_err(service_error)?;
+    // The wire carries the safe typed AST as JSON; it crosses the boundary
+    // unchanged because the query-layer AST is wire-compatible with the public
+    // contract AST.
+    let ast: AdvancedAstNode =
+        serde_json::from_str(&request.query_ast).map_err(|_| invalid_argument())?;
+    let explain = request.explain.unwrap_or(false);
+    let max_results = match request.max_results {
+        Some(results) => usize::try_from(results).map_err(|_| invalid_argument())?,
+        None => ADVANCED_DEFAULT_MAX_RESULTS,
+    };
+    let max_depth = match request.max_depth {
+        Some(depth) => usize::try_from(depth).map_err(|_| invalid_argument())?,
+        None => ADVANCED_DEFAULT_MAX_DEPTH,
+    };
+    let response = service
+        .advanced_query(
+            generation.generation,
+            ast,
+            explain,
+            max_results,
+            max_depth,
+            ADVANCED_MAX_TRAVERSAL,
+            request.cost_limit,
+            &context.cancellation,
+        )
+        .map_err(service_error)?;
+    let data = response.data;
+    let mut columns = Vec::new();
+    columns
+        .try_reserve_exact(data.columns.len())
+        .map_err(|_| resource_exhausted())?;
+    for column in data.columns {
+        columns.push(daemon::FirstSliceAdvancedColumn {
+            name: column.name,
+            column_type: column.column_type.as_str().to_owned(),
+        });
+    }
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(data.rows.len())
+        .map_err(|_| resource_exhausted())?;
+    for row in data.rows {
+        rows.push(serde_json::to_string(&row).map_err(|_| resource_exhausted())?);
+    }
+    let plan = data.plan.map(|plan| daemon::FirstSliceAdvancedPlan {
+        estimated_cost: plan.estimated_cost,
+        operators: plan.operators,
+        applied_limits: plan.applied_limits,
+    });
+    let completeness = data.completeness.as_str().to_owned();
+    Ok(daemon::AdvancedQueryResponse {
+        schema_version: Some(schema_version()),
+        context: Some(query_context(generation, &response.usage, &[])),
+        columns,
+        rows,
+        plan,
+        completeness,
     })
 }
 

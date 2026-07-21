@@ -46,15 +46,18 @@ use rootlight_ir::{
     NormalizedIrDocument, ProducerIdentity, SourceRef, SourceSpan,
 };
 pub use rootlight_query::{
-    ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesResult, ArchitectureHotspot,
-    ArchitectureOverviewDerivedView, ArchitectureOverviewResult, ArchitectureOverviewView,
-    BreakingCandidateRecord, ChangeImpactClassification, ChangeImpactResult, ChangeImpactRiskLevel,
-    ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadEntryPointPolicy, CodeDeadResult,
-    CodeLocateResult, FlowTraceResult, HistoryArchitectureDelta, HistoryChangeKind,
-    HistoryCompareResult, HistorySemanticChangeKind, ImpactEntryRecord, ImpactGroupRecord,
-    LineageMatchRecord, LocateMode, PlanChangeContextPack, PlanChangeDecision,
-    PlanChangeImpactSummary, PlanChangeObjective, PlanChangeResult, PlanChangeStepRecord,
-    QueryResponse, RankedTestSelection, RelationDirection, RelationFamily, ResolvedChangeRecord,
+    ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
+    AdvancedAstNode, AdvancedColumnSchema, AdvancedColumnType, AdvancedCompleteness,
+    AdvancedPlanExplanation, AdvancedQueryResult, ArchitectureComponent, ArchitectureConnection,
+    ArchitectureCyclesResult, ArchitectureHotspot, ArchitectureOverviewDerivedView,
+    ArchitectureOverviewResult, ArchitectureOverviewView, BreakingCandidateRecord,
+    ChangeImpactClassification, ChangeImpactResult, ChangeImpactRiskLevel, ChangeImpactRiskSummary,
+    ChangeImpactTestCandidate, CodeDeadEntryPointPolicy, CodeDeadResult, CodeLocateResult,
+    FlowTraceResult, HistoryArchitectureDelta, HistoryChangeKind, HistoryCompareResult,
+    HistorySemanticChangeKind, ImpactEntryRecord, ImpactGroupRecord, LineageMatchRecord,
+    LocateMode, PlanChangeContextPack, PlanChangeDecision, PlanChangeImpactSummary,
+    PlanChangeObjective, PlanChangeResult, PlanChangeStepRecord, QueryResponse,
+    RankedTestSelection, RelationDirection, RelationFamily, ResolvedChangeRecord,
     SemanticChangeRecord, SourceReadQueryResult, SymbolExplainResult, SymbolRelationshipsResult,
     TestsSelectCoverage, TestsSelectGap, TestsSelectKind, TestsSelectResult,
 };
@@ -2242,6 +2245,54 @@ impl FirstSliceService {
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_history_compare(&plan, base_document, cancellation)
+            .map_err(|error| map_query_error(error, cancellation))
+    }
+
+    /// Executes a generation-pinned bounded `query.advanced` query.
+    ///
+    /// The safe typed AST is planned and validated against the resource
+    /// ceilings and the optional client cost limit, then executed against the
+    /// pinned generation. Execution serves an honest supported operator subset;
+    /// unsupported patterns return non-empty columns with empty rows rather than
+    /// fabricated data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded advanced query dimension"
+    )]
+    pub fn advanced_query(
+        &self,
+        generation: GenerationId,
+        ast: AdvancedAstNode,
+        explain: bool,
+        max_results: usize,
+        max_depth: usize,
+        max_traversal: usize,
+        cost_limit: Option<u64>,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<AdvancedQueryResult>, FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let service = self
+            .generations
+            .query(generation)
+            .map_err(|_| FirstSliceError::Query)?;
+        let plan = service
+            .plan_advanced_query(
+                ast,
+                explain,
+                max_results,
+                max_depth,
+                max_traversal,
+                cost_limit,
+                QueryBudget::new(),
+            )
+            .map_err(|error| map_query_error(error, cancellation))?;
+        service
+            .execute_advanced_query(&plan, cancellation)
             .map_err(|error| map_query_error(error, cancellation))
     }
 
