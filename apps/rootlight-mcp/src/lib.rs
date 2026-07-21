@@ -9,7 +9,7 @@
 pub mod advanced;
 pub mod batch;
 mod client_port;
-pub mod context_pack;
+pub use rootlight_agent::context_pack;
 mod executor;
 mod json;
 mod tools;
