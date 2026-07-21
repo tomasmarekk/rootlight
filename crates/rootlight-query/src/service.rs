@@ -17,27 +17,29 @@ use rootlight_storage::GenerationSnapshot;
 use serde::Serialize;
 
 use crate::model::{
-    ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesPlan,
-    ArchitectureCyclesProjection, ArchitectureCyclesResult, ArchitectureHotspot,
-    ArchitectureOverviewDerivedView, ArchitectureOverviewPlan, ArchitectureOverviewResult,
-    ArchitectureOverviewView, BreakingCandidateRecord, ChangeImpactClassification,
-    ChangeImpactPlan, ChangeImpactResult, ChangeImpactRiskLevel, ChangeImpactRiskSummary,
-    ChangeImpactTestCandidate, CodeDeadBlindSpot, CodeDeadEntryPointPolicy,
-    CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult, CodeDeadSuppressionRule,
-    CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent, CyclePath, DeadCodeCandidate,
-    DeadCodeClassification, FlowTraceEdge, FlowTraceFrontier, FlowTracePath, FlowTracePlan,
-    FlowTraceProjection, FlowTraceResult, HistoryArchitectureDelta, HistoryChangeKind,
-    HistoryComparePlan, HistoryCompareResult, HistorySemanticChangeKind, ImpactEntryRecord,
-    ImpactGroupRecord, LineageMatchRecord, LocateHit, LocateMode, PlanChangeContextPack,
-    PlanChangeDecision, PlanChangeImpactSummary, PlanChangeObjective, PlanChangePlan,
-    PlanChangeResult, PlanChangeStepRecord, PlanEstimate, PlanExplanation, PlanKind, QueryBudget,
-    QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage, RankedTestSelection,
-    RelationDirection, RelationFamily, RelationshipEdgeTarget, RelationshipGroup,
-    RepositoryDataTrust, ResolvedChangeRecord, SemanticChangeRecord, SourceChunkResult,
-    SourceReadPlan, SourceReadQueryResult, SymbolExplainPlan, SymbolExplainResult,
-    SymbolRelationshipsPlan, SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap,
-    TestsSelectKind, TestsSelectPlan, TestsSelectResult, TokenAccountingProfile, checked_add,
-    checked_u128_to_u64, checked_usize_to_u64, ensure_estimate, search_mode,
+    AdvancedAggregateFunction, AdvancedAstNode, AdvancedColumnSchema, AdvancedColumnType,
+    AdvancedCompleteness, AdvancedEntityKind, AdvancedPlanExplanation, AdvancedPredicate,
+    AdvancedQueryPlan, AdvancedQueryResult, AdvancedSortKey, AdvancedValue, ArchitectureComponent,
+    ArchitectureConnection, ArchitectureCyclesPlan, ArchitectureCyclesProjection,
+    ArchitectureCyclesResult, ArchitectureHotspot, ArchitectureOverviewDerivedView,
+    ArchitectureOverviewPlan, ArchitectureOverviewResult, ArchitectureOverviewView,
+    BreakingCandidateRecord, ChangeImpactClassification, ChangeImpactPlan, ChangeImpactResult,
+    ChangeImpactRiskLevel, ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadBlindSpot,
+    CodeDeadEntryPointPolicy, CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult,
+    CodeDeadSuppressionRule, CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent,
+    CyclePath, DeadCodeCandidate, DeadCodeClassification, FlowTraceEdge, FlowTraceFrontier,
+    FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult, HistoryArchitectureDelta,
+    HistoryChangeKind, HistoryComparePlan, HistoryCompareResult, HistorySemanticChangeKind,
+    ImpactEntryRecord, ImpactGroupRecord, LineageMatchRecord, LocateHit, LocateMode,
+    PlanChangeContextPack, PlanChangeDecision, PlanChangeImpactSummary, PlanChangeObjective,
+    PlanChangePlan, PlanChangeResult, PlanChangeStepRecord, PlanEstimate, PlanExplanation,
+    PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage,
+    RankedTestSelection, RelationDirection, RelationFamily, RelationshipEdgeTarget,
+    RelationshipGroup, RepositoryDataTrust, ResolvedChangeRecord, SemanticChangeRecord,
+    SourceChunkResult, SourceReadPlan, SourceReadQueryResult, SymbolExplainPlan,
+    SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult, TestsSelectCoverage,
+    TestsSelectGap, TestsSelectKind, TestsSelectPlan, TestsSelectResult, TokenAccountingProfile,
+    checked_add, checked_u128_to_u64, checked_usize_to_u64, ensure_estimate, search_mode,
 };
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
@@ -1666,6 +1668,135 @@ where
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
     }
 
+    /// Builds a deterministic generation-bound `query.advanced` plan.
+    ///
+    /// The safe AST is walked to derive its operator sequence and nesting
+    /// depth, validated against the resource ceilings, and admitted only when
+    /// the static cost estimate fits both the hard ceiling and the optional
+    /// client `cost_limit`. Execution serves an honest supported subset; the
+    /// plan records whether an explanation was requested.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for an invalid budget, an empty or too-deep AST,
+    /// an out-of-range row or traversal bound, a cost estimate that exceeds the
+    /// ceiling or the client limit, or a conservative estimate that cannot be
+    /// admitted.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded advanced query dimension"
+    )]
+    pub fn plan_advanced_query(
+        &self,
+        ast: AdvancedAstNode,
+        explain: bool,
+        max_results: usize,
+        max_depth: usize,
+        max_traversal: usize,
+        cost_limit: Option<u64>,
+        budget: QueryBudget,
+    ) -> Result<AdvancedQueryPlan, QueryError> {
+        budget.validate()?;
+        let (operators, depth) = ast.derive_plan_shape();
+        let estimated_cost =
+            AdvancedQueryPlan::validate(&operators, max_results, max_traversal, depth)?;
+        if depth > max_depth {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if !AdvancedQueryPlan::admits_cost(estimated_cost, cost_limit) {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if checked_usize_to_u64(max_results)? > budget.max_results {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        let estimate = PlanEstimate {
+            rows: budget.max_rows,
+            edges: budget.max_edges,
+            results: budget.max_results,
+            source_bytes: 0,
+            // The normalized generation bounds every inspected record while the
+            // query memory budget remains the conservative aggregate ceiling.
+            memory_bytes: budget.max_memory_bytes,
+            json_bytes: budget.max_json_bytes,
+            estimated_tokens: budget.max_tokens,
+            duration_micros: duration_micros(budget.max_duration),
+        };
+        ensure_estimate(estimate, budget)?;
+        let explanation = PlanExplanation {
+            generation: self.generation.metadata().generation(),
+            kind: PlanKind::QueryAdvanced,
+            operators: vec![
+                QueryOperator::GenerationPin,
+                QueryOperator::EntityLookup,
+                QueryOperator::OutputBudget,
+            ],
+            estimate,
+        };
+        Ok(AdvancedQueryPlan {
+            ast,
+            operators,
+            max_rows: max_results,
+            max_traversal,
+            depth,
+            estimated_cost,
+            explain,
+            budget,
+            explanation,
+        })
+    }
+
+    /// Executes a prevalidated `query.advanced` plan.
+    ///
+    /// The supported operator subset (scan, filter, project, sort, limit) runs
+    /// against the pinned generation's entities and returns typed rows keyed by
+    /// column name. Unsupported patterns return honest non-empty columns with
+    /// empty rows rather than fabricated data. When an explanation was
+    /// requested, rows are empty and the plan is returned instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError`] for cancellation, generation drift, encoding, or
+    /// resource exhaustion.
+    pub fn execute_advanced_query(
+        &self,
+        plan: &AdvancedQueryPlan,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<AdvancedQueryResult>, QueryError> {
+        self.require_generation(plan.explanation.generation)?;
+        let started = Instant::now();
+        let control = QueryControl::new(cancellation, plan.budget.max_duration);
+        control.check()?;
+        let document = self.generation.document();
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+
+        let built = build_advanced_query(
+            document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )?;
+
+        let rows = if plan.explain { Vec::new() } else { built.rows };
+        let data = AdvancedQueryResult {
+            generation: self.generation.metadata().generation(),
+            columns: built.columns,
+            rows,
+            plan: plan.explain.then_some(built.plan),
+            completeness: built.completeness,
+            limiting_resources,
+            trust: RepositoryDataTrust::UntrustedRepositoryData,
+        };
+        finish_response(plan.explanation.clone(), data, tracker, started, &control)
+    }
+
     /// Builds a deterministic generation-bound `source.read` plan.
     ///
     /// # Errors
@@ -1838,6 +1969,479 @@ fn find_entity(
         .binary_search_by_key(&symbol, |entity| entity.id)
         .ok()
         .and_then(|index| document.entities.get(index))
+}
+
+/// Intermediate advanced query result before JSON encoding.
+struct AdvancedBuild {
+    columns: Vec<AdvancedColumnSchema>,
+    rows: Vec<serde_json::Value>,
+    plan: AdvancedPlanExplanation,
+    completeness: AdvancedCompleteness,
+}
+
+/// A typed row set materialized during advanced query execution.
+struct AdvancedRowSet {
+    columns: Vec<AdvancedColumnSchema>,
+    rows: Vec<BTreeMap<String, AdvancedValue>>,
+}
+
+/// Executes a bounded advanced query against the pinned generation document.
+///
+/// The supported operator subset is materialized into typed rows; unsupported
+/// patterns yield honest non-empty columns with empty rows. The plan
+/// explanation is always derived so an `explain` request can return it without
+/// materializing rows.
+fn build_advanced_query(
+    document: &NormalizedIrDocument,
+    plan: &AdvancedQueryPlan,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<AdvancedBuild, QueryError> {
+    let operator_names: Vec<String> = plan
+        .operators
+        .iter()
+        .map(|operator| operator.as_str().to_owned())
+        .collect();
+    let explanation = AdvancedPlanExplanation {
+        estimated_cost: plan.estimated_cost,
+        operators: operator_names,
+        applied_limits: vec![
+            format!("rows<={}", plan.max_rows),
+            format!("depth<={}", plan.depth),
+            format!("traversal<={}", plan.max_traversal),
+        ],
+    };
+
+    let supported = advanced_ast_supported(&plan.ast);
+    let columns = advanced_derive_columns(&plan.ast);
+
+    if plan.explain {
+        let completeness = if supported {
+            AdvancedCompleteness::Complete
+        } else {
+            AdvancedCompleteness::Unsupported
+        };
+        return Ok(AdvancedBuild {
+            columns,
+            rows: Vec::new(),
+            plan: explanation,
+            completeness,
+        });
+    }
+
+    if !supported {
+        return Ok(AdvancedBuild {
+            columns,
+            rows: Vec::new(),
+            plan: explanation,
+            completeness: AdvancedCompleteness::Unsupported,
+        });
+    }
+
+    // Index file identities to presentation paths for scan rows.
+    let mut file_paths: BTreeMap<FileId, String> = BTreeMap::new();
+    for file in &document.files {
+        file_paths.insert(file.id, file.path.clone());
+    }
+
+    let (mut set, mut truncated) =
+        eval_advanced_node(document, &plan.ast, &file_paths, control, tracker)?;
+
+    // Apply the top-level result cap admitted by the plan.
+    if set.rows.len() > plan.max_rows {
+        set.rows.truncate(plan.max_rows);
+        truncated = true;
+    }
+
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    try_reserve(&mut rows, set.rows.len())?;
+    for row in &set.rows {
+        control.check()?;
+        tracker.add_results(1)?;
+        tracker.add_memory(checked_usize_to_u64(mem::size_of::<serde_json::Value>())?)?;
+        rows.push(advanced_row_to_json(&set.columns, row));
+    }
+
+    if truncated {
+        note_advanced_limit(limiting_resources, QueryResource::Rows);
+    }
+    let completeness = if truncated {
+        AdvancedCompleteness::Truncated
+    } else {
+        AdvancedCompleteness::Complete
+    };
+
+    Ok(AdvancedBuild {
+        columns: set.columns,
+        rows,
+        plan: explanation,
+        completeness,
+    })
+}
+
+/// Whether an advanced AST can be served by the supported operator subset.
+///
+/// Join, aggregate, and traversal operators are not served in this slice and
+/// yield an honest unsupported result rather than fabricated rows.
+fn advanced_ast_supported(node: &AdvancedAstNode) -> bool {
+    match node {
+        AdvancedAstNode::Scan { .. } => true,
+        AdvancedAstNode::Filter { input, .. }
+        | AdvancedAstNode::Project { input, .. }
+        | AdvancedAstNode::Sort { input, .. }
+        | AdvancedAstNode::Limit { input, .. } => advanced_ast_supported(input),
+        AdvancedAstNode::Join { .. }
+        | AdvancedAstNode::Aggregate { .. }
+        | AdvancedAstNode::Traverse { .. } => false,
+    }
+}
+
+/// Derives the non-empty output column schema for an advanced AST.
+///
+/// The schema is derived for both supported and unsupported patterns so the
+/// contract's minimum-one-column invariant always holds.
+fn advanced_derive_columns(node: &AdvancedAstNode) -> Vec<AdvancedColumnSchema> {
+    match node {
+        AdvancedAstNode::Scan { .. } => advanced_default_scan_columns(),
+        AdvancedAstNode::Filter { input, .. }
+        | AdvancedAstNode::Sort { input, .. }
+        | AdvancedAstNode::Limit { input, .. } => advanced_derive_columns(input),
+        AdvancedAstNode::Project { input, columns } => {
+            let inner = advanced_derive_columns(input);
+            advanced_project_schema(&inner, columns)
+        }
+        AdvancedAstNode::Join { left, .. } => advanced_derive_columns(left),
+        AdvancedAstNode::Aggregate {
+            group_by,
+            aggregations,
+            ..
+        } => {
+            let mut columns = Vec::new();
+            for name in group_by {
+                columns.push(AdvancedColumnSchema {
+                    name: name.clone(),
+                    column_type: AdvancedColumnType::Text,
+                });
+            }
+            for aggregation in aggregations {
+                columns.push(advanced_aggregate_column(aggregation));
+            }
+            if columns.is_empty() {
+                columns.push(advanced_default_id_column());
+            }
+            columns
+        }
+        AdvancedAstNode::Traverse { .. } => vec![
+            AdvancedColumnSchema {
+                name: "source".to_owned(),
+                column_type: AdvancedColumnType::SymbolId,
+            },
+            AdvancedColumnSchema {
+                name: "target".to_owned(),
+                column_type: AdvancedColumnType::SymbolId,
+            },
+            AdvancedColumnSchema {
+                name: "relation".to_owned(),
+                column_type: AdvancedColumnType::Text,
+            },
+        ],
+    }
+}
+
+/// Default columns produced by a scan over entities.
+fn advanced_default_scan_columns() -> Vec<AdvancedColumnSchema> {
+    vec![
+        AdvancedColumnSchema {
+            name: "id".to_owned(),
+            column_type: AdvancedColumnType::SymbolId,
+        },
+        AdvancedColumnSchema {
+            name: "kind".to_owned(),
+            column_type: AdvancedColumnType::Text,
+        },
+        AdvancedColumnSchema {
+            name: "name".to_owned(),
+            column_type: AdvancedColumnType::Text,
+        },
+        AdvancedColumnSchema {
+            name: "path".to_owned(),
+            column_type: AdvancedColumnType::Path,
+        },
+    ]
+}
+
+/// Fallback single identity column guaranteeing a non-empty schema.
+fn advanced_default_id_column() -> AdvancedColumnSchema {
+    AdvancedColumnSchema {
+        name: "id".to_owned(),
+        column_type: AdvancedColumnType::SymbolId,
+    }
+}
+
+/// Output column for one aggregate function.
+fn advanced_aggregate_column(aggregation: &AdvancedAggregateFunction) -> AdvancedColumnSchema {
+    match aggregation {
+        AdvancedAggregateFunction::Count => AdvancedColumnSchema {
+            name: "count".to_owned(),
+            column_type: AdvancedColumnType::Integer,
+        },
+        AdvancedAggregateFunction::Sum { field } => AdvancedColumnSchema {
+            name: format!("sum_{field}"),
+            column_type: AdvancedColumnType::Integer,
+        },
+        AdvancedAggregateFunction::Min { field } => AdvancedColumnSchema {
+            name: format!("min_{field}"),
+            column_type: AdvancedColumnType::Text,
+        },
+        AdvancedAggregateFunction::Max { field } => AdvancedColumnSchema {
+            name: format!("max_{field}"),
+            column_type: AdvancedColumnType::Text,
+        },
+    }
+}
+
+/// Projects an inner schema onto the requested column names.
+///
+/// Requested columns absent from the inner schema default to text so the
+/// projected schema always mirrors the requested column list.
+fn advanced_project_schema(
+    inner: &[AdvancedColumnSchema],
+    columns: &[String],
+) -> Vec<AdvancedColumnSchema> {
+    columns
+        .iter()
+        .map(|name| {
+            let column_type = inner
+                .iter()
+                .find(|column| &column.name == name)
+                .map(|column| column.column_type)
+                .unwrap_or(AdvancedColumnType::Text);
+            AdvancedColumnSchema {
+                name: name.clone(),
+                column_type,
+            }
+        })
+        .collect()
+}
+
+/// Evaluates a supported advanced AST node into a typed row set.
+///
+/// Returns the row set and whether a limit already truncated the rows. Join,
+/// aggregate, and traverse nodes are rejected because the caller gates them
+/// with [`advanced_ast_supported`].
+fn eval_advanced_node(
+    document: &NormalizedIrDocument,
+    node: &AdvancedAstNode,
+    file_paths: &BTreeMap<FileId, String>,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+) -> Result<(AdvancedRowSet, bool), QueryError> {
+    match node {
+        AdvancedAstNode::Scan { entity, filter } => {
+            let set = eval_advanced_scan(
+                document,
+                *entity,
+                filter.as_deref(),
+                file_paths,
+                control,
+                tracker,
+            )?;
+            Ok((set, false))
+        }
+        AdvancedAstNode::Filter { input, predicate } => {
+            let (mut set, truncated) =
+                eval_advanced_node(document, input, file_paths, control, tracker)?;
+            set.rows
+                .retain(|row| advanced_predicate_matches(predicate, row));
+            Ok((set, truncated))
+        }
+        AdvancedAstNode::Project { input, columns } => {
+            let (set, truncated) =
+                eval_advanced_node(document, input, file_paths, control, tracker)?;
+            Ok((advanced_project_rows(set, columns), truncated))
+        }
+        AdvancedAstNode::Sort { input, by } => {
+            let (mut set, truncated) =
+                eval_advanced_node(document, input, file_paths, control, tracker)?;
+            advanced_sort_rows(&mut set.rows, by);
+            Ok((set, truncated))
+        }
+        AdvancedAstNode::Limit { input, max_rows } => {
+            let (mut set, truncated) =
+                eval_advanced_node(document, input, file_paths, control, tracker)?;
+            let cap = usize::from(*max_rows);
+            let limited = set.rows.len() > cap;
+            if limited {
+                set.rows.truncate(cap);
+            }
+            Ok((set, truncated || limited))
+        }
+        AdvancedAstNode::Join { .. }
+        | AdvancedAstNode::Aggregate { .. }
+        | AdvancedAstNode::Traverse { .. } => Err(QueryError::PlanRejected {
+            resource: QueryResource::Results,
+        }),
+    }
+}
+
+/// Scans entities of one kind, optionally filtering by a bounded predicate.
+fn eval_advanced_scan(
+    document: &NormalizedIrDocument,
+    entity_kind: AdvancedEntityKind,
+    filter: Option<&AdvancedPredicate>,
+    file_paths: &BTreeMap<FileId, String>,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+) -> Result<AdvancedRowSet, QueryError> {
+    let columns = advanced_default_scan_columns();
+    let mut matched: Vec<&rootlight_ir::EntityRecord> = document
+        .entities
+        .iter()
+        .filter(|entity| entity_kind.matches_ir(entity.kind))
+        .collect();
+    // Deterministic identity order independent of document insertion order.
+    matched.sort_by_key(|entity| entity.id);
+    let mut rows: Vec<BTreeMap<String, AdvancedValue>> = Vec::new();
+    for entity in matched {
+        control.check()?;
+        tracker.add_rows(1)?;
+        let row = advanced_scan_row(entity, file_paths)?;
+        if filter.is_some_and(|predicate| !advanced_predicate_matches(predicate, &row)) {
+            continue;
+        }
+        try_push(&mut rows, row)?;
+    }
+    Ok(AdvancedRowSet { columns, rows })
+}
+
+/// Builds one scan row keyed by the default scan columns.
+fn advanced_scan_row(
+    entity: &rootlight_ir::EntityRecord,
+    file_paths: &BTreeMap<FileId, String>,
+) -> Result<BTreeMap<String, AdvancedValue>, QueryError> {
+    let mut row = BTreeMap::new();
+    row.insert("id".to_owned(), AdvancedValue::Symbol(entity.id));
+    row.insert(
+        "kind".to_owned(),
+        AdvancedValue::Text(serialized_label(&entity.kind)?),
+    );
+    row.insert(
+        "name".to_owned(),
+        AdvancedValue::Text(entity.canonical_name.clone()),
+    );
+    let path = entity
+        .evidence
+        .source
+        .as_ref()
+        .and_then(|source| file_paths.get(&source.span().file()).cloned())
+        .unwrap_or_default();
+    row.insert("path".to_owned(), AdvancedValue::Text(path));
+    Ok(row)
+}
+
+/// Evaluates a bounded predicate against one row.
+///
+/// A predicate referencing a column absent from the row is not satisfied.
+fn advanced_predicate_matches(
+    predicate: &AdvancedPredicate,
+    row: &BTreeMap<String, AdvancedValue>,
+) -> bool {
+    match predicate {
+        AdvancedPredicate::Equals { field, value } => row.get(field) == Some(value),
+        AdvancedPredicate::NotEquals { field, value } => {
+            row.get(field).is_some_and(|current| current != value)
+        }
+        AdvancedPredicate::In { field, values } => row
+            .get(field)
+            .is_some_and(|current| values.contains(current)),
+        AdvancedPredicate::And { predicates } => predicates
+            .iter()
+            .all(|inner| advanced_predicate_matches(inner, row)),
+        AdvancedPredicate::Or { predicates } => predicates
+            .iter()
+            .any(|inner| advanced_predicate_matches(inner, row)),
+    }
+}
+
+/// Projects each row onto the requested columns.
+fn advanced_project_rows(set: AdvancedRowSet, columns: &[String]) -> AdvancedRowSet {
+    let schema = advanced_project_schema(&set.columns, columns);
+    let rows = set
+        .rows
+        .into_iter()
+        .map(|row| {
+            let mut projected = BTreeMap::new();
+            for name in columns {
+                if let Some(value) = row.get(name) {
+                    projected.insert(name.clone(), value.clone());
+                }
+            }
+            projected
+        })
+        .collect();
+    AdvancedRowSet {
+        columns: schema,
+        rows,
+    }
+}
+
+/// Sorts rows deterministically by the requested keys with a stable tie-break.
+fn advanced_sort_rows(rows: &mut [BTreeMap<String, AdvancedValue>], by: &[AdvancedSortKey]) {
+    rows.sort_by(|left, right| {
+        for key in by {
+            let ordering = match (left.get(&key.field), right.get(&key.field)) {
+                (Some(left_value), Some(right_value)) => left_value.cmp(right_value),
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (None, None) => std::cmp::Ordering::Equal,
+            };
+            let ordering = if key.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+            if ordering != std::cmp::Ordering::Equal {
+                return ordering;
+            }
+        }
+        // Total deterministic tie-break over the ordered row contents.
+        left.cmp(right)
+    });
+}
+
+/// Encodes one intermediate row as a JSON object keyed by column name.
+fn advanced_row_to_json(
+    columns: &[AdvancedColumnSchema],
+    row: &BTreeMap<String, AdvancedValue>,
+) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for column in columns {
+        let value = row
+            .get(&column.name)
+            .map(advanced_value_to_json)
+            .unwrap_or(serde_json::Value::Null);
+        map.insert(column.name.clone(), value);
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Encodes one typed value as JSON.
+fn advanced_value_to_json(value: &AdvancedValue) -> serde_json::Value {
+    match value {
+        AdvancedValue::Text(text) => serde_json::Value::String(text.clone()),
+        AdvancedValue::Integer(integer) => serde_json::Value::Number((*integer).into()),
+        AdvancedValue::Boolean(boolean) => serde_json::Value::Bool(*boolean),
+        AdvancedValue::Symbol(symbol) => serde_json::Value::String(symbol.to_string()),
+        AdvancedValue::File(file) => serde_json::Value::String(file.to_string()),
+    }
+}
+
+/// Records a limiting resource once, preserving deterministic execution order.
+fn note_advanced_limit(limiting_resources: &mut Vec<QueryResource>, resource: QueryResource) {
+    if !limiting_resources.contains(&resource) {
+        limiting_resources.push(resource);
+    }
 }
 
 fn find_file(document: &NormalizedIrDocument, file: FileId) -> Option<&rootlight_ir::FileRecord> {
@@ -7604,5 +8208,301 @@ mod tests {
         assert_eq!(first.lineage, second.lineage);
         assert_eq!(first.architecture_delta, second.architecture_delta);
         assert_eq!(first.coverage, second.coverage);
+    }
+
+    // -----------------------------------------------------------------
+    // query.advanced synthetic-document proofs
+    // -----------------------------------------------------------------
+
+    use crate::model::{
+        ADVANCED_MAX_DEPTH, ADVANCED_MAX_ESTIMATED_COST, ADVANCED_MAX_RESULTS,
+        ADVANCED_MAX_TRAVERSAL, AdvancedOperator, AdvancedRelationKind, AdvancedTraverseDirection,
+    };
+
+    fn advanced_document() -> NormalizedIrDocument {
+        let mut document = overview_document();
+        add_file(&mut document, 1, "src/a.rs");
+        add_file(&mut document, 2, "src/b.rs");
+        add_entity(&mut document, 11, 1, EntityKind::Function);
+        add_entity(&mut document, 12, 1, EntityKind::Struct);
+        add_entity(&mut document, 13, 2, EntityKind::Function);
+        document
+    }
+
+    fn advanced_plan(ast: AdvancedAstNode, explain: bool, max_rows: usize) -> AdvancedQueryPlan {
+        let (operators, depth) = ast.derive_plan_shape();
+        let estimated_cost =
+            AdvancedQueryPlan::validate(&operators, max_rows, ADVANCED_MAX_TRAVERSAL, depth)
+                .expect("test advanced plan is valid");
+        AdvancedQueryPlan {
+            ast,
+            operators,
+            max_rows,
+            max_traversal: ADVANCED_MAX_TRAVERSAL,
+            depth,
+            estimated_cost,
+            explain,
+            budget: QueryBudget::new(),
+            explanation: PlanExplanation {
+                generation: GenerationId::from_bytes([0; 20]),
+                kind: PlanKind::QueryAdvanced,
+                operators: Vec::new(),
+                estimate: PlanEstimate {
+                    rows: 0,
+                    edges: 0,
+                    results: 0,
+                    source_bytes: 0,
+                    memory_bytes: 0,
+                    json_bytes: 0,
+                    estimated_tokens: 0,
+                    duration_micros: 0,
+                },
+            },
+        }
+    }
+
+    fn run_advanced(document: &NormalizedIrDocument, plan: &AdvancedQueryPlan) -> AdvancedBuild {
+        let mut tracker = UsageTracker::new(plan.budget);
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::with_deadline(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("test deadline is representable"),
+        );
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+        build_advanced_query(
+            document,
+            plan,
+            &control,
+            &mut tracker,
+            &mut limiting_resources,
+        )
+        .expect("bounded advanced query succeeds")
+    }
+
+    fn scan_functions() -> AdvancedAstNode {
+        AdvancedAstNode::Scan {
+            entity: AdvancedEntityKind::Function,
+            filter: None,
+        }
+    }
+
+    #[test]
+    fn advanced_scan_filter_project_limit_returns_exact_rows() {
+        let document = advanced_document();
+        // Scan functions (sym_11, sym_13), keep only sym_11, project id+name.
+        let ast = AdvancedAstNode::Limit {
+            input: Box::new(AdvancedAstNode::Project {
+                input: Box::new(AdvancedAstNode::Filter {
+                    input: Box::new(scan_functions()),
+                    predicate: AdvancedPredicate::Equals {
+                        field: "name".to_owned(),
+                        value: AdvancedValue::Text("sym_11".to_owned()),
+                    },
+                }),
+                columns: vec!["id".to_owned(), "name".to_owned()],
+            }),
+            max_rows: 10,
+        };
+        let plan = advanced_plan(ast, false, 100);
+        let built = run_advanced(&document, &plan);
+
+        assert_eq!(built.completeness, AdvancedCompleteness::Complete);
+        assert_eq!(
+            built.columns,
+            vec![
+                AdvancedColumnSchema {
+                    name: "id".to_owned(),
+                    column_type: AdvancedColumnType::SymbolId
+                },
+                AdvancedColumnSchema {
+                    name: "name".to_owned(),
+                    column_type: AdvancedColumnType::Text
+                },
+            ]
+        );
+        assert_eq!(built.rows.len(), 1);
+        assert_eq!(
+            built.rows[0]["id"],
+            serde_json::Value::String(symbol(11).to_string())
+        );
+        assert_eq!(
+            built.rows[0]["name"],
+            serde_json::Value::String("sym_11".to_owned())
+        );
+    }
+
+    #[test]
+    fn advanced_scan_returns_matching_entities_in_identity_order() {
+        let document = advanced_document();
+        let ast = AdvancedAstNode::Limit {
+            input: Box::new(scan_functions()),
+            max_rows: 100,
+        };
+        let plan = advanced_plan(ast, false, 100);
+        let built = run_advanced(&document, &plan);
+
+        assert_eq!(built.completeness, AdvancedCompleteness::Complete);
+        // The default scan schema is always non-empty.
+        assert_eq!(built.columns.len(), 4);
+        assert_eq!(built.rows.len(), 2);
+        // Deterministic identity order: sym_11 precedes sym_13.
+        assert_eq!(
+            built.rows[0]["id"],
+            serde_json::Value::String(symbol(11).to_string())
+        );
+        assert_eq!(
+            built.rows[1]["id"],
+            serde_json::Value::String(symbol(13).to_string())
+        );
+        assert_eq!(
+            built.rows[0]["kind"],
+            serde_json::Value::String("function".to_owned())
+        );
+        assert_eq!(
+            built.rows[0]["path"],
+            serde_json::Value::String("src/a.rs".to_owned())
+        );
+    }
+
+    #[test]
+    fn advanced_explain_returns_a_plan_without_rows() {
+        let document = advanced_document();
+        let plan = advanced_plan(scan_functions(), true, 100);
+        let built = run_advanced(&document, &plan);
+
+        assert_eq!(built.completeness, AdvancedCompleteness::Complete);
+        assert!(built.rows.is_empty());
+        assert!(!built.columns.is_empty());
+        assert!(built.plan.operators.contains(&"Scan".to_owned()));
+        assert!(built.plan.estimated_cost > 0);
+        assert!(!built.plan.applied_limits.is_empty());
+    }
+
+    #[test]
+    fn advanced_unsupported_aggregate_returns_honest_unsupported() {
+        let document = advanced_document();
+        let ast = AdvancedAstNode::Aggregate {
+            input: Box::new(scan_functions()),
+            group_by: vec!["kind".to_owned()],
+            aggregations: vec![AdvancedAggregateFunction::Count],
+        };
+        let plan = advanced_plan(ast, false, 100);
+        let built = run_advanced(&document, &plan);
+
+        // Honest: non-empty columns, no fabricated rows.
+        assert_eq!(built.completeness, AdvancedCompleteness::Unsupported);
+        assert!(built.rows.is_empty());
+        assert!(!built.columns.is_empty());
+    }
+
+    #[test]
+    fn advanced_unsupported_traverse_returns_honest_unsupported() {
+        let document = advanced_document();
+        let ast = AdvancedAstNode::Traverse {
+            seed: Some(symbol(11)),
+            seed_from: None,
+            relation: AdvancedRelationKind::Calls,
+            direction: AdvancedTraverseDirection::Outbound,
+            max_depth: Some(1),
+        };
+        let plan = advanced_plan(ast, false, 100);
+        let built = run_advanced(&document, &plan);
+
+        assert_eq!(built.completeness, AdvancedCompleteness::Unsupported);
+        assert!(built.rows.is_empty());
+        assert!(!built.columns.is_empty());
+    }
+
+    #[test]
+    fn advanced_limit_truncates_and_marks_truncated() {
+        let document = advanced_document();
+        // Two functions exist; a top-level cap of one row truncates the result.
+        let plan = advanced_plan(scan_functions(), false, 1);
+        let built = run_advanced(&document, &plan);
+
+        assert_eq!(built.completeness, AdvancedCompleteness::Truncated);
+        assert_eq!(built.rows.len(), 1);
+    }
+
+    #[test]
+    fn advanced_sort_orders_rows_deterministically() {
+        let document = advanced_document();
+        let ast = AdvancedAstNode::Sort {
+            input: Box::new(scan_functions()),
+            by: vec![AdvancedSortKey {
+                field: "name".to_owned(),
+                descending: true,
+            }],
+        };
+        let plan = advanced_plan(ast, false, 100);
+        let built = run_advanced(&document, &plan);
+
+        assert_eq!(built.rows.len(), 2);
+        // Descending by name: sym_13 precedes sym_11.
+        assert_eq!(
+            built.rows[0]["name"],
+            serde_json::Value::String("sym_13".to_owned())
+        );
+        assert_eq!(
+            built.rows[1]["name"],
+            serde_json::Value::String("sym_11".to_owned())
+        );
+    }
+
+    #[test]
+    fn advanced_validate_rejects_an_excessive_cost_estimate() {
+        // Many expensive operators scaled by the maximum row count push the
+        // static cost past the hard ceiling, so the plan is rejected.
+        let operators = vec![AdvancedOperator::Join; 200];
+        let result = AdvancedQueryPlan::validate(
+            &operators,
+            ADVANCED_MAX_RESULTS,
+            ADVANCED_MAX_TRAVERSAL,
+            2,
+        );
+        assert!(result.is_err());
+        // A single cheap scan stays well under the ceiling.
+        let cheap =
+            AdvancedQueryPlan::validate(&[AdvancedOperator::Scan], 100, ADVANCED_MAX_TRAVERSAL, 1)
+                .expect("cheap plan is admitted");
+        assert!(cheap <= ADVANCED_MAX_ESTIMATED_COST);
+    }
+
+    #[test]
+    fn advanced_validate_rejects_excessive_depth() {
+        let result = AdvancedQueryPlan::validate(
+            &[AdvancedOperator::Scan],
+            100,
+            ADVANCED_MAX_TRAVERSAL,
+            ADVANCED_MAX_DEPTH + 1,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn advanced_admits_cost_honors_the_client_limit() {
+        assert!(AdvancedQueryPlan::admits_cost(100, None));
+        assert!(AdvancedQueryPlan::admits_cost(100, Some(100)));
+        assert!(AdvancedQueryPlan::admits_cost(100, Some(101)));
+        assert!(!AdvancedQueryPlan::admits_cost(101, Some(100)));
+    }
+
+    #[test]
+    fn advanced_query_is_deterministic() {
+        let document = advanced_document();
+        let ast = AdvancedAstNode::Limit {
+            input: Box::new(AdvancedAstNode::Project {
+                input: Box::new(scan_functions()),
+                columns: vec!["id".to_owned(), "name".to_owned(), "path".to_owned()],
+            }),
+            max_rows: 50,
+        };
+        let plan = advanced_plan(ast, false, 100);
+        let first = run_advanced(&document, &plan);
+        let second = run_advanced(&document, &plan);
+        assert_eq!(first.columns, second.columns);
+        assert_eq!(first.rows, second.rows);
+        assert_eq!(first.completeness, second.completeness);
     }
 }

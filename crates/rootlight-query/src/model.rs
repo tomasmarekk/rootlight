@@ -4,12 +4,12 @@ use std::time::Duration;
 use rootlight_cancel::CancellationReason;
 use rootlight_ids::{ContentHash, FileId, GenerationId, SymbolId};
 use rootlight_ir::{
-    CoverageRecord, CoverageStatus, EntityRecord, OccurrenceRecord, ProvenanceRecord,
-    RelationPredicate, RelationRecord, SourceRef,
+    CoverageRecord, CoverageStatus, EntityKind as IrEntityKind, EntityRecord, OccurrenceRecord,
+    ProvenanceRecord, RelationPredicate, RelationRecord, SourceRef,
 };
 use rootlight_search::{SearchBudget, SearchError, SearchMode};
 use rootlight_source::{SourceBudget, SourceError, SourceReadOptions};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const HARD_MAX_QUERY_ROWS: u64 = 1_000_000;
 const HARD_MAX_QUERY_EDGES: u64 = 1_000_000;
@@ -204,6 +204,8 @@ pub enum PlanKind {
     HistoryCompare,
     /// Read generation-bound source.
     SourceRead,
+    /// Execute a bounded advanced query over a safe typed AST.
+    QueryAdvanced,
 }
 
 /// Closed first-slice operator catalog.
@@ -1865,6 +1867,712 @@ pub struct SourceReadQueryResult {
     pub generation: GenerationId,
     /// Verified chunks in selector order.
     pub chunks: Vec<SourceChunkResult>,
+}
+
+/// Default maximum rows returned by an advanced query.
+pub const ADVANCED_DEFAULT_MAX_RESULTS: usize = 100;
+/// Hard ceiling on rows a single advanced query may return.
+pub const ADVANCED_MAX_RESULTS: usize = 1_000;
+/// Hard ceiling on advanced query AST nesting depth.
+pub const ADVANCED_MAX_DEPTH: usize = 5;
+/// Default maximum traversal or plan depth.
+pub const ADVANCED_DEFAULT_MAX_DEPTH: usize = 3;
+/// Hard ceiling on traversal facts an advanced query may examine.
+pub const ADVANCED_MAX_TRAVERSAL: usize = 100_000;
+/// Hard ceiling on the static advanced query cost estimate.
+pub const ADVANCED_MAX_ESTIMATED_COST: u64 = 1_000_000;
+
+/// Allow-listed advanced query operators.
+///
+/// Only these operators can appear in a valid advanced query AST. The grammar
+/// structurally excludes SQL, Cypher, shell, arbitrary regex, arbitrary code,
+/// and unbounded recursion. This is the query-layer mirror of the public
+/// contract operator catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AdvancedOperator {
+    /// Full entity scan with an optional kind filter.
+    Scan,
+    /// Predicate-based row filtering.
+    Filter,
+    /// Column selection.
+    Project,
+    /// Inner join on typed equality.
+    Join,
+    /// Count, sum, min, max aggregation.
+    Aggregate,
+    /// Bounded graph traversal along typed edges.
+    Traverse,
+    /// Deterministic ordering by typed keys.
+    Sort,
+    /// Row count limitation.
+    Limit,
+}
+
+impl AdvancedOperator {
+    /// Base cost weight for static estimation.
+    #[must_use]
+    pub const fn base_cost(self) -> u64 {
+        match self {
+            Self::Scan => 100,
+            Self::Filter => 10,
+            Self::Project => 5,
+            Self::Join => 500,
+            Self::Aggregate => 50,
+            Self::Traverse => 200,
+            Self::Sort => 20,
+            Self::Limit => 1,
+        }
+    }
+
+    /// Stable display name used in plan explanations.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scan => "Scan",
+            Self::Filter => "Filter",
+            Self::Project => "Project",
+            Self::Join => "Join",
+            Self::Aggregate => "Aggregate",
+            Self::Traverse => "Traverse",
+            Self::Sort => "Sort",
+            Self::Limit => "Limit",
+        }
+    }
+
+    /// Parses a stable operator label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "scan" => Some(Self::Scan),
+            "filter" => Some(Self::Filter),
+            "project" => Some(Self::Project),
+            "join" => Some(Self::Join),
+            "aggregate" => Some(Self::Aggregate),
+            "traverse" => Some(Self::Traverse),
+            "sort" => Some(Self::Sort),
+            "limit" => Some(Self::Limit),
+            _ => None,
+        }
+    }
+}
+
+/// Closed entity kind understood by the advanced query scan operator.
+///
+/// This is the query-layer mirror of the public contract entity kind. Each
+/// variant maps to a closed set of normalized IR entity kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AdvancedEntityKind {
+    /// Source file.
+    File,
+    /// Namespace or module.
+    Module,
+    /// Type declaration.
+    Type,
+    /// Function declaration.
+    Function,
+    /// Method declaration.
+    Method,
+    /// Field declaration.
+    Field,
+    /// Constant declaration.
+    Constant,
+    /// Variable declaration.
+    Variable,
+    /// Configuration record.
+    Configuration,
+}
+
+impl AdvancedEntityKind {
+    /// Stable wire label shared with the MCP entity-kind contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Module => "module",
+            Self::Type => "type",
+            Self::Function => "function",
+            Self::Method => "method",
+            Self::Field => "field",
+            Self::Constant => "constant",
+            Self::Variable => "variable",
+            Self::Configuration => "configuration",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "file" => Some(Self::File),
+            "module" => Some(Self::Module),
+            "type" => Some(Self::Type),
+            "function" => Some(Self::Function),
+            "method" => Some(Self::Method),
+            "field" => Some(Self::Field),
+            "constant" => Some(Self::Constant),
+            "variable" => Some(Self::Variable),
+            "configuration" => Some(Self::Configuration),
+            _ => None,
+        }
+    }
+
+    /// Whether a normalized IR entity kind belongs to this advanced kind.
+    #[must_use]
+    pub fn matches_ir(self, kind: IrEntityKind) -> bool {
+        match self {
+            Self::File => matches!(kind, IrEntityKind::File),
+            Self::Module => matches!(
+                kind,
+                IrEntityKind::Module | IrEntityKind::Namespace | IrEntityKind::Package
+            ),
+            Self::Type => matches!(
+                kind,
+                IrEntityKind::Class
+                    | IrEntityKind::Struct
+                    | IrEntityKind::Enum
+                    | IrEntityKind::Union
+                    | IrEntityKind::TypeAlias
+                    | IrEntityKind::Trait
+                    | IrEntityKind::Interface
+                    | IrEntityKind::Protocol
+                    | IrEntityKind::TypeParameter
+            ),
+            Self::Function => matches!(
+                kind,
+                IrEntityKind::Function | IrEntityKind::Constructor | IrEntityKind::Closure
+            ),
+            Self::Method => matches!(kind, IrEntityKind::Method),
+            Self::Field => matches!(kind, IrEntityKind::Field | IrEntityKind::Property),
+            Self::Constant => matches!(kind, IrEntityKind::Constant),
+            Self::Variable => matches!(kind, IrEntityKind::Variable | IrEntityKind::Parameter),
+            Self::Configuration => matches!(kind, IrEntityKind::ConfigurationKey),
+        }
+    }
+}
+
+/// Typed scalar or identifier value bound as an advanced query predicate operand.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdvancedValue {
+    /// UTF-8 text literal.
+    Text(String),
+    /// Signed 64-bit integer literal.
+    Integer(i64),
+    /// Boolean literal.
+    Boolean(bool),
+    /// Stable symbol identifier.
+    Symbol(SymbolId),
+    /// Stable file identifier.
+    File(FileId),
+}
+
+/// Allow-listed predicate operators for advanced query filter expressions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "pred", rename_all = "snake_case")]
+pub enum AdvancedPredicate {
+    /// Field equals a bound value.
+    Equals {
+        /// Column or field name to test.
+        field: String,
+        /// Expected value.
+        value: AdvancedValue,
+    },
+    /// Field does not equal a bound value.
+    NotEquals {
+        /// Column or field name to test.
+        field: String,
+        /// Value to exclude.
+        value: AdvancedValue,
+    },
+    /// Field value is contained in a bounded set.
+    In {
+        /// Column or field name to test.
+        field: String,
+        /// Bounded set of allowed values.
+        values: Vec<AdvancedValue>,
+    },
+    /// Logical conjunction of bounded predicates.
+    And {
+        /// Predicates that must all hold.
+        predicates: Vec<AdvancedPredicate>,
+    },
+    /// Logical disjunction of bounded predicates.
+    Or {
+        /// Predicates of which at least one must hold.
+        predicates: Vec<AdvancedPredicate>,
+    },
+}
+
+/// Traversal relation kinds permitted by the advanced query AST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AdvancedRelationKind {
+    /// Direct call edges.
+    Calls,
+    /// Reverse call edges.
+    CalledBy,
+    /// Import or use edges.
+    Imports,
+    /// Reverse import edges.
+    ImportedBy,
+    /// Test-to-subject edges.
+    Tests,
+    /// Subject-to-test edges.
+    TestedBy,
+    /// Containment or module membership.
+    Contains,
+    /// Reverse containment.
+    ContainedBy,
+    /// Trait or interface implementation edges.
+    Implements,
+    /// Reverse implementation edges.
+    ImplementedBy,
+    /// General reference edges.
+    References,
+    /// Reverse reference edges.
+    ReferencedBy,
+}
+
+impl AdvancedRelationKind {
+    /// Stable wire label shared with the MCP relation-kind contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Calls => "calls",
+            Self::CalledBy => "called_by",
+            Self::Imports => "imports",
+            Self::ImportedBy => "imported_by",
+            Self::Tests => "tests",
+            Self::TestedBy => "tested_by",
+            Self::Contains => "contains",
+            Self::ContainedBy => "contained_by",
+            Self::Implements => "implements",
+            Self::ImplementedBy => "implemented_by",
+            Self::References => "references",
+            Self::ReferencedBy => "referenced_by",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "calls" => Some(Self::Calls),
+            "called_by" => Some(Self::CalledBy),
+            "imports" => Some(Self::Imports),
+            "imported_by" => Some(Self::ImportedBy),
+            "tests" => Some(Self::Tests),
+            "tested_by" => Some(Self::TestedBy),
+            "contains" => Some(Self::Contains),
+            "contained_by" => Some(Self::ContainedBy),
+            "implements" => Some(Self::Implements),
+            "implemented_by" => Some(Self::ImplementedBy),
+            "references" => Some(Self::References),
+            "referenced_by" => Some(Self::ReferencedBy),
+            _ => None,
+        }
+    }
+}
+
+/// Traversal direction for advanced query graph navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AdvancedTraverseDirection {
+    /// Follow edges toward callers or importers.
+    Inbound,
+    /// Follow edges toward callees or dependencies.
+    Outbound,
+    /// Follow edges in both directions.
+    Both,
+}
+
+/// Allow-listed aggregate functions for the advanced query AST.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "fn", rename_all = "snake_case")]
+pub enum AdvancedAggregateFunction {
+    /// Count rows in each group.
+    Count,
+    /// Sum a numeric field per group.
+    Sum {
+        /// Numeric field to sum.
+        field: String,
+    },
+    /// Minimum of a comparable field per group.
+    Min {
+        /// Field to minimize.
+        field: String,
+    },
+    /// Maximum of a comparable field per group.
+    Max {
+        /// Field to maximize.
+        field: String,
+    },
+}
+
+/// One sort directive for the advanced query sort operator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvancedSortKey {
+    /// Column or field name to sort by.
+    pub field: String,
+    /// Whether to sort ascending or descending.
+    pub descending: bool,
+}
+
+/// Typed declarative advanced query AST node.
+///
+/// This is the query-layer mirror of the public contract AST. It is bounded and
+/// allow-listed; SQL strings, Cypher text, shell fragments, arbitrary regex,
+/// arbitrary code, and unbounded recursion are forbidden. The serde
+/// representation is wire-compatible with the contract AST so a normalized
+/// request can cross the daemon boundary unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum AdvancedAstNode {
+    /// Base scan over entities of a given kind.
+    Scan {
+        /// Entity kind to scan.
+        entity: AdvancedEntityKind,
+        /// Optional filter applied during the scan.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<Box<AdvancedPredicate>>,
+    },
+    /// Filter rows from an input node by a bounded predicate.
+    Filter {
+        /// Input node producing rows to filter.
+        input: Box<AdvancedAstNode>,
+        /// Predicate that rows must satisfy.
+        predicate: AdvancedPredicate,
+    },
+    /// Project a bounded set of columns from an input node.
+    Project {
+        /// Input node producing rows to project.
+        input: Box<AdvancedAstNode>,
+        /// Column names to retain.
+        columns: Vec<String>,
+    },
+    /// Join two input nodes on a shared key column.
+    Join {
+        /// Left input node.
+        left: Box<AdvancedAstNode>,
+        /// Right input node.
+        right: Box<AdvancedAstNode>,
+        /// Column name to join on.
+        on: String,
+    },
+    /// Aggregate rows from an input node by grouping keys.
+    Aggregate {
+        /// Input node producing rows to aggregate.
+        input: Box<AdvancedAstNode>,
+        /// Column names to group by.
+        group_by: Vec<String>,
+        /// Aggregate functions to compute per group.
+        aggregations: Vec<AdvancedAggregateFunction>,
+    },
+    /// Traverse graph edges from a seed symbol or bound column.
+    Traverse {
+        /// Seed symbol identifier for the traversal origin.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed: Option<SymbolId>,
+        /// Column name providing seed identifiers from the input node.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed_from: Option<String>,
+        /// Relation kind to traverse.
+        relation: AdvancedRelationKind,
+        /// Traversal direction.
+        direction: AdvancedTraverseDirection,
+        /// Maximum traversal depth, hard ceiling five.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_depth: Option<u8>,
+    },
+    /// Sort rows from an input node by bounded keys.
+    Sort {
+        /// Input node producing rows to sort.
+        input: Box<AdvancedAstNode>,
+        /// Sort directives applied in order.
+        by: Vec<AdvancedSortKey>,
+    },
+    /// Limit the number of rows from an input node.
+    Limit {
+        /// Input node producing rows to limit.
+        input: Box<AdvancedAstNode>,
+        /// Maximum rows to return.
+        max_rows: u16,
+    },
+}
+
+impl AdvancedAstNode {
+    /// Derives the operator sequence (innermost first) and the nesting depth.
+    #[must_use]
+    pub fn derive_plan_shape(&self) -> (Vec<AdvancedOperator>, usize) {
+        let mut operators = Vec::new();
+        let depth = self.collect_operators(&mut operators);
+        (operators, depth)
+    }
+
+    fn collect_operators(&self, operators: &mut Vec<AdvancedOperator>) -> usize {
+        match self {
+            Self::Scan { .. } => {
+                operators.push(AdvancedOperator::Scan);
+                1
+            }
+            Self::Filter { input, .. } => {
+                let depth = input.collect_operators(operators);
+                operators.push(AdvancedOperator::Filter);
+                depth + 1
+            }
+            Self::Project { input, .. } => {
+                let depth = input.collect_operators(operators);
+                operators.push(AdvancedOperator::Project);
+                depth + 1
+            }
+            Self::Join { left, right, .. } => {
+                let left_depth = left.collect_operators(operators);
+                let right_depth = right.collect_operators(operators);
+                operators.push(AdvancedOperator::Join);
+                left_depth.max(right_depth) + 1
+            }
+            Self::Aggregate { input, .. } => {
+                let depth = input.collect_operators(operators);
+                operators.push(AdvancedOperator::Aggregate);
+                depth + 1
+            }
+            Self::Traverse { .. } => {
+                operators.push(AdvancedOperator::Traverse);
+                1
+            }
+            Self::Sort { input, .. } => {
+                let depth = input.collect_operators(operators);
+                operators.push(AdvancedOperator::Sort);
+                depth + 1
+            }
+            Self::Limit { input, .. } => {
+                let depth = input.collect_operators(operators);
+                operators.push(AdvancedOperator::Limit);
+                depth + 1
+            }
+        }
+    }
+}
+
+/// Prevalidated `query.advanced` plan.
+///
+/// The plan captures the safe AST, the derived operator sequence, the static
+/// cost estimate, and the resolved limits. Execution serves only the supported
+/// operator subset; everything else yields an honest unsupported result.
+#[derive(Debug, Clone)]
+pub struct AdvancedQueryPlan {
+    pub(crate) ast: AdvancedAstNode,
+    pub(crate) operators: Vec<AdvancedOperator>,
+    pub(crate) max_rows: usize,
+    pub(crate) max_traversal: usize,
+    pub(crate) depth: usize,
+    pub(crate) estimated_cost: u64,
+    pub(crate) explain: bool,
+    pub(crate) budget: QueryBudget,
+    pub(crate) explanation: PlanExplanation,
+}
+
+impl AdvancedQueryPlan {
+    /// Validates an operator sequence and limits, returning the static cost.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryError::PlanRejected`] when the operator list is empty, the
+    /// depth exceeds the hard ceiling, the row limit is out of range, the
+    /// traversal bound is exceeded, or the static cost estimate is too large.
+    pub fn validate(
+        operators: &[AdvancedOperator],
+        max_rows: usize,
+        max_traversal: usize,
+        depth: usize,
+    ) -> Result<u64, QueryError> {
+        if operators.is_empty() {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if depth > ADVANCED_MAX_DEPTH {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if max_rows == 0 || max_rows > ADVANCED_MAX_RESULTS {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if max_traversal > ADVANCED_MAX_TRAVERSAL {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Edges,
+            });
+        }
+        let estimated_cost = operators
+            .iter()
+            .fold(0u64, |acc, op| acc.saturating_add(op.base_cost()))
+            .saturating_mul(u64::try_from(max_rows).unwrap_or(u64::MAX) / 100 + 1);
+        if estimated_cost > ADVANCED_MAX_ESTIMATED_COST {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        Ok(estimated_cost)
+    }
+
+    /// Whether a static cost estimate fits an optional client cost limit.
+    ///
+    /// An absent limit always admits the estimate.
+    #[must_use]
+    pub fn admits_cost(estimated_cost: u64, cost_limit: Option<u64>) -> bool {
+        match cost_limit {
+            Some(limit) => estimated_cost <= limit,
+            None => true,
+        }
+    }
+
+    /// Returns the deterministic plan explanation.
+    #[must_use]
+    pub const fn explanation(&self) -> &PlanExplanation {
+        &self.explanation
+    }
+}
+
+/// Supported column types in advanced query results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AdvancedColumnType {
+    /// Stable symbol identifier.
+    SymbolId,
+    /// Stable file identifier.
+    FileId,
+    /// UTF-8 text.
+    Text,
+    /// Signed 64-bit integer.
+    Integer,
+    /// Boolean.
+    Boolean,
+    /// Repository-relative path.
+    Path,
+}
+
+impl AdvancedColumnType {
+    /// Stable wire label shared with the MCP column-type contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SymbolId => "symbol_id",
+            Self::FileId => "file_id",
+            Self::Text => "text",
+            Self::Integer => "integer",
+            Self::Boolean => "boolean",
+            Self::Path => "path",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "symbol_id" => Some(Self::SymbolId),
+            "file_id" => Some(Self::FileId),
+            "text" => Some(Self::Text),
+            "integer" => Some(Self::Integer),
+            "boolean" => Some(Self::Boolean),
+            "path" => Some(Self::Path),
+            _ => None,
+        }
+    }
+}
+
+/// Typed column definition in an advanced query result schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdvancedColumnSchema {
+    /// Stable column name.
+    pub name: String,
+    /// Column type descriptor.
+    pub column_type: AdvancedColumnType,
+}
+
+/// Explainable cost and plan for an advanced query execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdvancedPlanExplanation {
+    /// Estimated total cost units for the query plan.
+    pub estimated_cost: u64,
+    /// Ordered operator names in the physical plan.
+    pub operators: Vec<String>,
+    /// Applied limit descriptions.
+    pub applied_limits: Vec<String>,
+}
+
+/// Completeness classification for an advanced query result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AdvancedCompleteness {
+    /// All matching rows were returned.
+    Complete,
+    /// Result is safely pageable with a continuation cursor.
+    Paged,
+    /// Result was truncated by a hard limit.
+    Truncated,
+    /// Query pattern is not supported in this slice.
+    Unsupported,
+}
+
+impl AdvancedCompleteness {
+    /// Stable wire label shared with the MCP completeness contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Paged => "paged",
+            Self::Truncated => "truncated",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    /// Parses a stable wire label.
+    #[must_use]
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "complete" => Some(Self::Complete),
+            "paged" => Some(Self::Paged),
+            "truncated" => Some(Self::Truncated),
+            "unsupported" => Some(Self::Unsupported),
+            _ => None,
+        }
+    }
+}
+
+/// Data returned by a `query.advanced` plan.
+///
+/// Rows are repository-controlled JSON objects keyed by column name. The
+/// `plan` is present only when an explanation was requested. Completeness is
+/// honest: unsupported patterns return non-empty columns and empty rows rather
+/// than fabricated data.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AdvancedQueryResult {
+    /// Immutable generation that served the query.
+    pub generation: GenerationId,
+    /// Stable typed column definitions for the result rows.
+    pub columns: Vec<AdvancedColumnSchema>,
+    /// Typed result rows as JSON objects keyed by column name.
+    pub rows: Vec<serde_json::Value>,
+    /// Operators, estimates, and applied limits when explain was requested.
+    pub plan: Option<AdvancedPlanExplanation>,
+    /// Whether the result is complete, paged, truncated, or unsupported.
+    pub completeness: AdvancedCompleteness,
+    /// Resource limits that stopped work, in deterministic execution order.
+    pub limiting_resources: Vec<QueryResource>,
+    /// Mandatory trust marker for repository-controlled values.
+    pub trust: RepositoryDataTrust,
 }
 
 /// Failure from the bounded daemon-independent query layer.
