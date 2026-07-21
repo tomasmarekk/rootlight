@@ -2547,6 +2547,18 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
     let source = wire_source_reference(5, 10, 2, 2);
     let cases = vec![
         (
+            VerticalTool::RepoStatus,
+            json!({"repository": {"repository_id": repository()}, "budget": {}}),
+        ),
+        (
+            VerticalTool::RepoStatus,
+            json!({"repository": {"repository_id": repository()}, "response_profile": "standard"}),
+        ),
+        (
+            VerticalTool::RepoList,
+            json!({"response_profile": "standard"}),
+        ),
+        (
             VerticalTool::RepoIndex,
             json!({"repository_id": repository()}),
         ),

@@ -2161,6 +2161,11 @@ where
     if input.states.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
+    // Non-compact response profiles are not served by this slice; rejecting
+    // here keeps the field from being silently ignored.
+    if !compact_profile(input.response_profile) {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
     let page_size = input.max_results.unwrap_or(DEFAULT_REPO_LIST_RESULTS);
     let context = repo_list_cursor_context(input.query.as_deref(), page_size);
     let offset = match &input.cursor {
@@ -2317,10 +2322,13 @@ where
     let input: RepoStatusInput = decode_input(arguments)?;
     let repository = repository_id(input.repository.clone(), unsupported)?;
     // Granular coverage, operation lists, and freshness gates are not served by
-    // this slice.
+    // this slice; neither are custom budgets or non-compact response profiles
+    // (rejecting them keeps those fields from being silently ignored).
     if input.coverage_detail.is_some()
         || input.require_freshness.is_some()
         || input.include_operations == Some(true)
+        || input.budget.is_some()
+        || !compact_profile(input.response_profile)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
