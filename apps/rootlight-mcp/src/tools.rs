@@ -1323,6 +1323,14 @@ mod tests {
         }
         assert_eq!(tools[0]["annotations"]["readOnlyHint"], false);
         assert_eq!(tools[2]["annotations"]["readOnlyHint"], true);
+        let operation_status = tools
+            .iter()
+            .find(|tool| tool["name"] == "operation.status")
+            .expect("operation.status is listed");
+        assert_eq!(
+            operation_status["annotations"]["readOnlyHint"], false,
+            "operation.status can cancel and must not be advertised as read-only"
+        );
     }
 
     #[tokio::test]

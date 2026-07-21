@@ -326,9 +326,13 @@ impl VerticalTool {
     }
 
     /// Whether the tool only reads already published state.
+    ///
+    /// `operation.status` can execute a cancel action, so it is conservatively
+    /// reported as not read-only even though a pure status read has no side
+    /// effect; clients must never treat a cancellation-capable call as read-only.
     #[must_use]
     pub const fn read_only(self) -> bool {
-        !matches!(self, Self::RepoIndex)
+        !matches!(self, Self::RepoIndex | Self::OperationStatus)
     }
 
     /// Whether repeating the same admitted request has the same intended effect.

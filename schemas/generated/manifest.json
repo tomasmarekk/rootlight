@@ -66,7 +66,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "d9e8bc8ced44edfe7337a8c4e4adb7f5fc0ac7dae54b8429d141905bd1b9faca"
+      "blake3": "4eee97b47e1e7556e1fc836489b4e058cef954d606eece9ca58868181b219146"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",

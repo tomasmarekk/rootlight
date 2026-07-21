@@ -184,9 +184,13 @@ impl McpTool {
     }
 
     /// Whether the tool only reads already published state.
+    ///
+    /// `operation.status` can execute a cancel action, so it is conservatively
+    /// reported as not read-only even though a pure status read has no side
+    /// effect; clients must never treat a cancellation-capable call as read-only.
     #[must_use]
     pub const fn read_only(self) -> bool {
-        !matches!(self, Self::RepoIndex)
+        !matches!(self, Self::RepoIndex | Self::OperationStatus)
     }
 
     /// Whether repeating the same admitted request has the same intended effect.
@@ -434,10 +438,10 @@ mod tests {
     }
 
     #[test]
-    fn only_repo_index_is_not_read_only() {
+    fn mutation_capable_tools_are_not_read_only() {
         for tool in McpTool::ALL {
-            if tool == McpTool::RepoIndex {
-                assert!(!tool.read_only());
+            if matches!(tool, McpTool::RepoIndex | McpTool::OperationStatus) {
+                assert!(!tool.read_only(), "{} has side effects", tool.name());
             } else {
                 assert!(tool.read_only(), "{} should be read-only", tool.name());
             }
