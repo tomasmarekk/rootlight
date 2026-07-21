@@ -2880,6 +2880,42 @@ async fn unsupported_fields_are_rejected_with_field_specific_actions() {
 }
 
 #[tokio::test]
+async fn tests_select_explain_returns_a_plan_without_retrieval() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
+        repository_id: repository(),
+        active_generation: generation(),
+        parent_generation: None,
+        structural_freshness: "current".to_owned(),
+        semantic_freshness: "current".to_owned(),
+        state: "ready".to_owned(),
+        coverage: vec![],
+    })));
+    let output = execute(
+        &harness.executor,
+        VerticalTool::TestsSelect,
+        json!({"repository": {"repository_id": repository()}, "seeds": {"symbols": [symbol()]}, "explain": true}),
+    )
+    .await
+    .expect("explain executes");
+    let output: TestsSelectOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected explain success");
+    };
+    assert!(
+        output.data.tests.is_empty(),
+        "explain performs no retrieval"
+    );
+    assert!(output.data.gaps.is_empty(), "explain performs no retrieval");
+    let explanation = output.data.explanation.expect("explain returns a plan");
+    assert_eq!(explanation.operators, vec!["test_selection".to_owned()]);
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        1,
+        "only the metadata status call runs, no test selection"
+    );
+}
+
+#[tokio::test]
 async fn change_impact_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),

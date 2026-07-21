@@ -3558,6 +3558,39 @@ fn architecture_view_from_label(label: &str) -> Result<ArchitectureView, ToolExe
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
+/// Builds the source-free `tests.select` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no test selection
+/// runs. The plan is deterministic for the normalized request.
+async fn explain_tests_select<P>(
+    port: Arc<P>,
+    request: TestsSelectPortRequest,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<TestsSelectData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(request.repository, request.generation);
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let explanation = rootlight_agent::explain::tests_select_plan(request.max_tests);
+    let data = TestsSelectData {
+        tests: Vec::new(),
+        coverage_strategy: TestCoverageStrategy {
+            direct_edges: false,
+            transitive_signals: false,
+            history_signals: false,
+            build_target_signals: false,
+        },
+        gaps: Vec::new(),
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_tests_select<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -3568,7 +3601,12 @@ where
     P: FirstSliceClientPort,
 {
     let input: TestsSelectInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let request = normalize_tests_select(input, unsupported)?;
+    if explain_only {
+        let output = explain_tests_select(port, request, cancellation).await?;
+        return serialize_success(output);
+    }
     let expected = request.clone();
     let future = port.tests_select(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -3664,6 +3702,7 @@ fn map_tests_select(
             build_target_signals: strategy.build_target_signals,
         },
         gaps,
+        explanation: None,
     };
     // The requested test cap is an explicit bound honored by the daemon; this
     // slice does not surface separate budget-truncation through the wire.

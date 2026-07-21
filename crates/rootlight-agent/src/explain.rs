@@ -25,6 +25,9 @@ const TRACE_COST_PER_DEPTH: u64 = 32;
 /// Estimated cost units per planned changed input for `change.impact`.
 const IMPACT_COST_PER_CHANGE: u64 = 40;
 
+/// Estimated cost units per planned selected test for `tests.select`.
+const TESTS_COST_PER_TEST: u64 = 6;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -128,6 +131,20 @@ pub fn change_impact_plan(changed_count: usize) -> PlanExplanation {
     }
 }
 
+/// Builds the source-free `tests.select` plan for explain mode.
+///
+/// `max_tests` bounds the planned selection and drives the cost estimate.
+#[must_use]
+pub fn tests_select_plan(max_tests: Option<u16>) -> PlanExplanation {
+    let tests = u64::from(max_tests.unwrap_or(100));
+    let cost = tests.saturating_mul(TESTS_COST_PER_TEST);
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["test_selection".to_owned()],
+        applied_limits: vec![format!("max_tests: {tests}")],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::code_locate_plan;
@@ -203,5 +220,14 @@ mod tests {
         let plan = change_impact_plan(2);
         assert_eq!(plan.operators, vec!["change_analysis".to_owned()]);
         assert_eq!(plan.applied_limits, vec!["changed_inputs: 2".to_owned()]);
+    }
+
+    #[test]
+    fn tests_select_plan_is_deterministic_and_bounded() {
+        use super::tests_select_plan;
+        assert_eq!(tests_select_plan(Some(20)), tests_select_plan(Some(20)));
+        let plan = tests_select_plan(Some(20));
+        assert_eq!(plan.operators, vec!["test_selection".to_owned()]);
+        assert_eq!(plan.applied_limits, vec!["max_tests: 20".to_owned()]);
     }
 }

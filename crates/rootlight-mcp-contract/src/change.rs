@@ -439,6 +439,9 @@ pub struct TestsSelectInput {
     /// Requested response profile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// One ranked test in the selection result.
@@ -507,6 +510,9 @@ pub struct TestsSelectData {
     /// Identified coverage gaps.
     #[schemars(length(max = 128))]
     pub gaps: Vec<TestGap>,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 /// Checked success-or-error output for `tests.select`.
