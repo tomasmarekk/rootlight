@@ -157,7 +157,7 @@ const fn is_czech_specific_letter(character: char) -> bool {
     )
 }
 
-fn forbidden_reference(input: &[u8]) -> Option<ForbiddenRule> {
+pub(crate) fn forbidden_reference(input: &[u8]) -> Option<ForbiddenRule> {
     if contains_numbered_plan_label(input) {
         return Some(ForbiddenRule::NumberedPlanLabel);
     }

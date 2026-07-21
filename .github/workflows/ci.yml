@@ -755,7 +755,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, parser-evidence, semantic-evidence, capability-evidence, adapter-isolation]
+    needs: [fast, msrv, current-stable, platform, vertical-slice, supply-chain, offline, commit-hygiene, parser-evidence, semantic-evidence, capability-evidence, adapter-isolation]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -802,7 +802,28 @@ jobs:
               print(f"required CI jobs did not succeed: {failures}", file=sys.stderr)
               raise SystemExit(1)
           print(
-              "all required foundation, daemon, vertical-slice, and evidence jobs "
-              "satisfied their requirements"
+            "all required foundation, daemon, vertical-slice, and evidence jobs "
+            "satisfied their requirements"
           )
           PY
+
+  commit-hygiene:
+    name: commit hygiene / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - name: Scan pull request commit range
+        if: github.event_name == 'pull_request'
+        run: cargo run --locked --quiet --package xtask -- internal-id-check --range "origin/${GITHUB_BASE_REF}..HEAD"
+      - name: Scan pull request title and body
+        if: github.event_name == 'pull_request'
+        run: cargo run --locked --quiet --package xtask -- internal-id-check --event "$GITHUB_EVENT_PATH"
+      - name: Scan pushed commit messages
+        if: github.event_name == 'push'
+        run: cargo run --locked --quiet --package xtask -- internal-id-check --event "$GITHUB_EVENT_PATH"

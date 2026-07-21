@@ -1,0 +1,10 @@
+#!/bin/sh
+# Reject internal planning identifiers in commit messages.
+#
+# Commit subjects and bodies must describe product behavior using Conventional
+# Commits, not private planning identifiers. This hook runs the same detector
+# that CI enforces over the pull-request commit range.
+#
+# Install once per clone with:
+#   git config core.hooksPath .githooks
+exec cargo run --locked --quiet --package xtask -- internal-id-check --commit-msg-file "$1"
