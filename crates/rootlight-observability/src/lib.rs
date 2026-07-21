@@ -50,7 +50,7 @@ const SUPPORT_ENTRY_COUNT_V1: usize = 5;
 const SUPPORT_ENTRY_COUNT_V2: usize = 6;
 const SUPPORT_ENTRY_COUNT_V3: usize = 6;
 const CONTROL_METHOD_COUNT_V2: usize = 8;
-const CONTROL_METHOD_COUNT: usize = 24;
+const CONTROL_METHOD_COUNT: usize = 25;
 const TELEMETRY_OUTCOME_COUNT: usize = 6;
 /// Ordered allow-list for the frozen support archive schema.
 pub const SUPPORT_ENTRY_NAMES: [&str; SUPPORT_ENTRY_COUNT_V1] = [
@@ -408,6 +408,8 @@ pub enum ControlMethod {
     PlanChange,
     /// Generation-pinned bounded history comparison.
     HistoryCompare,
+    /// Generation-pinned bounded advanced query over a safe typed AST.
+    QueryAdvanced,
 }
 
 impl ControlMethod {
@@ -437,6 +439,7 @@ impl ControlMethod {
         Self::ChangeImpact,
         Self::PlanChange,
         Self::HistoryCompare,
+        Self::QueryAdvanced,
     ];
 
     const fn index(self) -> usize {
@@ -465,6 +468,7 @@ impl ControlMethod {
             Self::ChangeImpact => 21,
             Self::PlanChange => 22,
             Self::HistoryCompare => 23,
+            Self::QueryAdvanced => 24,
         }
     }
 }
