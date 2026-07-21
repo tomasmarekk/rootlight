@@ -42,9 +42,10 @@ use rootlight_mcp_contract::{
     SourceReadInput, SymbolExplainInput, ToolResponse, TrustClassification, VerticalTool,
     context::{
         BatchOperation, BatchOperationResult, BatchOperationStatus, BatchStatus, BatchTool,
-        ContextItem, ContextPackData, ContextPackId, ContextPackInput, ContextStructure,
-        EvidenceRole as ContextEvidenceRole, FailurePolicy, OmissionSummary, QueryBatchData,
-        QueryBatchInput, TokenAccounting, ToolSuggestion,
+        ColumnSchema, ColumnType, ContextItem, ContextPackData, ContextPackId, ContextPackInput,
+        ContextStructure, EvidenceRole as ContextEvidenceRole, FailurePolicy, OmissionSummary,
+        PlanExplanation, QueryAdvancedData, QueryAdvancedInput, QueryAstNode, QueryBatchData,
+        QueryBatchInput, QueryCompleteness, TokenAccounting, ToolSuggestion,
     },
     repository::{
         CoverageReport, LanguageCoverageReport, RepoListData, RepoListInput, RepoStatusData,
@@ -67,6 +68,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL, QueryOperator};
 use crate::batch::BatchPlan;
 use crate::context_pack::{
     EvidenceCandidate as PackEvidenceCandidate, EvidenceRole as PackEvidenceRole, PackObjective,
@@ -79,10 +81,10 @@ use crate::{
 };
 
 const DEFAULT_LOCATE_RESULTS: u16 = 20;
+const DEFAULT_ADVANCED_RESULTS: u16 = 100;
 const CURRENT_SOURCE_CONTEXT_LINES: u8 = 2;
 const INVALID_ARGUMENT_MESSAGE: &str = "tool arguments are invalid";
 const UNSUPPORTED_MESSAGE: &str = "requested option is not supported";
-const UNAVAILABLE_MESSAGE: &str = "tool is not yet available through this bridge";
 const BATCH_OPERATION_FAILED_MESSAGE: &str = "batch operation failed";
 
 /// Future returned by one injected first-slice client-port operation.
@@ -216,6 +218,13 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         request: HistoryComparePortRequest,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<HistoryComparePortResponse>;
+
+    /// Executes one bounded advanced query over a safe typed AST.
+    fn query_advanced(
+        &self,
+        request: QueryAdvancedPortRequest,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<QueryAdvancedPortResponse>;
 }
 
 /// Source-free failure emitted by an injected daemon client port.
@@ -1153,6 +1162,77 @@ impl HistoryComparePortResponse {
     }
 }
 
+/// Normalized `query.advanced` request ready for the daemon client port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryAdvancedPortRequest {
+    repository: RepositoryId,
+    generation: client::GenerationSelector,
+    query_ast: String,
+    explain: Option<bool>,
+    max_results: Option<u16>,
+    max_depth: Option<u8>,
+    cost_limit: Option<u64>,
+}
+
+impl QueryAdvancedPortRequest {
+    /// Returns the selected repository.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the pinned generation selector.
+    #[must_use]
+    pub const fn generation(&self) -> client::GenerationSelector {
+        self.generation
+    }
+
+    /// Returns the JSON-encoded safe typed AST.
+    #[must_use]
+    pub fn query_ast(&self) -> &str {
+        &self.query_ast
+    }
+
+    /// Returns whether a plan explanation was requested without execution.
+    #[must_use]
+    pub const fn explain(&self) -> Option<bool> {
+        self.explain
+    }
+
+    /// Returns the optional result cap.
+    #[must_use]
+    pub const fn max_results(&self) -> Option<u16> {
+        self.max_results
+    }
+
+    /// Returns the optional maximum plan or traversal depth.
+    #[must_use]
+    pub const fn max_depth(&self) -> Option<u8> {
+        self.max_depth
+    }
+
+    /// Returns the optional client cost ceiling.
+    #[must_use]
+    pub const fn cost_limit(&self) -> Option<u64> {
+        self.cost_limit
+    }
+}
+
+/// Detected daemon advanced-query data plus mandatory MCP read metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryAdvancedPortResponse {
+    result: client::AdvancedQuery,
+    metadata: ReadResponseMetadata,
+}
+
+impl QueryAdvancedPortResponse {
+    /// Creates a complete `query.advanced` response for MCP mapping.
+    #[must_use]
+    pub const fn new(result: client::AdvancedQuery, metadata: ReadResponseMetadata) -> Self {
+        Self { result, metadata }
+    }
+}
+
 /// Normalized exact-reference `source.read` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceReadPortRequest {
@@ -1260,7 +1340,6 @@ pub struct FirstSliceToolExecutor<P> {
     port: Arc<P>,
     invalid_arguments: PublicError,
     unsupported: PublicError,
-    unavailable: PublicError,
 }
 
 impl<P> FirstSliceToolExecutor<P>
@@ -1288,15 +1367,10 @@ where
                 .next_action(NextAction::CorrectField { field })
                 .build()
                 .map_err(ToolExecutorBuildError::InvalidArgumentError)?;
-        let unavailable =
-            PublicError::builder(ErrorCode::UnsupportedCapability, UNAVAILABLE_MESSAGE)
-                .build()
-                .map_err(ToolExecutorBuildError::UnsupportedError)?;
         Ok(Self {
             port: Arc::new(port),
             invalid_arguments,
             unsupported,
-            unavailable,
         })
     }
 }
@@ -1314,7 +1388,6 @@ where
         let port = Arc::clone(&self.port);
         let invalid_arguments = self.invalid_arguments.clone();
         let unsupported = self.unsupported.clone();
-        let unavailable = self.unavailable.clone();
         Box::pin(async move {
             match tool {
                 VerticalTool::RepoIndex => {
@@ -1342,7 +1415,9 @@ where
                 VerticalTool::HistoryCompare => {
                     execute_history_compare(port, arguments, cancellation, &unsupported).await
                 }
-                VerticalTool::QueryAdvanced => execute_intent_fallback(&unavailable).await,
+                VerticalTool::QueryAdvanced => {
+                    execute_query_advanced(port, arguments, cancellation, &unsupported).await
+                }
                 VerticalTool::SymbolRelationships => {
                     execute_symbol_relationships(port, arguments, cancellation, &unsupported).await
                 }
@@ -1414,12 +1489,6 @@ impl<P> fmt::Debug for FirstSliceToolExecutor<P> {
 /// coverage, or data that Rootlight cannot prove. The router validates the
 /// input schema before execution, so malformed requests are rejected before
 /// this point.
-async fn execute_intent_fallback(
-    unavailable: &PublicError,
-) -> Result<Map<String, Value>, ToolExecutionError> {
-    Err(ToolExecutionError::new(unavailable.clone()))
-}
-
 /// Executes a bounded `query.batch` by composing the read tools that already
 /// have a production engine behind this bridge.
 ///
@@ -3609,6 +3678,174 @@ fn map_history_compare(
 }
 
 fn semantic_change_kind_from_label(label: &str) -> Result<SemanticChangeKind, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+async fn execute_query_advanced<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: QueryAdvancedInput = decode_input(arguments)?;
+    let request = normalize_query_advanced(input, unsupported)?;
+    let expected = request.clone();
+    let future = port.query_advanced(request, cancellation.clone());
+    let response = await_port(future, cancellation).await?;
+    let output = map_query_advanced(response, &expected)?;
+    serialize_success(output)
+}
+
+fn normalize_query_advanced(
+    input: QueryAdvancedInput,
+    unsupported: &PublicError,
+) -> Result<QueryAdvancedPortRequest, ToolExecutionError> {
+    let repository = repository_id(input.repository, unsupported)?;
+    // Paging cursors and bound parameters are not served by this slice.
+    if input.cursor.is_some()
+        || input
+            .parameters
+            .as_ref()
+            .is_some_and(|parameters| !parameters.is_empty())
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    // Derive the operator sequence and nesting depth, then validate the static
+    // plan against the resource ceilings before crossing the daemon boundary.
+    let mut operators = Vec::new();
+    let depth = derive_query_operators(&input.query, &mut operators);
+    let max_rows = usize::from(input.max_results.unwrap_or(DEFAULT_ADVANCED_RESULTS));
+    let plan = AdvancedQueryPlan::validate(&operators, max_rows, MAX_ADVANCED_TRAVERSAL, depth)
+        .map_err(|_| ToolExecutionError::new(unsupported.clone()))?;
+    // Honor the optional client cost ceiling against the static estimate.
+    if input
+        .cost_limit
+        .is_some_and(|limit| plan.estimated_cost > limit)
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    let query_ast = serde_json::to_string(&input.query)
+        .map_err(|_| ToolExecutionError::new(unsupported.clone()))?;
+    Ok(QueryAdvancedPortRequest {
+        repository,
+        generation: client_generation(input.generation),
+        query_ast,
+        explain: input.explain,
+        max_results: input.max_results,
+        max_depth: input.max_depth,
+        cost_limit: input.cost_limit,
+    })
+}
+
+/// Walks a safe typed AST, appending each operator innermost-first and
+/// returning the nesting depth.
+fn derive_query_operators(node: &QueryAstNode, operators: &mut Vec<QueryOperator>) -> usize {
+    match node {
+        QueryAstNode::Scan { .. } => {
+            operators.push(QueryOperator::Scan);
+            1
+        }
+        QueryAstNode::Filter { input, .. } => {
+            let depth = derive_query_operators(input, operators);
+            operators.push(QueryOperator::Filter);
+            depth + 1
+        }
+        QueryAstNode::Project { input, .. } => {
+            let depth = derive_query_operators(input, operators);
+            operators.push(QueryOperator::Project);
+            depth + 1
+        }
+        QueryAstNode::Join { left, right, .. } => {
+            let left_depth = derive_query_operators(left, operators);
+            let right_depth = derive_query_operators(right, operators);
+            operators.push(QueryOperator::Join);
+            left_depth.max(right_depth) + 1
+        }
+        QueryAstNode::Aggregate { input, .. } => {
+            let depth = derive_query_operators(input, operators);
+            operators.push(QueryOperator::Aggregate);
+            depth + 1
+        }
+        QueryAstNode::Traverse { .. } => {
+            operators.push(QueryOperator::Traverse);
+            1
+        }
+        QueryAstNode::Sort { input, .. } => {
+            let depth = derive_query_operators(input, operators);
+            operators.push(QueryOperator::Sort);
+            depth + 1
+        }
+        QueryAstNode::Limit { input, .. } => {
+            let depth = derive_query_operators(input, operators);
+            operators.push(QueryOperator::Limit);
+            depth + 1
+        }
+    }
+}
+
+fn map_query_advanced(
+    response: QueryAdvancedPortResponse,
+    request: &QueryAdvancedPortRequest,
+) -> Result<ReadEnvelope<QueryAdvancedData>, ToolExecutionError> {
+    validate_query_context(
+        &response.result.context,
+        request.repository,
+        request.generation,
+    )?;
+    if response.result.columns.is_empty() || response.result.columns.len() > 64 {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    let mut columns = Vec::new();
+    columns
+        .try_reserve_exact(response.result.columns.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for column in response.result.columns {
+        columns.push(ColumnSchema {
+            name: column.name,
+            column_type: column_type_from_label(&column.column_type)?,
+        });
+    }
+    if response.result.rows.len() > 1_000 {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    let rows = response.result.rows;
+    let plan = match response.result.plan {
+        Some(plan) => {
+            if plan.estimated_cost > 10_000_000
+                || plan.operators.len() > 64
+                || plan.applied_limits.len() > 16
+            {
+                return Err(internal(ToolExecutionFailure::InvalidResponse));
+            }
+            RequiredNullable(Some(PlanExplanation {
+                estimated_cost: plan.estimated_cost,
+                operators: plan.operators,
+                applied_limits: plan.applied_limits,
+            }))
+        }
+        None => RequiredNullable(None),
+    };
+    let completeness = query_completeness_from_label(&response.result.completeness)?;
+    let truncated = matches!(completeness, QueryCompleteness::Truncated);
+    let data = QueryAdvancedData {
+        columns,
+        rows,
+        plan,
+        completeness,
+    };
+    map_read_envelope(response.result.context, response.metadata, data, truncated)
+}
+
+fn column_type_from_label(label: &str) -> Result<ColumnType, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+fn query_completeness_from_label(label: &str) -> Result<QueryCompleteness, ToolExecutionError> {
     serde_json::from_value(Value::String(label.to_owned()))
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }

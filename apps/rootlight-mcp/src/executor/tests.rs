@@ -12,6 +12,7 @@ use std::{
 };
 
 use rootlight_client::{
+    AdvancedColumn as ClientAdvancedColumn, AdvancedQuery as ClientAdvancedQuery,
     AnalysisTier as ClientTier, ArchitectureCycles as ClientArchitectureCycles,
     ArchitectureOverview as ClientArchitectureOverview,
     ArchitectureOverviewComponent as ClientArchitectureComponent,
@@ -55,7 +56,9 @@ use rootlight_mcp_contract::{
         ChangeClassification, ChangeImpactOutput, HistoryCompareOutput, PlanChangeOutput,
         RiskLevel, SemanticChangeKind, TestKind, TestsSelectOutput,
     },
-    context::{ContextPackOutput, QueryBatchOutput},
+    context::{
+        ColumnType, ContextPackOutput, QueryAdvancedOutput, QueryBatchOutput, QueryCompleteness,
+    },
     intent::{
         ArchitectureCyclesOutput, ArchitectureOverviewOutput, ArchitectureView, CodeDeadOutput,
         FlowTraceOutput, RelationKind, SymbolRelationshipsOutput,
@@ -100,6 +103,7 @@ enum FakeOutcome {
     ChangeImpact(Result<ChangeImpactPortResponse, ClientPortError>),
     PlanChange(Result<PlanChangePortResponse, ClientPortError>),
     HistoryCompare(Result<HistoryComparePortResponse, ClientPortError>),
+    QueryAdvanced(Result<QueryAdvancedPortResponse, ClientPortError>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +124,7 @@ enum ObservedCall {
     ChangeImpact(ChangeImpactPortRequest),
     PlanChange(PlanChangePortRequest),
     HistoryCompare(HistoryComparePortRequest),
+    QueryAdvanced(QueryAdvancedPortRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -365,6 +370,19 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::HistoryCompare(request));
         let outcome = match &self.outcome {
             FakeOutcome::HistoryCompare(outcome) => outcome.clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { outcome })
+    }
+
+    fn query_advanced(
+        &self,
+        request: QueryAdvancedPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<QueryAdvancedPortResponse> {
+        self.record(ObservedCall::QueryAdvanced(request));
+        let outcome = match &self.outcome {
+            FakeOutcome::QueryAdvanced(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -2246,6 +2264,75 @@ async fn history_compare_rejects_a_git_revision_selector() {
     )
     .await
     .expect_err("git revision selector is rejected before the port");
+    let public = error
+        .public_error()
+        .expect("unsupported option is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn query_advanced_maps_columns_rows_and_completeness() {
+    let response = QueryAdvancedPortResponse::new(
+        ClientAdvancedQuery {
+            context: context(1, 0),
+            columns: vec![ClientAdvancedColumn {
+                name: "id".to_owned(),
+                column_type: "symbol_id".to_owned(),
+            }],
+            rows: vec![json!({"id": "sym"})],
+            plan: None,
+            completeness: "complete".to_owned(),
+        },
+        metadata("query-advanced-1"),
+    );
+    let harness = Harness::new(FakeOutcome::QueryAdvanced(Ok(response)));
+    let output: QueryAdvancedOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::QueryAdvanced,
+            json!({
+                "repository": {"repository_id": repository()},
+                "query": {"op": "scan", "entity": "function"}
+            }),
+        )
+        .await
+        .expect("query advanced maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected query advanced success");
+    };
+    assert_eq!(output.data.columns.len(), 1);
+    assert_eq!(output.data.columns[0].name, "id");
+    assert_eq!(output.data.columns[0].column_type, ColumnType::SymbolId);
+    assert_eq!(output.data.rows.len(), 1);
+    assert_eq!(output.data.rows[0], json!({"id": "sym"}));
+    assert_eq!(output.data.completeness, QueryCompleteness::Complete);
+    assert_eq!(output.data.plan, RequiredNullable(None));
+    let ObservedCall::QueryAdvanced(request) = harness.only_call() else {
+        panic!("expected query advanced call");
+    };
+    assert_eq!(request.repository(), repository());
+    assert_eq!(request.max_results(), None);
+    assert_eq!(request.explain(), None);
+    assert!(request.query_ast().contains("scan"));
+}
+
+#[tokio::test]
+async fn query_advanced_rejects_a_paging_cursor() {
+    let harness = Harness::new(FakeOutcome::QueryAdvanced(Err(ClientPortError::Executor)));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryAdvanced,
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": {"op": "scan", "entity": "function"},
+            "cursor": "abc"
+        }),
+    )
+    .await
+    .expect_err("paging cursor is rejected before the port");
     let public = error
         .public_error()
         .expect("unsupported option is a checked public error");

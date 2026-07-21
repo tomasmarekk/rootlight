@@ -6,9 +6,9 @@
 use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use rootlight_client::{
-    AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview, ChangeImpact,
-    Client, ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace, GenerationSelector,
-    HistoryCompare, LocateMode, PlanChange, RepositoryIndex, RepositoryList,
+    AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview,
+    ChangeImpact, Client, ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace,
+    GenerationSelector, HistoryCompare, LocateMode, PlanChange, RepositoryIndex, RepositoryList,
     RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, RequestTimeout,
     SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
 };
@@ -26,11 +26,12 @@ use crate::{
     CodeLocatePortRequest, CodeLocatePortResponse, FirstSliceClientPort, FlowTracePortRequest,
     FlowTracePortResponse, HistoryComparePortRequest, HistoryComparePortResponse,
     OperationStatusPortRequest, PlanChangePortRequest, PlanChangePortResponse,
-    ReadResponseMetadata, RepositoryIndexPortRequest, RepositoryIndexPortResponse,
-    RepositoryListPortRequest, RepositoryStatusPortRequest, RequestCancellation,
-    SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
-    SymbolExplainPortResponse, SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
-    TestsSelectPortRequest, TestsSelectPortResponse,
+    QueryAdvancedPortRequest, QueryAdvancedPortResponse, ReadResponseMetadata,
+    RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
+    RepositoryStatusPortRequest, RequestCancellation, SourceReadPortRequest,
+    SourceReadPortResponse, SymbolExplainPortRequest, SymbolExplainPortResponse,
+    SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse, TestsSelectPortRequest,
+    TestsSelectPortResponse,
 };
 
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -235,6 +236,22 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         max_results: Option<u16>,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<HistoryCompare>;
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded advanced query dimension"
+    )]
+    fn query_advanced(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query_ast: String,
+        explain: Option<bool>,
+        max_results: Option<u16>,
+        max_depth: Option<u8>,
+        cost_limit: Option<u64>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<AdvancedQuery>;
 }
 
 struct LiveAsyncFirstSliceClient {
@@ -599,6 +616,34 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
             let kind_labels: Vec<&str> = change_kinds.iter().map(String::as_str).collect();
             client
                 .history_compare_async(repository, base, head, &kind_labels, max_results, timeout)
+                .await
+        })
+    }
+
+    fn query_advanced(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query_ast: String,
+        explain: Option<bool>,
+        max_results: Option<u16>,
+        max_depth: Option<u8>,
+        cost_limit: Option<u64>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<AdvancedQuery> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .advanced_query_async(
+                    repository,
+                    generation,
+                    &query_ast,
+                    explain,
+                    max_results,
+                    max_depth,
+                    cost_limit,
+                    timeout,
+                )
                 .await
         })
     }
@@ -1027,6 +1072,31 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
             Ok(HistoryComparePortResponse::new(result, metadata))
         })
     }
+
+    fn query_advanced(
+        &self,
+        request: QueryAdvancedPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<QueryAdvancedPortResponse> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let result = client
+                .query_advanced(
+                    request.repository(),
+                    request.generation(),
+                    request.query_ast().to_owned(),
+                    request.explain(),
+                    request.max_results(),
+                    request.max_depth(),
+                    request.cost_limit(),
+                    request_timeout()?,
+                )
+                .await
+                .map_err(map_client_error)?;
+            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            Ok(QueryAdvancedPortResponse::new(result, metadata))
+        })
+    }
 }
 
 /// Source-free first-slice port used when synchronous daemon setup is unavailable.
@@ -1159,6 +1229,14 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
         _request: HistoryComparePortRequest,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<HistoryComparePortResponse> {
+        unavailable()
+    }
+
+    fn query_advanced(
+        &self,
+        _request: QueryAdvancedPortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<QueryAdvancedPortResponse> {
         unavailable()
     }
 }

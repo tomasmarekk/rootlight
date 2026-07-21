@@ -6,15 +6,16 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use rootlight_client::{
-    AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview, ChangeImpact,
-    ChangeImpactRiskSummary, ClientError, CodeDead, CodeDeadEntryPointSummary, CodeLocate,
-    CoverageStatus, CycleProjection, FlowTrace, FlowTraceFrontier, FlowTraceProjection,
-    GenerationSelector, HistoryArchitectureDelta, HistoryCompare, HistoryMatchedStates, LocateMode,
-    OperationKind, OperationStage, OperationState, PlanChange, PlanChangeContextPack,
-    PlanChangeImpactSummary, QueryContext, QueryUsage, RecoveryClass, RepositoryCoverageEntry,
-    RepositoryIndex, RepositoryList, RepositoryListEntry, RepositoryOperationAction,
-    RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceChunk, SourceRead,
-    SourceReference, SymbolExplain, SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
+    AdvancedColumn, AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles,
+    ArchitectureOverview, ChangeImpact, ChangeImpactRiskSummary, ClientError, CodeDead,
+    CodeDeadEntryPointSummary, CodeLocate, CoverageStatus, CycleProjection, FlowTrace,
+    FlowTraceFrontier, FlowTraceProjection, GenerationSelector, HistoryArchitectureDelta,
+    HistoryCompare, HistoryMatchedStates, LocateMode, OperationKind, OperationStage,
+    OperationState, PlanChange, PlanChangeContextPack, PlanChangeImpactSummary, QueryContext,
+    QueryUsage, RecoveryClass, RepositoryCoverageEntry, RepositoryIndex, RepositoryList,
+    RepositoryListEntry, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
+    RequestTimeout, SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
+    TestsSelect, TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -165,6 +166,16 @@ enum Call {
         head: GenerationId,
         change_kinds: Vec<String>,
         max_results: Option<u16>,
+        timeout: RequestTimeout,
+    },
+    QueryAdvanced {
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query_ast: String,
+        explain: Option<bool>,
+        max_results: Option<u16>,
+        max_depth: Option<u8>,
+        cost_limit: Option<u64>,
         timeout: RequestTimeout,
     },
 }
@@ -724,6 +735,41 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 },
                 breaking_candidates: Vec::new(),
                 lineage: Vec::new(),
+            })
+        })
+    }
+
+    fn query_advanced(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query_ast: String,
+        explain: Option<bool>,
+        max_results: Option<u16>,
+        max_depth: Option<u8>,
+        cost_limit: Option<u64>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<AdvancedQuery> {
+        self.record(Call::QueryAdvanced {
+            repository,
+            generation,
+            query_ast,
+            explain,
+            max_results,
+            max_depth,
+            cost_limit,
+            timeout,
+        });
+        Box::pin(async move {
+            Ok(AdvancedQuery {
+                context: query_context(repository, generation, false),
+                columns: vec![AdvancedColumn {
+                    name: "id".to_owned(),
+                    column_type: "symbol_id".to_owned(),
+                }],
+                rows: Vec::new(),
+                plan: None,
+                completeness: "complete".to_owned(),
             })
         })
     }
