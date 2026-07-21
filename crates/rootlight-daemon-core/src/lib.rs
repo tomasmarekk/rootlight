@@ -168,6 +168,8 @@ pub enum FirstSliceIpcRequest {
     PlanChange(daemon::PlanChangeRequest),
     /// Compare two revisions or generations for bounded semantic changes.
     HistoryCompare(daemon::HistoryCompareRequest),
+    /// Execute a bounded advanced query over a safe typed AST.
+    QueryAdvanced(daemon::AdvancedQueryRequest),
 }
 
 /// Typed first-slice response returned by the daemon application.
@@ -205,6 +207,8 @@ pub enum FirstSliceIpcResponse {
     PlanChange(daemon::PlanChangeResponse),
     /// Bounded semantic comparison between two revisions or generations.
     HistoryCompare(daemon::HistoryCompareResponse),
+    /// Bounded advanced query result over a safe typed AST.
+    QueryAdvanced(daemon::AdvancedQueryResponse),
 }
 
 impl FirstSliceIpcResponse {
@@ -247,6 +251,9 @@ impl FirstSliceIpcResponse {
             Self::PlanChange(response) => daemon::response_envelope::Response::PlanChange(response),
             Self::HistoryCompare(response) => {
                 daemon::response_envelope::Response::HistoryCompare(response)
+            }
+            Self::QueryAdvanced(response) => {
+                daemon::response_envelope::Response::AdvancedQuery(response)
             }
         }
     }
@@ -5485,6 +5492,9 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::HistoryCompare(request)) => {
             Ok(Some(FirstSliceIpcRequest::HistoryCompare(request)))
         }
+        Some(daemon::request_envelope::Request::AdvancedQuery(request)) => {
+            Ok(Some(FirstSliceIpcRequest::QueryAdvanced(request)))
+        }
         Some(request) => Err(request),
         None => Ok(None),
     }
@@ -6399,6 +6409,55 @@ fn first_slice_response_correlates(
                         && lineage.confidence <= 1_000
                 })
         }
+        (
+            FirstSliceIpcRequest::QueryAdvanced(request),
+            FirstSliceIpcResponse::QueryAdvanced(response),
+        ) => {
+            let Some(context) = response.context.as_ref() else {
+                return false;
+            };
+            first_slice_schema_matches(response.schema_version.as_ref())
+                && query_context_correlates(
+                    context,
+                    request.repository.as_ref(),
+                    request.generation.as_ref(),
+                )
+                && !request.query_ast.is_empty()
+                && request.query_ast.len() <= 65_536
+                && request
+                    .max_results
+                    .is_none_or(|results| (1..=1_000).contains(&results))
+                && request
+                    .max_depth
+                    .is_none_or(|depth| (1..=5).contains(&depth))
+                && (1..=64).contains(&response.columns.len())
+                && response.columns.iter().all(|column| {
+                    !column.name.is_empty()
+                        && column.name.len() <= 256
+                        && !column.column_type.is_empty()
+                        && column.column_type.len() <= 32
+                })
+                && response.rows.len() <= 1_000
+                && response
+                    .rows
+                    .iter()
+                    .all(|row| !row.is_empty() && row.len() <= 65_536)
+                && !response.completeness.is_empty()
+                && response.completeness.len() <= 32
+                && response.plan.as_ref().is_none_or(|plan| {
+                    plan.estimated_cost <= 10_000_000
+                        && plan.operators.len() <= 64
+                        && plan
+                            .operators
+                            .iter()
+                            .all(|operator| !operator.is_empty() && operator.len() <= 128)
+                        && plan.applied_limits.len() <= 16
+                        && plan
+                            .applied_limits
+                            .iter()
+                            .all(|limit| !limit.is_empty() && limit.len() <= 256)
+                })
+        }
         _ => false,
     }
 }
@@ -7214,6 +7273,35 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 )));
             }
         }
+        FirstSliceIpcRequest::QueryAdvanced(request) => {
+            require_first_slice_schema(request.schema_version.as_ref())?;
+            require_wire_id(
+                request.repository.as_ref().map(|id| id.value.as_slice()),
+                16,
+            )?;
+            validate_generation_selector(request.generation.as_ref())?;
+            if request.query_ast.is_empty() || request.query_ast.len() > 65_536 {
+                return Err(Box::new(invalid_argument(
+                    "advanced query request is invalid",
+                )));
+            }
+            if request
+                .max_results
+                .is_some_and(|results| !(1..=1_000).contains(&results))
+            {
+                return Err(Box::new(invalid_argument(
+                    "advanced query request is invalid",
+                )));
+            }
+            if request
+                .max_depth
+                .is_some_and(|depth| !(1..=5).contains(&depth))
+            {
+                return Err(Box::new(invalid_argument(
+                    "advanced query request is invalid",
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -7366,6 +7454,7 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         Some(daemon::request_envelope::Request::ChangeImpact(_)) => ControlMethod::ChangeImpact,
         Some(daemon::request_envelope::Request::PlanChange(_)) => ControlMethod::PlanChange,
         Some(daemon::request_envelope::Request::HistoryCompare(_)) => ControlMethod::HistoryCompare,
+        Some(daemon::request_envelope::Request::AdvancedQuery(_)) => ControlMethod::QueryAdvanced,
         None => ControlMethod::Unknown,
     }
 }
@@ -7830,6 +7919,9 @@ fn request_from_wire(
             Err(Box::new(first_slice_unavailable()))
         }
         Some(daemon::request_envelope::Request::HistoryCompare(_)) => {
+            Err(Box::new(first_slice_unavailable()))
+        }
+        Some(daemon::request_envelope::Request::AdvancedQuery(_)) => {
             Err(Box::new(first_slice_unavailable()))
         }
         None => Err(Box::new(invalid_argument("daemon request is missing"))),
