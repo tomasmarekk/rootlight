@@ -22,6 +22,9 @@ const RELATIONSHIPS_COST_PER_SEED: u64 = 24;
 /// Estimated cost units per planned traversal depth for `flow.trace`.
 const TRACE_COST_PER_DEPTH: u64 = 32;
 
+/// Estimated cost units per planned changed input for `change.impact`.
+const IMPACT_COST_PER_CHANGE: u64 = 40;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -109,6 +112,22 @@ pub fn flow_trace_plan(max_depth: Option<u8>, max_paths: Option<u16>) -> PlanExp
     }
 }
 
+/// Builds the source-free `change.impact` plan for explain mode.
+///
+/// `changed_count` bounds the planned impact analysis and drives the cost
+/// estimate.
+#[must_use]
+pub fn change_impact_plan(changed_count: usize) -> PlanExplanation {
+    let cost = u64::try_from(changed_count)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(IMPACT_COST_PER_CHANGE);
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["change_analysis".to_owned()],
+        applied_limits: vec![format!("changed_inputs: {changed_count}")],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::code_locate_plan;
@@ -175,5 +194,14 @@ mod tests {
             plan.applied_limits,
             vec!["max_depth: 3".to_owned(), "max_paths: 10".to_owned()]
         );
+    }
+
+    #[test]
+    fn change_impact_plan_is_deterministic_and_bounded() {
+        use super::change_impact_plan;
+        assert_eq!(change_impact_plan(2), change_impact_plan(2));
+        let plan = change_impact_plan(2);
+        assert_eq!(plan.operators, vec!["change_analysis".to_owned()]);
+        assert_eq!(plan.applied_limits, vec!["changed_inputs: 2".to_owned()]);
     }
 }

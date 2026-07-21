@@ -17,6 +17,10 @@
       "description": "The change set to map.",
       "$ref": "#/$defs/ChangeSelector"
     },
+    "explain": {
+      "description": "Return the bounded plan without executing retrieval.",
+      "type": "boolean"
+    },
     "generation": {
       "description": "Generation to analyze against.",
       "anyOf": [

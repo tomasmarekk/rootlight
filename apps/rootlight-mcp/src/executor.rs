@@ -3682,6 +3682,47 @@ fn test_kind_from_label(label: &str) -> Result<TestKind, ToolExecutionError> {
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
+/// Builds the source-free `change.impact` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no impact analysis
+/// runs. The plan is deterministic for the normalized request.
+async fn explain_change_impact<P>(
+    port: Arc<P>,
+    request: ChangeImpactPortRequest,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<ChangeImpactData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(request.repository, request.generation);
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let changed_count = request
+        .changed_symbols
+        .len()
+        .saturating_add(request.changed_paths.len());
+    let explanation = rootlight_agent::explain::change_impact_plan(changed_count);
+    let data = ChangeImpactData {
+        resolved_changes: Vec::new(),
+        impacted: Vec::new(),
+        service_impacts: Vec::new(),
+        tests: Vec::new(),
+        risk_summary: ImpactRiskSummary {
+            level: RiskLevel::None,
+            reasons: Vec::new(),
+            coverage: rootlight_ir::CoverageStatus::Unknown,
+            breaking_surface: false,
+            fanout: 0,
+            dynamic_blind_spots: false,
+        },
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_change_impact<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -3692,7 +3733,12 @@ where
     P: FirstSliceClientPort,
 {
     let input: ChangeImpactInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let request = normalize_change_impact(input, unsupported)?;
+    if explain_only {
+        let output = explain_change_impact(port, request, cancellation).await?;
+        return serialize_success(output);
+    }
     let expected = request.clone();
     let future = port.change_impact(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -3826,6 +3872,7 @@ fn map_change_impact(
             fanout: risk.fanout,
             dynamic_blind_spots: risk.dynamic_blind_spots,
         },
+        explanation: None,
     };
     map_read_envelope(response.result.context, response.metadata, data, false)
 }
