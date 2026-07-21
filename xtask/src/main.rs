@@ -9,6 +9,7 @@ mod architecture;
 mod daemon_lifecycle;
 mod grammar_lock;
 mod ids;
+mod license;
 mod mcp_vertical;
 mod policy;
 mod protobuf_compatibility;
@@ -57,6 +58,7 @@ fn run() -> Result<(), XtaskError> {
             mcp_vertical::check(&options)?;
         }
         Some("policy-check") | Some("policy") => policy::check()?,
+        Some("license-check") => license::check()?,
         Some("unsafe-check") => {
             let fixture_root = parse_required_fixture_root(&mut args)?;
             policy::check_unsafe_fixture(&fixture_root)?;
@@ -115,7 +117,7 @@ fn parse_required_bin_dir(
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH]|freeze-daemon-protocol|id-vectors|generate [--check]|policy-check|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH]|freeze-daemon-protocol|id-vectors|generate [--check]|license-check|policy-check|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -132,6 +134,8 @@ enum XtaskError {
     DaemonLifecycle(#[from] daemon_lifecycle::LifecycleError),
     #[error(transparent)]
     IdVectors(#[from] ids::IdVectorError),
+    #[error(transparent)]
+    License(#[from] license::LicenseError),
     #[error(transparent)]
     McpVertical(#[from] mcp_vertical::VerticalError),
     #[error(transparent)]

@@ -162,11 +162,11 @@
     },
     {
       "path": "xtask/Cargo.toml",
-      "blake3": "df53b09f37280aedc1cf1716023f9dcf5e224acd3e5ca076cf1b6c7324e27f28"
+      "blake3": "0c2442aad8826ce8bd769efa6798aa3143807636d76a439697b4fdd0604163da"
     },
     {
       "path": "xtask/src/main.rs",
-      "blake3": "d9b428dbefc736383da3833fcbca40e3d09719ed2bf17e1da42f07c10b35b920"
+      "blake3": "7d7959b8bdb795f03ab20f9dd5bd390ef0dca56ed0330089e0929ae8d876edb3"
     },
     {
       "path": "xtask/src/schemas.rs",
