@@ -1331,6 +1331,79 @@ async fn repo_list_maps_registered_repositories() {
 }
 
 #[tokio::test]
+async fn repo_list_paginates_with_authenticated_cursor() {
+    let entries: Vec<RepositoryListEntry> = (0..3u8)
+        .map(|i| RepositoryListEntry {
+            repository_id: RepositoryId::from_bytes([i + 1; 16]),
+            active_generation: generation(),
+            languages: vec!["rust".to_owned()],
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
+            state: "ready".to_owned(),
+        })
+        .collect();
+    let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
+        repositories: entries,
+    })));
+    let first: RepoListOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({"max_results": 2}),
+        )
+        .await
+        .expect("first page maps"),
+    );
+    let ToolResponse::Success(first) = first else {
+        panic!("expected first page success");
+    };
+    assert_eq!(first.data.total_count, 3);
+    assert_eq!(first.data.repositories.len(), 2);
+    assert!(first.truncated);
+    let cursor = first
+        .next_cursor
+        .0
+        .expect("first page has a continuation cursor");
+
+    let second: RepoListOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({"max_results": 2, "cursor": cursor.as_str()}),
+        )
+        .await
+        .expect("second page maps"),
+    );
+    let ToolResponse::Success(second) = second else {
+        panic!("expected second page success");
+    };
+    assert_eq!(second.data.repositories.len(), 1);
+    assert!(!second.truncated);
+    assert!(second.next_cursor.0.is_none());
+}
+
+#[tokio::test]
+async fn repo_list_rejects_a_malformed_cursor() {
+    let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
+        repositories: vec![RepositoryListEntry {
+            repository_id: repository(),
+            active_generation: generation(),
+            languages: vec!["rust".to_owned()],
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
+            state: "ready".to_owned(),
+        }],
+    })));
+    let result = execute(
+        &harness.executor,
+        VerticalTool::RepoList,
+        json!({"max_results": 2, "cursor": "c1.AAAA"}),
+    )
+    .await;
+    assert!(result.is_err(), "a malformed cursor is rejected");
+}
+
+#[tokio::test]
 async fn repo_status_maps_active_generation_and_coverage() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),

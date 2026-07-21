@@ -47,21 +47,23 @@ use rootlight_mcp_contract::{
         PlanExplanation, QueryAdvancedData, QueryAdvancedInput, QueryAstNode, QueryBatchData,
         QueryBatchInput, QueryCompleteness, TokenAccounting, ToolSuggestion,
     },
+    pagination::{AuthenticatedCursor, CursorContext},
     repository::{
         CoverageReport, LanguageCoverageReport, RepoListData, RepoListInput, RepoStatusData,
         RepoStatusInput, RepositoryEntry, RepositoryState,
     },
     vertical::{
         ActiveGeneration, AnalysisTier, CacheStatus, CodeLocateData, CodeLocateInput,
-        CoverageSummary, DetailHandle, Diagnostic, EntityKind, Freshness, GenerationSummary,
-        IndexMode, IndexPlanScope, IndexPlanSummary, IndexScope, LanguageCoverage, LocateReason,
-        LocatedItem, OperationAction, OperationDetail, OperationProgress, OperationResources,
-        OperationState, OperationStatusData, OperationStatusInput, OperationStatusSuccess,
-        ProvenanceLevel, ProvenanceSummary, QueryInterpretation, ReadEnvelope, RepoIndexData,
-        RepoIndexSuccess, RequiredNullable, ResolvedRepository, ResponseBudget, ResponseProfile,
-        ResponseWarning, SearchMode, SourceChunk, SourceElision, SourceEncoding,
-        SourceEncodingRequest, SourceFreeMessage, SourceReadData, SourceReadSelector,
-        StaleSourceReference, SymbolExplainData, SymbolExplanation, UsageSummary,
+        ContinuationCursor, CoverageSummary, DetailHandle, Diagnostic, EntityKind, Freshness,
+        GenerationSummary, IndexMode, IndexPlanScope, IndexPlanSummary, IndexScope,
+        LanguageCoverage, LocateReason, LocatedItem, OperationAction, OperationDetail,
+        OperationProgress, OperationResources, OperationState, OperationStatusData,
+        OperationStatusInput, OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary,
+        QueryInterpretation, ReadEnvelope, RepoIndexData, RepoIndexSuccess, RequiredNullable,
+        ResolvedRepository, ResponseBudget, ResponseProfile, ResponseWarning, SearchMode,
+        SourceChunk, SourceElision, SourceEncoding, SourceEncodingRequest, SourceFreeMessage,
+        SourceReadData, SourceReadSelector, StaleSourceReference, SymbolExplainData,
+        SymbolExplanation, UsageSummary,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -1340,6 +1342,11 @@ pub struct FirstSliceToolExecutor<P> {
     port: Arc<P>,
     invalid_arguments: PublicError,
     unsupported: PublicError,
+    /// Process-local secret used to authenticate pagination cursors.
+    ///
+    /// It rotates on process restart, gracefully invalidating outstanding
+    /// cursors (they fail validation and clients restart the listing).
+    cursor_key: [u8; 32],
 }
 
 impl<P> FirstSliceToolExecutor<P>
@@ -1367,10 +1374,16 @@ where
                 .next_action(NextAction::CorrectField { field })
                 .build()
                 .map_err(ToolExecutorBuildError::InvalidArgumentError)?;
+        // A process-local cursor signing key gives cursors per-process
+        // rotation. If the OS RNG is unavailable the key stays fixed; cursors
+        // remain integrity-checked, only the restart rotation is lost.
+        let mut cursor_key = [0_u8; 32];
+        let _ = getrandom::fill(&mut cursor_key);
         Ok(Self {
             port: Arc::new(port),
             invalid_arguments,
             unsupported,
+            cursor_key,
         })
     }
 }
@@ -1388,6 +1401,7 @@ where
         let port = Arc::clone(&self.port);
         let invalid_arguments = self.invalid_arguments.clone();
         let unsupported = self.unsupported.clone();
+        let cursor_key = self.cursor_key;
         Box::pin(async move {
             match tool {
                 VerticalTool::RepoIndex => {
@@ -1404,7 +1418,15 @@ where
                     execute_repo_status(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::RepoList => {
-                    execute_repo_list(port, arguments, cancellation, &unsupported).await
+                    execute_repo_list(
+                        port,
+                        arguments,
+                        cancellation,
+                        &unsupported,
+                        &invalid_arguments,
+                        cursor_key,
+                    )
+                    .await
                 }
                 VerticalTool::ChangeImpact => {
                     execute_change_impact(port, arguments, cancellation, &unsupported).await
@@ -2120,16 +2142,27 @@ async fn execute_repo_list<P>(
     arguments: Map<String, Value>,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
+    invalid_arguments: &PublicError,
+    cursor_key: [u8; 32],
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
     let input: RepoListInput = decode_input(arguments)?;
-    // Cursor paging and state filtering are not served by this slice.
-    if input.cursor.is_some() || input.states.is_some() {
+    // State filtering is not served by this slice.
+    if input.states.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
-    let request = RepositoryListPortRequest::new(input.max_results.map(u32::from), input.query);
+    let page_size = input.max_results.unwrap_or(DEFAULT_REPO_LIST_RESULTS);
+    let context = repo_list_cursor_context(input.query.as_deref(), page_size);
+    let offset = match &input.cursor {
+        Some(cursor) => decode_repo_list_cursor(cursor, &context, &cursor_key, invalid_arguments)?,
+        None => 0,
+    };
+
+    // The daemon returns the full bounded list; the bridge applies the
+    // authenticated page window so the continuation cursor is tamper-protected.
+    let request = RepositoryListPortRequest::new(None, input.query);
     let future = port.repository_list(request, cancellation.clone());
     let list = await_port(future, cancellation).await?;
 
@@ -2137,8 +2170,14 @@ where
         return Err(ToolExecutionError::new(no_repositories_error()?));
     };
 
+    let total = list.repositories.len();
+    let start = offset.min(total);
+    let page_end = start.saturating_add(usize::from(page_size)).min(total);
+    let truncated = page_end < total;
     let repositories: Vec<RepositoryEntry> = list
         .repositories
+        .get(start..page_end)
+        .unwrap_or(&[])
         .iter()
         .map(|entry| RepositoryEntry {
             repository_id: entry.repository_id,
@@ -2149,10 +2188,27 @@ where
             alias: RequiredNullable(None),
         })
         .collect();
-    let total_count = u64::try_from(repositories.len()).unwrap_or(u64::MAX);
+    let total_count = u64::try_from(total).unwrap_or(u64::MAX);
     let data = RepoListData {
         repositories,
         total_count,
+    };
+    let next_cursor = if truncated {
+        let next = AuthenticatedCursor::create(
+            context,
+            u32::try_from(page_end)
+                .unwrap_or(u32::MAX)
+                .to_le_bytes()
+                .to_vec(),
+            now_unix_ms(),
+            &cursor_key,
+        );
+        RequiredNullable(Some(
+            ContinuationCursor::parse(&next.to_wire())
+                .map_err(|_| internal(ToolExecutionFailure::Executor))?,
+        ))
+    } else {
+        RequiredNullable(None)
     };
     let envelope = ReadEnvelope {
         schema_version: SchemaVersion::V1_0,
@@ -2172,8 +2228,8 @@ where
             skipped_inputs: 0,
         },
         data,
-        truncated: false,
-        next_cursor: RequiredNullable(None),
+        truncated,
+        next_cursor,
         usage: UsageSummary {
             rows: total_count,
             edges: 0,
@@ -2188,6 +2244,56 @@ where
         trust: TrustClassification::UntrustedRepositoryData,
     };
     serialize_success(envelope)
+}
+
+/// Default page size for `repo.list`.
+const DEFAULT_REPO_LIST_RESULTS: u16 = 20;
+
+/// Builds the list-level cursor context for `repo.list`.
+///
+/// `repo.list` is not generation-bound, so the cursor binds to a documented
+/// list-level sentinel identity and instead authenticates the request shape
+/// (the query filter) and the page offset.
+fn repo_list_cursor_context(query: Option<&str>, page_size: u16) -> CursorContext {
+    CursorContext {
+        repository: RepositoryId::from_bytes([0; 16]),
+        generation: GenerationId::from_bytes([0; 20]),
+        tool_name: "repo.list",
+        query_fingerprint: repo_list_fingerprint(query),
+        page_size,
+    }
+}
+
+fn repo_list_fingerprint(query: Option<&str>) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"repo.list");
+    hasher.update(query.unwrap_or("").as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+fn decode_repo_list_cursor(
+    cursor: &ContinuationCursor,
+    context: &CursorContext,
+    cursor_key: &[u8; 32],
+    invalid_arguments: &PublicError,
+) -> Result<usize, ToolExecutionError> {
+    let parsed = AuthenticatedCursor::from_wire(cursor.as_str())
+        .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
+    parsed
+        .validate(context, now_unix_ms(), cursor_key)
+        .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
+    let bytes: [u8; 4] = parsed
+        .last_sort_key()
+        .try_into()
+        .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
+    Ok(usize::try_from(u32::from_le_bytes(bytes)).unwrap_or(usize::MAX))
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// Reads one repository's active generation, freshness, and coverage.
