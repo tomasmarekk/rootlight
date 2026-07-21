@@ -3,6 +3,6 @@ id = "charlie"
 title = "Pending dependent stage"
 implementation_status = "not_started"
 acceptance = "pending"
-source_revision = "1111111111111111111111111111111111111111111111111111111111111111"
+source_revision = "1111111111111111111111111111111111111111"
 evidence = []
 residual_risks = []

@@ -235,7 +235,10 @@ fn validate_gate_blocking(
 }
 
 fn is_full_revision(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    // A full Git revision is a 40-character SHA-1 (this repository) or a
+    // 64-character SHA-256 (future-proofing); abbreviated forms are rejected so
+    // evidence stays pinned to one unambiguous commit.
+    (value.len() == 40 || value.len() == 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Deserialize)]
@@ -323,7 +326,7 @@ impl std::fmt::Display for Problem {
             ProblemKind::EmptyTitle => write!(formatter, "{}: record title is empty", self.id),
             ProblemKind::InvalidRevision => write!(
                 formatter,
-                "{}: source_revision is not a 64-character hex revision",
+                "{}: source_revision is not a full 40- or 64-character hex revision",
                 self.id
             ),
             ProblemKind::UnsupportedSchema(version) => write!(
@@ -398,7 +401,7 @@ pub(crate) enum DispositionError {
 mod tests {
     use super::*;
 
-    const REV: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const REV: &str = "1111111111111111111111111111111111111111";
 
     fn write_stage(root: &Path, id: &str, body: &str) {
         let dir = root.join(RECORDS_DIR);

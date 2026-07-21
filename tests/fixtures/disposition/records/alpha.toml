@@ -3,6 +3,6 @@ id = "alpha"
 title = "First synthetic stage"
 implementation_status = "complete"
 acceptance = "pass"
-source_revision = "1111111111111111111111111111111111111111111111111111111111111111"
+source_revision = "1111111111111111111111111111111111111111"
 evidence = ["evidence/alpha.json"]
 residual_risks = []
