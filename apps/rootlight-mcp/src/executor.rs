@@ -16,13 +16,15 @@ use rootlight_client::{
     RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, SourceRead,
     SymbolExplain,
 };
-use rootlight_ids::{FileId, OperationId, RepositoryId, SymbolId};
+use rootlight_ids::{FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{EntityKind as IrEntityKind, LineRange, SourceRef, SourceSpan};
 use rootlight_mcp_contract::change::{
-    ChangeClassification, ChangeImpactData, ChangeImpactInput, ChangePlanStep, ContextPackRequest,
-    ImpactEntry, ImpactGroup, ImpactRiskSummary, PlanChangeData, PlanChangeInput, PlanDecision,
-    PlanImpactSummary, PlanObjective, PlanTargetSelector, RankedTest, RelationPolicy,
-    ResolvedChange, RiskLevel, TestCandidate, TestCoverageStrategy, TestGap, TestKind,
+    ArchitectureDelta, BreakingCandidate, ChangeClassification, ChangeImpactData,
+    ChangeImpactInput, ChangePlanStep, CompareChangeKind, ContextPackRequest, HistoryCompareData,
+    HistoryCompareInput, ImpactEntry, ImpactGroup, ImpactRiskSummary, LineageMatch, MatchedStates,
+    PlanChangeData, PlanChangeInput, PlanDecision, PlanImpactSummary, PlanObjective,
+    PlanTargetSelector, RankedTest, RelationPolicy, ResolvedChange, RevisionSelector, RiskLevel,
+    SemanticChange, SemanticChangeKind, TestCandidate, TestCoverageStrategy, TestGap, TestKind,
     TestsSelectData, TestsSelectInput,
 };
 use rootlight_mcp_contract::intent::{
@@ -207,6 +209,13 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         request: PlanChangePortRequest,
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<PlanChangePortResponse>;
+
+    /// Compares two explicit generations for bounded semantic changes.
+    fn history_compare(
+        &self,
+        request: HistoryComparePortRequest,
+        cancellation: RequestCancellation,
+    ) -> ClientPortFuture<HistoryComparePortResponse>;
 }
 
 /// Source-free failure emitted by an injected daemon client port.
@@ -1087,6 +1096,63 @@ impl PlanChangePortResponse {
     }
 }
 
+/// Normalized `history.compare` request ready for the daemon client port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryComparePortRequest {
+    repository: RepositoryId,
+    base: GenerationId,
+    head: GenerationId,
+    change_kinds: Vec<String>,
+    max_results: Option<u16>,
+}
+
+impl HistoryComparePortRequest {
+    /// Returns the selected repository.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// Returns the resolved base generation.
+    #[must_use]
+    pub const fn base(&self) -> GenerationId {
+        self.base
+    }
+
+    /// Returns the resolved head generation.
+    #[must_use]
+    pub const fn head(&self) -> GenerationId {
+        self.head
+    }
+
+    /// Returns the change-kind filter labels.
+    #[must_use]
+    pub fn change_kinds(&self) -> &[String] {
+        &self.change_kinds
+    }
+
+    /// Returns the optional result cap.
+    #[must_use]
+    pub const fn max_results(&self) -> Option<u16> {
+        self.max_results
+    }
+}
+
+/// Detected daemon history-compare data plus mandatory MCP read metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryComparePortResponse {
+    result: client::HistoryCompare,
+    metadata: ReadResponseMetadata,
+}
+
+impl HistoryComparePortResponse {
+    /// Creates a complete `history.compare` response for MCP mapping.
+    #[must_use]
+    pub const fn new(result: client::HistoryCompare, metadata: ReadResponseMetadata) -> Self {
+        Self { result, metadata }
+    }
+}
+
 /// Normalized exact-reference `source.read` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceReadPortRequest {
@@ -1273,9 +1339,10 @@ where
                 VerticalTool::PlanChange => {
                     execute_plan_change(port, arguments, cancellation, &unsupported).await
                 }
-                VerticalTool::HistoryCompare | VerticalTool::QueryAdvanced => {
-                    execute_intent_fallback(&unavailable).await
+                VerticalTool::HistoryCompare => {
+                    execute_history_compare(port, arguments, cancellation, &unsupported).await
                 }
+                VerticalTool::QueryAdvanced => execute_intent_fallback(&unavailable).await,
                 VerticalTool::SymbolRelationships => {
                     execute_symbol_relationships(port, arguments, cancellation, &unsupported).await
                 }
@@ -3402,6 +3469,148 @@ fn map_plan_change(
         },
     };
     map_read_envelope(response.result.context, response.metadata, data, false)
+}
+
+async fn execute_history_compare<P>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let input: HistoryCompareInput = decode_input(arguments)?;
+    let request = normalize_history_compare(input, unsupported)?;
+    let expected = request.clone();
+    let future = port.history_compare(request, cancellation.clone());
+    let response = await_port(future, cancellation).await?;
+    let output = map_history_compare(response, &expected)?;
+    serialize_success(output)
+}
+
+fn normalize_history_compare(
+    input: HistoryCompareInput,
+    unsupported: &PublicError,
+) -> Result<HistoryComparePortRequest, ToolExecutionError> {
+    let repository = repository_id(input.repository, unsupported)?;
+    // Scope bounding, unchanged-context inclusion, custom budgets, and
+    // non-compact profiles are not served by this slice.
+    if input.scope.is_some()
+        || input.include_unchanged_context == Some(true)
+        || input.budget.is_some()
+        || !compact_profile(input.profile)
+    {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    // Git revision selectors require a git-ref to generation mapping this slice
+    // does not maintain.
+    let RevisionSelector::Generation(base) = input.base else {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    };
+    let RevisionSelector::Generation(head) = input.head else {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    };
+    let change_kinds = input
+        .change_kinds
+        .unwrap_or_default()
+        .iter()
+        .map(|kind| compare_change_kind_label(*kind).to_owned())
+        .collect();
+    Ok(HistoryComparePortRequest {
+        repository,
+        base,
+        head,
+        change_kinds,
+        max_results: input.max_results,
+    })
+}
+
+/// Returns the stable wire label for one typed compare change kind.
+const fn compare_change_kind_label(kind: CompareChangeKind) -> &'static str {
+    match kind {
+        CompareChangeKind::Entities => "entities",
+        CompareChangeKind::Signatures => "signatures",
+        CompareChangeKind::Relations => "relations",
+        CompareChangeKind::Architecture => "architecture",
+        CompareChangeKind::Ownership => "ownership",
+        CompareChangeKind::Tests => "tests",
+        CompareChangeKind::Routes => "routes",
+        CompareChangeKind::Data => "data",
+    }
+}
+
+fn map_history_compare(
+    response: HistoryComparePortResponse,
+    request: &HistoryComparePortRequest,
+) -> Result<ReadEnvelope<HistoryCompareData>, ToolExecutionError> {
+    validate_query_context(
+        &response.result.context,
+        request.repository,
+        client::GenerationSelector::Generation(request.head),
+    )?;
+    let states = response.result.matched_states;
+    let delta = response.result.architecture_delta;
+    let mut changes = Vec::new();
+    changes
+        .try_reserve_exact(response.result.changes.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for change in response.result.changes {
+        changes.push(SemanticChange {
+            kind: semantic_change_kind_from_label(&change.kind)?,
+            symbol_id: change.symbol_id,
+            entity_kind: ir_entity_kind_from_label(&change.entity_kind)?,
+            breaking_candidate: change.breaking_candidate,
+            significance: change.significance,
+        });
+    }
+    let mut breaking_candidates = Vec::new();
+    breaking_candidates
+        .try_reserve_exact(response.result.breaking_candidates.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for candidate in response.result.breaking_candidates {
+        breaking_candidates.push(BreakingCandidate {
+            symbol_id: candidate.symbol_id,
+            consumer_count: candidate.consumer_count,
+            is_public_surface: candidate.is_public_surface,
+            reason: SafeLabel::parse(&candidate.reason)
+                .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+        });
+    }
+    let mut lineage = Vec::new();
+    lineage
+        .try_reserve_exact(response.result.lineage.len())
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    for lineage_match in response.result.lineage {
+        lineage.push(LineageMatch {
+            base_symbol_id: lineage_match.base_symbol_id,
+            head_symbol_id: lineage_match.head_symbol_id,
+            confidence: lineage_match.confidence,
+            is_rename: lineage_match.is_rename,
+        });
+    }
+    let data = HistoryCompareData {
+        matched_states: MatchedStates {
+            base_generation: states.base_generation,
+            head_generation: states.head_generation,
+            coverage: coverage_status_from_label(&states.coverage),
+        },
+        changes,
+        architecture_delta: ArchitectureDelta {
+            new_cross_service_edges: delta.new_cross_service_edges,
+            removed_cross_service_edges: delta.removed_cross_service_edges,
+            new_boundaries: delta.new_boundaries,
+            removed_boundaries: delta.removed_boundaries,
+        },
+        breaking_candidates,
+        lineage,
+    };
+    map_read_envelope(response.result.context, response.metadata, data, false)
+}
+
+fn semantic_change_kind_from_label(label: &str) -> Result<SemanticChangeKind, ToolExecutionError> {
+    serde_json::from_value(Value::String(label.to_owned()))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
 async fn execute_source_read<P>(

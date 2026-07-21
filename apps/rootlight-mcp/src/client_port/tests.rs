@@ -9,12 +9,12 @@ use rootlight_client::{
     AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview, ChangeImpact,
     ChangeImpactRiskSummary, ClientError, CodeDead, CodeDeadEntryPointSummary, CodeLocate,
     CoverageStatus, CycleProjection, FlowTrace, FlowTraceFrontier, FlowTraceProjection,
-    GenerationSelector, LocateMode, OperationKind, OperationStage, OperationState, PlanChange,
-    PlanChangeContextPack, PlanChangeImpactSummary, QueryContext, QueryUsage, RecoveryClass,
-    RepositoryCoverageEntry, RepositoryIndex, RepositoryList, RepositoryListEntry,
-    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, RequestTimeout,
-    SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
-    TestsSelectCoverageStrategy,
+    GenerationSelector, HistoryArchitectureDelta, HistoryCompare, HistoryMatchedStates, LocateMode,
+    OperationKind, OperationStage, OperationState, PlanChange, PlanChangeContextPack,
+    PlanChangeImpactSummary, QueryContext, QueryUsage, RecoveryClass, RepositoryCoverageEntry,
+    RepositoryIndex, RepositoryList, RepositoryListEntry, RepositoryOperationAction,
+    RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceChunk, SourceRead,
+    SourceReference, SymbolExplain, SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -157,6 +157,14 @@ enum Call {
         target_symbols: Vec<SymbolId>,
         target_files: Vec<FileId>,
         max_steps: Option<u8>,
+        timeout: RequestTimeout,
+    },
+    HistoryCompare {
+        repository: RepositoryId,
+        base: GenerationId,
+        head: GenerationId,
+        change_kinds: Vec<String>,
+        max_results: Option<u16>,
         timeout: RequestTimeout,
     },
 }
@@ -678,6 +686,44 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     symbols: Vec::new(),
                     files: Vec::new(),
                 },
+            })
+        })
+    }
+
+    fn history_compare(
+        &self,
+        repository: RepositoryId,
+        base: GenerationId,
+        head: GenerationId,
+        change_kinds: Vec<String>,
+        max_results: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<HistoryCompare> {
+        self.record(Call::HistoryCompare {
+            repository,
+            base,
+            head,
+            change_kinds,
+            max_results,
+            timeout,
+        });
+        Box::pin(async move {
+            Ok(HistoryCompare {
+                context: query_context(repository, GenerationSelector::Generation(head), false),
+                matched_states: HistoryMatchedStates {
+                    base_generation: base,
+                    head_generation: head,
+                    coverage: "complete".to_owned(),
+                },
+                changes: Vec::new(),
+                architecture_delta: HistoryArchitectureDelta {
+                    new_cross_service_edges: 0,
+                    removed_cross_service_edges: 0,
+                    new_boundaries: 0,
+                    removed_boundaries: 0,
+                },
+                breaking_candidates: Vec::new(),
+                lineage: Vec::new(),
             })
         })
     }

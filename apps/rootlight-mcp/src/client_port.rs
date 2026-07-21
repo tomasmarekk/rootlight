@@ -8,11 +8,11 @@ use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time:
 use rootlight_client::{
     AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview, ChangeImpact,
     Client, ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace, GenerationSelector,
-    LocateMode, PlanChange, RepositoryIndex, RepositoryList, RepositoryOperationAction,
-    RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceRead, SourceReference,
-    SymbolExplain, SymbolRelationships, TestsSelect,
+    HistoryCompare, LocateMode, PlanChange, RepositoryIndex, RepositoryList,
+    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, RequestTimeout,
+    SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
 };
-use rootlight_ids::{FileId, OperationId, RepositoryId, SymbolId};
+use rootlight_ids::{FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
 use rootlight_mcp_contract::vertical::{
     AnalysisTier, CacheStatus, Freshness, IndexMode, IndexPlanScope, IndexPlanSummary,
@@ -24,10 +24,11 @@ use crate::{
     ArchitectureOverviewPortResponse, ChangeImpactPortRequest, ChangeImpactPortResponse,
     ClientPortError, ClientPortFuture, CodeDeadPortRequest, CodeDeadPortResponse,
     CodeLocatePortRequest, CodeLocatePortResponse, FirstSliceClientPort, FlowTracePortRequest,
-    FlowTracePortResponse, OperationStatusPortRequest, PlanChangePortRequest,
-    PlanChangePortResponse, ReadResponseMetadata, RepositoryIndexPortRequest,
-    RepositoryIndexPortResponse, RepositoryListPortRequest, RepositoryStatusPortRequest,
-    RequestCancellation, SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
+    FlowTracePortResponse, HistoryComparePortRequest, HistoryComparePortResponse,
+    OperationStatusPortRequest, PlanChangePortRequest, PlanChangePortResponse,
+    ReadResponseMetadata, RepositoryIndexPortRequest, RepositoryIndexPortResponse,
+    RepositoryListPortRequest, RepositoryStatusPortRequest, RequestCancellation,
+    SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
     SymbolExplainPortResponse, SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
     TestsSelectPortRequest, TestsSelectPortResponse,
 };
@@ -224,6 +225,16 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         max_steps: Option<u8>,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<PlanChange>;
+
+    fn history_compare(
+        &self,
+        repository: RepositoryId,
+        base: GenerationId,
+        head: GenerationId,
+        change_kinds: Vec<String>,
+        max_results: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<HistoryCompare>;
 }
 
 struct LiveAsyncFirstSliceClient {
@@ -570,6 +581,24 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     max_steps,
                     timeout,
                 )
+                .await
+        })
+    }
+
+    fn history_compare(
+        &self,
+        repository: RepositoryId,
+        base: GenerationId,
+        head: GenerationId,
+        change_kinds: Vec<String>,
+        max_results: Option<u16>,
+        timeout: RequestTimeout,
+    ) -> AsyncClientFuture<HistoryCompare> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let kind_labels: Vec<&str> = change_kinds.iter().map(String::as_str).collect();
+            client
+                .history_compare_async(repository, base, head, &kind_labels, max_results, timeout)
                 .await
         })
     }
@@ -975,6 +1004,29 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
             Ok(PlanChangePortResponse::new(result, metadata))
         })
     }
+
+    fn history_compare(
+        &self,
+        request: HistoryComparePortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<HistoryComparePortResponse> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let result = client
+                .history_compare(
+                    request.repository(),
+                    request.base(),
+                    request.head(),
+                    request.change_kinds().to_vec(),
+                    request.max_results(),
+                    request_timeout()?,
+                )
+                .await
+                .map_err(map_client_error)?;
+            let metadata = read_metadata(&result.context, service_languages(&result.context))?;
+            Ok(HistoryComparePortResponse::new(result, metadata))
+        })
+    }
 }
 
 /// Source-free first-slice port used when synchronous daemon setup is unavailable.
@@ -1099,6 +1151,14 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
         _request: PlanChangePortRequest,
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<PlanChangePortResponse> {
+        unavailable()
+    }
+
+    fn history_compare(
+        &self,
+        _request: HistoryComparePortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<HistoryComparePortResponse> {
         unavailable()
     }
 }

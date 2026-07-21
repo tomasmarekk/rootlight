@@ -28,7 +28,12 @@ use rootlight_client::{
     CycleComponent as ClientCycleComponent, CycleProjection as ClientCycleProjection,
     FlowTrace as ClientFlowTrace, FlowTraceEdge as ClientTraceEdge,
     FlowTraceFrontier as ClientTraceFrontier, FlowTracePath as ClientTracePath,
-    FlowTraceProjection as ClientTraceProjection, LocateHit, OperationKind, OperationStage,
+    FlowTraceProjection as ClientTraceProjection,
+    HistoryArchitectureDelta as ClientHistoryArchitectureDelta,
+    HistoryBreakingCandidate as ClientHistoryBreakingCandidate,
+    HistoryCompare as ClientHistoryCompare, HistoryLineageMatch as ClientHistoryLineageMatch,
+    HistoryMatchedStates as ClientHistoryMatchedStates,
+    HistorySemanticChange as ClientHistorySemanticChange, LocateHit, OperationKind, OperationStage,
     OperationState as ClientOperationState, PlanChange as ClientPlanChange,
     PlanChangeContextPack as ClientPlanContextPack, PlanChangeDecision as ClientPlanDecision,
     PlanChangeImpactSummary as ClientPlanImpactSummary, PlanChangeStep as ClientPlanStep,
@@ -47,8 +52,8 @@ use rootlight_mcp_contract::{
     CodeLocateOutput, ErrorCode, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
     SymbolExplainOutput,
     change::{
-        ChangeClassification, ChangeImpactOutput, PlanChangeOutput, RiskLevel, TestKind,
-        TestsSelectOutput,
+        ChangeClassification, ChangeImpactOutput, HistoryCompareOutput, PlanChangeOutput,
+        RiskLevel, SemanticChangeKind, TestKind, TestsSelectOutput,
     },
     context::{ContextPackOutput, QueryBatchOutput},
     intent::{
@@ -94,6 +99,7 @@ enum FakeOutcome {
     TestsSelect(Result<TestsSelectPortResponse, ClientPortError>),
     ChangeImpact(Result<ChangeImpactPortResponse, ClientPortError>),
     PlanChange(Result<PlanChangePortResponse, ClientPortError>),
+    HistoryCompare(Result<HistoryComparePortResponse, ClientPortError>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +119,7 @@ enum ObservedCall {
     TestsSelect(TestsSelectPortRequest),
     ChangeImpact(ChangeImpactPortRequest),
     PlanChange(PlanChangePortRequest),
+    HistoryCompare(HistoryComparePortRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +352,19 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::PlanChange(request));
         let outcome = match &self.outcome {
             FakeOutcome::PlanChange(outcome) => outcome.clone(),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { outcome })
+    }
+
+    fn history_compare(
+        &self,
+        request: HistoryComparePortRequest,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<HistoryComparePortResponse> {
+        self.record(ObservedCall::HistoryCompare(request));
+        let outcome = match &self.outcome {
+            FakeOutcome::HistoryCompare(outcome) => outcome.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -2109,6 +2129,123 @@ async fn plan_change_rejects_a_change_context() {
     )
     .await
     .expect_err("change context is rejected before the port");
+    let public = error
+        .public_error()
+        .expect("unsupported option is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn history_compare_maps_changes_breaking_candidates_and_lineage() {
+    let response = HistoryComparePortResponse::new(
+        ClientHistoryCompare {
+            context: context(1, 0),
+            matched_states: ClientHistoryMatchedStates {
+                base_generation: parent_generation(),
+                head_generation: generation(),
+                coverage: "bounded".to_owned(),
+            },
+            changes: vec![ClientHistorySemanticChange {
+                kind: "added".to_owned(),
+                symbol_id: symbol(),
+                entity_kind: "function".to_owned(),
+                breaking_candidate: false,
+                significance: 200,
+            }],
+            architecture_delta: ClientHistoryArchitectureDelta {
+                new_cross_service_edges: 0,
+                removed_cross_service_edges: 0,
+                new_boundaries: 0,
+                removed_boundaries: 0,
+            },
+            breaking_candidates: vec![ClientHistoryBreakingCandidate {
+                symbol_id: symbol(),
+                consumer_count: 3,
+                is_public_surface: true,
+                reason: "removed_public_surface".to_owned(),
+            }],
+            lineage: vec![ClientHistoryLineageMatch {
+                base_symbol_id: symbol(),
+                head_symbol_id: symbol(),
+                confidence: 1_000,
+                is_rename: false,
+            }],
+        },
+        metadata("history-compare-1"),
+    );
+    let harness = Harness::new(FakeOutcome::HistoryCompare(Ok(response)));
+    let output: HistoryCompareOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::HistoryCompare,
+            json!({
+                "repository": {"repository_id": repository()},
+                "base": parent_generation(),
+                "head": generation()
+            }),
+        )
+        .await
+        .expect("history compare maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected history compare success");
+    };
+    assert_eq!(
+        output.data.matched_states.base_generation,
+        parent_generation()
+    );
+    assert_eq!(output.data.matched_states.head_generation, generation());
+    assert_eq!(output.data.matched_states.coverage, IrCoverage::Bounded);
+    assert_eq!(output.data.changes.len(), 1);
+    assert_eq!(output.data.changes[0].kind, SemanticChangeKind::Added);
+    assert_eq!(output.data.changes[0].symbol_id, symbol());
+    assert_eq!(output.data.changes[0].significance, 200);
+    assert!(!output.data.changes[0].breaking_candidate);
+    assert_eq!(output.data.architecture_delta.new_cross_service_edges, 0);
+    assert_eq!(
+        output.data.architecture_delta.removed_cross_service_edges,
+        0
+    );
+    assert_eq!(output.data.architecture_delta.new_boundaries, 0);
+    assert_eq!(output.data.architecture_delta.removed_boundaries, 0);
+    assert_eq!(output.data.breaking_candidates.len(), 1);
+    assert_eq!(output.data.breaking_candidates[0].consumer_count, 3);
+    assert!(output.data.breaking_candidates[0].is_public_surface);
+    assert_eq!(
+        output.data.breaking_candidates[0].reason.as_str(),
+        "removed_public_surface"
+    );
+    assert_eq!(output.data.lineage.len(), 1);
+    assert_eq!(output.data.lineage[0].base_symbol_id, symbol());
+    assert_eq!(output.data.lineage[0].head_symbol_id, symbol());
+    assert_eq!(output.data.lineage[0].confidence, 1_000);
+    assert!(!output.data.lineage[0].is_rename);
+    let ObservedCall::HistoryCompare(request) = harness.only_call() else {
+        panic!("expected history compare call");
+    };
+    assert_eq!(request.repository(), repository());
+    assert_eq!(request.base(), parent_generation());
+    assert_eq!(request.head(), generation());
+    assert!(request.change_kinds().is_empty());
+    assert_eq!(request.max_results(), None);
+}
+
+#[tokio::test]
+async fn history_compare_rejects_a_git_revision_selector() {
+    let harness = Harness::new(FakeOutcome::HistoryCompare(Err(ClientPortError::Executor)));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::HistoryCompare,
+        json!({
+            "repository": {"repository_id": repository()},
+            "base": {"git": "main"},
+            "head": generation()
+        }),
+    )
+    .await
+    .expect_err("git revision selector is rejected before the port");
     let public = error
         .public_error()
         .expect("unsupported option is a checked public error");
