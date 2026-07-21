@@ -35,6 +35,10 @@
         }
       ]
     },
+    "explain": {
+      "description": "Return the bounded plan without executing retrieval.",
+      "type": "boolean"
+    },
     "generation": {
       "description": "Immutable generation selector.",
       "anyOf": [

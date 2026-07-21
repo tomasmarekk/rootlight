@@ -2722,6 +2722,35 @@ where
     explain_envelope_from_status(status, data)
 }
 
+/// Builds the source-free `source.read` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no source bytes
+/// are read. The plan is deterministic for the normalized request.
+async fn explain_source_read<P>(
+    port: Arc<P>,
+    request: SourceReadPortRequest,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<SourceReadData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(request.repository, request.generation);
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let explanation = rootlight_agent::explain::source_read_plan(request.references.len());
+    let data = SourceReadData {
+        chunks: Vec::new(),
+        stale_references: Vec::new(),
+        elisions: Vec::new(),
+        total_source_bytes: 0,
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_symbol_explain<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -4173,7 +4202,12 @@ where
     P: FirstSliceClientPort,
 {
     let input: SourceReadInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let request = normalize_source_read(input, unsupported, invalid_arguments)?;
+    if explain_only {
+        let output = explain_source_read(port, request, cancellation).await?;
+        return serialize_success(output);
+    }
     let expected = request.clone();
     let future = port.source_read(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -4757,6 +4791,7 @@ fn map_source_read(
         stale_references: response.stale_references,
         elisions: response.elisions,
         total_source_bytes,
+        explanation: None,
     };
     map_read_envelope(
         response.result.context,

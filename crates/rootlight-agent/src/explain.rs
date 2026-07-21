@@ -13,6 +13,9 @@ const LOCATE_COST_PER_RESULT: u64 = 8;
 /// Estimated cost units per planned symbol for `symbol.explain`.
 const EXPLAIN_COST_PER_SYMBOL: u64 = 12;
 
+/// Estimated cost units per planned source reference for `source.read`.
+const READ_COST_PER_REFERENCE: u64 = 16;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -46,6 +49,21 @@ pub fn symbol_explain_plan(symbol_count: usize) -> PlanExplanation {
     }
 }
 
+/// Builds the source-free `source.read` plan for explain mode.
+///
+/// `reference_count` bounds the planned work and drives the cost estimate.
+#[must_use]
+pub fn source_read_plan(reference_count: usize) -> PlanExplanation {
+    let cost = u64::try_from(reference_count)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(READ_COST_PER_REFERENCE);
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["source_read".to_owned()],
+        applied_limits: vec![format!("references: {reference_count}")],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::code_locate_plan;
@@ -73,5 +91,14 @@ mod tests {
         let plan = symbol_explain_plan(3);
         assert_eq!(plan.operators, vec!["symbol_lookup".to_owned()]);
         assert_eq!(plan.applied_limits, vec!["symbols: 3".to_owned()]);
+    }
+
+    #[test]
+    fn source_read_plan_is_deterministic_and_bounded() {
+        use super::source_read_plan;
+        assert_eq!(source_read_plan(2), source_read_plan(2));
+        let plan = source_read_plan(2);
+        assert_eq!(plan.operators, vec!["source_read".to_owned()]);
+        assert_eq!(plan.applied_limits, vec!["references: 2".to_owned()]);
     }
 }

@@ -1537,6 +1537,9 @@ pub struct SourceReadInput {
     /// Requested representation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// Encoding used by one source chunk.
@@ -1753,6 +1756,9 @@ pub struct SourceReadData {
     /// Raw bytes returned before JSON escaping.
     #[schemars(range(max = 524_288))]
     pub total_source_bytes: u32,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 impl<'de> Deserialize<'de> for SourceReadData {
@@ -1767,6 +1773,8 @@ impl<'de> Deserialize<'de> for SourceReadData {
             stale_references: Vec<StaleSourceReference>,
             elisions: Vec<SourceElision>,
             total_source_bytes: u32,
+            #[serde(default)]
+            explanation: Option<crate::context::PlanExplanation>,
         }
 
         let wire = WireSourceReadData::deserialize(deserializer)?;
@@ -1793,6 +1801,7 @@ impl<'de> Deserialize<'de> for SourceReadData {
             stale_references: wire.stale_references,
             elisions: wire.elisions,
             total_source_bytes: wire.total_source_bytes,
+            explanation: wire.explanation,
         })
     }
 }
