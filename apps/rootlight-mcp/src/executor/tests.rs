@@ -2880,6 +2880,41 @@ async fn unsupported_fields_are_rejected_with_field_specific_actions() {
 }
 
 #[tokio::test]
+async fn symbol_explain_explain_returns_a_plan_without_retrieval() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
+        repository_id: repository(),
+        active_generation: generation(),
+        parent_generation: None,
+        structural_freshness: "current".to_owned(),
+        semantic_freshness: "current".to_owned(),
+        state: "ready".to_owned(),
+        coverage: vec![],
+    })));
+    let output = execute(
+        &harness.executor,
+        VerticalTool::SymbolExplain,
+        json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()], "explain": true}),
+    )
+    .await
+    .expect("explain executes");
+    let output: SymbolExplainOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected explain success");
+    };
+    assert!(
+        output.data.symbols.is_empty(),
+        "explain performs no retrieval"
+    );
+    let explanation = output.data.explanation.expect("explain returns a plan");
+    assert_eq!(explanation.operators, vec!["symbol_lookup".to_owned()]);
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        1,
+        "only the metadata status call runs, no symbol retrieval"
+    );
+}
+
+#[tokio::test]
 async fn code_locate_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),

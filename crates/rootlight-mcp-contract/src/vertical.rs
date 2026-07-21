@@ -1323,6 +1323,9 @@ pub struct SymbolExplainInput {
     /// Requested representation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// Compact relation counts for one symbol.
@@ -1412,6 +1415,9 @@ pub struct SymbolExplainData {
     /// Bounded progressive-disclosure handles.
     #[schemars(length(max = 64))]
     pub detail_handles: Vec<DetailHandle>,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 /// Checked success-or-error output for `symbol.explain`.

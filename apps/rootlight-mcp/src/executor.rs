@@ -2634,15 +2634,6 @@ where
         matches!(request.mode, LocateMode::Exact),
         request.maximum_results,
     );
-    let languages: Vec<LanguageCoverage> = status
-        .coverage
-        .iter()
-        .map(|entry| LanguageCoverage {
-            language: entry.language.clone(),
-            tier: analysis_tier(&entry.tier),
-            status: coverage_status_from_label(&entry.status),
-        })
-        .collect();
     let data = CodeLocateData {
         matches: Vec::new(),
         query_interpretation: QueryInterpretation {
@@ -2653,6 +2644,26 @@ where
         suggested_next: Vec::new(),
         explanation: Some(explanation),
     };
+    explain_envelope_from_status(status, data)
+}
+
+/// Builds a source-free explain envelope from repository metadata.
+///
+/// Shared by the read tools' explain mode: the envelope identity is pinned to
+/// the resolved generation and no source is read.
+fn explain_envelope_from_status<T>(
+    status: client::RepositoryStatus,
+    data: T,
+) -> Result<ReadEnvelope<T>, ToolExecutionError> {
+    let languages: Vec<LanguageCoverage> = status
+        .coverage
+        .iter()
+        .map(|entry| LanguageCoverage {
+            language: entry.language.clone(),
+            tier: analysis_tier(&entry.tier),
+            status: coverage_status_from_label(&entry.status),
+        })
+        .collect();
     let context = client::QueryContext {
         repository: status.repository_id,
         generation: status.active_generation,
@@ -2683,6 +2694,34 @@ where
     map_read_envelope(context, metadata, data, false)
 }
 
+/// Builds the source-free `symbol.explain` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no symbol evidence
+/// is fetched. The plan is deterministic for the normalized request.
+async fn explain_symbol_explain<P>(
+    port: Arc<P>,
+    request: SymbolExplainPortRequest,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<SymbolExplainData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(request.repository, request.generation);
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let explanation = rootlight_agent::explain::symbol_explain_plan(request.symbols.len());
+    let data = SymbolExplainData {
+        symbols: Vec::new(),
+        unresolved_ids: Vec::new(),
+        detail_handles: Vec::new(),
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_symbol_explain<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -2693,7 +2732,12 @@ where
     P: FirstSliceClientPort,
 {
     let input: SymbolExplainInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let request = normalize_symbol_explain(input, unsupported)?;
+    if explain_only {
+        let output = explain_symbol_explain(port, request, cancellation).await?;
+        return serialize_success(output);
+    }
     let expected = request.clone();
     let future = port.symbol_explain(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -4618,6 +4662,7 @@ fn map_symbol_explain(
         symbols,
         unresolved_ids: response.result.unresolved_symbols,
         detail_handles: Vec::<DetailHandle>::new(),
+        explanation: None,
     };
     map_read_envelope(
         response.result.context,
