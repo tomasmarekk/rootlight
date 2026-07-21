@@ -1196,3 +1196,110 @@ fn plan_change_requires_an_explicit_target_set() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn history_compare_reports_an_honest_empty_comparison_for_base_equal_to_head() {
+    // The first-slice daemon retains few generations and maps no git ref to a
+    // generation, so the honest service-level proof compares a generation
+    // against itself. The two-generation load path still runs (the base document
+    // is read from the generation set while the head pins the query service),
+    // but diffing a document against itself yields no added, removed, or
+    // modified entities, no breaking candidates, and an honest zero architecture
+    // delta: every retained entity survives as an identity-preserved, non-rename
+    // lineage match at full confidence, the comparison is trivially complete, and
+    // mandatory trust labeling still holds. No change, rename, or architecture
+    // delta is fabricated.
+    let source =
+        "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    let located = service
+        .code_locate(
+            indexed.generation,
+            "callee".to_owned(),
+            LocateMode::Exact,
+            8,
+            &cancellation,
+        )
+        .expect("locate query succeeds");
+    assert_eq!(located.data.hits.len(), 1);
+    let target = located.data.hits[0].symbol;
+
+    let comparison = service
+        .history_compare(
+            indexed.generation,
+            indexed.generation,
+            BTreeSet::new(),
+            100,
+            &cancellation,
+        )
+        .expect("history compare query succeeds");
+
+    // The resolved state pair names the same generation on both sides.
+    assert_eq!(comparison.data.base_generation, indexed.generation);
+    assert_eq!(comparison.data.head_generation, indexed.generation);
+    assert_eq!(comparison.data.coverage, CoverageStatus::Complete);
+    // No semantic change, breaking candidate, or architecture delta is fabricated.
+    assert!(comparison.data.changes.is_empty());
+    assert!(comparison.data.breaking_candidates.is_empty());
+    assert_eq!(
+        comparison.data.architecture_delta.new_cross_service_edges,
+        0
+    );
+    assert_eq!(
+        comparison
+            .data
+            .architecture_delta
+            .removed_cross_service_edges,
+        0
+    );
+    assert_eq!(comparison.data.architecture_delta.new_boundaries, 0);
+    assert_eq!(comparison.data.architecture_delta.removed_boundaries, 0);
+    // Every retained entity survives as an identity-preserved, non-rename match,
+    // including the located target symbol.
+    assert!(!comparison.data.lineage.is_empty());
+    assert!(comparison.data.lineage.iter().all(|lineage| {
+        lineage.base_symbol_id == lineage.head_symbol_id
+            && !lineage.is_rename
+            && lineage.confidence == 1_000
+    }));
+    assert!(
+        comparison
+            .data
+            .lineage
+            .iter()
+            .any(|lineage| lineage.base_symbol_id == target)
+    );
+    assert_eq!(
+        comparison.data.trust,
+        RepositoryDataTrust::UntrustedRepositoryData
+    );
+}
+
+#[test]
+fn history_compare_requires_a_known_base_generation() {
+    // The comparison loads both generations from the bounded generation set; a
+    // base generation that was never retained is rejected by the facade.
+    let source = "pub fn answer() -> u32 {\n    42\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    let unknown = GenerationId::from_bytes([0xEE; 20]);
+    let result = service.history_compare(
+        unknown,
+        indexed.generation,
+        BTreeSet::new(),
+        100,
+        &cancellation,
+    );
+    assert!(result.is_err());
+}
