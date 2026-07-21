@@ -10,7 +10,10 @@ use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{GenerationId, RepositoryId};
 use rootlight_incremental::{FactDomain, FactDomainSet};
 use rootlight_ir::CoverageStatus;
-use rootlight_query::{LocateMode, RepositoryDataTrust};
+use rootlight_query::{
+    ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_MAX_TRAVERSAL, AdvancedAggregateFunction, AdvancedAstNode,
+    AdvancedCompleteness, AdvancedEntityKind, LocateMode, RepositoryDataTrust,
+};
 use rootlight_service::{
     ArchitectureOverviewView, ChangeClass, ChangeImpactClassification, ChangeImpactRiskLevel,
     CodeDeadEntryPointPolicy, FileChangeKind, FirstSliceBuildStrategy, FirstSliceError,
@@ -1302,4 +1305,78 @@ fn history_compare_requires_a_known_base_generation() {
         &cancellation,
     );
     assert!(result.is_err());
+}
+
+#[test]
+fn advanced_query_serves_a_scan_and_reports_unsupported_honestly() {
+    // The first-slice lexical oracle has entities and relations but no full
+    // relational engine, so the honest service-level proof serves the supported
+    // scan/filter/project/limit subset directly against the fixture entities and
+    // reports an honest unsupported result for operators this slice does not
+    // serve. Columns are always non-empty and no row is fabricated for an
+    // unsupported operator.
+    let source =
+        "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n";
+    let fixture = fixture(source);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let indexed = service
+        .index_rust_fixture(fixture.path(), &cancellation)
+        .expect("fixture generation indexes");
+
+    // A simple scan over functions is served from the fixture entities.
+    let scan = AdvancedAstNode::Scan {
+        entity: AdvancedEntityKind::Function,
+        filter: None,
+    };
+    let result = service
+        .advanced_query(
+            indexed.generation,
+            scan,
+            false,
+            100,
+            ADVANCED_DEFAULT_MAX_DEPTH,
+            ADVANCED_MAX_TRAVERSAL,
+            None,
+            &cancellation,
+        )
+        .expect("advanced scan query succeeds");
+
+    // Columns are always non-empty and rows carry the fixture functions.
+    assert!(!result.data.columns.is_empty());
+    assert_eq!(result.data.completeness, AdvancedCompleteness::Complete);
+    assert!(!result.data.rows.is_empty());
+    assert_eq!(
+        result.data.trust,
+        RepositoryDataTrust::UntrustedRepositoryData
+    );
+
+    // An aggregate operator is not served by this slice: the result is honestly
+    // unsupported with non-empty columns and no fabricated rows.
+    let aggregate = AdvancedAstNode::Aggregate {
+        input: Box::new(AdvancedAstNode::Scan {
+            entity: AdvancedEntityKind::Function,
+            filter: None,
+        }),
+        group_by: vec!["kind".to_owned()],
+        aggregations: vec![AdvancedAggregateFunction::Count],
+    };
+    let unsupported = service
+        .advanced_query(
+            indexed.generation,
+            aggregate,
+            false,
+            100,
+            ADVANCED_DEFAULT_MAX_DEPTH,
+            ADVANCED_MAX_TRAVERSAL,
+            None,
+            &cancellation,
+        )
+        .expect("advanced aggregate query succeeds");
+    assert_eq!(
+        unsupported.data.completeness,
+        AdvancedCompleteness::Unsupported
+    );
+    assert!(!unsupported.data.columns.is_empty());
+    assert!(unsupported.data.rows.is_empty());
 }
