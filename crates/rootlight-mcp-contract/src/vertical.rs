@@ -996,6 +996,9 @@ pub struct CodeLocateInput {
     /// Requested representation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// Resolved repository metadata.
@@ -1239,6 +1242,9 @@ pub struct CodeLocateData {
     /// Bounded next-action suggestions.
     #[schemars(length(max = 16))]
     pub suggested_next: Vec<ToolSuggestion>,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 /// Checked success-or-error output for `code.locate`.

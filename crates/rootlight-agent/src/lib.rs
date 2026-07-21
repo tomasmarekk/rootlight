@@ -15,3 +15,4 @@
 pub mod advanced;
 pub mod batch;
 pub mod context_pack;
+pub mod explain;

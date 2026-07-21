@@ -2816,6 +2816,41 @@ async fn unsupported_fields_are_rejected_with_field_specific_actions() {
 }
 
 #[tokio::test]
+async fn code_locate_explain_returns_a_plan_without_retrieval() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
+        repository_id: repository(),
+        active_generation: generation(),
+        parent_generation: None,
+        structural_freshness: "current".to_owned(),
+        semantic_freshness: "current".to_owned(),
+        state: "ready".to_owned(),
+        coverage: vec![],
+    })));
+    let output = execute(
+        &harness.executor,
+        VerticalTool::CodeLocate,
+        json!({"repository": {"repository_id": repository()}, "query": "publish", "explain": true}),
+    )
+    .await
+    .expect("explain executes");
+    let output: CodeLocateOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected explain success");
+    };
+    assert!(
+        output.data.matches.is_empty(),
+        "explain performs no retrieval"
+    );
+    let explanation = output.data.explanation.expect("explain returns a plan");
+    assert_eq!(explanation.operators, vec!["lexical_scan".to_owned()]);
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        1,
+        "only the metadata status call runs, no locate retrieval"
+    );
+}
+
+#[tokio::test]
 async fn executor_rejects_semantically_invalid_arguments_before_the_port() {
     let harness = Harness::new(FakeOutcome::RepositoryIndex(Err(ClientPortError::Executor)));
 

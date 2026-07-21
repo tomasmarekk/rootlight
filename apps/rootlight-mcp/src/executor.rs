@@ -2569,12 +2569,96 @@ where
     P: FirstSliceClientPort,
 {
     let input: CodeLocateInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let request = normalize_code_locate(input, unsupported)?;
+    if explain_only {
+        let output = explain_code_locate(port, request, cancellation).await?;
+        return serialize_success(output);
+    }
     let expected = request.clone();
     let future = port.code_locate(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_code_locate(response, &expected)?;
     serialize_success(output)
+}
+
+/// Builds the source-free `code.locate` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no source bodies
+/// are fetched and no locate traversal runs, so explain is safe before work is
+/// spent. The plan is deterministic for the normalized request.
+async fn explain_code_locate<P>(
+    port: Arc<P>,
+    request: CodeLocatePortRequest,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<CodeLocateData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(request.repository, request.generation);
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let mode = match request.mode {
+        LocateMode::Exact => SearchMode::Exact,
+        LocateMode::Text => SearchMode::Lexical,
+        LocateMode::Prefix | LocateMode::SafeRegex | LocateMode::Glob => {
+            return Err(internal(ToolExecutionFailure::InvalidResponse));
+        }
+    };
+    let explanation = rootlight_agent::explain::code_locate_plan(
+        matches!(request.mode, LocateMode::Exact),
+        request.maximum_results,
+    );
+    let languages: Vec<LanguageCoverage> = status
+        .coverage
+        .iter()
+        .map(|entry| LanguageCoverage {
+            language: entry.language.clone(),
+            tier: analysis_tier(&entry.tier),
+            status: coverage_status_from_label(&entry.status),
+        })
+        .collect();
+    let data = CodeLocateData {
+        matches: Vec::new(),
+        query_interpretation: QueryInterpretation {
+            tokens: Vec::new(),
+            modes: BTreeSet::from([mode]),
+            semantic_available: false,
+        },
+        suggested_next: Vec::new(),
+        explanation: Some(explanation),
+    };
+    let context = client::QueryContext {
+        repository: status.repository_id,
+        generation: status.active_generation,
+        parent_generation: status.parent_generation,
+        active_generation: true,
+        tier: client::AnalysisTier::TierC,
+        coverage_status: client::CoverageStatus::Bounded,
+        skipped_inputs: 0,
+        usage: client::QueryUsage {
+            rows: 0,
+            edges: 0,
+            results: 0,
+            source_bytes: 0,
+            json_bytes: 0,
+            estimated_tokens: 0,
+            elapsed_micros: 0,
+        },
+    };
+    let metadata = ReadResponseMetadata::new(
+        status.repository_id.to_string(),
+        freshness_from_label(&status.structural_freshness),
+        freshness_from_label(&status.semantic_freshness),
+        languages,
+        CacheStatus::NotApplicable,
+        "explain".to_owned(),
+        Vec::new(),
+    );
+    map_read_envelope(context, metadata, data, false)
 }
 
 async fn execute_symbol_explain<P>(
@@ -4443,6 +4527,7 @@ fn map_code_locate(
             semantic_available: false,
         },
         suggested_next: Vec::new(),
+        explanation: None,
     };
     map_read_envelope(
         response.result.context,
