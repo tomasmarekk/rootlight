@@ -107,7 +107,7 @@ allow_build_script = false
 
 [[crates]]
 name = "rootlight-agent"
-allowed_internal_dependencies = []
+allowed_internal_dependencies = ["rootlight-mcp-contract"]
 allow_build_script = false
 
 [[crates]]

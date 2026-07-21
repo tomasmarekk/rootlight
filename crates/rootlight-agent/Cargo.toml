@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rootlight-mcp-contract = { path = "../rootlight-mcp-contract" }
 thiserror.workspace = true
 
 [lints]

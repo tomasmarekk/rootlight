@@ -6,8 +6,8 @@
 
 #![forbid(unsafe_code)]
 
-pub mod advanced;
-pub mod batch;
+pub use rootlight_agent::advanced;
+pub use rootlight_agent::batch;
 mod client_port;
 pub use rootlight_agent::context_pack;
 mod executor;
