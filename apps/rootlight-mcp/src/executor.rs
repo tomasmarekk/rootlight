@@ -1426,15 +1426,8 @@ where
                     execute_repo_status(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::RepoList => {
-                    execute_repo_list(
-                        port,
-                        arguments,
-                        cancellation,
-                        &unsupported,
-                        &invalid_cursor,
-                        cursor_key,
-                    )
-                    .await
+                    execute_repo_list(port, arguments, cancellation, &invalid_cursor, cursor_key)
+                        .await
                 }
                 VerticalTool::ChangeImpact => {
                     execute_change_impact(port, arguments, cancellation, &unsupported).await
@@ -1540,9 +1533,12 @@ where
     let input: QueryBatchInput = decode_input(arguments)?;
     let repository = repository_id(input.repository.clone(), unsupported)?;
     // Shared budgets and aggregate response profiles are not enforced by this
-    // slice; reject them rather than silently ignoring them.
-    if input.budget.is_some() || !compact_profile(input.response_profile) {
-        return Err(ToolExecutionError::new(unsupported.clone()));
+    // slice; each is rejected by name rather than silently ignored.
+    if input.budget.is_some() {
+        return Err(unsupported_field("budget"));
+    }
+    if !compact_profile(input.response_profile) {
+        return Err(unsupported_field("response_profile"));
     }
     let operation_failed =
         PublicError::builder(ErrorCode::Internal, BATCH_OPERATION_FAILED_MESSAGE)
@@ -1917,20 +1913,37 @@ where
     repository_id(input.repository.clone(), unsupported)?;
 
     // This slice assembles packs from symbol/test seeds only. The other seed
-    // kinds and the selection controls are not served and are rejected here so
-    // they are never silently ignored.
-    if input.seeds.paths.is_some()
-        || input.seeds.routes.is_some()
-        || input.seeds.located.is_some()
-        || input.seeds.change.is_some()
-        || input.seeds.plan.is_some()
-        || input.source_policy.is_some()
-        || input.sections.is_some()
-        || input.diversity.is_some()
-        || input.min_confidence.is_some()
-        || input.continuation.is_some()
-    {
-        return Err(ToolExecutionError::new(unsupported.clone()));
+    // kinds and selection controls are not served; each is rejected by name so
+    // it is never silently ignored.
+    if input.seeds.paths.is_some() {
+        return Err(unsupported_field("paths"));
+    }
+    if input.seeds.routes.is_some() {
+        return Err(unsupported_field("routes"));
+    }
+    if input.seeds.located.is_some() {
+        return Err(unsupported_field("located"));
+    }
+    if input.seeds.change.is_some() {
+        return Err(unsupported_field("change"));
+    }
+    if input.seeds.plan.is_some() {
+        return Err(unsupported_field("plan"));
+    }
+    if input.source_policy.is_some() {
+        return Err(unsupported_field("source_policy"));
+    }
+    if input.sections.is_some() {
+        return Err(unsupported_field("sections"));
+    }
+    if input.diversity.is_some() {
+        return Err(unsupported_field("diversity"));
+    }
+    if input.min_confidence.is_some() {
+        return Err(unsupported_field("min_confidence"));
+    }
+    if input.continuation.is_some() {
+        return Err(unsupported_field("continuation"));
     }
 
     let mut seed_symbols: BTreeSet<SymbolId> = BTreeSet::new();
@@ -2171,7 +2184,6 @@ async fn execute_repo_list<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
     cancellation: RequestCancellation,
-    unsupported: &PublicError,
     invalid_cursor: &PublicError,
     cursor_key: [u8; 32],
 ) -> Result<Map<String, Value>, ToolExecutionError>
@@ -2179,14 +2191,13 @@ where
     P: FirstSliceClientPort,
 {
     let input: RepoListInput = decode_input(arguments)?;
-    // State filtering is not served by this slice.
+    // State filtering and non-compact response profiles are not served by this
+    // slice; each is rejected by name rather than silently ignored.
     if input.states.is_some() {
-        return Err(ToolExecutionError::new(unsupported.clone()));
+        return Err(unsupported_field("states"));
     }
-    // Non-compact response profiles are not served by this slice; rejecting
-    // here keeps the field from being silently ignored.
     if !compact_profile(input.response_profile) {
-        return Err(ToolExecutionError::new(unsupported.clone()));
+        return Err(unsupported_field("response_profile"));
     }
     let page_size = input.max_results.unwrap_or(DEFAULT_REPO_LIST_RESULTS);
     let context = repo_list_cursor_context(input.query.as_deref(), page_size);
@@ -2343,16 +2354,23 @@ where
 {
     let input: RepoStatusInput = decode_input(arguments)?;
     let repository = repository_id(input.repository.clone(), unsupported)?;
-    // Granular coverage, operation lists, and freshness gates are not served by
-    // this slice; neither are custom budgets or non-compact response profiles
-    // (rejecting them keeps those fields from being silently ignored).
-    if input.coverage_detail.is_some()
-        || input.require_freshness.is_some()
-        || input.include_operations == Some(true)
-        || input.budget.is_some()
-        || !compact_profile(input.response_profile)
-    {
-        return Err(ToolExecutionError::new(unsupported.clone()));
+    // Granular coverage, operation lists, freshness gates, custom budgets, and
+    // non-compact profiles are not served by this slice; each is rejected by
+    // name so a client can correct the request.
+    if input.coverage_detail.is_some() {
+        return Err(unsupported_field("coverage_detail"));
+    }
+    if input.require_freshness.is_some() {
+        return Err(unsupported_field("require_freshness"));
+    }
+    if input.include_operations == Some(true) {
+        return Err(unsupported_field("include_operations"));
+    }
+    if input.budget.is_some() {
+        return Err(unsupported_field("budget"));
+    }
+    if !compact_profile(input.response_profile) {
+        return Err(unsupported_field("response_profile"));
     }
     let request = RepositoryStatusPortRequest::new(repository, client_generation(input.generation));
     let future = port.repository_status(request, cancellation.clone());
@@ -4045,6 +4063,17 @@ fn invalid_input() -> ToolExecutionError {
     ToolExecutionError::new(error)
 }
 
+/// Builds the pre-execution error for a schema-valid field this slice does not
+/// serve, naming the offending field so a client can correct the request
+/// instead of seeing a generic arguments-level rejection.
+fn unsupported_field(field: &'static str) -> ToolExecutionError {
+    let field = DetailKey::parse(field).expect("static field name is valid");
+    let error = PublicError::builder(ErrorCode::UnsupportedCapability, UNSUPPORTED_MESSAGE)
+        .next_action(NextAction::CorrectField { field })
+        .build()
+        .expect("static unsupported-field template is valid");
+    ToolExecutionError::new(error)
+}
 fn normalize_repository_index(
     input: RepoIndexInput,
     unsupported: &PublicError,

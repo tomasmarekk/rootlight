@@ -2774,6 +2774,48 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
 }
 
 #[tokio::test]
+async fn unsupported_fields_are_rejected_with_field_specific_actions() {
+    let harness = Harness::new(FakeOutcome::RepositoryIndex(Err(ClientPortError::Executor)));
+    let cases = [
+        (
+            VerticalTool::RepoStatus,
+            json!({"repository": {"repository_id": repository()}, "budget": {}}),
+            "budget",
+        ),
+        (
+            VerticalTool::RepoList,
+            json!({"response_profile": "standard"}),
+            "response_profile",
+        ),
+        (
+            VerticalTool::QueryBatch,
+            json!({"repository": {"repository_id": repository()}, "operations": [{"id": "a", "tool": "code.locate", "arguments": {"query": "x"}}], "budget": {}}),
+            "budget",
+        ),
+        (
+            VerticalTool::ContextPack,
+            json!({"repository": {"repository_id": repository()}, "task": "fix a bug", "seeds": {"symbols": [symbol()]}, "token_budget": 1000, "min_confidence": 800}),
+            "min_confidence",
+        ),
+    ];
+    for (tool, arguments, field) in cases {
+        let error = execute(&harness.executor, tool, arguments)
+            .await
+            .expect_err("unsupported field is rejected");
+        let public = error.public_error().expect("checked public error");
+        assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+        assert!(
+            public.next_actions().iter().any(|action| matches!(
+                action,
+                NextAction::CorrectField { field: named } if named.as_str() == field
+            )),
+            "expected a correct-field action naming {field}"
+        );
+    }
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn executor_rejects_semantically_invalid_arguments_before_the_port() {
     let harness = Harness::new(FakeOutcome::RepositoryIndex(Err(ClientPortError::Executor)));
 
