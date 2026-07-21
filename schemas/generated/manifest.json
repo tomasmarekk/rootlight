@@ -54,7 +54,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/intent.rs",
-      "blake3": "061bf62b52d77f492f15169e615a961c74ab2e0788397554af0ea3579bd135e5"
+      "blake3": "8ba14c3c3c3a663d044c11b573d87a429ab5f7e2b3a45074e2e62cbe17ec6621"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/lib.rs",
@@ -220,11 +220,11 @@
     },
     {
       "path": "schemas/generated/json/mcp-architecture-overview-input-1.0.schema.json",
-      "blake3": "41f8702c901b19169be02fee6ceab6d62ecbfa92ed644b5aaaac6daae1d51e8b"
+      "blake3": "61d172541e07979827712c2fcd9be38f0c7a63145d49c95a7aa3c90ac061b03c"
     },
     {
       "path": "schemas/generated/json/mcp-architecture-overview-output-1.0.schema.json",
-      "blake3": "705f343ad6a2c74f653075d332b1ae1adc4ccb291fa5adec2ab724c62398332c"
+      "blake3": "ec9bc1f95e033e9840c56e68df0b6de4d0c72b3391b5999ab21a40a379d1993c"
     },
     {
       "path": "schemas/generated/json/mcp-change-impact-input-1.0.schema.json",

@@ -3420,6 +3420,35 @@ fn dead_classification_from_label(label: &str) -> Result<DeadClassification, Too
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
+/// Builds the source-free `architecture.overview` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no component
+/// aggregation runs. The plan is deterministic for the normalized request.
+async fn explain_architecture_overview<P>(
+    port: Arc<P>,
+    request: ArchitectureOverviewPortRequest,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<ArchitectureOverviewData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(request.repository, request.generation);
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let explanation = rootlight_agent::explain::architecture_overview_plan(request.max_components);
+    let data = ArchitectureOverviewData {
+        components: Vec::new(),
+        connections: Vec::new(),
+        hotspots: Vec::new(),
+        views: Vec::new(),
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_architecture_overview<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -3430,7 +3459,12 @@ where
     P: FirstSliceClientPort,
 {
     let input: ArchitectureOverviewInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let request = normalize_architecture_overview(input, unsupported)?;
+    if explain_only {
+        let output = explain_architecture_overview(port, request, cancellation).await?;
+        return serialize_success(output);
+    }
     let expected = request.clone();
     let future = port.architecture_overview(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
@@ -3540,6 +3574,7 @@ fn map_architecture_overview(
         connections,
         hotspots,
         views,
+        explanation: None,
     };
     // The requested component cap is an explicit bound honored by the daemon;
     // this slice does not surface separate budget-truncation through the wire.

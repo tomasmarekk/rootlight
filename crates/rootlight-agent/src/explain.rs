@@ -28,6 +28,9 @@ const IMPACT_COST_PER_CHANGE: u64 = 40;
 /// Estimated cost units per planned selected test for `tests.select`.
 const TESTS_COST_PER_TEST: u64 = 6;
 
+/// Estimated cost units per planned component for `architecture.overview`.
+const OVERVIEW_COST_PER_COMPONENT: u64 = 20;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -145,6 +148,20 @@ pub fn tests_select_plan(max_tests: Option<u16>) -> PlanExplanation {
     }
 }
 
+/// Builds the source-free `architecture.overview` plan for explain mode.
+///
+/// `max_components` bounds the planned aggregation and drives the cost estimate.
+#[must_use]
+pub fn architecture_overview_plan(max_components: Option<u16>) -> PlanExplanation {
+    let components = u64::from(max_components.unwrap_or(100));
+    let cost = components.saturating_mul(OVERVIEW_COST_PER_COMPONENT);
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["architecture_mapping".to_owned()],
+        applied_limits: vec![format!("max_components: {components}")],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::code_locate_plan;
@@ -229,5 +246,17 @@ mod tests {
         let plan = tests_select_plan(Some(20));
         assert_eq!(plan.operators, vec!["test_selection".to_owned()]);
         assert_eq!(plan.applied_limits, vec!["max_tests: 20".to_owned()]);
+    }
+
+    #[test]
+    fn architecture_overview_plan_is_deterministic_and_bounded() {
+        use super::architecture_overview_plan;
+        assert_eq!(
+            architecture_overview_plan(Some(50)),
+            architecture_overview_plan(Some(50))
+        );
+        let plan = architecture_overview_plan(Some(50));
+        assert_eq!(plan.operators, vec!["architecture_mapping".to_owned()]);
+        assert_eq!(plan.applied_limits, vec!["max_components: 50".to_owned()]);
     }
 }
