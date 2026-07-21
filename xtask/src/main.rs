@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod architecture;
+mod capability;
 mod daemon_lifecycle;
 mod disposition;
 mod git_metadata;
@@ -66,6 +67,7 @@ fn run() -> Result<(), XtaskError> {
             let root = parse_required_root(&mut args)?;
             disposition::check(&root)?;
         }
+        Some("capability-check") => capability::check()?,
         Some("unsafe-check") => {
             let fixture_root = parse_required_fixture_root(&mut args)?;
             policy::check_unsafe_fixture(&fixture_root)?;
@@ -153,7 +155,7 @@ fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), X
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|policy-check|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|capability-check|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|policy-check|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -174,6 +176,8 @@ enum XtaskError {
     WorkingDir(#[source] std::io::Error),
     #[error(transparent)]
     Architecture(#[from] architecture::ArchitectureError),
+    #[error(transparent)]
+    Capability(#[from] capability::CapabilityError),
     #[error(transparent)]
     DaemonLifecycle(#[from] daemon_lifecycle::LifecycleError),
     #[error(transparent)]

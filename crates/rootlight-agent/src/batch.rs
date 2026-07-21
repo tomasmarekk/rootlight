@@ -18,22 +18,11 @@ pub const MAX_DEPS_PER_OPERATION: usize = 8;
 
 /// The closed allowlist of tools permitted inside a public batch.
 ///
-/// Mutation tools, repository or operation polling, nested batches,
-/// `history.compare`, `query.advanced`, and cross-generation operations
-/// are forbidden.
-pub const BATCH_ALLOWLIST: [McpTool; 11] = [
-    McpTool::CodeLocate,
-    McpTool::SymbolExplain,
-    McpTool::SymbolRelationships,
-    McpTool::FlowTrace,
-    McpTool::ChangeImpact,
-    McpTool::TestsSelect,
-    McpTool::ArchitectureOverview,
-    McpTool::ArchitectureCycles,
-    McpTool::CodeDead,
-    McpTool::ContextPack,
-    McpTool::SourceRead,
-];
+/// Aliased from the capability registry, the single source of truth for batch
+/// eligibility. Mutation tools, repository or operation polling, nested
+/// batches, `history.compare`, `query.advanced`, and cross-generation
+/// operations are forbidden.
+pub const BATCH_ALLOWLIST: [McpTool; 11] = rootlight_mcp_contract::capability::BATCH_ELIGIBLE;
 
 /// Errors returned during batch validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -233,6 +222,16 @@ mod tests {
         is_batch_allowed_under_profile,
     };
     use rootlight_mcp_contract::{ExposureProfile, McpTool};
+
+    #[test]
+    fn batch_allowlist_aliases_the_capability_registry() {
+        // The batch validator must not maintain a parallel eligibility list; it
+        // aliases the capability registry, the single source of truth.
+        assert_eq!(
+            super::BATCH_ALLOWLIST,
+            rootlight_mcp_contract::capability::BATCH_ELIGIBLE
+        );
+    }
 
     #[test]
     fn empty_batch_is_rejected() {

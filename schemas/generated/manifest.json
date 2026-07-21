@@ -58,7 +58,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/lib.rs",
-      "blake3": "13bc3b4dc7b4eb43f4cc81a34ef67e7868a02dda18ae110594ab271ab78eb458"
+      "blake3": "b1b30998975d8bdd475c5c49e86749f0c91cdd56492a55a4eec2a5f48142c5e3"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/repository.rs",
@@ -166,7 +166,7 @@
     },
     {
       "path": "xtask/src/main.rs",
-      "blake3": "1c888d4afc983cbecfd51dd0fea4d09feccd6b3e13d1d25cab66bfc44acf1017"
+      "blake3": "341658d5b399d7eb294fb0f5ac05a44785fe669ca7fc48b170f07ab4f6e62b1e"
     },
     {
       "path": "xtask/src/schemas.rs",

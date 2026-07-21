@@ -45,6 +45,7 @@ jobs:
       - name: Architecture and contracts
         run: |
           cargo run --locked --quiet --package xtask -- architecture-check
+          cargo run --locked --quiet --package xtask -- capability-check
           cargo run --locked --quiet --package xtask -- generate --check
           cargo run --locked --quiet --package xtask -- compatibility-check
           cargo run --locked --quiet --package xtask -- policy-check
