@@ -10,6 +10,6 @@
 //! crates, the stdio transport, or JSON-RPC server internals, and its types
 //! carry no request IDs or transport lifecycle.
 
-pub mod context_pack;
 pub mod advanced;
 pub mod batch;
+pub mod context_pack;
