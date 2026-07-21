@@ -6113,8 +6113,13 @@ mod tests {
             OperationJournal::open(&path),
             Err(OperationError::CatalogRowLimitExceeded)
         ));
+        // Use an explicit generous budget here: this asserts limit detection, not
+        // the fail-fast default. Revalidating a full catalog can exceed the 250ms
+        // CATALOG_BUSY_TIMEOUT on slow or loaded runners, which would surface as a
+        // timeout and make the assertion flaky. The default budget's timing
+        // behavior is covered by the dedicated quick-check timing tests below.
         assert!(matches!(
-            OperationJournal::quick_check_path(&path),
+            OperationJournal::quick_check_path_with_timeout(&path, Duration::from_secs(5)),
             Err(OperationError::CatalogRowLimitExceeded)
         ));
     }
