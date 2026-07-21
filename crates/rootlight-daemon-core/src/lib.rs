@@ -6673,12 +6673,16 @@ fn checked_next_action_from_wire(action: &common::NextAction) -> Option<NextActi
         common::next_action::Kind::CollectSupportBundle if action.field.is_none() => {
             Some(NextAction::CollectSupportBundle)
         }
+        common::next_action::Kind::RestartEnumeration if action.field.is_none() => {
+            Some(NextAction::RestartEnumeration)
+        }
         common::next_action::Kind::Unspecified
         | common::next_action::Kind::Retry
         | common::next_action::Kind::SelectSupportedVersion
         | common::next_action::Kind::InspectOperation
         | common::next_action::Kind::RebuildRepository
-        | common::next_action::Kind::CollectSupportBundle => None,
+        | common::next_action::Kind::CollectSupportBundle
+        | common::next_action::Kind::RestartEnumeration => None,
     }
 }
 
@@ -8663,6 +8667,7 @@ fn next_action_to_wire(action: &NextAction) -> Result<common::NextAction, Servic
         NextAction::InspectOperation => (common::next_action::Kind::InspectOperation, None),
         NextAction::RebuildRepository => (common::next_action::Kind::RebuildRepository, None),
         NextAction::CollectSupportBundle => (common::next_action::Kind::CollectSupportBundle, None),
+        NextAction::RestartEnumeration => (common::next_action::Kind::RestartEnumeration, None),
         _ => return Err(ServiceError::UnsupportedPublicErrorVariant),
     };
     Ok(common::NextAction {

@@ -6750,12 +6750,16 @@ fn parse_next_action(action: common::NextAction) -> Result<NextAction, ClientErr
         common::next_action::Kind::CollectSupportBundle if action.field.is_none() => {
             Ok(NextAction::CollectSupportBundle)
         }
+        common::next_action::Kind::RestartEnumeration if action.field.is_none() => {
+            Ok(NextAction::RestartEnumeration)
+        }
         common::next_action::Kind::Unspecified
         | common::next_action::Kind::Retry
         | common::next_action::Kind::SelectSupportedVersion
         | common::next_action::Kind::InspectOperation
         | common::next_action::Kind::RebuildRepository
-        | common::next_action::Kind::CollectSupportBundle => Err(ClientError::InvalidPublicError),
+        | common::next_action::Kind::CollectSupportBundle
+        | common::next_action::Kind::RestartEnumeration => Err(ClientError::InvalidPublicError),
     }
 }
 

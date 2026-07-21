@@ -136,6 +136,8 @@ pub mod next_action {
         RebuildRepository = 5,
         #[allow(missing_docs)]
         CollectSupportBundle = 6,
+        #[allow(missing_docs)]
+        RestartEnumeration = 7,
     }
     impl Kind {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -151,6 +153,7 @@ pub mod next_action {
                 Self::InspectOperation => "INSPECT_OPERATION",
                 Self::RebuildRepository => "REBUILD_REPOSITORY",
                 Self::CollectSupportBundle => "COLLECT_SUPPORT_BUNDLE",
+                Self::RestartEnumeration => "RESTART_ENUMERATION",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -163,6 +166,7 @@ pub mod next_action {
                 "INSPECT_OPERATION" => Some(Self::InspectOperation),
                 "REBUILD_REPOSITORY" => Some(Self::RebuildRepository),
                 "COLLECT_SUPPORT_BUNDLE" => Some(Self::CollectSupportBundle),
+                "RESTART_ENUMERATION" => Some(Self::RestartEnumeration),
                 _ => None,
             }
         }

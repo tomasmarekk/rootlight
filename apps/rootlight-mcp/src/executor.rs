@@ -88,6 +88,7 @@ const CURRENT_SOURCE_CONTEXT_LINES: u8 = 2;
 const INVALID_ARGUMENT_MESSAGE: &str = "tool arguments are invalid";
 const UNSUPPORTED_MESSAGE: &str = "requested option is not supported";
 const BATCH_OPERATION_FAILED_MESSAGE: &str = "batch operation failed";
+const INVALID_CURSOR_MESSAGE: &str = "pagination cursor is invalid or expired";
 
 /// Future returned by one injected first-slice client-port operation.
 pub type ClientPortFuture<T> =
@@ -1342,6 +1343,7 @@ pub struct FirstSliceToolExecutor<P> {
     port: Arc<P>,
     invalid_arguments: PublicError,
     unsupported: PublicError,
+    invalid_cursor: PublicError,
     /// Process-local secret used to authenticate pagination cursors.
     ///
     /// It rotates on process restart, gracefully invalidating outstanding
@@ -1374,6 +1376,10 @@ where
                 .next_action(NextAction::CorrectField { field })
                 .build()
                 .map_err(ToolExecutorBuildError::InvalidArgumentError)?;
+        let invalid_cursor = PublicError::builder(ErrorCode::InvalidCursor, INVALID_CURSOR_MESSAGE)
+            .next_action(NextAction::RestartEnumeration)
+            .build()
+            .map_err(ToolExecutorBuildError::InvalidArgumentError)?;
         // A process-local cursor signing key gives cursors per-process
         // rotation. If the OS RNG is unavailable the key stays fixed; cursors
         // remain integrity-checked, only the restart rotation is lost.
@@ -1383,6 +1389,7 @@ where
             port: Arc::new(port),
             invalid_arguments,
             unsupported,
+            invalid_cursor,
             cursor_key,
         })
     }
@@ -1401,6 +1408,7 @@ where
         let port = Arc::clone(&self.port);
         let invalid_arguments = self.invalid_arguments.clone();
         let unsupported = self.unsupported.clone();
+        let invalid_cursor = self.invalid_cursor.clone();
         let cursor_key = self.cursor_key;
         Box::pin(async move {
             match tool {
@@ -1423,7 +1431,7 @@ where
                         arguments,
                         cancellation,
                         &unsupported,
-                        &invalid_arguments,
+                        &invalid_cursor,
                         cursor_key,
                     )
                     .await
@@ -2142,7 +2150,7 @@ async fn execute_repo_list<P>(
     arguments: Map<String, Value>,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
-    invalid_arguments: &PublicError,
+    invalid_cursor: &PublicError,
     cursor_key: [u8; 32],
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
@@ -2156,7 +2164,7 @@ where
     let page_size = input.max_results.unwrap_or(DEFAULT_REPO_LIST_RESULTS);
     let context = repo_list_cursor_context(input.query.as_deref(), page_size);
     let offset = match &input.cursor {
-        Some(cursor) => decode_repo_list_cursor(cursor, &context, &cursor_key, invalid_arguments)?,
+        Some(cursor) => decode_repo_list_cursor(cursor, &context, &cursor_key, invalid_cursor)?,
         None => 0,
     };
 
@@ -2275,17 +2283,17 @@ fn decode_repo_list_cursor(
     cursor: &ContinuationCursor,
     context: &CursorContext,
     cursor_key: &[u8; 32],
-    invalid_arguments: &PublicError,
+    invalid_cursor: &PublicError,
 ) -> Result<usize, ToolExecutionError> {
     let parsed = AuthenticatedCursor::from_wire(cursor.as_str())
-        .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
+        .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))?;
     parsed
         .validate(context, now_unix_ms(), cursor_key)
-        .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
+        .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))?;
     let bytes: [u8; 4] = parsed
         .last_sort_key()
         .try_into()
-        .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
+        .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))?;
     Ok(usize::try_from(u32::from_le_bytes(bytes)).unwrap_or(usize::MAX))
 }
 
@@ -3990,8 +3998,21 @@ fn decode_input<T>(arguments: Map<String, Value>) -> Result<T, ToolExecutionErro
 where
     T: DeserializeOwned,
 {
-    serde_json::from_value(Value::Object(arguments))
-        .map_err(|_| internal(ToolExecutionFailure::Executor))
+    serde_json::from_value(Value::Object(arguments)).map_err(|_| invalid_input())
+}
+
+/// Builds the client-correctable error for malformed tool arguments.
+///
+/// Argument decoding failures are caller errors, not internal failures, so they
+/// are reported as invalid arguments with a stable correct-field action rather
+/// than collapsed into an opaque internal error.
+fn invalid_input() -> ToolExecutionError {
+    let field = DetailKey::parse("arguments").expect("static detail key is valid");
+    let error = PublicError::builder(ErrorCode::InvalidArgument, INVALID_ARGUMENT_MESSAGE)
+        .next_action(NextAction::CorrectField { field })
+        .build()
+        .expect("static invalid-argument template is valid");
+    ToolExecutionError::new(error)
 }
 
 fn normalize_repository_index(

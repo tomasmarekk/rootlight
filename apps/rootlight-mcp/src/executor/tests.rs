@@ -1400,7 +1400,37 @@ async fn repo_list_rejects_a_malformed_cursor() {
         json!({"max_results": 2, "cursor": "c1.AAAA"}),
     )
     .await;
-    assert!(result.is_err(), "a malformed cursor is rejected");
+    let error = result.expect_err("a malformed cursor is rejected");
+    let public = error
+        .public_error()
+        .expect("malformed cursor is a checked public error");
+    assert_eq!(
+        public.code(),
+        ErrorCode::InvalidCursor,
+        "cursor failures map to INVALID_CURSOR, not a generic argument or internal error"
+    );
+}
+
+#[tokio::test]
+async fn executor_maps_malformed_arguments_to_invalid_argument_not_internal() {
+    let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
+        repositories: vec![],
+    })));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::RepoList,
+        json!({"max_results": "not-a-number"}),
+    )
+    .await
+    .expect_err("malformed arguments are rejected");
+    let public = error
+        .public_error()
+        .expect("malformed arguments are a checked public error");
+    assert_eq!(
+        public.code(),
+        ErrorCode::InvalidArgument,
+        "argument decoding failures are client-correctable, not internal"
+    );
 }
 
 #[tokio::test]

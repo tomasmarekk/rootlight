@@ -485,6 +485,20 @@
           "required": [
             "action"
           ]
+        },
+        {
+          "description": "Restart the enumeration or query from the beginning after an invalid\ncontinuation cursor.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "restart_enumeration"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ]
         }
       ]
     },

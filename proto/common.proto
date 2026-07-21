@@ -94,6 +94,7 @@ message NextAction {
     INSPECT_OPERATION = 4;
     REBUILD_REPOSITORY = 5;
     COLLECT_SUPPORT_BUNDLE = 6;
+    RESTART_ENUMERATION = 7;
   }
 
   Kind kind = 1;

@@ -308,6 +308,9 @@ pub enum NextAction {
     RebuildRepository,
     /// Collect a protected source-free support bundle.
     CollectSupportBundle,
+    /// Restart the enumeration or query from the beginning after an invalid
+    /// continuation cursor.
+    RestartEnumeration,
 }
 
 /// A stable source-redacted failure safe to serialize across public boundaries.
