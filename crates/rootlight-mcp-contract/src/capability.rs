@@ -590,7 +590,7 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
     accepted_fallback("query"),
     accepted_fallback("search_modes"),
     accepted_fallback("max_results"),
-    accepted_fallback("budget"),
+    implemented("budget", "reduces the common hard execution budget"),
     implemented(
         "response_profile",
         "selects compact, standard, or bounded evidence representation",
@@ -609,18 +609,6 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
         "relationship-constrained lookup is not served",
     ),
     unsupported("min_confidence", "confidence filtering is not served"),
-    unsupported("budget.max_tokens", "token budgeting is not served"),
-    unsupported(
-        "budget.max_source_bytes",
-        "source-byte budgeting is not served",
-    ),
-    unsupported(
-        "budget.max_traversal_facts",
-        "traversal-fact budgeting is not served",
-    ),
-    unsupported("budget.max_depth", "depth budgeting is not served"),
-    unsupported("budget.max_paths", "path budgeting is not served"),
-    unsupported("budget.timeout_ms", "timeout budgeting is not served"),
     unsupported("budget.evidence_level", "evidence projection is not served"),
     unsupported_value(
         "search_modes[]",
@@ -663,7 +651,8 @@ const SYMBOL_EXPLAIN_RULES: &[CapabilityRule] = &[
         "source_preview_lines",
         "custom source previews are not served",
     ),
-    unsupported("budget", "custom response budgets are not served"),
+    implemented("budget", "reduces the common hard execution budget"),
+    unsupported("budget.evidence_level", "evidence projection is not served"),
     unsupported_value(
         "include_provenance",
         "full",
@@ -696,7 +685,8 @@ const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
         "true",
         "ambiguous candidate projection is not served",
     ),
-    unsupported("budget", "custom response budgets are not served"),
+    implemented("budget", "reduces the common hard execution budget"),
+    unsupported("budget.evidence_level", "evidence projection is not served"),
 ];
 
 const FLOW_TRACE_RULES: &[CapabilityRule] = &[
@@ -728,7 +718,8 @@ const FLOW_TRACE_RULES: &[CapabilityRule] = &[
         "path_policy",
         "explicit path selection policy is not served",
     ),
-    unsupported("budget", "custom response budgets are not served"),
+    implemented("budget", "reduces the common hard execution budget"),
+    unsupported("budget.evidence_level", "evidence projection is not served"),
     unsupported("from.route_id", "route endpoints are not served"),
     unsupported("from.service_id", "service endpoints are not served"),
     unsupported(
@@ -759,7 +750,8 @@ const CHANGE_IMPACT_RULES: &[CapabilityRule] = &[
         "only stable repository identifiers are served",
     ),
     unsupported("scope", "structural scope filtering is not served"),
-    unsupported("budget", "custom response budgets are not served"),
+    implemented("budget", "reduces the common hard execution budget"),
+    unsupported("budget.evidence_level", "evidence projection is not served"),
     unsupported(
         "change.working_tree",
         "working-tree diff resolution is not served",
@@ -796,7 +788,8 @@ const TESTS_SELECT_RULES: &[CapabilityRule] = &[
         "repository.alias",
         "only stable repository identifiers are served",
     ),
-    unsupported("budget", "custom response budgets are not served"),
+    implemented("budget", "reduces the common hard execution budget"),
+    unsupported("budget.evidence_level", "evidence projection is not served"),
     unsupported("execution_budget", "execution-time budgeting is not served"),
     unsupported("frameworks", "framework filtering is not served"),
     unsupported("seeds.paths", "path seeds are not served"),
@@ -822,7 +815,8 @@ const ARCHITECTURE_OVERVIEW_RULES: &[CapabilityRule] = &[
     ),
     unsupported("scope", "structural scope filtering is not served"),
     unsupported("detail", "explicit detail projection is not served"),
-    unsupported("budget", "custom response budgets are not served"),
+    implemented("budget", "reduces the common hard execution budget"),
+    unsupported("budget.evidence_level", "evidence projection is not served"),
     unsupported_value("views[]", "build", "build view is not served"),
     unsupported_value("views[]", "communities", "community view is not served"),
     unsupported_value("views[]", "data", "data view is not served"),
@@ -859,7 +853,8 @@ const ARCHITECTURE_CYCLES_RULES: &[CapabilityRule] = &[
         "detects cycles between symbols",
     ),
     unsupported("rank_by", "cycle ranking strategy is not served"),
-    unsupported("budget", "custom response budgets are not served"),
+    implemented("budget", "reduces the common hard execution budget"),
+    unsupported("budget.evidence_level", "evidence projection is not served"),
 ];
 
 const CODE_DEAD_RULES: &[CapabilityRule] = &[
@@ -880,7 +875,8 @@ const CODE_DEAD_RULES: &[CapabilityRule] = &[
         "only stable repository identifiers are served",
     ),
     unsupported("scope", "structural scope filtering is not served"),
-    unsupported("budget", "custom response budgets are not served"),
+    implemented("budget", "reduces the common hard execution budget"),
+    unsupported("budget.evidence_level", "evidence projection is not served"),
 ];
 
 const HISTORY_COMPARE_RULES: &[CapabilityRule] = &[
@@ -902,7 +898,8 @@ const HISTORY_COMPARE_RULES: &[CapabilityRule] = &[
         "true",
         "unchanged-context projection is not served",
     ),
-    unsupported("budget", "custom response budgets are not served"),
+    implemented("budget", "reduces the common hard execution budget"),
+    unsupported("budget.evidence_level", "evidence projection is not served"),
     unsupported("base.git", "git revision resolution is not served"),
     unsupported("head.git", "git revision resolution is not served"),
     unsupported_value(
@@ -935,7 +932,8 @@ const PLAN_CHANGE_RULES: &[CapabilityRule] = &[
     ),
     unsupported("change_context", "change-context resolution is not served"),
     unsupported("constraints", "user constraint evaluation is not served"),
-    unsupported("budget", "custom response budgets are not served"),
+    implemented("budget", "reduces the common hard execution budget"),
+    unsupported("budget.evidence_level", "evidence projection is not served"),
 ];
 
 const CONTEXT_PACK_RULES: &[CapabilityRule] = &[
@@ -999,10 +997,7 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
         "file range selectors are not served by source reads",
     ),
     unsupported_value("merge_overlaps", "true", "overlap merging is not served"),
-    unsupported(
-        "max_source_bytes",
-        "custom source-byte bounds are not served",
-    ),
+    implemented("max_source_bytes", "reduces the common source-byte ceiling"),
     unsupported_value(
         "include_line_numbers",
         "false",
@@ -1013,7 +1008,8 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
         "bytes_base64",
         "base64 source projection is not served",
     ),
-    unsupported("budget", "custom response budgets are not served"),
+    implemented("budget", "reduces the common hard execution budget"),
+    unsupported("budget.evidence_level", "evidence projection is not served"),
     unsupported_value(
         "response_profile",
         "evidence",
@@ -1368,9 +1364,7 @@ const fn generation_semantics(tool: McpTool) -> GenerationSemantics {
 
 const fn budget_semantics(tool: McpTool) -> BudgetSemantics {
     match tool {
-        McpTool::CodeLocate | McpTool::QueryAdvanced => BudgetSemantics::PerRequest,
-        McpTool::ContextPack => BudgetSemantics::TokenBudget,
-        McpTool::RepoStatus
+        McpTool::CodeLocate
         | McpTool::SymbolExplain
         | McpTool::SymbolRelationships
         | McpTool::FlowTrace
@@ -1381,7 +1375,10 @@ const fn budget_semantics(tool: McpTool) -> BudgetSemantics {
         | McpTool::CodeDead
         | McpTool::HistoryCompare
         | McpTool::PlanChange
-        | McpTool::SourceRead => BudgetSemantics::Unsupported,
+        | McpTool::SourceRead
+        | McpTool::QueryAdvanced => BudgetSemantics::PerRequest,
+        McpTool::ContextPack => BudgetSemantics::TokenBudget,
+        McpTool::RepoStatus => BudgetSemantics::Unsupported,
         McpTool::QueryBatch => BudgetSemantics::PerRequest,
         McpTool::RepoIndex | McpTool::RepoList | McpTool::OperationStatus => BudgetSemantics::None,
     }

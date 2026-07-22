@@ -23,7 +23,7 @@ use rootlight_agent::{
         PlanChangeService, PlanChangeServiceError, PlanImpactResult,
     },
     context_pack::{ContextPackService, ContextPackServiceError},
-    policy::is_compact_profile,
+    policy::{BudgetLimits, is_compact_profile},
     port::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentPortFuture,
         AgentResolutionContext, AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
@@ -113,6 +113,65 @@ const INVALID_ARGUMENT_MESSAGE: &str = error_definition(ErrorCode::InvalidArgume
 #[cfg(test)]
 const UNSUPPORTED_MESSAGE: &str = error_definition(ErrorCode::UnsupportedCapability).message;
 const BATCH_OPERATION_FAILED_MESSAGE: &str = "batch operation failed";
+
+#[derive(Debug, Clone, Copy)]
+struct AnalyticalBudget {
+    limits: BudgetLimits,
+    options: client::RequestOptions,
+}
+
+impl AnalyticalBudget {
+    fn new(requested: Option<&ResponseBudget>) -> Result<Self, ToolExecutionError> {
+        Self::validate(requested)?;
+        let limits = BudgetLimits::server_ceiling().constrained_by_response_budget(requested);
+        Self::from_limits(limits)
+    }
+
+    fn with_source_limit(
+        requested: Option<&ResponseBudget>,
+        source_bytes: Option<u32>,
+    ) -> Result<Self, ToolExecutionError> {
+        Self::validate(requested)?;
+        let limits = BudgetLimits::server_ceiling().constrained_by_response_budget(requested);
+        let mut maximums = limits.maximums();
+        if let Some(source_bytes) = source_bytes {
+            maximums.source_bytes = maximums.source_bytes.min(u64::from(source_bytes));
+        }
+        Self::from_limits(BudgetLimits::from_maximums(maximums))
+    }
+
+    fn validate(requested: Option<&ResponseBudget>) -> Result<(), ToolExecutionError> {
+        if requested.is_some_and(|budget| budget.evidence_level.is_some()) {
+            return Err(unsupported_field("budget"));
+        }
+        Ok(())
+    }
+
+    fn from_limits(limits: BudgetLimits) -> Result<Self, ToolExecutionError> {
+        let maximums = limits.maximums();
+        let timeout = client::RequestTimeout::new(Duration::from_millis(maximums.time_ms))
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        let effective = client::EffectiveBudget::new(client::EffectiveBudgetLimits {
+            rows: maximums.rows,
+            edges: maximums.traversal_facts,
+            results: maximums.results,
+            source_bytes: maximums.source_bytes,
+            json_bytes: maximums.json_bytes,
+            estimated_tokens: maximums.tokens,
+            memory_bytes: maximums.memory_bytes,
+            duration: Duration::from_millis(maximums.time_ms),
+            depth: Some(maximums.depth),
+            paths: Some(maximums.paths),
+        })
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        Ok(Self {
+            limits,
+            options: client::RequestOptions::new()
+                .with_timeout(timeout)
+                .with_effective_budget(effective),
+        })
+    }
+}
 
 /// Future returned by one injected first-slice client-port operation.
 pub type ClientPortFuture<T> =
@@ -1782,7 +1841,9 @@ async fn execute_query_batch<P>(
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: QueryBatchInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     if !is_compact_profile(input.response_profile) {
         return Err(unsupported_field("response_profile"));
@@ -1801,7 +1862,7 @@ where
     let repository = repository_id(input.repository.clone(), unsupported)?;
     if explain_only {
         let output = explain_query_batch(port, repository, &input, cancellation).await?;
-        return serialize_success(output);
+        return serialize_measured_read_success(output, started_at, budget.limits);
     }
     let operation_failed =
         PublicError::builder(ErrorCode::Internal, BATCH_OPERATION_FAILED_MESSAGE)
@@ -1822,7 +1883,7 @@ where
         .execute(adapter, input, repository, cancellation, errors)
         .await
         .map_err(map_batch_orchestration_error)?;
-    serialize_success(output)
+    serialize_measured_read_success(output, started_at, budget.limits)
 }
 
 fn preflight_batch_capabilities(input: &QueryBatchInput) -> Result<(), ToolExecutionError> {
@@ -2004,14 +2065,16 @@ where
     {
         let port = Arc::clone(&self.port);
         let deadline = context.deadline();
+        let requested_budget = context.budget().clone();
         let cancellation = context.into_cancellation();
         Box::pin(async move {
             if cancellation.is_cancelled() {
                 return Err(AgentPortError::Cancelled);
             }
             let expected = request.clone();
-            let operation =
-                port.plan_change(request, client::RequestOptions::new(), cancellation.clone());
+            let budget =
+                AnalyticalBudget::new(Some(&requested_budget)).map_err(map_agent_child_error)?;
+            let operation = port.plan_change(request, budget.options, cancellation.clone());
             let response = if let Some(deadline) = deadline {
                 let mut cancellation_wait = cancellation.clone();
                 tokio::select! {
@@ -2058,48 +2121,20 @@ fn apply_child_budget(
     if budget.evidence_level.is_some() {
         return Err(unsupported_field("budget"));
     }
+    if !matches!(tool, BatchTool::ContextPack | BatchTool::PlanChange) {
+        let mut transported = budget.clone();
+        // The daemon protocol cannot represent sub-10 ms request timeouts.
+        // The outer batch deadline still wins the biased cancellation race.
+        if transported.timeout_ms.is_some_and(|timeout| timeout < 10) {
+            transported.timeout_ms = Some(10);
+        }
+        arguments.insert(
+            "budget".to_owned(),
+            serde_json::to_value(transported)
+                .map_err(|_| internal(ToolExecutionFailure::Executor))?,
+        );
+    }
     match tool {
-        BatchTool::CodeLocate => {
-            lower_numeric_argument(arguments, "max_results", budget.max_results.map(u64::from));
-        }
-        BatchTool::SymbolExplain => {
-            if let Some(limit) = budget.max_results
-                && let Some(Value::Array(symbols)) = arguments.get_mut("symbol_ids")
-            {
-                symbols.truncate(usize::from(limit));
-            }
-        }
-        BatchTool::SymbolRelationships => {
-            lower_numeric_argument(arguments, "max_results", budget.max_results.map(u64::from));
-        }
-        BatchTool::FlowTrace => {
-            lower_numeric_argument(arguments, "max_depth", budget.max_depth.map(u64::from));
-            lower_numeric_argument(arguments, "max_paths", budget.max_paths.map(u64::from));
-            lower_numeric_argument(arguments, "max_paths", budget.max_results.map(u64::from));
-        }
-        BatchTool::ChangeImpact => {
-            lower_numeric_argument(arguments, "max_depth", budget.max_depth.map(u64::from));
-        }
-        BatchTool::TestsSelect => {
-            lower_numeric_argument(arguments, "max_tests", budget.max_results.map(u64::from));
-        }
-        BatchTool::ArchitectureOverview => {
-            lower_numeric_argument(
-                arguments,
-                "max_components",
-                budget.max_results.map(u64::from),
-            );
-        }
-        BatchTool::ArchitectureCycles => {
-            lower_numeric_argument(arguments, "max_cycles", budget.max_results.map(u64::from));
-        }
-        BatchTool::CodeDead => {
-            lower_numeric_argument(
-                arguments,
-                "max_candidates",
-                budget.max_results.map(u64::from),
-            );
-        }
         BatchTool::ContextPack => {
             if let Some(tokens) = budget.max_tokens {
                 if tokens < 500 {
@@ -2110,14 +2145,17 @@ fn apply_child_budget(
                 lower_numeric_argument(arguments, "token_budget", Some(u64::from(tokens)));
             }
         }
-        BatchTool::SourceRead => {
-            if let Some(limit) = budget.max_results
-                && let Some(Value::Array(references)) = arguments.get_mut("references")
-            {
-                references.truncate(usize::from(limit));
-            }
-        }
         BatchTool::PlanChange => return Err(unsupported_field("operations")),
+        BatchTool::CodeLocate
+        | BatchTool::SymbolExplain
+        | BatchTool::SymbolRelationships
+        | BatchTool::FlowTrace
+        | BatchTool::ChangeImpact
+        | BatchTool::TestsSelect
+        | BatchTool::ArchitectureOverview
+        | BatchTool::ArchitectureCycles
+        | BatchTool::CodeDead
+        | BatchTool::SourceRead => {}
     }
     Ok(())
 }
@@ -2132,26 +2170,14 @@ fn validate_local_child_budget(
     if local.evidence_level.is_some() {
         return Err(unsupported_field("local_budget_evidence_level"));
     }
-    if local.max_tokens.is_some() && tool != BatchTool::ContextPack {
-        return Err(unsupported_field("local_budget_max_tokens"));
-    }
-    if local.max_source_bytes.is_some() {
-        return Err(unsupported_field("local_budget_max_source_bytes"));
-    }
-    if local.max_traversal_facts.is_some() {
-        return Err(unsupported_field("local_budget_max_traversal_facts"));
-    }
-    if local.max_depth.is_some() && !matches!(tool, BatchTool::FlowTrace | BatchTool::ChangeImpact)
+    if tool == BatchTool::ContextPack
+        && (local.max_results.is_some()
+            || local.max_source_bytes.is_some()
+            || local.max_traversal_facts.is_some()
+            || local.max_depth.is_some()
+            || local.max_paths.is_some())
     {
-        return Err(unsupported_field("local_budget_max_depth"));
-    }
-    if local.max_paths.is_some() && tool != BatchTool::FlowTrace {
-        return Err(unsupported_field("local_budget_max_paths"));
-    }
-    if local.max_results.is_some()
-        && matches!(tool, BatchTool::ChangeImpact | BatchTool::ContextPack)
-    {
-        return Err(unsupported_field("local_budget_max_results"));
+        return Err(unsupported_field("local_budget"));
     }
     Ok(())
 }
@@ -2424,7 +2450,9 @@ async fn execute_context_pack<P>(
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: ContextPackInput = decode_input(arguments)?;
+    let limits = BudgetLimits::server_ceiling();
     let repository = repository_id(input.repository.clone(), unsupported)?;
     let adapter = Arc::new(McpAgentToolPort {
         port,
@@ -2439,7 +2467,7 @@ where
         .execute(adapter, input, repository, cancellation)
         .await
         .map_err(|error| map_context_pack_service_error(error, unsupported))?;
-    serialize_success(output)
+    serialize_measured_read_success(output, started_at, limits)
 }
 
 fn map_context_pack_service_error(
@@ -2913,6 +2941,7 @@ fn code_locate_cursor_context(
     generation: GenerationId,
     exposure_profile: ExposureProfile,
     response_profile: ResponseProfile,
+    budget: BudgetLimits,
     key_id: u64,
 ) -> CursorContext {
     let mut request_hasher = blake3::Hasher::new();
@@ -2921,6 +2950,7 @@ fn code_locate_cursor_context(
     request_hasher.update(request.query.as_bytes());
     request_hasher.update(&[locate_mode_tag(request.mode)]);
     request_hasher.update(&request.maximum_results.to_le_bytes());
+    hash_budget_limits(&mut request_hasher, budget);
     let query_fingerprint = *request_hasher.finalize().as_bytes();
     let mut plan_material = Vec::from(query_fingerprint);
     plan_material.extend_from_slice(b"lexical-rank-desc-symbol-id-asc.v1");
@@ -2952,6 +2982,7 @@ fn symbol_relationships_cursor_context(
     generation: GenerationId,
     exposure_profile: ExposureProfile,
     response_profile: ResponseProfile,
+    budget: BudgetLimits,
     key_id: u64,
 ) -> CursorContext {
     let mut request_hasher = blake3::Hasher::new();
@@ -2967,6 +2998,7 @@ fn symbol_relationships_cursor_context(
     request_hasher.update(request.direction.as_deref().unwrap_or("natural").as_bytes());
     request_hasher.update(&request.min_confidence.unwrap_or(700).to_le_bytes());
     request_hasher.update(&request.max_results.unwrap_or(50).to_le_bytes());
+    hash_budget_limits(&mut request_hasher, budget);
     let query_fingerprint = *request_hasher.finalize().as_bytes();
     let mut plan_material = Vec::from(query_fingerprint);
     plan_material.extend_from_slice(b"seed-family-direction-target-confidence.v1");
@@ -2981,6 +3013,25 @@ fn symbol_relationships_cursor_context(
         domain_hash(b"rootlight.symbol-relationships.plan.v1", &plan_material),
         key_id,
     )
+}
+
+fn hash_budget_limits(hasher: &mut blake3::Hasher, budget: BudgetLimits) {
+    let maximums = budget.maximums();
+    for value in [
+        maximums.rows,
+        maximums.results,
+        maximums.tokens,
+        maximums.actual_tokens,
+        maximums.source_bytes,
+        maximums.traversal_facts,
+        maximums.depth,
+        maximums.paths,
+        maximums.json_bytes,
+        maximums.memory_bytes,
+        maximums.time_ms,
+    ] {
+        hasher.update(&value.to_le_bytes());
+    }
 }
 
 fn query_advanced_cursor_context(
@@ -3252,7 +3303,7 @@ where
         warnings,
         trust: TrustClassification::UntrustedRepositoryData,
     };
-    serialize_measured_read_success(envelope, started_at)
+    serialize_measured_read_success(envelope, started_at, BudgetLimits::server_ceiling())
 }
 
 fn status_coverage_report(entries: &[client::RepositoryCoverageEntry]) -> CoverageReport {
@@ -3419,6 +3470,7 @@ where
 {
     let started_at = Instant::now();
     let input: CodeLocateInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     if explain_only && input.cursor.is_some() {
@@ -3434,6 +3486,7 @@ where
             parsed.generation(),
             presentation.exposure_profile,
             response_profile,
+            budget.limits,
             cursor_key.key_id,
         );
         validate_repository_cursor(&parsed, &context, invalid_cursor, cursor_key)?;
@@ -3445,10 +3498,11 @@ where
             response_profile,
             started_at,
             presentation.shaping,
+            budget.limits,
         );
     }
     let expected = request.clone();
-    let future = port.code_locate(request, client::RequestOptions::new(), cancellation.clone());
+    let future = port.code_locate(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let generation = response.result.context.generation;
     let next_cursor = create_page_cursor(
@@ -3458,12 +3512,19 @@ where
             generation,
             presentation.exposure_profile,
             response_profile,
+            budget.limits,
             cursor_key.key_id,
         ),
         cursor_key,
     )?;
     let output = map_code_locate(response, &expected, next_cursor)?;
-    serialize_profiled_read_success(output, response_profile, started_at, presentation.shaping)
+    serialize_profiled_read_success(
+        output,
+        response_profile,
+        started_at,
+        presentation.shaping,
+        budget.limits,
+    )
 }
 
 /// Builds the source-free `code.locate` plan without executing retrieval.
@@ -3705,18 +3766,25 @@ where
 {
     let started_at = Instant::now();
     let input: SymbolExplainInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_symbol_explain(input, unsupported)?;
     if explain_only {
         let output = explain_symbol_explain(port, request, cancellation).await?;
-        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
+        return serialize_profiled_read_success(
+            output,
+            response_profile,
+            started_at,
+            shaping,
+            budget.limits,
+        );
     }
     let expected = request.clone();
-    let future = port.symbol_explain(request, client::RequestOptions::new(), cancellation.clone());
+    let future = port.symbol_explain(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_symbol_explain(response, &expected)?;
-    serialize_profiled_read_success(output, response_profile, started_at, shaping)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping, budget.limits)
 }
 
 async fn execute_symbol_relationships<P>(
@@ -3733,6 +3801,7 @@ where
 {
     let started_at = Instant::now();
     let input: SymbolRelationshipsInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     if explain_only && input.cursor.is_some() {
@@ -3748,6 +3817,7 @@ where
             parsed.generation(),
             presentation.exposure_profile,
             response_profile,
+            budget.limits,
             cursor_key.key_id,
         );
         validate_repository_cursor(&parsed, &context, invalid_cursor, cursor_key)?;
@@ -3759,11 +3829,11 @@ where
             response_profile,
             started_at,
             presentation.shaping,
+            budget.limits,
         );
     }
     let expected = request.clone();
-    let future =
-        port.symbol_relationships(request, client::RequestOptions::new(), cancellation.clone());
+    let future = port.symbol_relationships(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let generation = response.result.context.generation;
     let next_cursor = create_page_cursor(
@@ -3773,12 +3843,19 @@ where
             generation,
             presentation.exposure_profile,
             response_profile,
+            budget.limits,
             cursor_key.key_id,
         ),
         cursor_key,
     )?;
     let output = map_symbol_relationships(response, &expected, next_cursor)?;
-    serialize_profiled_read_success(output, response_profile, started_at, presentation.shaping)
+    serialize_profiled_read_success(
+        output,
+        response_profile,
+        started_at,
+        presentation.shaping,
+        budget.limits,
+    )
 }
 
 fn normalize_symbol_relationships(
@@ -3786,9 +3863,8 @@ fn normalize_symbol_relationships(
     unsupported: &PublicError,
 ) -> Result<SymbolRelationshipsPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Structural scope, ambiguous candidates, and custom budgets are not
-    // served by this slice.
-    if input.scope.is_some() || input.include_candidates == Some(true) || input.budget.is_some() {
+    // Structural scope and ambiguous candidates are not served by this slice.
+    if input.scope.is_some() || input.include_candidates == Some(true) {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let mut relations = Vec::new();
@@ -3992,6 +4068,7 @@ where
 {
     let started_at = Instant::now();
     let input: FlowTraceInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let trace_relations = input.relations.clone();
@@ -4006,13 +4083,19 @@ where
             cancellation,
         )
         .await?;
-        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
+        return serialize_profiled_read_success(
+            output,
+            response_profile,
+            started_at,
+            shaping,
+            budget.limits,
+        );
     }
     let expected = request.clone();
-    let future = port.flow_trace(request, client::RequestOptions::new(), cancellation.clone());
+    let future = port.flow_trace(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_flow_trace(response, &expected)?;
-    serialize_profiled_read_success(output, response_profile, started_at, shaping)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping, budget.limits)
 }
 
 fn normalize_flow_trace(
@@ -4020,10 +4103,9 @@ fn normalize_flow_trace(
     unsupported: &PublicError,
 ) -> Result<FlowTracePortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Cross-repository traversal, explicit path policies, and custom budgets
-    // are not served by this slice.
-    if input.cross_repository == Some(true) || input.path_policy.is_some() || input.budget.is_some()
-    {
+    // Cross-repository traversal and explicit path policies are not served by
+    // this slice.
+    if input.cross_repository == Some(true) || input.path_policy.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     // The first slice resolves only stable symbol endpoints; route, service,
@@ -4177,19 +4259,25 @@ where
 {
     let started_at = Instant::now();
     let input: ArchitectureCyclesInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_architecture_cycles(input, unsupported)?;
     if explain_only {
         let output = explain_architecture_cycles(port, request, cancellation).await?;
-        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
+        return serialize_profiled_read_success(
+            output,
+            response_profile,
+            started_at,
+            shaping,
+            budget.limits,
+        );
     }
     let expected = request.clone();
-    let future =
-        port.architecture_cycles(request, client::RequestOptions::new(), cancellation.clone());
+    let future = port.architecture_cycles(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_architecture_cycles(response, &expected)?;
-    serialize_profiled_read_success(output, response_profile, started_at, shaping)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping, budget.limits)
 }
 
 fn normalize_architecture_cycles(
@@ -4197,10 +4285,10 @@ fn normalize_architecture_cycles(
     unsupported: &PublicError,
 ) -> Result<ArchitectureCyclesPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Structural scope, ranking strategies, and custom budgets are not served
-    // by this slice. The projection level is accepted as a descriptive label;
+    // Structural scope and ranking strategies are not served by this slice.
+    // The projection level is accepted as a descriptive label;
     // detection runs at symbol granularity.
-    if input.scope.is_some() || input.rank_by.is_some() || input.budget.is_some() {
+    if input.scope.is_some() || input.rank_by.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let mut relations = Vec::new();
@@ -4358,18 +4446,25 @@ where
 {
     let started_at = Instant::now();
     let input: CodeDeadInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_code_dead(input, unsupported)?;
     if explain_only {
         let output = explain_code_dead(port, request, cancellation).await?;
-        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
+        return serialize_profiled_read_success(
+            output,
+            response_profile,
+            started_at,
+            shaping,
+            budget.limits,
+        );
     }
     let expected = request.clone();
-    let future = port.code_dead(request, client::RequestOptions::new(), cancellation.clone());
+    let future = port.code_dead(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_code_dead(response, &expected)?;
-    serialize_profiled_read_success(output, response_profile, started_at, shaping)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping, budget.limits)
 }
 
 fn normalize_code_dead(
@@ -4377,8 +4472,8 @@ fn normalize_code_dead(
     unsupported: &PublicError,
 ) -> Result<CodeDeadPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Structural scope and custom budgets are not served by this slice.
-    if input.scope.is_some() || input.budget.is_some() {
+    // Structural scope is not served by this slice.
+    if input.scope.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let entry_point_policy = match input.entry_point_policy {
@@ -4535,19 +4630,25 @@ where
 {
     let started_at = Instant::now();
     let input: ArchitectureOverviewInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_architecture_overview(input, unsupported)?;
     if explain_only {
         let output = explain_architecture_overview(port, request, cancellation).await?;
-        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
+        return serialize_profiled_read_success(
+            output,
+            response_profile,
+            started_at,
+            shaping,
+            budget.limits,
+        );
     }
     let expected = request.clone();
-    let future =
-        port.architecture_overview(request, client::RequestOptions::new(), cancellation.clone());
+    let future = port.architecture_overview(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_architecture_overview(response, &expected)?;
-    serialize_profiled_read_success(output, response_profile, started_at, shaping)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping, budget.limits)
 }
 
 fn normalize_architecture_overview(
@@ -4555,10 +4656,10 @@ fn normalize_architecture_overview(
     unsupported: &PublicError,
 ) -> Result<ArchitectureOverviewPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Structural scope, explicit detail levels, and custom budgets are not
-    // served by this slice. The base file-granularity model is always returned;
+    // Structural scope and explicit detail levels are not served by this
+    // slice. The base file-granularity model is always returned;
     // only the hotspot derived view is honored.
-    if input.scope.is_some() || input.detail.is_some() || input.budget.is_some() {
+    if input.scope.is_some() || input.detail.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let mut views = Vec::new();
@@ -4721,18 +4822,25 @@ where
 {
     let started_at = Instant::now();
     let input: TestsSelectInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_tests_select(input, unsupported)?;
     if explain_only {
         let output = explain_tests_select(port, request, cancellation).await?;
-        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
+        return serialize_profiled_read_success(
+            output,
+            response_profile,
+            started_at,
+            shaping,
+            budget.limits,
+        );
     }
     let expected = request.clone();
-    let future = port.tests_select(request, client::RequestOptions::new(), cancellation.clone());
+    let future = port.tests_select(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_tests_select(response, &expected)?;
-    serialize_profiled_read_success(output, response_profile, started_at, shaping)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping, budget.limits)
 }
 
 fn normalize_tests_select(
@@ -4740,9 +4848,8 @@ fn normalize_tests_select(
     unsupported: &PublicError,
 ) -> Result<TestsSelectPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Custom budgets, execution budgets, and framework filters are not served
-    // by this slice.
-    if input.budget.is_some() || input.execution_budget.is_some() || input.frameworks.is_some() {
+    // Execution budgets and framework filters are not served by this slice.
+    if input.execution_budget.is_some() || input.frameworks.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     // Only explicit symbol seeds are served; path, change, and build-target
@@ -4900,18 +5007,25 @@ where
 {
     let started_at = Instant::now();
     let input: ChangeImpactInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_change_impact(input, unsupported)?;
     if explain_only {
         let output = explain_change_impact(port, request, cancellation).await?;
-        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
+        return serialize_profiled_read_success(
+            output,
+            response_profile,
+            started_at,
+            shaping,
+            budget.limits,
+        );
     }
     let expected = request.clone();
-    let future = port.change_impact(request, client::RequestOptions::new(), cancellation.clone());
+    let future = port.change_impact(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_change_impact(response, &expected)?;
-    serialize_profiled_read_success(output, response_profile, started_at, shaping)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping, budget.limits)
 }
 
 fn normalize_change_impact(
@@ -4919,8 +5033,8 @@ fn normalize_change_impact(
     unsupported: &PublicError,
 ) -> Result<ChangeImpactPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Scope bounding and custom budgets are not served by this slice.
-    if input.scope.is_some() || input.budget.is_some() {
+    // Scope bounding is not served by this slice.
+    if input.scope.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     // Working-tree and revision-range changes require a git diff this slice does
@@ -5087,9 +5201,10 @@ where
 {
     let started_at = Instant::now();
     let input: PlanChangeInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
     let deadline = started_at
-        .checked_add(Duration::from_millis(30_000))
+        .checked_add(Duration::from_millis(budget.limits.maximums().time_ms))
         .ok_or_else(|| internal(ToolExecutionFailure::Executor))?;
     let adapter = Arc::new(McpAgentToolPort {
         port,
@@ -5109,6 +5224,7 @@ where
         response_profile,
         started_at,
         ResponseShaping::Public,
+        budget.limits,
     )
 }
 
@@ -5274,18 +5390,20 @@ async fn execute_history_compare<P>(
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: HistoryCompareInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
     let request = normalize_history_compare(input, unsupported)?;
     if explain_only {
         let output = explain_history_compare(port, request, cancellation).await?;
-        return serialize_success(output);
+        return serialize_measured_read_success(output, started_at, budget.limits);
     }
     let expected = request.clone();
-    let future = port.history_compare(request, client::RequestOptions::new(), cancellation.clone());
+    let future = port.history_compare(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_history_compare(response, &expected)?;
-    serialize_success(output)
+    serialize_measured_read_success(output, started_at, budget.limits)
 }
 
 fn normalize_history_compare(
@@ -5293,11 +5411,10 @@ fn normalize_history_compare(
     unsupported: &PublicError,
 ) -> Result<HistoryComparePortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Scope bounding, unchanged-context inclusion, custom budgets, and expanded
-    // profiles are not served by this slice.
+    // Scope bounding, unchanged-context inclusion, and expanded profiles are
+    // not served by this slice.
     if input.scope.is_some()
         || input.include_unchanged_context == Some(true)
-        || input.budget.is_some()
         || !is_compact_profile(input.profile)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
@@ -5431,7 +5548,9 @@ async fn execute_query_advanced<P>(
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: QueryAdvancedInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(None)?;
     if input.explain == Some(true) && input.cursor.is_some() {
         return Err(ToolExecutionError::new(invalid_cursor.clone()));
     }
@@ -5449,7 +5568,7 @@ where
         validate_repository_cursor(&parsed, &context, invalid_cursor, cursor_key)?;
     }
     let expected = request.clone();
-    let future = port.query_advanced(request, client::RequestOptions::new(), cancellation.clone());
+    let future = port.query_advanced(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let generation = response.result.context.generation;
     let next_cursor = create_page_cursor(
@@ -5458,7 +5577,7 @@ where
         cursor_key,
     )?;
     let output = map_query_advanced(response, &expected, next_cursor)?;
-    serialize_success(output)
+    serialize_measured_read_success(output, started_at, budget.limits)
 }
 
 fn normalize_query_advanced(
@@ -5593,18 +5712,21 @@ async fn execute_source_read<P>(
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: SourceReadInput = decode_input(arguments)?;
+    let budget =
+        AnalyticalBudget::with_source_limit(input.budget.as_ref(), input.max_source_bytes)?;
     let explain_only = input.explain == Some(true);
     let request = normalize_source_read(input, unsupported, invalid_arguments)?;
     if explain_only {
         let output = explain_source_read(port, request, cancellation).await?;
-        return serialize_success(output);
+        return serialize_measured_read_success(output, started_at, budget.limits);
     }
     let expected = request.clone();
-    let future = port.source_read(request, client::RequestOptions::new(), cancellation.clone());
+    let future = port.source_read(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_source_read(response, &expected)?;
-    serialize_success(output)
+    serialize_measured_read_success(output, started_at, budget.limits)
 }
 
 async fn await_port<T>(
@@ -5755,7 +5877,6 @@ fn normalize_code_locate(
         || input.languages.is_some()
         || input.related_to.is_some()
         || input.min_confidence.is_some()
-        || budget_has_unsupported_locate_limits(input.budget.as_ref())
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -5784,7 +5905,6 @@ fn normalize_symbol_explain(
     if input.sections.is_some()
         || input.relation_sample_limit.is_some()
         || input.source_preview_lines.is_some()
-        || input.budget.is_some()
         || matches!(input.include_provenance, Some(ProvenanceLevel::Full))
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
@@ -5807,10 +5927,8 @@ fn normalize_source_read(
     if input.context_lines_before.is_some()
         || input.context_lines_after.is_some()
         || input.merge_overlaps == Some(true)
-        || input.max_source_bytes.is_some()
         || input.include_line_numbers == Some(false)
         || matches!(input.encoding, Some(SourceEncodingRequest::BytesBase64))
-        || input.budget.is_some()
         || !is_compact_profile(input.response_profile)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
@@ -5908,18 +6026,6 @@ fn locate_mode(
         }
         Some(_) => Err(ToolExecutionError::new(unsupported.clone())),
     }
-}
-
-fn budget_has_unsupported_locate_limits(budget: Option<&ResponseBudget>) -> bool {
-    budget.is_some_and(|budget| {
-        budget.max_tokens.is_some()
-            || budget.max_source_bytes.is_some()
-            || budget.max_traversal_facts.is_some()
-            || budget.max_depth.is_some()
-            || budget.max_paths.is_some()
-            || budget.timeout_ms.is_some()
-            || budget.evidence_level.is_some()
-    })
 }
 
 fn map_repository_index(
@@ -6722,17 +6828,23 @@ fn serialize_catalog_success(
     output: CatalogEnvelope<RepoListData>,
     started_at: Instant,
 ) -> Result<Map<String, Value>, ToolExecutionError> {
-    serialize_measured_success(output, started_at, |output| &mut output.usage)
+    serialize_measured_success(
+        output,
+        started_at,
+        BudgetLimits::server_ceiling(),
+        |output| &mut output.usage,
+    )
 }
 
 fn serialize_measured_read_success<T>(
     output: ReadEnvelope<T>,
     started_at: Instant,
+    limits: BudgetLimits,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     T: Serialize,
 {
-    serialize_measured_success(output, started_at, |output| &mut output.usage)
+    serialize_measured_success(output, started_at, limits, |output| &mut output.usage)
 }
 
 fn serialize_profiled_read_success<T>(
@@ -6740,6 +6852,7 @@ fn serialize_profiled_read_success<T>(
     profile: ResponseProfile,
     started_at: Instant,
     shaping: ResponseShaping,
+    limits: BudgetLimits,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     T: Serialize + rootlight_agent::response_profile::ProfileShape,
@@ -6747,7 +6860,7 @@ where
     match shaping {
         ResponseShaping::Public => {
             rootlight_agent::response_profile::shape_read_envelope(&mut output, profile);
-            serialize_measured_read_success(output, started_at)
+            serialize_measured_read_success(output, started_at, limits)
         }
         ResponseShaping::CanonicalInternal => serialize_success(output),
     }
@@ -6768,6 +6881,7 @@ struct CursorPresentation {
 fn serialize_measured_success<T, F>(
     mut output: T,
     started_at: Instant,
+    limits: BudgetLimits,
     usage: F,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
@@ -6795,6 +6909,22 @@ where
             usage.json_bytes == json_bytes && usage.estimated_tokens == estimated_tokens
         };
         if counters_match {
+            let usage = usage(&mut output);
+            let maximums = limits.maximums();
+            if usage.rows > maximums.rows
+                || usage.edges > maximums.traversal_facts
+                || usage.source_bytes > maximums.source_bytes
+                || usage.json_bytes > maximums.json_bytes
+                // The public estimate is bytes/4 for stable comparisons, not a
+                // safety upper bound. Exact UTF-8 bytes are the conservative
+                // provider-neutral token ceiling used for hard admission.
+                || usage.json_bytes > maximums.tokens
+                || usage.wall_time_ms > maximums.time_ms
+            {
+                return Err(ToolExecutionError::new(authoritative_error(
+                    MappedDomainFailure::budget_exceeded(),
+                )));
+            }
             let Value::Object(output) = value else {
                 return Err(internal(ToolExecutionFailure::Executor));
             };

@@ -976,7 +976,8 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
             ..
         } if *observed == repository()
             && query == "answer"
-            && *options == RequestOptions::new()
+            && options.timeout().is_some()
+            && options.effective_budget().is_some()
     ));
     assert!(matches!(
         &calls[3],
@@ -987,7 +988,8 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
             ..
         } if *observed == parent_generation()
             && symbols == &[symbol()]
-            && *options == RequestOptions::new()
+            && options.timeout().is_some()
+            && options.effective_budget().is_some()
     ));
     assert!(matches!(
         &calls[4],
@@ -998,7 +1000,8 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
             ..
         } if *observed == generation()
             && references.len() == 1
-            && *options == RequestOptions::new()
+            && options.timeout().is_some()
+            && options.effective_budget().is_some()
     ));
 }
 

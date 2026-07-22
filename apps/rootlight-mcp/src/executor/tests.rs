@@ -770,6 +770,151 @@ async fn analytic_request_options_reach_the_port_unchanged() {
     assert_eq!(call.options, options);
 }
 
+#[test]
+fn analytical_budget_lowers_every_public_resource_dimension() {
+    let ceiling = BudgetLimits::server_ceiling().maximums();
+    let requested = ResponseBudget {
+        max_results: Some(3),
+        max_tokens: Some(100),
+        max_source_bytes: Some(256),
+        max_traversal_facts: Some(4),
+        max_depth: Some(2),
+        max_paths: Some(5),
+        timeout_ms: Some(10),
+        evidence_level: None,
+    };
+    let budget = AnalyticalBudget::new(Some(&requested)).expect("public budget is representable");
+    let maximums = budget.limits.maximums();
+
+    assert_eq!(maximums.rows, ceiling.rows);
+    assert_eq!(maximums.results, 3);
+    assert_eq!(maximums.tokens, 100);
+    assert_eq!(maximums.actual_tokens, ceiling.actual_tokens);
+    assert_eq!(maximums.source_bytes, 256);
+    assert_eq!(maximums.traversal_facts, 4);
+    assert_eq!(maximums.depth, 2);
+    assert_eq!(maximums.paths, 5);
+    assert_eq!(maximums.json_bytes, ceiling.json_bytes);
+    assert_eq!(maximums.memory_bytes, ceiling.memory_bytes);
+    assert_eq!(maximums.time_ms, 10);
+
+    let timeout = budget
+        .options
+        .timeout()
+        .expect("effective budget carries an explicit transport timeout");
+    assert_eq!(timeout.duration(), Duration::from_millis(10));
+    let transported = budget
+        .options
+        .effective_budget()
+        .expect("effective budget reaches the daemon")
+        .limits();
+    assert_eq!(transported.rows, maximums.rows);
+    assert_eq!(transported.edges, maximums.traversal_facts);
+    assert_eq!(transported.results, maximums.results);
+    assert_eq!(transported.source_bytes, maximums.source_bytes);
+    assert_eq!(transported.json_bytes, maximums.json_bytes);
+    assert_eq!(transported.estimated_tokens, maximums.tokens);
+    assert_eq!(transported.memory_bytes, maximums.memory_bytes);
+    assert_eq!(
+        transported.duration,
+        Duration::from_millis(maximums.time_ms)
+    );
+    assert_eq!(transported.depth, Some(maximums.depth));
+    assert_eq!(transported.paths, Some(maximums.paths));
+
+    let source_limited = AnalyticalBudget::with_source_limit(Some(&requested), Some(128))
+        .expect("top-level source limit is representable");
+    assert_eq!(source_limited.limits.maximums().source_bytes, 128);
+}
+
+#[test]
+fn omitted_analytical_budget_transports_the_complete_server_ceiling() {
+    let budget = AnalyticalBudget::new(None).expect("server ceiling is representable");
+    assert_eq!(budget.limits, BudgetLimits::server_ceiling());
+    assert_eq!(
+        budget
+            .options
+            .effective_budget()
+            .expect("omitted public budget still has a server-owned ceiling")
+            .limits()
+            .results,
+        BudgetLimits::server_ceiling().maximums().results
+    );
+    assert_eq!(
+        budget
+            .options
+            .timeout()
+            .expect("server ceiling supplies the transport timeout")
+            .duration(),
+        Duration::from_millis(BudgetLimits::server_ceiling().maximums().time_ms)
+    );
+}
+
+#[test]
+fn final_serialization_enforces_exact_byte_and_conservative_token_boundaries() {
+    let unsupported = PublicError::builder(ErrorCode::UnsupportedCapability, UNSUPPORTED_MESSAGE)
+        .build()
+        .expect("static unsupported error is valid");
+    let input: CodeLocateInput = decode_input(Map::from_iter([
+        (
+            "repository".to_owned(),
+            json!({"repository_id": repository()}),
+        ),
+        ("query".to_owned(), json!("publish")),
+    ]))
+    .expect("fixture input decodes");
+    let request = normalize_code_locate(input, &unsupported).expect("fixture input normalizes");
+    let output = map_code_locate(locate_response(), &request, None).expect("fixture output maps");
+    let measured = serialize_measured_read_success(
+        output.clone(),
+        Instant::now(),
+        BudgetLimits::server_ceiling(),
+    )
+    .expect("server ceiling admits the fixture");
+    let exact_bytes = measured["usage"]["json_bytes"]
+        .as_u64()
+        .expect("measured usage contains exact JSON bytes");
+    assert!(exact_bytes > 1);
+
+    let mut exact = BudgetLimits::server_ceiling().maximums();
+    exact.json_bytes = exact_bytes;
+    exact.tokens = exact_bytes;
+    serialize_measured_read_success(
+        output.clone(),
+        Instant::now(),
+        BudgetLimits::from_maximums(exact),
+    )
+    .expect("the exact byte and conservative token boundaries are inclusive");
+
+    let mut below_bytes = exact;
+    below_bytes.json_bytes = exact_bytes - 1;
+    let error = serialize_measured_read_success(
+        output.clone(),
+        Instant::now(),
+        BudgetLimits::from_maximums(below_bytes),
+    )
+    .expect_err("one byte above the response ceiling is rejected");
+    assert_canonical_budget_error(
+        error
+            .public_error()
+            .expect("byte exhaustion is a checked budget error"),
+    );
+
+    let mut below_tokens = exact;
+    below_tokens.tokens = exact_bytes - 1;
+    let error = serialize_measured_read_success(
+        output,
+        Instant::now(),
+        BudgetLimits::from_maximums(below_tokens),
+    )
+    .expect_err("one byte above the conservative token ceiling is rejected");
+    assert_canonical_budget_error(
+        error
+            .public_error()
+            .expect("token exhaustion is a checked budget error"),
+    );
+}
+
 async fn execute(
     executor: &impl ToolExecutor,
     tool: VerticalTool,
@@ -1286,6 +1431,8 @@ fn pagination_cursor_context(
         VerticalTool::CodeLocate => {
             let input: CodeLocateInput =
                 decode_input(arguments).expect("code locate fixture decodes");
+            let budget =
+                AnalyticalBudget::new(input.budget.as_ref()).expect("fixture budget is valid");
             let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
             let request =
                 normalize_code_locate(input, &unsupported).expect("code locate fixture normalizes");
@@ -1294,12 +1441,15 @@ fn pagination_cursor_context(
                 generation(),
                 exposure_profile,
                 response_profile,
+                budget.limits,
                 key_id,
             )
         }
         VerticalTool::SymbolRelationships => {
             let input: SymbolRelationshipsInput =
                 decode_input(arguments).expect("relationships fixture decodes");
+            let budget =
+                AnalyticalBudget::new(input.budget.as_ref()).expect("fixture budget is valid");
             let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
             let request = normalize_symbol_relationships(input, &unsupported)
                 .expect("relationships fixture normalizes");
@@ -1308,6 +1458,7 @@ fn pagination_cursor_context(
                 generation(),
                 exposure_profile,
                 response_profile,
+                budget.limits,
                 key_id,
             )
         }
@@ -1517,6 +1668,61 @@ async fn repository_read_cursors_bind_every_cross_tool_execution_dimension() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn repository_read_cursor_binds_the_complete_effective_budget() {
+    const KEY_MATERIAL: [u8; 32] = [0x7E; 32];
+    let tool = VerticalTool::CodeLocate;
+    let budgeted = with_argument(
+        pagination_arguments(tool),
+        "budget",
+        json!({"max_tokens": 1_000}),
+    );
+    let cursor = issue_pagination_cursor(
+        tool,
+        budgeted.clone(),
+        ExposureProfile::Developer,
+        CursorSigningKey::deterministic(KEY_MATERIAL).expect("test signing key is valid"),
+        now_unix_ms(),
+        false,
+    );
+
+    let valid_harness = Harness::with_cursor_key(
+        FakeOutcome::CodeLocate(Err(ClientPortError::Executor)),
+        KEY_MATERIAL,
+    );
+    let error = execute(
+        &valid_harness.executor,
+        tool,
+        with_argument(budgeted.clone(), "cursor", json!(cursor.clone())),
+    )
+    .await
+    .expect_err("valid cursor reaches the failing fake port");
+    assert!(error.public_error().is_none());
+    assert_eq!(valid_harness.call_count.load(Ordering::Relaxed), 1);
+
+    let changed = with_argument(
+        with_argument(
+            pagination_arguments(tool),
+            "budget",
+            json!({"max_tokens": 1_001}),
+        ),
+        "cursor",
+        json!(cursor),
+    );
+    let changed_harness = Harness::with_cursor_key(
+        FakeOutcome::CodeLocate(Err(ClientPortError::Executor)),
+        KEY_MATERIAL,
+    );
+    let error = execute(&changed_harness.executor, tool, changed)
+        .await
+        .expect_err("cursor cannot be reused under a different budget");
+    assert_eq!(
+        error.public_error().map(PublicError::code),
+        Some(ErrorCode::InvalidCursor)
+    );
+    assert_eq!(changed_harness.call_count.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -2430,8 +2636,8 @@ async fn query_batch_enforces_aggregate_budget_across_the_app_boundary() {
     );
     assert_eq!(
         harness.call_count.load(Ordering::Relaxed),
-        3,
-        "status pinning and both observed children cross the client port"
+        2,
+        "status pinning and the first child exhaust the budget before more work starts"
     );
 }
 
@@ -6158,30 +6364,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         ),
         (
             VerticalTool::CodeLocate,
-            json!({"repository": {"repository_id": repository()}, "query": "x", "budget": {"max_tokens": 100}}),
-        ),
-        (
-            VerticalTool::CodeLocate,
-            json!({"repository": {"repository_id": repository()}, "query": "x", "budget": {"max_source_bytes": 1}}),
-        ),
-        (
-            VerticalTool::CodeLocate,
-            json!({"repository": {"repository_id": repository()}, "query": "x", "budget": {"max_traversal_facts": 1}}),
-        ),
-        (
-            VerticalTool::CodeLocate,
-            json!({"repository": {"repository_id": repository()}, "query": "x", "budget": {"max_depth": 1}}),
-        ),
-        (
-            VerticalTool::CodeLocate,
-            json!({"repository": {"repository_id": repository()}, "query": "x", "budget": {"max_paths": 1}}),
-        ),
-        (
-            VerticalTool::CodeLocate,
-            json!({"repository": {"repository_id": repository()}, "query": "x", "budget": {"timeout_ms": 10}}),
-        ),
-        (
-            VerticalTool::CodeLocate,
             json!({"repository": {"repository_id": repository()}, "query": "x", "budget": {"evidence_level": "compact"}}),
         ),
         (
@@ -6203,10 +6385,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::SymbolExplain,
             json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()], "include_provenance": "full"}),
-        ),
-        (
-            VerticalTool::SymbolExplain,
-            json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()], "budget": {}}),
         ),
         (
             VerticalTool::SourceRead,
@@ -6238,10 +6416,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         ),
         (
             VerticalTool::SourceRead,
-            json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source.clone()}], "max_source_bytes": 1}),
-        ),
-        (
-            VerticalTool::SourceRead,
             json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source.clone()}], "include_line_numbers": false}),
         ),
         (
@@ -6250,21 +6424,19 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         ),
         (
             VerticalTool::SourceRead,
-            json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source.clone()}], "budget": {}}),
-        ),
-        (
-            VerticalTool::SourceRead,
             json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source}], "response_profile": "standard"}),
         ),
     ];
 
     for (tool, arguments) in cases {
-        let error = execute(&harness.executor, tool, arguments)
-            .await
-            .expect_err("unsupported option is rejected");
+        let label = format!("{}:{arguments}", tool.name());
+        let error = match execute(&harness.executor, tool, arguments).await {
+            Ok(_) => panic!("{label} unexpectedly reached execution"),
+            Err(error) => error,
+        };
         let public = error
             .public_error()
-            .expect("unsupported option is a checked public error");
+            .unwrap_or_else(|| panic!("{label} did not produce a checked public error"));
         assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
         assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
     }
@@ -7338,6 +7510,7 @@ fn operating_request(params: Value) -> OperatingRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum AcceptedFieldOracle {
     NormalizedDelta,
+    BudgetRuntime,
     StructuredVariant,
     StructuredQueryAst,
     DefaultEquivalent,
@@ -7411,7 +7584,6 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         CodeLocate,
         NormalizedDelta,
         [
-            "budget",
             "generation",
             "max_results",
             "query",
@@ -7419,6 +7591,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "search_modes"
         ]
     );
+    group!(CodeLocate, BudgetRuntime, ["budget"]);
     group!(CodeLocate, ExplainPlan, ["explain"]);
     group!(CodeLocate, DefaultEquivalent, ["response_profile"]);
     group!(CodeLocate, CursorContinuation, ["cursor"]);
@@ -7434,6 +7607,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     );
     group!(SymbolExplain, ExplainPlan, ["explain"]);
     group!(SymbolExplain, DefaultEquivalent, ["response_profile"]);
+    group!(SymbolExplain, BudgetRuntime, ["budget"]);
     group!(
         SymbolRelationships,
         NormalizedDelta,
@@ -7448,6 +7622,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         ]
     );
     group!(SymbolRelationships, ExplainPlan, ["explain"]);
+    group!(SymbolRelationships, BudgetRuntime, ["budget"]);
     group!(
         SymbolRelationships,
         DefaultEquivalent,
@@ -7470,6 +7645,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         ]
     );
     group!(FlowTrace, ExplainPlan, ["explain"]);
+    group!(FlowTrace, BudgetRuntime, ["budget"]);
     group!(
         FlowTrace,
         DefaultEquivalent,
@@ -7491,6 +7667,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     );
     group!(ChangeImpact, StructuredVariant, ["change.paths"]);
     group!(ChangeImpact, ExplainPlan, ["explain"]);
+    group!(ChangeImpact, BudgetRuntime, ["budget"]);
     group!(
         ChangeImpact,
         DefaultEquivalent,
@@ -7510,6 +7687,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     );
     group!(TestsSelect, ExplainPlan, ["explain"]);
     group!(TestsSelect, DefaultEquivalent, ["profile"]);
+    group!(TestsSelect, BudgetRuntime, ["budget"]);
     group!(
         ArchitectureOverview,
         NormalizedDelta,
@@ -7523,6 +7701,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         ]
     );
     group!(ArchitectureOverview, ExplainPlan, ["explain"]);
+    group!(ArchitectureOverview, BudgetRuntime, ["budget"]);
     group!(
         ArchitectureOverview,
         DefaultEquivalent,
@@ -7548,6 +7727,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     group!(ArchitectureCycles, FixedDiscriminator, ["projection.level"]);
     group!(ArchitectureCycles, ExplainPlan, ["explain"]);
     group!(ArchitectureCycles, DefaultEquivalent, ["response_profile"]);
+    group!(ArchitectureCycles, BudgetRuntime, ["budget"]);
     group!(
         CodeDead,
         NormalizedDelta,
@@ -7563,12 +7743,14 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     );
     group!(CodeDead, ExplainPlan, ["explain"]);
     group!(CodeDead, DefaultEquivalent, ["response_profile"]);
+    group!(CodeDead, BudgetRuntime, ["budget"]);
     group!(
         HistoryCompare,
         NormalizedDelta,
         ["base", "change_kinds", "head", "max_results", "repository"]
     );
     group!(HistoryCompare, ExplainPlan, ["explain"]);
+    group!(HistoryCompare, BudgetRuntime, ["budget"]);
     group!(
         HistoryCompare,
         DefaultEquivalent,
@@ -7590,6 +7772,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     group!(PlanChange, StructuredVariant, ["targets[].file_id"]);
     group!(PlanChange, ExplainPlan, ["explain"]);
     group!(PlanChange, DefaultEquivalent, ["profile"]);
+    group!(PlanChange, BudgetRuntime, ["budget"]);
     group!(
         ContextPack,
         ContextRuntime,
@@ -7601,6 +7784,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         NormalizedDelta,
         ["generation", "references", "repository"]
     );
+    group!(SourceRead, BudgetRuntime, ["budget", "max_source_bytes"]);
     group!(SourceRead, ExplainPlan, ["explain"]);
     group!(
         SourceRead,
@@ -7700,7 +7884,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "733c43141d03da16229d4959186f5e71f653741029c327f1fd80b0cb88340b51",
+        "21270067f87c965556672f0fbe9b93e48f5fb4833ca4b5dcdedcfd272c392f0e",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -7731,6 +7915,7 @@ fn accepted_schema_paths_have_effect_evidence() {
 
     let counts = [
         AcceptedFieldOracle::NormalizedDelta,
+        AcceptedFieldOracle::BudgetRuntime,
         AcceptedFieldOracle::StructuredVariant,
         AcceptedFieldOracle::StructuredQueryAst,
         AcceptedFieldOracle::DefaultEquivalent,
@@ -7749,7 +7934,7 @@ fn accepted_schema_paths_have_effect_evidence() {
             .count()
     });
     println!(
-        "accepted_paths={} normalized_delta={} structured_variant={} structured_query_ast={} default_equivalent={} explain_plan={} output_selection={} context_runtime={} batch_runtime={} local_timeout={} fixed_discriminator={} cursor_continuation={}",
+        "accepted_paths={} normalized_delta={} budget_runtime={} structured_variant={} structured_query_ast={} default_equivalent={} explain_plan={} output_selection={} context_runtime={} batch_runtime={} local_timeout={} fixed_discriminator={} cursor_continuation={}",
         categorized.len(),
         counts[0],
         counts[1],
@@ -7762,9 +7947,10 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[8],
         counts[9],
         counts[10],
+        counts[11],
     );
-    assert_eq!(counts, [131, 3, 61, 27, 16, 5, 10, 10, 1, 1, 3]);
-    assert_eq!(categorized.len(), 268);
+    assert_eq!(counts, [129, 97, 3, 61, 27, 16, 5, 10, 10, 1, 1, 3]);
+    assert_eq!(categorized.len(), 363);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -8000,7 +8186,6 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
         ("query", json!(format!("publish-{seed}")), false),
         ("search_modes", json!(["exact"]), true),
         ("max_results", bounded.clone(), true),
-        ("budget", json!({"max_results": number + 1}), true),
     ] {
         add(VerticalTool::CodeLocate, field, value, optional);
     }
@@ -8289,7 +8474,7 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
                 "generation" => json!(format!("{:?}", request.generation())),
                 "query" => json!(request.query()),
                 "search_modes" => json!(format!("{:?}", request.mode())),
-                "max_results" | "budget" => json!(request.maximum_results()),
+                "max_results" => json!(request.maximum_results()),
                 _ => panic!("unknown code.locate observation field"),
             }
         }

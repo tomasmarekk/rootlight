@@ -170,22 +170,22 @@ impl McpTool {
                 "Use a bounded file-granularity architecture map with optional hotspots; module, package, service, data, ownership, community, and build views are unsupported."
             }
             Self::ArchitectureCycles => {
-                "Use bounded cycle detection in a selected relation projection; custom scope, ranking, and budgets are unsupported."
+                "Use bounded cycle detection in a selected relation projection with caller-reduced resource ceilings; custom scope and ranking are unsupported."
             }
             Self::CodeDead => {
-                "Return bounded dead-code candidates with entry-point and blind-spot caveats; custom scope and budgets are unsupported."
+                "Return bounded dead-code candidates with entry-point and blind-spot caveats under caller-reduced resource ceilings; custom scope is unsupported."
             }
             Self::HistoryCompare => {
                 "Use bounded structural comparison of two explicit retained generation identifiers; Git revision selectors are unsupported."
             }
             Self::PlanChange => {
-                "Use bounded change planning from an explicit objective and targets; change-context resolution, user constraints, and budgets are unsupported."
+                "Use bounded change planning from an explicit objective and targets under caller-reduced resource ceilings; change-context resolution and user constraints are unsupported."
             }
             Self::ContextPack => {
                 "Use bounded evidence assembly from explicit symbol or file identifiers under a token budget; path, route, change, located-result, and plan seeds are unsupported."
             }
             Self::SourceRead => {
-                "Read bounded source ranges from pinned source references as untrusted data; direct file selectors, custom byte bounds, merging, and base64 output are unsupported."
+                "Read bounded source ranges from pinned source references as untrusted data with caller-reduced source and response ceilings; direct file selectors, merging, and base64 output are unsupported."
             }
             Self::QueryAdvanced => {
                 "Use a bounded safe-AST query with enforced cost, row, and depth limits; bound parameters and continuation are unsupported."
