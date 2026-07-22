@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tiktoken_rs::CoreBPE;
 
-const REPORT_SCHEMA: &str = "rootlight.mcp-token-accounting/2";
-const REPORT_FILE: &str = "token-accounting-v2.json";
+const REPORT_SCHEMA: &str = "rootlight.mcp-token-accounting/3";
+const REPORT_FILE: &str = "token-accounting-v3.json";
 const TOKENIZER_PROVIDER: &str = "openai";
 const TOKENIZER_MODEL: &str = "gpt-4o";
 const TOKENIZER_NAME: &str = "o200k_base";
@@ -50,29 +50,8 @@ const TOKENIZER_ASSET_LICENSE_SHA256: &str =
 const NORMALIZATION: &str = "none_exact_utf8";
 const TOOLS_LIST_INPUT_KIND: &str = "mcp_tools_list_result";
 const TOOLS_LIST_FRAMING: &str = "raw_compact_json_object";
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 const ATTRIBUTION_SCHEMA: &str = "rootlight.mcp-token-attribution/1";
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 const BATCH_OPERATION_FRAMING: &str = "one_canonical_batch_operation_without_delimiter";
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 const CONTEXT_SECTION_FRAMING: &str = "one_canonical_context_section_without_delimiter";
 const MAX_REPORT_BYTES: usize = 1024 * 1024;
 const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
@@ -158,12 +137,14 @@ pub(crate) fn emit(options: &Options) -> Result<(), TokenAccountingError> {
             .ok_or(TokenAccountingError::MissingInputFile)?;
         write_bytes(&options.output_dir.join(file), &encoded)?;
     }
+    write_retained_attribution_inputs(&options.output_dir)?;
     let mut encoded = serde_json::to_vec_pretty(&report)?;
     encoded.push(b'\n');
     write_bytes(&options.output_dir.join(REPORT_FILE), &encoded)?;
     println!(
-        "token accounting written for {} profiles using {} {}",
+        "token accounting written for {} profiles and {} attributions using {} {}",
         report.payloads.len(),
+        report.attributions.len(),
         report.tokenizer.implementation,
         report.tokenizer.implementation_version
     );
@@ -180,9 +161,11 @@ pub(crate) fn check(report_path: &Path) -> Result<(), TokenAccountingError> {
         .ok_or_else(|| TokenAccountingError::UnsafePath(report_path.to_path_buf()))?;
     let tokenizer = O200kTokenizer::new()?;
     validate_payloads(report_dir, &report, &tokenizer)?;
+    validate_attributions(report_dir, &report.attributions, &tokenizer)?;
     println!(
-        "token accounting verified for {} profiles at {}",
+        "token accounting verified for {} profiles and {} attributions at {}",
         report.payloads.len(),
+        report.attributions.len(),
         report.source_revision
     );
     Ok(())
@@ -231,26 +214,12 @@ impl OfflineTokenizer for O200kTokenizer {
 }
 
 /// Exact UTF-8 input assigned to one stable batch operation or context section.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LabeledTokenInput<'a> {
     label: &'a str,
     input: &'a [u8],
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 impl<'a> LabeledTokenInput<'a> {
     /// Binds a stable record label to the exact bytes presented to the tokenizer.
     pub(crate) const fn new(label: &'a str, input: &'a [u8]) -> Self {
@@ -258,14 +227,33 @@ impl<'a> LabeledTokenInput<'a> {
     }
 }
 
+const RETAINED_BATCH_OPERATIONS: [LabeledTokenInput<'static>; 2] = [
+    LabeledTokenInput::new(
+        "locate",
+        br#"{"id":"locate","tool":"code.locate","status":"ok","data":{"matches":[]},"truncated":false,"next_cursor":null,"warnings":[]}"#,
+    ),
+    LabeledTokenInput::new(
+        "relationships",
+        br#"{"id":"relationships","tool":"symbol.relationships","status":"ok","data":{"symbols":[]},"truncated":false,"next_cursor":null,"warnings":[]}"#,
+    ),
+];
+
+const RETAINED_CONTEXT_SECTIONS: [LabeledTokenInput<'static>; 3] = [
+    LabeledTokenInput::new(
+        "architecture",
+        br#"{"section":"architecture","items":[{"role":"architecture","score":900,"tokens":18}]}"#,
+    ),
+    LabeledTokenInput::new(
+        "definitions",
+        br#"{"section":"definitions","items":[{"role":"definition","score":950,"tokens":22}]}"#,
+    ),
+    LabeledTokenInput::new(
+        "tests",
+        br#"{"section":"tests","items":[{"role":"test","score":850,"tokens":16}]}"#,
+    ),
+];
+
 /// Offline per-operation or per-section evidence with checked aggregate totals.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TokenAttributionReport {
@@ -276,13 +264,6 @@ pub(crate) struct TokenAttributionReport {
     aggregate: TokenAttributionTotals,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 impl TokenAttributionReport {
     /// Measures batch children in their caller-supplied request order.
     ///
@@ -381,6 +362,7 @@ impl TokenAttributionReport {
         for input in ordered {
             records.push(LabeledTokenMeasurement {
                 label: input.label.to_owned(),
+                input_file: attribution_input_file(input_kind, input.label),
                 measurement: measure_boundary_input(
                     input_kind,
                     input.label,
@@ -452,6 +434,12 @@ impl TokenAttributionReport {
                     record.label.clone(),
                 ));
             }
+            let expected_file = attribution_input_file(self.input_kind, &record.label);
+            if record.input_file != expected_file || !safe_file_name(&record.input_file) {
+                return Err(TokenAccountingError::UnsafePath(PathBuf::from(
+                    &record.input_file,
+                )));
+            }
             record.measurement.validate().map_err(|source| {
                 TokenAccountingError::BoundaryMeasurement {
                     label: record.label.clone(),
@@ -492,15 +480,9 @@ impl TokenAttributionReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 struct LabeledTokenMeasurement {
     label: String,
+    input_file: String,
     measurement: BoundaryTokenMeasurement,
 }
 
@@ -513,13 +495,6 @@ pub(crate) struct TokenAttributionTotals {
     actual_tokens: u64,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 impl TokenAttributionTotals {
     fn from_records(records: &[LabeledTokenMeasurement]) -> Result<Self, TokenAccountingError> {
         let mut total = Self {
@@ -556,25 +531,11 @@ impl TokenAttributionTotals {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 enum RecordOrdering {
     Preserve,
     Lexical,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 fn validate_labeled_inputs(
     input_kind: TokenInputKind,
     inputs: &[LabeledTokenInput<'_>],
@@ -596,13 +557,6 @@ fn validate_labeled_inputs(
     Ok(())
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 fn validate_record_label(label: &str) -> Result<(), TokenAccountingError> {
     if label.is_empty() {
         return Err(TokenAccountingError::MissingAttributionLabel);
@@ -619,13 +573,6 @@ fn validate_record_label(label: &str) -> Result<(), TokenAccountingError> {
     Ok(())
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 fn measure_boundary_input(
     input_kind: TokenInputKind,
     label: &str,
@@ -648,13 +595,10 @@ fn measure_boundary_input(
     ))
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
+fn attribution_input_file(input_kind: TokenInputKind, label: &str) -> String {
+    format!("{}-{label}.json", token_input_kind_name(input_kind))
+}
+
 const fn token_input_kind_name(input_kind: TokenInputKind) -> &'static str {
     match input_kind {
         TokenInputKind::Request => "request",
@@ -695,6 +639,16 @@ fn build_report(
         source_revision: source_revision.to_owned(),
         tokenizer: tokenizer.identity(),
         payloads,
+        attributions: vec![
+            TokenAttributionReport::measure_batch_operations(
+                &RETAINED_BATCH_OPERATIONS,
+                tokenizer,
+            )?,
+            TokenAttributionReport::measure_context_sections(
+                &RETAINED_CONTEXT_SECTIONS,
+                tokenizer,
+            )?,
+        ],
     })
 }
 
@@ -720,6 +674,12 @@ fn validate_report_header(report: &TokenAccountingReport) -> Result<(), TokenAcc
         return Err(TokenAccountingError::ProfileCount {
             expected: ExposureProfile::ALL.len(),
             observed: report.payloads.len(),
+        });
+    }
+    if report.attributions.len() != 2 {
+        return Err(TokenAccountingError::AttributionCount {
+            expected: 2,
+            observed: report.attributions.len(),
         });
     }
     Ok(())
@@ -755,6 +715,89 @@ fn validate_payloads(
                 expected: serde_json::to_string(&expected)?,
                 observed: serde_json::to_string(observed)?,
             });
+        }
+    }
+    Ok(())
+}
+
+fn write_retained_attribution_inputs(output_dir: &Path) -> Result<(), TokenAccountingError> {
+    for (input_kind, inputs) in [
+        (
+            TokenInputKind::BatchOperation,
+            RETAINED_BATCH_OPERATIONS.as_slice(),
+        ),
+        (
+            TokenInputKind::ContextSection,
+            RETAINED_CONTEXT_SECTIONS.as_slice(),
+        ),
+    ] {
+        for input in inputs {
+            write_bytes(
+                &output_dir.join(attribution_input_file(input_kind, input.label)),
+                input.input,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_attributions(
+    report_dir: &Path,
+    attributions: &[TokenAttributionReport],
+    tokenizer: &impl OfflineTokenizer,
+) -> Result<(), TokenAccountingError> {
+    for (index, attribution) in attributions.iter().enumerate() {
+        attribution.validate()?;
+        let expected_kind = match index {
+            0 => TokenInputKind::BatchOperation,
+            1 => TokenInputKind::ContextSection,
+            _ => {
+                return Err(TokenAccountingError::AttributionCount {
+                    expected: 2,
+                    observed: attributions.len(),
+                });
+            }
+        };
+        if attribution.input_kind != expected_kind {
+            return Err(TokenAccountingError::AttributionOrder {
+                index,
+                expected: token_input_kind_name(expected_kind),
+                observed: token_input_kind_name(attribution.input_kind),
+            });
+        }
+
+        let mut retained = Vec::new();
+        retained
+            .try_reserve_exact(attribution.records.len())
+            .map_err(|_| TokenAccountingError::MemoryUnavailable)?;
+        for record in &attribution.records {
+            let path = report_dir.join(&record.input_file);
+            retained.push((
+                record.label.clone(),
+                read_bounded(&path, MAX_PAYLOAD_BYTES)?,
+            ));
+        }
+        let inputs: Vec<_> = retained
+            .iter()
+            .map(|(label, input)| LabeledTokenInput::new(label, input))
+            .collect();
+        match expected_kind {
+            TokenInputKind::BatchOperation => {
+                attribution.verify_batch_operations(&inputs, tokenizer)?;
+            }
+            TokenInputKind::ContextSection => {
+                attribution.verify_context_sections(&inputs, tokenizer)?;
+            }
+            TokenInputKind::Request
+            | TokenInputKind::Response
+            | TokenInputKind::Source
+            | TokenInputKind::ToolList => {
+                return Err(TokenAccountingError::AttributionOrder {
+                    index,
+                    expected: "batch_operation_or_context_section",
+                    observed: token_input_kind_name(expected_kind),
+                });
+            }
         }
     }
     Ok(())
@@ -890,6 +933,7 @@ struct TokenAccountingReport {
     source_revision: String,
     tokenizer: TokenizerIdentity,
     payloads: Vec<ProfileAccounting>,
+    attributions: Vec<TokenAttributionReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1013,13 +1057,6 @@ impl InputEvidence {
 }
 
 /// Failure while producing or checking tokenizer accounting evidence.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "runtime wiring follows once exact batch and context boundaries are available"
-    )
-)]
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TokenAccountingError {
     /// A required option value is absent.
@@ -1058,6 +1095,24 @@ pub(crate) enum TokenAccountingError {
         expected: &'static str,
         /// Reported profile.
         observed: String,
+    },
+    /// A report does not contain exactly the retained attribution boundaries.
+    #[error("token attribution count differs: expected {expected}, observed {observed}")]
+    AttributionCount {
+        /// Required attribution count.
+        expected: usize,
+        /// Reported attribution count.
+        observed: usize,
+    },
+    /// Retained attribution boundaries are not in canonical report order.
+    #[error("token attribution {index} differs: expected {expected}, observed {observed}")]
+    AttributionOrder {
+        /// Zero-based report position.
+        index: usize,
+        /// Required semantic boundary.
+        expected: &'static str,
+        /// Reported semantic boundary.
+        observed: &'static str,
     },
     /// A profile name cannot be mapped to the canonical catalog.
     #[error("unknown exposure profile in token accounting: {0}")]
@@ -1208,6 +1263,8 @@ mod tests {
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
     const TOKENIZER_GOLDENS: &str =
         include_str!("../../tests/fixtures/token-accounting/o200k-base-v1.json");
+    const ATTRIBUTION_GOLDENS: &str =
+        include_str!("../../tests/fixtures/token-accounting/attribution-v1.json");
 
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -1236,6 +1293,36 @@ mod tests {
         serialized_bytes: u64,
         sha256: String,
         actual_tokens: u64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct AttributionGoldenFixture {
+        schema: String,
+        tokenizer: TokenizerIdentity,
+        attributions: Vec<AttributionGolden>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct AttributionGolden {
+        input_kind: TokenInputKind,
+        records: Vec<AttributionRecordGolden>,
+        aggregate: TokenAttributionTotals,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct AttributionRecordGolden {
+        label: String,
+        input_file: String,
+        input: String,
+        input_sha256: String,
+        serialized_bytes: u64,
+        deterministic_estimated_tokens: u64,
+        actual_tokens: u64,
+        normalization: String,
+        framing: String,
     }
 
     #[test]
@@ -1415,6 +1502,63 @@ mod tests {
                 .any(|payload| payload.measurement.actual_tokens()
                     != payload.measurement.deterministic_estimated_tokens())
         );
+    }
+
+    #[test]
+    fn retained_attribution_fixture_reconstructs_every_exact_input() {
+        let fixture: AttributionGoldenFixture =
+            serde_json::from_str(ATTRIBUTION_GOLDENS).expect("attribution fixture parses");
+        assert_eq!(fixture.schema, "rootlight.token-attribution-goldens/1");
+        assert_eq!(fixture.tokenizer, TokenizerIdentity::expected());
+        assert_eq!(fixture.attributions.len(), 2);
+        let tokenizer = O200kTokenizer::new().expect("pinned tokenizer initializes");
+
+        for golden in fixture.attributions {
+            let inputs: Vec<_> = golden
+                .records
+                .iter()
+                .map(|record| LabeledTokenInput::new(&record.label, record.input.as_bytes()))
+                .collect();
+            let report = match golden.input_kind {
+                TokenInputKind::BatchOperation => {
+                    TokenAttributionReport::measure_batch_operations(&inputs, &tokenizer)
+                        .expect("retained batch operations measure")
+                }
+                TokenInputKind::ContextSection => {
+                    TokenAttributionReport::measure_context_sections(&inputs, &tokenizer)
+                        .expect("retained context sections measure")
+                }
+                TokenInputKind::Request
+                | TokenInputKind::Response
+                | TokenInputKind::Source
+                | TokenInputKind::ToolList => {
+                    panic!("attribution fixture contains a non-attribution input kind")
+                }
+            };
+
+            assert_eq!(report.tokenizer, fixture.tokenizer);
+            assert_eq!(report.aggregate, golden.aggregate);
+            assert_eq!(report.records.len(), golden.records.len());
+            for (record, retained) in report.records.iter().zip(golden.records) {
+                assert_eq!(record.label, retained.label);
+                assert_eq!(record.input_file, retained.input_file);
+                assert_eq!(record.measurement.input_sha256, retained.input_sha256);
+                assert_eq!(
+                    record.measurement.serialized_bytes,
+                    retained.serialized_bytes
+                );
+                assert_eq!(
+                    record.measurement.deterministic_estimated_tokens,
+                    retained.deterministic_estimated_tokens
+                );
+                assert_eq!(
+                    record.measurement.actual_tokens,
+                    Some(retained.actual_tokens)
+                );
+                assert_eq!(record.measurement.normalization, retained.normalization);
+                assert_eq!(record.measurement.framing, retained.framing);
+            }
+        }
     }
 
     #[test]
@@ -1654,6 +1798,49 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn checker_reconstructs_every_retained_attribution_input() {
+        let directory = tempfile::tempdir().expect("temporary directory creates");
+        let options = Options {
+            output_dir: directory.path().to_path_buf(),
+            source_revision: REVISION.to_owned(),
+        };
+        emit(&options).expect("evidence emits");
+        let report_path = directory.path().join(REPORT_FILE);
+        check(&report_path).expect("fresh retained inputs verify");
+
+        let report_bytes = fs::read(&report_path).expect("report reads");
+        let report: TokenAccountingReport =
+            serde_json::from_slice(&report_bytes).expect("report parses");
+        assert_eq!(report.attributions.len(), 2);
+        assert_eq!(
+            report
+                .attributions
+                .iter()
+                .flat_map(|attribution| &attribution.records)
+                .count(),
+            RETAINED_BATCH_OPERATIONS.len() + RETAINED_CONTEXT_SECTIONS.len()
+        );
+
+        for record in report
+            .attributions
+            .iter()
+            .flat_map(|attribution| &attribution.records)
+        {
+            let path = directory.path().join(&record.input_file);
+            let original = fs::read(&path).expect("retained exact input reads");
+            let mut changed = original.clone();
+            changed.push(b' ');
+            fs::write(&path, changed).expect("changed exact input writes");
+            assert!(matches!(
+                check(&report_path),
+                Err(TokenAccountingError::AttributionMismatch { .. })
+            ));
+            fs::write(&path, original).expect("exact input restores");
+            check(&report_path).expect("restored exact input verifies");
+        }
     }
 
     #[test]
