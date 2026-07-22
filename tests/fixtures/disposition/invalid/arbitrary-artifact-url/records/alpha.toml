@@ -27,7 +27,7 @@ classification = "observed_pass"
 source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
 sha256 = "96af57812e0d1a7ad3cdf80531a94edce34ead57ac980a32d4027fdbe2e9b5c8"
 bytes = 88
-source = { kind = "github_artifact", repository = "owner/project", run_id = 1, run_attempt = 1, job_id = 2, artifact_id = 3, artifact_name = "proof", head_sha = "a9487e06a9d8820500383e55bff93f72a68003ec", run_url = "https://api.github.com/repos/owner/project/actions/runs/1/attempts/1", job_url = "https://api.github.com/repos/owner/project/actions/jobs/2", api_url = "https://example.invalid/proof", archive_url = "https://api.github.com/repos/owner/project/actions/artifacts/3/zip", api_digest = "sha256:96af57812e0d1a7ad3cdf80531a94edce34ead57ac980a32d4027fdbe2e9b5c8", api_bytes = 88 }
+source = { kind = "github_artifact", path = "tests/fixtures/disposition/invalid/arbitrary-artifact-url/attestations/alpha.json", source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec", sha256 = "e544b6cdb0dd96fabb0c6c43d6bfff65446c99cc0abcd0c27ee887d50ee2d9ef", bytes = 564 }
 
 [[capabilities]]
 id = "alpha.capability"
