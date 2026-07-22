@@ -9,10 +9,14 @@ use jsonschema::{Validator, error::ValidationErrorKind};
 use rootlight_mcp_contract::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, DetailKey, ErrorCode, ErrorResponse,
     ExposureProfile, GenerationSelector, McpTool, NextAction, OperationStatusInput,
-    OperationStatusOutput, PublicError, RepoIndexInput, RepoIndexOutput, RepositorySelector,
-    SchemaVersion, SourceReadInput, SourceReadOutput, SymbolExplainInput, SymbolExplainOutput,
-    ToolResponse, TrustClassification, VerticalTool,
-    capability::{DISCOVERY_METADATA_KEY, discovery_metadata},
+    OperationStatusOutput, PublicError, PublicErrorBuildError, PublicValue, RepoIndexInput,
+    RepoIndexOutput, RepositorySelector, SafeLabel, SchemaVersion, SourceReadInput,
+    SourceReadOutput, SymbolExplainInput, SymbolExplainOutput, ToolResponse, TrustClassification,
+    VerticalTool,
+    capability::{
+        CapabilityStatus, DISCOVERY_METADATA_KEY, ToolCapability, capability_for,
+        discovery_metadata,
+    },
     context::{BatchOperation, ContextPackInput, QueryAdvancedInput, QueryBatchInput},
     error_definition,
     pagination::AuthenticatedCursor,
@@ -461,6 +465,287 @@ struct ToolContract {
     definition: ToolDefinition,
     input_validator: Validator,
     output_validator: Validator,
+}
+
+/// Controls how unresolved batch bindings participate in capability admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CapabilityBindingPolicy {
+    /// Validates concrete input values after bindings have been materialized.
+    Materialized,
+    /// Rejects a binding when its eventual value could select a restricted rule.
+    RejectUnprovenRestrictedBindings,
+}
+
+/// Stable classification for a rejected capability field or value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CapabilityRejectionReason {
+    /// A field is declared unsupported.
+    UnsupportedField,
+    /// One concrete field value is declared unsupported.
+    UnsupportedValue,
+    /// A field is blocked pending a complete implementation.
+    BlockedField,
+    /// An unresolved binding could select a restricted value.
+    UnprovenBoundValue,
+    /// A binding reached validation before it was materialized.
+    UnresolvedBinding,
+}
+
+impl CapabilityRejectionReason {
+    const fn public_name(self) -> &'static str {
+        match self {
+            Self::UnsupportedField => "unsupported_field",
+            Self::UnsupportedValue => "unsupported_value",
+            Self::BlockedField => "blocked_field",
+            Self::UnprovenBoundValue => "unproven_bound_value",
+            Self::UnresolvedBinding => "unresolved_binding",
+        }
+    }
+}
+
+/// Source-free capability rejection produced before tool execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapabilityAdmissionError {
+    code: ErrorCode,
+    registry_path: String,
+    instance_path: String,
+    reason: CapabilityRejectionReason,
+}
+
+impl CapabilityAdmissionError {
+    /// Returns the stable public error code selected by the capability registry.
+    #[must_use]
+    pub(crate) const fn code(&self) -> ErrorCode {
+        self.code
+    }
+
+    /// Returns the generated-schema path used to resolve the capability rule.
+    #[must_use]
+    pub(crate) fn registry_path(&self) -> &str {
+        &self.registry_path
+    }
+
+    /// Returns the concrete input path, including array indices.
+    #[must_use]
+    pub(crate) fn instance_path(&self) -> &str {
+        &self.instance_path
+    }
+
+    /// Returns the stable rejection classification.
+    #[must_use]
+    pub(crate) const fn reason(&self) -> CapabilityRejectionReason {
+        self.reason
+    }
+
+    /// Builds the checked public error, optionally beneath a caller-owned path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the combined diagnostic path exceeds public bounds.
+    pub(crate) fn to_public_error(
+        &self,
+        path_prefix: Option<&str>,
+    ) -> Result<PublicError, PublicErrorBuildError> {
+        let field_path = match (path_prefix, self.instance_path.is_empty()) {
+            (Some(prefix), false) => format!("{prefix}.{}", self.instance_path),
+            (Some(prefix), true) => prefix.to_owned(),
+            (None, false) => self.instance_path.clone(),
+            (None, true) => "arguments".to_owned(),
+        };
+        let definition = error_definition(self.code);
+        let mut builder = PublicError::builder(self.code, definition.message)
+            .detail(
+                DetailKey::parse("field_path").expect("static detail key is valid"),
+                PublicValue::Label(SafeLabel::parse(&field_path)?),
+            )
+            .detail(
+                DetailKey::parse("capability_reason").expect("static detail key is valid"),
+                PublicValue::Label(
+                    SafeLabel::parse(self.reason.public_name())
+                        .expect("static capability reason is valid"),
+                ),
+            )
+            .next_action(NextAction::CorrectField {
+                field: DetailKey::parse("arguments").expect("static detail key is valid"),
+            });
+        if definition.retryable {
+            builder = builder.retryable();
+        }
+        builder.build()
+    }
+}
+
+#[derive(Debug)]
+struct PendingCapabilityValue<'a> {
+    value: &'a Value,
+    registry_path: String,
+    instance_path: String,
+}
+
+/// Validates all explicit input leaves against the canonical capability registry.
+pub(crate) fn validate_capability_input(
+    tool: VerticalTool,
+    arguments: &Value,
+    binding_policy: CapabilityBindingPolicy,
+) -> Result<(), CapabilityAdmissionError> {
+    let capability = capability_for(catalog_tool(tool));
+    let mut pending = vec![PendingCapabilityValue {
+        value: arguments,
+        registry_path: String::new(),
+        instance_path: String::new(),
+    }];
+
+    while let Some(current) = pending.pop() {
+        match current.value {
+            Value::Object(object) if is_batch_binding(object) => match binding_policy {
+                CapabilityBindingPolicy::Materialized => {
+                    return Err(CapabilityAdmissionError {
+                        code: ErrorCode::BindingInvalid,
+                        registry_path: current.registry_path,
+                        instance_path: current.instance_path,
+                        reason: CapabilityRejectionReason::UnresolvedBinding,
+                    });
+                }
+                CapabilityBindingPolicy::RejectUnprovenRestrictedBindings => {
+                    validate_unresolved_binding(capability, &current)?;
+                }
+            },
+            Value::Object(object) if object.is_empty() => {
+                validate_capability_leaf(capability, &current, None)?;
+            }
+            Value::Object(object) => {
+                let mut entries: Vec<_> = object.iter().collect();
+                entries.sort_unstable_by_key(|(name, _)| *name);
+                for (name, value) in entries.into_iter().rev() {
+                    pending.push(PendingCapabilityValue {
+                        value,
+                        registry_path: join_object_path(&current.registry_path, name),
+                        instance_path: join_object_path(&current.instance_path, name),
+                    });
+                }
+            }
+            Value::Array(items) if items.is_empty() => {
+                validate_capability_leaf(capability, &current, None)?;
+            }
+            Value::Array(items) => {
+                for (index, value) in items.iter().enumerate().rev() {
+                    pending.push(PendingCapabilityValue {
+                        value,
+                        registry_path: format!("{}[]", current.registry_path),
+                        instance_path: join_object_path(&current.instance_path, &index.to_string()),
+                    });
+                }
+            }
+            value => {
+                let canonical = canonical_capability_value(value);
+                validate_capability_leaf(capability, &current, canonical.as_deref())?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_unresolved_binding(
+    capability: &ToolCapability,
+    current: &PendingCapabilityValue<'_>,
+) -> Result<(), CapabilityAdmissionError> {
+    let field_rule = capability.disposition(&current.registry_path, None);
+    let value_rules: Vec<_> = capability
+        .rules
+        .iter()
+        .filter(|rule| rule.path == current.registry_path && rule.value.is_some())
+        .collect();
+    let field_is_restricted = matches!(
+        field_rule.status,
+        CapabilityStatus::UnsupportedStableError | CapabilityStatus::Blocked
+    );
+    if !value_rules.is_empty()
+        && (field_is_restricted
+            || value_rules
+                .iter()
+                .any(|rule| rule.status != CapabilityStatus::Implemented))
+    {
+        return Err(CapabilityAdmissionError {
+            code: ErrorCode::UnsupportedCapability,
+            registry_path: current.registry_path.clone(),
+            instance_path: current.instance_path.clone(),
+            reason: CapabilityRejectionReason::UnprovenBoundValue,
+        });
+    }
+    if let Some(error) =
+        capability_rejection(current, field_rule.status, field_rule.error_code, false)
+    {
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+fn validate_capability_leaf(
+    capability: &ToolCapability,
+    current: &PendingCapabilityValue<'_>,
+    value: Option<&str>,
+) -> Result<(), CapabilityAdmissionError> {
+    if current.registry_path.is_empty() {
+        return Ok(());
+    }
+    let rule = capability.disposition(&current.registry_path, value);
+    match capability_rejection(current, rule.status, rule.error_code, rule.value.is_some()) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn capability_rejection(
+    current: &PendingCapabilityValue<'_>,
+    status: CapabilityStatus,
+    error_code: Option<ErrorCode>,
+    value_specific: bool,
+) -> Option<CapabilityAdmissionError> {
+    let (code, reason) = match status {
+        CapabilityStatus::Implemented | CapabilityStatus::FallbackLimited => return None,
+        CapabilityStatus::UnsupportedStableError => (
+            error_code.expect("unsupported capability rules declare a stable error code"),
+            if value_specific {
+                CapabilityRejectionReason::UnsupportedValue
+            } else {
+                CapabilityRejectionReason::UnsupportedField
+            },
+        ),
+        CapabilityStatus::Blocked => (
+            ErrorCode::UnsupportedCapability,
+            CapabilityRejectionReason::BlockedField,
+        ),
+    };
+    Some(CapabilityAdmissionError {
+        code,
+        registry_path: current.registry_path.clone(),
+        instance_path: current.instance_path.clone(),
+        reason,
+    })
+}
+
+fn is_batch_binding(object: &Map<String, Value>) -> bool {
+    object.len() == 2 && object.contains_key("$from") && object.contains_key("pointer")
+}
+
+fn join_object_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_owned()
+    } else {
+        format!("{parent}.{child}")
+    }
+}
+
+fn canonical_capability_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => Some("null".to_owned()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::String(value) => Some(value.clone()),
+        Value::Array(_) | Value::Object(_) => None,
+    }
 }
 
 /// Reusable pre-execution validator for dynamic batch child requests.
@@ -1393,7 +1678,7 @@ mod tests {
 
     use rootlight_mcp_contract::{
         accounting::tool_list_payload,
-        capability::{CAPABILITIES, CapabilityStatus},
+        capability::{CAPABILITIES, CapabilityRule, CapabilityStatus},
     };
     use serde_json::json;
     use tokio::sync::watch;
@@ -1521,6 +1806,231 @@ mod tests {
             .as_object()
             .expect("retained output is an object")
             .clone()
+    }
+
+    #[test]
+    fn capability_traversal_reports_the_first_path_deterministically() {
+        let mut query_first = Map::new();
+        query_first.insert("query".to_owned(), json!("needle"));
+        query_first.insert("states".to_owned(), json!(["ready"]));
+        let mut states_first = Map::new();
+        states_first.insert("states".to_owned(), json!(["ready"]));
+        states_first.insert("query".to_owned(), json!("needle"));
+
+        let first = validate_capability_input(
+            VerticalTool::RepoList,
+            &Value::Object(query_first),
+            CapabilityBindingPolicy::Materialized,
+        )
+        .expect_err("blocked query is rejected");
+        let second = validate_capability_input(
+            VerticalTool::RepoList,
+            &Value::Object(states_first),
+            CapabilityBindingPolicy::Materialized,
+        )
+        .expect_err("blocked query is rejected regardless of insertion order");
+
+        assert_eq!(first, second);
+        assert_eq!(first.registry_path(), "query");
+        assert_eq!(first.instance_path(), "query");
+        assert_eq!(first.reason(), CapabilityRejectionReason::BlockedField);
+        assert_eq!(first.code(), ErrorCode::UnsupportedCapability);
+    }
+
+    #[test]
+    fn capability_traversal_checks_explicit_empty_containers() {
+        let error = validate_capability_input(
+            VerticalTool::QueryBatch,
+            &json!({"budget": {}}),
+            CapabilityBindingPolicy::Materialized,
+        )
+        .expect_err("an explicit blocked budget is rejected even when empty");
+
+        assert_eq!(error.registry_path(), "budget");
+        assert_eq!(error.instance_path(), "budget");
+        assert_eq!(error.reason(), CapabilityRejectionReason::BlockedField);
+    }
+
+    #[test]
+    fn capability_traversal_prefers_values_and_descendants_over_ancestors() {
+        validate_capability_input(
+            VerticalTool::QueryBatch,
+            &json!({
+                "generation": "active",
+                "operations": [{
+                    "local_budget": {"timeout_ms": 50}
+                }]
+            }),
+            CapabilityBindingPolicy::Materialized,
+        )
+        .expect("implemented values and descendants override limited ancestors");
+
+        let error = validate_capability_input(
+            VerticalTool::QueryBatch,
+            &json!({"operations": [{"tool": "plan.change"}]}),
+            CapabilityBindingPolicy::Materialized,
+        )
+        .expect_err("the restricted batch tool value is rejected");
+        assert_eq!(error.code(), ErrorCode::OperatorForbidden);
+        assert_eq!(error.registry_path(), "operations[].tool");
+        assert_eq!(error.instance_path(), "operations.0.tool");
+        assert_eq!(error.reason(), CapabilityRejectionReason::UnsupportedValue);
+    }
+
+    #[test]
+    fn unresolved_bindings_fail_closed_only_for_restricted_targets() {
+        let binding = json!({"$from": "find", "pointer": "/data/matches/0/source_ref"});
+        let error = validate_capability_input(
+            VerticalTool::SourceRead,
+            &json!({"response_profile": binding}),
+            CapabilityBindingPolicy::RejectUnprovenRestrictedBindings,
+        )
+        .expect_err("a binding cannot prove that it avoids restricted profile values");
+        assert_eq!(error.registry_path(), "response_profile");
+        assert_eq!(error.instance_path(), "response_profile");
+        assert_eq!(
+            error.reason(),
+            CapabilityRejectionReason::UnprovenBoundValue
+        );
+
+        validate_capability_input(
+            VerticalTool::SourceRead,
+            &json!({
+                "source_ref": {"$from": "find", "pointer": "/data/matches/0/source_ref"}
+            }),
+            CapabilityBindingPolicy::RejectUnprovenRestrictedBindings,
+        )
+        .expect("an unrestricted binding remains eligible for materialization");
+    }
+
+    #[test]
+    fn unresolved_binding_over_an_implemented_exception_is_unproven() {
+        const RULES: &[CapabilityRule] = &[
+            CapabilityRule {
+                path: "selector",
+                value: None,
+                status: CapabilityStatus::UnsupportedStableError,
+                error_code: Some(ErrorCode::UnsupportedCapability),
+                summary: "fixture field is restricted",
+            },
+            CapabilityRule {
+                path: "selector",
+                value: Some("active"),
+                status: CapabilityStatus::Implemented,
+                error_code: None,
+                summary: "fixture value is implemented",
+            },
+        ];
+        let capability = ToolCapability {
+            rules: RULES,
+            ..*capability_for(McpTool::QueryBatch)
+        };
+        let binding = json!({"$from": "find", "pointer": "/data/selector"});
+        let current = PendingCapabilityValue {
+            value: &binding,
+            registry_path: "selector".to_owned(),
+            instance_path: "selector".to_owned(),
+        };
+
+        let error = validate_unresolved_binding(&capability, &current)
+            .expect_err("the binding cannot prove it selects the implemented exception");
+        assert_eq!(
+            error.reason(),
+            CapabilityRejectionReason::UnprovenBoundValue
+        );
+    }
+
+    #[test]
+    fn materialized_policy_rejects_an_unresolved_binding_object() {
+        let error = validate_capability_input(
+            VerticalTool::SourceRead,
+            &json!({
+                "source_ref": {"$from": "find", "pointer": "/data/matches/0/source_ref"}
+            }),
+            CapabilityBindingPolicy::Materialized,
+        )
+        .expect_err("materialized validation cannot accept a binding placeholder");
+
+        assert_eq!(error.code(), ErrorCode::BindingInvalid);
+        assert_eq!(error.registry_path(), "source_ref");
+        assert_eq!(error.instance_path(), "source_ref");
+        assert_eq!(error.reason(), CapabilityRejectionReason::UnresolvedBinding);
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported capability rules declare a stable error code")]
+    fn unsupported_rule_without_error_code_violates_the_registry_invariant() {
+        let current = PendingCapabilityValue {
+            value: &Value::Null,
+            registry_path: "fixture".to_owned(),
+            instance_path: "fixture".to_owned(),
+        };
+
+        let _ = capability_rejection(
+            &current,
+            CapabilityStatus::UnsupportedStableError,
+            None,
+            false,
+        );
+    }
+
+    #[test]
+    fn capability_values_use_canonical_scalar_spellings() {
+        assert_eq!(
+            canonical_capability_value(&json!("active")).as_deref(),
+            Some("active")
+        );
+        assert_eq!(
+            canonical_capability_value(&Value::Bool(true)).as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            canonical_capability_value(&json!(42.5)).as_deref(),
+            Some("42.5")
+        );
+        assert_eq!(
+            canonical_capability_value(&Value::Null).as_deref(),
+            Some("null")
+        );
+        assert_eq!(canonical_capability_value(&json!([])), None);
+        assert_eq!(canonical_capability_value(&json!({})), None);
+    }
+
+    #[test]
+    fn capability_rejection_builds_bounded_field_details() {
+        let error = validate_capability_input(
+            VerticalTool::QueryBatch,
+            &json!({"operations": [{"tool": "plan.change"}]}),
+            CapabilityBindingPolicy::Materialized,
+        )
+        .expect_err("the restricted value is rejected")
+        .to_public_error(Some("operations.3.arguments"))
+        .expect("generated capability paths fit public diagnostic bounds");
+
+        assert_eq!(error.code(), ErrorCode::OperatorForbidden);
+        assert_eq!(
+            error
+                .details()
+                .get(&DetailKey::parse("field_path").expect("static detail key is valid")),
+            Some(&PublicValue::Label(
+                SafeLabel::parse("operations.3.arguments.operations.0.tool")
+                    .expect("fixture path is valid")
+            ))
+        );
+        assert_eq!(
+            error
+                .details()
+                .get(&DetailKey::parse("capability_reason").expect("static detail key is valid")),
+            Some(&PublicValue::Label(
+                SafeLabel::parse("unsupported_value").expect("fixture reason is valid")
+            ))
+        );
+        assert_eq!(
+            error.next_actions(),
+            &[NextAction::CorrectField {
+                field: DetailKey::parse("arguments").expect("static detail key is valid")
+            }]
+        );
     }
 
     fn checked_not_found() -> PublicError {
