@@ -4894,6 +4894,7 @@ fn normalize_repository_index(
             .as_ref()
             .is_some_and(|patch| !patch.is_empty())
         || input.wait_ms.is_some()
+        || input.detached == Some(true)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -4906,7 +4907,7 @@ fn normalize_repository_index(
     Ok(RepositoryIndexPortRequest {
         root,
         mode: input.mode.unwrap_or(IndexMode::Auto),
-        detached: input.detached.unwrap_or(false),
+        detached: false,
     })
 }
 

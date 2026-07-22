@@ -651,11 +651,11 @@
           "maxItems": 100
         },
         "operation_id": {
-          "description": "Durable operation identity.",
+          "description": "Process-local operation identity.",
           "$ref": "#/$defs/OperationId"
         },
         "published_generation": {
-          "description": "Generation published within `wait_ms`, if any.",
+          "description": "Generation published before the attached call returns, if any.",
           "$ref": "#/$defs/RequiredNullable"
         },
         "repository_id": {

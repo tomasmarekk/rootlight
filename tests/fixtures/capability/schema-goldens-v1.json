@@ -50,8 +50,8 @@
       "outputSha256": "0cbf48c858bdee566a185cd97d6b7e13b0372d44e7d9cb72639a61f1405ccfd0"
     },
     "repo.index": {
-      "inputSha256": "eddf99aecc028e03ad2bb711fd320aa63dcfc02c00a435fdc763654d4ff7b37c",
-      "outputSha256": "780662e64ec6a0822dbd9e3ecec9065c78a1d3359729206393fbe6c28777186b"
+      "inputSha256": "dc5caae4d0d855bb44985a0a0a89005945bff066d592bbcf948c4100a0a1145b",
+      "outputSha256": "d64c4966b6eab264edc31ec83031a5a5de2c4f6a16498b450ddd8ec2fe30f3bd"
     },
     "repo.list": {
       "inputSha256": "7f50f93b0ab3a506b81596624716c69a8312176f0f172041060c47a3da76de79",
