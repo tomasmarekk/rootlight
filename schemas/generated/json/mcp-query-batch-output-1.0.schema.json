@@ -135,6 +135,16 @@
           "const": "not_run_fail_fast"
         },
         {
+          "description": "The operation was not scheduled because the shared budget was exhausted.",
+          "type": "string",
+          "const": "not_run_budget"
+        },
+        {
+          "description": "The operation was cancelled after the batch plan had been accepted.",
+          "type": "string",
+          "const": "cancelled"
+        },
+        {
           "description": "The operation was planned in explain mode and not executed.",
           "type": "string",
           "const": "not_run"
