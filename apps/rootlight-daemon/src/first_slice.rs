@@ -46,6 +46,11 @@ use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
     AdvancedAstNode, FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexReceipt,
     FirstSliceService, HistoryChangeKind, PlanChangeObjective,
+    catalog::{
+        CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
+        CatalogPageSize, CatalogRepositoryRecord, CatalogRepositoryState, CatalogSnapshotId,
+        CatalogSortKey,
+    },
 };
 
 const FIRST_SLICE_SCHEMA_MAJOR: u32 = 1;
@@ -84,6 +89,15 @@ struct PublicationBoundaryHook {
     armed: AtomicBool,
     reached: SyncSender<()>,
     release: Receiver<()>,
+}
+
+#[derive(Clone, Copy)]
+struct ServiceRequestResources<'a> {
+    journal: &'a JournalActorHandle,
+    metadata: &'a Mutex<OperationMetadataSet>,
+    runtime: &'a tokio::runtime::Runtime,
+    catalog_epoch: Instant,
+    publication_hook: Option<&'a PublicationBoundaryHook>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -425,6 +439,9 @@ fn service_worker(
     commands: Receiver<WorkerCommand>,
     publication_hook: Option<PublicationBoundaryHook>,
 ) {
+    // Snapshot expiry is process-relative so wall-clock corrections cannot
+    // invalidate live cursor sessions or make the service observe time regress.
+    let catalog_epoch = Instant::now();
     loop {
         if stopping.load(Ordering::Acquire) {
             return;
@@ -440,15 +457,14 @@ fn service_worker(
                 context,
                 reply,
             } => {
-                let result = execute_service_request(
-                    &mut service,
-                    &journal,
-                    metadata.as_ref(),
-                    &runtime,
-                    request,
-                    context,
-                    publication_hook.as_ref(),
-                );
+                let resources = ServiceRequestResources {
+                    journal: &journal,
+                    metadata: metadata.as_ref(),
+                    runtime: &runtime,
+                    catalog_epoch,
+                    publication_hook: publication_hook.as_ref(),
+                };
+                let result = execute_service_request(&mut service, resources, request, context);
                 let _ = reply.send(result);
             }
         }
@@ -496,12 +512,9 @@ fn lifecycle_worker(
 
 fn execute_service_request(
     service: &mut FirstSliceService,
-    journal: &JournalActorHandle,
-    metadata: &Mutex<OperationMetadataSet>,
-    runtime: &tokio::runtime::Runtime,
+    resources: ServiceRequestResources<'_>,
     request: FirstSliceIpcRequest,
     context: FirstSliceIpcContext,
-    publication_hook: Option<&PublicationBoundaryHook>,
 ) -> Result<FirstSliceIpcResponse, PublicError> {
     context
         .cancellation
@@ -510,12 +523,12 @@ fn execute_service_request(
     match request {
         FirstSliceIpcRequest::RepositoryIndex(request) => repository_index(
             service,
-            journal,
-            metadata,
-            runtime,
+            resources.journal,
+            resources.metadata,
+            resources.runtime,
             request,
             &context,
-            publication_hook,
+            resources.publication_hook,
         )
         .map(FirstSliceIpcResponse::RepositoryIndex),
         FirstSliceIpcRequest::CodeLocate(request) => {
@@ -529,6 +542,10 @@ fn execute_service_request(
         }
         FirstSliceIpcRequest::RepositoryList(request) => {
             repository_list(service, request).map(FirstSliceIpcResponse::RepositoryList)
+        }
+        FirstSliceIpcRequest::RepositoryCatalogPage(request) => {
+            repository_catalog_page(service, request, resources.catalog_epoch)
+                .map(FirstSliceIpcResponse::RepositoryCatalogPage)
         }
         FirstSliceIpcRequest::RepositoryStatus(request) => {
             repository_status(service, request).map(FirstSliceIpcResponse::RepositoryStatus)
@@ -2094,6 +2111,152 @@ fn repository_list(
     Ok(daemon::RepositoryListResponse { repositories })
 }
 
+fn repository_catalog_page(
+    service: &mut FirstSliceService,
+    request: daemon::RepositoryCatalogPageRequest,
+    catalog_epoch: Instant,
+) -> Result<daemon::RepositoryCatalogPageResponse, PublicError> {
+    let sort_version = u16::try_from(request.sort_version).map_err(|_| invalid_cursor())?;
+    if sort_version != CATALOG_SORT_VERSION {
+        return Err(invalid_cursor());
+    }
+    if !request.states_present && !request.states.is_empty() {
+        return Err(invalid_argument());
+    }
+
+    let states = request
+        .states_present
+        .then(|| {
+            request
+                .states
+                .iter()
+                .map(|state| catalog_state(state))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+    let filter = CatalogListFilter::new(request.normalized_query.as_deref(), states, None)
+        .map_err(catalog_error)?;
+    let page_size = u16::try_from(request.page_size)
+        .map_err(|_| invalid_argument())
+        .and_then(|page_size| CatalogPageSize::new(page_size).map_err(catalog_error))?;
+    let snapshot_id = request
+        .snapshot
+        .map(|snapshot| {
+            let bytes: [u8; 32] = snapshot.value.try_into().map_err(|_| invalid_cursor())?;
+            Ok(CatalogSnapshotId::from_bytes(bytes))
+        })
+        .transpose()?;
+    let after = request
+        .after
+        .map(|after| CatalogSortKey::from_bytes(sort_version, &after.value).map_err(catalog_error))
+        .transpose()?;
+    let request =
+        CatalogPageRequest::new(snapshot_id, after, filter, page_size).map_err(catalog_error)?;
+    let page = service
+        .repository_catalog_page(request, catalog_now(catalog_epoch)?)
+        .map_err(catalog_error)?;
+
+    let snapshot = daemon::RepositoryCatalogSnapshotId {
+        value: page.snapshot_id().as_bytes().to_vec(),
+    };
+    let next_after = page
+        .next_after()
+        .map(|key| daemon::RepositoryCatalogSortKey {
+            value: key.to_bytes(),
+        });
+    let total_count = page.total_count();
+    let sort_version = u32::from(page.sort_version());
+    let truncated = next_after.is_some();
+    let mut repositories = Vec::new();
+    repositories
+        .try_reserve_exact(page.items().len())
+        .map_err(|_| resource_exhausted())?;
+    for record in page.into_items() {
+        repositories.push(catalog_record_to_wire(&record)?);
+    }
+
+    Ok(daemon::RepositoryCatalogPageResponse {
+        repositories,
+        snapshot: Some(snapshot),
+        next_after,
+        total_count: Some(total_count),
+        truncated,
+        sort_version,
+    })
+}
+
+fn catalog_state(value: &str) -> Result<CatalogRepositoryState, PublicError> {
+    match value {
+        "ready" => Ok(CatalogRepositoryState::Ready),
+        "indexing" => Ok(CatalogRepositoryState::Indexing),
+        "degraded" => Ok(CatalogRepositoryState::Degraded),
+        "corrupt" => Ok(CatalogRepositoryState::Corrupt),
+        "migration_required" => Ok(CatalogRepositoryState::MigrationRequired),
+        "rebuild_required" => Ok(CatalogRepositoryState::RebuildRequired),
+        _ => Err(invalid_argument()),
+    }
+}
+
+fn catalog_record_to_wire(
+    record: &CatalogRepositoryRecord,
+) -> Result<daemon::RepositoryCatalogEntry, PublicError> {
+    let mut languages = Vec::new();
+    languages
+        .try_reserve_exact(record.coverage().len())
+        .map_err(|_| resource_exhausted())?;
+    let mut coverage = Vec::new();
+    coverage
+        .try_reserve_exact(record.coverage().len())
+        .map_err(|_| resource_exhausted())?;
+    for entry in record.coverage() {
+        languages.push(entry.language().to_owned());
+        coverage.push(daemon::RepositoryCoverageEntry {
+            language: entry.language().to_owned(),
+            tier: catalog_tier_label(entry.tier())?.to_owned(),
+            status: catalog_coverage_label(entry.status())?.to_owned(),
+            discovered_files: entry.discovered_files(),
+            indexed_files: entry.indexed_files(),
+        });
+    }
+    Ok(daemon::RepositoryCatalogEntry {
+        repository: Some(repository_to_wire(record.repository())),
+        active_generation: record.active_generation().map(generation_to_wire),
+        display_name: record.display_name().to_owned(),
+        alias: record.alias().map(str::to_owned),
+        generation_count: record.generation_count(),
+        state: record.state().as_str().to_owned(),
+        languages,
+        structural_freshness: record.structural_freshness().as_str().to_owned(),
+        semantic_freshness: record.semantic_freshness().as_str().to_owned(),
+        coverage,
+    })
+}
+
+fn catalog_tier_label(tier: AnalysisTier) -> Result<&'static str, PublicError> {
+    match tier {
+        AnalysisTier::TierA => Ok("tier_a"),
+        AnalysisTier::TierB => Ok("tier_b"),
+        AnalysisTier::TierC => Ok("tier_c"),
+        AnalysisTier::TierD => Ok("tier_d"),
+        _ => Err(internal_error()),
+    }
+}
+
+fn catalog_coverage_label(status: CoverageStatus) -> Result<&'static str, PublicError> {
+    match status {
+        CoverageStatus::Complete => Ok("complete"),
+        CoverageStatus::Bounded => Ok("bounded"),
+        CoverageStatus::Sampled => Ok("sampled"),
+        CoverageStatus::Unknown => Ok("unknown"),
+        _ => Err(internal_error()),
+    }
+}
+
+fn catalog_now(epoch: Instant) -> Result<CatalogInstant, PublicError> {
+    let elapsed = u64::try_from(epoch.elapsed().as_millis()).map_err(|_| internal_error())?;
+    Ok(CatalogInstant::from_millis(elapsed))
+}
+
 fn repository_status(
     service: &FirstSliceService,
     request: daemon::RepositoryStatusRequest,
@@ -2710,6 +2873,42 @@ fn resource_exhausted() -> PublicError {
     .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
 }
 
+fn invalid_cursor() -> PublicError {
+    PublicError::builder(
+        ErrorCode::InvalidCursor,
+        "pagination cursor is invalid or expired",
+    )
+    .next_action(NextAction::RestartEnumeration)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
+}
+
+fn catalog_error(error: CatalogError) -> PublicError {
+    match error {
+        CatalogError::InvalidQuery | CatalogError::InvalidPageSize => invalid_argument(),
+        CatalogError::UnsupportedFilter(_) => unsupported_capability(),
+        CatalogError::UnsupportedSortVersion
+        | CatalogError::InvalidSortKey
+        | CatalogError::SnapshotMismatch
+        | CatalogError::SnapshotExpired
+        | CatalogError::SnapshotEvicted
+        | CatalogError::SnapshotUnavailable => invalid_cursor(),
+        CatalogError::SnapshotEntryBound | CatalogError::SnapshotByteBound => resource_exhausted(),
+        CatalogError::InvalidLimits
+        | CatalogError::InvalidLabel
+        | CatalogError::InvalidLanguage
+        | CatalogError::InvalidCoverage
+        | CatalogError::TooManyLanguages
+        | CatalogError::DuplicateLanguage
+        | CatalogError::InvalidGenerationState
+        | CatalogError::DuplicateRepository
+        | CatalogError::TimeRegressed
+        | CatalogError::IdentityExhausted
+        | CatalogError::CatalogInvariant => internal_error(),
+        _ => internal_error(),
+    }
+}
+
 fn cancelled_error() -> PublicError {
     PublicError::builder(ErrorCode::Cancelled, "first-slice request was cancelled")
         .build()
@@ -2737,6 +2936,285 @@ mod tests {
     use rootlight_operations::{ClientInstanceId, OperationJournal, OperationStage, RecoveryClass};
     use std::{fs, time::Duration};
     use tempfile::TempDir;
+
+    fn catalog_request(
+        page_size: u32,
+        states_present: bool,
+        states: Vec<&str>,
+        snapshot: Option<daemon::RepositoryCatalogSnapshotId>,
+        after: Option<daemon::RepositoryCatalogSortKey>,
+    ) -> daemon::RepositoryCatalogPageRequest {
+        daemon::RepositoryCatalogPageRequest {
+            page_size,
+            normalized_query: None,
+            states: states.into_iter().map(str::to_owned).collect(),
+            snapshot,
+            after,
+            sort_version: u32::from(CATALOG_SORT_VERSION),
+            states_present,
+        }
+    }
+
+    fn indexed_catalog(names: &[&str]) -> (FirstSliceService, TempDir) {
+        let root = TempDir::new().expect("catalog fixture root exists");
+        let mut service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        for name in names {
+            let repository = root.path().join(name);
+            fs::create_dir_all(repository.join("src")).expect("repository directory exists");
+            fs::write(
+                repository.join("src/lib.rs"),
+                format!("pub fn {name}_answer() -> u32 {{ 42 }}\n"),
+            )
+            .expect("repository source writes");
+            service
+                .index_rust_fixture(&repository, &cancellation)
+                .expect("catalog fixture indexes");
+        }
+        (service, root)
+    }
+
+    #[test]
+    fn repository_catalog_page_returns_an_empty_authoritative_snapshot() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(journal, 4, 4).expect("journal actor starts");
+        let (host, workers) = FirstSliceDaemon::start(actor.handle()).expect("host starts");
+        let response = execute(
+            &host,
+            FirstSliceIpcRequest::RepositoryCatalogPage(catalog_request(
+                20,
+                false,
+                Vec::new(),
+                None,
+                None,
+            )),
+        );
+        let FirstSliceIpcResponse::RepositoryCatalogPage(response) = response else {
+            panic!("catalog page response expected");
+        };
+
+        assert!(response.repositories.is_empty());
+        assert_eq!(
+            response
+                .snapshot
+                .as_ref()
+                .expect("snapshot identity is returned")
+                .value
+                .len(),
+            32
+        );
+        assert_eq!(response.total_count, Some(0));
+        assert!(!response.truncated);
+        assert!(response.next_after.is_none());
+        assert_eq!(response.sort_version, u32::from(CATALOG_SORT_VERSION));
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        drop(host);
+        runtime
+            .block_on(workers.stop(tokio::time::Instant::now() + Duration::from_secs(5)))
+            .expect("workers stop");
+        actor.join().expect("journal actor joins");
+    }
+
+    #[test]
+    fn repository_catalog_continuation_is_stable_across_catalog_mutation() {
+        let (mut service, root) = indexed_catalog(&["alpha", "beta"]);
+        let epoch = Instant::now();
+        let first = repository_catalog_page(
+            &mut service,
+            catalog_request(1, false, Vec::new(), None, None),
+            epoch,
+        )
+        .expect("first page succeeds");
+        assert_eq!(first.total_count, Some(2));
+        assert!(first.truncated);
+        assert_eq!(first.repositories.len(), 1);
+        let first_entry = &first.repositories[0];
+        assert_eq!(first_entry.display_name, "alpha");
+        assert!(first_entry.repository.is_some());
+        assert!(first_entry.active_generation.is_some());
+        assert_eq!(first_entry.alias, None);
+        assert_eq!(first_entry.generation_count, 1);
+        assert_eq!(first_entry.state, "ready");
+        assert_eq!(first_entry.languages, ["rust"]);
+        assert_eq!(first_entry.structural_freshness, "current");
+        assert_eq!(first_entry.semantic_freshness, "current");
+        assert_eq!(first_entry.coverage.len(), 1);
+        assert_eq!(first_entry.coverage[0].language, "rust");
+        assert_eq!(first_entry.coverage[0].tier, "tier_a");
+        assert_eq!(first_entry.coverage[0].status, "complete");
+        assert_eq!(first_entry.coverage[0].discovered_files, 1);
+        assert_eq!(first_entry.coverage[0].indexed_files, 1);
+
+        let gamma = root.path().join("gamma");
+        fs::create_dir_all(gamma.join("src")).expect("new repository directory exists");
+        fs::write(
+            gamma.join("src/lib.rs"),
+            "pub fn gamma_answer() -> u32 { 42 }\n",
+        )
+        .expect("new repository source writes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        service
+            .index_rust_fixture(&gamma, &cancellation)
+            .expect("new repository indexes");
+
+        let continuation = repository_catalog_page(
+            &mut service,
+            catalog_request(
+                1,
+                false,
+                Vec::new(),
+                first.snapshot.clone(),
+                first.next_after.clone(),
+            ),
+            epoch,
+        )
+        .expect("continuation succeeds");
+        assert_eq!(continuation.total_count, Some(2));
+        assert_eq!(continuation.repositories.len(), 1);
+        assert_eq!(continuation.repositories[0].display_name, "beta");
+        assert!(!continuation.truncated);
+        assert!(continuation.next_after.is_none());
+
+        let refreshed = repository_catalog_page(
+            &mut service,
+            catalog_request(20, false, Vec::new(), None, None),
+            epoch,
+        )
+        .expect("fresh enumeration succeeds");
+        assert_eq!(refreshed.total_count, Some(3));
+        assert_eq!(refreshed.repositories.len(), 3);
+        assert_eq!(refreshed.repositories[2].display_name, "gamma");
+    }
+
+    #[test]
+    fn repository_catalog_preserves_absent_and_empty_state_filters() {
+        let (mut service, _root) = indexed_catalog(&["alpha"]);
+        let epoch = Instant::now();
+
+        let all = repository_catalog_page(
+            &mut service,
+            catalog_request(20, false, Vec::new(), None, None),
+            epoch,
+        )
+        .expect("absent state filter succeeds");
+        assert_eq!(all.total_count, Some(1));
+
+        let none = repository_catalog_page(
+            &mut service,
+            catalog_request(20, true, Vec::new(), None, None),
+            epoch,
+        )
+        .expect("present empty state filter succeeds");
+        assert_eq!(none.total_count, Some(0));
+
+        let ready = repository_catalog_page(
+            &mut service,
+            catalog_request(20, true, vec!["ready"], None, None),
+            epoch,
+        )
+        .expect("ready state filter succeeds");
+        assert_eq!(ready.total_count, Some(1));
+
+        let inconsistent = repository_catalog_page(
+            &mut service,
+            catalog_request(20, false, vec!["ready"], None, None),
+            epoch,
+        )
+        .expect_err("states without presence fail closed");
+        assert_eq!(inconsistent.code(), ErrorCode::InvalidArgument);
+
+        let unknown = repository_catalog_page(
+            &mut service,
+            catalog_request(20, true, vec!["unknown"], None, None),
+            epoch,
+        )
+        .expect_err("unknown state fails closed");
+        assert_eq!(unknown.code(), ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn repository_catalog_cursor_errors_request_restart_without_leaking_sources() {
+        let mut service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let mut request = catalog_request(20, false, Vec::new(), None, None);
+        request.sort_version = u32::from(CATALOG_SORT_VERSION) + 1;
+        let unsupported = repository_catalog_page(&mut service, request, Instant::now())
+            .expect_err("unsupported sort version fails");
+        assert_eq!(unsupported.code(), ErrorCode::InvalidCursor);
+        assert_eq!(
+            unsupported.message(),
+            "pagination cursor is invalid or expired"
+        );
+        assert_eq!(
+            unsupported.next_actions(),
+            &[NextAction::RestartEnumeration]
+        );
+        assert!(!unsupported.message().contains('\\'));
+        assert!(!unsupported.message().contains('/'));
+
+        let malformed_snapshot = repository_catalog_page(
+            &mut service,
+            catalog_request(
+                20,
+                false,
+                Vec::new(),
+                Some(daemon::RepositoryCatalogSnapshotId { value: vec![7; 31] }),
+                None,
+            ),
+            Instant::now(),
+        )
+        .expect_err("malformed snapshot identity fails");
+        assert_eq!(malformed_snapshot.code(), ErrorCode::InvalidCursor);
+
+        let oversized_page = repository_catalog_page(
+            &mut service,
+            catalog_request(u32::from(u16::MAX) + 1, false, Vec::new(), None, None),
+            Instant::now(),
+        )
+        .expect_err("oversized page fails");
+        assert_eq!(oversized_page.code(), ErrorCode::InvalidArgument);
+
+        for error in [
+            CatalogError::UnsupportedSortVersion,
+            CatalogError::InvalidSortKey,
+            CatalogError::SnapshotMismatch,
+            CatalogError::SnapshotExpired,
+            CatalogError::SnapshotEvicted,
+            CatalogError::SnapshotUnavailable,
+        ] {
+            let public = catalog_error(error);
+            assert_eq!(public.code(), ErrorCode::InvalidCursor);
+            assert_eq!(public.next_actions(), &[NextAction::RestartEnumeration]);
+        }
+
+        let capacity = catalog_error(CatalogError::SnapshotEntryBound);
+        assert_eq!(capacity.code(), ErrorCode::ResourceExhausted);
+        assert!(capacity.retryable());
+        assert_eq!(capacity.next_actions(), &[NextAction::Retry]);
+        assert_eq!(
+            catalog_error(CatalogError::UnsupportedFilter("workspace")).code(),
+            ErrorCode::UnsupportedCapability
+        );
+        assert_eq!(
+            catalog_error(CatalogError::CatalogInvariant).code(),
+            ErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn repository_catalog_epoch_is_monotonic_and_process_relative() {
+        let epoch = Instant::now();
+        let first = catalog_now(epoch).expect("first catalog timestamp exists");
+        let second = catalog_now(epoch).expect("second catalog timestamp exists");
+
+        assert!(second >= first);
+        assert!(second.as_millis() < 60_000);
+    }
 
     fn repository_submission(operation: OperationId, seed: u8) -> OperationSubmission {
         OperationSubmission::new(
@@ -3434,7 +3912,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(30);
         let context = FirstSliceIpcContext {
             client_instance_id: rootlight_operations::ClientInstanceId::from_bytes([7; 16]),
-            selected_protocol_minor: 5,
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: rootlight_operations::Cancellation::with_deadline(deadline),
             deadline,
             index_admission: None,
