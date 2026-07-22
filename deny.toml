@@ -42,6 +42,7 @@ external-default-features = "allow"
 allow-workspace = true
 skip = [
   { crate = "bitflags@1.3.2", reason = "reviewed Windows ACL wrapper dependency for protected per-user runtime DACLs; owner @tomasmarekk; review by 2026-10-16" },
+  { crate = "fancy-regex@0.17.0", reason = "pinned offline tokenizer dependency duplicates the schema validator regex engine; owner @tomasmarekk; review by 2026-10-22" },
   { crate = "foldhash@0.1.5", reason = "tooling-only duplicate via prost-build 0.14.4; owner @tomasmarekk; review by 2026-10-15" },
   { crate = "getrandom@0.2.17", reason = "Redox-only current-user directory dependency retained by the cross-target lockfile; owner @tomasmarekk; review by 2026-10-16" },
   { crate = "getrandom@0.4.3", reason = "Tantivy UUID dependency duplicates the established random backend; owner @tomasmarekk; review by 2026-10-17" },
