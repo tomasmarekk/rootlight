@@ -7,7 +7,9 @@ use std::fs::{self, File};
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
-use rootlight_bench::ActualTokenizerIdentity;
+use rootlight_bench::{
+    ActualTokenizerIdentity, TokenInputKind, TokenMeasurement as BoundaryTokenMeasurement,
+};
 use rootlight_mcp_contract::accounting::{estimate_tokens, tool_list_payload};
 use rootlight_mcp_contract::catalog::ExposureProfile;
 use serde::{Deserialize, Serialize};
@@ -48,6 +50,30 @@ const TOKENIZER_ASSET_LICENSE_SHA256: &str =
 const NORMALIZATION: &str = "none_exact_utf8";
 const TOOLS_LIST_INPUT_KIND: &str = "mcp_tools_list_result";
 const TOOLS_LIST_FRAMING: &str = "raw_compact_json_object";
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+const ATTRIBUTION_SCHEMA: &str = "rootlight.mcp-token-attribution/1";
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+const BATCH_OPERATION_FRAMING: &str = "one_canonical_batch_operation_without_delimiter";
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+const CONTEXT_SECTION_FRAMING: &str = "one_canonical_context_section_without_delimiter";
 const MAX_REPORT_BYTES: usize = 1024 * 1024;
 const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
@@ -201,6 +227,442 @@ impl OfflineTokenizer for O200kTokenizer {
     fn count(&self, input: &str) -> Result<u64, TokenAccountingError> {
         u64::try_from(self.inner.encode_ordinary(input).len())
             .map_err(|_| TokenAccountingError::IntegerOverflow("actual token count"))
+    }
+}
+
+/// Exact UTF-8 input assigned to one stable batch operation or context section.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LabeledTokenInput<'a> {
+    label: &'a str,
+    input: &'a [u8],
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+impl<'a> LabeledTokenInput<'a> {
+    /// Binds a stable record label to the exact bytes presented to the tokenizer.
+    pub(crate) const fn new(label: &'a str, input: &'a [u8]) -> Self {
+        Self { label, input }
+    }
+}
+
+/// Offline per-operation or per-section evidence with checked aggregate totals.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TokenAttributionReport {
+    schema: String,
+    tokenizer: TokenizerIdentity,
+    input_kind: TokenInputKind,
+    records: Vec<LabeledTokenMeasurement>,
+    aggregate: TokenAttributionTotals,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+impl TokenAttributionReport {
+    /// Measures batch children in their caller-supplied request order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TokenAccountingError`] for missing or duplicate labels,
+    /// non-UTF-8 input, tokenizer failure, or an overflowing aggregate.
+    pub(crate) fn measure_batch_operations(
+        inputs: &[LabeledTokenInput<'_>],
+        tokenizer: &impl OfflineTokenizer,
+    ) -> Result<Self, TokenAccountingError> {
+        Self::measure(
+            TokenInputKind::BatchOperation,
+            inputs,
+            RecordOrdering::Preserve,
+            BATCH_OPERATION_FRAMING,
+            tokenizer,
+        )
+    }
+
+    /// Measures context sections in canonical lexical label order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TokenAccountingError`] for missing or duplicate labels,
+    /// non-UTF-8 input, tokenizer failure, or an overflowing aggregate.
+    pub(crate) fn measure_context_sections(
+        inputs: &[LabeledTokenInput<'_>],
+        tokenizer: &impl OfflineTokenizer,
+    ) -> Result<Self, TokenAccountingError> {
+        Self::measure(
+            TokenInputKind::ContextSection,
+            inputs,
+            RecordOrdering::Lexical,
+            CONTEXT_SECTION_FRAMING,
+            tokenizer,
+        )
+    }
+
+    /// Verifies exact batch-operation inputs against retained evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TokenAccountingError`] when the report is malformed, its
+    /// tokenizer identity differs, or any record or aggregate has drifted.
+    pub(crate) fn verify_batch_operations(
+        &self,
+        inputs: &[LabeledTokenInput<'_>],
+        tokenizer: &impl OfflineTokenizer,
+    ) -> Result<(), TokenAccountingError> {
+        self.verify(
+            TokenInputKind::BatchOperation,
+            inputs,
+            RecordOrdering::Preserve,
+            BATCH_OPERATION_FRAMING,
+            tokenizer,
+        )
+    }
+
+    /// Verifies exact context-section inputs against retained evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TokenAccountingError`] when the report is malformed, its
+    /// tokenizer identity differs, or any record or aggregate has drifted.
+    pub(crate) fn verify_context_sections(
+        &self,
+        inputs: &[LabeledTokenInput<'_>],
+        tokenizer: &impl OfflineTokenizer,
+    ) -> Result<(), TokenAccountingError> {
+        self.verify(
+            TokenInputKind::ContextSection,
+            inputs,
+            RecordOrdering::Lexical,
+            CONTEXT_SECTION_FRAMING,
+            tokenizer,
+        )
+    }
+
+    fn measure(
+        input_kind: TokenInputKind,
+        inputs: &[LabeledTokenInput<'_>],
+        ordering: RecordOrdering,
+        framing: &'static str,
+        tokenizer: &impl OfflineTokenizer,
+    ) -> Result<Self, TokenAccountingError> {
+        validate_labeled_inputs(input_kind, inputs)?;
+        let mut ordered = inputs.to_vec();
+        if ordering == RecordOrdering::Lexical {
+            ordered.sort_unstable_by_key(|input| input.label);
+        }
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(ordered.len())
+            .map_err(|_| TokenAccountingError::MemoryUnavailable)?;
+        for input in ordered {
+            records.push(LabeledTokenMeasurement {
+                label: input.label.to_owned(),
+                measurement: measure_boundary_input(
+                    input_kind,
+                    input.label,
+                    input.input,
+                    framing,
+                    tokenizer,
+                )?,
+            });
+        }
+        let aggregate = TokenAttributionTotals::from_records(&records)?;
+        let report = Self {
+            schema: ATTRIBUTION_SCHEMA.to_owned(),
+            tokenizer: tokenizer.identity(),
+            input_kind,
+            records,
+            aggregate,
+        };
+        report.validate()?;
+        Ok(report)
+    }
+
+    fn verify(
+        &self,
+        input_kind: TokenInputKind,
+        inputs: &[LabeledTokenInput<'_>],
+        ordering: RecordOrdering,
+        framing: &'static str,
+        tokenizer: &impl OfflineTokenizer,
+    ) -> Result<(), TokenAccountingError> {
+        self.validate()?;
+        if self.tokenizer != tokenizer.identity() {
+            return Err(TokenAccountingError::TokenizerIdentityMismatch {
+                expected: serde_json::to_string(&tokenizer.identity())?,
+                observed: serde_json::to_string(&self.tokenizer)?,
+            });
+        }
+        let expected = Self::measure(input_kind, inputs, ordering, framing, tokenizer)?;
+        if *self != expected {
+            return Err(TokenAccountingError::AttributionMismatch {
+                kind: token_input_kind_name(input_kind),
+                expected: serde_json::to_string(&expected)?,
+                observed: serde_json::to_string(self)?,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), TokenAccountingError> {
+        if self.schema != ATTRIBUTION_SCHEMA {
+            return Err(TokenAccountingError::UnsupportedSchema(self.schema.clone()));
+        }
+        let expected_identity = TokenizerIdentity::expected();
+        if self.tokenizer != expected_identity {
+            return Err(TokenAccountingError::TokenizerIdentityMismatch {
+                expected: serde_json::to_string(&expected_identity)?,
+                observed: serde_json::to_string(&self.tokenizer)?,
+            });
+        }
+        if self.records.is_empty() {
+            return Err(TokenAccountingError::MissingAttributionRecords(
+                token_input_kind_name(self.input_kind),
+            ));
+        }
+        let mut labels = std::collections::BTreeSet::new();
+        for record in &self.records {
+            validate_record_label(&record.label)?;
+            if !labels.insert(record.label.as_str()) {
+                return Err(TokenAccountingError::DuplicateAttributionLabel(
+                    record.label.clone(),
+                ));
+            }
+            record.measurement.validate().map_err(|source| {
+                TokenAccountingError::BoundaryMeasurement {
+                    label: record.label.clone(),
+                    source,
+                }
+            })?;
+            if record.measurement.input_kind != self.input_kind {
+                return Err(TokenAccountingError::AttributionKindMismatch {
+                    label: record.label.clone(),
+                    expected: token_input_kind_name(self.input_kind),
+                    observed: token_input_kind_name(record.measurement.input_kind),
+                });
+            }
+            if record.measurement.actual_tokens.is_none() {
+                return Err(TokenAccountingError::MissingActualTokenCount(
+                    record.label.clone(),
+                ));
+            }
+        }
+        if self.input_kind == TokenInputKind::ContextSection
+            && self
+                .records
+                .windows(2)
+                .any(|pair| pair[0].label >= pair[1].label)
+        {
+            return Err(TokenAccountingError::NonCanonicalAttributionOrder);
+        }
+        let expected = TokenAttributionTotals::from_records(&self.records)?;
+        if self.aggregate != expected {
+            return Err(TokenAccountingError::AttributionTotalsMismatch {
+                expected,
+                observed: self.aggregate,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+struct LabeledTokenMeasurement {
+    label: String,
+    measurement: BoundaryTokenMeasurement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TokenAttributionTotals {
+    record_count: u64,
+    serialized_bytes: u64,
+    deterministic_estimated_tokens: u64,
+    actual_tokens: u64,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+impl TokenAttributionTotals {
+    fn from_records(records: &[LabeledTokenMeasurement]) -> Result<Self, TokenAccountingError> {
+        let mut total = Self {
+            record_count: u64::try_from(records.len())
+                .map_err(|_| TokenAccountingError::IntegerOverflow("attribution record count"))?,
+            serialized_bytes: 0,
+            deterministic_estimated_tokens: 0,
+            actual_tokens: 0,
+        };
+        for record in records {
+            total.serialized_bytes = total
+                .serialized_bytes
+                .checked_add(record.measurement.serialized_bytes)
+                .ok_or(TokenAccountingError::IntegerOverflow(
+                    "attribution serialized byte total",
+                ))?;
+            total.deterministic_estimated_tokens = total
+                .deterministic_estimated_tokens
+                .checked_add(record.measurement.deterministic_estimated_tokens)
+                .ok_or(TokenAccountingError::IntegerOverflow(
+                    "attribution estimated token total",
+                ))?;
+            total.actual_tokens = total
+                .actual_tokens
+                .checked_add(record.measurement.actual_tokens.ok_or_else(|| {
+                    TokenAccountingError::MissingActualTokenCount(record.label.clone())
+                })?)
+                .ok_or(TokenAccountingError::IntegerOverflow(
+                    "attribution actual token total",
+                ))?;
+        }
+        Ok(total)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+enum RecordOrdering {
+    Preserve,
+    Lexical,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+fn validate_labeled_inputs(
+    input_kind: TokenInputKind,
+    inputs: &[LabeledTokenInput<'_>],
+) -> Result<(), TokenAccountingError> {
+    if inputs.is_empty() {
+        return Err(TokenAccountingError::MissingAttributionRecords(
+            token_input_kind_name(input_kind),
+        ));
+    }
+    let mut labels = std::collections::BTreeSet::new();
+    for input in inputs {
+        validate_record_label(input.label)?;
+        if !labels.insert(input.label) {
+            return Err(TokenAccountingError::DuplicateAttributionLabel(
+                input.label.to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+fn validate_record_label(label: &str) -> Result<(), TokenAccountingError> {
+    if label.is_empty() {
+        return Err(TokenAccountingError::MissingAttributionLabel);
+    }
+    if label.len() > 128
+        || !label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+    {
+        return Err(TokenAccountingError::InvalidAttributionLabel(
+            label.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+fn measure_boundary_input(
+    input_kind: TokenInputKind,
+    label: &str,
+    input: &[u8],
+    framing: &'static str,
+    tokenizer: &impl OfflineTokenizer,
+) -> Result<BoundaryTokenMeasurement, TokenAccountingError> {
+    let text =
+        std::str::from_utf8(input).map_err(|source| TokenAccountingError::AttributionUtf8 {
+            label: label.to_owned(),
+            source,
+        })?;
+    Ok(BoundaryTokenMeasurement::from_input(
+        input_kind,
+        input,
+        estimate_tokens(input.len()),
+        Some(tokenizer.count(text)?),
+        NORMALIZATION,
+        framing,
+    ))
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
+const fn token_input_kind_name(input_kind: TokenInputKind) -> &'static str {
+    match input_kind {
+        TokenInputKind::Request => "request",
+        TokenInputKind::Response => "response",
+        TokenInputKind::Source => "source",
+        TokenInputKind::ToolList => "tool_list",
+        TokenInputKind::BatchOperation => "batch_operation",
+        TokenInputKind::ContextSection => "context_section",
     }
 }
 
@@ -551,6 +1013,13 @@ impl InputEvidence {
 }
 
 /// Failure while producing or checking tokenizer accounting evidence.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "runtime wiring follows once exact batch and context boundaries are available"
+    )
+)]
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TokenAccountingError {
     /// A required option value is absent.
@@ -593,6 +1062,70 @@ pub(crate) enum TokenAccountingError {
     /// A profile name cannot be mapped to the canonical catalog.
     #[error("unknown exposure profile in token accounting: {0}")]
     UnknownProfile(String),
+    /// A batch or context attribution report contains no records.
+    #[error("token attribution for {0} requires at least one record")]
+    MissingAttributionRecords(&'static str),
+    /// A batch operation or context section omitted its stable label.
+    #[error("token attribution record label is missing")]
+    MissingAttributionLabel,
+    /// A batch operation or context section label is not stable and bounded.
+    #[error("invalid token attribution record label: {0}")]
+    InvalidAttributionLabel(String),
+    /// Stable labels must uniquely identify records within one attribution.
+    #[error("duplicate token attribution record label: {0}")]
+    DuplicateAttributionLabel(String),
+    /// Context-section records were not retained in canonical lexical order.
+    #[error("context-section token attribution order is not canonical")]
+    NonCanonicalAttributionOrder,
+    /// A retained boundary differs from the report-level boundary.
+    #[error("token attribution kind differs for {label}: expected {expected}, observed {observed}")]
+    AttributionKindMismatch {
+        /// Stable record label.
+        label: String,
+        /// Report-level boundary.
+        expected: &'static str,
+        /// Record-level boundary.
+        observed: &'static str,
+    },
+    /// Actual counts are mandatory in offline attribution evidence.
+    #[error("token attribution record {0} is missing its actual token count")]
+    MissingActualTokenCount(String),
+    /// A retained record failed the shared boundary contract.
+    #[error("token attribution record {label} is invalid")]
+    BoundaryMeasurement {
+        /// Stable record label.
+        label: String,
+        /// Shared measurement failure.
+        #[source]
+        source: rootlight_bench::TokenAccountingError,
+    },
+    /// Caller-supplied exact bytes were not valid UTF-8 tokenizer input.
+    #[error("token attribution input is not UTF-8 for {label}")]
+    AttributionUtf8 {
+        /// Stable record label.
+        label: String,
+        /// UTF-8 failure.
+        #[source]
+        source: std::str::Utf8Error,
+    },
+    /// Retained records do not reconcile with their reported aggregate.
+    #[error("token attribution totals differ: expected {expected:?}, observed {observed:?}")]
+    AttributionTotalsMismatch {
+        /// Totals recomputed from records.
+        expected: TokenAttributionTotals,
+        /// Totals retained in the report.
+        observed: TokenAttributionTotals,
+    },
+    /// Exact caller inputs differ from the retained attribution evidence.
+    #[error("{kind} token attribution differs: expected {expected}, observed {observed}")]
+    AttributionMismatch {
+        /// Semantic attribution boundary.
+        kind: &'static str,
+        /// Recomputed canonical evidence.
+        expected: String,
+        /// Retained evidence.
+        observed: String,
+    },
     /// A report-controlled path could escape the evidence directory.
     #[error("unsafe token accounting artifact path: {}", .0.display())]
     UnsafePath(PathBuf),
@@ -654,6 +1187,9 @@ pub(crate) enum TokenAccountingError {
     /// A platform value could not fit the stable report representation.
     #[error("token accounting value exceeds u64: {0}")]
     IntegerOverflow(&'static str),
+    /// A bounded token attribution allocation failed.
+    #[error("memory unavailable while building token attribution")]
+    MemoryUnavailable,
     /// An artifact could not be read or written.
     #[error("token accounting I/O failed for {}", path.display())]
     Io {
@@ -879,6 +1415,212 @@ mod tests {
                 .any(|payload| payload.measurement.actual_tokens()
                     != payload.measurement.deterministic_estimated_tokens())
         );
+    }
+
+    #[test]
+    fn batch_operation_records_preserve_order_and_reconcile_totals() {
+        let tokenizer = O200kTokenizer::new().expect("pinned tokenizer initializes");
+        let inputs = [
+            LabeledTokenInput::new(
+                "locate",
+                br#"{"id":"locate","status":"ok","data":{"matches":[]}}"#,
+            ),
+            LabeledTokenInput::new(
+                "explain",
+                br#"{"id":"explain","status":"ok","data":{"symbols":[]}}"#,
+            ),
+        ];
+
+        let report = TokenAttributionReport::measure_batch_operations(&inputs, &tokenizer)
+            .expect("batch operations measure");
+        report
+            .verify_batch_operations(&inputs, &tokenizer)
+            .expect("batch operation evidence verifies");
+
+        assert_eq!(report.input_kind, TokenInputKind::BatchOperation);
+        assert_eq!(
+            report
+                .records
+                .iter()
+                .map(|record| record.label.as_str())
+                .collect::<Vec<_>>(),
+            ["locate", "explain"]
+        );
+        assert_eq!(
+            report.aggregate.serialized_bytes,
+            report
+                .records
+                .iter()
+                .map(|record| record.measurement.serialized_bytes)
+                .sum::<u64>()
+        );
+        assert_eq!(
+            report.aggregate.actual_tokens,
+            report
+                .records
+                .iter()
+                .map(|record| {
+                    record
+                        .measurement
+                        .actual_tokens
+                        .expect("offline measurements always retain actual counts")
+                })
+                .sum::<u64>()
+        );
+    }
+
+    #[test]
+    fn context_section_records_sort_labels_and_reconcile_totals() {
+        let tokenizer = O200kTokenizer::new().expect("pinned tokenizer initializes");
+        let inputs = [
+            LabeledTokenInput::new(
+                "tests",
+                br#"{"section":"tests","items":[{"test_id":"test1_example"}]}"#,
+            ),
+            LabeledTokenInput::new(
+                "definitions",
+                br#"{"section":"definitions","items":[{"symbol_id":"sym1_example"}]}"#,
+            ),
+            LabeledTokenInput::new("architecture", br#"{"section":"architecture","items":[]}"#),
+        ];
+
+        let report = TokenAttributionReport::measure_context_sections(&inputs, &tokenizer)
+            .expect("context sections measure");
+        report
+            .verify_context_sections(&inputs, &tokenizer)
+            .expect("context section evidence verifies");
+
+        assert_eq!(report.input_kind, TokenInputKind::ContextSection);
+        assert_eq!(
+            report
+                .records
+                .iter()
+                .map(|record| record.label.as_str())
+                .collect::<Vec<_>>(),
+            ["architecture", "definitions", "tests"]
+        );
+        assert_eq!(
+            report.aggregate.deterministic_estimated_tokens,
+            report
+                .records
+                .iter()
+                .map(|record| record.measurement.deterministic_estimated_tokens)
+                .sum::<u64>()
+        );
+        assert_eq!(
+            report.aggregate.actual_tokens,
+            report
+                .records
+                .iter()
+                .map(|record| {
+                    record
+                        .measurement
+                        .actual_tokens
+                        .expect("offline measurements always retain actual counts")
+                })
+                .sum::<u64>()
+        );
+    }
+
+    #[test]
+    fn attribution_generation_rejects_missing_duplicate_and_invalid_inputs() {
+        let tokenizer = O200kTokenizer::new().expect("pinned tokenizer initializes");
+        assert!(matches!(
+            TokenAttributionReport::measure_batch_operations(&[], &tokenizer),
+            Err(TokenAccountingError::MissingAttributionRecords(
+                "batch_operation"
+            ))
+        ));
+
+        let duplicate = [
+            LabeledTokenInput::new("same", br#"{"value":1}"#),
+            LabeledTokenInput::new("same", br#"{"value":2}"#),
+        ];
+        assert!(matches!(
+            TokenAttributionReport::measure_context_sections(&duplicate, &tokenizer),
+            Err(TokenAccountingError::DuplicateAttributionLabel(label)) if label == "same"
+        ));
+
+        let missing = [LabeledTokenInput::new("", br#"{"value":1}"#)];
+        assert!(matches!(
+            TokenAttributionReport::measure_batch_operations(&missing, &tokenizer),
+            Err(TokenAccountingError::MissingAttributionLabel)
+        ));
+
+        let invalid_utf8 = [LabeledTokenInput::new("invalid", &[0xff])];
+        assert!(matches!(
+            TokenAttributionReport::measure_batch_operations(&invalid_utf8, &tokenizer),
+            Err(TokenAccountingError::AttributionUtf8 { label, .. }) if label == "invalid"
+        ));
+    }
+
+    #[test]
+    fn attribution_verifier_rejects_identity_input_and_total_drift() {
+        let tokenizer = O200kTokenizer::new().expect("pinned tokenizer initializes");
+        let inputs = [
+            LabeledTokenInput::new("architecture", br#"{"items":[]}"#),
+            LabeledTokenInput::new("tests", br#"{"items":[1]}"#),
+        ];
+        let report = TokenAttributionReport::measure_context_sections(&inputs, &tokenizer)
+            .expect("context sections measure");
+
+        let changed_inputs = [
+            LabeledTokenInput::new("architecture", br#"{"items":[]}"#),
+            LabeledTokenInput::new("tests", br#"{"items":[1,2]}"#),
+        ];
+        assert!(matches!(
+            report.verify_context_sections(&changed_inputs, &tokenizer),
+            Err(TokenAccountingError::AttributionMismatch {
+                kind: "context_section",
+                ..
+            })
+        ));
+
+        let mut changed_identity = report.clone();
+        changed_identity.tokenizer.implementation_version = "0.0.0".to_owned();
+        assert!(matches!(
+            changed_identity.verify_context_sections(&inputs, &tokenizer),
+            Err(TokenAccountingError::TokenizerIdentityMismatch { .. })
+        ));
+
+        let mut changed_digest = report.clone();
+        changed_digest.records[0].measurement.input_sha256 = "0".repeat(64);
+        assert!(matches!(
+            changed_digest.verify_context_sections(&inputs, &tokenizer),
+            Err(TokenAccountingError::AttributionMismatch {
+                kind: "context_section",
+                ..
+            })
+        ));
+
+        let mut changed_total = report;
+        changed_total.aggregate.serialized_bytes = changed_total
+            .aggregate
+            .serialized_bytes
+            .checked_add(1)
+            .expect("small test total cannot overflow");
+        assert!(matches!(
+            changed_total.verify_context_sections(&inputs, &tokenizer),
+            Err(TokenAccountingError::AttributionTotalsMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn attribution_report_requires_complete_tokenizer_identity() {
+        let tokenizer = O200kTokenizer::new().expect("pinned tokenizer initializes");
+        let report = TokenAttributionReport::measure_batch_operations(
+            &[LabeledTokenInput::new("locate", br#"{"matches":[]}"#)],
+            &tokenizer,
+        )
+        .expect("batch operation measures");
+        let mut value = serde_json::to_value(report).expect("report converts to JSON");
+        value
+            .get_mut("tokenizer")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("tokenizer identity is an object")
+            .remove("implementation_package_sha256");
+
+        assert!(serde_json::from_value::<TokenAttributionReport>(value).is_err());
     }
 
     #[test]
