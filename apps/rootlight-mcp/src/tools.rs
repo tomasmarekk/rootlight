@@ -473,6 +473,13 @@ pub(crate) enum CapabilityBindingPolicy {
     /// Validates concrete input values after bindings have been materialized.
     Materialized,
     /// Rejects a binding when its eventual value could select a restricted rule.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reserved for static batch preflight before materialization"
+        )
+    )]
     RejectUnprovenRestrictedBindings,
 }
 
@@ -512,6 +519,13 @@ pub(crate) struct CapabilityAdmissionError {
     reason: CapabilityRejectionReason,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "accessors support static batch preflight diagnostics and focused tests"
+    )
+)]
 impl CapabilityAdmissionError {
     /// Returns the stable public error code selected by the capability registry.
     #[must_use]
@@ -841,6 +855,16 @@ fn validate_contract_input(
                 |error| MaterializedInputError::Public(Box::new(error)),
             ),
         );
+    }
+    if let Err(error) = validate_capability_input(
+        contract.tool,
+        arguments,
+        CapabilityBindingPolicy::Materialized,
+    ) {
+        let public_error = error
+            .to_public_error(None)
+            .expect("generated capability paths satisfy public diagnostic bounds");
+        return Err(MaterializedInputError::Public(Box::new(public_error)));
     }
     Ok(typed_input)
 }
@@ -2413,6 +2437,109 @@ mod tests {
         serde_json::from_value::<RepoIndexOutput>(result["structuredContent"].clone())
             .expect("invalid input uses the advertised checked error envelope");
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn schema_validation_precedes_capability_admission() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "repo.list",
+                        "arguments": {
+                            "query": "needle",
+                            "unknown": true
+                        }
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+        let result = success(response);
+        let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+            .expect("schema rejection uses the checked error contract");
+        assert_eq!(direct.error.code(), ErrorCode::InvalidArgument);
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+
+        let validator =
+            MaterializedToolValidator::compile().expect("checked contracts compile once");
+        let arguments = Map::from_iter([
+            ("query".to_owned(), json!("needle")),
+            ("unknown".to_owned(), Value::Bool(true)),
+        ]);
+        assert!(matches!(
+            validator.validate(
+                VerticalTool::RepoList,
+                &arguments,
+                ExposureProfile::Developer
+            ),
+            Err(MaterializedInputError::Invalid { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn direct_and_materialized_capability_rejections_match_without_execution() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "repo.list",
+                        "arguments": {"query": "needle"}
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+        let result = success(response);
+        let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+            .expect("capability rejection uses the checked error contract");
+        assert_eq!(direct.error.code(), ErrorCode::UnsupportedCapability);
+        assert_eq!(
+            direct
+                .error
+                .details()
+                .get(&DetailKey::parse("field_path").expect("static detail key is valid")),
+            Some(&PublicValue::Label(
+                SafeLabel::parse("query").expect("fixture path is valid")
+            ))
+        );
+        assert_eq!(
+            direct
+                .error
+                .details()
+                .get(&DetailKey::parse("capability_reason").expect("static detail key is valid")),
+            Some(&PublicValue::Label(
+                SafeLabel::parse("blocked_field").expect("fixture reason is valid")
+            ))
+        );
+        assert_eq!(
+            direct.error.next_actions(),
+            &[NextAction::CorrectField {
+                field: DetailKey::parse("arguments").expect("static detail key is valid")
+            }]
+        );
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+
+        let validator =
+            MaterializedToolValidator::compile().expect("checked contracts compile once");
+        let arguments = Map::from_iter([("query".to_owned(), json!("needle"))]);
+        let materialized = validator
+            .validate(
+                VerticalTool::RepoList,
+                &arguments,
+                ExposureProfile::Developer,
+            )
+            .expect_err("materialized requests share capability admission");
+        let MaterializedInputError::Public(materialized) = materialized else {
+            panic!("capability rejection must not become a binding type mismatch");
+        };
+        assert_eq!(*materialized, direct.error);
     }
 
     #[tokio::test]
