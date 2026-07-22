@@ -3596,7 +3596,9 @@ where
         .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
     if matches!(
         repository_state,
-        RepositoryState::Corrupt | RepositoryState::RebuildRequired
+        RepositoryState::Corrupt
+            | RepositoryState::MigrationRequired
+            | RepositoryState::RebuildRequired
     ) {
         recommended_actions.push(source_free_message("rebuild repository")?);
     }

@@ -1,0 +1,120 @@
+{
+  "schema": "rootlight.repository-status-lifecycle-goldens/1",
+  "success_cases": [
+    {
+      "name": "ready",
+      "state": "ready",
+      "structural_freshness": "current",
+      "semantic_freshness": "current",
+      "operation_state": null,
+      "expected": {
+        "repository_state": "ready",
+        "warnings": [],
+        "recommended_actions": []
+      }
+    },
+    {
+      "name": "indexing",
+      "state": "indexing",
+      "structural_freshness": "current",
+      "semantic_freshness": "current",
+      "operation_state": "running",
+      "expected": {
+        "repository_state": "indexing",
+        "warnings": [],
+        "recommended_actions": ["inspect operation"]
+      }
+    },
+    {
+      "name": "degraded_stale",
+      "state": "degraded",
+      "structural_freshness": "stale",
+      "semantic_freshness": "current",
+      "operation_state": null,
+      "expected": {
+        "repository_state": "degraded",
+        "warnings": [
+          {
+            "code": "stale_generation",
+            "message": "selected generation is not current"
+          }
+        ],
+        "recommended_actions": ["index repository"]
+      }
+    },
+    {
+      "name": "corrupt",
+      "state": "corrupt",
+      "structural_freshness": "current",
+      "semantic_freshness": "current",
+      "operation_state": null,
+      "expected": {
+        "repository_state": "corrupt",
+        "warnings": [],
+        "recommended_actions": ["rebuild repository"]
+      }
+    },
+    {
+      "name": "migration_required",
+      "state": "migration_required",
+      "structural_freshness": "current",
+      "semantic_freshness": "current",
+      "operation_state": null,
+      "expected": {
+        "repository_state": "migration_required",
+        "warnings": [],
+        "recommended_actions": ["rebuild repository"]
+      }
+    },
+    {
+      "name": "rebuild_required",
+      "state": "rebuild_required",
+      "structural_freshness": "current",
+      "semantic_freshness": "current",
+      "operation_state": null,
+      "expected": {
+        "repository_state": "rebuild_required",
+        "warnings": [],
+        "recommended_actions": ["rebuild repository"]
+      }
+    }
+  ],
+  "error_cases": [
+    {
+      "name": "missing_generation",
+      "error_kind": "missing",
+      "expected": {
+        "code": "STALE_GENERATION",
+        "message": "generation is not retained",
+        "retryable": false,
+        "repository_bound": true,
+        "generation_bound": true,
+        "next_actions": [{"action": "restart_enumeration"}]
+      }
+    },
+    {
+      "name": "corrupt_generation",
+      "error_kind": "corrupt",
+      "expected": {
+        "code": "INDEX_CORRUPT",
+        "message": "repository index is corrupt",
+        "retryable": false,
+        "repository_bound": true,
+        "generation_bound": true,
+        "next_actions": [{"action": "rebuild_repository"}]
+      }
+    },
+    {
+      "name": "incompatible_generation",
+      "error_kind": "incompatible",
+      "expected": {
+        "code": "MIGRATION_REQUIRED",
+        "message": "stored data requires migration",
+        "retryable": false,
+        "repository_bound": true,
+        "generation_bound": true,
+        "next_actions": [{"action": "rebuild_repository"}]
+      }
+    }
+  ]
+}
