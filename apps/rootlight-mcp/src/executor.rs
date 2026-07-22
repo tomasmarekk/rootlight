@@ -2287,6 +2287,13 @@ fn apply_child_budget(
     }
     if tool != BatchTool::ContextPack {
         let mut transported = budget.clone();
+        if matches!(tool, BatchTool::CodeLocate | BatchTool::SymbolExplain) {
+            // The batch ledger accounts public estimated tokens after the
+            // canonical child envelope is mapped. Applying that aggregate
+            // limit to the daemon's larger internal response would reject
+            // retrievals whose public representation still fits.
+            transported.max_tokens = None;
+        }
         if tool == BatchTool::CodeLocate {
             let requested_max_results = arguments
                 .get("max_results")

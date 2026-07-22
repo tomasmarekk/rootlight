@@ -138,6 +138,106 @@ fn every_advertised_batch_subtool_reaches_its_production_adapter() {
 }
 
 #[test]
+fn positive_retrievals_match_standalone_semantics_in_production_processes() {
+    let fixture = tempfile::tempdir().expect("isolated process fixture is available");
+    let repository_root = fixture.path().join("repository");
+    fs::create_dir_all(repository_root.join("src")).expect("fixture source directory is created");
+    fs::write(
+        repository_root.join("Cargo.toml"),
+        "[package]\nname = \"batch_parity_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("fixture manifest is written");
+    fs::write(
+        repository_root.join("src").join("lib.rs"),
+        "pub fn batch_parity_fixture() -> usize { 12 }\n",
+    )
+    .expect("fixture source is written");
+
+    let state_dir = fixture.path().join("state");
+    let runtime_dir = fixture.path().join("runtime");
+    let daemon_binary = ensure_daemon_binary();
+    let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
+    daemon.wait_until_ready(&runtime_dir);
+    let mut mcp = McpProcess::spawn(false, &state_dir, &runtime_dir, "developer");
+
+    let index = mcp.call(
+        "parity-index",
+        "repo.index",
+        json!({
+            "root": repository_root,
+            "mode": "auto",
+            "detached": false
+        }),
+    );
+    assert_success(&index, "repo.index");
+    let repository_id = index["result"]["structuredContent"]["data"]["repository_id"]
+        .as_str()
+        .expect("repo.index returns a repository identity")
+        .to_owned();
+    let operation_id = index["result"]["structuredContent"]["data"]["operation_id"]
+        .as_str()
+        .expect("repo.index returns an operation identity")
+        .to_owned();
+    wait_for_publication(&mut mcp, &index, &operation_id);
+
+    let locate_arguments = json!({
+        "repository": {"repository_id": repository_id},
+        "generation": "active",
+        "query": "batch_parity_fixture",
+        "search_modes": ["exact"]
+    });
+    let standalone_locate = mcp.call("standalone-locate", "code.locate", locate_arguments.clone());
+    assert_success(&standalone_locate, "code.locate");
+    let symbol =
+        standalone_locate["result"]["structuredContent"]["data"]["matches"][0]["symbol_id"].clone();
+    let batch_locate = mcp.call(
+        "batch-locate",
+        "query.batch",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": "active",
+            "operations": [{
+                "id": "locate",
+                "tool": "code.locate",
+                "arguments": {
+                    "query": "batch_parity_fixture",
+                    "search_modes": ["exact"]
+                }
+            }]
+        }),
+    );
+    assert_standalone_batch_parity(&standalone_locate, &batch_locate, "code.locate");
+
+    let standalone_explain = mcp.call(
+        "standalone-explain",
+        "symbol.explain",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": "active",
+            "symbol_ids": [symbol.clone()]
+        }),
+    );
+    assert_success(&standalone_explain, "symbol.explain");
+    let batch_explain = mcp.call(
+        "batch-explain",
+        "query.batch",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": "active",
+            "operations": [{
+                "id": "explain",
+                "tool": "symbol.explain",
+                "arguments": {"symbol_ids": [symbol]}
+            }]
+        }),
+    );
+    assert_standalone_batch_parity(&standalone_explain, &batch_explain, "symbol.explain");
+
+    mcp.finish();
+    daemon.finish();
+}
+
+#[test]
 fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
     let fixture = tempfile::tempdir().expect("isolated process fixture is available");
     let mut developer = McpProcess::spawn(
@@ -315,6 +415,35 @@ fn assert_public_error(response: &Value, expected: &str) {
         response["result"]["structuredContent"]["error"]["code"], expected,
         "unexpected process error: {response:#}"
     );
+}
+
+fn assert_standalone_batch_parity(standalone: &Value, batch: &Value, tool: &str) {
+    assert_success(standalone, tool);
+    assert_success(batch, "query.batch");
+    let standalone = &standalone["result"]["structuredContent"];
+    let batch = &batch["result"]["structuredContent"];
+    let operation = &batch["data"]["operation_results"][0];
+
+    assert_eq!(batch["data"]["batch_status"], "ok");
+    assert_eq!(operation["tool"], tool);
+    assert_eq!(operation["status"], "ok");
+    assert!(operation.get("error").is_none());
+    assert_eq!(operation["data"], standalone["data"]);
+    assert_eq!(operation["truncated"], standalone["truncated"]);
+    assert_eq!(operation["next_cursor"], standalone["next_cursor"]);
+
+    assert_eq!(
+        batch["repository"]["repository_id"],
+        standalone["repository"]["repository_id"]
+    );
+    assert_eq!(batch["generation"], standalone["generation"]);
+    assert_eq!(
+        batch["data"]["generation_id"],
+        standalone["generation"]["generation_id"]
+    );
+    assert_eq!(batch["trust"], standalone["trust"]);
+    assert_eq!(batch["truncated"], standalone["truncated"]);
+    assert_eq!(batch["completeness"], standalone["completeness"]);
 }
 
 fn ensure_daemon_binary() -> PathBuf {

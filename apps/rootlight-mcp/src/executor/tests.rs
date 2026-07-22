@@ -948,7 +948,7 @@ fn omitted_analytical_budget_transports_the_complete_server_ceiling() {
 }
 
 #[test]
-fn batch_code_locate_budget_never_widens_the_child_result_limit() {
+fn batch_retrieval_budget_preserves_results_without_transporting_tokens() {
     let budget = ResponseBudget {
         max_results: Some(1_000),
         max_tokens: Some(3_000),
@@ -967,11 +967,21 @@ fn batch_code_locate_budget_never_widens_the_child_result_limit() {
         json!(20),
         "the standalone default is narrower than the shared batch ceiling"
     );
+    assert_eq!(
+        default_arguments["budget"].get("max_tokens"),
+        None,
+        "the aggregate token limit is enforced against the mapped child envelope"
+    );
 
     let mut explicit_arguments = Map::from_iter([("max_results".to_owned(), json!(7))]);
     apply_child_budget(BatchTool::CodeLocate, &budget, &mut explicit_arguments)
         .expect("explicit locate limit is representable");
     assert_eq!(explicit_arguments["budget"]["max_results"], json!(7));
+
+    let mut explain_arguments = Map::new();
+    apply_child_budget(BatchTool::SymbolExplain, &budget, &mut explain_arguments)
+        .expect("symbol explain budget is representable");
+    assert_eq!(explain_arguments["budget"].get("max_tokens"), None);
 }
 
 #[test]
