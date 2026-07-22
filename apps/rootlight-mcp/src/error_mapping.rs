@@ -249,6 +249,10 @@ impl From<AdvancedQueryError> for MappedDomainFailure {
         match error {
             AdvancedQueryError::ForbiddenOperator => Self::operator_forbidden("query"),
             AdvancedQueryError::TypeMismatch => Self::type_mismatch("query"),
+            AdvancedQueryError::MissingParameter
+            | AdvancedQueryError::UnexpectedParameter
+            | AdvancedQueryError::InvalidParameter
+            | AdvancedQueryError::ParameterSizeExceeded => Self::invalid_argument("parameters"),
             AdvancedQueryError::CostExceeded
             | AdvancedQueryError::DepthExceeded
             | AdvancedQueryError::RowLimitExceeded

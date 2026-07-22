@@ -605,6 +605,15 @@ pub enum QueryValue {
     Symbol(SymbolId),
     /// Stable file identifier.
     File(FileId),
+    /// Reference to a typed scalar in `query.advanced.parameters`.
+    ///
+    /// Parameter references are accepted only in value positions and are
+    /// replaced with their typed value before the query reaches the daemon.
+    Parameter {
+        /// Parameter name using the portable identifier grammar.
+        #[schemars(length(min = 1, max = 64))]
+        name: String,
+    },
 }
 
 /// Allow-listed predicate operators for filter expressions.
@@ -783,15 +792,10 @@ pub enum QueryAstNode {
         #[schemars(length(min = 1, max = 16))]
         aggregations: Vec<AggregateFunction>,
     },
-    /// Traverse graph edges from a seed symbol or bound column.
+    /// Traverse graph edges from a seed symbol.
     Traverse {
         /// Seed symbol identifier for the traversal origin.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        seed: Option<SymbolId>,
-        /// Column name providing seed identifiers from the input node.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[schemars(length(min = 1, max = 256))]
-        seed_from: Option<String>,
+        seed: SymbolId,
         /// Relation kind to traverse.
         relation: RelationKind,
         /// Traversal direction.

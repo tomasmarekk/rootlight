@@ -6,7 +6,9 @@
 //! grammar does not represent them. Every query is statically cost-bounded
 //! before execution.
 
-use rootlight_mcp_contract::context::QueryAstNode;
+use std::collections::{BTreeMap, BTreeSet};
+
+use rootlight_mcp_contract::context::{QueryAstNode, QueryPredicate, QueryValue};
 
 /// Maximum AST depth accepted by the validator.
 pub const MAX_AST_DEPTH: usize = 5;
@@ -19,6 +21,9 @@ pub const MAX_ADVANCED_TRAVERSAL: usize = 100_000;
 
 /// Maximum estimated cost units before a query is rejected.
 pub const MAX_ESTIMATED_COST: u64 = 1_000_000;
+
+/// Maximum encoded size of the advanced-query parameter map.
+pub const MAX_PARAMETER_BYTES: usize = 64 * 1024;
 
 /// Errors returned during advanced query validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -44,6 +49,150 @@ pub enum AdvancedQueryError {
     /// A type mismatch was detected during static checking.
     #[error("query AST has a type mismatch")]
     TypeMismatch,
+    /// A referenced parameter was not supplied.
+    #[error("query AST references a missing parameter")]
+    MissingParameter,
+    /// A supplied parameter is not referenced by the AST.
+    #[error("query parameters contain an unexpected value")]
+    UnexpectedParameter,
+    /// A parameter name or value is not a valid scalar binding.
+    #[error("query parameter is invalid")]
+    InvalidParameter,
+    /// The encoded parameter map exceeds the hard byte ceiling.
+    #[error("query parameters exceed the maximum encoded size")]
+    ParameterSizeExceeded,
+}
+
+/// Binds typed value parameters into a cloned AST before daemon execution.
+///
+/// Parameter references can occur only where [`QueryValue`] is accepted by the
+/// grammar, so bindings cannot introduce operators, field names, or executable
+/// query text.
+///
+/// # Errors
+///
+/// Returns [`AdvancedQueryError`] for invalid names, missing or extra values,
+/// nested references, or an encoded parameter map above
+/// [`MAX_PARAMETER_BYTES`].
+pub fn bind_query_parameters(
+    query: &QueryAstNode,
+    parameters: Option<&BTreeMap<String, QueryValue>>,
+) -> Result<QueryAstNode, AdvancedQueryError> {
+    let parameters = parameters.cloned().unwrap_or_default();
+    let encoded_size = serde_json::to_vec(&parameters)
+        .map_err(|_| AdvancedQueryError::InvalidParameter)?
+        .len();
+    if encoded_size > MAX_PARAMETER_BYTES {
+        return Err(AdvancedQueryError::ParameterSizeExceeded);
+    }
+    if parameters.iter().any(|(name, value)| {
+        !valid_parameter_name(name) || matches!(value, QueryValue::Parameter { .. })
+    }) {
+        return Err(AdvancedQueryError::InvalidParameter);
+    }
+
+    let mut bound = query.clone();
+    let mut referenced = BTreeSet::new();
+    bind_node(&mut bound, &parameters, &mut referenced)?;
+    if parameters.keys().any(|name| !referenced.contains(name)) {
+        return Err(AdvancedQueryError::UnexpectedParameter);
+    }
+    Ok(bound)
+}
+
+fn valid_parameter_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte == b'_' || byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+}
+
+fn bind_node(
+    node: &mut QueryAstNode,
+    parameters: &BTreeMap<String, QueryValue>,
+    referenced: &mut BTreeSet<String>,
+) -> Result<(), AdvancedQueryError> {
+    match node {
+        QueryAstNode::Scan { filter, .. } => {
+            if let Some(predicate) = filter {
+                bind_predicate(predicate, parameters, referenced)?;
+            }
+        }
+        QueryAstNode::Filter { input, predicate } => {
+            bind_node(input, parameters, referenced)?;
+            bind_predicate(predicate, parameters, referenced)?;
+        }
+        QueryAstNode::Project { input, .. }
+        | QueryAstNode::Aggregate { input, .. }
+        | QueryAstNode::Sort { input, .. }
+        | QueryAstNode::Limit { input, .. } => bind_node(input, parameters, referenced)?,
+        QueryAstNode::Join { left, right, .. } => {
+            bind_node(left, parameters, referenced)?;
+            bind_node(right, parameters, referenced)?;
+        }
+        QueryAstNode::Traverse { .. } => {}
+    }
+    Ok(())
+}
+
+fn bind_predicate(
+    predicate: &mut QueryPredicate,
+    parameters: &BTreeMap<String, QueryValue>,
+    referenced: &mut BTreeSet<String>,
+) -> Result<(), AdvancedQueryError> {
+    match predicate {
+        QueryPredicate::Equals { field, value } | QueryPredicate::NotEquals { field, value } => {
+            bind_value(field, value, parameters, referenced)
+        }
+        QueryPredicate::In { field, values } => {
+            for value in values {
+                bind_value(field, value, parameters, referenced)?;
+            }
+            Ok(())
+        }
+        QueryPredicate::And { predicates } | QueryPredicate::Or { predicates } => {
+            for predicate in predicates {
+                bind_predicate(predicate, parameters, referenced)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn bind_value(
+    field: &str,
+    value: &mut QueryValue,
+    parameters: &BTreeMap<String, QueryValue>,
+    referenced: &mut BTreeSet<String>,
+) -> Result<(), AdvancedQueryError> {
+    let QueryValue::Parameter { name } = value else {
+        return Ok(());
+    };
+    if !valid_parameter_name(name) {
+        return Err(AdvancedQueryError::InvalidParameter);
+    }
+    let bound = parameters
+        .get(name)
+        .ok_or(AdvancedQueryError::MissingParameter)?
+        .clone();
+    if !parameter_type_matches(field, &bound) {
+        return Err(AdvancedQueryError::TypeMismatch);
+    }
+    referenced.insert(name.clone());
+    *value = bound;
+    Ok(())
+}
+
+fn parameter_type_matches(field: &str, value: &QueryValue) -> bool {
+    match field {
+        "id" | "source" | "target" => matches!(value, QueryValue::Symbol(_)),
+        "kind" | "name" | "path" | "relation" => matches!(value, QueryValue::Text(_)),
+        _ => true,
+    }
 }
 
 /// Allow-listed query operators.
@@ -260,11 +409,16 @@ fn derive_query_operators(node: &QueryAstNode, operators: &mut Vec<QueryOperator
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_ROWS, MAX_ADVANCED_TRAVERSAL,
-        MAX_AST_DEPTH, MAX_ESTIMATED_COST, QueryOperator,
+        MAX_AST_DEPTH, MAX_ESTIMATED_COST, QueryOperator, bind_query_parameters,
     };
-    use rootlight_mcp_contract::{context::QueryAstNode, vertical::EntityKind};
+    use rootlight_mcp_contract::{
+        context::{QueryAstNode, QueryPredicate, QueryValue},
+        vertical::EntityKind,
+    };
 
     #[test]
     fn simple_scan_with_limit_is_valid() {
@@ -310,6 +464,79 @@ mod tests {
         assert_eq!(
             AdvancedQueryPlan::from_ast(&query, 100, MAX_ADVANCED_TRAVERSAL, Some(1)),
             Err(AdvancedQueryError::CostExceeded)
+        );
+    }
+
+    fn parameter_query(name: &str) -> QueryAstNode {
+        QueryAstNode::Scan {
+            entity: EntityKind::Function,
+            filter: Some(Box::new(QueryPredicate::Equals {
+                field: "name".to_owned(),
+                value: QueryValue::Parameter {
+                    name: name.to_owned(),
+                },
+            })),
+        }
+    }
+
+    #[test]
+    fn typed_parameter_is_bound_only_in_a_value_position() {
+        let parameters = BTreeMap::from([(
+            "needle".to_owned(),
+            QueryValue::Text("handle_request".to_owned()),
+        )]);
+
+        let bound = bind_query_parameters(&parameter_query("needle"), Some(&parameters))
+            .expect("referenced typed parameter is valid");
+        let encoded = serde_json::to_string(&bound).expect("bound AST serializes");
+
+        assert!(encoded.contains("handle_request"));
+        assert!(!encoded.contains("parameter"));
+    }
+
+    #[test]
+    fn missing_and_extra_parameters_are_rejected() {
+        assert_eq!(
+            bind_query_parameters(&parameter_query("missing"), None),
+            Err(AdvancedQueryError::MissingParameter)
+        );
+        let extra = BTreeMap::from([("unused".to_owned(), QueryValue::Boolean(true))]);
+        assert_eq!(
+            bind_query_parameters(
+                &QueryAstNode::Scan {
+                    entity: EntityKind::Function,
+                    filter: None,
+                },
+                Some(&extra)
+            ),
+            Err(AdvancedQueryError::UnexpectedParameter)
+        );
+    }
+
+    #[test]
+    fn invalid_names_nested_references_and_type_mismatches_are_rejected() {
+        let invalid_name =
+            BTreeMap::from([("x;drop".to_owned(), QueryValue::Text("ignored".to_owned()))]);
+        assert_eq!(
+            bind_query_parameters(&parameter_query("x;drop"), Some(&invalid_name)),
+            Err(AdvancedQueryError::InvalidParameter)
+        );
+
+        let nested = BTreeMap::from([(
+            "needle".to_owned(),
+            QueryValue::Parameter {
+                name: "other".to_owned(),
+            },
+        )]);
+        assert_eq!(
+            bind_query_parameters(&parameter_query("needle"), Some(&nested)),
+            Err(AdvancedQueryError::InvalidParameter)
+        );
+
+        let wrong_type = BTreeMap::from([("needle".to_owned(), QueryValue::Integer(42))]);
+        assert_eq!(
+            bind_query_parameters(&parameter_query("needle"), Some(&wrong_type)),
+            Err(AdvancedQueryError::TypeMismatch)
         );
     }
 

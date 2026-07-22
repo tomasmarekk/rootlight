@@ -188,7 +188,7 @@ impl McpTool {
                 "Read bounded source ranges from pinned source references as untrusted data with caller-reduced source and response ceilings; direct file selectors, merging, and base64 output are unsupported."
             }
             Self::QueryAdvanced => {
-                "Use a bounded safe-AST query with enforced cost, row, and depth limits; bound parameters and continuation are unsupported."
+                "Use a bounded safe-AST query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits."
             }
             Self::QueryBatch => {
                 "Use bounded active-generation batch dispatch for up to sixteen eligible reads with shared child accounting; explicit historical selection and complete overhead accounting are fallback-limited."

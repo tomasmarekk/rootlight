@@ -94,7 +94,9 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use crate::advanced::{AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL};
+use crate::advanced::{
+    AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL, bind_query_parameters,
+};
 use crate::{
     RequestCancellation, ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture,
     ToolExecutor,
@@ -5823,16 +5825,10 @@ fn normalize_query_advanced(
     unsupported: &PublicError,
 ) -> Result<QueryAdvancedPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Bound parameters are not served by this slice.
-    if input
-        .parameters
-        .as_ref()
-        .is_some_and(|parameters| !parameters.is_empty())
-    {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
+    let query = bind_query_parameters(&input.query, input.parameters.as_ref())
+        .map_err(advanced_query_error)?;
     let max_rows = usize::from(input.max_results.unwrap_or(DEFAULT_ADVANCED_RESULTS));
-    let plan = AdvancedQueryPlan::from_ast(&input.query, max_rows, MAX_ADVANCED_TRAVERSAL, None)
+    let plan = AdvancedQueryPlan::from_ast(&query, max_rows, MAX_ADVANCED_TRAVERSAL, None)
         .map_err(advanced_query_error)?;
     if input
         .cost_limit
@@ -5840,8 +5836,8 @@ fn normalize_query_advanced(
     {
         return Err(cost_limit_error(plan.estimated_cost, input.cost_limit));
     }
-    let query_ast = serde_json::to_string(&input.query)
-        .map_err(|_| ToolExecutionError::new(unsupported.clone()))?;
+    let query_ast =
+        serde_json::to_string(&query).map_err(|_| ToolExecutionError::new(unsupported.clone()))?;
     Ok(QueryAdvancedPortRequest {
         repository,
         generation: client_generation(input.generation),

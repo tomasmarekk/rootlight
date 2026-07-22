@@ -9784,16 +9784,6 @@ fn advanced_ast_cases() -> Vec<AdvancedAstCase> {
             }),
         },
         AdvancedAstCase {
-            label: "operator.traverse.seed_from",
-            query: json!({
-                "op": "traverse",
-                "seed_from": "symbol_id",
-                "relation": "called_by",
-                "direction": "inbound",
-                "max_depth": 3
-            }),
-        },
-        AdvancedAstCase {
             label: "operator.sort",
             query: json!({
                 "op": "sort",
@@ -9871,7 +9861,6 @@ fn advanced_query_ast_branches_are_losslessly_normalized() {
         "operator.scan.filter.values",
         "operator.sort",
         "operator.traverse.seed",
-        "operator.traverse.seed_from",
         "predicate.and.value.symbol",
         "predicate.equals.value.boolean",
         "predicate.equals.value.file",
@@ -9900,8 +9889,12 @@ fn advanced_query_ast_branches_are_losslessly_normalized() {
         "query.filter.predicates",
         "query.filter.predicates[]",
         "query.filter.value",
+        "query.filter.value.parameter",
+        "query.filter.value.parameter.name",
         "query.filter.values",
         "query.filter.values[]",
+        "query.filter.values[].parameter",
+        "query.filter.values[].parameter.name",
         "query.group_by",
         "query.input",
         "query.left",
@@ -9909,8 +9902,12 @@ fn advanced_query_ast_branches_are_losslessly_normalized() {
         "query.predicate.predicates",
         "query.predicate.predicates[]",
         "query.predicate.value",
+        "query.predicate.value.parameter",
+        "query.predicate.value.parameter.name",
         "query.predicate.values",
         "query.predicate.values[]",
+        "query.predicate.values[].parameter",
+        "query.predicate.values[].parameter.name",
         "query.right",
     ]);
     let expected_descendants: std::collections::BTreeSet<_> = [
@@ -9952,7 +9949,6 @@ fn advanced_query_ast_branches_are_losslessly_normalized() {
         "query.predicate.values[].text",
         "query.relation",
         "query.seed",
-        "query.seed_from",
     ]
     .into_iter()
     .collect();
@@ -9997,6 +9993,39 @@ fn advanced_query_ast_branches_are_losslessly_normalized() {
         .filter(|path| query_paths.contains(*path) && !structural_containers.contains(*path))
         .collect();
     assert_eq!(exercised_descendants, expected_descendants);
+}
+
+#[test]
+fn advanced_query_parameters_are_bound_before_the_daemon_boundary() {
+    let input: QueryAdvancedInput = decode_arguments(json!({
+        "repository": {"repository_id": repository()},
+        "query": {
+            "op": "scan",
+            "entity": "function",
+            "filter": {
+                "pred": "equals",
+                "field": "name",
+                "value": {"parameter": {"name": "needle"}}
+            }
+        },
+        "parameters": {
+            "needle": {"text": "handle_request"}
+        }
+    }));
+
+    let request = normalize_query_advanced(input, &normalization_error())
+        .expect("typed value parameter normalizes");
+    let observed: Value =
+        serde_json::from_str(request.query_ast()).expect("bound AST remains JSON");
+
+    assert_eq!(
+        observed["filter"]["value"],
+        json!({"text": "handle_request"})
+    );
+    assert!(
+        !request.query_ast().contains("parameter"),
+        "parameter references must not cross the daemon boundary"
+    );
 }
 
 #[test]

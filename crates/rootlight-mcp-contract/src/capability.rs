@@ -1033,7 +1033,10 @@ const QUERY_ADVANCED_RULES: &[CapabilityRule] = &[
         "repository.alias",
         "only stable repository identifiers are served",
     ),
-    unsupported("parameters", "bound query parameters are not served"),
+    implemented(
+        "parameters",
+        "binds typed scalars only at AST value positions before execution",
+    ),
     implemented(
         "cost_limit",
         "rejects plans above the requested static cost ceiling",
@@ -1444,7 +1447,7 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
             "bounded source ranges from pinned source references as untrusted data"
         }
         McpTool::QueryAdvanced => {
-            "bounded safe-ast query with enforced cost, row, and depth limits"
+            "bounded safe-ast query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits"
         }
         McpTool::QueryBatch => {
             "bounded active-generation batch dispatch for up to sixteen eligible reads with shared child accounting"

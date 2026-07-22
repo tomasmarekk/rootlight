@@ -30,7 +30,7 @@ use super::{
     INVALID_PARAMS, MAX_REQUEST_ID_BYTES, METHOD_NOT_FOUND, OperatingRequest, RequestCancellation,
     RequestHandler, request_meta_is_valid,
 };
-use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL};
+use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL, bind_query_parameters};
 use crate::batch::{
     BatchPlan, is_batch_allowed, is_batch_allowed_under_profile, mcp_tool_for_batch,
 };
@@ -1229,12 +1229,15 @@ fn advanced_invariants_are_valid(input: &QueryAdvancedInput) -> bool {
 }
 
 fn advanced_invariant_error(input: &QueryAdvancedInput) -> Option<PublicError> {
+    let query = match bind_query_parameters(&input.query, input.parameters.as_ref()) {
+        Ok(query) => query,
+        Err(error) => return Some(mapped_public_error(error.into())),
+    };
     let max_rows = usize::from(input.max_results.unwrap_or(100));
-    let plan =
-        match AdvancedQueryPlan::from_ast(&input.query, max_rows, MAX_ADVANCED_TRAVERSAL, None) {
-            Ok(plan) => plan,
-            Err(error) => return Some(mapped_public_error(error.into())),
-        };
+    let plan = match AdvancedQueryPlan::from_ast(&query, max_rows, MAX_ADVANCED_TRAVERSAL, None) {
+        Ok(plan) => plan,
+        Err(error) => return Some(mapped_public_error(error.into())),
+    };
     (!input
         .cost_limit
         .is_none_or(|limit| plan.estimated_cost <= limit))
@@ -4275,6 +4278,44 @@ mod tests {
         let mut generous = advanced_input(scan());
         generous.cost_limit = Some(1_000);
         assert!(advanced_invariants_are_valid(&generous));
+    }
+
+    #[test]
+    fn advanced_parameter_failures_are_rejected_before_execution() {
+        let mut input = advanced_input(QueryAstNode::Scan {
+            entity: EntityKind::Function,
+            filter: Some(Box::new(QueryPredicate::Equals {
+                field: "name".to_owned(),
+                value: QueryValue::Parameter {
+                    name: "needle".to_owned(),
+                },
+            })),
+        });
+        assert_eq!(
+            advanced_invariant_error(&input).map(|error| error.code()),
+            Some(ErrorCode::InvalidArgument)
+        );
+
+        input.parameters = Some(std::collections::BTreeMap::from([(
+            "needle".to_owned(),
+            QueryValue::Integer(7),
+        )]));
+        assert_eq!(
+            advanced_invariant_error(&input).map(|error| error.code()),
+            Some(ErrorCode::TypeMismatch)
+        );
+
+        input.parameters = Some(std::collections::BTreeMap::from([
+            (
+                "needle".to_owned(),
+                QueryValue::Text("handle_request".to_owned()),
+            ),
+            ("unused".to_owned(), QueryValue::Boolean(true)),
+        ]));
+        assert_eq!(
+            advanced_invariant_error(&input).map(|error| error.code()),
+            Some(ErrorCode::InvalidArgument)
+        );
     }
 
     #[tokio::test]
