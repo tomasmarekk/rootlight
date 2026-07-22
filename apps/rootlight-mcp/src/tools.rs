@@ -3,22 +3,20 @@
 //! This module validates both sides of the generic daemon executor boundary
 //! and keeps MCP structured content identical to its JSON text mirror.
 
-use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
+use std::{fmt, future::Future, io, pin::Pin, sync::Arc, time::Duration};
 
 use jsonschema::{Validator, error::ValidationErrorKind};
 use rootlight_mcp_contract::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, DetailKey, ErrorCode, ErrorResponse,
-    ExposureProfile, GenerationSelector, McpTool, NextAction, OperationStatusInput,
-    OperationStatusOutput, PublicError, PublicErrorBuildError, PublicValue, RepoIndexInput,
-    RepoIndexOutput, RepositorySelector, SafeLabel, SchemaVersion, SourceReadInput,
-    SourceReadOutput, SymbolExplainInput, SymbolExplainOutput, ToolResponse, TrustClassification,
-    VerticalTool,
+    ExposureProfile, GenerationSelector, McpTool, OperationStatusInput, OperationStatusOutput,
+    PublicError, PublicErrorBuildError, PublicValue, RepoIndexInput, RepoIndexOutput,
+    RepositorySelector, SafeLabel, SchemaVersion, SourceReadInput, SourceReadOutput,
+    SymbolExplainInput, SymbolExplainOutput, ToolResponse, TrustClassification, VerticalTool,
     capability::{
         CapabilityStatus, DISCOVERY_METADATA_KEY, ToolCapability, capability_for,
         discovery_metadata,
     },
     context::{BatchOperation, ContextPackInput, QueryAdvancedInput, QueryBatchInput},
-    error_definition,
     pagination::AuthenticatedCursor,
     repository::RepoListInput,
 };
@@ -32,11 +30,11 @@ use super::{
     INVALID_PARAMS, MAX_REQUEST_ID_BYTES, METHOD_NOT_FOUND, OperatingRequest, RequestCancellation,
     RequestHandler, request_meta_is_valid,
 };
-use crate::advanced::{AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL};
+use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL};
 use crate::batch::{
-    BatchPlan, BatchValidationError, is_batch_allowed, is_batch_allowed_under_profile,
-    mcp_tool_for_batch,
+    BatchPlan, is_batch_allowed, is_batch_allowed_under_profile, mcp_tool_for_batch,
 };
+use crate::error_mapping::{MappedDomainFailure, public_error};
 
 #[cfg(test)]
 use rootlight_mcp_contract::context::{BatchTool, QueryAstNode};
@@ -46,8 +44,6 @@ const MAX_TOOL_NAME_BYTES: usize = 128;
 const MAX_REPOSITORY_ROOT_BYTES: usize = 4_096;
 const MAX_CONFIGURATION_PATCH_BYTES: usize = 64 * 1_024;
 const MAX_LOCATE_QUERY_BYTES: usize = 2_048;
-const INVALID_ARGUMENT_MESSAGE: &str = error_definition(ErrorCode::InvalidArgument).message;
-const RESOURCE_EXHAUSTED_MESSAGE: &str = "tool result exceeds the mcp response limit";
 const MAX_REPO_INDEX_ARGUMENT_BYTES: usize = 96 * 1_024;
 const MAX_OPERATION_STATUS_ARGUMENT_BYTES: usize = 16 * 1_024;
 const MAX_CODE_LOCATE_ARGUMENT_BYTES: usize = 64 * 1_024;
@@ -204,16 +200,10 @@ where
         profile: watch::Receiver<ExposureProfile>,
         ceiling: ExposureProfile,
     ) -> Result<Self, ToolRegistryError> {
-        let invalid_arguments = checked_public_error(
-            ErrorCode::InvalidArgument,
-            INVALID_ARGUMENT_MESSAGE,
-            "arguments",
-        )?;
-        let resource_exhausted = checked_public_error(
-            ErrorCode::ResourceExhausted,
-            RESOURCE_EXHAUSTED_MESSAGE,
-            "budget",
-        )?;
+        let invalid_arguments = public_error(MappedDomainFailure::invalid_argument("arguments"))
+            .map_err(ToolRegistryError::BuildPublicError)?;
+        let resource_exhausted = public_error(MappedDomainFailure::resource_exhausted())
+            .map_err(ToolRegistryError::BuildPublicError)?;
         let mut contracts = Vec::new();
         contracts
             .try_reserve_exact(VerticalTool::ALL.len())
@@ -562,27 +552,63 @@ impl CapabilityAdmissionError {
             (None, false) => self.instance_path.clone(),
             (None, true) => "arguments".to_owned(),
         };
-        let definition = error_definition(self.code);
-        let mut builder = PublicError::builder(self.code, definition.message)
-            .detail(
-                DetailKey::parse("field_path").expect("static detail key is valid"),
-                PublicValue::Label(SafeLabel::parse(&field_path)?),
-            )
-            .detail(
-                DetailKey::parse("capability_reason").expect("static detail key is valid"),
-                PublicValue::Label(
-                    SafeLabel::parse(self.reason.public_name())
-                        .expect("static capability reason is valid"),
+        let failure = match self.code {
+            ErrorCode::UnsupportedCapability => {
+                MappedDomainFailure::unsupported_capability("arguments")
+            }
+            ErrorCode::OperatorForbidden => MappedDomainFailure::operator_forbidden("arguments"),
+            ErrorCode::BindingInvalid => MappedDomainFailure::binding_invalid(),
+            _ => unreachable!("capability rules emit only mapped capability error families"),
+        };
+        let authoritative = public_error(failure)?;
+        extend_public_error(
+            authoritative,
+            [
+                (
+                    DetailKey::parse("field_path").expect("static detail key is valid"),
+                    PublicValue::Label(SafeLabel::parse(&field_path)?),
                 ),
-            )
-            .next_action(NextAction::CorrectField {
-                field: DetailKey::parse("arguments").expect("static detail key is valid"),
-            });
-        if definition.retryable {
-            builder = builder.retryable();
-        }
-        builder.build()
+                (
+                    DetailKey::parse("capability_reason").expect("static detail key is valid"),
+                    PublicValue::Label(
+                        SafeLabel::parse(self.reason.public_name())
+                            .expect("static capability reason is valid"),
+                    ),
+                ),
+            ],
+        )
     }
+}
+
+fn extend_public_error(
+    error: PublicError,
+    details: impl IntoIterator<Item = (DetailKey, PublicValue)>,
+) -> Result<PublicError, PublicErrorBuildError> {
+    let mut builder = PublicError::builder_with_message(error.code(), error.message().to_owned());
+    builder = match error.retry_after_ms() {
+        Some(delay) => builder.retry_after(Duration::from_millis(delay)),
+        None if error.retryable() => builder.retryable(),
+        None => builder,
+    };
+    if let Some(repository) = error.repository() {
+        builder = builder.repository(repository);
+    }
+    if let Some(operation) = error.operation() {
+        builder = builder.operation(operation);
+    }
+    if let Some(generation) = error.generation() {
+        builder = builder.generation(generation);
+    }
+    for (key, value) in error.details() {
+        builder = builder.detail(key.clone(), value.clone());
+    }
+    for action in error.next_actions() {
+        builder = builder.next_action(action.clone());
+    }
+    for (key, value) in details {
+        builder = builder.detail(key, value);
+    }
+    builder.build()
 }
 
 #[derive(Debug)]
@@ -1128,20 +1154,23 @@ fn typed_input_invariants_are_valid(
 
 fn classify_schema_error(tool: VerticalTool, input: &Value) -> Option<PublicError> {
     if repo_list_cursor_is_invalid(tool, input) {
-        return Some(invalid_cursor_error());
+        return Some(mapped_public_error(MappedDomainFailure::invalid_cursor()));
     }
     if tool == VerticalTool::QueryAdvanced
         && input
             .get("query")
             .is_some_and(query_contains_forbidden_operator)
     {
-        return Some(domain_error(ErrorCode::OperatorForbidden, "query"));
+        return Some(mapped_public_error(
+            MappedDomainFailure::operator_forbidden("query"),
+        ));
     }
     None
 }
 
 fn classify_typed_decode_error(tool: VerticalTool, input: &Value) -> Option<PublicError> {
-    repo_list_cursor_is_invalid(tool, input).then(invalid_cursor_error)
+    repo_list_cursor_is_invalid(tool, input)
+        .then(|| mapped_public_error(MappedDomainFailure::invalid_cursor()))
 }
 
 fn repo_list_cursor_is_invalid(tool: VerticalTool, input: &Value) -> bool {
@@ -1154,14 +1183,6 @@ fn repo_list_cursor_is_invalid(tool: VerticalTool, input: &Value) -> bool {
     cursor
         .as_str()
         .is_none_or(|cursor| ContinuationCursor::parse(cursor).is_err())
-}
-
-fn invalid_cursor_error() -> PublicError {
-    let definition = error_definition(ErrorCode::InvalidCursor);
-    PublicError::builder(ErrorCode::InvalidCursor, definition.message)
-        .next_action(NextAction::RestartEnumeration)
-        .build()
-        .expect("normative cursor error satisfies public bounds")
 }
 
 fn query_contains_forbidden_operator(value: &Value) -> bool {
@@ -1195,7 +1216,9 @@ fn classify_typed_invariant_error(
     profile: ExposureProfile,
 ) -> Option<PublicError> {
     match (tool, input) {
-        (VerticalTool::RepoList, TypedInput::RepoList(_)) => Some(invalid_cursor_error()),
+        (VerticalTool::RepoList, TypedInput::RepoList(_)) => {
+            Some(mapped_public_error(MappedDomainFailure::invalid_cursor()))
+        }
         (VerticalTool::QueryAdvanced, TypedInput::QueryAdvanced(input)) => {
             advanced_invariant_error(input)
         }
@@ -1241,12 +1264,12 @@ fn advanced_invariant_error(input: &QueryAdvancedInput) -> Option<PublicError> {
     let plan =
         match AdvancedQueryPlan::from_ast(&input.query, max_rows, MAX_ADVANCED_TRAVERSAL, None) {
             Ok(plan) => plan,
-            Err(error) => return Some(advanced_error(error)),
+            Err(error) => return Some(mapped_public_error(error.into())),
         };
     (!input
         .cost_limit
         .is_none_or(|limit| plan.estimated_cost <= limit))
-    .then(|| domain_error(ErrorCode::CostLimit, "cost_limit"))
+    .then(|| mapped_public_error(MappedDomainFailure::cost_limit("cost_limit")))
 }
 
 /// Validates the public batch invariants: unique operation ids, an acyclic
@@ -1263,7 +1286,9 @@ fn batch_invariant_error(input: &QueryBatchInput, profile: ExposureProfile) -> O
     let mut ids: Vec<&str> = operations.iter().map(|op| op.id.as_str()).collect();
     ids.sort_unstable();
     if ids.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Some(domain_error(ErrorCode::InvalidArgument, "operations"));
+        return Some(mapped_public_error(MappedDomainFailure::invalid_argument(
+            "operations",
+        )));
     }
 
     let tools: Vec<McpTool> = operations
@@ -1272,10 +1297,14 @@ fn batch_invariant_error(input: &QueryBatchInput, profile: ExposureProfile) -> O
         .collect();
     for tool in &tools {
         if !is_batch_allowed(*tool) {
-            return Some(domain_error(ErrorCode::OperatorForbidden, "operations"));
+            return Some(mapped_public_error(
+                MappedDomainFailure::operator_forbidden("operations"),
+            ));
         }
         if !is_batch_allowed_under_profile(*tool, profile) {
-            return Some(domain_error(ErrorCode::UnsupportedCapability, "operations"));
+            return Some(mapped_public_error(
+                MappedDomainFailure::unsupported_capability("operations"),
+            ));
         }
     }
 
@@ -1285,7 +1314,9 @@ fn batch_invariant_error(input: &QueryBatchInput, profile: ExposureProfile) -> O
         if let Some(declared) = &operation.depends_on {
             for name in declared {
                 let Some(index) = operations.iter().position(|other| other.id == *name) else {
-                    return Some(domain_error(ErrorCode::InvalidArgument, "depends_on"));
+                    return Some(mapped_public_error(MappedDomainFailure::invalid_argument(
+                        "depends_on",
+                    )));
                 };
                 resolved.push(index);
             }
@@ -1294,7 +1325,7 @@ fn batch_invariant_error(input: &QueryBatchInput, profile: ExposureProfile) -> O
     }
 
     if let Err(error) = BatchPlan::validate(&tools, &dependencies) {
-        return Some(batch_validation_error(error));
+        return Some(mapped_public_error(error.into()));
     }
 
     for (index, operation) in operations.iter().enumerate() {
@@ -1303,53 +1334,15 @@ fn batch_invariant_error(input: &QueryBatchInput, profile: ExposureProfile) -> O
             &dependencies[index],
             operations,
         ) {
-            return Some(domain_error(ErrorCode::BindingInvalid, "arguments"));
+            return Some(mapped_public_error(MappedDomainFailure::binding_invalid()));
         }
     }
 
     None
 }
 
-fn advanced_error(error: AdvancedQueryError) -> PublicError {
-    let (code, field) = match error {
-        AdvancedQueryError::ForbiddenOperator => (ErrorCode::OperatorForbidden, "query"),
-        AdvancedQueryError::TypeMismatch => (ErrorCode::TypeMismatch, "query"),
-        AdvancedQueryError::CostExceeded
-        | AdvancedQueryError::DepthExceeded
-        | AdvancedQueryError::RowLimitExceeded
-        | AdvancedQueryError::TraversalLimitExceeded => (ErrorCode::CostLimit, "query"),
-        AdvancedQueryError::Malformed => (ErrorCode::InvalidArgument, "query"),
-    };
-    domain_error(code, field)
-}
-
-fn batch_validation_error(error: BatchValidationError) -> PublicError {
-    let (code, field) = match error {
-        BatchValidationError::ForbiddenTool | BatchValidationError::NestedBatch => {
-            (ErrorCode::OperatorForbidden, "operations")
-        }
-        BatchValidationError::InvalidBinding => (ErrorCode::BindingInvalid, "arguments"),
-        BatchValidationError::InvalidOperationCount
-        | BatchValidationError::CyclicDependency
-        | BatchValidationError::DepthExceeded
-        | BatchValidationError::InvalidDependencyReference
-        | BatchValidationError::TooManyDependencies => (ErrorCode::InvalidArgument, "operations"),
-    };
-    domain_error(code, field)
-}
-
-fn domain_error(code: ErrorCode, field: &'static str) -> PublicError {
-    let definition = error_definition(code);
-    let mut builder =
-        PublicError::builder(code, definition.message).next_action(NextAction::CorrectField {
-            field: DetailKey::parse(field).expect("static detail key is valid"),
-        });
-    if definition.retryable {
-        builder = builder.retryable();
-    }
-    builder
-        .build()
-        .expect("normative error registry entries satisfy public bounds")
+fn mapped_public_error(failure: MappedDomainFailure) -> PublicError {
+    public_error(failure).expect("authoritative domain error mapping satisfies public bounds")
 }
 
 /// Checks that every `$from` binding leaf names a declared dependency of its
@@ -1692,18 +1685,6 @@ const fn internal_tool_error(message: &'static str) -> HandlerResponse {
     HandlerResponse::error(INTERNAL_ERROR, message)
 }
 
-fn checked_public_error(
-    code: ErrorCode,
-    message: &'static str,
-    field: &'static str,
-) -> Result<PublicError, ToolRegistryError> {
-    let field = DetailKey::parse(field).map_err(ToolRegistryError::BuildPublicError)?;
-    PublicError::builder(code, message)
-        .next_action(NextAction::CorrectField { field })
-        .build()
-        .map_err(ToolRegistryError::BuildPublicError)
-}
-
 /// Failure while constructing the server-owned tool registry.
 #[derive(Debug, Error)]
 pub enum ToolRegistryError {
@@ -1745,6 +1726,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rootlight_mcp_contract::{
+        NextAction,
         accounting::tool_list_payload,
         capability::{CAPABILITIES, CapabilityRule, CapabilityStatus},
     };
@@ -3191,7 +3173,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schema_validation_precedes_capability_admission() {
+    async fn schema_and_typed_failures_use_authoritative_mapping() {
         let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
             .expect("registry compiles");
         let response = router
@@ -3212,7 +3194,11 @@ mod tests {
         let result = success(response);
         let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
             .expect("schema rejection uses the checked error contract");
-        assert_eq!(direct.error.code(), ErrorCode::InvalidArgument);
+        assert_eq!(
+            direct.error,
+            public_error(MappedDomainFailure::invalid_argument("arguments"))
+                .expect("authoritative schema mapping builds")
+        );
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
 
         let validator =
@@ -3229,6 +3215,46 @@ mod tests {
             ),
             Err(MaterializedInputError::Invalid { .. })
         ));
+
+        let typed_arguments = json!({
+            "repository": selector(),
+            "operations": [
+                {"id": "duplicate", "tool": "code.locate", "arguments": {"query": "first"}},
+                {"id": "duplicate", "tool": "code.locate", "arguments": {"query": "second"}}
+            ]
+        })
+        .as_object()
+        .expect("typed fixture is an object")
+        .clone();
+        let typed_response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({"name": "query.batch", "arguments": typed_arguments.clone()}),
+                ),
+                cancellation(),
+            )
+            .await;
+        let typed_result = success(typed_response);
+        let typed_direct: ErrorResponse =
+            serde_json::from_value(typed_result["structuredContent"].clone())
+                .expect("typed rejection uses the checked error contract");
+        let authoritative = public_error(MappedDomainFailure::invalid_argument("operations"))
+            .expect("authoritative typed mapping builds");
+        assert_eq!(typed_direct.error, authoritative);
+
+        let MaterializedInputError::Public(typed_materialized) = validator
+            .validate(
+                VerticalTool::QueryBatch,
+                &typed_arguments,
+                ExposureProfile::Developer,
+            )
+            .expect_err("materialized typed fixture is rejected")
+        else {
+            panic!("typed invariant must retain its public domain error");
+        };
+        assert_eq!(*typed_materialized, authoritative);
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -3250,6 +3276,12 @@ mod tests {
         let result = success(response);
         let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
             .expect("capability rejection uses the checked error contract");
+        let authoritative = public_error(MappedDomainFailure::unsupported_capability("arguments"))
+            .expect("authoritative capability mapping builds");
+        assert_eq!(direct.error.code(), authoritative.code());
+        assert_eq!(direct.error.message(), authoritative.message());
+        assert_eq!(direct.error.retryable(), authoritative.retryable());
+        assert_eq!(direct.error.next_actions(), authoritative.next_actions());
         assert_eq!(direct.error.code(), ErrorCode::UnsupportedCapability);
         assert_eq!(
             direct
@@ -3416,9 +3448,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repo_list_cursor_boundary_failures_restart_enumeration_without_execution() {
+    async fn cursor_failures_use_authoritative_restart_mapping() {
         let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
             .expect("registry compiles");
+        let authoritative = public_error(MappedDomainFailure::invalid_cursor())
+            .expect("authoritative cursor mapping builds");
         let invalid_cursors = [
             String::new(),
             "A".repeat(4_097),
@@ -3438,14 +3472,9 @@ mod tests {
                 .await;
             let result = success(response);
             assert_eq!(result["isError"], true);
-            assert_eq!(
-                result["structuredContent"]["error"]["code"],
-                "INVALID_CURSOR"
-            );
-            assert_eq!(
-                result["structuredContent"]["error"]["next_actions"],
-                json!([{"action": "restart_enumeration"}])
-            );
+            let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+                .expect("cursor rejection uses the checked error contract");
+            assert_eq!(direct.error, authoritative);
         }
 
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
@@ -4242,7 +4271,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advanced_forbidden_operator_has_a_stable_domain_code() {
+    async fn forbidden_operator_uses_authoritative_mapping() {
         let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
             .expect("registry compiles");
         let response = router
@@ -4261,9 +4290,12 @@ mod tests {
             )
             .await;
         let result = success(response);
+        let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+            .expect("forbidden operator uses the checked error contract");
         assert_eq!(
-            result["structuredContent"]["error"]["code"],
-            "OPERATOR_FORBIDDEN"
+            direct.error,
+            public_error(MappedDomainFailure::operator_forbidden("query"))
+                .expect("authoritative operator mapping builds")
         );
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
     }
@@ -4297,7 +4329,7 @@ mod tests {
     async fn batch_plan_and_profile_failures_remain_top_level_domain_errors() {
         let developer = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
             .expect("registry compiles");
-        let invalid_binding = developer
+        let invalid_plan = developer
             .handle(
                 request(
                     "tools/call",
@@ -4307,18 +4339,16 @@ mod tests {
                             "repository": selector(),
                             "operations": [
                                 {
-                                    "id": "find",
+                                    "id": "first",
                                     "tool": "code.locate",
+                                    "depends_on": ["second"],
                                     "arguments": {"query": "publish"}
                                 },
                                 {
-                                    "id": "explain",
-                                    "tool": "symbol.explain",
-                                    "arguments": {
-                                        "symbol_ids": [
-                                            {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
-                                        ]
-                                    }
+                                    "id": "second",
+                                    "tool": "code.locate",
+                                    "depends_on": ["first"],
+                                    "arguments": {"query": "stage"}
                                 }
                             ]
                         }
@@ -4327,10 +4357,14 @@ mod tests {
                 cancellation(),
             )
             .await;
-        let invalid_binding = success(invalid_binding);
+        let invalid_plan = success(invalid_plan);
+        let invalid_plan: ErrorResponse =
+            serde_json::from_value(invalid_plan["structuredContent"].clone())
+                .expect("batch plan failure uses the checked error contract");
         assert_eq!(
-            invalid_binding["structuredContent"]["error"]["code"],
-            "BINDING_INVALID"
+            invalid_plan.error,
+            public_error(MappedDomainFailure::invalid_argument("operations"))
+                .expect("authoritative batch plan mapping builds")
         );
 
         let scout = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Scout)
@@ -4357,9 +4391,12 @@ mod tests {
             )
             .await;
         let hidden = success(hidden);
+        let hidden: ErrorResponse = serde_json::from_value(hidden["structuredContent"].clone())
+            .expect("batch profile failure uses the checked error contract");
         assert_eq!(
-            hidden["structuredContent"]["error"]["code"],
-            "UNSUPPORTED_CAPABILITY"
+            hidden.error,
+            public_error(MappedDomainFailure::unsupported_capability("operations"))
+                .expect("authoritative profile mapping builds")
         );
         assert_eq!(developer.executor.calls.load(Ordering::Relaxed), 0);
         assert_eq!(scout.executor.calls.load(Ordering::Relaxed), 0);
