@@ -253,6 +253,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         &mut mcp,
         &catalog,
         &mut transcript,
+        &repository_root,
         &v1_index.repository,
         &v1_index.generation,
         Value::String("active".to_owned()),
@@ -288,6 +289,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         &mut mcp,
         &catalog,
         &mut transcript,
+        &repository_root,
         &v2_index.repository,
         &v2_index.generation,
         Value::String("active".to_owned()),
@@ -299,6 +301,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         &mut mcp,
         &catalog,
         &mut transcript,
+        &repository_root,
         &v1_index.repository,
         &v1_index.generation,
         Value::String(v1_index.generation.clone()),
@@ -315,6 +318,15 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
             "pinned old generation returned a different source reference",
         ));
     }
+    let tool_matrix = exercise_complete_tool_matrix(
+        &mut mcp,
+        &catalog,
+        &mut transcript,
+        &repository_root,
+        &v1_index,
+        &v2_index,
+        &v2,
+    )?;
 
     let state_bytes_before_restart = directory_bytes(paths.state_dir())?;
     let primary_mcp_stderr = mcp.shutdown()?;
@@ -413,6 +425,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         &mut rebuilt_mcp,
         &rebuilt_catalog,
         &mut transcript,
+        &repository_root,
         &rebuilt_index.repository,
         &rebuilt_index.generation,
         Value::String("active".to_owned()),
@@ -562,6 +575,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
             nested_negation_kept_source_read: discovery_policy.kept_source_read,
         },
         catalog: catalog_evidence,
+        tool_matrix,
         process_safety: ProcessSafetyEvidence {
             live_daemon_port_verified_for_all_sessions: true,
             cancellation_fixture_profile: "generated-cancellation-only-rust-v1",
@@ -1591,6 +1605,7 @@ fn query_snapshot(
     process: &mut McpProcess,
     catalog: &ToolCatalog,
     transcript: &mut TranscriptWriter,
+    repository_root: &Path,
     repository: &str,
     expected_generation: &str,
     generation_selector: Value,
@@ -1711,6 +1726,19 @@ fn query_snapshot(
         ));
     }
 
+    let source_file = repository_root.join("src/lib.rs");
+    let source_bytes = fs::metadata(&source_file)
+        .map_err(|source| VerticalError::Io {
+            action: "measure vertical fixture source",
+            source,
+        })?
+        .len();
+    let source_end = u32::try_from(source_bytes).map_err(|_| {
+        VerticalError::Invariant("vertical fixture source exceeds the public span range")
+    })?;
+    let mut full_source_ref = source_ref.clone();
+    full_source_ref["span"]["start_byte"] = json!(0);
+    full_source_ref["span"]["end_byte"] = json!(source_end);
     let source = call_tool(
         &format!("{label}.source-read"),
         process,
@@ -1720,7 +1748,7 @@ fn query_snapshot(
         json!({
             "repository": {"repository_id": repository},
             "generation": expected_generation,
-            "references": [{"source_ref": source_ref}],
+            "references": [{"source_ref": full_source_ref}],
             "include_line_numbers": true,
             "encoding": "utf8_lossless_when_valid",
             "response_profile": "compact"
@@ -1774,6 +1802,406 @@ fn query_snapshot(
         .into_iter()
         .any(|warnings| diagnostic_code_is_present(warnings, SYNTAX_RECOVERY_DIAGNOSTIC)),
     })
+}
+
+fn exercise_complete_tool_matrix(
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    repository_root: &Path,
+    base: &IndexReceipt,
+    head: &IndexReceipt,
+    snapshot: &SnapshotEvidence,
+) -> Result<ToolMatrixEvidence, VerticalError> {
+    let matrix_index = index_repository("matrix", process, catalog, transcript, repository_root)?;
+    if matrix_index.repository != head.repository || matrix_index.generation != head.generation {
+        return Err(VerticalError::Invariant(
+            "unchanged matrix fixture did not preserve repository and generation identity",
+        ));
+    }
+
+    let mut cells = vec![ToolMatrixCell {
+        tool: "repo.index",
+        state: "published_unchanged_generation",
+        outcome: "success",
+        requested_profile: "not_applicable_operational_contract",
+        identity: "matched_published_receipt",
+        completeness: "not_applicable_operational_contract",
+        usage: "not_applicable_operational_contract",
+        input_schema_validated: true,
+        output_schema_validated: true,
+        transcript_timing_recorded: true,
+    }];
+
+    let status = call_tool(
+        "matrix.repo-status",
+        process,
+        catalog,
+        transcript,
+        "repo.status",
+        json!({
+            "repository": {"repository_id": head.repository},
+            "generation": head.generation,
+            "include_operations": true,
+            "response_profile": "compact"
+        }),
+    )?;
+    record_matrix_read(
+        &mut cells,
+        "repo.status",
+        "ready_exact_generation",
+        status,
+        Some((&head.repository, &head.generation)),
+    )?;
+
+    let list = call_tool(
+        "matrix.repo-list",
+        process,
+        catalog,
+        transcript,
+        "repo.list",
+        json!({"max_results": 20, "response_profile": "compact"}),
+    )?;
+    require_tool_success(&list, "repo.list")?;
+    require_matrix_usage(&list.structured)?;
+    if !list.structured["truncated"].is_boolean() || list.structured.get("next_cursor").is_none() {
+        return Err(VerticalError::Invariant(
+            "matrix catalog result omitted truncation or continuation state",
+        ));
+    }
+    cells.push(ToolMatrixCell {
+        tool: "repo.list",
+        state: "nonempty_catalog",
+        outcome: "success",
+        requested_profile: "compact",
+        identity: "matched_immutable_catalog_snapshot",
+        completeness: "validated_catalog_truncation",
+        usage: "measured_nonplaceholder",
+        input_schema_validated: true,
+        output_schema_validated: true,
+        transcript_timing_recorded: true,
+    });
+
+    let operation = operation_status(
+        "matrix.operation-status",
+        process,
+        catalog,
+        transcript,
+        &matrix_index.operation,
+    )?;
+    require_tool_success(&operation, "operation.status")?;
+    if operation.structured["data"]["operation"]["state"] != "published"
+        || operation.structured["data"]["published_generation"] != head.generation
+    {
+        return Err(VerticalError::Invariant(
+            "matrix operation status did not preserve its published identity",
+        ));
+    }
+    cells.push(ToolMatrixCell {
+        tool: "operation.status",
+        state: "published_terminal_operation",
+        outcome: "success",
+        requested_profile: "not_applicable_operational_contract",
+        identity: "matched_published_generation",
+        completeness: "not_applicable_operational_contract",
+        usage: "not_applicable_operational_contract",
+        input_schema_validated: true,
+        output_schema_validated: true,
+        transcript_timing_recorded: true,
+    });
+
+    let repository = || json!({"repository_id": head.repository});
+    let generation = || Value::String(head.generation.clone());
+    let symbol = || Value::String(snapshot.symbol.clone());
+    let source_ref = || snapshot.source_ref.clone();
+    let cases = [
+        (
+            "code.locate",
+            "fresh_exact_match",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "query": "answer",
+                "search_modes": ["exact"],
+                "max_results": 10,
+                "response_profile": "compact"
+            }),
+        ),
+        (
+            "symbol.explain",
+            "fresh_resolved_symbol",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "symbol_ids": [symbol()],
+                "response_profile": "compact"
+            }),
+        ),
+        (
+            "symbol.relationships",
+            "fresh_bounded_graph",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "symbol_ids": [symbol()],
+                "relations": ["calls"],
+                "direction": "both",
+                "max_results": 20,
+                "response_profile": "compact"
+            }),
+        ),
+        (
+            "flow.trace",
+            "fresh_bounded_graph",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "from": {"symbol_id": symbol()},
+                "relations": ["calls"],
+                "direction": "outbound",
+                "max_depth": 3,
+                "max_paths": 20,
+                "response_profile": "compact"
+            }),
+        ),
+        (
+            "change.impact",
+            "explicit_symbol_change",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "change": {"symbol_ids": [symbol()]},
+                "max_depth": 3,
+                "include_tests": true,
+                "profile": "compact"
+            }),
+        ),
+        (
+            "tests.select",
+            "unit_test_inventory",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "seeds": {"symbols": [symbol()]},
+                "profile": "compact"
+            }),
+        ),
+        (
+            "architecture.overview",
+            "fresh_bounded_architecture",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "response_profile": "compact"
+            }),
+        ),
+        (
+            "architecture.cycles",
+            "fresh_static_cycle_projection",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "projection": {"relations": ["calls"], "level": "symbol"},
+                "max_cycles": 20,
+                "response_profile": "compact"
+            }),
+        ),
+        (
+            "code.dead",
+            "fresh_partial_entry_model",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "entry_point_policy": "standard",
+                "response_profile": "compact"
+            }),
+        ),
+        (
+            "history.compare",
+            "retained_generation_comparison",
+            json!({
+                "repository": repository(),
+                "base": base.generation,
+                "head": head.generation,
+                "max_results": 20,
+                "profile": "compact"
+            }),
+        ),
+        (
+            "plan.change",
+            "bounded_bug_fix_plan",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "objective": "bug_fix",
+                "objective_text": "adjust the bounded fixture behavior",
+                "targets": [{"symbol_id": symbol()}],
+                "profile": "compact"
+            }),
+        ),
+        (
+            "context.pack",
+            "bounded_symbol_context",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "task": "explain the bounded fixture behavior",
+                "seeds": {"symbols": [symbol()]},
+                "token_budget": 4_500,
+                "response_profile": "compact"
+            }),
+        ),
+        (
+            "source.read",
+            "fresh_pinned_source",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "references": [{"source_ref": source_ref()}],
+                "include_line_numbers": true,
+                "encoding": "utf8_lossless_when_valid",
+                "response_profile": "compact"
+            }),
+        ),
+        (
+            "query.advanced",
+            "bounded_closed_scan",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "query": {"op": "scan", "entity": "function"},
+                "max_results": 100,
+                "max_depth": 5,
+                "cost_limit": 10_000_000
+            }),
+        ),
+        (
+            "query.batch",
+            "single_generation_composition",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "operations": [{
+                    "id": "locate",
+                    "tool": "code.locate",
+                    "arguments": {
+                        "query": "answer",
+                        "search_modes": ["exact"],
+                        "max_results": 10
+                    }
+                }],
+                "response_profile": "compact"
+            }),
+        ),
+    ];
+
+    for (tool, state, arguments) in cases {
+        let outcome = call_tool(
+            &format!("matrix.{}", tool.replace('.', "-")),
+            process,
+            catalog,
+            transcript,
+            tool,
+            arguments,
+        )?;
+        record_matrix_read(
+            &mut cells,
+            tool,
+            state,
+            outcome,
+            Some((&head.repository, &head.generation)),
+        )?;
+    }
+
+    let observed = cells.iter().map(|cell| cell.tool).collect::<BTreeSet<_>>();
+    let expected = EXPECTED_TOOLS.into_iter().collect::<BTreeSet<_>>();
+    if observed != expected || cells.len() != EXPECTED_TOOLS.len() {
+        return Err(VerticalError::Invariant(
+            "complete tool matrix omitted or duplicated a public tool",
+        ));
+    }
+
+    Ok(ToolMatrixEvidence {
+        schema_version: "1.0",
+        exact_tool_count: EXPECTED_TOOLS.len(),
+        executed_cell_count: cells.len(),
+        unexecuted_applicable_cells: 0,
+        input_and_output_schema_validation: true,
+        source_free_transcript: true,
+        cells,
+    })
+}
+
+fn record_matrix_read(
+    cells: &mut Vec<ToolMatrixCell>,
+    tool: &'static str,
+    state: &'static str,
+    outcome: ToolOutcome,
+    expected_identity: Option<(&str, &str)>,
+) -> Result<(), VerticalError> {
+    require_tool_success(&outcome, tool)?;
+    require_matrix_read_contract(&outcome.structured)?;
+    let identity = if let Some((repository, generation)) = expected_identity {
+        assert_read_correlation(&outcome.structured, repository, generation)?;
+        "matched_exact_repository_generation"
+    } else {
+        "not_applicable_catalog_snapshot"
+    };
+    cells.push(ToolMatrixCell {
+        tool,
+        state,
+        outcome: "success",
+        requested_profile: "compact",
+        identity,
+        completeness: "validated",
+        usage: "measured_nonplaceholder",
+        input_schema_validated: true,
+        output_schema_validated: true,
+        transcript_timing_recorded: true,
+    });
+    Ok(())
+}
+
+fn require_matrix_read_contract(structured: &Value) -> Result<(), VerticalError> {
+    if !structured["completeness"]["state"].is_string()
+        || !structured["completeness"]["limiting_resources"].is_array()
+        || !structured["truncated"].is_boolean()
+        || structured.get("next_cursor").is_none()
+    {
+        return Err(VerticalError::Invariant(
+            "matrix read result omitted completeness or continuation state",
+        ));
+    }
+    require_matrix_usage(structured)
+}
+
+fn require_matrix_usage(structured: &Value) -> Result<(), VerticalError> {
+    let usage = &structured["usage"];
+    for counter in [
+        "rows",
+        "edges",
+        "source_bytes",
+        "json_bytes",
+        "estimated_tokens",
+        "wall_time_ms",
+    ] {
+        if !usage[counter].is_u64() {
+            return Err(VerticalError::Invariant(
+                "matrix read result omitted measured usage",
+            ));
+        }
+    }
+    if usage["json_bytes"].as_u64() == Some(0)
+        || usage["estimated_tokens"].as_u64() == Some(0)
+        || usage["trace_id"]
+            .as_str()
+            .is_none_or(|trace_id| trace_id.is_empty())
+    {
+        return Err(VerticalError::Invariant(
+            "matrix read result retained placeholder usage",
+        ));
+    }
+    Ok(())
 }
 
 fn exercise_nested_ignore_policy(
@@ -3731,6 +4159,7 @@ struct Summary {
     environment: EnvironmentEvidence,
     fixture: FixtureEvidence,
     catalog: CatalogEvidence,
+    tool_matrix: ToolMatrixEvidence,
     process_safety: ProcessSafetyEvidence,
     generations: GenerationEvidence,
     measurements: MeasurementEvidence,
@@ -3831,6 +4260,31 @@ struct CatalogEvidence {
     process_mutations_exercised: [&'static str; 1],
     lower_layer_only_coverage: [&'static str; 4],
     lower_layer_reason: &'static str,
+}
+
+#[derive(Serialize)]
+struct ToolMatrixEvidence {
+    schema_version: &'static str,
+    exact_tool_count: usize,
+    executed_cell_count: usize,
+    unexecuted_applicable_cells: usize,
+    input_and_output_schema_validation: bool,
+    source_free_transcript: bool,
+    cells: Vec<ToolMatrixCell>,
+}
+
+#[derive(Serialize)]
+struct ToolMatrixCell {
+    tool: &'static str,
+    state: &'static str,
+    outcome: &'static str,
+    requested_profile: &'static str,
+    identity: &'static str,
+    completeness: &'static str,
+    usage: &'static str,
+    input_schema_validated: bool,
+    output_schema_validated: bool,
+    transcript_timing_recorded: bool,
 }
 
 #[derive(Serialize)]
