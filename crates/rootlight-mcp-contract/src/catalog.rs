@@ -140,7 +140,7 @@ impl McpTool {
                 "Use bounded attached process-local structural generation creation for one whole repository in auto or structural mode; the call terminates within 30 seconds, each public call creates a fresh operation, internal retries reuse an operation, success is atomically queryable, and restart requires reindexing."
             }
             Self::RepoStatus => {
-                "Use bounded process-local status with the active generation and compact coverage; operation projection and freshness gates are unsupported."
+                "Use bounded process-local active or exact-generation status with coverage, operations, and freshness gates; coverage is compact summary or language detail, operation projection is bounded, and custom budgets and expanded response profiles are unsupported."
             }
             Self::RepoList => {
                 "Use an immutable catalog snapshot with bounded display-name or alias and lifecycle-state filters, deterministic ordering, and authenticated continuation; workspace grouping and expanded profiles are unsupported."

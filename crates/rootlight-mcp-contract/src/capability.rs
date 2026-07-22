@@ -1405,7 +1405,7 @@ const fn input_shape_hash(tool: McpTool) -> &'static str {
         McpTool::ContextPack => "788f06bf0d8c6ec9718fcf76319af6bb1f7ce470dfa182476265be343b228d4b",
         McpTool::SourceRead => "df1472b995ed8d489d9abafb8adc95ab0b5da699beb3ed29dcc16b7293de32f8",
         McpTool::QueryAdvanced => {
-            "d36c896849df560f106e59b4ddbe27259dfa93071481572edb909698e348d77e"
+            "2e8e0b28deda82821ecc8cacd45b424929303bb5ccca057e89cabfc1552aaa3b"
         }
         McpTool::QueryBatch => "7a9e82cf00569c6df57b9cf733703517e918ce5fbc0143c88c61514ef82fb927",
     }
@@ -1415,7 +1415,7 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
     match tool {
         McpTool::RepoIndex => "bounded attached process-local structural generation creation",
         McpTool::RepoStatus => {
-            "bounded process-local status with the active generation and compact coverage"
+            "bounded process-local active or exact-generation status with coverage, operations, and freshness gates"
         }
         McpTool::RepoList => {
             "immutable catalog snapshot with bounded display-name or alias and lifecycle-state filters"
