@@ -1,7 +1,7 @@
 //! Process-boundary coverage for the Rootlight MCP stdio bridge.
 
 use std::{
-    io::Write,
+    io::{BufRead, BufReader, Write},
     process::{Command, Output, Stdio},
 };
 
@@ -74,6 +74,107 @@ fn invalid_message_limit_exits_with_only_a_static_stderr_category() {
             .iter()
             .all(|response| response["error"]["code"] == -32_700)
     );
+}
+
+#[test]
+fn repo_list_cursor_failures_share_the_public_restart_contract() {
+    let cursors = [
+        String::new(),
+        "A".repeat(4_097),
+        "\u{1f4a1}".repeat(1_025),
+        "c2.A".to_owned(),
+    ];
+    let expected_error = serde_json::json!({
+        "code": "INVALID_CURSOR",
+        "message": "pagination cursor is invalid or expired",
+        "retryable": false,
+        "retry_after_ms": null,
+        "repository": null,
+        "operation": null,
+        "generation": null,
+        "details": {},
+        "next_actions": [{"action": "restart_enumeration"}]
+    });
+
+    for (index, cursor) in cursors.into_iter().enumerate() {
+        let (initialize, response, output) = run_initialized_call(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": format!("cursor-{index}"),
+            "method": "tools/call",
+            "params": {"name": "repo.list", "arguments": {"cursor": cursor}}
+        }));
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(initialize["id"], "initialize");
+        assert_eq!(
+            response["result"]["isError"], true,
+            "unexpected response: {response:#?}"
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["error"],
+            expected_error
+        );
+    }
+}
+
+fn run_initialized_call(request: Value) -> (Value, Value, Output) {
+    let isolated = tempfile::tempdir().expect("isolated MCP runtime root is available");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"))
+        .arg("--transport-only")
+        .env("ROOTLIGHT_STATE_DIR", isolated.path().join("state"))
+        .env("ROOTLIGHT_RUNTIME_DIR", isolated.path().join("runtime"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("MCP fixture process starts");
+    let mut stdin = child.stdin.take().expect("fixture stdin is piped");
+    let stdout = child.stdout.take().expect("fixture stdout is piped");
+    let mut stdout = BufReader::new(stdout);
+
+    write_message(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "initialize",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "cursor-fixture", "version": "1.0"}
+            }
+        }),
+    );
+    let initialize = read_response(&mut stdout);
+    write_message(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    );
+    write_message(&mut stdin, &request);
+    let response = read_response(&mut stdout);
+
+    drop(stdin);
+    drop(stdout);
+    let output = child
+        .wait_with_output()
+        .expect("MCP fixture process terminates");
+    (initialize, response, output)
+}
+
+fn write_message(writer: &mut impl Write, message: &Value) {
+    serde_json::to_writer(&mut *writer, message).expect("fixture message serializes");
+    writer.write_all(b"\n").expect("fixture message terminates");
+    writer.flush().expect("fixture message flushes");
+}
+
+fn read_response(reader: &mut impl BufRead) -> Value {
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("fixture response reads");
+    serde_json::from_str(&line).expect("fixture response is valid JSON")
 }
 
 fn run_process(input: &[u8]) -> Output {
