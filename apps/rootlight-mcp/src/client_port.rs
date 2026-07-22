@@ -8,9 +8,10 @@ use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time:
 use rootlight_client::{
     AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles, ArchitectureOverview,
     ChangeImpact, Client, ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace,
-    GenerationSelector, HistoryCompare, LocateMode, PlanChange, RepositoryIndex, RepositoryList,
-    RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, RequestTimeout,
-    SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
+    GenerationSelector, HistoryCompare, LocateMode, PlanChange, RepositoryCatalogPage,
+    RepositoryCatalogPageRequest, RepositoryIndex, RepositoryOperationAction,
+    RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceRead, SourceReference,
+    SymbolExplain, SymbolRelationships, TestsSelect,
 };
 use rootlight_ids::{FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
@@ -27,7 +28,7 @@ use crate::{
     FlowTracePortResponse, HistoryComparePortRequest, HistoryComparePortResponse,
     OperationStatusPortRequest, PlanChangePortRequest, PlanChangePortResponse,
     QueryAdvancedPortRequest, QueryAdvancedPortResponse, ReadResponseMetadata,
-    RepositoryIndexPortRequest, RepositoryIndexPortResponse, RepositoryListPortRequest,
+    RepositoryCatalogPagePortRequest, RepositoryIndexPortRequest, RepositoryIndexPortResponse,
     RepositoryStatusPortRequest, RequestCancellation, SourceReadPortRequest,
     SourceReadPortResponse, SymbolExplainPortRequest, SymbolExplainPortResponse,
     SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse, TestsSelectPortRequest,
@@ -85,12 +86,11 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<SourceRead>;
 
-    fn repository_list(
+    fn repository_catalog_page(
         &self,
-        max_results: Option<u32>,
-        query: Option<String>,
+        request: RepositoryCatalogPageRequest,
         timeout: RequestTimeout,
-    ) -> AsyncClientFuture<RepositoryList>;
+    ) -> AsyncClientFuture<RepositoryCatalogPage>;
 
     fn repository_status(
         &self,
@@ -350,16 +350,15 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         })
     }
 
-    fn repository_list(
+    fn repository_catalog_page(
         &self,
-        max_results: Option<u32>,
-        query: Option<String>,
+        request: RepositoryCatalogPageRequest,
         timeout: RequestTimeout,
-    ) -> AsyncClientFuture<RepositoryList> {
+    ) -> AsyncClientFuture<RepositoryCatalogPage> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .repository_list_async(max_results, query.as_deref(), timeout)
+                .repository_catalog_page_async(&request, timeout)
                 .await
         })
     }
@@ -814,19 +813,15 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
         })
     }
 
-    fn repository_list(
+    fn repository_catalog_page(
         &self,
-        request: RepositoryListPortRequest,
+        request: RepositoryCatalogPagePortRequest,
         _cancellation: RequestCancellation,
-    ) -> ClientPortFuture<RepositoryList> {
+    ) -> ClientPortFuture<RepositoryCatalogPage> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .repository_list(
-                    request.max_results(),
-                    request.query().map(str::to_owned),
-                    request_timeout()?,
-                )
+                .repository_catalog_page(request, request_timeout()?)
                 .await
                 .map_err(map_client_error)
         })
@@ -1151,11 +1146,11 @@ impl FirstSliceClientPort for UnavailableFirstSliceClientPort {
         unavailable()
     }
 
-    fn repository_list(
+    fn repository_catalog_page(
         &self,
-        _request: RepositoryListPortRequest,
+        _request: RepositoryCatalogPagePortRequest,
         _cancellation: RequestCancellation,
-    ) -> ClientPortFuture<RepositoryList> {
+    ) -> ClientPortFuture<RepositoryCatalogPage> {
         unavailable()
     }
 
@@ -1401,6 +1396,7 @@ fn map_client_error(error: ClientError) -> ClientPortError {
         | ClientError::InvalidPublicError => ClientPortError::InvalidResponse,
         ClientError::ResponseAllocationFailed
         | ClientError::InvalidFirstSliceRequest
+        | ClientError::InvalidRepositoryCatalogRequest
         | ClientError::InvalidSourceReference
         | ClientError::InvalidRequestTimeout
         | ClientError::InvalidOperationTiming

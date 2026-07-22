@@ -12,10 +12,11 @@ use rootlight_client::{
     FlowTraceFrontier, FlowTraceProjection, GenerationSelector, HistoryArchitectureDelta,
     HistoryCompare, HistoryMatchedStates, LocateMode, OperationKind, OperationStage,
     OperationState, PlanChange, PlanChangeContextPack, PlanChangeImpactSummary, QueryContext,
-    QueryUsage, RecoveryClass, RepositoryCoverageEntry, RepositoryIndex, RepositoryList,
-    RepositoryListEntry, RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus,
-    RequestTimeout, SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships,
-    TestsSelect, TestsSelectCoverageStrategy,
+    QueryUsage, RecoveryClass, RepositoryCatalogEntry, RepositoryCatalogFreshness,
+    RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId,
+    RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex, RepositoryOperationAction,
+    RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceChunk, SourceRead,
+    SourceReference, SymbolExplain, SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -33,7 +34,10 @@ use super::{
     AsyncClientFuture, AsyncFirstSliceClient, FIRST_SLICE_PROVIDER, NativeFirstSliceClientPort,
     UnavailableFirstSliceClientPort, map_client_error,
 };
-use crate::{FirstSliceToolExecutor, RequestCancellation, ToolExecutionFailure, ToolExecutor};
+use crate::{
+    FirstSliceClientPort, FirstSliceToolExecutor, RequestCancellation, ToolExecutionFailure,
+    ToolExecutor,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Call {
@@ -70,9 +74,8 @@ enum Call {
         references: Vec<SourceReference>,
         timeout: RequestTimeout,
     },
-    RepositoryList {
-        max_results: Option<u32>,
-        query: Option<String>,
+    RepositoryCatalogPage {
+        request: RepositoryCatalogPageRequest,
         timeout: RequestTimeout,
     },
     RepositoryStatus {
@@ -355,27 +358,34 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         })
     }
 
-    fn repository_list(
+    fn repository_catalog_page(
         &self,
-        max_results: Option<u32>,
-        query: Option<String>,
+        request: RepositoryCatalogPageRequest,
         timeout: RequestTimeout,
-    ) -> AsyncClientFuture<RepositoryList> {
-        self.record(Call::RepositoryList {
-            max_results,
-            query,
-            timeout,
-        });
+    ) -> AsyncClientFuture<RepositoryCatalogPage> {
+        let snapshot_id = request
+            .snapshot_id()
+            .unwrap_or(RepositoryCatalogSnapshotId::from_bytes([8; 32]));
+        self.record(Call::RepositoryCatalogPage { request, timeout });
         Box::pin(async move {
-            Ok(RepositoryList {
-                repositories: vec![RepositoryListEntry {
+            Ok(RepositoryCatalogPage {
+                repositories: vec![RepositoryCatalogEntry {
                     repository_id: repository(),
-                    active_generation: generation(),
+                    display_name: "fixture".to_owned(),
+                    alias: None,
+                    active_generation: Some(generation()),
+                    generation_count: 1,
+                    state: RepositoryCatalogState::Ready,
                     languages: vec!["rust".to_owned()],
-                    structural_freshness: "current".to_owned(),
-                    semantic_freshness: "current".to_owned(),
-                    state: "ready".to_owned(),
+                    structural_freshness: RepositoryCatalogFreshness::Current,
+                    semantic_freshness: RepositoryCatalogFreshness::Current,
+                    coverage: Vec::new(),
                 }],
+                snapshot_id,
+                next_after: None,
+                total_count: Some(1),
+                truncated: false,
+                sort_version: 1,
             })
         })
     }
@@ -942,6 +952,45 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
 }
 
 #[tokio::test]
+async fn native_port_forwards_the_typed_catalog_continuation() {
+    let fake = FakeAsyncClient::default();
+    let calls = Arc::clone(&fake.calls);
+    let port = NativeFirstSliceClientPort::with_client(fake);
+    let mut sort_key = Vec::new();
+    sort_key.extend_from_slice(&1_u16.to_le_bytes());
+    sort_key.push(b'x');
+    sort_key.extend_from_slice(repository().as_bytes());
+    let request = RepositoryCatalogPageRequest::new(
+        37,
+        Some("Straße"),
+        Some(&[RepositoryCatalogState::Ready]),
+        Some(RepositoryCatalogSnapshotId::from_bytes([8; 32])),
+        Some(
+            rootlight_client::RepositoryCatalogSortKey::from_bytes(&sort_key)
+                .expect("test sort key is valid"),
+        ),
+    )
+    .expect("test catalog request is valid");
+
+    let response =
+        FirstSliceClientPort::repository_catalog_page(&port, request.clone(), cancellation())
+            .await
+            .expect("native port forwards the catalog request");
+    assert_eq!(
+        response.snapshot_id,
+        RepositoryCatalogSnapshotId::from_bytes([8; 32])
+    );
+    let calls = calls.lock().expect("fake call recorder is not poisoned");
+    assert!(matches!(
+        calls.as_slice(),
+        [Call::RepositoryCatalogPage {
+            request: observed,
+            ..
+        }] if observed == &request
+    ));
+}
+
+#[tokio::test]
 async fn unavailable_port_returns_transport_for_every_tool() {
     let executor =
         FirstSliceToolExecutor::new(UnavailableFirstSliceClientPort).expect("executor initializes");
@@ -985,6 +1034,10 @@ fn client_errors_map_to_source_free_port_classes() {
     );
     assert_eq!(
         map_client_error(ClientError::InvalidFirstSliceRequest),
+        crate::ClientPortError::Executor
+    );
+    assert_eq!(
+        map_client_error(ClientError::InvalidRepositoryCatalogRequest),
         crate::ClientPortError::Executor
     );
 }

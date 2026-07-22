@@ -42,11 +42,14 @@ use rootlight_client::{
     PlanChangeContextPack as ClientPlanContextPack, PlanChangeDecision as ClientPlanDecision,
     PlanChangeImpactSummary as ClientPlanImpactSummary, PlanChangeStep as ClientPlanStep,
     QueryContext, QueryUsage, RecoveryClass, RelationshipGroup as ClientRelationshipGroup,
-    RelationshipTarget as ClientRelationshipTarget, RepositoryCoverageEntry, RepositoryList,
-    RepositoryListEntry, RepositoryStatus, SourceChunk as ClientSourceChunk,
-    SymbolExplanation as ClientExplanation, SymbolRelationships as ClientRelationships,
-    TestsSelect as ClientTestsSelect, TestsSelectCoverageStrategy as ClientCoverageStrategy,
-    TestsSelectGap as ClientTestGap, TestsSelectRankedTest as ClientRankedTest,
+    RelationshipTarget as ClientRelationshipTarget, RepositoryCatalogEntry,
+    RepositoryCatalogFreshness, RepositoryCatalogPage, RepositoryCatalogPageRequest,
+    RepositoryCatalogSnapshotId, RepositoryCatalogSortKey, RepositoryCatalogState,
+    RepositoryCoverageEntry, RepositoryList, RepositoryListEntry, RepositoryStatus,
+    SourceChunk as ClientSourceChunk, SymbolExplanation as ClientExplanation,
+    SymbolRelationships as ClientRelationships, TestsSelect as ClientTestsSelect,
+    TestsSelectCoverageStrategy as ClientCoverageStrategy, TestsSelectGap as ClientTestGap,
+    TestsSelectRankedTest as ClientRankedTest,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{
@@ -97,6 +100,9 @@ enum FakeOutcome {
     SymbolExplain(Result<SymbolExplainPortResponse, ClientPortError>),
     SourceRead(Result<SourceReadPortResponse, ClientPortError>),
     RepositoryList(Result<RepositoryList, ClientPortError>),
+    RepositoryCatalogPageSequence(
+        Arc<Mutex<VecDeque<Result<RepositoryCatalogPage, ClientPortError>>>>,
+    ),
     RepositoryStatus(Result<RepositoryStatus, ClientPortError>),
     SymbolRelationships(Result<SymbolRelationshipsPortResponse, ClientPortError>),
     FlowTrace(Result<FlowTracePortResponse, ClientPortError>),
@@ -124,7 +130,7 @@ enum ObservedCall {
     CodeLocate(CodeLocatePortRequest),
     SymbolExplain(SymbolExplainPortRequest),
     SourceRead(SourceReadPortRequest),
-    RepositoryList(RepositoryListPortRequest),
+    RepositoryList(RepositoryCatalogPagePortRequest),
     RepositoryStatus(RepositoryStatusPortRequest),
     SymbolRelationships(SymbolRelationshipsPortRequest),
     FlowTrace(FlowTracePortRequest),
@@ -160,6 +166,188 @@ impl FakePort {
             .lock()
             .expect("fake call recorder is not poisoned")
             .push(call);
+    }
+}
+
+fn catalog_page_for_fixture(
+    list: RepositoryList,
+    request: &RepositoryCatalogPageRequest,
+) -> Result<RepositoryCatalogPage, ClientPortError> {
+    let snapshot_id = fixture_catalog_snapshot(&list.repositories);
+    if request
+        .snapshot_id()
+        .is_some_and(|requested| requested != snapshot_id)
+    {
+        return Err(ClientPortError::Public(Box::new(authoritative_error(
+            MappedDomainFailure::invalid_cursor(),
+        ))));
+    }
+    let display_name = request
+        .normalized_query()
+        .map(str::to_owned)
+        .unwrap_or_else(|| "repository".to_owned());
+    let mut repositories: Vec<_> = list
+        .repositories
+        .into_iter()
+        .map(|entry| RepositoryCatalogEntry {
+            repository_id: entry.repository_id,
+            display_name: display_name.clone(),
+            alias: None,
+            active_generation: Some(entry.active_generation),
+            generation_count: 1,
+            state: fixture_catalog_state(&entry.state),
+            languages: entry.languages,
+            structural_freshness: fixture_catalog_freshness(&entry.structural_freshness),
+            semantic_freshness: fixture_catalog_freshness(&entry.semantic_freshness),
+            coverage: Vec::new(),
+        })
+        .filter(|entry| {
+            request
+                .states()
+                .is_none_or(|states| states.contains(&entry.state))
+        })
+        .collect();
+    repositories.sort_by(|left, right| {
+        left.display_name
+            .cmp(&right.display_name)
+            .then_with(|| left.repository_id.cmp(&right.repository_id))
+    });
+    let total_count =
+        u64::try_from(repositories.len()).expect("test repository catalog is bounded");
+    let start = if let Some(after) = request.after() {
+        repositories
+            .iter()
+            .position(|entry| {
+                fixture_catalog_sort_key(entry).is_ok_and(|key| key.as_bytes() == after.as_bytes())
+            })
+            .map(|index| index.saturating_add(1))
+            .ok_or_else(|| {
+                ClientPortError::Public(Box::new(authoritative_error(
+                    MappedDomainFailure::invalid_cursor(),
+                )))
+            })?
+    } else {
+        0
+    };
+    let end = start
+        .saturating_add(usize::from(request.page_size()))
+        .min(repositories.len());
+    let page = repositories
+        .get(start..end)
+        .expect("bounded test page range exists")
+        .to_vec();
+    let truncated = end < repositories.len();
+    let next_after = if truncated {
+        page.last().map(fixture_catalog_sort_key).transpose()?
+    } else {
+        None
+    };
+    Ok(RepositoryCatalogPage {
+        repositories: page,
+        snapshot_id,
+        next_after,
+        total_count: Some(total_count),
+        truncated,
+        sort_version: 1,
+    })
+}
+
+fn fixture_catalog_snapshot(entries: &[RepositoryListEntry]) -> RepositoryCatalogSnapshotId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.test.catalog-snapshot.v1");
+    hasher.update(
+        &u64::try_from(entries.len())
+            .expect("test repository catalog is bounded")
+            .to_le_bytes(),
+    );
+    for entry in entries {
+        hasher.update(entry.repository_id.as_bytes());
+        hasher.update(entry.active_generation.as_bytes());
+    }
+    RepositoryCatalogSnapshotId::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn fixture_catalog_sort_key(
+    entry: &RepositoryCatalogEntry,
+) -> Result<RepositoryCatalogSortKey, ClientPortError> {
+    let name_length = u16::try_from(entry.display_name.len()).map_err(|_| {
+        ClientPortError::Public(Box::new(authoritative_error(
+            MappedDomainFailure::invalid_cursor(),
+        )))
+    })?;
+    let mut bytes = Vec::with_capacity(2 + entry.display_name.len() + 16);
+    bytes.extend_from_slice(&name_length.to_le_bytes());
+    bytes.extend_from_slice(entry.display_name.as_bytes());
+    bytes.extend_from_slice(entry.repository_id.as_bytes());
+    RepositoryCatalogSortKey::from_bytes(&bytes).map_err(|_| {
+        ClientPortError::Public(Box::new(authoritative_error(
+            MappedDomainFailure::invalid_cursor(),
+        )))
+    })
+}
+
+fn fixture_catalog_state(state: &str) -> RepositoryCatalogState {
+    match state {
+        "ready" => RepositoryCatalogState::Ready,
+        "indexing" => RepositoryCatalogState::Indexing,
+        "corrupt" => RepositoryCatalogState::Corrupt,
+        "migration_required" => RepositoryCatalogState::MigrationRequired,
+        "rebuild_required" => RepositoryCatalogState::RebuildRequired,
+        _ => RepositoryCatalogState::Degraded,
+    }
+}
+
+fn fixture_catalog_freshness(freshness: &str) -> RepositoryCatalogFreshness {
+    match freshness {
+        "current" => RepositoryCatalogFreshness::Current,
+        "superseded" => RepositoryCatalogFreshness::Superseded,
+        _ => RepositoryCatalogFreshness::Stale,
+    }
+}
+
+fn catalog_entry(marker: u8, display_name: &str) -> RepositoryCatalogEntry {
+    RepositoryCatalogEntry {
+        repository_id: RepositoryId::from_bytes([marker; 16]),
+        display_name: display_name.to_owned(),
+        alias: Some(format!("{display_name}-alias")),
+        active_generation: Some(GenerationId::from_bytes([marker; 20])),
+        generation_count: u64::from(marker),
+        state: RepositoryCatalogState::Ready,
+        languages: vec!["rust".to_owned()],
+        structural_freshness: RepositoryCatalogFreshness::Current,
+        semantic_freshness: RepositoryCatalogFreshness::Superseded,
+        coverage: vec![RepositoryCoverageEntry {
+            language: "rust".to_owned(),
+            tier: "tier_c".to_owned(),
+            status: "bounded".to_owned(),
+            discovered_files: 3,
+            indexed_files: 2,
+        }],
+    }
+}
+
+fn catalog_page(
+    snapshot: [u8; 32],
+    repositories: Vec<RepositoryCatalogEntry>,
+    total_count: u64,
+    truncated: bool,
+) -> RepositoryCatalogPage {
+    let next_after = truncated
+        .then(|| {
+            repositories
+                .last()
+                .expect("a truncated test page has a last entry")
+        })
+        .map(fixture_catalog_sort_key)
+        .transpose()
+        .expect("test catalog sort key is valid");
+    RepositoryCatalogPage {
+        repositories,
+        snapshot_id: RepositoryCatalogSnapshotId::from_bytes(snapshot),
+        next_after,
+        total_count: Some(total_count),
+        truncated,
+        sort_version: 1,
     }
 }
 
@@ -248,14 +436,22 @@ impl FirstSliceClientPort for FakePort {
         Box::pin(async move { outcome })
     }
 
-    fn repository_list(
+    fn repository_catalog_page(
         &self,
-        request: RepositoryListPortRequest,
+        request: RepositoryCatalogPagePortRequest,
         _cancellation: RequestCancellation,
-    ) -> ClientPortFuture<RepositoryList> {
+    ) -> ClientPortFuture<RepositoryCatalogPage> {
+        let catalog_request = request.clone();
         self.record(ObservedCall::RepositoryList(request));
         let outcome = match &self.outcome {
-            FakeOutcome::RepositoryList(outcome) => outcome.clone(),
+            FakeOutcome::RepositoryList(outcome) => outcome
+                .clone()
+                .and_then(|list| catalog_page_for_fixture(list, &catalog_request)),
+            FakeOutcome::RepositoryCatalogPageSequence(outcomes) => outcomes
+                .lock()
+                .expect("fake catalog response sequence is not poisoned")
+                .pop_front()
+                .unwrap_or(Err(ClientPortError::Executor)),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -2265,6 +2461,97 @@ async fn repo_list_maps_registered_repositories() {
         output.data.repositories[0].active_generation.0,
         Some(generation())
     );
+    assert_eq!(output.data.repositories[0].display_name, "repository");
+    assert_eq!(output.data.repositories[0].generation_count, 1);
+    assert_eq!(output.usage.rows, 1);
+    assert!(output.snapshot_id.as_str().starts_with("catalog1_"));
+}
+
+#[tokio::test]
+async fn repo_list_empty_catalog_is_a_success_with_exact_accounting() {
+    let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
+        repositories: Vec::new(),
+    })));
+    let output = execute(
+        &harness.executor,
+        VerticalTool::RepoList,
+        json!({"max_results": 200}),
+    )
+    .await
+    .expect("an empty catalog is a successful page");
+    let serialized =
+        serde_json::to_vec(&Value::Object(output.clone())).expect("catalog response serializes");
+    let json_bytes = output["usage"]["json_bytes"]
+        .as_u64()
+        .expect("json byte count is numeric");
+    let estimated_tokens = output["usage"]["estimated_tokens"]
+        .as_u64()
+        .expect("token estimate is numeric");
+
+    assert_eq!(output["schema_version"], "2.0");
+    assert_eq!(output["data"]["repositories"], json!([]));
+    assert_eq!(output["data"]["total_count"], 0);
+    assert_eq!(output["truncated"], false);
+    assert!(output["next_cursor"].is_null());
+    assert_eq!(output["usage"]["rows"], 0);
+    assert!(
+        output["usage"]["wall_time_ms"]
+            .as_u64()
+            .is_some_and(|elapsed| elapsed >= 1),
+        "elapsed time is measured through mapping and accounting stabilization"
+    );
+    assert_eq!(
+        json_bytes,
+        u64::try_from(serialized.len()).expect("test response size fits u64")
+    );
+    assert!(
+        json_bytes >= 100,
+        "the fixed point must cross the one-to-three digit byte boundary"
+    );
+    assert_eq!(
+        estimated_tokens,
+        rootlight_mcp_contract::accounting::estimate_tokens(serialized.len())
+    );
+    assert!(output.get("repository").is_none());
+    assert!(output.get("generation").is_none());
+    assert!(output.get("coverage").is_none());
+    assert_eq!(output["usage"]["trace_id"], "catalog-page");
+    assert!(!String::from_utf8_lossy(&serialized).contains("C:\\"));
+    assert!(!String::from_utf8_lossy(&serialized).contains("/Users/"));
+}
+
+#[tokio::test]
+async fn repo_list_exact_page_boundary_has_no_continuation() {
+    let entries = (1..=2)
+        .map(|marker| RepositoryListEntry {
+            repository_id: RepositoryId::from_bytes([marker; 16]),
+            active_generation: generation(),
+            languages: vec!["rust".to_owned()],
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
+            state: "ready".to_owned(),
+        })
+        .collect();
+    let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
+        repositories: entries,
+    })));
+    let output: RepoListOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({"max_results": 2}),
+        )
+        .await
+        .expect("exact-boundary page maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected repo list success");
+    };
+    assert_eq!(output.data.repositories.len(), 2);
+    assert_eq!(output.data.total_count, 2);
+    assert!(!output.truncated);
+    assert!(output.next_cursor.0.is_none());
+    assert_eq!(output.usage.rows, 2);
 }
 
 #[tokio::test]
@@ -2282,7 +2569,12 @@ async fn repo_list_paginates_with_authenticated_cursor() {
         .collect();
     assert_eq!(
         registered,
-        std::collections::BTreeSet::from([("repo.list", "cursor"), ("repo.list", "max_results")])
+        std::collections::BTreeSet::from([
+            ("repo.list", "cursor"),
+            ("repo.list", "max_results"),
+            ("repo.list", "query"),
+            ("repo.list", "states")
+        ])
     );
 
     let entries: Vec<RepositoryListEntry> = (0..3u8)
@@ -2337,24 +2629,154 @@ async fn repo_list_paginates_with_authenticated_cursor() {
     );
     assert!(!second.truncated);
     assert!(second.next_cursor.0.is_none());
+    assert_eq!(second.usage.rows, 1);
+}
+
+#[tokio::test]
+async fn pinned_catalog_continuation_ignores_a_new_live_order() {
+    let snapshot = [17; 32];
+    let responses = VecDeque::from([
+        Ok(catalog_page(
+            snapshot,
+            vec![catalog_entry(1, "same"), catalog_entry(2, "same")],
+            3,
+            true,
+        )),
+        // A newly inserted live entry that sorts before marker 3 is absent:
+        // the daemon responds from the snapshot pinned by page one.
+        Ok(catalog_page(
+            snapshot,
+            vec![catalog_entry(3, "same")],
+            3,
+            false,
+        )),
+    ]);
+    let harness = Harness::with_cursor_key(
+        FakeOutcome::RepositoryCatalogPageSequence(Arc::new(Mutex::new(responses))),
+        [7; 32],
+    );
+    let first: RepoListOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({"max_results": 2}),
+        )
+        .await
+        .expect("first snapshot page maps"),
+    );
+    let ToolResponse::Success(first) = first else {
+        panic!("expected first page success");
+    };
+    let cursor = first.next_cursor.0.expect("first page continues");
+    let second: RepoListOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({"max_results": 2, "cursor": cursor.as_str()}),
+        )
+        .await
+        .expect("pinned continuation maps"),
+    );
+    let ToolResponse::Success(second) = second else {
+        panic!("expected final page success");
+    };
+    let ids: Vec<_> = first
+        .data
+        .repositories
+        .iter()
+        .chain(&second.data.repositories)
+        .map(|entry| entry.repository_id)
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            RepositoryId::from_bytes([1; 16]),
+            RepositoryId::from_bytes([2; 16]),
+            RepositoryId::from_bytes([3; 16])
+        ],
+        "equal display names remain ordered by repository identity without duplicates"
+    );
+    assert_eq!(first.snapshot_id, second.snapshot_id);
+
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    let Some(ObservedCall::RepositoryList(continuation)) = calls.get(1) else {
+        panic!("second call is a catalog continuation");
+    };
+    assert_eq!(
+        continuation.snapshot_id(),
+        Some(RepositoryCatalogSnapshotId::from_bytes(snapshot))
+    );
+    assert!(continuation.after().is_some());
 }
 
 #[test]
 fn repo_list_query_normalization_is_case_folded_and_canonical() {
-    assert_eq!(
-        normalize_repo_list_query(Some("Straße".to_owned())),
-        Some("strasse".to_owned())
+    let normalized = |query: Option<&str>| {
+        RepositoryCatalogPageRequest::new(20, query, None, None, None)
+            .expect("test query is valid")
+            .normalized_query()
+            .map(str::to_owned)
+    };
+    assert_eq!(normalized(Some("Straße")), Some("strasse".to_owned()));
+    assert_eq!(normalized(Some("STRASSE")), Some("strasse".to_owned()));
+    assert_eq!(normalized(Some("e\u{301}")), normalized(Some("é")));
+    assert_eq!(normalized(Some("")), None);
+    assert_eq!(normalized(None), None);
+}
+
+#[tokio::test]
+async fn repo_list_forwards_canonical_query_and_state_filters() {
+    let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
+        repositories: vec![
+            RepositoryListEntry {
+                repository_id: RepositoryId::from_bytes([1; 16]),
+                active_generation: generation(),
+                languages: vec!["rust".to_owned()],
+                structural_freshness: "current".to_owned(),
+                semantic_freshness: "current".to_owned(),
+                state: "ready".to_owned(),
+            },
+            RepositoryListEntry {
+                repository_id: RepositoryId::from_bytes([2; 16]),
+                active_generation: generation(),
+                languages: vec!["rust".to_owned()],
+                structural_freshness: "current".to_owned(),
+                semantic_freshness: "stale".to_owned(),
+                state: "degraded".to_owned(),
+            },
+        ],
+    })));
+    let output: RepoListOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({
+                "query": "Straße",
+                "states": ["ready", "ready"],
+                "max_results": 10
+            }),
+        )
+        .await
+        .expect("filtered catalog page maps"),
     );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected catalog success");
+    };
+    assert_eq!(output.data.total_count, 1);
+    assert_eq!(output.data.repositories.len(), 1);
+    assert_eq!(output.data.repositories[0].state, RepositoryState::Ready);
+    assert_eq!(output.data.repositories[0].display_name, "strasse");
+    let ObservedCall::RepositoryList(request) = harness.only_call() else {
+        panic!("expected one catalog page call");
+    };
+    assert_eq!(request.normalized_query(), Some("strasse"));
     assert_eq!(
-        normalize_repo_list_query(Some("STRASSE".to_owned())),
-        Some("strasse".to_owned())
+        request.states(),
+        Some([RepositoryCatalogState::Ready].as_slice())
     );
-    assert_eq!(
-        normalize_repo_list_query(Some("e\u{301}".to_owned())),
-        normalize_repo_list_query(Some("é".to_owned()))
-    );
-    assert_eq!(normalize_repo_list_query(Some(String::new())), None);
-    assert_eq!(normalize_repo_list_query(None), None);
 }
 
 #[tokio::test]
@@ -2415,8 +2837,79 @@ async fn repo_list_cursor_accepts_equivalent_normalized_query() {
         let ObservedCall::RepositoryList(request) = call else {
             panic!("expected only repository list calls");
         };
-        assert_eq!(request.query(), Some("strasse"));
+        assert_eq!(request.normalized_query(), Some("strasse"));
     }
+}
+
+#[tokio::test]
+async fn repo_list_cursor_binds_query_and_state_presence_before_daemon_work() {
+    let entries: Vec<_> = (1..=3)
+        .map(|marker| RepositoryListEntry {
+            repository_id: RepositoryId::from_bytes([marker; 16]),
+            active_generation: generation(),
+            languages: vec!["rust".to_owned()],
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
+            state: "ready".to_owned(),
+        })
+        .collect();
+    let harness = Harness::with_cursor_key(
+        FakeOutcome::RepositoryList(Ok(RepositoryList {
+            repositories: entries,
+        })),
+        [7; 32],
+    );
+    let first: RepoListOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({"max_results": 2}),
+        )
+        .await
+        .expect("first page maps"),
+    );
+    let ToolResponse::Success(first) = first else {
+        panic!("expected first page success");
+    };
+    let cursor = first.next_cursor.0.expect("first page continues");
+
+    for (label, changed) in [
+        (
+            "query",
+            json!({"max_results": 2, "query": "other", "cursor": cursor.as_str()}),
+        ),
+        (
+            "explicit empty states",
+            json!({"max_results": 2, "states": [], "cursor": cursor.as_str()}),
+        ),
+        (
+            "state filter",
+            json!({"max_results": 2, "states": ["ready"], "cursor": cursor.as_str()}),
+        ),
+        (
+            "page size",
+            json!({"max_results": 3, "cursor": cursor.as_str()}),
+        ),
+    ] {
+        let error = execute(&harness.executor, VerticalTool::RepoList, changed)
+            .await
+            .expect_err(label);
+        let public = error
+            .public_error()
+            .expect("cursor context failure is public");
+        assert_eq!(public.code(), ErrorCode::InvalidCursor, "{label}");
+        assert!(
+            public
+                .next_actions()
+                .contains(&NextAction::RestartEnumeration),
+            "{label}"
+        );
+    }
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        1,
+        "context mismatches are authenticated before daemon lookup"
+    );
 }
 
 #[tokio::test]
@@ -2666,6 +3159,15 @@ async fn repo_list_cursor_is_rejected_after_catalog_snapshot_changes() {
             .code(),
         ErrorCode::InvalidCursor
     );
+    let public_json = serde_json::to_string(
+        error
+            .public_error()
+            .expect("snapshot failure is a checked public error"),
+    )
+    .expect("public error serializes");
+    assert!(!public_json.contains("C:\\"));
+    assert!(!public_json.contains("/Users/"));
+    assert!(!public_json.contains(&repository().to_string()));
 }
 
 #[tokio::test]
@@ -2681,8 +3183,12 @@ async fn every_repo_list_cursor_failure_category_maps_to_invalid_cursor() {
         })
         .collect();
     let signing_key = CursorSigningKey::deterministic([7; 32]).expect("test key is valid");
-    let snapshot = repo_list_snapshot_id(&entries);
-    let base = repo_list_cursor_context(None, 2, snapshot, signing_key.key_id);
+    let snapshot = *fixture_catalog_snapshot(&entries).as_bytes();
+    let plan_context =
+        rootlight_agent::explain::RepoListPlanContext::new(2, false, [], ResponseProfile::Compact)
+            .expect("test plan context is valid");
+    let plan = rootlight_agent::explain::repo_list_plan(&plan_context);
+    let base = repo_list_cursor_context(None, None, 2, snapshot, &plan, signing_key.key_id);
     let wire = |context: CursorContext, issued_at_ms| {
         AuthenticatedCursor::create(
             context,
@@ -2704,7 +3210,7 @@ async fn every_repo_list_cursor_failure_category_maps_to_invalid_cursor() {
     let mut wrong_key_id = base.clone();
     wrong_key_id.key_id = wrong_key_id.key_id.saturating_add(1);
     let mut wrong_tool_major = base.clone();
-    wrong_tool_major.tool_major_version = 2;
+    wrong_tool_major.tool_major_version = 1;
     let mut wrong_tool = base.clone();
     wrong_tool.tool = McpTool::RepoStatus;
     let mut wrong_repository = base.clone();
@@ -2712,7 +3218,7 @@ async fn every_repo_list_cursor_failure_category_maps_to_invalid_cursor() {
     let mut wrong_generation = base.clone();
     wrong_generation.generation = generation();
     let mut wrong_request = base.clone();
-    wrong_request.query_fingerprint = repo_list_fingerprint(Some("other"));
+    wrong_request.query_fingerprint = repo_list_fingerprint(Some("other"), None, 2);
     let mut wrong_plan = base.clone();
     wrong_plan.plan_fingerprint = [9; 32];
     let mut wrong_profile = base.clone();
@@ -2730,7 +3236,7 @@ async fn every_repo_list_cursor_failure_category_maps_to_invalid_cursor() {
         (
             "future issue time",
             wire(
-                repo_list_cursor_context(None, 2, snapshot, signing_key.key_id),
+                repo_list_cursor_context(None, None, 2, snapshot, &plan, signing_key.key_id),
                 now_unix_ms().saturating_add(60_000),
             ),
         ),
@@ -2767,6 +3273,11 @@ async fn every_repo_list_cursor_failure_category_maps_to_invalid_cursor() {
                 .code(),
             ErrorCode::InvalidCursor,
             "{label}"
+        );
+        assert_eq!(
+            harness.call_count.load(Ordering::Relaxed),
+            0,
+            "{label} must fail before a daemon catalog lookup"
         );
     }
 }
@@ -5189,7 +5700,7 @@ async fn repo_list_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
     }];
-    let snapshot = repo_list_snapshot_id(&entries);
+    let snapshot = *fixture_catalog_snapshot(&entries).as_bytes();
     let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
         repositories: entries,
     })));
@@ -5211,8 +5722,19 @@ async fn repo_list_explain_returns_a_plan_without_retrieval() {
     );
     assert_eq!(output.data.total_count, 1);
     let explanation = output.data.explanation.expect("explain returns a plan");
-    assert_eq!(explanation.operators, vec!["repository_listing".to_owned()]);
-    let full_fingerprint = repo_list_plan_fingerprint(&snapshot);
+    assert_eq!(
+        explanation.operators,
+        vec![
+            "catalog_snapshot".to_owned(),
+            "catalog_sort".to_owned(),
+            "page_window".to_owned()
+        ]
+    );
+    let plan_context =
+        rootlight_agent::explain::RepoListPlanContext::new(10, false, [], ResponseProfile::Compact)
+            .expect("test plan context is valid");
+    let plan = rootlight_agent::explain::repo_list_plan(&plan_context);
+    let full_fingerprint = repo_list_plan_fingerprint(&plan, &snapshot);
     let expected = blake3::Hash::from_bytes(full_fingerprint).to_hex();
     assert_eq!(
         explanation.fingerprint,
@@ -5224,6 +5746,43 @@ async fn repo_list_explain_returns_a_plan_without_retrieval() {
         1,
         "only the metadata catalog call runs"
     );
+}
+
+#[tokio::test]
+async fn repo_list_explain_empty_catalog_uses_one_bounded_catalog_call() {
+    let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
+        repositories: Vec::new(),
+    })));
+    let output: RepoListOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoList,
+            json!({
+                "query": "Straße",
+                "states": [],
+                "max_results": 200,
+                "explain": true
+            }),
+        )
+        .await
+        .expect("empty catalog explain succeeds"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected explain success");
+    };
+    assert!(output.data.repositories.is_empty());
+    assert_eq!(output.data.total_count, 0);
+    assert!(!output.truncated);
+    assert!(output.next_cursor.0.is_none());
+    assert_eq!(output.usage.rows, 0);
+    assert!(output.data.explanation.is_some());
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 1);
+    let ObservedCall::RepositoryList(request) = harness.only_call() else {
+        panic!("explain performs only the catalog metadata call");
+    };
+    assert_eq!(request.page_size(), 200);
+    assert_eq!(request.normalized_query(), Some("strasse"));
+    assert_eq!(request.states(), Some(&[] as &[RepositoryCatalogState]));
 }
 
 #[tokio::test]
@@ -5587,7 +6146,11 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         DefaultEquivalent,
         ["generation", "include_operations", "response_profile"]
     );
-    group!(RepoList, OutputSelection, ["cursor", "max_results"]);
+    group!(
+        RepoList,
+        OutputSelection,
+        ["cursor", "max_results", "query", "states"]
+    );
     group!(RepoList, ExplainPlan, ["explain"]);
     group!(RepoList, DefaultEquivalent, ["response_profile"]);
     group!(
@@ -5885,7 +6448,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "5e7071b1037334571ceacf58a41cb387f1c15885f01ece58e7d31ecb81806bb5",
+        "56166684097f9abcd3f776cdaa0ea66ecbe486deab5136481b8b16e24be0358d",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -5946,8 +6509,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[8],
         counts[9],
     );
-    assert_eq!(counts, [131, 3, 61, 25, 16, 2, 10, 10, 1, 1]);
-    assert_eq!(categorized.len(), 260);
+    assert_eq!(counts, [131, 3, 61, 25, 16, 5, 10, 10, 1, 1]);
+    assert_eq!(categorized.len(), 263);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -7424,7 +7987,7 @@ async fn accepted_effect_defaults_match_omitted_values() {
             panic!("default-equivalence arguments are objects");
         };
         explicit_arguments.insert(case.field.to_owned(), case.explicit_default);
-        let explicit = execute(
+        let mut explicit = execute(
             &harness.executor,
             case.tool,
             Value::Object(explicit_arguments),
@@ -7437,6 +8000,11 @@ async fn accepted_effect_defaults_match_omitted_values() {
                 case.field
             )
         });
+        let mut omitted = omitted;
+        if case.tool == VerticalTool::RepoList {
+            explicit.remove("usage");
+            omitted.remove("usage");
+        }
         assert_eq!(
             explicit,
             omitted,
