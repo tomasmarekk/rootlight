@@ -83,7 +83,7 @@ fn all_budget_tools_enforce_hard_limits_across_daemon_and_mcp_processes() {
     let tokenizer = tiktoken_rs::o200k_base().expect("pinned o200k tokenizer initializes");
     let mut observations = Vec::with_capacity(cases.len());
     for (index, case) in cases.into_iter().enumerate() {
-        let baseline = mcp.call(
+        let baseline = mcp.call_evidence(
             &format!("baseline-{index}"),
             case.tool,
             case.arguments.clone(),
@@ -95,7 +95,7 @@ fn all_budget_tools_enforce_hard_limits_across_daemon_and_mcp_processes() {
             case.arguments,
             baseline_measurement.serialized_json_bytes,
         );
-        let limited = mcp.call(&format!("limited-{index}"), case.tool, limited_arguments);
+        let limited = mcp.call_evidence(&format!("limited-{index}"), case.tool, limited_arguments);
         let limited_measurement = measure_error(case.tool, &limited, expected_error, &tokenizer);
         observations.push(ToolBudgetObservation {
             tool: case.tool,
@@ -781,6 +781,21 @@ impl McpProcess {
         self.write(&tool_call(id, tool, arguments));
         let response = self.read();
         assert_eq!(response["id"], id, "MCP response identity differs");
+        response
+    }
+
+    fn call_evidence(&mut self, id: &str, tool: &str, arguments: Value) -> Value {
+        const MAX_ATTEMPTS: usize = 3;
+
+        let mut response = Value::Null;
+        for attempt in 1..=MAX_ATTEMPTS {
+            let attempt_id = format!("{id}-attempt-{attempt}");
+            response = self.call(&attempt_id, tool, arguments.clone());
+            if response["error"]["code"] != -32603 {
+                return response;
+            }
+            thread::yield_now();
+        }
         response
     }
 
