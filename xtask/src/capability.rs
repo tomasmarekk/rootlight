@@ -7,18 +7,68 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use rootlight_mcp_contract::MCP_SCHEMA_VERSION;
 use rootlight_mcp_contract::capability::{
-    BudgetSemantics, CAPABILITIES, CapabilityStatus, GenerationSemantics, PaginationSemantics,
-    ToolCapability, is_batch_eligible,
+    BudgetSemantics, CAPABILITIES, CapabilityRule, CapabilityStatus, GenerationSemantics,
+    PaginationSemantics, ToolCapability, is_batch_eligible,
 };
 use rootlight_mcp_contract::catalog::{ExposureProfile, McpTool};
 use rootlight_mcp_contract::{ErrorCode, VerticalTool};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub(crate) fn check() -> Result<(), CapabilityError> {
+const REGISTRY_ARTIFACT_SCHEMA: &str = "rootlight.mcp-capability-registry/1";
+const PARITY_ARTIFACT_SCHEMA: &str = "rootlight.mcp-capability-parity/1";
+const EXECUTION_MATRIX_SCHEMA: &str = "rootlight.mcp-execution-matrix/1";
+const INITIAL_MISMATCH_SCHEMA: &str = "rootlight.mcp-capability-mismatches/1";
+const SCHEMA_GOLDEN_SCHEMA: &str = "rootlight.mcp-schema-goldens/1";
+
+pub(crate) struct Options {
+    output_dir: Option<PathBuf>,
+    source_revision: Option<String>,
+}
+
+impl Options {
+    pub(crate) fn parse(args: &mut impl Iterator<Item = String>) -> Result<Self, CapabilityError> {
+        let mut output_dir = None;
+        let mut source_revision = None;
+        while let Some(flag) = args.next() {
+            match flag.as_str() {
+                "--output-dir" if output_dir.is_none() => {
+                    output_dir = Some(PathBuf::from(
+                        args.next()
+                            .ok_or(CapabilityError::MissingArgument("--output-dir"))?,
+                    ));
+                }
+                "--source-revision" if source_revision.is_none() => {
+                    source_revision = Some(
+                        args.next()
+                            .ok_or(CapabilityError::MissingArgument("--source-revision"))?,
+                    );
+                }
+                _ => return Err(CapabilityError::UnexpectedArgument(flag)),
+            }
+        }
+        match (&output_dir, &source_revision) {
+            (None, None) => {}
+            (Some(_), Some(revision)) if valid_source_revision(revision) => {}
+            (Some(_), Some(revision)) => {
+                return Err(CapabilityError::InvalidSourceRevision(revision.clone()));
+            }
+            _ => return Err(CapabilityError::IncompleteArtifactOptions),
+        }
+        Ok(Self {
+            output_dir,
+            source_revision,
+        })
+    }
+}
+
+pub(crate) fn check(options: &Options) -> Result<(), CapabilityError> {
     let registry = CAPABILITIES.to_vec();
     let mut problems: Vec<Problem> = Vec::new();
     validate_catalog_parity(&registry, &mut problems);
@@ -27,27 +77,41 @@ pub(crate) fn check() -> Result<(), CapabilityError> {
     validate_profile_membership(&registry, &mut problems);
     validate_handler_disposition(&registry, &mut problems);
     validate_input_contracts(&registry, &mut problems);
+    validate_schema_goldens(&mut problems)?;
 
-    if problems.is_empty() {
-        let reviewed_fields = reviewed_field_count().map_err(CapabilityError::Schema)?;
-        let blocked = registry
+    if !problems.is_empty() {
+        problems.sort();
+        let report = problems
             .iter()
-            .flat_map(|entry| entry.rules)
-            .filter(|rule| rule.status == CapabilityStatus::Blocked)
-            .count();
-        println!(
-            "capability check passed: {} tools, {reviewed_fields} input fields, {blocked} explicit blocked gaps",
-            registry.len()
-        );
-        return Ok(());
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(CapabilityError::Problems { report });
     }
-    problems.sort();
-    let report = problems
+
+    let reviewed_fields = reviewed_field_count().map_err(CapabilityError::Schema)?;
+    let blocked = registry
         .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    Err(CapabilityError::Problems { report })
+        .flat_map(|entry| entry.rules)
+        .filter(|rule| rule.status == CapabilityStatus::Blocked)
+        .count();
+    if let (Some(output_dir), Some(source_revision)) =
+        (&options.output_dir, &options.source_revision)
+    {
+        write_artifacts(output_dir, source_revision, reviewed_fields, blocked)?;
+    }
+    println!(
+        "capability check passed: {} tools, {reviewed_fields} input fields, {blocked} explicit blocked gaps",
+        registry.len()
+    );
+    Ok(())
+}
+
+fn valid_source_revision(revision: &str) -> bool {
+    matches!(revision.len(), 40 | 64)
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_catalog_parity(registry: &[ToolCapability], problems: &mut Vec<Problem>) {
@@ -561,6 +625,441 @@ fn input_shape_hash(shape: &BTreeMap<String, BTreeSet<String>>) -> String {
         })
 }
 
+fn schema_document_hash(schema_text: &str) -> Result<String, SchemaError> {
+    let document: Value =
+        serde_json::from_str(schema_text).map_err(|source| SchemaError::InvalidJson { source })?;
+    let canonical =
+        serde_json::to_vec(&document).map_err(|source| SchemaError::CanonicalJson { source })?;
+    Ok(sha256_hex(&canonical))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to a string cannot fail");
+            output
+        })
+}
+
+fn validate_schema_goldens(problems: &mut Vec<Problem>) -> Result<(), CapabilityError> {
+    let goldens: SchemaGoldenFixture = serde_json::from_str(include_str!(
+        "../../tests/fixtures/capability/schema-goldens-v1.json"
+    ))
+    .map_err(|source| CapabilityError::FixtureJson {
+        fixture: "schema-goldens-v1.json",
+        source,
+    })?;
+    if goldens.schema != SCHEMA_GOLDEN_SCHEMA {
+        return Err(CapabilityError::FixtureContract {
+            fixture: "schema-goldens-v1.json",
+            detail: "schema identifier differs",
+        });
+    }
+
+    let catalog_names: BTreeSet<&str> = VerticalTool::ALL
+        .into_iter()
+        .map(VerticalTool::name)
+        .collect();
+    for unexpected in goldens
+        .tools
+        .keys()
+        .filter(|name| !catalog_names.contains(name.as_str()))
+    {
+        problems.push(Problem::new(
+            unexpected,
+            ProblemKind::UnexpectedSchemaGolden,
+        ));
+    }
+
+    for tool in VerticalTool::ALL {
+        let Some(expected) = goldens.tools.get(tool.name()) else {
+            problems.push(Problem::new(tool.name(), ProblemKind::MissingSchemaGolden));
+            continue;
+        };
+        let observed_input =
+            schema_document_hash(tool.input_schema_json()).map_err(CapabilityError::Schema)?;
+        let observed_output =
+            schema_document_hash(tool.output_schema_json()).map_err(CapabilityError::Schema)?;
+        if observed_input != expected.input_sha256 {
+            problems.push(Problem::new(
+                tool.name(),
+                ProblemKind::SchemaGoldenDrift {
+                    direction: "input",
+                    expected: expected.input_sha256.clone(),
+                    observed: observed_input,
+                },
+            ));
+        }
+        if observed_output != expected.output_sha256 {
+            problems.push(Problem::new(
+                tool.name(),
+                ProblemKind::SchemaGoldenDrift {
+                    direction: "output",
+                    expected: expected.output_sha256.clone(),
+                    observed: observed_output,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_artifacts(
+    output_dir: &Path,
+    source_revision: &str,
+    reviewed_fields: usize,
+    blocked_gaps: usize,
+) -> Result<(), CapabilityError> {
+    fs::create_dir_all(output_dir).map_err(|source| CapabilityError::Io {
+        operation: "create capability artifact directory",
+        path: output_dir.to_path_buf(),
+        source,
+    })?;
+
+    let tools = build_registry_artifact_tools()?;
+    let registry = RegistryArtifact {
+        schema: REGISTRY_ARTIFACT_SCHEMA,
+        source_revision,
+        contract_version: MCP_SCHEMA_VERSION,
+        tools,
+    };
+    write_json(&output_dir.join("capability-registry-v1.json"), &registry)?;
+
+    let matrix = ExecutionMatrixArtifact {
+        schema: EXECUTION_MATRIX_SCHEMA,
+        source_revision,
+        observation_state: "not_run",
+        verdict: "unknown",
+        cases: build_execution_matrix_cases()?,
+    };
+    write_json(
+        &output_dir.join("capability-execution-matrix-v1.json"),
+        &matrix,
+    )?;
+
+    let parity = ParityArtifact {
+        schema: PARITY_ARTIFACT_SCHEMA,
+        source_revision,
+        status: "passed_with_explicit_blockers",
+        tool_count: CAPABILITIES.len(),
+        reviewed_input_fields: reviewed_fields,
+        schema_golden_pairs: VerticalTool::ALL.len(),
+        profile_counts: ProfileCounts {
+            scout: ExposureProfile::Scout.tools().len(),
+            analysis: ExposureProfile::Analysis.tools().len(),
+            developer: ExposureProfile::Developer.tools().len(),
+        },
+        blocked_gaps,
+    };
+    write_json(
+        &output_dir.join("capability-parity-report-v1.json"),
+        &parity,
+    )?;
+
+    let mut initial_mismatches: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/capability/initial-mismatches-v1.json"
+    ))
+    .map_err(|source| CapabilityError::FixtureJson {
+        fixture: "initial-mismatches-v1.json",
+        source,
+    })?;
+    validate_initial_mismatches(&initial_mismatches)?;
+    initial_mismatches
+        .as_object_mut()
+        .expect("validated mismatch fixture is an object")
+        .insert(
+            "generatedForRevision".to_owned(),
+            Value::String(source_revision.to_owned()),
+        );
+    write_json(
+        &output_dir.join("capability-initial-mismatches-v1.json"),
+        &initial_mismatches,
+    )?;
+    Ok(())
+}
+
+fn write_json(path: &Path, value: &impl Serialize) -> Result<(), CapabilityError> {
+    let mut encoded =
+        serde_json::to_vec_pretty(value).map_err(|source| CapabilityError::ArtifactJson {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    encoded.push(b'\n');
+    fs::write(path, encoded).map_err(|source| CapabilityError::Io {
+        operation: "write capability artifact",
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn validate_initial_mismatches(value: &Value) -> Result<(), CapabilityError> {
+    let object = value.as_object().ok_or(CapabilityError::FixtureContract {
+        fixture: "initial-mismatches-v1.json",
+        detail: "root must be an object",
+    })?;
+    if object.get("schema").and_then(Value::as_str) != Some(INITIAL_MISMATCH_SCHEMA) {
+        return Err(CapabilityError::FixtureContract {
+            fixture: "initial-mismatches-v1.json",
+            detail: "schema identifier differs",
+        });
+    }
+    let findings = object.get("findings").and_then(Value::as_array).ok_or(
+        CapabilityError::FixtureContract {
+            fixture: "initial-mismatches-v1.json",
+            detail: "findings must be an array",
+        },
+    )?;
+    for finding in findings {
+        let tool_name = finding.get("tool").and_then(Value::as_str).ok_or(
+            CapabilityError::FixtureContract {
+                fixture: "initial-mismatches-v1.json",
+                detail: "finding tool is missing",
+            },
+        )?;
+        let capability = finding.get("capability").and_then(Value::as_str).ok_or(
+            CapabilityError::FixtureContract {
+                fixture: "initial-mismatches-v1.json",
+                detail: "finding capability is missing",
+            },
+        )?;
+        let Some(entry) = CAPABILITIES
+            .iter()
+            .find(|entry| entry.tool.name() == tool_name)
+        else {
+            return Err(CapabilityError::FixtureContract {
+                fixture: "initial-mismatches-v1.json",
+                detail: "finding tool is not registered",
+            });
+        };
+        if entry.disposition(capability, None).status != CapabilityStatus::Blocked
+            || finding
+                .get("currentRegistryDisposition")
+                .and_then(Value::as_str)
+                != Some("blocked")
+        {
+            return Err(CapabilityError::FixtureContract {
+                fixture: "initial-mismatches-v1.json",
+                detail: "finding no longer matches an explicit blocked disposition",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn build_registry_artifact_tools() -> Result<Vec<RegistryArtifactTool>, CapabilityError> {
+    CAPABILITIES
+        .iter()
+        .map(|entry| {
+            let vertical = vertical_tool(entry.tool)?;
+            Ok(RegistryArtifactTool {
+                name: entry.tool.name(),
+                status: entry.status.name(),
+                input_shape_hash: entry.input_shape_hash,
+                input_schema_sha256: schema_document_hash(vertical.input_schema_json())
+                    .map_err(CapabilityError::Schema)?,
+                output_schema_sha256: schema_document_hash(vertical.output_schema_json())
+                    .map_err(CapabilityError::Schema)?,
+                profiles: entry
+                    .profiles
+                    .iter()
+                    .map(|profile| profile.name())
+                    .collect(),
+                batch_eligible: entry.batch_eligible,
+                explain_supported: entry.explain_supported,
+                handler_available: entry.handler_available,
+                pagination: entry.pagination.name(),
+                generation: entry.generation.name(),
+                budget: entry.budget.name(),
+                batch_shared_budget: entry.batch_shared_budget,
+                fallback_summary: entry.fallback_summary,
+                fields: artifact_field_dispositions(entry, vertical)?,
+            })
+        })
+        .collect()
+}
+
+fn build_execution_matrix_cases() -> Result<Vec<ExecutionMatrixCase>, CapabilityError> {
+    let mut cases = Vec::new();
+    for entry in &CAPABILITIES {
+        cases.push(ExecutionMatrixCase {
+            id: format!("{}::handler", entry.tool.name()),
+            tool: entry.tool.name(),
+            capability: "handler".to_owned(),
+            value: None,
+            expected_disposition: if entry.handler_available {
+                "handler_available"
+            } else {
+                entry.status.name()
+            },
+            expected_error: None,
+            observation: "not_run",
+            verdict: "unknown",
+        });
+        let vertical = vertical_tool(entry.tool)?;
+        for field in artifact_field_dispositions(entry, vertical)? {
+            cases.push(ExecutionMatrixCase {
+                id: field.value.as_ref().map_or_else(
+                    || format!("{}::{}", entry.tool.name(), field.path),
+                    |value| format!("{}::{}={value}", entry.tool.name(), field.path),
+                ),
+                tool: entry.tool.name(),
+                capability: field.path,
+                value: field.value,
+                expected_disposition: field.status,
+                expected_error: field.error_code,
+                observation: "not_run",
+                verdict: "unknown",
+            });
+        }
+    }
+    Ok(cases)
+}
+
+fn artifact_field_dispositions(
+    entry: &ToolCapability,
+    vertical: VerticalTool,
+) -> Result<Vec<ArtifactFieldDisposition>, CapabilityError> {
+    let shape = schema_shape(vertical.input_schema_json()).map_err(CapabilityError::Schema)?;
+    let mut fields = Vec::new();
+    for (path, values) in shape {
+        fields.push(artifact_field(
+            entry.disposition(&path, None),
+            path.clone(),
+            None,
+        ));
+        for value in values {
+            fields.push(artifact_field(
+                entry.disposition(&path, Some(&value)),
+                path.clone(),
+                Some(value),
+            ));
+        }
+    }
+    Ok(fields)
+}
+
+fn artifact_field(
+    rule: CapabilityRule,
+    path: String,
+    value: Option<String>,
+) -> ArtifactFieldDisposition {
+    ArtifactFieldDisposition {
+        path,
+        value,
+        status: rule.status.name(),
+        error_code: rule.error_code,
+        summary: rule.summary,
+    }
+}
+
+fn vertical_tool(tool: McpTool) -> Result<VerticalTool, CapabilityError> {
+    VerticalTool::ALL
+        .into_iter()
+        .find(|candidate| candidate.name() == tool.name())
+        .ok_or(CapabilityError::MissingVerticalTool(tool.name()))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SchemaGoldenFixture {
+    schema: String,
+    tools: BTreeMap<String, SchemaGolden>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SchemaGolden {
+    input_sha256: String,
+    output_sha256: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryArtifact<'a> {
+    schema: &'static str,
+    source_revision: &'a str,
+    contract_version: &'static str,
+    tools: Vec<RegistryArtifactTool>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryArtifactTool {
+    name: &'static str,
+    status: &'static str,
+    input_shape_hash: &'static str,
+    input_schema_sha256: String,
+    output_schema_sha256: String,
+    profiles: Vec<&'static str>,
+    batch_eligible: bool,
+    explain_supported: bool,
+    handler_available: bool,
+    pagination: &'static str,
+    generation: &'static str,
+    budget: &'static str,
+    batch_shared_budget: bool,
+    fallback_summary: &'static str,
+    fields: Vec<ArtifactFieldDisposition>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactFieldDisposition {
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<ErrorCode>,
+    summary: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionMatrixArtifact<'a> {
+    schema: &'static str,
+    source_revision: &'a str,
+    observation_state: &'static str,
+    verdict: &'static str,
+    cases: Vec<ExecutionMatrixCase>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionMatrixCase {
+    id: String,
+    tool: &'static str,
+    capability: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+    expected_disposition: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_error: Option<ErrorCode>,
+    observation: &'static str,
+    verdict: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ParityArtifact<'a> {
+    schema: &'static str,
+    source_revision: &'a str,
+    status: &'static str,
+    tool_count: usize,
+    reviewed_input_fields: usize,
+    schema_golden_pairs: usize,
+    profile_counts: ProfileCounts,
+    blocked_gaps: usize,
+}
+
+#[derive(Serialize)]
+struct ProfileCounts {
+    scout: usize,
+    analysis: usize,
+    developer: usize,
+}
+
 fn rule_identity(path: &str, value: Option<&str>) -> String {
     value.map_or_else(|| path.to_owned(), |value| format!("{path}={value}"))
 }
@@ -649,6 +1148,13 @@ enum ProblemKind {
         has_budget: bool,
         has_token_budget: bool,
         semantics: String,
+    },
+    MissingSchemaGolden,
+    UnexpectedSchemaGolden,
+    SchemaGoldenDrift {
+        direction: &'static str,
+        expected: String,
+        observed: String,
     },
 }
 
@@ -753,6 +1259,20 @@ impl std::fmt::Display for Problem {
                 formatter,
                 "budget semantics {semantics} disagree with budget={has_budget}, token_budget={has_token_budget}"
             ),
+            ProblemKind::MissingSchemaGolden => {
+                write!(formatter, "generated schema golden is missing")
+            }
+            ProblemKind::UnexpectedSchemaGolden => {
+                write!(formatter, "schema golden has no catalog tool")
+            }
+            ProblemKind::SchemaGoldenDrift {
+                direction,
+                expected,
+                observed,
+            } => write!(
+                formatter,
+                "{direction} schema changed; expected {expected}, observed {observed}"
+            ),
         }
     }
 }
@@ -763,12 +1283,51 @@ pub(crate) enum CapabilityError {
     Problems { report: String },
     #[error("capability schema inventory failed: {0}")]
     Schema(#[from] SchemaError),
+    #[error("{0} requires a value")]
+    MissingArgument(&'static str),
+    #[error("unexpected capability-check argument: {0}")]
+    UnexpectedArgument(String),
+    #[error("--output-dir and --source-revision must be supplied together")]
+    IncompleteArtifactOptions,
+    #[error("source revision must be a lowercase 40- or 64-character hexadecimal object id: {0}")]
+    InvalidSourceRevision(String),
+    #[error("capability fixture {fixture} is invalid JSON")]
+    FixtureJson {
+        fixture: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("capability fixture {fixture} violates its contract: {detail}")]
+    FixtureContract {
+        fixture: &'static str,
+        detail: &'static str,
+    },
+    #[error("MCP catalog tool has no vertical contract: {0}")]
+    MissingVerticalTool(&'static str),
+    #[error("failed to serialize capability artifact {}", path.display())]
+    ArtifactJson {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("{operation} at {}", path.display())]
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SchemaError {
     #[error("invalid generated JSON schema")]
     InvalidJson {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("generated JSON schema cannot be canonicalized")]
+    CanonicalJson {
         #[source]
         source: serde_json::Error,
     },
@@ -803,6 +1362,7 @@ mod tests {
         validate_profile_membership(&CAPABILITIES, &mut problems);
         validate_handler_disposition(&CAPABILITIES, &mut problems);
         validate_input_contracts(&CAPABILITIES, &mut problems);
+        validate_schema_goldens(&mut problems).expect("schema goldens are readable");
         assert!(problems.is_empty(), "unexpected problems: {problems:#?}");
     }
 
@@ -821,8 +1381,18 @@ mod tests {
 
     #[test]
     fn drifted_batch_flag_is_rejected() {
-        let mut drifted = entry(McpTool::RepoIndex);
-        drifted.batch_eligible = true;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/capability/batch-allowlist-drift.json"
+        ))
+        .expect("batch drift fixture is valid");
+        let tool = McpTool::ALL
+            .into_iter()
+            .find(|tool| fixture["tool"] == tool.name())
+            .expect("fixture tool is registered");
+        let mut drifted = entry(tool);
+        drifted.batch_eligible = fixture["batchEligible"]
+            .as_bool()
+            .expect("fixture batch flag is boolean");
         let mut problems = Vec::new();
         validate_batch_eligibility(&[drifted], &mut problems);
         assert!(problems.iter().any(|problem| matches!(
@@ -893,5 +1463,117 @@ mod tests {
                 .iter()
                 .any(|problem| matches!(problem.kind, ProblemKind::UnknownRuleValue { .. }))
         );
+    }
+
+    #[test]
+    fn hidden_profile_bypass_fixture_is_rejected() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/capability/hidden-profile-bypass.json"
+        ))
+        .expect("profile bypass fixture is valid");
+        let tool = McpTool::ALL
+            .into_iter()
+            .find(|tool| fixture["tool"] == tool.name())
+            .expect("fixture tool is registered");
+        let profiles = fixture["declaredProfiles"]
+            .as_array()
+            .expect("fixture profiles are an array")
+            .iter()
+            .map(|profile| {
+                ExposureProfile::from_name(profile.as_str().expect("profile is a string"))
+                    .expect("fixture profile is known")
+            })
+            .collect::<Vec<_>>();
+        let mut drifted = entry(tool);
+        drifted.profiles = Box::leak(profiles.into_boxed_slice());
+        let mut problems = Vec::new();
+        validate_profile_membership(&[drifted], &mut problems);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| matches!(problem.kind, ProblemKind::ProfileMembership { .. }))
+        );
+    }
+
+    #[test]
+    fn unregistered_handler_without_stable_error_is_rejected() {
+        let mut drifted = entry(McpTool::CodeLocate);
+        drifted.handler_available = false;
+        drifted.status = CapabilityStatus::FallbackLimited;
+        let mut problems = Vec::new();
+        validate_handler_disposition(&[drifted], &mut problems);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| matches!(problem.kind, ProblemKind::MissingHandlerOrDisposition))
+        );
+    }
+
+    #[test]
+    fn input_and_output_schema_goldens_cover_the_complete_catalog() {
+        let fixture: SchemaGoldenFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/capability/schema-goldens-v1.json"
+        ))
+        .expect("schema golden fixture is valid");
+        assert_eq!(fixture.schema, SCHEMA_GOLDEN_SCHEMA);
+        assert_eq!(fixture.tools.len(), VerticalTool::ALL.len());
+        let mut problems = Vec::new();
+        validate_schema_goldens(&mut problems).expect("schema goldens are readable");
+        assert!(problems.is_empty(), "unexpected problems: {problems:#?}");
+    }
+
+    #[test]
+    fn versioned_artifacts_are_deterministic_and_execution_remains_unobserved() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        let revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_artifacts(&first, revision, 557, 2).expect("first artifacts are generated");
+        write_artifacts(&second, revision, 557, 2).expect("second artifacts are generated");
+
+        for name in [
+            "capability-registry-v1.json",
+            "capability-execution-matrix-v1.json",
+            "capability-parity-report-v1.json",
+            "capability-initial-mismatches-v1.json",
+        ] {
+            let left = fs::read(first.join(name)).expect("first artifact is readable");
+            let right = fs::read(second.join(name)).expect("second artifact is readable");
+            assert_eq!(left, right, "{name} must serialize deterministically");
+        }
+
+        let registry: Value = serde_json::from_slice(
+            &fs::read(first.join("capability-registry-v1.json"))
+                .expect("registry artifact is readable"),
+        )
+        .expect("registry artifact is valid JSON");
+        assert_eq!(registry["schema"], REGISTRY_ARTIFACT_SCHEMA);
+        assert_eq!(
+            registry["tools"].as_array().map(Vec::len),
+            Some(CAPABILITIES.len())
+        );
+
+        let matrix: Value = serde_json::from_slice(
+            &fs::read(first.join("capability-execution-matrix-v1.json"))
+                .expect("matrix artifact is readable"),
+        )
+        .expect("matrix artifact is valid JSON");
+        let cases = matrix["cases"]
+            .as_array()
+            .expect("matrix cases are an array");
+        assert!(cases.len() > 557);
+        assert!(
+            cases
+                .iter()
+                .all(|case| { case["observation"] == "not_run" && case["verdict"] == "unknown" })
+        );
+        for blocked_case in [
+            "repo.list::query",
+            "query.batch::operations[].local_budget.max_tokens",
+        ] {
+            assert!(cases.iter().any(|case| {
+                case["id"] == blocked_case && case["expectedDisposition"] == "blocked"
+            }));
+        }
     }
 }

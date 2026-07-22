@@ -72,7 +72,10 @@ fn run() -> Result<(), XtaskError> {
             let root = parse_required_root(&mut args)?;
             disposition::check(&root)?;
         }
-        Some("capability-check") => capability::check()?,
+        Some("capability-check") => {
+            let options = capability::Options::parse(&mut args)?;
+            capability::check(&options)?;
+        }
         Some("unsafe-check") => {
             let fixture_root = parse_required_fixture_root(&mut args)?;
             policy::check_unsafe_fixture(&fixture_root)?;
