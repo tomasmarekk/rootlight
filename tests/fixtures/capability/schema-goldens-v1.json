@@ -46,8 +46,8 @@
       "outputSha256": "0212f1944e342e6d252cf9089f7fe1ef3ff127282d9ffb93cbb51119d1880511"
     },
     "query.batch": {
-      "inputSha256": "d74b187424b5d5626b38e53a1dea173d07a9a914a3e4d6224a71bdc35ce97167",
-      "outputSha256": "df5bddfbc21190d626cb5da8fca8f33a2dd37229b5dc173eceaf8d742385db45"
+      "inputSha256": "b2e4064315d544e3ccfbc9263b9892d1e9f4e1e09e3178d83869653733411a92",
+      "outputSha256": "117ad3ae24a860639605cd3943aaa1d24a6c3eb8d6935c64684264d35f004049"
     },
     "repo.index": {
       "inputSha256": "dc5caae4d0d855bb44985a0a0a89005945bff066d592bbcf948c4100a0a1145b",

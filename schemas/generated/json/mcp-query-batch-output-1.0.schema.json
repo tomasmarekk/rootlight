@@ -215,7 +215,7 @@
           "const": "code.dead"
         },
         {
-          "description": "Reserved change-planning identifier; not eligible for public batch execution.",
+          "description": "Bounded change planning.",
           "type": "string",
           "const": "plan.change"
         },
