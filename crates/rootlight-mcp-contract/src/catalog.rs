@@ -149,10 +149,10 @@ impl McpTool {
                 "Read or request cancellation of one known long-running Rootlight operation."
             }
             Self::CodeLocate => {
-                "Use bounded exact-identifier and lexical matching in one selected generation with authenticated continuation; path, structural, semantic, and documentation modes are unsupported."
+                "Use bounded exact-identifier or indexed lexical-text matching over normalized symbols in one selected generation with authenticated continuation; path, structural, semantic, and documentation modes are unsupported."
             }
             Self::SymbolExplain => {
-                "Return bounded profiled semantic evidence for explicit stable symbol identifiers; custom sections and full provenance are unsupported."
+                "Return bounded definitions, exact relation counts, and optional compact producer provenance for explicit stable symbol identifiers; absent identifiers are reported as unresolved, while custom sections, source previews, relation samples, full provenance, and continuation are unsupported."
             }
             Self::SymbolRelationships => {
                 "Return bounded typed relationships around explicit stable symbol identifiers with authenticated continuation; custom scope and candidate projection are unsupported."

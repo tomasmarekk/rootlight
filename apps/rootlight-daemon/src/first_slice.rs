@@ -1353,6 +1353,10 @@ fn symbol_explain(
     symbols
         .try_reserve_exact(request.symbols.len())
         .map_err(|_| resource_exhausted())?;
+    let mut unresolved_symbols = Vec::new();
+    unresolved_symbols
+        .try_reserve_exact(request.symbols.len())
+        .map_err(|_| resource_exhausted())?;
     let mut usage = UsageAccumulator::default();
     let mut coverage = Vec::new();
     let mut limiting_resources = Vec::new();
@@ -1370,14 +1374,19 @@ fn symbol_explain(
             Err(BudgetExhaustion::Duration) => return Err(budget_exceeded()),
         };
         let symbol = parse_symbol(Some(&symbol))?;
-        let response = service
-            .symbol_explain_with_budget(
-                generation.generation,
-                symbol,
-                budget,
-                &context.cancellation,
-            )
-            .map_err(service_error)?;
+        let response = match service.symbol_explain_with_budget(
+            generation.generation,
+            symbol,
+            budget,
+            &context.cancellation,
+        ) {
+            Ok(response) => response,
+            Err(FirstSliceError::SymbolNotFound) => {
+                unresolved_symbols.push(symbol_to_wire(symbol));
+                continue;
+            }
+            Err(error) => return Err(service_error(error)),
+        };
         for resource in &response.data.limiting_resources {
             if !limiting_resources.contains(resource) {
                 limiting_resources.push(*resource);
@@ -1427,7 +1436,7 @@ fn symbol_explain(
         schema_version: Some(schema_version()),
         context: Some(query_context(generation, &usage.finish(), &coverage)),
         symbols,
-        unresolved_symbols: Vec::new(),
+        unresolved_symbols,
         truncated: !limiting_resources.is_empty(),
         completeness: Some(execution_completeness(
             execution_state,
@@ -3488,6 +3497,7 @@ fn service_error(error: FirstSliceError) -> PublicError {
             "first-slice resource limit was reached",
             true,
         ),
+        FirstSliceError::SymbolNotFound => (ErrorCode::NotFound, "symbol was not found", false),
         FirstSliceError::Query => (ErrorCode::NotFound, "query target was not found", false),
         FirstSliceError::Adapter => (
             ErrorCode::AdapterFailed,
@@ -3856,6 +3866,85 @@ mod tests {
         assert_eq!(reduced.plan.estimate.results, 1);
         assert_eq!(reduced.data.hits.len(), 1);
         assert!(reduced.data.truncated);
+    }
+
+    #[test]
+    fn symbol_explain_partitions_resolved_and_absent_identifiers() {
+        let fixture = TempDir::new().expect("fixture exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn explained_symbol() -> u32 { 42 }\n",
+        )
+        .expect("source writes");
+        let mut service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let cancellation = Cancellation::with_deadline(deadline);
+        let indexed = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("fixture indexes");
+        let located = service
+            .code_locate(
+                indexed.generation,
+                "explained_symbol".to_owned(),
+                LocateMode::Exact,
+                1,
+                0,
+                &cancellation,
+            )
+            .expect("fixture symbol locates");
+        let resolved = located.data.hits[0].symbol;
+        let absent = SymbolId::from_bytes([0xff; 20]);
+        assert_ne!(resolved, absent);
+        let mut requested = vec![resolved, absent];
+        requested.sort_unstable();
+        let context = FirstSliceIpcContext {
+            client_instance_id: ClientInstanceId::from_bytes([7; 16]),
+            selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
+            cancellation,
+            deadline,
+            effective_budget: None,
+            index_admission: None,
+        };
+
+        let response = symbol_explain(
+            &service,
+            daemon::SymbolExplainRequest {
+                schema_version: Some(schema_version()),
+                repository: Some(repository_to_wire(indexed.repository)),
+                generation: Some(daemon::GenerationSelector {
+                    selector: Some(daemon::generation_selector::Selector::Generation(
+                        generation_to_wire(indexed.generation),
+                    )),
+                }),
+                symbols: requested.iter().copied().map(symbol_to_wire).collect(),
+            },
+            &context,
+        )
+        .expect("mixed explanation succeeds");
+
+        assert!(!response.truncated);
+        assert_eq!(response.symbols.len(), 1);
+        assert_eq!(
+            parse_symbol(response.symbols[0].symbol.as_ref()).expect("resolved symbol parses"),
+            resolved
+        );
+        assert_eq!(
+            response
+                .unresolved_symbols
+                .iter()
+                .map(|symbol| parse_symbol(Some(symbol)).expect("unresolved symbol parses"))
+                .collect::<Vec<_>>(),
+            [absent]
+        );
+        assert_eq!(
+            daemon::FirstSliceCompletenessState::try_from(
+                response.completeness.expect("completeness exists").state
+            )
+            .expect("completeness state is valid"),
+            daemon::FirstSliceCompletenessState::FirstSliceCompletenessComplete
+        );
     }
 
     #[test]

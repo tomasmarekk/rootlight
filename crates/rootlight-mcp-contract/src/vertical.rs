@@ -1298,7 +1298,7 @@ pub struct SymbolExplanation {
     pub trust: TrustClassification,
 }
 
-/// Progressive detail handle.
+/// Reserved detail handle for a future pageable contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DetailHandle {
@@ -1320,7 +1320,7 @@ pub struct SymbolExplainData {
     /// Requested identities absent from the pinned generation.
     #[schemars(length(max = 16))]
     pub unresolved_ids: Vec<SymbolId>,
-    /// Bounded progressive-disclosure handles.
+    /// Reserved handles; empty while this tool uses explicit truncation.
     #[schemars(length(max = 64))]
     pub detail_handles: Vec<DetailHandle>,
     /// Bounded source-free plan present when explain was requested.

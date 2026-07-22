@@ -3353,6 +3353,9 @@ pub enum FirstSliceError {
     /// A query plan or execution failed.
     #[error("first-slice query failed")]
     Query,
+    /// The requested stable symbol is absent from the pinned generation.
+    #[error("first-slice symbol was not found")]
+    SymbolNotFound,
     /// The process-local repository registration is unavailable.
     #[error("first-slice repository was not found")]
     RepositoryNotFound,
@@ -4380,6 +4383,7 @@ fn map_query_error(error: QueryError, cancellation: &Cancellation) -> FirstSlice
     }
     match error {
         QueryError::Cancelled(reason) => FirstSliceError::Cancelled(reason),
+        QueryError::SymbolNotFound => FirstSliceError::SymbolNotFound,
         _ => FirstSliceError::Query,
     }
 }

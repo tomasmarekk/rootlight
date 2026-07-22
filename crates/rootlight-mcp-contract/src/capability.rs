@@ -1400,7 +1400,7 @@ const fn pagination_semantics(tool: McpTool) -> PaginationSemantics {
         | McpTool::ContextPack
         | McpTool::QueryAdvanced => PaginationSemantics::AuthenticatedCursor,
         McpTool::RepoStatus | McpTool::OperationStatus => PaginationSemantics::BoundedComplete,
-        McpTool::SymbolExplain => PaginationSemantics::ProgressiveHandle,
+        McpTool::SymbolExplain => PaginationSemantics::ExplicitTruncation,
         McpTool::QueryBatch => PaginationSemantics::ChildContinuations,
         McpTool::FlowTrace
         | McpTool::ChangeImpact
@@ -1495,9 +1495,9 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
             "immutable catalog snapshot with bounded display-name or alias and lifecycle-state filters"
         }
         McpTool::OperationStatus => "bounded operation read and cancel",
-        McpTool::CodeLocate => "bounded exact-identifier and lexical matching",
+        McpTool::CodeLocate => "bounded exact-identifier or indexed lexical-text matching",
         McpTool::SymbolExplain => {
-            "bounded profiled semantic evidence for explicit stable symbol identifiers"
+            "bounded definitions, exact relation counts, and optional compact producer provenance"
         }
         McpTool::SymbolRelationships => {
             "bounded typed relationships around explicit stable symbol identifiers"
@@ -2097,7 +2097,7 @@ mod tests {
             ),
             (
                 McpTool::SymbolExplain,
-                PaginationSemantics::ProgressiveHandle,
+                PaginationSemantics::ExplicitTruncation,
             ),
             (
                 McpTool::SymbolRelationships,
