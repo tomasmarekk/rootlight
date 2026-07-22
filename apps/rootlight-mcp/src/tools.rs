@@ -1391,7 +1391,10 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use rootlight_mcp_contract::capability::CAPABILITIES;
+    use rootlight_mcp_contract::{
+        accounting::tool_list_payload,
+        capability::{CAPABILITIES, CapabilityStatus},
+    };
     use serde_json::json;
     use tokio::sync::watch;
 
@@ -1558,6 +1561,20 @@ mod tests {
                 .iter()
                 .find(|capability| tool["name"] == capability.tool.name())
                 .expect("listed tool has a capability entry");
+            assert_eq!(tool["title"], capability.tool.title());
+            assert_eq!(tool["description"], capability.tool.description());
+            assert_eq!(
+                tool["annotations"]["readOnlyHint"],
+                capability.tool.read_only()
+            );
+            assert_eq!(
+                tool["annotations"]["destructiveHint"],
+                capability.tool.destructive()
+            );
+            assert_eq!(
+                tool["annotations"]["idempotentHint"],
+                capability.tool.idempotent()
+            );
             assert_eq!(metadata["status"], capability.status.name());
             assert!(
                 metadata["profiles"]
@@ -1567,6 +1584,7 @@ mod tests {
             assert!(metadata["inputShapeHash"].as_str().is_some());
         }
         assert_eq!(tools[0]["annotations"]["readOnlyHint"], false);
+        assert_eq!(tools[0]["annotations"]["idempotentHint"], false);
         assert_eq!(tools[2]["annotations"]["readOnlyHint"], true);
         let operation_status = tools
             .iter()
@@ -1576,6 +1594,7 @@ mod tests {
             operation_status["annotations"]["readOnlyHint"], false,
             "operation.status can cancel and must not be advertised as read-only"
         );
+        assert_eq!(operation_status["annotations"]["idempotentHint"], true);
         let repo_list = tools
             .iter()
             .find(|tool| tool["name"] == "repo.list")
@@ -1678,18 +1697,154 @@ mod tests {
                 .handle(request("tools/list", json!({})), cancellation())
                 .await;
             let result = success(response);
+            assert_eq!(
+                Value::Object(result.clone()),
+                tool_list_payload(profile),
+                "{} server payload drifted from canonical accounting",
+                profile.name()
+            );
             let encoded = serde_json::to_vec(&result).expect("tools/list serializes");
-            observed.push(blake3::hash(&encoded).to_hex().to_string());
+            observed.push((encoded.len(), blake3::hash(&encoded).to_hex().to_string()));
         }
         assert_eq!(
             observed,
             [
-                "4759cecf649d03eca287567f33386003282a7068ce614396fd5ec352134192f2",
-                "94d9c1a2fc6962fea1e6108505bcbc157cfe49a825dee3401c85b88fd554186a",
-                "9d29b86da344f336429f49a85579f8ea154a5cf74f66762e470b724a8fdcb361",
+                (
+                    193_362,
+                    "82eeca17c486228a72588fe3fa6889e13d8dea125eceb7cdf580817ceda6df2f".to_owned(),
+                ),
+                (
+                    424_905,
+                    "68c1600528e13a07b0425408ef9db7ee5795354b6a605230b8df9577a03591fd".to_owned(),
+                ),
+                (
+                    578_475,
+                    "74f5823b6bf98024108057b423dcad8153f80aa996ead64ad413c03afd599039".to_owned(),
+                ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
         );
+    }
+
+    #[tokio::test]
+    async fn discovery_copy_and_guidance_are_source_free() {
+        for profile in ExposureProfile::ALL {
+            let router =
+                ToolRouter::new(FixtureExecutor::default(), profile).expect("registry compiles");
+            let result = success(
+                router
+                    .handle(request("tools/list", json!({})), cancellation())
+                    .await,
+            );
+            for tool in result["tools"].as_array().expect("tools is an array") {
+                let copy = serde_json::to_string(&json!({
+                    "title": tool["title"],
+                    "description": tool["description"],
+                    "capabilities": tool["_meta"][DISCOVERY_METADATA_KEY],
+                }))
+                .expect("discovery copy serializes");
+                let lowercase = copy.to_ascii_lowercase();
+                for forbidden in [
+                    "rootlight_prompt_sentinel",
+                    "ignore previous instructions",
+                    "rootlight-mcp::",
+                    "c:\\",
+                    "c:/users/",
+                    "/home/",
+                    "/users/",
+                    "file://",
+                ] {
+                    assert!(
+                        !lowercase.contains(forbidden),
+                        "{} discovery contains forbidden source or prompt text: {forbidden}",
+                        tool["name"]
+                    );
+                }
+                for private_label in [["TASK", "-"].concat(), ["GATE", "-"].concat()] {
+                    assert!(!copy.contains(&private_label));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn representative_intents_route_to_six_truthful_discovery_entries() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let result = success(
+            router
+                .handle(request("tools/list", json!({})), cancellation())
+                .await,
+        );
+        let listed = result["tools"].as_array().expect("tools is an array");
+        let cases = [
+            (
+                "find an exact identifier",
+                "code.locate",
+                "exact-identifier and lexical matching",
+                "search_modes[]",
+            ),
+            (
+                "map an explicit symbol change",
+                "change.impact",
+                "symbol-or-path change mapping",
+                "change.revision_range",
+            ),
+            (
+                "summarize file architecture",
+                "architecture.overview",
+                "file-granularity architecture map",
+                "views[]",
+            ),
+            (
+                "compare retained generations",
+                "history.compare",
+                "retained generation identifiers",
+                "base.git",
+            ),
+            (
+                "assemble focused evidence",
+                "context.pack",
+                "evidence assembly from explicit symbol or file identifiers",
+                "seeds.paths",
+            ),
+            (
+                "dispatch several generation-pinned reads",
+                "query.batch",
+                "active-generation batch dispatch",
+                "generation",
+            ),
+        ];
+        for (intent, expected, routing_phrase, limitation_field) in cases {
+            let matches: Vec<&Value> = listed
+                .iter()
+                .filter(|tool| {
+                    tool["description"]
+                        .as_str()
+                        .is_some_and(|description| description.contains(routing_phrase))
+                })
+                .collect();
+            assert_eq!(
+                matches.len(),
+                1,
+                "intent {intent:?} must have one unambiguous discovery match"
+            );
+            let selected = matches[0];
+            assert_eq!(selected["name"], expected, "intent {intent:?} misrouted");
+            let capability = CAPABILITIES
+                .iter()
+                .find(|capability| capability.tool.name() == expected)
+                .expect("routing tool has a capability");
+            assert_eq!(capability.status, CapabilityStatus::FallbackLimited);
+            assert!(
+                selected["_meta"][DISCOVERY_METADATA_KEY]["limitations"]
+                    .as_array()
+                    .is_some_and(|limitations| limitations
+                        .iter()
+                        .any(|limitation| limitation["field"] == limitation_field)),
+                "intent {intent:?} lacks a visible fallback for {limitation_field}"
+            );
+        }
     }
 
     #[tokio::test]

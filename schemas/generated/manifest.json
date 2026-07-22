@@ -66,7 +66,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/vertical.rs",
-      "blake3": "d3607155ee86e2af579797acdfef9c0ddcbafd4d5c04202fc1d6c2d103357d10"
+      "blake3": "962804fe0d0f0053f3ae92db7d25add4ae2f7fb1a9d810c07662c193539a4edf"
     },
     {
       "path": "crates/rootlight-storage/src/generation.rs",
@@ -154,7 +154,7 @@
     },
     {
       "path": "tests/fixtures/mcp/1.0/tool-contracts.json",
-      "blake3": "95b156a2227a04235d4bdcf10981f94fc4d637409e40a766a38e49913f556858"
+      "blake3": "669468b056dd89bd9b38432b35bce8738f7785652d81a25b1195d8e3b0aa69b0"
     },
     {
       "path": "tests/fixtures/mcp/1.0/tool-transcript.jsonl",
@@ -166,7 +166,7 @@
     },
     {
       "path": "xtask/src/main.rs",
-      "blake3": "ed5a62eedfc652b30dcfc2a9a23a1cfc86219a7224fe3111708db7fcc50745d0"
+      "blake3": "cf5af8ab204f8ce0bcabea66352fa0ff2217d267ec4aa7a82775ac0b2124c03b"
     },
     {
       "path": "xtask/src/schemas.rs",

@@ -1316,6 +1316,22 @@ mod tests {
     }
 
     #[test]
+    fn fallback_descriptions_are_bounded_by_the_registry_summary() {
+        for entry in &CAPABILITIES {
+            if entry.status == CapabilityStatus::Implemented {
+                continue;
+            }
+            let description = entry.tool.description().to_ascii_lowercase();
+            assert!(
+                description.contains(entry.fallback_summary),
+                "{} description is broader than its capability summary: {}",
+                entry.tool.name(),
+                entry.tool.description()
+            );
+        }
+    }
+
+    #[test]
     fn unsupported_values_carry_stable_error_metadata() {
         for entry in &CAPABILITIES {
             for rule in entry.rules {

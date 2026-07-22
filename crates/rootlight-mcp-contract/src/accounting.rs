@@ -79,20 +79,34 @@ impl InvocationAccounting {
 /// of the schema catalog.
 #[must_use]
 pub fn measure_tool_list(profile: ExposureProfile) -> ToolListAccounting {
-    let tools = profile.tools();
-    let definitions: Vec<Value> = tools.iter().copied().map(tool_definition_value).collect();
-    let mut result = Map::new();
-    result.insert("tools".to_owned(), Value::Array(definitions));
+    let payload = tool_list_payload(profile);
     // A value assembled from valid JSON parts always serializes.
-    let serialized =
-        serde_json::to_vec(&Value::Object(result)).expect("tool list result serializes");
+    let serialized = serde_json::to_vec(&payload).expect("tool list result serializes");
     let definition_bytes = serialized.len();
     ToolListAccounting {
         profile,
-        tool_count: tools.len(),
+        tool_count: profile.tools().len(),
         definition_bytes,
         estimated_tokens: estimate_tokens(definition_bytes),
     }
+}
+
+/// Builds the complete deterministic `tools/list` result for one profile.
+///
+/// This mirrors the server's serialized discovery result, including schemas,
+/// annotations, execution metadata, and capability metadata. It is intended
+/// for compatibility evidence and exact payload accounting.
+#[must_use]
+pub fn tool_list_payload(profile: ExposureProfile) -> Value {
+    let definitions = profile
+        .tools()
+        .iter()
+        .copied()
+        .map(tool_definition_value)
+        .collect();
+    let mut result = Map::new();
+    result.insert("tools".to_owned(), Value::Array(definitions));
+    Value::Object(result)
 }
 
 /// Bridges a catalog tool to its schema-bearing vertical counterpart.
