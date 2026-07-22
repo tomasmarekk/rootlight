@@ -193,6 +193,8 @@ fn baseline_payload(profile: ExposureProfile) -> Result<Value, DiscoveryError> {
                                 | "context_lines_after"
                                 | "references[].symbol_id"
                                 | "references[].file_id"
+                                | "references[].start_byte"
+                                | "references[].end_byte"
                         )
                     )
             )

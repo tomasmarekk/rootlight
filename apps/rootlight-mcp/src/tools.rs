@@ -2491,14 +2491,19 @@ mod tests {
                     capability.tool.name(),
                     rule.path
                 );
+                let resolves_through_rule = admission.registry_path() == rule.path
+                    || admission
+                        .registry_path()
+                        .strip_prefix(rule.path)
+                        .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with("[]"));
+                let co_required_source_selector = capability.tool == McpTool::SourceRead
+                    && matches!(
+                        rule.path,
+                        "references[].file_id" | "references[].start_byte"
+                    )
+                    && admission.registry_path() == "references[].end_byte";
                 assert!(
-                    admission.registry_path() == rule.path
-                        || admission
-                            .registry_path()
-                            .strip_prefix(rule.path)
-                            .is_some_and(|suffix| {
-                                suffix.starts_with('.') || suffix.starts_with("[]")
-                            }),
+                    resolves_through_rule || co_required_source_selector,
                     "{}:{} resolved through unrelated registry path {}",
                     capability.tool.name(),
                     rule.path,
@@ -2570,16 +2575,28 @@ mod tests {
                     capability.tool.name(),
                     rule.path
                 );
-                covered += 1;
+                if co_required_source_selector {
+                    exclusions.push(format!(
+                        "{}:{}=*:co_required_selector",
+                        capability.tool.name(),
+                        rule.path
+                    ));
+                } else {
+                    covered += 1;
+                }
             }
         }
 
         assert_eq!(
             exclusions,
-            ["query.batch:operations[].tool=plan.change:typed_invariant"],
+            [
+                "source.read:references[].file_id=*:co_required_selector",
+                "source.read:references[].start_byte=*:co_required_selector",
+                "query.batch:operations[].tool=plan.change:typed_invariant",
+            ],
             "review any new generated-rule exclusion"
         );
-        assert_eq!((declared, covered, exclusions.len()), (150, 149, 1));
+        assert_eq!((declared, covered, exclusions.len()), (157, 154, 3));
     }
 
     #[tokio::test]
@@ -2905,16 +2922,16 @@ mod tests {
             observed,
             [
                 (
-                    193_546,
-                    "e8c158f9ba067a621a3bca0cb7067faa6e9096fe003e0c1d8c69f9cd74c93b08".to_owned(),
+                    194_541,
+                    "473bd959ad0e22ef9c5b06ca9e8556e49e5463242650a765509cf7a21ba44ff6".to_owned(),
                 ),
                 (
-                    425_248,
-                    "44b07d5a6839e90f176d667797ba097200c9d8f9e213fe73f0200bd6b53694ef".to_owned(),
+                    426_243,
+                    "5e2ba8f249c06c25da27a07f75c286816f77cb46208d5ae5ab96cdce20979ac7".to_owned(),
                 ),
                 (
-                    578_818,
-                    "edf2069a4c9a919718041bca09b1757e204762fd455feac7a8244ce66fb169f7".to_owned(),
+                    579_961,
+                    "0b94b9e3185c963ef3633f07befed3f8ee129322a2aaf64abf0afd002739cff1".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
