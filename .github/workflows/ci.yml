@@ -46,7 +46,6 @@ jobs:
       - name: Architecture and contracts
         run: |
           cargo run --locked --quiet --package xtask -- architecture-check
-          cargo run --locked --quiet --package xtask -- capability-check
           cargo run --locked --quiet --package xtask -- generate --check
           cargo run --locked --quiet --package xtask -- compatibility-check
           cargo run --locked --quiet --package xtask -- policy-check
@@ -54,6 +53,95 @@ jobs:
           cargo run --locked --quiet --package xtask -- markdown-link-check --root tests/fixtures/markdown-links/valid
           cargo run --locked --quiet --package xtask -- id-vectors > target/id-vectors.actual.json
           cmp tests/fixtures/id-vectors.json target/id-vectors.actual.json
+      - name: Capability parity and evidence
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          mkdir -p target/capability-parity target/capability-parity-second
+          cargo run --locked --quiet --package xtask -- capability-check \
+            --output-dir target/capability-parity \
+            --source-revision "$SOURCE_REVISION"
+          cargo run --locked --quiet --package xtask -- capability-check \
+            --output-dir target/capability-parity-second \
+            --source-revision "$SOURCE_REVISION"
+          diff --recursive target/capability-parity target/capability-parity-second
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("target/capability-parity")
+          expected_files = {
+              "capability-execution-matrix-v1.json",
+              "capability-initial-mismatches-v1.json",
+              "capability-parity-report-v1.json",
+              "capability-registry-v1.json",
+          }
+          if {path.name for path in root.iterdir()} != expected_files:
+              raise SystemExit("capability artifact set differs")
+
+          revision = os.environ["SOURCE_REVISION"]
+          report = json.loads(
+              (root / "capability-parity-report-v1.json").read_bytes()
+          )
+          expected_report = {
+              "schema": "rootlight.mcp-capability-parity/1",
+              "sourceRevision": revision,
+              "status": "passed_with_explicit_blockers",
+              "toolCount": 19,
+              "reviewedInputFields": 557,
+              "schemaGoldenPairs": 19,
+              "profileCounts": {
+                  "scout": 6,
+                  "analysis": 13,
+                  "developer": 19,
+              },
+              "blockedGaps": 2,
+          }
+          if report != expected_report:
+              raise SystemExit(f"capability parity report differs: {report!r}")
+
+          registry = json.loads(
+              (root / "capability-registry-v1.json").read_bytes()
+          )
+          if (
+              registry.get("schema") != "rootlight.mcp-capability-registry/1"
+              or registry.get("sourceRevision") != revision
+              or len(registry.get("tools", [])) != 19
+          ):
+              raise SystemExit("capability registry artifact differs")
+
+          matrix = json.loads(
+              (root / "capability-execution-matrix-v1.json").read_bytes()
+          )
+          cases = matrix.get("cases")
+          if (
+              matrix.get("schema") != "rootlight.mcp-execution-matrix/1"
+              or matrix.get("sourceRevision") != revision
+              or not isinstance(cases, list)
+              or not cases
+              or any(
+                  case.get("observation") != "not_run"
+                  or case.get("verdict") != "unknown"
+                  for case in cases
+              )
+          ):
+              raise SystemExit("execution matrix overstates observed behavior")
+
+          encoded = b"".join(path.read_bytes() for path in sorted(root.iterdir()))
+          if str(Path.cwd()).encode() in encoded:
+              raise SystemExit("capability artifacts contain the checkout path")
+          PY
+      - name: Upload immutable capability parity evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-mcp-capability-parity-v1-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/capability-parity
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
       - name: Disposition validation
         run: |
           mkdir -p target/disposition-validation
