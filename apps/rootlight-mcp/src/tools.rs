@@ -485,6 +485,8 @@ pub(crate) enum CapabilityRejectionReason {
     UnsupportedValue,
     /// A field is blocked pending a complete implementation.
     BlockedField,
+    /// Individually supported values cannot be combined in one request.
+    UnsupportedCombination,
     /// An unresolved binding could select a restricted value.
     UnprovenBoundValue,
     /// A binding reached validation before it was materialized.
@@ -497,6 +499,7 @@ impl CapabilityRejectionReason {
             Self::UnsupportedField => "unsupported_field",
             Self::UnsupportedValue => "unsupported_value",
             Self::BlockedField => "blocked_field",
+            Self::UnsupportedCombination => "unsupported_combination",
             Self::UnprovenBoundValue => "unproven_bound_value",
             Self::UnresolvedBinding => "unresolved_binding",
         }
@@ -595,6 +598,7 @@ pub(crate) fn validate_capability_input(
     arguments: &Value,
     binding_policy: CapabilityBindingPolicy,
 ) -> Result<(), CapabilityAdmissionError> {
+    validate_capability_invariants(tool, arguments)?;
     let capability = capability_for(catalog_tool(tool));
     let mut pending = vec![PendingCapabilityValue {
         value: arguments,
@@ -650,6 +654,31 @@ pub(crate) fn validate_capability_input(
         }
     }
 
+    Ok(())
+}
+
+fn validate_capability_invariants(
+    tool: VerticalTool,
+    arguments: &Value,
+) -> Result<(), CapabilityAdmissionError> {
+    if tool == VerticalTool::CodeLocate
+        && arguments
+            .get("search_modes")
+            .and_then(Value::as_array)
+            .is_some_and(|modes| {
+                modes.len() > 1
+                    && modes
+                        .iter()
+                        .all(|mode| matches!(mode.as_str(), Some("exact" | "lexical")))
+            })
+    {
+        return Err(CapabilityAdmissionError {
+            code: ErrorCode::UnsupportedCapability,
+            registry_path: "search_modes".to_owned(),
+            instance_path: "search_modes".to_owned(),
+            reason: CapabilityRejectionReason::UnsupportedCombination,
+        });
+    }
     Ok(())
 }
 
@@ -1825,6 +1854,345 @@ mod tests {
             .clone()
     }
 
+    fn retained_input(name: &str) -> Map<String, Value> {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/mcp/1.0/tool-contracts.json"
+        ))
+        .expect("retained tool contracts are valid JSON");
+        fixture["tools"]
+            .as_array()
+            .expect("tool contracts contain an array")
+            .iter()
+            .find(|entry| entry["tool"] == name)
+            .unwrap_or_else(|| panic!("retained tool contract {name} exists"))["input"]
+            .as_object()
+            .expect("retained input is an object")
+            .clone()
+    }
+
+    fn vertical_tool(name: &str) -> VerticalTool {
+        VerticalTool::ALL
+            .into_iter()
+            .find(|tool| tool.name() == name)
+            .unwrap_or_else(|| panic!("vertical tool {name} exists"))
+    }
+
+    fn dereference_schema(root: &Value, schema: &Value) -> Value {
+        let mut resolved = schema.clone();
+        while let Some(reference) = resolved.get("$ref").and_then(Value::as_str) {
+            let pointer = reference
+                .strip_prefix('#')
+                .unwrap_or_else(|| panic!("generated schema reference is local: {reference}"));
+            resolved = root
+                .pointer(pointer)
+                .unwrap_or_else(|| panic!("generated schema reference exists: {reference}"))
+                .clone();
+        }
+        resolved
+    }
+
+    fn schema_property(root: &Value, schema: &Value, name: &str) -> Option<Value> {
+        let resolved = dereference_schema(root, schema);
+        if let Some(property) = resolved
+            .get("properties")
+            .and_then(|properties| properties.get(name))
+        {
+            return Some(property.clone());
+        }
+        for keyword in ["anyOf", "oneOf", "allOf"] {
+            if let Some(variants) = resolved.get(keyword).and_then(Value::as_array) {
+                for variant in variants {
+                    if let Some(property) = schema_property(root, variant, name) {
+                        return Some(property);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn schema_array_items(root: &Value, schema: &Value) -> Option<Value> {
+        let resolved = dereference_schema(root, schema);
+        if let Some(items) = resolved.get("items") {
+            return Some(items.clone());
+        }
+        for keyword in ["anyOf", "oneOf", "allOf"] {
+            if let Some(variants) = resolved.get(keyword).and_then(Value::as_array) {
+                for variant in variants {
+                    if let Some(items) = schema_array_items(root, variant) {
+                        return Some(items);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn split_capability_path(path: &str) -> Vec<(&str, bool)> {
+        path.split('.')
+            .map(|segment| {
+                segment
+                    .strip_suffix("[]")
+                    .map_or((segment, false), |name| (name, true))
+            })
+            .collect()
+    }
+
+    fn schema_at_capability_path(root: &Value, path: &str) -> Option<Value> {
+        let mut schema = root.clone();
+        for (name, array_item) in split_capability_path(path) {
+            schema = schema_property(root, &schema, name)?;
+            if array_item {
+                schema = schema_array_items(root, &schema)?;
+            }
+        }
+        Some(schema)
+    }
+
+    fn sample_string(schema: &Value) -> String {
+        let pattern = schema.get("pattern").and_then(Value::as_str).unwrap_or("");
+        if pattern.starts_with("^repo1_") {
+            return "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v".to_owned();
+        }
+        if pattern.starts_with("^gen1_") {
+            return "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by".to_owned();
+        }
+        if pattern.starts_with("^sym1_") {
+            return "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey".to_owned();
+        }
+        if pattern.starts_with("^file1_") {
+            return "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq".to_owned();
+        }
+        if pattern.starts_with("^op1_") {
+            return "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv".to_owned();
+        }
+        let minimum = schema.get("minLength").and_then(Value::as_u64).unwrap_or(1);
+        "x".repeat(usize::try_from(minimum.max(1)).expect("schema string bound fits usize"))
+    }
+
+    fn sample_schema_values(root: &Value, schema: &Value) -> Vec<Value> {
+        let resolved = dereference_schema(root, schema);
+        if let Some(constant) = resolved.get("const") {
+            return vec![constant.clone()];
+        }
+        if let Some(values) = resolved.get("enum").and_then(Value::as_array) {
+            return values.clone();
+        }
+        for keyword in ["anyOf", "oneOf"] {
+            if let Some(variants) = resolved.get(keyword).and_then(Value::as_array) {
+                return variants
+                    .iter()
+                    .flat_map(|variant| sample_schema_values(root, variant))
+                    .collect();
+            }
+        }
+        let sample = match resolved.get("type").and_then(Value::as_str) {
+            Some("object") => {
+                let mut object = Map::new();
+                if let Some(required) = resolved.get("required").and_then(Value::as_array) {
+                    for name in required.iter().filter_map(Value::as_str) {
+                        let property = resolved
+                            .get("properties")
+                            .and_then(|properties| properties.get(name))
+                            .unwrap_or_else(|| panic!("required generated property {name} exists"));
+                        object.insert(name.to_owned(), sample_schema_value(root, property));
+                    }
+                }
+                Value::Object(object)
+            }
+            Some("array") => {
+                let count = resolved
+                    .get("minItems")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .max(1);
+                let Some(items) = resolved.get("items") else {
+                    return vec![Value::Array(Vec::new())];
+                };
+                Value::Array(
+                    (0..count)
+                        .map(|_| sample_schema_value(root, items))
+                        .collect(),
+                )
+            }
+            Some("boolean") => Value::Bool(false),
+            Some("integer") => {
+                Value::from(resolved.get("minimum").and_then(Value::as_i64).unwrap_or(0))
+            }
+            Some("number") => resolved
+                .get("minimum")
+                .cloned()
+                .unwrap_or_else(|| Value::from(0)),
+            Some("null") => Value::Null,
+            Some("string") => Value::String(sample_string(&resolved)),
+            other => panic!("generated schema has a sampleable type: {other:?}"),
+        };
+        vec![sample]
+    }
+
+    fn sample_schema_value(root: &Value, schema: &Value) -> Value {
+        sample_schema_values(root, schema)
+            .into_iter()
+            .next()
+            .expect("generated schema has a sample value")
+    }
+
+    fn force_schema_path(
+        root: &Value,
+        schema: &Value,
+        path: &[(&str, bool)],
+        leaf: &Value,
+    ) -> Option<Value> {
+        if path.is_empty() {
+            return Some(leaf.clone());
+        }
+        let resolved = dereference_schema(root, schema);
+        for keyword in ["anyOf", "oneOf"] {
+            if let Some(variants) = resolved.get(keyword).and_then(Value::as_array) {
+                for variant in variants {
+                    if let Some(value) = force_schema_path(root, variant, path, leaf) {
+                        return Some(value);
+                    }
+                }
+                return None;
+            }
+        }
+        let (name, array_item) = path[0];
+        let property = resolved
+            .get("properties")
+            .and_then(|properties| properties.get(name))?;
+        let forced = if array_item {
+            let items = schema_array_items(root, property)?;
+            Value::Array(vec![force_schema_path(root, &items, &path[1..], leaf)?])
+        } else {
+            force_schema_path(root, property, &path[1..], leaf)?
+        };
+        let mut object = match sample_schema_value(root, &resolved) {
+            Value::Object(object) => object,
+            _ => return None,
+        };
+        object.insert(name.to_owned(), forced);
+        Some(Value::Object(object))
+    }
+
+    fn rule_value(value: &str) -> Value {
+        serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_owned()))
+    }
+
+    fn admitted_retained_input(
+        capability: &ToolCapability,
+        tool: VerticalTool,
+        contract: &ToolContract,
+        schema: &Value,
+    ) -> Map<String, Value> {
+        let mut input = retained_input(capability.tool.name());
+        loop {
+            let value = Value::Object(input.clone());
+            match validate_capability_input(tool, &value, CapabilityBindingPolicy::Materialized) {
+                Ok(()) => return input,
+                Err(error) => {
+                    if let Some(implemented) = capability.rules.iter().find(|rule| {
+                        rule.path == error.registry_path()
+                            && rule.value.is_some()
+                            && rule.status == CapabilityStatus::Implemented
+                    }) {
+                        let path = split_capability_path(implemented.path);
+                        let (top_level, _) = *path.first().expect("implemented path is non-empty");
+                        let Value::Object(forced) = force_schema_path(
+                            schema,
+                            schema,
+                            &path,
+                            &rule_value(
+                                implemented
+                                    .value
+                                    .expect("implemented value rule has a value"),
+                            ),
+                        )
+                        .expect("implemented registry value exists in the generated schema") else {
+                            panic!("implemented path builds an input object");
+                        };
+                        input.insert(
+                            top_level.to_owned(),
+                            forced
+                                .get(top_level)
+                                .expect("forced input contains its top-level field")
+                                .clone(),
+                        );
+                        continue;
+                    }
+                    let top_level = error
+                        .instance_path()
+                        .split('.')
+                        .next()
+                        .expect("capability instance path is non-empty");
+                    assert!(
+                        input.remove(top_level).is_some(),
+                        "{} retained input cannot remove restricted path {}",
+                        capability.tool.name(),
+                        error.instance_path()
+                    );
+                    assert!(
+                        contract
+                            .input_validator
+                            .is_valid(&Value::Object(input.clone())),
+                        "{} retained input requires restricted path {}",
+                        capability.tool.name(),
+                        error.instance_path()
+                    );
+                }
+            }
+        }
+    }
+
+    fn generated_rule_input(
+        capability: &ToolCapability,
+        rule: &CapabilityRule,
+        tool: VerticalTool,
+        schema: &Value,
+    ) -> Option<(Map<String, Value>, CapabilityAdmissionError)> {
+        let leaf_schema = schema_at_capability_path(schema, rule.path)?;
+        let candidates = rule.value.map_or_else(
+            || sample_schema_values(schema, &leaf_schema),
+            |value| vec![rule_value(value)],
+        );
+        let path = split_capability_path(rule.path);
+        let (top_name, top_array_item) = *path.first()?;
+        let top_schema = schema_property(schema, schema, top_name)?;
+        let contract = ToolContract::compile(tool).expect("generated tool contract compiles");
+
+        for candidate in candidates {
+            let top_value = if top_array_item {
+                let items = schema_array_items(schema, &top_schema)?;
+                Value::Array(vec![force_schema_path(
+                    schema,
+                    &items,
+                    &path[1..],
+                    &candidate,
+                )?])
+            } else {
+                force_schema_path(schema, &top_schema, &path[1..], &candidate)?
+            };
+            let mut input = admitted_retained_input(capability, tool, &contract, schema);
+            input.insert(top_name.to_owned(), top_value);
+            if capability.tool == McpTool::RepoIndex && top_name == "repository_id" {
+                input.remove("root");
+            }
+            let value = Value::Object(input.clone());
+            if !contract.input_validator.is_valid(&value) {
+                continue;
+            }
+            let Ok(()) =
+                validate_capability_input(tool, &value, CapabilityBindingPolicy::Materialized)
+            else {
+                let error =
+                    validate_capability_input(tool, &value, CapabilityBindingPolicy::Materialized)
+                        .expect_err("restricted generated case is rejected");
+                return Some((input, error));
+            };
+        }
+        None
+    }
+
     #[test]
     fn capability_traversal_reports_the_first_path_deterministically() {
         let mut query_first = Map::new();
@@ -2048,6 +2416,306 @@ mod tests {
                 field: DetailKey::parse("arguments").expect("static detail key is valid")
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn generated_restricted_rules_reject_direct_calls_without_execution() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let field_key = DetailKey::parse("field_path").expect("static detail key is valid");
+        let reason_key = DetailKey::parse("capability_reason").expect("static detail key is valid");
+        let mut declared = 0usize;
+        let mut covered = 0usize;
+        let mut exclusions = Vec::new();
+
+        for capability in &CAPABILITIES {
+            let tool = vertical_tool(capability.tool.name());
+            let schema: Value =
+                serde_json::from_str(tool.input_schema_json()).expect("input schema is valid JSON");
+            for rule in capability.rules.iter().filter(|rule| {
+                matches!(
+                    rule.status,
+                    CapabilityStatus::UnsupportedStableError | CapabilityStatus::Blocked
+                )
+            }) {
+                declared += 1;
+                assert!(
+                    schema_at_capability_path(&schema, rule.path).is_some(),
+                    "{} capability path {} exists in its generated schema",
+                    capability.tool.name(),
+                    rule.path
+                );
+                let Some((arguments, admission)) =
+                    generated_rule_input(capability, rule, tool, &schema)
+                else {
+                    exclusions.push(format!(
+                        "{}:{}={}",
+                        capability.tool.name(),
+                        rule.path,
+                        rule.value.unwrap_or("*")
+                    ));
+                    continue;
+                };
+                let expected_code = match rule.status {
+                    CapabilityStatus::UnsupportedStableError => rule
+                        .error_code
+                        .expect("unsupported rule declares a stable code"),
+                    CapabilityStatus::Blocked => ErrorCode::UnsupportedCapability,
+                    CapabilityStatus::Implemented | CapabilityStatus::FallbackLimited => {
+                        unreachable!("test filters to rejected rules")
+                    }
+                };
+                let expected_reason = match (rule.status, rule.value) {
+                    (CapabilityStatus::UnsupportedStableError, Some(_)) => {
+                        CapabilityRejectionReason::UnsupportedValue
+                    }
+                    (CapabilityStatus::UnsupportedStableError, None) => {
+                        CapabilityRejectionReason::UnsupportedField
+                    }
+                    (CapabilityStatus::Blocked, _) => CapabilityRejectionReason::BlockedField,
+                    (CapabilityStatus::Implemented | CapabilityStatus::FallbackLimited, _) => {
+                        unreachable!("test filters to rejected rules")
+                    }
+                };
+                assert_eq!(
+                    admission.code(),
+                    expected_code,
+                    "{}:{} resolved to the wrong code",
+                    capability.tool.name(),
+                    rule.path
+                );
+                assert_eq!(
+                    admission.reason(),
+                    expected_reason,
+                    "{}:{} resolved to the wrong reason",
+                    capability.tool.name(),
+                    rule.path
+                );
+                assert!(
+                    admission.registry_path() == rule.path
+                        || admission
+                            .registry_path()
+                            .strip_prefix(rule.path)
+                            .is_some_and(|suffix| {
+                                suffix.starts_with('.') || suffix.starts_with("[]")
+                            }),
+                    "{}:{} resolved through unrelated registry path {}",
+                    capability.tool.name(),
+                    rule.path,
+                    admission.registry_path()
+                );
+
+                let calls_before = router.executor.calls.load(Ordering::Relaxed);
+                let response = router
+                    .handle(
+                        request(
+                            "tools/call",
+                            json!({
+                                "name": capability.tool.name(),
+                                "arguments": arguments
+                            }),
+                        ),
+                        cancellation(),
+                    )
+                    .await;
+                let result = success(response);
+                let direct: ErrorResponse =
+                    serde_json::from_value(result["structuredContent"].clone())
+                        .expect("capability rejection uses the checked error contract");
+                assert_eq!(
+                    direct.error.code(),
+                    expected_code,
+                    "{}:{}={}",
+                    capability.tool.name(),
+                    rule.path,
+                    rule.value.unwrap_or("*")
+                );
+                if capability.tool == McpTool::QueryBatch
+                    && rule.path == "operations[].tool"
+                    && rule.value == Some("plan.change")
+                {
+                    assert!(
+                        direct.error.details().get(&field_key).is_none()
+                            && direct.error.details().get(&reason_key).is_none(),
+                        "typed batch-plan admission intentionally precedes capability details"
+                    );
+                    assert_eq!(
+                        router.executor.calls.load(Ordering::Relaxed),
+                        calls_before,
+                        "query.batch:operations[].tool reached the executor"
+                    );
+                    exclusions.push(
+                        "query.batch:operations[].tool=plan.change:typed_invariant".to_owned(),
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    direct.error.details().get(&field_key),
+                    Some(&PublicValue::Label(
+                        SafeLabel::parse(admission.instance_path())
+                            .expect("generated instance path is a safe label")
+                    ))
+                );
+                assert_eq!(
+                    direct.error.details().get(&reason_key),
+                    Some(&PublicValue::Label(
+                        SafeLabel::parse(expected_reason.public_name())
+                            .expect("stable reason is a safe label")
+                    ))
+                );
+                assert_eq!(
+                    router.executor.calls.load(Ordering::Relaxed),
+                    calls_before,
+                    "{}:{} reached the executor",
+                    capability.tool.name(),
+                    rule.path
+                );
+                covered += 1;
+            }
+        }
+
+        assert_eq!(
+            exclusions,
+            ["query.batch:operations[].tool=plan.change:typed_invariant"],
+            "review any new generated-rule exclusion"
+        );
+        assert_eq!((declared, covered, exclusions.len()), (150, 149, 1));
+    }
+
+    #[tokio::test]
+    async fn every_tool_rejects_malformed_and_unknown_fields_without_execution() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+
+        for capability in &CAPABILITIES {
+            let tool = vertical_tool(capability.tool.name());
+            let contract = ToolContract::compile(tool).expect("generated tool contract compiles");
+            let retained = retained_input(capability.tool.name());
+            let mut cases = Vec::with_capacity(2);
+
+            let mut unknown = retained.clone();
+            unknown.insert("unknown_field".to_owned(), Value::Bool(true));
+            cases.push(("unknown", unknown));
+
+            let mut malformed = retained;
+            if let Some(name) = malformed.keys().next().cloned() {
+                malformed.insert(name, Value::Null);
+            } else {
+                malformed.insert("max_results".to_owned(), Value::Null);
+            }
+            cases.push(("malformed", malformed));
+
+            for (label, arguments) in cases {
+                assert!(
+                    !contract
+                        .input_validator
+                        .is_valid(&Value::Object(arguments.clone())),
+                    "{} {label} fixture must fail the generated schema",
+                    capability.tool.name()
+                );
+                let calls_before = router.executor.calls.load(Ordering::Relaxed);
+                let response = router
+                    .handle(
+                        request(
+                            "tools/call",
+                            json!({
+                                "name": capability.tool.name(),
+                                "arguments": arguments
+                            }),
+                        ),
+                        cancellation(),
+                    )
+                    .await;
+                let result = success(response);
+                let error: ErrorResponse =
+                    serde_json::from_value(result["structuredContent"].clone())
+                        .expect("schema rejection uses the checked error contract");
+                assert_eq!(
+                    error.error.code(),
+                    ErrorCode::InvalidArgument,
+                    "{} {label} input used the wrong code",
+                    capability.tool.name()
+                );
+                assert_eq!(
+                    router.executor.calls.load(Ordering::Relaxed),
+                    calls_before,
+                    "{} {label} input reached the executor",
+                    capability.tool.name()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn locate_mode_combinations_match_direct_and_materialized_admission() {
+        for mode in ["exact", "lexical"] {
+            validate_capability_input(
+                VerticalTool::CodeLocate,
+                &json!({"search_modes": [mode]}),
+                CapabilityBindingPolicy::Materialized,
+            )
+            .unwrap_or_else(|error| panic!("single {mode} mode remains admitted: {error:?}"));
+        }
+
+        let mut arguments = retained_input("code.locate");
+        arguments.insert("search_modes".to_owned(), json!(["exact", "lexical"]));
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({"name": "code.locate", "arguments": arguments}),
+                ),
+                cancellation(),
+            )
+            .await;
+        let result = success(response);
+        let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
+            .expect("combination rejection uses the checked error contract");
+        assert_eq!(direct.error.code(), ErrorCode::UnsupportedCapability);
+        assert_eq!(
+            direct
+                .error
+                .details()
+                .get(&DetailKey::parse("field_path").expect("static detail key is valid")),
+            Some(&PublicValue::Label(
+                SafeLabel::parse("search_modes").expect("static field path is valid")
+            ))
+        );
+        assert_eq!(
+            direct
+                .error
+                .details()
+                .get(&DetailKey::parse("capability_reason").expect("static detail key is valid")),
+            Some(&PublicValue::Label(
+                SafeLabel::parse("unsupported_combination")
+                    .expect("static capability reason is valid")
+            ))
+        );
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+
+        let validator =
+            MaterializedToolValidator::compile().expect("checked contracts compile once");
+        let materialized_arguments = Map::from_iter([
+            (
+                "repository".to_owned(),
+                json!({"repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"}),
+            ),
+            ("query".to_owned(), json!("fixture")),
+            ("search_modes".to_owned(), json!(["exact", "lexical"])),
+        ]);
+        let MaterializedInputError::Public(materialized) = validator
+            .validate(
+                VerticalTool::CodeLocate,
+                &materialized_arguments,
+                ExposureProfile::Developer,
+            )
+            .expect_err("materialized mode combination is rejected")
+        else {
+            panic!("materialized combination must retain the capability error");
+        };
+        assert_eq!(*materialized, direct.error);
     }
 
     fn checked_not_found() -> PublicError {
