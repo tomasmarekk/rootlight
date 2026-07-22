@@ -71,14 +71,142 @@
         }
       ]
     },
+    "BatchArgument": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BatchBinding"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BatchArgument"
+          }
+        },
+        {
+          "$ref": "#/$defs/BatchArgumentObject"
+        }
+      ]
+    },
+    "BatchArgumentObject": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/BatchArgument"
+      },
+      "not": {
+        "required": [
+          "$from"
+        ]
+      }
+    },
+    "BatchArguments": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/BatchArgument"
+      }
+    },
+    "BatchBinding": {
+      "description": "A restricted typed binding from one declared dependency operation.\n\nThe semantic source and bounded item index select one registry-reviewed\noutput slot. Arbitrary response paths, envelope metadata, warnings, cursor\npayloads, usage fields, and repository-controlled free text are not\nrepresentable.",
+      "type": "object",
+      "properties": {
+        "$from": {
+          "description": "Operation identifier of the declared dependency to read from.",
+          "type": "string",
+          "maxLength": 32,
+          "minLength": 1
+        },
+        "index": {
+          "description": "Item selected from the source tool's bounded result collection.\n\nA source slot without a collection omits this field. Static planning\nvalidates whether the selected source requires an index and applies the\ntighter source-specific bound.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 499,
+          "minimum": 0
+        },
+        "source": {
+          "description": "Stable semantic name of the registry-reviewed dependency output.",
+          "$ref": "#/$defs/BatchBindingSource"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "$from",
+        "source"
+      ]
+    },
+    "BatchBindingSource": {
+      "description": "Stable semantic name of a reviewed dependency-output slot.",
+      "oneOf": [
+        {
+          "description": "One stable symbol identifier.",
+          "type": "string",
+          "const": "symbol_id"
+        },
+        {
+          "description": "A bounded collection of stable symbol identifiers.",
+          "type": "string",
+          "const": "symbol_ids"
+        },
+        {
+          "description": "One immutable generation-pinned source reference.",
+          "type": "string",
+          "const": "source_ref"
+        },
+        {
+          "description": "A bounded collection of immutable source references.",
+          "type": "string",
+          "const": "source_refs"
+        },
+        {
+          "description": "A symbol definition source reference.",
+          "type": "string",
+          "const": "definition"
+        },
+        {
+          "description": "A bounded collection of graph node identifiers.",
+          "type": "string",
+          "const": "nodes"
+        },
+        {
+          "description": "One stable test identifier.",
+          "type": "string",
+          "const": "test_id"
+        },
+        {
+          "description": "One stable context-pack identifier.",
+          "type": "string",
+          "const": "pack_id"
+        }
+      ]
+    },
     "BatchOperation": {
       "description": "One operation inside a `query.batch` request.\n\nThe `arguments` object is validated against the selected tool's strict input\nschema after all bindings are resolved. The `repository`, `generation`,\n`budget`, `cursor`, and `response_profile` fields are omitted from arguments\nbecause they are inherited from the batch envelope.",
       "type": "object",
       "properties": {
         "arguments": {
           "description": "Strict tool arguments as an object with batch-inherited fields omitted.\n\nLeaf values may be [`BatchBinding`] references that are resolved from\ncompleted dependency responses before schema validation.",
-          "type": "object",
-          "additionalProperties": true
+          "$ref": "#/$defs/BatchArguments"
         },
         "depends_on": {
           "description": "Zero to eight earlier or later operation identifiers forming a bounded\nacyclic dependency graph with maximum depth eight.",

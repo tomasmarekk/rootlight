@@ -1418,7 +1418,7 @@ const fn input_shape_hash(tool: McpTool) -> &'static str {
             "ca8734f87fb7a3c7e8215c19ff295d9ba37092ab4e9288f6f5f7e993fe5c777c"
         }
         McpTool::PlanChange => "6f2e2f974582a6025e15233d36ce798742089e8bb055c726b63c3258a27ef411",
-        McpTool::ContextPack => "788f06bf0d8c6ec9718fcf76319af6bb1f7ce470dfa182476265be343b228d4b",
+        McpTool::ContextPack => "bcefc3fce03c389f26078725694aabdd2878e315e31e213c0ef8fb961b197142",
         McpTool::SourceRead => "df1472b995ed8d489d9abafb8adc95ab0b5da699beb3ed29dcc16b7293de32f8",
         McpTool::QueryAdvanced => {
             "2e8e0b28deda82821ecc8cacd45b424929303bb5ccca057e89cabfc1552aaa3b"

@@ -28186,9 +28186,9 @@
             "budget": "token_budget",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded profiled evidence assembly with generation-pinned references signatures and source snippets under a token budget",
+            "fallbackSummary": "bounded profiled evidence assembly with authenticated continuation, generation-pinned references signatures and source snippets under a token budget",
             "generation": "selects_generation",
-            "inputShapeHash": "788f06bf0d8c6ec9718fcf76319af6bb1f7ce470dfa182476265be343b228d4b",
+            "inputShapeHash": "bcefc3fce03c389f26078725694aabdd2878e315e31e213c0ef8fb961b197142",
             "limitations": [
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -28225,15 +28225,9 @@
                 "field": "seeds.plan",
                 "status": "unsupported_stable_error",
                 "summary": "plan seeds are not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "continuation",
-                "status": "unsupported_stable_error",
-                "summary": "continuation assembly is not served"
               }
             ],
-            "pagination": "progressive_handle",
+            "pagination": "authenticated_cursor",
             "profiles": [
               "scout",
               "analysis",
@@ -28258,7 +28252,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded profiled evidence assembly with generation-pinned references signatures and source snippets under a token budget; selectable response profiles and source policies control representation, while path, route, change, located-result, and plan seeds are unsupported.",
+        "description": "Use bounded profiled evidence assembly with authenticated continuation, generation-pinned references signatures and source snippets under a token budget; selectable response profiles and source policies control representation, while path, route, change, located-result, and plan seeds are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -29629,9 +29623,44 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "limiting_resources": {
+                  "description": "Exact resources that prevented inclusion.",
+                  "items": {
+                    "$ref": "#/$defs/LimitingResource"
+                  },
+                  "maxItems": 16,
+                  "type": "array"
+                },
+                "provider": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/SafeLabel"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Provider domain that observed the omission, when provider-specific."
+                },
                 "reason": {
                   "$ref": "#/$defs/SafeLabel",
                   "description": "Source-free reason code for the omission."
+                },
+                "resumable": {
+                  "default": false,
+                  "description": "Whether another page of this exact request can retrieve the omission.",
+                  "type": "boolean"
+                },
+                "role": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/EvidenceRole"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Evidence role affected by the omission, when role-specific."
                 }
               },
               "required": [
@@ -34879,14 +34908,142 @@
                 }
               ]
             },
+            "BatchArgument": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BatchBinding"
+                },
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                {
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "format": "double",
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "$ref": "#/$defs/BatchArgument"
+                  },
+                  "type": "array"
+                },
+                {
+                  "$ref": "#/$defs/BatchArgumentObject"
+                }
+              ]
+            },
+            "BatchArgumentObject": {
+              "additionalProperties": {
+                "$ref": "#/$defs/BatchArgument"
+              },
+              "not": {
+                "required": [
+                  "$from"
+                ]
+              },
+              "type": "object"
+            },
+            "BatchArguments": {
+              "additionalProperties": {
+                "$ref": "#/$defs/BatchArgument"
+              },
+              "type": "object"
+            },
+            "BatchBinding": {
+              "additionalProperties": false,
+              "description": "A restricted typed binding from one declared dependency operation.\n\nThe semantic source and bounded item index select one registry-reviewed\noutput slot. Arbitrary response paths, envelope metadata, warnings, cursor\npayloads, usage fields, and repository-controlled free text are not\nrepresentable.",
+              "properties": {
+                "$from": {
+                  "description": "Operation identifier of the declared dependency to read from.",
+                  "maxLength": 32,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "index": {
+                  "description": "Item selected from the source tool's bounded result collection.\n\nA source slot without a collection omits this field. Static planning\nvalidates whether the selected source requires an index and applies the\ntighter source-specific bound.",
+                  "format": "uint16",
+                  "maximum": 499,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "source": {
+                  "$ref": "#/$defs/BatchBindingSource",
+                  "description": "Stable semantic name of the registry-reviewed dependency output."
+                }
+              },
+              "required": [
+                "$from",
+                "source"
+              ],
+              "type": "object"
+            },
+            "BatchBindingSource": {
+              "description": "Stable semantic name of a reviewed dependency-output slot.",
+              "oneOf": [
+                {
+                  "const": "symbol_id",
+                  "description": "One stable symbol identifier.",
+                  "type": "string"
+                },
+                {
+                  "const": "symbol_ids",
+                  "description": "A bounded collection of stable symbol identifiers.",
+                  "type": "string"
+                },
+                {
+                  "const": "source_ref",
+                  "description": "One immutable generation-pinned source reference.",
+                  "type": "string"
+                },
+                {
+                  "const": "source_refs",
+                  "description": "A bounded collection of immutable source references.",
+                  "type": "string"
+                },
+                {
+                  "const": "definition",
+                  "description": "A symbol definition source reference.",
+                  "type": "string"
+                },
+                {
+                  "const": "nodes",
+                  "description": "A bounded collection of graph node identifiers.",
+                  "type": "string"
+                },
+                {
+                  "const": "test_id",
+                  "description": "One stable test identifier.",
+                  "type": "string"
+                },
+                {
+                  "const": "pack_id",
+                  "description": "One stable context-pack identifier.",
+                  "type": "string"
+                }
+              ]
+            },
             "BatchOperation": {
               "additionalProperties": false,
               "description": "One operation inside a `query.batch` request.\n\nThe `arguments` object is validated against the selected tool's strict input\nschema after all bindings are resolved. The `repository`, `generation`,\n`budget`, `cursor`, and `response_profile` fields are omitted from arguments\nbecause they are inherited from the batch envelope.",
               "properties": {
                 "arguments": {
-                  "additionalProperties": true,
-                  "description": "Strict tool arguments as an object with batch-inherited fields omitted.\n\nLeaf values may be [`BatchBinding`] references that are resolved from\ncompleted dependency responses before schema validation.",
-                  "type": "object"
+                  "$ref": "#/$defs/BatchArguments",
+                  "description": "Strict tool arguments as an object with batch-inherited fields omitted.\n\nLeaf values may be [`BatchBinding`] references that are resolved from\ncompleted dependency responses before schema validation."
                 },
                 "depends_on": {
                   "description": "Zero to eight earlier or later operation identifiers forming a bounded\nacyclic dependency graph with maximum depth eight.",

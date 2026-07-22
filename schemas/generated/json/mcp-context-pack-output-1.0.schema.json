@@ -1010,9 +1010,44 @@
           "maximum": 100000,
           "minimum": 0
         },
+        "limiting_resources": {
+          "description": "Exact resources that prevented inclusion.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LimitingResource"
+          },
+          "maxItems": 16
+        },
+        "provider": {
+          "description": "Provider domain that observed the omission, when provider-specific.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SafeLabel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "reason": {
           "description": "Source-free reason code for the omission.",
           "$ref": "#/$defs/SafeLabel"
+        },
+        "resumable": {
+          "description": "Whether another page of this exact request can retrieve the omission.",
+          "type": "boolean",
+          "default": false
+        },
+        "role": {
+          "description": "Evidence role affected by the omission, when role-specific.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRole"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,

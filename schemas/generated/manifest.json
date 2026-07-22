@@ -50,7 +50,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/context.rs",
-      "blake3": "44430c8d411d1113ebc11a3f5764522959cd57ebe278ecab0a1cb4839ea570a5"
+      "blake3": "17dcb879879943c66052a7a1ef4a4a5b0e9109a7fcf416703925e4ff3a33b41b"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/intent.rs",
@@ -186,7 +186,7 @@
     },
     {
       "path": "xtask/src/main.rs",
-      "blake3": "f3b5bcd5b3d91dca0d5b7ce5548ff3dea16b7002629016821b11fa1b5eff9c07"
+      "blake3": "0024883879b8a369b33b893b7671f50d6162be8a37cc569c61d836c25c67d01c"
     },
     {
       "path": "xtask/src/schemas.rs",
@@ -276,7 +276,7 @@
     },
     {
       "path": "schemas/generated/json/mcp-context-pack-output-1.0.schema.json",
-      "blake3": "779b873d253043858e7f3503c3fec5069af901c1fcbff394bbc60a411a12adab"
+      "blake3": "1a6554e16a287e7c57438b44c586024319f0e8e867f38d29647aab56792c7c46"
     },
     {
       "path": "schemas/generated/json/mcp-error-response-1.0.schema.json",
@@ -324,7 +324,7 @@
     },
     {
       "path": "schemas/generated/json/mcp-query-batch-input-1.0.schema.json",
-      "blake3": "983f5a204675e9ae9255b061db193b3a092086eb8eb3f933a5dc8d730acf758f"
+      "blake3": "f2f795c3c1bbafe1b7140c6131411d7a8ddc7dacdbda63422013539462f7f75c"
     },
     {
       "path": "schemas/generated/json/mcp-query-batch-output-1.0.schema.json",

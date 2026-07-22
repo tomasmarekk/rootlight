@@ -533,7 +533,8 @@ fn validate_cross_cutting_metadata(
         ));
     }
 
-    let has_cursor = shape.contains_key("cursor");
+    let has_cursor = shape.contains_key("cursor")
+        || (entry.tool == McpTool::ContextPack && shape.contains_key("continuation"));
     let pagination_has_cursor = entry.pagination == PaginationSemantics::AuthenticatedCursor;
     if has_cursor != pagination_has_cursor {
         problems.push(Problem::new(

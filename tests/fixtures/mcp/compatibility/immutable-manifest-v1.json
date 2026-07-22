@@ -10,8 +10,8 @@
     },
     {
       "path": "current/catalog.json",
-      "bytes": 1320638,
-      "sha256": "01f584638b62b413778967c601e390520fb248f77971127fd9fa68766c0e90ef"
+      "bytes": 1326461,
+      "sha256": "f5d8ebf5d9871fadd524fc2457739bdec527d2471ffb2fcca7f8ebf6aa3d110d"
     },
     {
       "path": "current/error-examples.json",
