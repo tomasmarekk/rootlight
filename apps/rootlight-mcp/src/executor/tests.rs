@@ -12,6 +12,7 @@ use std::{
     },
 };
 
+use proptest::prelude::*;
 use rootlight_client::{
     AdvancedColumn as ClientAdvancedColumn, AdvancedQuery as ClientAdvancedQuery,
     AnalysisTier as ClientTier, ArchitectureCycles as ClientArchitectureCycles,
@@ -1365,6 +1366,22 @@ async fn batch_adapter_rejects_unrepresentable_evidence_before_client_dispatch()
 
 #[tokio::test]
 async fn batch_adapter_preserves_local_and_parent_deadline_provenance() {
+    let registered: std::collections::BTreeSet<_> = accepted_field_evidence()
+        .into_iter()
+        .filter(|evidence| evidence.oracle == AcceptedFieldOracle::LocalTimeout)
+        .flat_map(|evidence| {
+            evidence
+                .fields
+                .iter()
+                .copied()
+                .map(move |field| (evidence.tool.name(), field))
+        })
+        .collect();
+    assert_eq!(
+        registered,
+        std::collections::BTreeSet::from([("query.batch", "operations[].local_budget.timeout_ms")])
+    );
+
     for (local, expected) in [
         (true, AgentPortError::LocalDeadlineExceeded),
         (false, AgentPortError::DeadlineExceeded),
@@ -1560,6 +1577,9 @@ async fn query_batch_classifies_bound_value_type_before_subtool_execution() {
                 {"id": "refine", "tool": "code.locate", "depends_on": ["find"], "arguments": {
                     "query": "publish",
                     "search_modes": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
+                }},
+                {"id": "later", "tool": "code.locate", "depends_on": ["refine"], "arguments": {
+                    "query": "stage"
                 }}
             ]
         }),
@@ -1579,6 +1599,11 @@ async fn query_batch_classifies_bound_value_type_before_subtool_execution() {
         Some(ErrorCode::BindingTypeMismatch)
     );
     assert_eq!(
+        output.data.operation_results[2].status,
+        BatchOperationStatus::SkippedDependency,
+        "a later dependent is not scheduled after materialized validation fails"
+    );
+    assert_eq!(
         harness
             .calls
             .lock()
@@ -1588,6 +1613,11 @@ async fn query_batch_classifies_bound_value_type_before_subtool_execution() {
             .count(),
         1,
         "the type-invalid dependent operation must not cross the client port"
+    );
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        2,
+        "only identity resolution and the successful dependency reach the daemon"
     );
 }
 
@@ -2133,6 +2163,22 @@ async fn repo_list_maps_registered_repositories() {
 
 #[tokio::test]
 async fn repo_list_paginates_with_authenticated_cursor() {
+    let registered: std::collections::BTreeSet<_> = accepted_field_evidence()
+        .into_iter()
+        .filter(|evidence| evidence.oracle == AcceptedFieldOracle::OutputSelection)
+        .flat_map(|evidence| {
+            evidence
+                .fields
+                .iter()
+                .copied()
+                .map(move |field| (evidence.tool.name(), field))
+        })
+        .collect();
+    assert_eq!(
+        registered,
+        std::collections::BTreeSet::from([("repo.list", "cursor"), ("repo.list", "max_results")])
+    );
+
     let entries: Vec<RepositoryListEntry> = (0..3u8)
         .map(|i| RepositoryListEntry {
             repository_id: RepositoryId::from_bytes([i + 1; 16]),
@@ -2179,6 +2225,10 @@ async fn repo_list_paginates_with_authenticated_cursor() {
         panic!("expected second page success");
     };
     assert_eq!(second.data.repositories.len(), 1);
+    assert_ne!(
+        first.data.repositories[0].repository_id,
+        second.data.repositories[0].repository_id
+    );
     assert!(!second.truncated);
     assert!(second.next_cursor.0.is_none());
 }
@@ -5203,109 +5253,82 @@ fn operating_request(params: Value) -> OperatingRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum AcceptedFieldOracle {
-    RuntimeDelta,
+    NormalizedDelta,
+    StructuredVariant,
+    StructuredQueryAst,
     DefaultEquivalent,
-    ExistingFocused,
+    ExplainPlan,
+    OutputSelection,
+    ContextRuntime,
+    BatchRuntime,
+    LocalTimeout,
+    FixedDiscriminator,
 }
 
 #[derive(Debug)]
 struct AcceptedFieldEvidence {
     tool: VerticalTool,
     fields: &'static [&'static str],
+    excluded_descendants: &'static [&'static str],
     oracle: AcceptedFieldOracle,
-    oracle_test: &'static str,
 }
 
 fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     let mut evidence = Vec::new();
     macro_rules! group {
-        ($tool:ident, $oracle:ident, $test:ident, [$($field:literal),+ $(,)?]) => {{
-            let _ = $test;
+        ($tool:ident, $oracle:ident, [$($field:literal),+ $(,)?]) => {{
             evidence.push(AcceptedFieldEvidence {
                 tool: VerticalTool::$tool,
                 fields: &[$($field),+],
+                excluded_descendants: &[],
                 oracle: AcceptedFieldOracle::$oracle,
-                oracle_test: stringify!($test),
+            });
+        }};
+    }
+    macro_rules! group_excluding {
+        ($tool:ident, $oracle:ident, [$($field:literal),+ $(,)?], [$($excluded:literal),+ $(,)?]) => {{
+            evidence.push(AcceptedFieldEvidence {
+                tool: VerticalTool::$tool,
+                fields: &[$($field),+],
+                excluded_descendants: &[$($excluded),+],
+                oracle: AcceptedFieldOracle::$oracle,
             });
         }};
     }
 
-    group!(
-        RepoIndex,
-        ExistingFocused,
-        maps_repository_index_without_replacing_stable_identities,
-        ["detached", "mode", "root"]
-    );
-    group!(
-        RepoStatus,
-        ExistingFocused,
-        repo_status_maps_active_generation_and_coverage,
-        ["repository"]
-    );
-    group!(
-        RepoStatus,
-        ExistingFocused,
-        repo_status_explain_attaches_a_plan_to_the_metadata_read,
-        ["explain"]
-    );
+    group!(RepoIndex, NormalizedDelta, ["detached", "mode", "root"]);
+    group!(RepoStatus, NormalizedDelta, ["repository"]);
+    group!(RepoStatus, ExplainPlan, ["explain"]);
     group!(
         RepoStatus,
         DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
         ["generation", "include_operations", "response_profile"]
     );
-    group!(
-        RepoList,
-        ExistingFocused,
-        repo_list_paginates_with_authenticated_cursor,
-        ["cursor", "max_results"]
-    );
-    group!(
-        RepoList,
-        ExistingFocused,
-        repo_list_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
-    group!(
-        RepoList,
-        DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
-        ["response_profile"]
-    );
+    group!(RepoList, OutputSelection, ["cursor", "max_results"]);
+    group!(RepoList, ExplainPlan, ["explain"]);
+    group!(RepoList, DefaultEquivalent, ["response_profile"]);
     group!(
         OperationStatus,
-        ExistingFocused,
-        maps_operation_status_action_time_progress_and_resources,
+        NormalizedDelta,
         ["action", "after_revision", "operation_id", "wait_ms"]
     );
     group!(
         CodeLocate,
-        RuntimeDelta,
-        accepted_effect_code_locate_controls_change_the_normalized_request,
-        ["budget", "max_results", "search_modes"]
+        NormalizedDelta,
+        [
+            "budget",
+            "generation",
+            "max_results",
+            "query",
+            "repository",
+            "search_modes"
+        ]
     );
-    group!(
-        CodeLocate,
-        ExistingFocused,
-        maps_code_locate_with_trust_generation_and_deterministic_output,
-        ["generation", "query", "repository"]
-    );
-    group!(
-        CodeLocate,
-        ExistingFocused,
-        code_locate_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
-    group!(
-        CodeLocate,
-        DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
-        ["response_profile"]
-    );
+    group!(CodeLocate, ExplainPlan, ["explain"]);
+    group!(CodeLocate, DefaultEquivalent, ["response_profile"]);
     group!(
         SymbolExplain,
-        ExistingFocused,
-        maps_symbol_explain_with_compact_provenance_and_unresolved_ids,
+        NormalizedDelta,
         [
             "generation",
             "include_provenance",
@@ -5313,22 +5336,11 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "symbol_ids"
         ]
     );
-    group!(
-        SymbolExplain,
-        ExistingFocused,
-        symbol_explain_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
-    group!(
-        SymbolExplain,
-        DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
-        ["response_profile"]
-    );
+    group!(SymbolExplain, ExplainPlan, ["explain"]);
+    group!(SymbolExplain, DefaultEquivalent, ["response_profile"]);
     group!(
         SymbolRelationships,
-        ExistingFocused,
-        symbol_relationships_maps_groups_and_totals,
+        NormalizedDelta,
         [
             "direction",
             "generation",
@@ -5339,22 +5351,15 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "symbol_ids"
         ]
     );
-    group!(
-        SymbolRelationships,
-        ExistingFocused,
-        symbol_relationships_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
+    group!(SymbolRelationships, ExplainPlan, ["explain"]);
     group!(
         SymbolRelationships,
         DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
         ["include_candidates", "response_profile"]
     );
     group!(
         FlowTrace,
-        ExistingFocused,
-        flow_trace_maps_paths_frontier_and_projection,
+        NormalizedDelta,
         [
             "direction",
             "from",
@@ -5367,22 +5372,15 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "to"
         ]
     );
-    group!(
-        FlowTrace,
-        ExistingFocused,
-        flow_trace_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
+    group!(FlowTrace, ExplainPlan, ["explain"]);
     group!(
         FlowTrace,
         DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
         ["cross_repository", "response_profile"]
     );
-    group!(
+    group_excluding!(
         ChangeImpact,
-        ExistingFocused,
-        change_impact_maps_resolved_changes_impact_groups_and_risk,
+        NormalizedDelta,
         [
             "change",
             "generation",
@@ -5391,24 +5389,19 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "min_confidence",
             "relation_policy",
             "repository"
-        ]
+        ],
+        ["change.paths"]
     );
-    group!(
-        ChangeImpact,
-        ExistingFocused,
-        change_impact_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
+    group!(ChangeImpact, StructuredVariant, ["change.paths"]);
+    group!(ChangeImpact, ExplainPlan, ["explain"]);
     group!(
         ChangeImpact,
         DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
         ["include_history", "profile"]
     );
     group!(
         TestsSelect,
-        ExistingFocused,
-        tests_select_maps_ranked_tests_strategy_and_gaps,
+        NormalizedDelta,
         [
             "generation",
             "include_commands",
@@ -5418,22 +5411,11 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "test_kinds"
         ]
     );
-    group!(
-        TestsSelect,
-        ExistingFocused,
-        tests_select_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
-    group!(
-        TestsSelect,
-        DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
-        ["profile"]
-    );
+    group!(TestsSelect, ExplainPlan, ["explain"]);
+    group!(TestsSelect, DefaultEquivalent, ["profile"]);
     group!(
         ArchitectureOverview,
-        ExistingFocused,
-        architecture_overview_maps_components_connections_and_hotspots,
+        NormalizedDelta,
         [
             "generation",
             "include_edges",
@@ -5443,47 +5425,35 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "views"
         ]
     );
-    group!(
-        ArchitectureOverview,
-        ExistingFocused,
-        architecture_overview_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
+    group!(ArchitectureOverview, ExplainPlan, ["explain"]);
     group!(
         ArchitectureOverview,
         DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
         ["response_profile"]
     );
     group!(
         ArchitectureCycles,
-        ExistingFocused,
-        architecture_cycles_maps_components_cycles_and_breaks,
+        NormalizedDelta,
         [
             "generation",
             "include_self_cycles",
             "max_cycles",
             "min_size",
-            "projection",
             "repository"
         ]
     );
-    group!(
+    group_excluding!(
         ArchitectureCycles,
-        ExistingFocused,
-        architecture_cycles_explain_returns_a_plan_without_retrieval,
-        ["explain"]
+        NormalizedDelta,
+        ["projection"],
+        ["projection.level"]
     );
-    group!(
-        ArchitectureCycles,
-        DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
-        ["response_profile"]
-    );
+    group!(ArchitectureCycles, FixedDiscriminator, ["projection.level"]);
+    group!(ArchitectureCycles, ExplainPlan, ["explain"]);
+    group!(ArchitectureCycles, DefaultEquivalent, ["response_profile"]);
     group!(
         CodeDead,
-        ExistingFocused,
-        code_dead_maps_candidates_entry_points_and_blind_spots,
+        NormalizedDelta,
         [
             "entry_point_policy",
             "generation",
@@ -5494,40 +5464,22 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "repository"
         ]
     );
-    group!(
-        CodeDead,
-        ExistingFocused,
-        code_dead_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
-    group!(
-        CodeDead,
-        DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
-        ["response_profile"]
-    );
+    group!(CodeDead, ExplainPlan, ["explain"]);
+    group!(CodeDead, DefaultEquivalent, ["response_profile"]);
     group!(
         HistoryCompare,
-        ExistingFocused,
-        history_compare_maps_changes_breaking_candidates_and_lineage,
+        NormalizedDelta,
         ["base", "change_kinds", "head", "max_results", "repository"]
     );
-    group!(
-        HistoryCompare,
-        ExistingFocused,
-        history_compare_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
+    group!(HistoryCompare, ExplainPlan, ["explain"]);
     group!(
         HistoryCompare,
         DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
         ["include_unchanged_context", "profile"]
     );
-    group!(
+    group_excluding!(
         PlanChange,
-        ExistingFocused,
-        plan_change_maps_steps_impact_summary_decisions_and_context_pack,
+        NormalizedDelta,
         [
             "generation",
             "max_steps",
@@ -5535,54 +5487,27 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "objective_text",
             "repository",
             "targets"
-        ]
+        ],
+        ["targets[].file_id"]
     );
-    group!(
-        PlanChange,
-        ExistingFocused,
-        plan_change_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
-    group!(
-        PlanChange,
-        DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
-        ["profile"]
-    );
+    group!(PlanChange, StructuredVariant, ["targets[].file_id"]);
+    group!(PlanChange, ExplainPlan, ["explain"]);
+    group!(PlanChange, DefaultEquivalent, ["profile"]);
     group!(
         ContextPack,
-        RuntimeDelta,
-        accepted_effect_context_pack_token_budget_changes_selection,
-        ["token_budget"]
+        ContextRuntime,
+        ["generation", "repository", "seeds", "task", "token_budget"]
     );
-    group!(
-        ContextPack,
-        ExistingFocused,
-        context_pack_assembles_definition_evidence_under_budget,
-        ["generation", "repository", "seeds", "task"]
-    );
-    group!(
-        ContextPack,
-        ExistingFocused,
-        context_pack_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
+    group!(ContextPack, ExplainPlan, ["explain"]);
     group!(
         SourceRead,
-        ExistingFocused,
-        maps_expanded_source_range_as_the_returned_verified_reference,
+        NormalizedDelta,
         ["generation", "references", "repository"]
     );
-    group!(
-        SourceRead,
-        ExistingFocused,
-        source_read_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
+    group!(SourceRead, ExplainPlan, ["explain"]);
     group!(
         SourceRead,
         DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
         [
             "encoding",
             "include_line_numbers",
@@ -5592,38 +5517,33 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     );
     group!(
         QueryAdvanced,
-        RuntimeDelta,
-        accepted_effect_query_advanced_controls_change_the_normalized_request,
-        ["cost_limit", "explain", "max_depth", "max_results"]
+        NormalizedDelta,
+        [
+            "cost_limit",
+            "explain",
+            "generation",
+            "max_depth",
+            "max_results",
+            "repository"
+        ]
     );
-    group!(
-        QueryAdvanced,
-        ExistingFocused,
-        query_advanced_maps_columns_rows_and_completeness,
-        ["generation", "query", "repository"]
+    group!(QueryAdvanced, StructuredQueryAst, ["query"]);
+    group!(QueryBatch, BatchRuntime, ["failure_policy", "repository"]);
+    group_excluding!(
+        QueryBatch,
+        BatchRuntime,
+        ["operations"],
+        ["operations[].local_budget"]
     );
     group!(
         QueryBatch,
-        RuntimeDelta,
-        accepted_effect_query_batch_failure_policy_changes_scheduling,
-        ["failure_policy"]
+        LocalTimeout,
+        ["operations[].local_budget.timeout_ms"]
     );
-    group!(
-        QueryBatch,
-        ExistingFocused,
-        query_batch_composes_locate_subtools_under_one_pinned_generation,
-        ["operations", "repository"]
-    );
-    group!(
-        QueryBatch,
-        ExistingFocused,
-        query_batch_explain_returns_a_plan_without_retrieval,
-        ["explain"]
-    );
+    group!(QueryBatch, ExplainPlan, ["explain"]);
     group!(
         QueryBatch,
         DefaultEquivalent,
-        accepted_effect_defaults_match_omitted_values,
         ["generation", "response_profile"]
     );
     evidence
@@ -5639,19 +5559,14 @@ fn accepted_schema_paths_have_effect_evidence() {
             CapabilityStatus::Implemented | CapabilityStatus::FallbackLimited
         )
     };
+    let groups = accepted_field_evidence();
     let mut registered = Vec::new();
-    for group in accepted_field_evidence() {
-        assert!(!group.oracle_test.is_empty());
-        registered.extend(
-            group
-                .fields
-                .iter()
-                .map(|field| (group.tool.name(), *field, group.oracle)),
-        );
+    for group in &groups {
+        registered.extend(group.fields.iter().map(|field| (group.tool.name(), *field)));
     }
     registered.sort_unstable();
     let duplicate = registered.windows(2).find(|pair| {
-        let [(left_tool, left_field, _), (right_tool, right_field, _)] = pair else {
+        let [(left_tool, left_field), (right_tool, right_field)] = pair else {
             return false;
         };
         left_tool == right_tool && left_field == right_field
@@ -5679,13 +5594,32 @@ fn accepted_schema_paths_have_effect_evidence() {
         );
     }
     accepted.sort_unstable();
+    let accepted_snapshot = accepted
+        .iter()
+        .map(|(tool, path)| format!("{tool}:{path}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
+    assert_eq!(
+        accepted_digest.as_str(),
+        "5e7071b1037334571ceacf58a41cb387f1c15885f01ece58e7d31ecb81806bb5",
+        "accepted path universe changed"
+    );
     let categorized: Vec<_> = accepted
         .iter()
         .map(|(tool, path)| {
-            let matches: Vec<_> = registered
+            let matches: Vec<_> = groups
                 .iter()
-                .filter(|(registered_tool, ancestor, _)| {
-                    registered_tool == tool && capability_path_is_within(path, ancestor)
+                .filter(|group| {
+                    group.tool.name() == *tool
+                        && group
+                            .fields
+                            .iter()
+                            .any(|ancestor| capability_path_is_within(path, ancestor))
+                        && !group
+                            .excluded_descendants
+                            .iter()
+                            .any(|excluded| capability_path_is_within(path, excluded))
                 })
                 .collect();
             assert_eq!(
@@ -5693,14 +5627,21 @@ fn accepted_schema_paths_have_effect_evidence() {
                 1,
                 "{tool}:{path} must have exactly one explicit oracle ancestor, found {matches:?}"
             );
-            (*tool, path.as_str(), matches[0].2)
+            (*tool, path.as_str(), matches[0].oracle)
         })
         .collect();
 
     let counts = [
-        AcceptedFieldOracle::RuntimeDelta,
+        AcceptedFieldOracle::NormalizedDelta,
+        AcceptedFieldOracle::StructuredVariant,
+        AcceptedFieldOracle::StructuredQueryAst,
         AcceptedFieldOracle::DefaultEquivalent,
-        AcceptedFieldOracle::ExistingFocused,
+        AcceptedFieldOracle::ExplainPlan,
+        AcceptedFieldOracle::OutputSelection,
+        AcceptedFieldOracle::ContextRuntime,
+        AcceptedFieldOracle::BatchRuntime,
+        AcceptedFieldOracle::LocalTimeout,
+        AcceptedFieldOracle::FixedDiscriminator,
     ]
     .map(|oracle| {
         categorized
@@ -5709,13 +5650,20 @@ fn accepted_schema_paths_have_effect_evidence() {
             .count()
     });
     println!(
-        "accepted_paths={} runtime_delta={} default_equivalent={} existing_focused={}",
+        "accepted_paths={} normalized_delta={} structured_variant={} structured_query_ast={} default_equivalent={} explain_plan={} output_selection={} context_runtime={} batch_runtime={} local_timeout={} fixed_discriminator={}",
         categorized.len(),
         counts[0],
         counts[1],
-        counts[2]
+        counts[2],
+        counts[3],
+        counts[4],
+        counts[5],
+        counts[6],
+        counts[7],
+        counts[8],
+        counts[9],
     );
-    assert_eq!(counts, [11, 25, 224]);
+    assert_eq!(counts, [131, 3, 61, 25, 16, 2, 10, 10, 1, 1]);
     assert_eq!(categorized.len(), 260);
 }
 
@@ -5792,6 +5740,1228 @@ fn generated_schema_paths(schema: &Value) -> Vec<String> {
         &mut paths,
     );
     paths.into_iter().collect()
+}
+
+#[derive(Debug)]
+struct NormalizedDeltaCase {
+    tool: VerticalTool,
+    field: &'static str,
+    first: Value,
+    second: Value,
+    optional: bool,
+}
+
+fn alternate_repository() -> RepositoryId {
+    RepositoryId::from_bytes([9; 16])
+}
+
+fn alternate_generation() -> GenerationId {
+    GenerationId::from_bytes([9; 20])
+}
+
+fn replace_top_level_field(mut arguments: Value, field: &str, value: Value) -> Value {
+    arguments[field] = value;
+    arguments
+}
+
+fn normalized_base_arguments(tool: VerticalTool) -> Value {
+    match tool {
+        VerticalTool::RepoIndex => json!({"root": "C:/fixture-a"}),
+        VerticalTool::RepoStatus => {
+            json!({"repository": {"repository_id": repository()}})
+        }
+        VerticalTool::OperationStatus => json!({"operation_id": operation()}),
+        VerticalTool::CodeLocate => {
+            json!({"repository": {"repository_id": repository()}, "query": "publish"})
+        }
+        VerticalTool::SymbolExplain => {
+            json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()]})
+        }
+        VerticalTool::SymbolRelationships => json!({
+            "repository": {"repository_id": repository()},
+            "symbol_ids": [symbol()],
+            "relations": ["calls"]
+        }),
+        VerticalTool::FlowTrace => json!({
+            "repository": {"repository_id": repository()},
+            "from": {"symbol_id": symbol()},
+            "relations": ["calls"]
+        }),
+        VerticalTool::ChangeImpact => json!({
+            "repository": {"repository_id": repository()},
+            "change": {"symbol_ids": [symbol()]}
+        }),
+        VerticalTool::TestsSelect => json!({
+            "repository": {"repository_id": repository()},
+            "seeds": {"symbols": [symbol()]}
+        }),
+        VerticalTool::ArchitectureOverview => {
+            json!({"repository": {"repository_id": repository()}})
+        }
+        VerticalTool::ArchitectureCycles => json!({
+            "repository": {"repository_id": repository()},
+            "projection": {"relations": ["calls"], "level": "symbol"}
+        }),
+        VerticalTool::CodeDead => {
+            json!({"repository": {"repository_id": repository()}})
+        }
+        VerticalTool::HistoryCompare => json!({
+            "repository": {"repository_id": repository()},
+            "base": parent_generation(),
+            "head": generation()
+        }),
+        VerticalTool::PlanChange => json!({
+            "repository": {"repository_id": repository()},
+            "objective": "bug_fix",
+            "objective_text": "fix the defect",
+            "targets": [{"symbol_id": symbol()}]
+        }),
+        VerticalTool::SourceRead => json!({
+            "repository": {"repository_id": repository()},
+            "references": [{"source_ref": wire_source_reference(5, 10, 2, 2)}]
+        }),
+        VerticalTool::QueryAdvanced => json!({
+            "repository": {"repository_id": repository()},
+            "query": {"op": "scan", "entity": "function"}
+        }),
+        VerticalTool::RepoList | VerticalTool::ContextPack | VerticalTool::QueryBatch => {
+            panic!("tool uses a service-level effect oracle")
+        }
+    }
+}
+
+fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
+    let number = u64::from(seed % 5) + 2;
+    let bounded = json!(number);
+    let confidence = json!(u16::from(seed % 200) + 700);
+    let mut cases = Vec::new();
+    let mut add = |tool, field, second, optional| {
+        let first = normalized_base_arguments(tool);
+        let second = replace_top_level_field(first.clone(), field, second);
+        cases.push(NormalizedDeltaCase {
+            tool,
+            field,
+            first,
+            second,
+            optional,
+        });
+    };
+
+    add(
+        VerticalTool::RepoIndex,
+        "root",
+        json!("C:/fixture-b"),
+        false,
+    );
+    add(VerticalTool::RepoIndex, "mode", json!("structural"), true);
+    add(VerticalTool::RepoIndex, "detached", json!(true), true);
+    add(
+        VerticalTool::RepoStatus,
+        "repository",
+        json!({"repository_id": alternate_repository()}),
+        false,
+    );
+    add(
+        VerticalTool::OperationStatus,
+        "operation_id",
+        json!(second_operation()),
+        false,
+    );
+    add(
+        VerticalTool::OperationStatus,
+        "action",
+        json!("cancel"),
+        true,
+    );
+    add(
+        VerticalTool::OperationStatus,
+        "wait_ms",
+        bounded.clone(),
+        true,
+    );
+    add(
+        VerticalTool::OperationStatus,
+        "after_revision",
+        bounded.clone(),
+        true,
+    );
+    for (field, value, optional) in [
+        (
+            "repository",
+            json!({"repository_id": alternate_repository()}),
+            false,
+        ),
+        ("generation", json!(alternate_generation()), true),
+        ("query", json!(format!("publish-{seed}")), false),
+        ("search_modes", json!(["exact"]), true),
+        ("max_results", bounded.clone(), true),
+        ("budget", json!({"max_results": number + 1}), true),
+    ] {
+        add(VerticalTool::CodeLocate, field, value, optional);
+    }
+    for (field, value, optional) in [
+        (
+            "repository",
+            json!({"repository_id": alternate_repository()}),
+            false,
+        ),
+        ("generation", json!(alternate_generation()), true),
+        ("symbol_ids", json!([missing_symbol()]), false),
+        ("include_provenance", json!("none"), true),
+    ] {
+        add(VerticalTool::SymbolExplain, field, value, optional);
+    }
+    for (field, value, optional) in [
+        (
+            "repository",
+            json!({"repository_id": alternate_repository()}),
+            false,
+        ),
+        ("generation", json!(alternate_generation()), true),
+        ("symbol_ids", json!([missing_symbol()]), false),
+        ("relations", json!(["imports"]), false),
+        ("direction", json!("inbound"), true),
+        ("min_confidence", confidence.clone(), true),
+        ("max_results", bounded.clone(), true),
+    ] {
+        add(VerticalTool::SymbolRelationships, field, value, optional);
+    }
+    for (field, value, optional) in [
+        (
+            "repository",
+            json!({"repository_id": alternate_repository()}),
+            false,
+        ),
+        ("generation", json!(alternate_generation()), true),
+        ("from", json!({"symbol_id": missing_symbol()}), false),
+        ("to", json!({"symbol_id": missing_symbol()}), true),
+        ("relations", json!(["imports"]), false),
+        ("direction", json!("both"), true),
+        ("max_depth", bounded.clone(), true),
+        ("max_paths", bounded.clone(), true),
+        ("min_confidence", confidence.clone(), true),
+    ] {
+        add(VerticalTool::FlowTrace, field, value, optional);
+    }
+    for (field, value, optional) in [
+        (
+            "repository",
+            json!({"repository_id": alternate_repository()}),
+            false,
+        ),
+        ("generation", json!(alternate_generation()), true),
+        (
+            "change",
+            json!({"paths": [format!("src/file-{seed}.rs")]}),
+            false,
+        ),
+        ("include_tests", json!(true), true),
+        ("max_depth", bounded.clone(), true),
+        ("min_confidence", confidence.clone(), true),
+        ("relation_policy", json!("direct_only"), true),
+    ] {
+        add(VerticalTool::ChangeImpact, field, value, optional);
+    }
+    for (field, value, optional) in [
+        (
+            "repository",
+            json!({"repository_id": alternate_repository()}),
+            false,
+        ),
+        ("generation", json!(alternate_generation()), true),
+        ("seeds", json!({"symbols": [missing_symbol()]}), false),
+        ("test_kinds", json!(["integration"]), true),
+        ("max_tests", bounded.clone(), true),
+        ("include_commands", json!(true), true),
+    ] {
+        add(VerticalTool::TestsSelect, field, value, optional);
+    }
+    for (field, value, optional) in [
+        (
+            "repository",
+            json!({"repository_id": alternate_repository()}),
+            false,
+        ),
+        ("generation", json!(alternate_generation()), true),
+        ("views", json!(["hotspots"]), true),
+        ("max_components", bounded.clone(), true),
+        ("include_edges", json!(true), true),
+        ("min_confidence", confidence.clone(), true),
+    ] {
+        add(VerticalTool::ArchitectureOverview, field, value, optional);
+    }
+    for (field, value, optional) in [
+        (
+            "repository",
+            json!({"repository_id": alternate_repository()}),
+            false,
+        ),
+        ("generation", json!(alternate_generation()), true),
+        (
+            "projection",
+            json!({"relations": ["imports"], "level": "symbol"}),
+            false,
+        ),
+        ("min_size", bounded.clone(), true),
+        ("max_cycles", bounded.clone(), true),
+        ("include_self_cycles", json!(true), true),
+    ] {
+        add(VerticalTool::ArchitectureCycles, field, value, optional);
+    }
+    for (field, value, optional) in [
+        (
+            "repository",
+            json!({"repository_id": alternate_repository()}),
+            false,
+        ),
+        ("generation", json!(alternate_generation()), true),
+        ("entry_point_policy", json!("library"), true),
+        ("include_exported", json!(true), true),
+        ("include_tests", json!(true), true),
+        ("min_confidence", confidence.clone(), true),
+        ("max_candidates", bounded.clone(), true),
+    ] {
+        add(VerticalTool::CodeDead, field, value, optional);
+    }
+    for (field, value, optional) in [
+        (
+            "repository",
+            json!({"repository_id": alternate_repository()}),
+            false,
+        ),
+        ("base", json!(alternate_generation()), false),
+        ("head", json!(GenerationId::from_bytes([8; 20])), false),
+        ("change_kinds", json!(["entities"]), true),
+        ("max_results", bounded.clone(), true),
+    ] {
+        add(VerticalTool::HistoryCompare, field, value, optional);
+    }
+    for (field, value, optional) in [
+        (
+            "repository",
+            json!({"repository_id": alternate_repository()}),
+            false,
+        ),
+        ("generation", json!(alternate_generation()), true),
+        ("objective", json!("refactor"), false),
+        (
+            "objective_text",
+            json!(format!("refactor safely {seed}")),
+            false,
+        ),
+        ("targets", json!([{"file_id": file()}]), false),
+        ("max_steps", bounded.clone(), true),
+    ] {
+        add(VerticalTool::PlanChange, field, value, optional);
+    }
+    add(
+        VerticalTool::SourceRead,
+        "references",
+        json!([{"source_ref": wire_source_reference(12, 20, 3, 3)}]),
+        false,
+    );
+    for (field, value, optional) in [
+        (
+            "repository",
+            json!({"repository_id": alternate_repository()}),
+            false,
+        ),
+        ("generation", json!(alternate_generation()), true),
+        ("cost_limit", json!(10_000_000), true),
+        ("max_depth", json!((seed % 4) + 1), true),
+        ("max_results", bounded, true),
+        ("explain", json!(true), true),
+    ] {
+        add(VerticalTool::QueryAdvanced, field, value, optional);
+    }
+    let source_base = normalized_base_arguments(VerticalTool::SourceRead);
+    cases.push(NormalizedDeltaCase {
+        tool: VerticalTool::SourceRead,
+        field: "repository",
+        first: source_base,
+        second: json!({
+            "repository": {"repository_id": alternate_repository()},
+            "references": [{
+                "source_ref": wire_source_reference_for(
+                    alternate_repository(),
+                    generation(),
+                    5,
+                    10,
+                    2,
+                    2
+                )
+            }]
+        }),
+        optional: false,
+    });
+    cases.push(NormalizedDeltaCase {
+        tool: VerticalTool::SourceRead,
+        field: "generation",
+        first: normalized_base_arguments(VerticalTool::SourceRead),
+        second: json!({
+            "repository": {"repository_id": repository()},
+            "generation": alternate_generation(),
+            "references": [{
+                "source_ref": wire_source_reference_for(
+                    repository(),
+                    alternate_generation(),
+                    5,
+                    10,
+                    2,
+                    2
+                )
+            }]
+        }),
+        optional: true,
+    });
+    cases
+}
+
+fn decode_arguments<T: DeserializeOwned>(arguments: Value) -> T {
+    serde_json::from_value(arguments).expect("effect fixture satisfies the typed input")
+}
+
+fn normalization_error() -> PublicError {
+    PublicError::builder(ErrorCode::UnsupportedCapability, UNSUPPORTED_MESSAGE)
+        .build()
+        .expect("static normalization error is valid")
+}
+
+fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Value) -> Value {
+    let unsupported = normalization_error();
+    match tool {
+        VerticalTool::RepoIndex => {
+            let request = normalize_repository_index(
+                decode_arguments(arguments),
+                &unsupported,
+                &normalization_error(),
+            )
+            .expect("accepted repository-index fixture normalizes");
+            match field {
+                "root" => json!(request.root()),
+                "mode" => json!(format!("{:?}", request.mode())),
+                "detached" => json!(request.detached()),
+                _ => panic!("unknown repo.index observation field"),
+            }
+        }
+        VerticalTool::RepoStatus => {
+            let input: RepoStatusInput = decode_arguments(arguments);
+            let request = RepositoryStatusPortRequest::new(
+                repository_id(input.repository, &unsupported)
+                    .expect("accepted repository selector normalizes"),
+                client_generation(input.generation),
+            );
+            match field {
+                "repository" => json!(request.repository()),
+                _ => panic!("unknown repo.status observation field"),
+            }
+        }
+        VerticalTool::OperationStatus => {
+            let input: OperationStatusInput = decode_arguments(arguments);
+            let request = OperationStatusPortRequest {
+                operation: input.operation_id,
+                action: match input.action.unwrap_or(OperationAction::Get) {
+                    OperationAction::Get => RepositoryOperationAction::Get,
+                    OperationAction::Cancel => RepositoryOperationAction::Cancel,
+                },
+                wait_ms: input.wait_ms,
+                after_revision: input.after_revision,
+            };
+            match field {
+                "operation_id" => json!(request.operation()),
+                "action" => json!(format!("{:?}", request.action())),
+                "wait_ms" => json!(request.wait_ms()),
+                "after_revision" => json!(request.after_revision()),
+                _ => panic!("unknown operation.status observation field"),
+            }
+        }
+        VerticalTool::CodeLocate => {
+            let request = normalize_code_locate(decode_arguments(arguments), &unsupported)
+                .expect("accepted locate fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "generation" => json!(format!("{:?}", request.generation())),
+                "query" => json!(request.query()),
+                "search_modes" => json!(format!("{:?}", request.mode())),
+                "max_results" | "budget" => json!(request.maximum_results()),
+                _ => panic!("unknown code.locate observation field"),
+            }
+        }
+        VerticalTool::SymbolExplain => {
+            let request = normalize_symbol_explain(decode_arguments(arguments), &unsupported)
+                .expect("accepted symbol explanation fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "generation" => json!(format!("{:?}", request.generation())),
+                "symbol_ids" => json!(request.symbols()),
+                "include_provenance" => json!(request.include_provenance()),
+                _ => panic!("unknown symbol.explain observation field"),
+            }
+        }
+        VerticalTool::SymbolRelationships => {
+            let request = normalize_symbol_relationships(decode_arguments(arguments), &unsupported)
+                .expect("accepted relationship fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "generation" => json!(format!("{:?}", request.generation())),
+                "symbol_ids" => json!(request.seeds()),
+                "relations" => json!(request.relations()),
+                "direction" => json!(request.direction()),
+                "min_confidence" => json!(request.min_confidence()),
+                "max_results" => json!(request.max_results()),
+                _ => panic!("unknown symbol.relationships observation field"),
+            }
+        }
+        VerticalTool::FlowTrace => {
+            let request = normalize_flow_trace(decode_arguments(arguments), &unsupported)
+                .expect("accepted flow trace fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "generation" => json!(format!("{:?}", request.generation())),
+                "from" => json!(request.from()),
+                "to" => json!(request.to()),
+                "relations" => json!(request.relations()),
+                "direction" => json!(request.direction()),
+                "max_depth" => json!(request.max_depth()),
+                "max_paths" => json!(request.max_paths()),
+                "min_confidence" => json!(request.min_confidence()),
+                _ => panic!("unknown flow.trace observation field"),
+            }
+        }
+        VerticalTool::ChangeImpact => {
+            let request = normalize_change_impact(decode_arguments(arguments), &unsupported)
+                .expect("accepted impact fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "generation" => json!(format!("{:?}", request.generation())),
+                "change" => json!({
+                    "symbols": request.changed_symbols(),
+                    "paths": request.changed_paths()
+                }),
+                "max_depth" | "relation_policy" => json!(request.max_depth()),
+                "min_confidence" => json!(request.min_confidence()),
+                "include_tests" => json!(request.include_tests()),
+                _ => panic!("unknown change.impact observation field"),
+            }
+        }
+        VerticalTool::TestsSelect => {
+            let request = normalize_tests_select(decode_arguments(arguments), &unsupported)
+                .expect("accepted test-selection fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "generation" => json!(format!("{:?}", request.generation())),
+                "seeds" => json!(request.seeds()),
+                "test_kinds" => json!(request.test_kinds()),
+                "max_tests" => json!(request.max_tests()),
+                "include_commands" => json!(request.include_commands()),
+                _ => panic!("unknown tests.select observation field"),
+            }
+        }
+        VerticalTool::ArchitectureOverview => {
+            let request =
+                normalize_architecture_overview(decode_arguments(arguments), &unsupported)
+                    .expect("accepted architecture overview fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "generation" => json!(format!("{:?}", request.generation())),
+                "views" => json!(request.views()),
+                "max_components" => json!(request.max_components()),
+                "include_edges" => json!(request.include_edges()),
+                "min_confidence" => json!(request.min_confidence()),
+                _ => panic!("unknown architecture.overview observation field"),
+            }
+        }
+        VerticalTool::ArchitectureCycles => {
+            let request = normalize_architecture_cycles(decode_arguments(arguments), &unsupported)
+                .expect("accepted architecture-cycle fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "generation" => json!(format!("{:?}", request.generation())),
+                "projection" => json!(request.relations()),
+                "min_size" => json!(request.min_size()),
+                "max_cycles" => json!(request.max_cycles()),
+                "include_self_cycles" => json!(request.include_self_cycles()),
+                _ => panic!("unknown architecture.cycles observation field"),
+            }
+        }
+        VerticalTool::CodeDead => {
+            let request = normalize_code_dead(decode_arguments(arguments), &unsupported)
+                .expect("accepted dead-code fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "generation" => json!(format!("{:?}", request.generation())),
+                "entry_point_policy" => json!(request.entry_point_policy()),
+                "include_exported" => json!(request.include_exported()),
+                "include_tests" => json!(request.include_tests()),
+                "min_confidence" => json!(request.min_confidence()),
+                "max_candidates" => json!(request.max_candidates()),
+                _ => panic!("unknown code.dead observation field"),
+            }
+        }
+        VerticalTool::HistoryCompare => {
+            let request = normalize_history_compare(decode_arguments(arguments), &unsupported)
+                .expect("accepted history comparison fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "base" => json!(request.base()),
+                "head" => json!(request.head()),
+                "change_kinds" => json!(request.change_kinds()),
+                "max_results" => json!(request.max_results()),
+                _ => panic!("unknown history.compare observation field"),
+            }
+        }
+        VerticalTool::PlanChange => {
+            let request =
+                rootlight_agent::change::normalize_plan_change(decode_arguments(arguments))
+                    .expect("accepted change-plan fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "generation" => json!(request.generation()),
+                "objective" => json!(request.objective()),
+                "objective_text" => json!(request.objective_text()),
+                "targets" => json!({
+                    "symbols": request.target_symbols(),
+                    "files": request.target_files()
+                }),
+                "max_steps" => json!(request.max_steps()),
+                _ => panic!("unknown plan.change observation field"),
+            }
+        }
+        VerticalTool::SourceRead => {
+            let request = normalize_source_read(
+                decode_arguments(arguments),
+                &unsupported,
+                &normalization_error(),
+            )
+            .expect("accepted source-read fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "generation" => json!(format!("{:?}", request.generation())),
+                "references" => json!(format!("{:?}", request.references())),
+                _ => panic!("unknown source.read observation field"),
+            }
+        }
+        VerticalTool::QueryAdvanced => {
+            let request = normalize_query_advanced(decode_arguments(arguments), &unsupported)
+                .expect("accepted advanced-query fixture normalizes");
+            match field {
+                "repository" => json!(request.repository()),
+                "generation" => json!(format!("{:?}", request.generation())),
+                "query" => serde_json::from_str(request.query_ast())
+                    .expect("normalized query AST remains JSON"),
+                "explain" => json!(request.explain()),
+                "max_results" => json!(request.max_results()),
+                "max_depth" => json!(request.max_depth()),
+                "cost_limit" => json!(request.cost_limit()),
+                _ => panic!("unknown query.advanced observation field"),
+            }
+        }
+        VerticalTool::RepoList | VerticalTool::ContextPack | VerticalTool::QueryBatch => {
+            panic!("tool uses a service-level effect oracle")
+        }
+    }
+}
+
+#[test]
+fn every_normalized_field_case_changes_its_exact_observation() {
+    let cases = normalized_delta_cases(0);
+    for case in &cases {
+        let first = normalized_field_observation(case.tool, case.field, case.first.clone());
+        let second = normalized_field_observation(case.tool, case.field, case.second.clone());
+        assert_ne!(
+            first,
+            second,
+            "{}:{} produced no normalized delta",
+            case.tool.name(),
+            case.field
+        );
+    }
+
+    let expected: std::collections::BTreeSet<_> = accepted_field_evidence()
+        .into_iter()
+        .filter(|evidence| evidence.oracle == AcceptedFieldOracle::NormalizedDelta)
+        .flat_map(|evidence| {
+            evidence
+                .fields
+                .iter()
+                .copied()
+                .map(move |field| (evidence.tool.name(), field))
+        })
+        .collect();
+    let observed: std::collections::BTreeSet<_> = cases
+        .iter()
+        .map(|case| (case.tool.name(), case.field))
+        .collect();
+    assert_eq!(observed, expected);
+    assert_eq!(cases.len(), observed.len(), "duplicate normalized case");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn optional_normalized_fields_preserve_a_property_level_delta(
+        selected in any::<usize>(),
+        seed in any::<u8>(),
+    ) {
+        let cases: Vec<_> = normalized_delta_cases(seed)
+            .into_iter()
+            .filter(|case| case.optional)
+            .collect();
+        let case = &cases[selected % cases.len()];
+        let first = normalized_field_observation(case.tool, case.field, case.first.clone());
+        let second = normalized_field_observation(case.tool, case.field, case.second.clone());
+        prop_assert_ne!(
+            first,
+            second,
+            "{}:{} produced no normalized delta",
+            case.tool.name(),
+            case.field
+        );
+    }
+}
+
+struct AdvancedAstCase {
+    label: &'static str,
+    query: Value,
+}
+
+fn scan_query() -> Value {
+    json!({"op": "scan", "entity": "function"})
+}
+
+fn advanced_ast_cases() -> Vec<AdvancedAstCase> {
+    let predicate_case = |label, predicate| AdvancedAstCase {
+        label,
+        query: json!({
+            "op": "filter",
+            "input": scan_query(),
+            "predicate": predicate
+        }),
+    };
+    let aggregate_case = |label, aggregation| AdvancedAstCase {
+        label,
+        query: json!({
+            "op": "aggregate",
+            "input": scan_query(),
+            "group_by": ["module"],
+            "aggregations": [aggregation]
+        }),
+    };
+
+    vec![
+        AdvancedAstCase {
+            label: "operator.scan.filter",
+            query: json!({
+                "op": "scan",
+                "entity": "function",
+                "filter": {
+                    "pred": "equals",
+                    "field": "name",
+                    "value": {"text": "entry"}
+                }
+            }),
+        },
+        AdvancedAstCase {
+            label: "operator.scan.filter.predicates",
+            query: json!({
+                "op": "scan",
+                "entity": "function",
+                "filter": {
+                    "pred": "and",
+                    "predicates": [{
+                        "pred": "equals",
+                        "field": "name",
+                        "value": {"text": "entry"}
+                    }]
+                }
+            }),
+        },
+        AdvancedAstCase {
+            label: "operator.scan.filter.value.boolean",
+            query: json!({
+                "op": "scan",
+                "entity": "function",
+                "filter": {
+                    "pred": "equals",
+                    "field": "exported",
+                    "value": {"boolean": true}
+                }
+            }),
+        },
+        AdvancedAstCase {
+            label: "operator.scan.filter.value.file",
+            query: json!({
+                "op": "scan",
+                "entity": "function",
+                "filter": {
+                    "pred": "equals",
+                    "field": "file",
+                    "value": {"file": file()}
+                }
+            }),
+        },
+        AdvancedAstCase {
+            label: "operator.scan.filter.value.integer",
+            query: json!({
+                "op": "scan",
+                "entity": "function",
+                "filter": {
+                    "pred": "equals",
+                    "field": "line",
+                    "value": {"integer": 7}
+                }
+            }),
+        },
+        AdvancedAstCase {
+            label: "operator.scan.filter.value.symbol",
+            query: json!({
+                "op": "scan",
+                "entity": "function",
+                "filter": {
+                    "pred": "equals",
+                    "field": "symbol",
+                    "value": {"symbol": symbol()}
+                }
+            }),
+        },
+        AdvancedAstCase {
+            label: "operator.scan.filter.values",
+            query: json!({
+                "op": "scan",
+                "entity": "function",
+                "filter": {
+                    "pred": "in",
+                    "field": "value",
+                    "values": [
+                        {"text": "entry"},
+                        {"integer": 7},
+                        {"boolean": true},
+                        {"symbol": symbol()},
+                        {"file": file()}
+                    ]
+                }
+            }),
+        },
+        predicate_case(
+            "predicate.equals.value.text",
+            json!({
+                "pred": "equals",
+                "field": "name",
+                "value": {"text": "entry"}
+            }),
+        ),
+        predicate_case(
+            "predicate.not_equals.value.integer",
+            json!({
+                "pred": "not_equals",
+                "field": "line",
+                "value": {"integer": 7}
+            }),
+        ),
+        predicate_case(
+            "predicate.in.value.boolean",
+            json!({
+                "pred": "in",
+                "field": "value",
+                "values": [
+                    {"text": "entry"},
+                    {"integer": 7},
+                    {"boolean": true},
+                    {"symbol": symbol()},
+                    {"file": file()}
+                ]
+            }),
+        ),
+        predicate_case(
+            "predicate.equals.value.boolean",
+            json!({
+                "pred": "equals",
+                "field": "exported",
+                "value": {"boolean": true}
+            }),
+        ),
+        predicate_case(
+            "predicate.equals.value.file",
+            json!({
+                "pred": "equals",
+                "field": "file",
+                "value": {"file": file()}
+            }),
+        ),
+        predicate_case(
+            "predicate.equals.value.symbol",
+            json!({
+                "pred": "equals",
+                "field": "symbol",
+                "value": {"symbol": symbol()}
+            }),
+        ),
+        predicate_case(
+            "predicate.and.value.symbol",
+            json!({
+                "pred": "and",
+                "predicates": [{
+                    "pred": "equals",
+                    "field": "symbol",
+                    "value": {"symbol": symbol()}
+                }]
+            }),
+        ),
+        predicate_case(
+            "predicate.or.value.file",
+            json!({
+                "pred": "or",
+                "predicates": [{
+                    "pred": "equals",
+                    "field": "file",
+                    "value": {"file": file()}
+                }]
+            }),
+        ),
+        AdvancedAstCase {
+            label: "operator.project",
+            query: json!({
+                "op": "project",
+                "input": scan_query(),
+                "columns": ["name", "symbol_id"]
+            }),
+        },
+        AdvancedAstCase {
+            label: "operator.join",
+            query: json!({
+                "op": "join",
+                "left": scan_query(),
+                "right": {"op": "scan", "entity": "file"},
+                "on": "file_id"
+            }),
+        },
+        aggregate_case("aggregate.count", json!({"fn": "count"})),
+        aggregate_case("aggregate.sum", json!({"fn": "sum", "field": "line_count"})),
+        aggregate_case("aggregate.min", json!({"fn": "min", "field": "line"})),
+        aggregate_case("aggregate.max", json!({"fn": "max", "field": "line"})),
+        AdvancedAstCase {
+            label: "operator.traverse.seed",
+            query: json!({
+                "op": "traverse",
+                "seed": symbol(),
+                "relation": "calls",
+                "direction": "outbound",
+                "max_depth": 2
+            }),
+        },
+        AdvancedAstCase {
+            label: "operator.traverse.seed_from",
+            query: json!({
+                "op": "traverse",
+                "seed_from": "symbol_id",
+                "relation": "called_by",
+                "direction": "inbound",
+                "max_depth": 3
+            }),
+        },
+        AdvancedAstCase {
+            label: "operator.sort",
+            query: json!({
+                "op": "sort",
+                "input": scan_query(),
+                "by": [{"field": "name", "descending": true}]
+            }),
+        },
+        AdvancedAstCase {
+            label: "operator.limit",
+            query: json!({
+                "op": "limit",
+                "input": scan_query(),
+                "max_rows": 19
+            }),
+        },
+    ]
+}
+
+#[test]
+fn advanced_query_ast_branches_are_losslessly_normalized() {
+    let registered: std::collections::BTreeSet<_> = accepted_field_evidence()
+        .into_iter()
+        .filter(|evidence| evidence.oracle == AcceptedFieldOracle::StructuredQueryAst)
+        .flat_map(|evidence| {
+            evidence
+                .fields
+                .iter()
+                .copied()
+                .map(move |field| (evidence.tool.name(), field))
+        })
+        .collect();
+    assert_eq!(
+        registered,
+        std::collections::BTreeSet::from([("query.advanced", "query")])
+    );
+
+    let unsupported = normalization_error();
+    let mut observed_labels = std::collections::BTreeSet::new();
+    for case in advanced_ast_cases() {
+        let input: QueryAdvancedInput = decode_arguments(json!({
+            "repository": {"repository_id": repository()},
+            "query": case.query
+        }));
+        let expected =
+            serde_json::to_value(&input.query).expect("typed query AST serializes canonically");
+        let request = normalize_query_advanced(input, &unsupported)
+            .expect("accepted query AST branch normalizes");
+        let observed: Value =
+            serde_json::from_str(request.query_ast()).expect("normalized query AST remains JSON");
+        assert_eq!(
+            observed, expected,
+            "typed query AST serialization changed for {}",
+            case.label
+        );
+        assert!(
+            observed_labels.insert(case.label),
+            "duplicate AST case label"
+        );
+    }
+
+    let expected_labels = std::collections::BTreeSet::from([
+        "aggregate.count",
+        "aggregate.max",
+        "aggregate.min",
+        "aggregate.sum",
+        "operator.join",
+        "operator.limit",
+        "operator.project",
+        "operator.scan.filter",
+        "operator.scan.filter.predicates",
+        "operator.scan.filter.value.boolean",
+        "operator.scan.filter.value.file",
+        "operator.scan.filter.value.integer",
+        "operator.scan.filter.value.symbol",
+        "operator.scan.filter.values",
+        "operator.sort",
+        "operator.traverse.seed",
+        "operator.traverse.seed_from",
+        "predicate.and.value.symbol",
+        "predicate.equals.value.boolean",
+        "predicate.equals.value.file",
+        "predicate.equals.value.symbol",
+        "predicate.equals.value.text",
+        "predicate.in.value.boolean",
+        "predicate.not_equals.value.integer",
+        "predicate.or.value.file",
+    ]);
+    assert_eq!(observed_labels, expected_labels);
+
+    let schema: Value = serde_json::from_str(VerticalTool::QueryAdvanced.input_schema_json())
+        .expect("built-in query schema is valid");
+    let query_paths: std::collections::BTreeSet<_> = generated_schema_paths(&schema)
+        .into_iter()
+        .filter(|path| capability_path_is_within(path, "query"))
+        .collect();
+    let structural_containers = std::collections::BTreeSet::from([
+        "query",
+        "query.aggregations",
+        "query.aggregations[]",
+        "query.by",
+        "query.by[]",
+        "query.columns",
+        "query.filter",
+        "query.filter.predicates",
+        "query.filter.predicates[]",
+        "query.filter.value",
+        "query.filter.values",
+        "query.filter.values[]",
+        "query.group_by",
+        "query.input",
+        "query.left",
+        "query.predicate",
+        "query.predicate.predicates",
+        "query.predicate.predicates[]",
+        "query.predicate.value",
+        "query.predicate.values",
+        "query.predicate.values[]",
+        "query.right",
+    ]);
+    let expected_descendants: std::collections::BTreeSet<_> = [
+        "query.aggregations[].field",
+        "query.aggregations[].fn",
+        "query.by[].descending",
+        "query.by[].field",
+        "query.columns[]",
+        "query.direction",
+        "query.entity",
+        "query.filter.field",
+        "query.filter.pred",
+        "query.filter.value.boolean",
+        "query.filter.value.file",
+        "query.filter.value.integer",
+        "query.filter.value.symbol",
+        "query.filter.value.text",
+        "query.filter.values[].boolean",
+        "query.filter.values[].file",
+        "query.filter.values[].integer",
+        "query.filter.values[].symbol",
+        "query.filter.values[].text",
+        "query.group_by[]",
+        "query.max_depth",
+        "query.max_rows",
+        "query.on",
+        "query.op",
+        "query.predicate.field",
+        "query.predicate.pred",
+        "query.predicate.value.boolean",
+        "query.predicate.value.file",
+        "query.predicate.value.integer",
+        "query.predicate.value.symbol",
+        "query.predicate.value.text",
+        "query.predicate.values[].boolean",
+        "query.predicate.values[].file",
+        "query.predicate.values[].integer",
+        "query.predicate.values[].symbol",
+        "query.predicate.values[].text",
+        "query.relation",
+        "query.seed",
+        "query.seed_from",
+    ]
+    .into_iter()
+    .collect();
+    let schema_descendants: std::collections::BTreeSet<_> = query_paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| !structural_containers.contains(path))
+        .collect();
+    assert_eq!(schema_descendants, expected_descendants);
+
+    fn collect_value_paths(
+        value: &Value,
+        path: &str,
+        paths: &mut std::collections::BTreeSet<String>,
+    ) {
+        match value {
+            Value::Object(object) => {
+                for (field, child) in object {
+                    let child_path = format!("{path}.{field}");
+                    paths.insert(child_path.clone());
+                    collect_value_paths(child, &child_path, paths);
+                }
+            }
+            Value::Array(items) => {
+                let item_path = format!("{path}[]");
+                paths.insert(item_path.clone());
+                for item in items {
+                    collect_value_paths(item, &item_path, paths);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut exercised_paths = std::collections::BTreeSet::new();
+    for case in advanced_ast_cases() {
+        collect_value_paths(&case.query, "query", &mut exercised_paths);
+    }
+    let exercised_descendants: std::collections::BTreeSet<_> = exercised_paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| query_paths.contains(*path) && !structural_containers.contains(*path))
+        .collect();
+    assert_eq!(exercised_descendants, expected_descendants);
+}
+
+#[test]
+fn structural_change_and_plan_variants_reach_distinct_normalized_targets() {
+    let unsupported = normalization_error();
+    let impact = normalize_change_impact(
+        decode_arguments(json!({
+            "repository": {"repository_id": repository()},
+            "change": {"paths": ["src/lib.rs"]}
+        })),
+        &unsupported,
+    )
+    .expect("path-based change normalizes");
+    assert!(impact.changed_symbols().is_empty());
+    assert_eq!(impact.changed_paths(), &["src/lib.rs"]);
+
+    let plan = rootlight_agent::change::normalize_plan_change(decode_arguments(json!({
+        "repository": {"repository_id": repository()},
+        "objective": "refactor",
+        "objective_text": "refactor safely",
+        "targets": [{"file_id": file()}]
+    })))
+    .expect("file-target change plan normalizes");
+    assert!(plan.target_symbols().is_empty());
+    assert_eq!(plan.target_files(), &[file()]);
+
+    let expected: std::collections::BTreeSet<_> = accepted_field_evidence()
+        .into_iter()
+        .filter(|evidence| evidence.oracle == AcceptedFieldOracle::StructuredVariant)
+        .flat_map(|evidence| {
+            evidence
+                .fields
+                .iter()
+                .copied()
+                .map(move |field| (evidence.tool.name(), field))
+        })
+        .collect();
+    assert_eq!(
+        expected,
+        std::collections::BTreeSet::from([
+            ("change.impact", "change.paths"),
+            ("plan.change", "targets[].file_id")
+        ])
+    );
+}
+
+#[tokio::test]
+async fn cycle_projection_level_accepts_only_the_executable_symbol_discriminator() {
+    let registered: std::collections::BTreeSet<_> = accepted_field_evidence()
+        .into_iter()
+        .filter(|evidence| evidence.oracle == AcceptedFieldOracle::FixedDiscriminator)
+        .flat_map(|evidence| {
+            evidence
+                .fields
+                .iter()
+                .copied()
+                .map(move |field| (evidence.tool.name(), field))
+        })
+        .collect();
+    assert_eq!(
+        registered,
+        std::collections::BTreeSet::from([("architecture.cycles", "projection.level")])
+    );
+
+    let accepted = json!({
+        "repository": {"repository_id": repository()},
+        "projection": {"relations": ["calls"], "level": "symbol"}
+    });
+    validate_capability_input(
+        VerticalTool::ArchitectureCycles,
+        &accepted,
+        CapabilityBindingPolicy::Materialized,
+    )
+    .expect("symbol projection is admitted");
+
+    let rejected = json!({
+        "repository": {"repository_id": repository()},
+        "projection": {"relations": ["calls"], "level": "module"}
+    });
+    validate_capability_input(
+        VerticalTool::ArchitectureCycles,
+        &rejected,
+        CapabilityBindingPolicy::Materialized,
+    )
+    .expect_err("non-symbol projection is rejected");
+
+    let harness = admission_harness(VerticalTool::ArchitectureCycles);
+    execute(
+        &harness.executor,
+        VerticalTool::ArchitectureCycles,
+        accepted,
+    )
+    .await
+    .expect_err("admitted projection reaches the failing fake port");
+    assert!(matches!(
+        harness.only_call(),
+        ObservedCall::ArchitectureCycles(_)
+    ));
 }
 
 struct DefaultEquivalentCase {
@@ -5927,7 +7097,26 @@ fn default_equivalent_cases() -> Vec<DefaultEquivalentCase> {
 
 #[tokio::test]
 async fn accepted_effect_defaults_match_omitted_values() {
-    for case in default_equivalent_cases() {
+    let cases = default_equivalent_cases();
+    let observed: std::collections::BTreeSet<_> = cases
+        .iter()
+        .map(|case| (case.tool.name(), case.field))
+        .collect();
+    let expected: std::collections::BTreeSet<_> = accepted_field_evidence()
+        .into_iter()
+        .filter(|evidence| evidence.oracle == AcceptedFieldOracle::DefaultEquivalent)
+        .flat_map(|evidence| {
+            evidence
+                .fields
+                .iter()
+                .copied()
+                .map(move |field| (evidence.tool.name(), field))
+        })
+        .collect();
+    assert_eq!(observed, expected);
+    assert_eq!(cases.len(), observed.len(), "duplicate default oracle case");
+
+    for case in cases {
         let outcome = if case.tool == VerticalTool::RepoList {
             FakeOutcome::RepositoryList(Ok(RepositoryList {
                 repositories: vec![RepositoryListEntry {
@@ -5971,6 +7160,148 @@ async fn accepted_effect_defaults_match_omitted_values() {
             "{} explicit default {} must normalize like omission",
             case.tool.name(),
             case.field
+        );
+    }
+}
+
+fn accepted_explain_cases() -> Vec<(VerticalTool, Value)> {
+    let repository_selector = || json!({"repository_id": repository()});
+    vec![
+        (
+            VerticalTool::RepoStatus,
+            json!({"repository": repository_selector(), "explain": true}),
+        ),
+        (VerticalTool::RepoList, json!({"explain": true})),
+        (
+            VerticalTool::CodeLocate,
+            json!({"repository": repository_selector(), "query": "publish", "explain": true}),
+        ),
+        (
+            VerticalTool::SymbolExplain,
+            json!({"repository": repository_selector(), "symbol_ids": [symbol()], "explain": true}),
+        ),
+        (
+            VerticalTool::SymbolRelationships,
+            json!({"repository": repository_selector(), "symbol_ids": [symbol()], "relations": ["calls"], "explain": true}),
+        ),
+        (
+            VerticalTool::FlowTrace,
+            json!({"repository": repository_selector(), "from": {"symbol_id": symbol()}, "relations": ["calls"], "explain": true}),
+        ),
+        (
+            VerticalTool::ChangeImpact,
+            json!({"repository": repository_selector(), "change": {"symbol_ids": [symbol()]}, "explain": true}),
+        ),
+        (
+            VerticalTool::TestsSelect,
+            json!({"repository": repository_selector(), "seeds": {"symbols": [symbol()]}, "explain": true}),
+        ),
+        (
+            VerticalTool::ArchitectureOverview,
+            json!({"repository": repository_selector(), "explain": true}),
+        ),
+        (
+            VerticalTool::ArchitectureCycles,
+            json!({"repository": repository_selector(), "projection": {"relations": ["calls"], "level": "symbol"}, "explain": true}),
+        ),
+        (
+            VerticalTool::CodeDead,
+            json!({"repository": repository_selector(), "explain": true}),
+        ),
+        (
+            VerticalTool::HistoryCompare,
+            json!({"repository": repository_selector(), "base": parent_generation(), "head": generation(), "explain": true}),
+        ),
+        (
+            VerticalTool::PlanChange,
+            json!({"repository": repository_selector(), "objective": "bug_fix", "objective_text": "fix the defect", "targets": [{"symbol_id": symbol()}], "explain": true}),
+        ),
+        (
+            VerticalTool::ContextPack,
+            json!({"repository": repository_selector(), "task": "fix a bug", "seeds": {"symbols": [symbol()]}, "token_budget": 1000, "explain": true}),
+        ),
+        (
+            VerticalTool::SourceRead,
+            json!({"repository": repository_selector(), "references": [{"source_ref": wire_source_reference(5, 10, 2, 2)}], "explain": true}),
+        ),
+        (
+            VerticalTool::QueryBatch,
+            json!({
+                "repository": repository_selector(),
+                "operations": [{
+                    "id": "find",
+                    "tool": "code.locate",
+                    "arguments": {"query": "publish"}
+                }],
+                "explain": true
+            }),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn every_explain_oracle_returns_a_plan_without_a_subtool_call() {
+    let cases = accepted_explain_cases();
+    let observed: std::collections::BTreeSet<_> = cases
+        .iter()
+        .map(|(tool, _)| (tool.name(), "explain"))
+        .collect();
+    let expected: std::collections::BTreeSet<_> = accepted_field_evidence()
+        .into_iter()
+        .filter(|evidence| evidence.oracle == AcceptedFieldOracle::ExplainPlan)
+        .flat_map(|evidence| {
+            evidence
+                .fields
+                .iter()
+                .copied()
+                .map(move |field| (evidence.tool.name(), field))
+        })
+        .collect();
+    assert_eq!(observed, expected);
+    assert_eq!(cases.len(), observed.len(), "duplicate explain oracle");
+
+    for (tool, arguments) in cases {
+        let outcome = if tool == VerticalTool::RepoList {
+            FakeOutcome::RepositoryList(Ok(RepositoryList {
+                repositories: vec![RepositoryListEntry {
+                    repository_id: repository(),
+                    active_generation: generation(),
+                    languages: vec!["rust".to_owned()],
+                    structural_freshness: "current".to_owned(),
+                    semantic_freshness: "current".to_owned(),
+                    state: "ready".to_owned(),
+                }],
+            }))
+        } else {
+            FakeOutcome::RepositoryStatus(Ok(repository_status_response()))
+        };
+        let harness = Harness::new(outcome);
+        let output = execute(&harness.executor, tool, arguments)
+            .await
+            .unwrap_or_else(|error| panic!("{} explain failed: {error:?}", tool.name()));
+        let output = Value::Object(output);
+        assert!(
+            output
+                .pointer("/data/explanation")
+                .is_some_and(Value::is_object),
+            "{} explain output omitted the plan",
+            tool.name()
+        );
+        assert_eq!(
+            harness.call_count.load(Ordering::Relaxed),
+            1,
+            "{} explain performed more than its metadata lookup",
+            tool.name()
+        );
+        let expected_metadata_call = if tool == VerticalTool::RepoList {
+            matches!(harness.only_call(), ObservedCall::RepositoryList(_))
+        } else {
+            matches!(harness.only_call(), ObservedCall::RepositoryStatus(_))
+        };
+        assert!(
+            expected_metadata_call,
+            "{} explain invoked a subtool",
+            tool.name()
         );
     }
 }
@@ -6030,6 +7361,28 @@ async fn accepted_effect_code_locate_controls_change_the_normalized_request() {
 
 #[tokio::test]
 async fn accepted_effect_context_pack_token_budget_changes_selection() {
+    let registered: std::collections::BTreeSet<_> = accepted_field_evidence()
+        .into_iter()
+        .filter(|evidence| evidence.oracle == AcceptedFieldOracle::ContextRuntime)
+        .flat_map(|evidence| {
+            evidence
+                .fields
+                .iter()
+                .copied()
+                .map(move |field| (evidence.tool.name(), field))
+        })
+        .collect();
+    assert_eq!(
+        registered,
+        std::collections::BTreeSet::from([
+            ("context.pack", "generation"),
+            ("context.pack", "repository"),
+            ("context.pack", "seeds"),
+            ("context.pack", "task"),
+            ("context.pack", "token_budget"),
+        ])
+    );
+
     let mut response = explain_response(source_reference(4, 12, 2, 2));
     response.result.symbols[0].signature = Some("x".repeat(2_400));
     let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
@@ -6065,6 +7418,197 @@ async fn accepted_effect_context_pack_token_budget_changes_selection() {
     assert_eq!(larger.data.items.len(), 1);
     assert!(smaller.truncated);
     assert!(!larger.truncated);
+}
+
+#[tokio::test]
+async fn context_pack_identity_task_and_seed_branches_have_runtime_effects() {
+    let context_arguments =
+        |repository_id, generation_selector: Option<GenerationId>, task, seeds| {
+            let mut arguments = json!({
+                "repository": {"repository_id": repository_id},
+                "task": task,
+                "seeds": seeds,
+                "token_budget": 1_000
+            });
+            if let Some(generation_selector) = generation_selector {
+                arguments
+                    .as_object_mut()
+                    .expect("context fixture is an object")
+                    .insert("generation".to_owned(), json!(generation_selector));
+            }
+            arguments
+        };
+
+    let base_identity = Harness::new(FakeOutcome::RepositoryStatus(Ok(
+        repository_status_response(),
+    )));
+    execute(
+        &base_identity.executor,
+        VerticalTool::ContextPack,
+        context_arguments(
+            repository(),
+            None,
+            "fix a bug",
+            json!({"symbols": [symbol()]}),
+        ),
+    )
+    .await
+    .expect_err("the identity fixture intentionally has no retrieval response");
+    let base_identity_call = {
+        let calls = base_identity
+            .calls
+            .lock()
+            .expect("fake call recorder is not poisoned");
+        let ObservedCall::RepositoryStatus(request) = &calls[0] else {
+            panic!("context identity starts with repository status");
+        };
+        request.clone()
+    };
+
+    let mut alternate_status = repository_status_response();
+    alternate_status.repository_id = alternate_repository();
+    let alternate_repository_harness =
+        Harness::new(FakeOutcome::RepositoryStatus(Ok(alternate_status)));
+    execute(
+        &alternate_repository_harness.executor,
+        VerticalTool::ContextPack,
+        context_arguments(
+            alternate_repository(),
+            None,
+            "fix a bug",
+            json!({"symbols": [symbol()]}),
+        ),
+    )
+    .await
+    .expect_err("the identity fixture intentionally has no retrieval response");
+    let alternate_repository_call = {
+        let calls = alternate_repository_harness
+            .calls
+            .lock()
+            .expect("fake call recorder is not poisoned");
+        let ObservedCall::RepositoryStatus(request) = &calls[0] else {
+            panic!("context identity starts with repository status");
+        };
+        request.clone()
+    };
+    assert_ne!(
+        base_identity_call.repository(),
+        alternate_repository_call.repository()
+    );
+
+    let mut alternate_generation_status = repository_status_response();
+    alternate_generation_status.active_generation = alternate_generation();
+    let alternate_generation_harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(
+        alternate_generation_status,
+    )));
+    execute(
+        &alternate_generation_harness.executor,
+        VerticalTool::ContextPack,
+        context_arguments(
+            repository(),
+            Some(alternate_generation()),
+            "fix a bug",
+            json!({"symbols": [symbol()]}),
+        ),
+    )
+    .await
+    .expect_err("the identity fixture intentionally has no retrieval response");
+    let alternate_generation_call = {
+        let calls = alternate_generation_harness
+            .calls
+            .lock()
+            .expect("fake call recorder is not poisoned");
+        let ObservedCall::RepositoryStatus(request) = &calls[0] else {
+            panic!("context identity starts with repository status");
+        };
+        request.clone()
+    };
+    assert_ne!(
+        base_identity_call.generation(),
+        alternate_generation_call.generation()
+    );
+
+    let execute_explain = |task: &'static str, seeds: Value| async move {
+        let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(
+            repository_status_response(),
+        )));
+        let output: ContextPackOutput = decode(
+            execute(
+                &harness.executor,
+                VerticalTool::ContextPack,
+                json!({
+                    "repository": {"repository_id": repository()},
+                    "task": task,
+                    "seeds": seeds,
+                    "token_budget": 1_000,
+                    "explain": true
+                }),
+            )
+            .await
+            .expect("context explain fixture executes"),
+        );
+        let ToolResponse::Success(output) = output else {
+            panic!("expected context pack success");
+        };
+        output.data.pack_id
+    };
+    let first_task = execute_explain("fix a bug", json!({"symbols": [symbol()]})).await;
+    let second_task = execute_explain("review a bug", json!({"symbols": [symbol()]})).await;
+    assert_ne!(first_task, second_task);
+
+    let symbol_seed_harness = Harness::new(FakeOutcome::SymbolExplain(Ok(explain_response(
+        source_reference(4, 12, 2, 2),
+    ))));
+    execute(
+        &symbol_seed_harness.executor,
+        VerticalTool::ContextPack,
+        context_arguments(
+            repository(),
+            None,
+            "fix a bug",
+            json!({"symbols": [symbol()]}),
+        ),
+    )
+    .await
+    .expect("symbol-seeded context pack executes");
+    let symbol_request = {
+        let calls = symbol_seed_harness
+            .calls
+            .lock()
+            .expect("fake call recorder is not poisoned");
+        let ObservedCall::SymbolExplain(request) = &calls[1] else {
+            panic!("context retrieval uses symbol explanation");
+        };
+        request.clone()
+    };
+
+    let test_seed_harness = Harness::new(FakeOutcome::SymbolExplain(Ok(explain_response(
+        source_reference(4, 12, 2, 2),
+    ))));
+    execute(
+        &test_seed_harness.executor,
+        VerticalTool::ContextPack,
+        context_arguments(
+            repository(),
+            None,
+            "fix a bug",
+            json!({"tests": [missing_symbol()]}),
+        ),
+    )
+    .await
+    .expect("test-seeded context pack executes");
+    let test_request = {
+        let calls = test_seed_harness
+            .calls
+            .lock()
+            .expect("fake call recorder is not poisoned");
+        let ObservedCall::SymbolExplain(request) = &calls[1] else {
+            panic!("test seeds are materialized as symbol explanation anchors");
+        };
+        request.clone()
+    };
+    assert_eq!(symbol_request.symbols(), &[symbol()]);
+    assert_eq!(test_request.symbols(), &[missing_symbol()]);
 }
 
 #[tokio::test]
@@ -6146,6 +7690,26 @@ async fn accepted_effect_query_advanced_controls_change_the_normalized_request()
 
 #[tokio::test]
 async fn accepted_effect_query_batch_failure_policy_changes_scheduling() {
+    let registered: std::collections::BTreeSet<_> = accepted_field_evidence()
+        .into_iter()
+        .filter(|evidence| evidence.oracle == AcceptedFieldOracle::BatchRuntime)
+        .flat_map(|evidence| {
+            evidence
+                .fields
+                .iter()
+                .copied()
+                .map(move |field| (evidence.tool.name(), field))
+        })
+        .collect();
+    assert_eq!(
+        registered,
+        std::collections::BTreeSet::from([
+            ("query.batch", "failure_policy"),
+            ("query.batch", "operations"),
+            ("query.batch", "repository"),
+        ])
+    );
+
     let arguments = |failure_policy: Option<&str>| {
         let mut arguments = json!({
             "repository": {"repository_id": repository()},
@@ -6201,4 +7765,35 @@ async fn accepted_effect_query_batch_failure_policy_changes_scheduling() {
         fail_fast.data.operation_results[0].status,
         BatchOperationStatus::NotRunFailFast
     );
+    assert_eq!(default.data.operation_results.len(), 2);
+    assert_eq!(fail_fast.data.operation_results.len(), 2);
+
+    let mut alternate_status = repository_status_response();
+    alternate_status.repository_id = alternate_repository();
+    let alternate_harness = Harness::new(FakeOutcome::Batch {
+        status: Ok(alternate_status),
+        locate: executor_failure(),
+    });
+    execute(
+        &alternate_harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": alternate_repository()},
+            "operations": [{
+                "id": "find",
+                "tool": "code.locate",
+                "arguments": {"query": "publish"}
+            }]
+        }),
+    )
+    .await
+    .expect("alternate batch identity remains operation-local");
+    let calls = alternate_harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    let ObservedCall::RepositoryStatus(identity) = &calls[0] else {
+        panic!("batch identity resolution is the first daemon call");
+    };
+    assert_eq!(identity.repository(), alternate_repository());
 }
