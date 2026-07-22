@@ -6974,6 +6974,49 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn resource_ledger_enforces_below_exact_and_above_runtime_boundaries() {
+        let resources = [
+            QueryResource::Rows,
+            QueryResource::Edges,
+            QueryResource::Results,
+            QueryResource::SourceBytes,
+            QueryResource::JsonBytes,
+            QueryResource::Tokens,
+            QueryResource::MemoryBytes,
+        ];
+
+        for resource in resources {
+            let budget = match resource {
+                QueryResource::Rows => QueryBudget::new().with_max_rows(2),
+                QueryResource::Edges => QueryBudget::new().with_max_edges(2),
+                QueryResource::Results => QueryBudget::new().with_max_results(2),
+                QueryResource::SourceBytes => QueryBudget::new().with_max_source_bytes(2),
+                QueryResource::JsonBytes => QueryBudget::new().with_max_json_bytes(2),
+                QueryResource::Tokens => QueryBudget::new().with_max_tokens(2),
+                QueryResource::MemoryBytes => QueryBudget::new().with_max_memory_bytes(2),
+                QueryResource::Depth | QueryResource::Paths | QueryResource::Capability => {
+                    unreachable!("untracked resource in the bounded test matrix")
+                }
+            };
+            let tracker = UsageTracker::new(budget);
+
+            tracker
+                .require(resource, 1)
+                .expect("the value below the runtime limit is admitted");
+            tracker
+                .require(resource, 2)
+                .expect("the exact runtime limit is admitted");
+            assert!(matches!(
+                tracker.require(resource, 3),
+                Err(QueryError::BudgetExceeded {
+                    resource: observed,
+                    limit: 2,
+                }) if observed == resource
+            ));
+        }
+    }
+
     fn symbol(byte: u8) -> SymbolId {
         SymbolId::from_bytes([byte; 20])
     }
@@ -9180,6 +9223,54 @@ mod tests {
             entity: AdvancedEntityKind::Function,
             filter: None,
         }
+    }
+
+    #[test]
+    fn advanced_result_materialization_enforces_the_exact_result_budget() {
+        let document = advanced_document();
+
+        let mut below = advanced_plan(scan_functions(), false, 2);
+        below.budget = QueryBudget::new().with_max_results(1);
+        assert!(matches!(
+            try_run_advanced(&document, &below),
+            Err(QueryError::BudgetExceeded {
+                resource: QueryResource::Results,
+                limit: 1,
+            })
+        ));
+
+        let mut exact = advanced_plan(scan_functions(), false, 2);
+        exact.budget = QueryBudget::new().with_max_results(2);
+        let built =
+            try_run_advanced(&document, &exact).expect("two result slots admit two function rows");
+        assert_eq!(built.rows.len(), 2);
+    }
+
+    #[test]
+    fn advanced_execution_observes_an_expired_duration_budget_before_work() {
+        let document = advanced_document();
+        let mut plan = advanced_plan(scan_functions(), false, 2);
+        plan.budget = QueryBudget::new().with_max_duration(Duration::from_millis(1));
+        let mut tracker =
+            UsageTracker::new(advanced_runtime_budget(&plan).expect("runtime budget is valid"));
+        let mut limiting_resources = Vec::new();
+        let cancellation = Cancellation::new();
+        let control = QueryControl::new(&cancellation, plan.budget.max_duration);
+        std::thread::sleep(Duration::from_millis(5));
+
+        assert!(matches!(
+            build_advanced_query(
+                &document,
+                &plan,
+                &control,
+                &mut tracker,
+                &mut limiting_resources,
+            ),
+            Err(QueryError::Cancelled(CancellationReason::DeadlineExceeded))
+        ));
+        assert_eq!(tracker.rows, 0);
+        assert_eq!(tracker.edges, 0);
+        assert_eq!(tracker.results, 0);
     }
 
     #[test]

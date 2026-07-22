@@ -2950,7 +2950,14 @@ pub(crate) fn search_mode(mode: LocateMode) -> SearchMode {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutionCompleteness, ExecutionCompletenessState, QueryResource};
+    use std::time::Duration;
+
+    use super::{
+        ExecutionCompleteness, ExecutionCompletenessState, HARD_MAX_QUERY_DURATION,
+        HARD_MAX_QUERY_EDGES, HARD_MAX_QUERY_JSON_BYTES, HARD_MAX_QUERY_MEMORY_BYTES,
+        HARD_MAX_QUERY_RESULTS, HARD_MAX_QUERY_ROWS, HARD_MAX_QUERY_SOURCE_BYTES,
+        HARD_MAX_QUERY_TOKENS, QueryBudget, QueryError, QueryResource,
+    };
 
     const RESOURCES: [QueryResource; 10] = [
         QueryResource::Rows,
@@ -2964,6 +2971,8 @@ mod tests {
         QueryResource::Paths,
         QueryResource::Capability,
     ];
+
+    type BudgetBoundaryCase = (QueryResource, u64, fn(QueryBudget, u64) -> QueryBudget);
 
     #[test]
     fn complete_execution_has_no_limiting_resource() {
@@ -3017,5 +3026,101 @@ mod tests {
             serde_json::to_string(&QueryResource::Paths).expect("paths serializes"),
             "\"paths\""
         );
+    }
+
+    #[test]
+    fn every_numeric_query_budget_enforces_below_exact_and_above_hard_boundaries() {
+        let cases: [BudgetBoundaryCase; 7] = [
+            (
+                QueryResource::Rows,
+                HARD_MAX_QUERY_ROWS,
+                QueryBudget::with_max_rows,
+            ),
+            (
+                QueryResource::Edges,
+                HARD_MAX_QUERY_EDGES,
+                QueryBudget::with_max_edges,
+            ),
+            (
+                QueryResource::Results,
+                HARD_MAX_QUERY_RESULTS,
+                QueryBudget::with_max_results,
+            ),
+            (
+                QueryResource::SourceBytes,
+                HARD_MAX_QUERY_SOURCE_BYTES,
+                QueryBudget::with_max_source_bytes,
+            ),
+            (
+                QueryResource::JsonBytes,
+                HARD_MAX_QUERY_JSON_BYTES,
+                QueryBudget::with_max_json_bytes,
+            ),
+            (
+                QueryResource::Tokens,
+                HARD_MAX_QUERY_TOKENS,
+                QueryBudget::with_max_tokens,
+            ),
+            (
+                QueryResource::MemoryBytes,
+                HARD_MAX_QUERY_MEMORY_BYTES,
+                QueryBudget::with_max_memory_bytes,
+            ),
+        ];
+
+        for (resource, maximum, apply) in cases {
+            assert!(
+                apply(QueryBudget::new(), maximum - 1).validate().is_ok(),
+                "{resource:?} rejects the value immediately below its hard ceiling"
+            );
+            assert!(
+                apply(QueryBudget::new(), maximum).validate().is_ok(),
+                "{resource:?} rejects its exact hard ceiling"
+            );
+            assert!(matches!(
+                apply(QueryBudget::new(), maximum + 1).validate(),
+                Err(QueryError::InvalidBudget {
+                    resource: observed,
+                    maximum: observed_maximum,
+                }) if observed == resource && observed_maximum == maximum
+            ));
+            assert!(matches!(
+                apply(QueryBudget::new(), 0).validate(),
+                Err(QueryError::InvalidBudget {
+                    resource: observed,
+                    maximum: observed_maximum,
+                }) if observed == resource && observed_maximum == maximum
+            ));
+        }
+    }
+
+    #[test]
+    fn duration_budget_enforces_below_exact_and_above_hard_boundaries() {
+        assert!(
+            QueryBudget::new()
+                .with_max_duration(HARD_MAX_QUERY_DURATION - Duration::from_nanos(1))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            QueryBudget::new()
+                .with_max_duration(HARD_MAX_QUERY_DURATION)
+                .validate()
+                .is_ok()
+        );
+        assert!(matches!(
+            QueryBudget::new()
+                .with_max_duration(HARD_MAX_QUERY_DURATION + Duration::from_nanos(1))
+                .validate(),
+            Err(QueryError::InvalidDurationBudget { maximum })
+                if maximum == HARD_MAX_QUERY_DURATION
+        ));
+        assert!(matches!(
+            QueryBudget::new()
+                .with_max_duration(Duration::ZERO)
+                .validate(),
+            Err(QueryError::InvalidDurationBudget { maximum })
+                if maximum == HARD_MAX_QUERY_DURATION
+        ));
     }
 }

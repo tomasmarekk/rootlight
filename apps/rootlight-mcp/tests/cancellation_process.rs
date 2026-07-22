@@ -154,8 +154,9 @@ fn assert_cancelled_request(
         b'C',
         "daemon worker observes client-request cancellation"
     );
+    let cancellation_latency = cancelled_at.elapsed();
     assert!(
-        cancelled_at.elapsed() <= CANCELLATION_TIMEOUT,
+        cancellation_latency <= CANCELLATION_TIMEOUT,
         "daemon cancellation must be observed within the cancellation bound"
     );
 
@@ -175,11 +176,19 @@ fn assert_cancelled_request(
     );
     assert_eq!(follow_up["id"], follow_up_id);
     assert_success(&follow_up, "repo.status");
+    let follow_up_latency = follow_up_started.elapsed();
     assert!(
-        follow_up_started.elapsed() <= FOLLOW_UP_TIMEOUT,
+        follow_up_latency <= FOLLOW_UP_TIMEOUT,
         "the analytical lane must be reusable within the follow-up bound"
     );
     mcp.assert_no_response_for(request_id, LATE_RESPONSE_WINDOW);
+    eprintln!(
+        "cancellation_measurement tool={tool} cancellation_latency_micros={} \
+         follow_up_latency_micros={} late_response_window_millis={}",
+        cancellation_latency.as_micros(),
+        follow_up_latency.as_micros(),
+        LATE_RESPONSE_WINDOW.as_millis()
+    );
 }
 
 fn write_large_repository(root: &Path) {
