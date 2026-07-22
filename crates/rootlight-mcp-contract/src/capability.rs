@@ -164,7 +164,7 @@ pub struct DiscoveryCapabilityMetadata {
     pub generation: &'static str,
     /// Request-budget behavior.
     pub budget: &'static str,
-    /// Whether nested batch operations share one enforced aggregate budget.
+    /// Whether nested operations share one enforced child-execution budget.
     pub batch_shared_budget: bool,
     /// Concise source-free aggregate limitation.
     pub fallback_summary: &'static str,
@@ -205,8 +205,11 @@ pub struct ToolCapability {
     pub batch_eligible: bool,
     /// Whether the tool exposes a source-free explain plan.
     pub explain_supported: bool,
-    /// Whether a process-level handler currently exists.
-    pub handler_available: bool,
+    /// Internal process handler used to route the public tool.
+    ///
+    /// This path is retained in evidence artifacts and is intentionally omitted
+    /// from public discovery metadata.
+    pub handler_path: Option<&'static str>,
     /// Honest aggregate runtime disposition.
     pub status: CapabilityStatus,
     /// Disposition inherited by fields without a more specific rule.
@@ -219,7 +222,7 @@ pub struct ToolCapability {
     pub generation: GenerationSemantics,
     /// Public budget behavior.
     pub budget: BudgetSemantics,
-    /// Whether `query.batch` enforces one shared aggregate budget.
+    /// Whether `query.batch` enforces one shared child-execution budget.
     pub batch_shared_budget: bool,
     /// Source-free, concise fallback description safe for discovery.
     pub fallback_summary: &'static str,
@@ -826,6 +829,13 @@ const QUERY_BATCH_RULES: &[CapabilityRule] = &[
         "active",
         "resolves and pins the active generation once for all nested operations",
     ),
+    CapabilityRule {
+        path: "operations[].tool",
+        value: Some("plan.change"),
+        status: CapabilityStatus::UnsupportedStableError,
+        error_code: Some(ErrorCode::OperatorForbidden),
+        summary: "change planning is not eligible for public batch execution",
+    },
     blocked(
         "budget",
         "measured child usage is bounded but orchestration and response serialization are not fully charged",
@@ -941,15 +951,46 @@ const fn tool_capability(tool: McpTool) -> ToolCapability {
         profiles: tool_profiles(tool),
         batch_eligible: is_batch_eligible(tool),
         explain_supported: !matches!(tool, McpTool::RepoIndex | McpTool::OperationStatus),
-        handler_available: true,
-        status: CapabilityStatus::FallbackLimited,
-        default_field_status: CapabilityStatus::FallbackLimited,
+        handler_path: Some(handler_path(tool)),
+        status: tool_status(tool),
+        default_field_status: tool_status(tool),
         rules: tool_rules(tool),
         pagination: pagination_semantics(tool),
         generation: generation_semantics(tool),
         budget: budget_semantics(tool),
-        batch_shared_budget: false,
+        batch_shared_budget: matches!(tool, McpTool::QueryBatch),
         fallback_summary: tool_fallback_summary(tool),
+    }
+}
+
+const fn handler_path(tool: McpTool) -> &'static str {
+    match tool {
+        McpTool::RepoIndex => "rootlight-mcp::executor::execute_repository_index",
+        McpTool::RepoStatus => "rootlight-mcp::executor::execute_repo_status",
+        McpTool::RepoList => "rootlight-mcp::executor::execute_repo_list",
+        McpTool::OperationStatus => "rootlight-mcp::executor::execute_operation_status",
+        McpTool::CodeLocate => "rootlight-mcp::executor::execute_code_locate",
+        McpTool::SymbolExplain => "rootlight-mcp::executor::execute_symbol_explain",
+        McpTool::SymbolRelationships => "rootlight-mcp::executor::execute_symbol_relationships",
+        McpTool::FlowTrace => "rootlight-mcp::executor::execute_flow_trace",
+        McpTool::ChangeImpact => "rootlight-mcp::executor::execute_change_impact",
+        McpTool::TestsSelect => "rootlight-mcp::executor::execute_tests_select",
+        McpTool::ArchitectureOverview => "rootlight-mcp::executor::execute_architecture_overview",
+        McpTool::ArchitectureCycles => "rootlight-mcp::executor::execute_architecture_cycles",
+        McpTool::CodeDead => "rootlight-mcp::executor::execute_code_dead",
+        McpTool::HistoryCompare => "rootlight-mcp::executor::execute_history_compare",
+        McpTool::PlanChange => "rootlight-mcp::executor::execute_plan_change",
+        McpTool::ContextPack => "rootlight-mcp::executor::execute_context_pack",
+        McpTool::SourceRead => "rootlight-mcp::executor::execute_source_read",
+        McpTool::QueryAdvanced => "rootlight-mcp::executor::execute_query_advanced",
+        McpTool::QueryBatch => "rootlight-mcp::executor::execute_query_batch",
+    }
+}
+
+const fn tool_status(tool: McpTool) -> CapabilityStatus {
+    match tool {
+        McpTool::OperationStatus => CapabilityStatus::Implemented,
+        _ => CapabilityStatus::FallbackLimited,
     }
 }
 
@@ -1097,7 +1138,7 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
         McpTool::SourceRead => "bounded source ranges as untrusted data",
         McpTool::QueryAdvanced => "bounded safe-AST query",
         McpTool::QueryBatch => {
-            "active generation pinned once; explicit historical selection and complete batch accounting remain fallback-limited"
+            "bounded active-generation dispatch with shared child accounting; historical selection and complete accounting remain fallback-limited"
         }
     }
 }
@@ -1134,7 +1175,12 @@ mod tests {
                 "{} batch flag drifted from the allowlist",
                 entry.tool.name()
             );
-            assert!(!entry.batch_shared_budget);
+            assert_eq!(
+                entry.batch_shared_budget,
+                entry.tool == McpTool::QueryBatch,
+                "{} shared child-budget flag drifted",
+                entry.tool.name()
+            );
         }
         assert_eq!(BATCH_ELIGIBLE.len(), 11);
         assert!(!is_batch_eligible(McpTool::QueryBatch));
@@ -1187,6 +1233,15 @@ mod tests {
             batch.disposition("generation", Some("active")).status,
             CapabilityStatus::Implemented
         );
+        let forbidden_plan = batch.disposition("operations[].tool", Some("plan.change"));
+        assert_eq!(
+            forbidden_plan.status,
+            CapabilityStatus::UnsupportedStableError
+        );
+        assert_eq!(
+            forbidden_plan.error_code,
+            Some(ErrorCode::OperatorForbidden)
+        );
     }
 
     #[test]
@@ -1218,10 +1273,15 @@ mod tests {
             );
             let encoded = serde_json::to_string(&metadata).expect("capability metadata serializes");
             assert!(!encoded.contains('\\'));
+            assert!(!encoded.contains("rootlight-mcp::"));
             for private_label in [["TASK", "-"].concat(), ["GATE", "-"].concat()] {
                 assert!(!encoded.contains(&private_label));
             }
         }
+
+        let operation_status = discovery_metadata(McpTool::OperationStatus);
+        assert_eq!(operation_status.status, "implemented");
+        assert!(operation_status.limitations.is_empty());
 
         let batch = discovery_metadata(McpTool::QueryBatch);
         assert_eq!(batch.generation, "batch_inherited");
@@ -1246,7 +1306,12 @@ mod tests {
                 assert!(!rule.path.is_empty());
                 assert!(!rule.summary.is_empty());
                 if rule.status == CapabilityStatus::UnsupportedStableError {
-                    assert_eq!(rule.error_code, Some(ErrorCode::UnsupportedCapability));
+                    assert!(
+                        rule.error_code.is_some(),
+                        "{} {} must declare its stable pre-execution error",
+                        entry.tool.name(),
+                        rule.path
+                    );
                 } else {
                     assert_eq!(rule.error_code, None);
                 }
