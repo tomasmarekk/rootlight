@@ -92,6 +92,7 @@ use crate::advanced::{AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_TRAVER
 use crate::{
     RequestCancellation, ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture,
     ToolExecutor,
+    error_mapping::{MappedDomainFailure, public_error as mapped_public_error},
     tools::{
         CapabilityBindingPolicy, MaterializedInputError, MaterializedToolValidator,
         validate_capability_input,
@@ -100,10 +101,11 @@ use crate::{
 
 const DEFAULT_LOCATE_RESULTS: u16 = 20;
 const DEFAULT_ADVANCED_RESULTS: u16 = 100;
+#[cfg(test)]
 const INVALID_ARGUMENT_MESSAGE: &str = error_definition(ErrorCode::InvalidArgument).message;
+#[cfg(test)]
 const UNSUPPORTED_MESSAGE: &str = error_definition(ErrorCode::UnsupportedCapability).message;
 const BATCH_OPERATION_FAILED_MESSAGE: &str = "batch operation failed";
-const INVALID_CURSOR_MESSAGE: &str = error_definition(ErrorCode::InvalidCursor).message;
 
 /// Future returned by one injected first-slice client-port operation.
 pub type ClientPortFuture<T> =
@@ -1419,23 +1421,13 @@ where
     }
 
     fn build(port: P, cursor_key: CursorSigningKey) -> Result<Self, ToolExecutorBuildError> {
-        let field =
-            DetailKey::parse("arguments").map_err(ToolExecutorBuildError::UnsupportedError)?;
         let unsupported =
-            PublicError::builder(ErrorCode::UnsupportedCapability, UNSUPPORTED_MESSAGE)
-                .next_action(NextAction::CorrectField { field })
-                .build()
+            mapped_public_error(MappedDomainFailure::unsupported_capability("arguments"))
                 .map_err(ToolExecutorBuildError::UnsupportedError)?;
-        let field =
-            DetailKey::parse("arguments").map_err(ToolExecutorBuildError::InvalidArgumentError)?;
         let invalid_arguments =
-            PublicError::builder(ErrorCode::InvalidArgument, INVALID_ARGUMENT_MESSAGE)
-                .next_action(NextAction::CorrectField { field })
-                .build()
+            mapped_public_error(MappedDomainFailure::invalid_argument("arguments"))
                 .map_err(ToolExecutorBuildError::InvalidArgumentError)?;
-        let invalid_cursor = PublicError::builder(ErrorCode::InvalidCursor, INVALID_CURSOR_MESSAGE)
-            .next_action(NextAction::RestartEnumeration)
-            .build()
+        let invalid_cursor = mapped_public_error(MappedDomainFailure::invalid_cursor())
             .map_err(ToolExecutorBuildError::InvalidArgumentError)?;
         let batch_validator = Arc::new(
             MaterializedToolValidator::compile().map_err(ToolExecutorBuildError::BatchValidator)?,
@@ -1653,7 +1645,7 @@ where
         PublicError::builder(ErrorCode::Internal, BATCH_OPERATION_FAILED_MESSAGE)
             .build()
             .map_err(|_| internal(ToolExecutionFailure::Executor))?;
-    let budget_exceeded = domain_error(ErrorCode::BudgetExceeded, None);
+    let budget_exceeded = authoritative_error(MappedDomainFailure::budget_exceeded());
     let adapter = Arc::new(McpAgentToolPort {
         port: Arc::clone(&port),
         validator: batch_validator,
@@ -1741,10 +1733,7 @@ where
                 Some(GenerationSelector::Explicit(expected))
                     if response.active_generation != expected
             ) {
-                return Err(AgentPortError::Public(Box::new(domain_error(
-                    ErrorCode::StaleGeneration,
-                    None,
-                ))));
+                return Err(AgentPortError::Public(Box::new(stale_generation_error())));
             }
             Ok(agent_identity_from_status(response))
         })
@@ -1947,9 +1936,8 @@ fn apply_child_budget(
         BatchTool::ContextPack => {
             if let Some(tokens) = budget.max_tokens {
                 if tokens < 500 {
-                    return Err(ToolExecutionError::new(domain_error(
-                        ErrorCode::BudgetExceeded,
-                        Some("budget"),
+                    return Err(ToolExecutionError::new(authoritative_error(
+                        MappedDomainFailure::budget_exceeded(),
                     )));
                 }
                 lower_numeric_argument(arguments, "token_budget", Some(u64::from(tokens)));
@@ -2155,10 +2143,7 @@ fn map_batch_orchestration_error(error: BatchOrchestrationError) -> ToolExecutio
         BatchOrchestrationError::InvalidArguments => invalid_input(),
         BatchOrchestrationError::UnsupportedProfile => unsupported_field("response_profile"),
         BatchOrchestrationError::BudgetExceeded | BatchOrchestrationError::DeadlineExceeded => {
-            let error = PublicError::builder(ErrorCode::BudgetExceeded, "batch budget exceeded")
-                .build()
-                .expect("static batch budget error is valid");
-            ToolExecutionError::new(error)
+            ToolExecutionError::new(authoritative_error(MappedDomainFailure::budget_exceeded()))
         }
         BatchOrchestrationError::IdentityResolution(error) => ToolExecutionError::new(*error),
         BatchOrchestrationError::Cancelled | BatchOrchestrationError::Internal => {
@@ -2204,7 +2189,7 @@ fn map_context_pack_service_error(
         ContextPackServiceError::EmptySeeds => ToolExecutionError::new(unsupported.clone()),
         ContextPackServiceError::Public(error) => ToolExecutionError::new(*error),
         ContextPackServiceError::DeadlineExceeded => {
-            ToolExecutionError::new(domain_error(ErrorCode::BudgetExceeded, Some("budget")))
+            ToolExecutionError::new(authoritative_error(MappedDomainFailure::budget_exceeded()))
         }
         ContextPackServiceError::InvalidResponse => internal(ToolExecutionFailure::InvalidResponse),
         ContextPackServiceError::Cancelled | ContextPackServiceError::Unavailable => {
@@ -4318,7 +4303,7 @@ fn map_plan_change_service_error(
         }
         PlanChangeServiceError::Public(error) => ToolExecutionError::new(*error),
         PlanChangeServiceError::DeadlineExceeded => {
-            ToolExecutionError::new(domain_error(ErrorCode::BudgetExceeded, Some("budget")))
+            ToolExecutionError::new(authoritative_error(MappedDomainFailure::budget_exceeded()))
         }
         PlanChangeServiceError::Cancelled | PlanChangeServiceError::Unavailable => {
             internal(ToolExecutionFailure::Executor)
@@ -4759,90 +4744,71 @@ where
     serde_json::from_value(Value::Object(arguments)).map_err(|_| type_mismatch_error("arguments"))
 }
 
-fn domain_error(code: ErrorCode, field: Option<&'static str>) -> PublicError {
-    let definition = error_definition(code);
-    let mut builder = PublicError::builder(code, definition.message);
-    if definition.retryable {
-        builder = builder.retryable();
-    }
-    if let Some(field) = field {
-        builder = builder.next_action(NextAction::CorrectField {
-            field: DetailKey::parse(field).expect("static detail key is valid"),
-        });
-    } else if code == ErrorCode::InvalidCursor {
-        builder = builder.next_action(NextAction::RestartEnumeration);
-    }
-    builder
+fn authoritative_error(failure: MappedDomainFailure) -> PublicError {
+    mapped_public_error(failure)
+        .expect("authoritative MCP error mappings satisfy public error bounds")
+}
+
+fn stale_generation_error() -> PublicError {
+    let definition = error_definition(ErrorCode::StaleGeneration);
+    PublicError::builder(ErrorCode::StaleGeneration, definition.message)
         .build()
-        .expect("normative error registry entries satisfy public bounds")
+        .expect("stale-generation registry entry satisfies public error bounds")
 }
 
 fn type_mismatch_error(field: &'static str) -> ToolExecutionError {
-    ToolExecutionError::new(domain_error(ErrorCode::TypeMismatch, Some(field)))
+    ToolExecutionError::new(authoritative_error(MappedDomainFailure::type_mismatch(
+        field,
+    )))
 }
 
 fn binding_invalid_error() -> PublicError {
-    domain_error(ErrorCode::BindingInvalid, Some("arguments"))
+    authoritative_error(MappedDomainFailure::binding_invalid())
 }
 
 fn binding_type_mismatch_error() -> PublicError {
-    domain_error(ErrorCode::BindingTypeMismatch, Some("arguments"))
+    authoritative_error(MappedDomainFailure::binding_type_mismatch())
 }
 
 fn batch_dependency_error(error: BatchExecutionError) -> ToolExecutionError {
-    let field = match error {
+    let failure = match error {
         BatchExecutionError::InvalidOperationId | BatchExecutionError::DuplicateOperationId => {
-            "operations"
+            MappedDomainFailure::invalid_argument("operations")
         }
-        BatchExecutionError::UnknownDependency => "depends_on",
-        BatchExecutionError::InvalidBinding => "arguments",
+        BatchExecutionError::UnknownDependency => {
+            MappedDomainFailure::invalid_argument("depends_on")
+        }
+        BatchExecutionError::InvalidBinding => MappedDomainFailure::binding_invalid(),
         BatchExecutionError::Serialization | BatchExecutionError::MemoryUnavailable => {
             return internal(ToolExecutionFailure::Executor);
         }
     };
-    ToolExecutionError::new(domain_error(ErrorCode::InvalidArgument, Some(field)))
+    ToolExecutionError::new(authoritative_error(failure))
 }
 
 fn batch_plan_error(error: BatchValidationError) -> ToolExecutionError {
-    let (code, field) = match error {
-        BatchValidationError::ForbiddenTool | BatchValidationError::NestedBatch => {
-            (ErrorCode::OperatorForbidden, "operations")
-        }
-        BatchValidationError::InvalidBinding => (ErrorCode::BindingInvalid, "arguments"),
-        BatchValidationError::InvalidOperationCount
-        | BatchValidationError::CyclicDependency
-        | BatchValidationError::DepthExceeded
-        | BatchValidationError::InvalidDependencyReference
-        | BatchValidationError::TooManyDependencies => (ErrorCode::InvalidArgument, "operations"),
-    };
-    ToolExecutionError::new(domain_error(code, Some(field)))
+    ToolExecutionError::new(authoritative_error(error.into()))
 }
 
 fn advanced_query_error(error: AdvancedQueryError) -> ToolExecutionError {
-    let (code, field) = match error {
-        AdvancedQueryError::ForbiddenOperator => (ErrorCode::OperatorForbidden, "query"),
-        AdvancedQueryError::TypeMismatch => (ErrorCode::TypeMismatch, "query"),
-        AdvancedQueryError::CostExceeded
-        | AdvancedQueryError::DepthExceeded
-        | AdvancedQueryError::RowLimitExceeded
-        | AdvancedQueryError::TraversalLimitExceeded => (ErrorCode::CostLimit, "query"),
-        AdvancedQueryError::Malformed => (ErrorCode::InvalidArgument, "query"),
-    };
-    ToolExecutionError::new(domain_error(code, Some(field)))
+    ToolExecutionError::new(authoritative_error(error.into()))
 }
 
 fn cost_limit_error(estimated_cost: u64, requested_limit: Option<u64>) -> ToolExecutionError {
-    let mut builder = PublicError::builder(
-        ErrorCode::CostLimit,
-        error_definition(ErrorCode::CostLimit).message,
-    )
-    .detail(
+    let mapped = authoritative_error(MappedDomainFailure::cost_limit("cost_limit"));
+    // Runtime cost values belong to this executor boundary; copy the checked
+    // authoritative base so its code and action cannot drift from the mapping.
+    let mut builder = PublicError::builder_with_message(mapped.code(), mapped.message().to_owned());
+    if mapped.retryable() {
+        builder = builder.retryable();
+    }
+    for action in mapped.next_actions() {
+        builder = builder.next_action(action.clone());
+    }
+    builder = builder.detail(
         DetailKey::parse("estimated_cost").expect("static detail key is valid"),
         PublicValue::Unsigned(estimated_cost),
-    )
-    .next_action(NextAction::CorrectField {
-        field: DetailKey::parse("cost_limit").expect("static detail key is valid"),
-    });
+    );
     if let Some(limit) = requested_limit {
         builder = builder.detail(
             DetailKey::parse("cost_limit").expect("static detail key is valid"),
@@ -4862,24 +4828,18 @@ fn cost_limit_error(estimated_cost: u64, requested_limit: Option<u64>) -> ToolEx
 /// are reported as invalid arguments with a stable correct-field action rather
 /// than collapsed into an opaque internal error.
 fn invalid_input() -> ToolExecutionError {
-    let field = DetailKey::parse("arguments").expect("static detail key is valid");
-    let error = PublicError::builder(ErrorCode::InvalidArgument, INVALID_ARGUMENT_MESSAGE)
-        .next_action(NextAction::CorrectField { field })
-        .build()
-        .expect("static invalid-argument template is valid");
-    ToolExecutionError::new(error)
+    ToolExecutionError::new(authoritative_error(MappedDomainFailure::invalid_argument(
+        "arguments",
+    )))
 }
 
 /// Builds the pre-execution error for a schema-valid field this slice does not
 /// serve, naming the offending field so a client can correct the request
 /// instead of seeing a generic arguments-level rejection.
 fn unsupported_field(field: &'static str) -> ToolExecutionError {
-    let field = DetailKey::parse(field).expect("static field name is valid");
-    let error = PublicError::builder(ErrorCode::UnsupportedCapability, UNSUPPORTED_MESSAGE)
-        .next_action(NextAction::CorrectField { field })
-        .build()
-        .expect("static unsupported-field template is valid");
-    ToolExecutionError::new(error)
+    ToolExecutionError::new(authoritative_error(
+        MappedDomainFailure::unsupported_capability(field),
+    ))
 }
 fn normalize_repository_index(
     input: RepoIndexInput,

@@ -111,6 +111,9 @@ enum FakeOutcome {
         status: Result<RepositoryStatus, ClientPortError>,
         locate: Result<CodeLocatePortResponse, ClientPortError>,
     },
+    BatchPendingLocate {
+        status: Result<RepositoryStatus, ClientPortError>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +212,9 @@ impl FirstSliceClientPort for FakePort {
         let outcome = match &self.outcome {
             FakeOutcome::CodeLocate(outcome) => outcome.clone(),
             FakeOutcome::Batch { locate, .. } => locate.clone(),
+            FakeOutcome::BatchPendingLocate { .. } => {
+                return Box::pin(std::future::pending());
+            }
             FakeOutcome::PendingCodeLocate => return Box::pin(std::future::pending()),
             _ => Err(ClientPortError::Executor),
         };
@@ -263,6 +269,7 @@ impl FirstSliceClientPort for FakePort {
         let outcome = match &self.outcome {
             FakeOutcome::RepositoryStatus(outcome) => outcome.clone(),
             FakeOutcome::Batch { status, .. } => status.clone(),
+            FakeOutcome::BatchPendingLocate { status } => status.clone(),
             FakeOutcome::SymbolExplain(Ok(_)) => Ok(repository_status_response()),
             _ => Err(ClientPortError::Executor),
         };
@@ -737,6 +744,21 @@ fn batch_harness() -> Harness {
         status: Ok(repository_status_response()),
         locate: Ok(locate_response()),
     })
+}
+
+fn assert_canonical_budget_error(error: &PublicError) {
+    let definition = error_definition(ErrorCode::BudgetExceeded);
+    assert_eq!(error.code(), ErrorCode::BudgetExceeded);
+    assert_eq!(error.message(), definition.message);
+    assert!(!error.retryable());
+    assert!(error.retry_after_ms().is_none());
+    assert!(error.details().is_empty());
+    assert_eq!(
+        error.next_actions(),
+        &[NextAction::CorrectField {
+            field: DetailKey::parse("budget").expect("static detail key is valid"),
+        }]
+    );
 }
 
 fn assert_capability_rejection(
@@ -1261,14 +1283,56 @@ async fn query_batch_enforces_aggregate_budget_across_the_app_boundary() {
     .await
     .expect_err("aggregate child usage exceeds the parent budget");
 
-    assert_eq!(
-        error.public_error().map(PublicError::code),
-        Some(ErrorCode::BudgetExceeded)
+    assert_canonical_budget_error(
+        error
+            .public_error()
+            .expect("aggregate budget exhaustion is a checked public error"),
     );
     assert_eq!(
         harness.call_count.load(Ordering::Relaxed),
         3,
         "status pinning and both observed children cross the client port"
+    );
+}
+
+#[tokio::test]
+async fn query_batch_keeps_plan_failures_top_level() {
+    let harness = batch_harness();
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "first", "tool": "code.locate", "depends_on": ["second"], "arguments": {
+                    "query": "publish"
+                }},
+                {"id": "second", "tool": "code.locate", "depends_on": ["first"], "arguments": {
+                    "query": "stage"
+                }}
+            ]
+        }),
+    )
+    .await
+    .expect_err("a cyclic batch plan is rejected at the request boundary");
+    let public = error
+        .public_error()
+        .expect("batch plan rejection is a checked public error");
+    assert_eq!(public.code(), ErrorCode::InvalidArgument);
+    assert_eq!(
+        public.message(),
+        error_definition(ErrorCode::InvalidArgument).message
+    );
+    assert_eq!(
+        public.next_actions(),
+        &[NextAction::CorrectField {
+            field: DetailKey::parse("operations").expect("static detail key is valid"),
+        }]
+    );
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        0,
+        "invalid plans remain top-level and start no repository work"
     );
 }
 
@@ -1906,6 +1970,47 @@ async fn query_batch_keeps_runtime_child_errors_inside_a_pinned_envelope() {
         harness.call_count.load(Ordering::Relaxed),
         2,
         "identity and the runtime child both cross the client port"
+    );
+}
+
+#[tokio::test]
+async fn query_batch_keeps_local_deadline_budget_error_inside_the_operation_result() {
+    let harness = Harness::new(FakeOutcome::BatchPendingLocate {
+        status: Ok(repository_status_response()),
+    });
+    let output = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "timed", "tool": "code.locate", "arguments": {
+                    "query": "publish"
+                }, "local_budget": {"timeout_ms": 1}}
+            ]
+        }),
+    )
+    .await
+    .expect("a local child deadline remains inside the batch envelope");
+    let ToolResponse::Success(output) = decode::<QueryBatchOutput>(output) else {
+        panic!("expected batch success envelope");
+    };
+    assert_eq!(output.data.batch_status, BatchStatus::Error);
+    assert_eq!(output.data.generation_id, generation());
+    assert_eq!(
+        output.data.operation_results[0].status,
+        BatchOperationStatus::Error
+    );
+    assert_canonical_budget_error(
+        output.data.operation_results[0]
+            .error
+            .as_ref()
+            .expect("local deadline records a child budget error"),
+    );
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        2,
+        "identity and the pending child cross the client port"
     );
 }
 
@@ -3751,6 +3856,18 @@ async fn query_advanced_distinguishes_cost_limit_from_capability_and_budget() {
         public
             .details()
             .contains_key(&DetailKey::parse("estimated_cost").expect("static key is valid"))
+    );
+    assert_eq!(
+        public
+            .details()
+            .get(&DetailKey::parse("cost_limit").expect("static key is valid")),
+        Some(&PublicValue::Unsigned(1))
+    );
+    assert_eq!(
+        public.next_actions(),
+        &[NextAction::CorrectField {
+            field: DetailKey::parse("cost_limit").expect("static key is valid"),
+        }]
     );
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
 }
