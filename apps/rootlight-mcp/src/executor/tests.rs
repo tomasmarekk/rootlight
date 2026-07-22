@@ -32,7 +32,7 @@ use rootlight_client::{
     CycleComponent as ClientCycleComponent, CycleProjection as ClientCycleProjection,
     FlowTrace as ClientFlowTrace, FlowTraceEdge as ClientTraceEdge,
     FlowTraceFrontier as ClientTraceFrontier, FlowTracePath as ClientTracePath,
-    FlowTraceProjection as ClientTraceProjection,
+    FlowTraceProjection as ClientTraceProjection, GenerationSelector as ClientGenerationSelector,
     HistoryArchitectureDelta as ClientHistoryArchitectureDelta,
     HistoryBreakingCandidate as ClientHistoryBreakingCandidate,
     HistoryCompare as ClientHistoryCompare, HistoryLineageMatch as ClientHistoryLineageMatch,
@@ -921,8 +921,10 @@ fn locate_response() -> CodeLocatePortResponse {
 fn repository_status_response() -> RepositoryStatus {
     RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: Some(parent_generation()),
+        active_parent_generation: Some(parent_generation()),
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -3337,8 +3339,10 @@ async fn executor_maps_malformed_argument_types_to_type_mismatch() {
 async fn repo_status_maps_active_generation_and_coverage() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: Some(parent_generation()),
+        active_parent_generation: Some(parent_generation()),
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -3350,15 +3354,29 @@ async fn repo_status_maps_active_generation_and_coverage() {
             indexed_files: 3,
         }],
     })));
-    let output: RepoStatusOutput = decode(
-        execute(
-            &harness.executor,
-            VerticalTool::RepoStatus,
-            json!({"repository": {"repository_id": repository()}}),
-        )
-        .await
-        .expect("repo status maps"),
+    let output = execute(
+        &harness.executor,
+        VerticalTool::RepoStatus,
+        json!({"repository": {"repository_id": repository()}}),
+    )
+    .await
+    .expect("repo status maps");
+    let serialized =
+        serde_json::to_vec(&Value::Object(output.clone())).expect("repo status serializes");
+    assert_eq!(
+        output["usage"]["json_bytes"],
+        u64::try_from(serialized.len()).expect("test response size fits u64")
     );
+    assert_eq!(
+        output["usage"]["estimated_tokens"],
+        rootlight_mcp_contract::accounting::estimate_tokens(serialized.len())
+    );
+    assert!(
+        output["usage"]["wall_time_ms"]
+            .as_u64()
+            .is_some_and(|elapsed| elapsed >= 1)
+    );
+    let output: RepoStatusOutput = decode(output);
     let ToolResponse::Success(output) = output else {
         panic!("expected repo status success");
     };
@@ -3377,26 +3395,82 @@ async fn repo_status_maps_active_generation_and_coverage() {
 }
 
 #[tokio::test]
-async fn repo_status_rejects_explicit_generation_before_active_fallback() {
-    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(
-        repository_status_response(),
-    )));
+async fn repo_status_preserves_exact_generation_when_active_changes() {
+    let mut status = repository_status_response();
+    status.resolved_generation = alternate_generation();
+    status.parent_generation = None;
+    status.structural_freshness = "superseded".to_owned();
+    status.semantic_freshness = "superseded".to_owned();
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(status)));
+    let output: RepoStatusOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoStatus,
+            json!({
+                "repository": {"repository_id": repository()},
+                "generation": alternate_generation()
+            }),
+        )
+        .await
+        .expect("retained exact generation reports status"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected exact repo status success");
+    };
+
+    assert_eq!(output.generation.generation_id, alternate_generation());
+    assert_eq!(
+        output.generation.structural_freshness,
+        Freshness::Superseded
+    );
+    assert_eq!(
+        output
+            .data
+            .active_generation
+            .0
+            .expect("active generation remains visible")
+            .generation_id,
+        generation()
+    );
+    let ObservedCall::RepositoryStatus(request) = harness.only_call() else {
+        panic!("expected repository status call");
+    };
+    assert_eq!(
+        request.generation(),
+        ClientGenerationSelector::Generation(alternate_generation())
+    );
+}
+
+#[tokio::test]
+async fn repo_status_propagates_actionable_missing_generation() {
+    let missing = alternate_generation();
+    let public = PublicError::builder(ErrorCode::StaleGeneration, "generation is not retained")
+        .repository(repository())
+        .generation(missing)
+        .next_action(NextAction::RestartEnumeration)
+        .build()
+        .expect("missing-generation fixture is valid");
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Err(ClientPortError::Public(
+        Box::new(public),
+    ))));
     let error = execute(
         &harness.executor,
         VerticalTool::RepoStatus,
         json!({
             "repository": {"repository_id": repository()},
-            "generation": generation()
+            "generation": missing
         }),
     )
     .await
-    .expect_err("historical status selection is unsupported");
+    .expect_err("missing exact generation is a checked error");
     let public = error
         .public_error()
-        .expect("unsupported generation is a checked public error");
+        .expect("missing generation remains a public error");
 
-    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+    assert_eq!(public.code(), ErrorCode::StaleGeneration);
+    assert_eq!(public.generation(), Some(missing));
+    assert_eq!(public.next_actions(), &[NextAction::RestartEnumeration]);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
@@ -5121,8 +5195,10 @@ async fn unsupported_fields_are_rejected_with_field_specific_actions() {
 async fn context_pack_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5157,8 +5233,10 @@ async fn context_pack_explain_returns_a_plan_without_retrieval() {
 async fn repo_status_explain_attaches_a_plan_to_the_metadata_read() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5188,8 +5266,10 @@ async fn repo_status_explain_attaches_a_plan_to_the_metadata_read() {
 async fn plan_change_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5228,8 +5308,10 @@ async fn plan_change_explain_returns_a_plan_without_retrieval() {
 async fn history_compare_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5270,8 +5352,10 @@ async fn history_compare_explain_returns_a_plan_without_retrieval() {
 async fn code_dead_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5309,8 +5393,10 @@ async fn code_dead_explain_returns_a_plan_without_retrieval() {
 async fn architecture_cycles_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5348,8 +5434,10 @@ async fn architecture_cycles_explain_returns_a_plan_without_retrieval() {
 async fn architecture_overview_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5390,8 +5478,10 @@ async fn architecture_overview_explain_returns_a_plan_without_retrieval() {
 async fn tests_select_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5426,8 +5516,10 @@ async fn tests_select_explain_returns_a_plan_without_retrieval() {
 async fn change_impact_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5461,8 +5553,10 @@ async fn change_impact_explain_returns_a_plan_without_retrieval() {
 async fn flow_trace_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5496,8 +5590,10 @@ async fn flow_trace_explain_returns_a_plan_without_retrieval() {
 async fn symbol_relationships_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5534,8 +5630,10 @@ async fn symbol_relationships_explain_returns_a_plan_without_retrieval() {
 async fn source_read_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5570,8 +5668,10 @@ async fn source_read_explain_returns_a_plan_without_retrieval() {
 async fn symbol_explain_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5605,8 +5705,10 @@ async fn symbol_explain_explain_returns_a_plan_without_retrieval() {
 async fn code_locate_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5644,8 +5746,10 @@ async fn code_locate_explain_returns_a_plan_without_retrieval() {
 async fn explain_fingerprint_is_stable_for_identical_requests() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5789,8 +5893,10 @@ async fn repo_list_explain_empty_catalog_uses_one_bounded_catalog_call() {
 async fn query_batch_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
+        resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: None,
+        active_parent_generation: None,
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
@@ -5867,8 +5973,10 @@ async fn explain_plan_is_invariant_across_index_states() {
     for (state, structural, semantic, coverage) in states {
         let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
             repository_id: repository(),
+            resolved_generation: generation(),
             active_generation: generation(),
             parent_generation: None,
+            active_parent_generation: None,
             structural_freshness: structural.to_owned(),
             semantic_freshness: semantic.to_owned(),
             state: state.to_owned(),
@@ -6139,12 +6247,12 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     }
 
     group!(RepoIndex, NormalizedDelta, ["detached", "mode", "root"]);
-    group!(RepoStatus, NormalizedDelta, ["repository"]);
+    group!(RepoStatus, NormalizedDelta, ["generation", "repository"]);
     group!(RepoStatus, ExplainPlan, ["explain"]);
     group!(
         RepoStatus,
         DefaultEquivalent,
-        ["generation", "include_operations", "response_profile"]
+        ["include_operations", "response_profile"]
     );
     group!(
         RepoList,
@@ -6509,7 +6617,7 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[8],
         counts[9],
     );
-    assert_eq!(counts, [131, 3, 61, 25, 16, 5, 10, 10, 1, 1]);
+    assert_eq!(counts, [132, 3, 61, 24, 16, 5, 10, 10, 1, 1]);
     assert_eq!(categorized.len(), 263);
 }
 
@@ -6706,6 +6814,12 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
         "repository",
         json!({"repository_id": alternate_repository()}),
         false,
+    );
+    add(
+        VerticalTool::RepoStatus,
+        "generation",
+        json!(alternate_generation()),
+        true,
     );
     add(
         VerticalTool::OperationStatus,
@@ -6999,6 +7113,7 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
             );
             match field {
                 "repository" => json!(request.repository()),
+                "generation" => json!(format!("{:?}", request.generation())),
                 _ => panic!("unknown repo.status observation field"),
             }
         }
@@ -7825,7 +7940,6 @@ fn default_equivalent_cases() -> Vec<DefaultEquivalentCase> {
             VerticalTool::RepoStatus,
             json!({"repository": repository_selector(), "explain": true}),
             &[
-                ("generation", json!("active")),
                 ("include_operations", json!(false)),
                 ("response_profile", json!("compact")),
             ][..],

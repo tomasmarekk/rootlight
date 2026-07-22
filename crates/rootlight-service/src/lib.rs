@@ -340,6 +340,10 @@ pub struct FirstSliceGenerationContext {
     pub generation: GenerationId,
     /// Optional predecessor generation.
     pub parent: Option<GenerationId>,
+    /// Repository generation active when selection was resolved.
+    pub active_generation: GenerationId,
+    /// Optional predecessor of the resolved active generation.
+    pub active_parent: Option<GenerationId>,
     /// Whether this generation is currently active for its repository.
     pub active: bool,
     /// Publication receipt retained with the generation.
@@ -390,15 +394,19 @@ pub struct RepositoryListEntryDto {
     pub state: String,
 }
 
-/// One repository's active generation, freshness, and coverage.
+/// One repository's resolved and active generation status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryStatusDto {
     /// Process-local repository identity.
     pub repository: RepositoryId,
+    /// Immutable generation selected by the request.
+    pub resolved_generation: GenerationId,
     /// Active immutable generation for the repository.
     pub active_generation: GenerationId,
-    /// Optional predecessor generation.
+    /// Optional predecessor of the resolved generation.
     pub parent_generation: Option<GenerationId>,
+    /// Optional predecessor of the active generation.
+    pub active_parent_generation: Option<GenerationId>,
     /// Structural freshness label, such as `current`.
     pub structural_freshness: String,
     /// Semantic freshness label, such as `current`.
@@ -1826,12 +1834,20 @@ impl FirstSliceService {
             .get(&repository)
             .copied()
             .ok_or(FirstSliceError::RepositoryNotFound)?;
-        let generation = generation.unwrap_or(active);
-        let receipt = self
+        let active_receipt = self
             .receipts
-            .get(&generation)
+            .get(&active)
             .copied()
             .ok_or(FirstSliceError::GenerationNotFound)?;
+        let generation = generation.unwrap_or(active);
+        let receipt = if generation == active {
+            active_receipt
+        } else {
+            self.receipts
+                .get(&generation)
+                .copied()
+                .ok_or(FirstSliceError::GenerationNotFound)?
+        };
         if receipt.repository != repository {
             return Err(FirstSliceError::GenerationMismatch);
         }
@@ -1839,6 +1855,8 @@ impl FirstSliceService {
             repository,
             generation,
             parent: receipt.parent,
+            active_generation: active,
+            active_parent: active_receipt.parent,
             active: generation == active,
             receipt,
         })
@@ -2477,11 +2495,11 @@ impl FirstSliceService {
         Ok(records)
     }
 
-    /// Returns the active generation, freshness, and coverage for one repository.
+    /// Returns one repository's active or exact generation status.
     ///
-    /// The reported generation is the repository's active generation. Freshness
-    /// is derived from [`Self::generation_freshness`] and coverage from the
-    /// active generation's receipt, keeping the result source-free.
+    /// Selection, active identity, freshness, and coverage come from one
+    /// resolution context, so an exact generation cannot be replaced by a
+    /// later active generation.
     ///
     /// # Errors
     ///
@@ -2490,15 +2508,22 @@ impl FirstSliceService {
     pub fn repository_status(
         &self,
         repository: RepositoryId,
+        generation: Option<GenerationId>,
     ) -> Result<RepositoryStatusDto, FirstSliceError> {
-        let context = self.resolve_generation(repository, None)?;
-        let freshness = self.generation_freshness(repository, context.generation)?;
+        let context = self.resolve_generation(repository, generation)?;
+        let freshness = if context.active {
+            FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan
+        } else {
+            FirstSliceObservedFreshness::Superseded
+        };
         Ok(RepositoryStatusDto {
             repository: context.repository,
-            active_generation: context.generation,
+            resolved_generation: context.generation,
+            active_generation: context.active_generation,
             parent_generation: context.parent,
-            structural_freshness: freshness_label(freshness.structural).to_owned(),
-            semantic_freshness: freshness_label(freshness.semantic).to_owned(),
+            active_parent_generation: context.active_parent,
+            structural_freshness: freshness_label(freshness).to_owned(),
+            semantic_freshness: freshness_label(freshness).to_owned(),
             state: REPOSITORY_STATE_READY.to_owned(),
             coverage: coverage_from_receipt(&context.receipt),
         })

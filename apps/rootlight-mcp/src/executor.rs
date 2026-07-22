@@ -2552,7 +2552,7 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Reads one repository's active generation, freshness, and coverage.
+/// Reads one repository's active or exact generation status.
 async fn execute_repo_status<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -2562,6 +2562,7 @@ async fn execute_repo_status<P>(
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: RepoStatusInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
     let repository = repository_id(input.repository.clone(), unsupported)?;
@@ -2583,18 +2584,25 @@ where
     if !is_compact_profile(input.response_profile) {
         return Err(unsupported_field("response_profile"));
     }
-    if matches!(input.generation, Some(GenerationSelector::Explicit(_))) {
-        return Err(unsupported_field("generation"));
-    }
     let request = RepositoryStatusPortRequest::new(repository, client_generation(input.generation));
     let future = port.repository_status(request, cancellation.clone());
     let status = await_port(future, cancellation).await?;
 
     let generation_summary = GenerationSummary {
-        generation_id: status.active_generation,
+        generation_id: status.resolved_generation,
         parent_generation: RequiredNullable(status.parent_generation),
         structural_freshness: freshness_from_label(&status.structural_freshness),
         semantic_freshness: freshness_from_label(&status.semantic_freshness),
+    };
+    let active_generation_summary = if status.active_generation == status.resolved_generation {
+        generation_summary.clone()
+    } else {
+        GenerationSummary {
+            generation_id: status.active_generation,
+            parent_generation: RequiredNullable(status.active_parent_generation),
+            structural_freshness: Freshness::Current,
+            semantic_freshness: Freshness::Current,
+        }
     };
     let summary_languages: Vec<LanguageCoverage> = status
         .coverage
@@ -2607,14 +2615,14 @@ where
         .collect();
     let data = RepoStatusData {
         repository_state: repository_state(&status.state),
-        active_generation: RequiredNullable(Some(generation_summary.clone())),
+        active_generation: RequiredNullable(Some(active_generation_summary)),
         coverage: status_coverage_report(&status.coverage),
         operations: Vec::new(),
         recommended_actions: Vec::new(),
         explanation: explain_only.then(|| {
             rootlight_agent::explain::finalize_plan(
                 rootlight_agent::explain::repo_status_plan(),
-                &status.active_generation.to_string(),
+                &status.resolved_generation.to_string(),
             )
         }),
     };
@@ -2646,7 +2654,7 @@ where
         warnings: Vec::new(),
         trust: TrustClassification::UntrustedRepositoryData,
     };
-    serialize_success(envelope)
+    serialize_measured_read_success(envelope, started_at)
 }
 
 fn status_coverage_report(entries: &[client::RepositoryCoverageEntry]) -> CoverageReport {
@@ -5634,15 +5642,37 @@ where
 }
 
 fn serialize_catalog_success(
-    mut output: CatalogEnvelope<RepoListData>,
+    output: CatalogEnvelope<RepoListData>,
     started_at: Instant,
 ) -> Result<Map<String, Value>, ToolExecutionError> {
+    serialize_measured_success(output, started_at, |output| &mut output.usage)
+}
+
+fn serialize_measured_read_success<T>(
+    output: ReadEnvelope<T>,
+    started_at: Instant,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    T: Serialize,
+{
+    serialize_measured_success(output, started_at, |output| &mut output.usage)
+}
+
+fn serialize_measured_success<T, F>(
+    mut output: T,
+    started_at: Instant,
+    usage: F,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    T: Serialize,
+    F: for<'a> Fn(&'a mut T) -> &'a mut UsageSummary,
+{
     for _ in 0..8 {
         // This timestamp covers decode, cursor validation, daemon I/O, mapping,
         // and prior accounting passes. The final serde conversion is excluded
         // because including work performed after a serialized timestamp would
         // make an exact self-describing payload impossible.
-        output.usage.wall_time_ms = u64::try_from(started_at.elapsed().as_micros())
+        usage(&mut output).wall_time_ms = u64::try_from(started_at.elapsed().as_micros())
             .unwrap_or(u64::MAX)
             .div_ceil(1_000);
         let value = serde_json::to_value(ToolResponse::Success(&output))
@@ -5653,9 +5683,11 @@ fn serialize_catalog_success(
             .map_err(|_| internal(ToolExecutionFailure::Executor))?;
         let estimated_tokens =
             rootlight_mcp_contract::accounting::estimate_tokens(serialized.len());
-        if output.usage.json_bytes == json_bytes
-            && output.usage.estimated_tokens == estimated_tokens
-        {
+        let counters_match = {
+            let usage = usage(&mut output);
+            usage.json_bytes == json_bytes && usage.estimated_tokens == estimated_tokens
+        };
+        if counters_match {
             let Value::Object(output) = value else {
                 return Err(internal(ToolExecutionFailure::Executor));
             };
@@ -5664,8 +5696,9 @@ fn serialize_catalog_success(
         // Both counters are serialized into the measured document. Iterating
         // to a fixed point keeps the reported byte count exact across digit
         // width changes without excluding the accounting fields themselves.
-        output.usage.json_bytes = json_bytes;
-        output.usage.estimated_tokens = estimated_tokens;
+        let usage = usage(&mut output);
+        usage.json_bytes = json_bytes;
+        usage.estimated_tokens = estimated_tokens;
     }
     Err(internal(ToolExecutionFailure::Executor))
 }

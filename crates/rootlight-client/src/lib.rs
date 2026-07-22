@@ -1020,15 +1020,19 @@ pub struct RepositoryCoverageEntry {
     pub indexed_files: u64,
 }
 
-/// One repository's active generation, freshness, and coverage.
+/// One repository's resolved and active generation status.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RepositoryStatus {
     /// Process-local repository identity.
     pub repository_id: RepositoryId,
+    /// Immutable generation selected by the request.
+    pub resolved_generation: GenerationId,
     /// Active immutable generation for the repository.
     pub active_generation: GenerationId,
-    /// Optional predecessor generation.
+    /// Optional predecessor of the resolved generation.
     pub parent_generation: Option<GenerationId>,
+    /// Optional predecessor of the active generation.
+    pub active_parent_generation: Option<GenerationId>,
     /// Structural freshness label, such as `current`.
     pub structural_freshness: String,
     /// Semantic freshness label, such as `current`.
@@ -2505,10 +2509,10 @@ impl Client {
         }
     }
 
-    /// Reads the active generation status of one repository.
+    /// Reads the active or exact generation status of one repository.
     ///
-    /// The response always reports the repository's active generation; the
-    /// selector is validated but does not change which generation is reported.
+    /// The response separates the selector's resolved immutable generation
+    /// from the repository generation that was active at resolution time.
     ///
     /// # Errors
     ///
@@ -2521,13 +2525,13 @@ impl Client {
     ) -> Result<RepositoryStatus, ClientError> {
         match self.request(build_repository_status_request(repository, generation)?)? {
             daemon::response_envelope::Response::RepositoryStatus(response) => {
-                parse_repository_status(response, repository)
+                parse_repository_status(response, repository, generation)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
 
-    /// Asynchronously reads the active generation status of one repository.
+    /// Asynchronously reads the active or exact generation status of one repository.
     ///
     /// Dropping the returned future closes its one-request stream.
     ///
@@ -2553,7 +2557,7 @@ impl Client {
             .await?
         {
             daemon::response_envelope::Response::RepositoryStatus(response) => {
-                parse_repository_status(response, repository)
+                parse_repository_status(response, repository, generation)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -5378,6 +5382,7 @@ fn repository_catalog_sort_key_parts(bytes: &[u8]) -> Result<(&str, &[u8]), Clie
 fn parse_repository_status(
     response: daemon::RepositoryStatusResponse,
     expected_repository: RepositoryId,
+    selector: GenerationSelector,
 ) -> Result<RepositoryStatus, ClientError> {
     let repository_id =
         parse_repository(response.repository.ok_or(ClientError::InvalidIdentifier)?)?;
@@ -5389,10 +5394,31 @@ fn parse_repository_status(
             .active_generation
             .ok_or(ClientError::InvalidIdentifier)?,
     )?;
+    let resolved_generation = match response.resolved_generation {
+        Some(generation) => parse_generation(generation)?,
+        None if selector == GenerationSelector::Active => active_generation,
+        None => return Err(ClientError::InvalidResponseCorrelation),
+    };
+    let selector_matches = match selector {
+        GenerationSelector::Active => resolved_generation == active_generation,
+        GenerationSelector::Generation(selected) => resolved_generation == selected,
+    };
+    if !selector_matches {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
     let parent_generation = response
         .parent_generation
         .map(parse_generation)
         .transpose()?;
+    let active_parent_generation = response
+        .active_parent_generation
+        .map(parse_generation)
+        .transpose()?;
+    if parent_generation == Some(resolved_generation)
+        || active_parent_generation == Some(active_generation)
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
     let coverage = response
         .coverage
         .into_iter()
@@ -5406,8 +5432,10 @@ fn parse_repository_status(
         .collect();
     Ok(RepositoryStatus {
         repository_id,
+        resolved_generation,
         active_generation,
         parent_generation,
+        active_parent_generation,
         structural_freshness: response.structural_freshness,
         semantic_freshness: response.semantic_freshness,
         state: response.state,
@@ -7695,6 +7723,73 @@ mod tests {
 
     fn test_generation() -> GenerationId {
         GenerationId::from_bytes([2; 20])
+    }
+
+    fn wire_repository_status_response(
+        resolved: Option<GenerationId>,
+        active: GenerationId,
+    ) -> daemon::RepositoryStatusResponse {
+        daemon::RepositoryStatusResponse {
+            repository: Some(repository_to_wire(test_repository())),
+            active_generation: Some(generation_to_wire(active)),
+            parent_generation: None,
+            structural_freshness: "current".to_owned(),
+            semantic_freshness: "current".to_owned(),
+            state: "ready".to_owned(),
+            coverage: Vec::new(),
+            resolved_generation: resolved.map(generation_to_wire),
+            active_parent_generation: None,
+        }
+    }
+
+    #[test]
+    fn repository_status_correlation_binds_the_generation_selector() {
+        let active = test_generation();
+        let exact = GenerationId::from_bytes([3; 20]);
+
+        let active_status = parse_repository_status(
+            wire_repository_status_response(Some(active), active),
+            test_repository(),
+            GenerationSelector::Active,
+        )
+        .expect("active status correlates");
+        assert_eq!(active_status.resolved_generation, active);
+        assert_eq!(active_status.active_generation, active);
+
+        let exact_status = parse_repository_status(
+            wire_repository_status_response(Some(exact), active),
+            test_repository(),
+            GenerationSelector::Generation(exact),
+        )
+        .expect("exact status remains distinct from active");
+        assert_eq!(exact_status.resolved_generation, exact);
+        assert_eq!(exact_status.active_generation, active);
+
+        assert!(matches!(
+            parse_repository_status(
+                wire_repository_status_response(Some(active), active),
+                test_repository(),
+                GenerationSelector::Generation(exact),
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        assert!(matches!(
+            parse_repository_status(
+                wire_repository_status_response(None, active),
+                test_repository(),
+                GenerationSelector::Generation(exact),
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        assert!(
+            parse_repository_status(
+                wire_repository_status_response(None, active),
+                test_repository(),
+                GenerationSelector::Active,
+            )
+            .is_ok(),
+            "an older active-only daemon response remains compatible"
+        );
     }
 
     fn test_source(file_byte: u8, start: u64, end: u64) -> SourceReference {

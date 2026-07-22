@@ -404,8 +404,10 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         Box::pin(async move {
             Ok(RepositoryStatus {
                 repository_id: repository,
+                resolved_generation: generation(),
                 active_generation: generation(),
                 parent_generation: Some(parent_generation()),
+                active_parent_generation: Some(parent_generation()),
                 structural_freshness: "current".to_owned(),
                 semantic_freshness: "current".to_owned(),
                 state: "ready".to_owned(),
