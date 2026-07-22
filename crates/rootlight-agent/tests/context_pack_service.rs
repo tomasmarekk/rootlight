@@ -366,6 +366,12 @@ async fn execution_propagates_policy_and_shapes_child_response() {
     assert_eq!(calls[0].budget.max_results, Some(1));
     assert_eq!(calls[0].budget.max_tokens, None);
     assert_eq!(calls[0].budget.timeout_ms, Some(CONTEXT_PACK_TIMEOUT_MS));
+    assert_eq!(
+        u64::from(CONTEXT_PACK_TIMEOUT_MS),
+        rootlight_agent::policy::BudgetLimits::server_ceiling()
+            .maximums()
+            .time_ms
+    );
     assert!(!calls[0].cancelled);
     assert!(calls[0].deadline.is_some());
     assert_eq!(output.usage, usage());

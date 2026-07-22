@@ -60,7 +60,9 @@ pub const MAX_PACK_TOKENS: u32 = 20_000;
 pub const MIN_PACK_TOKENS: u32 = 500;
 
 /// Bounded wall-clock ceiling for context-pack identity and evidence reads.
-pub const CONTEXT_PACK_TIMEOUT_MS: u32 = 30_000;
+///
+/// This matches the common server-owned analytical deadline.
+pub const CONTEXT_PACK_TIMEOUT_MS: u32 = 2_000;
 
 /// Evidence role classification for pack items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -301,9 +303,10 @@ where
                 explanation.definition.clone(),
             );
             let signature_bytes = explanation.signature.as_ref().map_or(0, String::len);
+            // Exact UTF-8 bytes are a conservative provider-neutral token
+            // ceiling. Actual tokenizer counts remain benchmark evidence.
             let estimated_tokens =
-                u32::try_from((signature_bytes + explanation.display_name.len()).div_ceil(4))
-                    .unwrap_or(u32::MAX);
+                u32::try_from(signature_bytes + explanation.display_name.len()).unwrap_or(u32::MAX);
             candidates.push(EvidenceCandidate {
                 identity: explanation.symbol_id.to_string(),
                 role: EvidenceRole::Definition,
@@ -532,7 +535,9 @@ fn context_pack_completeness(
     }
     let state = child.state.max(CompletenessState::Truncated);
     let mut resources = child.limiting_resources.clone();
-    resources.push(LimitingResource::kind(LimitingResourceKind::Results));
+    resources.push(LimitingResource::kind(
+        LimitingResourceKind::EstimatedTokens,
+    ));
     let mut guidance = child
         .guidance
         .iter()
@@ -951,14 +956,15 @@ where
 mod tests {
     use super::{
         ContextPackPlanRequest, ContextPackPlanner, DefaultContextPackPlanner, EvidenceCandidate,
-        EvidenceRole, MAX_PACK_TOKENS, MIN_PACK_TOKENS, PackError, PackObjective, context_pack_id,
-        objective_for_task, optimize_pack,
+        EvidenceRole, MAX_PACK_TOKENS, MIN_PACK_TOKENS, PackError, PackObjective,
+        context_pack_completeness, context_pack_id, objective_for_task, optimize_pack,
     };
     use crate::policy::NeverCancelled;
     use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
     use rootlight_ir::{LineRange, SourceRef, SourceSpan};
     use rootlight_mcp_contract::{
         RepositorySelector, TrustClassification,
+        completeness::{LimitingResourceKind, ResultCompleteness},
         context::{ContextPackInput, ContextSeedSelector},
         vertical::{EntityKind, RelationSummary, RepositoryIdSelector, SymbolExplanation},
     };
@@ -1119,6 +1125,24 @@ mod tests {
     }
 
     #[test]
+    fn token_truncation_reports_the_token_resource() {
+        let completeness = context_pack_completeness(&ResultCompleteness::complete(), true)
+            .expect("token truncation remains a valid completeness state");
+        assert!(
+            completeness
+                .limiting_resources
+                .iter()
+                .any(|resource| { resource.kind == LimitingResourceKind::EstimatedTokens })
+        );
+        assert!(
+            !completeness
+                .limiting_resources
+                .iter()
+                .any(|resource| resource.kind == LimitingResourceKind::Results)
+        );
+    }
+
+    #[test]
     fn deduplication_limits_same_path_items() {
         let mut candidates = vec![
             EvidenceCandidate {
@@ -1237,7 +1261,15 @@ mod tests {
         assert_eq!(planned.data.pack_id, context_pack_id(&input, generation));
         assert_eq!(planned.data.items.len(), 1);
         assert_eq!(planned.data.items[0].symbol_id, Some(symbol));
-        assert_eq!(planned.data.token_accounting.estimated_total, 11);
+        let expected_token_ceiling = symbols[0]
+            .signature
+            .as_ref()
+            .map_or(0, String::len)
+            .saturating_add(symbols[0].display_name.len());
+        assert_eq!(
+            planned.data.token_accounting.estimated_total,
+            u32::try_from(expected_token_ceiling).expect("fixture ceiling fits u32")
+        );
         assert!(!planned.truncated);
 
         let encoded = serde_json::to_value(&planned.data).expect("planned data serializes");

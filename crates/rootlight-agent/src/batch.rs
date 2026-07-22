@@ -32,7 +32,8 @@ use serde_json::{Map, Value};
 
 use crate::{
     policy::{
-        BudgetCharge, BudgetLedger, CancellationSignal, ExecutionPolicyError, is_compact_profile,
+        BudgetCharge, BudgetLedger, BudgetLimits, CancellationSignal, ExecutionPolicyError,
+        is_compact_profile,
     },
     port::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentResolutionContext,
@@ -1031,7 +1032,19 @@ fn admitted_parent_budget(requested: Option<&ResponseBudget>) -> ResponseBudget 
             .unwrap_or(DEFAULT_BATCH_TIMEOUT_MS)
             .min(DEFAULT_BATCH_TIMEOUT_MS),
     );
-    admitted
+    let maximums = BudgetLimits::server_ceiling()
+        .constrained_by_response_budget(Some(&admitted))
+        .maximums();
+    ResponseBudget {
+        max_results: Some(u16::try_from(maximums.results).unwrap_or(u16::MAX)),
+        max_tokens: Some(u16::try_from(maximums.tokens).unwrap_or(u16::MAX)),
+        max_source_bytes: Some(u32::try_from(maximums.source_bytes).unwrap_or(u32::MAX)),
+        max_traversal_facts: Some(u32::try_from(maximums.traversal_facts).unwrap_or(u32::MAX)),
+        max_depth: Some(u8::try_from(maximums.depth).unwrap_or(u8::MAX)),
+        max_paths: Some(u16::try_from(maximums.paths).unwrap_or(u16::MAX)),
+        timeout_ms: Some(u32::try_from(maximums.time_ms).unwrap_or(u32::MAX)),
+        evidence_level: admitted.evidence_level,
+    }
 }
 
 async fn resolve_identity<P, C>(
@@ -1370,15 +1383,18 @@ fn map_policy_error(error: ExecutionPolicyError) -> BatchOrchestrationError {
 #[cfg(test)]
 mod tests {
     use super::{
-        BatchExecutionError, BatchPlan, BatchValidationError, DeadlineSource, MAX_BATCH_DEPTH,
-        MAX_BATCH_OPERATIONS, aggregate_status, effective_child_deadline, is_batch_allowed,
-        is_batch_allowed_under_profile, resolve_dependencies, terminal_result,
+        BatchExecutionError, BatchPlan, BatchValidationError, DEFAULT_BATCH_TOKENS, DeadlineSource,
+        MAX_BATCH_DEPTH, MAX_BATCH_OPERATIONS, admitted_parent_budget, aggregate_status,
+        effective_child_deadline, is_batch_allowed, is_batch_allowed_under_profile,
+        resolve_dependencies, terminal_result,
     };
+    use crate::policy::BudgetLimits;
     use rootlight_mcp_contract::{
         ExposureProfile, McpTool,
         context::{
             BatchOperation as ContractBatchOperation, BatchOperationStatus, BatchStatus, BatchTool,
         },
+        vertical::ResponseBudget,
     };
     use serde_json::Map;
     use std::time::{Duration, Instant};
@@ -1617,5 +1633,41 @@ mod tests {
             .expect("local deadline is representable");
         assert_eq!(tighter.at, started_at + Duration::from_millis(99));
         assert_eq!(tighter.source, DeadlineSource::Local);
+    }
+
+    #[test]
+    fn admitted_batch_defaults_are_complete_server_bounded_limits() {
+        let admitted = admitted_parent_budget(None);
+        let ceiling = BudgetLimits::server_ceiling().maximums();
+
+        assert_eq!(admitted.max_results, u16::try_from(ceiling.results).ok());
+        assert_eq!(admitted.max_tokens, Some(DEFAULT_BATCH_TOKENS));
+        assert_eq!(
+            admitted.max_source_bytes,
+            u32::try_from(ceiling.source_bytes).ok()
+        );
+        assert_eq!(
+            admitted.max_traversal_facts,
+            u32::try_from(ceiling.traversal_facts).ok()
+        );
+        assert_eq!(admitted.max_depth, u8::try_from(ceiling.depth).ok());
+        assert_eq!(admitted.max_paths, u16::try_from(ceiling.paths).ok());
+        assert_eq!(admitted.timeout_ms, u32::try_from(ceiling.time_ms).ok());
+        assert_eq!(admitted.evidence_level, None);
+
+        let attempted_raise = admitted_parent_budget(Some(&ResponseBudget {
+            max_results: Some(1_000),
+            max_tokens: Some(16_000),
+            max_source_bytes: Some(524_288),
+            max_traversal_facts: Some(100_000),
+            max_depth: Some(16),
+            max_paths: Some(1_000),
+            timeout_ms: Some(30_000),
+            evidence_level: None,
+        }));
+        assert_eq!(
+            attempted_raise.timeout_ms,
+            u32::try_from(ceiling.time_ms).ok()
+        );
     }
 }
