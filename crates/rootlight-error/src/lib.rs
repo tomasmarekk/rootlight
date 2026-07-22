@@ -17,6 +17,9 @@ const MAX_NEXT_ACTIONS: usize = 8;
 const MAX_RETRY_AFTER_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_RETRY_AFTER: Duration = Duration::from_millis(MAX_RETRY_AFTER_MS);
 
+/// Version of the stable public error registry.
+pub const ERROR_REGISTRY_VERSION: &str = "1.0";
+
 const fn is_safe_message_template(message: &str) -> bool {
     let bytes = message.as_bytes();
     if bytes.is_empty() || bytes.len() > MAX_MESSAGE_BYTES {
@@ -85,6 +88,93 @@ pub enum ErrorCode {
     BindingTypeMismatch,
 }
 
+impl ErrorCode {
+    /// Every stable public error code in wire-number order.
+    pub const ALL: [Self; 22] = [
+        Self::InvalidArgument,
+        Self::NotFound,
+        Self::Conflict,
+        Self::StaleGeneration,
+        Self::UnsupportedCapability,
+        Self::IncompleteCoverage,
+        Self::BudgetExceeded,
+        Self::ResourceExhausted,
+        Self::Cancelled,
+        Self::AdapterFailed,
+        Self::IndexCorrupt,
+        Self::MigrationRequired,
+        Self::PermissionDenied,
+        Self::ProtocolMismatch,
+        Self::Busy,
+        Self::Internal,
+        Self::InvalidCursor,
+        Self::TypeMismatch,
+        Self::CostLimit,
+        Self::OperatorForbidden,
+        Self::BindingInvalid,
+        Self::BindingTypeMismatch,
+    ];
+
+    /// Returns the stable protobuf numeric representation.
+    #[must_use]
+    pub const fn wire_number(self) -> i32 {
+        match self {
+            Self::InvalidArgument => 1,
+            Self::NotFound => 2,
+            Self::Conflict => 3,
+            Self::StaleGeneration => 4,
+            Self::UnsupportedCapability => 5,
+            Self::IncompleteCoverage => 6,
+            Self::BudgetExceeded => 7,
+            Self::ResourceExhausted => 8,
+            Self::Cancelled => 9,
+            Self::AdapterFailed => 10,
+            Self::IndexCorrupt => 11,
+            Self::MigrationRequired => 12,
+            Self::PermissionDenied => 13,
+            Self::ProtocolMismatch => 14,
+            Self::Busy => 15,
+            Self::Internal => 16,
+            Self::InvalidCursor => 17,
+            Self::TypeMismatch => 18,
+            Self::CostLimit => 19,
+            Self::OperatorForbidden => 20,
+            Self::BindingInvalid => 21,
+            Self::BindingTypeMismatch => 22,
+        }
+    }
+
+    /// Decodes one stable protobuf numeric representation.
+    #[must_use]
+    pub const fn from_wire_number(value: i32) -> Option<Self> {
+        match value {
+            1 => Some(Self::InvalidArgument),
+            2 => Some(Self::NotFound),
+            3 => Some(Self::Conflict),
+            4 => Some(Self::StaleGeneration),
+            5 => Some(Self::UnsupportedCapability),
+            6 => Some(Self::IncompleteCoverage),
+            7 => Some(Self::BudgetExceeded),
+            8 => Some(Self::ResourceExhausted),
+            9 => Some(Self::Cancelled),
+            10 => Some(Self::AdapterFailed),
+            11 => Some(Self::IndexCorrupt),
+            12 => Some(Self::MigrationRequired),
+            13 => Some(Self::PermissionDenied),
+            14 => Some(Self::ProtocolMismatch),
+            15 => Some(Self::Busy),
+            16 => Some(Self::Internal),
+            17 => Some(Self::InvalidCursor),
+            18 => Some(Self::TypeMismatch),
+            19 => Some(Self::CostLimit),
+            20 => Some(Self::OperatorForbidden),
+            21 => Some(Self::BindingInvalid),
+            22 => Some(Self::BindingTypeMismatch),
+            _ => None,
+        }
+    }
+}
+
 /// Stable recommended remediation class for a public error code.
 ///
 /// The class is derived from the code alone so client automation can react
@@ -109,47 +199,230 @@ pub enum Remediation {
     CollectSupportBundle,
 }
 
+/// One normative entry in the stable public error registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrorDefinition {
+    /// Stable domain code.
+    pub code: ErrorCode,
+    /// Stable uppercase wire name.
+    pub name: &'static str,
+    /// Stable protobuf numeric value.
+    pub wire_number: i32,
+    /// Default source-free message.
+    pub message: &'static str,
+    /// Whether the unchanged request may be retried.
+    pub retryable: bool,
+    /// Recommended client remediation class.
+    pub remediation: Remediation,
+}
+
+macro_rules! error_registry {
+    ($(($code:ident, $name:literal, $wire:literal, $message:literal, $retryable:literal, $remediation:ident)),+ $(,)?) => {
+        /// Normative stable public error registry in protobuf numeric order.
+        pub const ERROR_REGISTRY: [ErrorDefinition; 22] = [
+            $(ErrorDefinition {
+                code: ErrorCode::$code,
+                name: $name,
+                wire_number: $wire,
+                message: $message,
+                retryable: $retryable,
+                remediation: Remediation::$remediation,
+            }),+
+        ];
+
+        /// Returns the normative registry entry for a public code.
+        #[must_use]
+        pub const fn error_definition(code: ErrorCode) -> &'static ErrorDefinition {
+            match code {
+                $(ErrorCode::$code => &ERROR_REGISTRY[$wire - 1]),+
+            }
+        }
+    };
+}
+
+error_registry!(
+    (
+        InvalidArgument,
+        "INVALID_ARGUMENT",
+        1,
+        "tool arguments are invalid",
+        false,
+        CorrectInput
+    ),
+    (
+        NotFound,
+        "NOT_FOUND",
+        2,
+        "requested entity was not found",
+        false,
+        None
+    ),
+    (
+        Conflict,
+        "CONFLICT",
+        3,
+        "request conflicts with current state",
+        true,
+        Retry
+    ),
+    (
+        StaleGeneration,
+        "STALE_GENERATION",
+        4,
+        "selected generation is stale",
+        false,
+        RestartEnumeration
+    ),
+    (
+        UnsupportedCapability,
+        "UNSUPPORTED_CAPABILITY",
+        5,
+        "requested capability is unavailable",
+        false,
+        ReduceScope
+    ),
+    (
+        IncompleteCoverage,
+        "INCOMPLETE_COVERAGE",
+        6,
+        "requested data is unavailable",
+        false,
+        ReduceScope
+    ),
+    (
+        BudgetExceeded,
+        "BUDGET_EXCEEDED",
+        7,
+        "request budget is exhausted",
+        false,
+        ReduceScope
+    ),
+    (
+        ResourceExhausted,
+        "RESOURCE_EXHAUSTED",
+        8,
+        "bounded resource is exhausted",
+        true,
+        Retry
+    ),
+    (
+        Cancelled,
+        "CANCELLED",
+        9,
+        "operation was cancelled",
+        true,
+        Retry
+    ),
+    (
+        AdapterFailed,
+        "ADAPTER_FAILED",
+        10,
+        "adapter operation failed",
+        true,
+        Retry
+    ),
+    (
+        IndexCorrupt,
+        "INDEX_CORRUPT",
+        11,
+        "repository index is corrupt",
+        false,
+        RebuildRepository
+    ),
+    (
+        MigrationRequired,
+        "MIGRATION_REQUIRED",
+        12,
+        "stored data requires migration",
+        false,
+        RebuildRepository
+    ),
+    (
+        PermissionDenied,
+        "PERMISSION_DENIED",
+        13,
+        "request is denied by policy",
+        false,
+        None
+    ),
+    (
+        ProtocolMismatch,
+        "PROTOCOL_MISMATCH",
+        14,
+        "protocol version is incompatible",
+        false,
+        SelectSupportedVersion
+    ),
+    (Busy, "BUSY", 15, "requested resource is busy", true, Retry),
+    (
+        Internal,
+        "INTERNAL",
+        16,
+        "internal operation failed",
+        false,
+        CollectSupportBundle
+    ),
+    (
+        InvalidCursor,
+        "INVALID_CURSOR",
+        17,
+        "pagination cursor is invalid or expired",
+        false,
+        RestartEnumeration
+    ),
+    (
+        TypeMismatch,
+        "TYPE_MISMATCH",
+        18,
+        "tool argument type does not match",
+        false,
+        CorrectInput
+    ),
+    (
+        CostLimit,
+        "COST_LIMIT",
+        19,
+        "query cost limit was exceeded",
+        false,
+        ReduceScope
+    ),
+    (
+        OperatorForbidden,
+        "OPERATOR_FORBIDDEN",
+        20,
+        "query operator is forbidden",
+        false,
+        CorrectInput
+    ),
+    (
+        BindingInvalid,
+        "BINDING_INVALID",
+        21,
+        "batch binding is invalid",
+        false,
+        CorrectInput
+    ),
+    (
+        BindingTypeMismatch,
+        "BINDING_TYPE_MISMATCH",
+        22,
+        "batch binding type does not match",
+        false,
+        CorrectInput
+    ),
+);
+
 /// Reports whether a request that failed with this code is safe to retry
 /// unchanged.
 #[must_use]
 pub const fn error_retryable(code: ErrorCode) -> bool {
-    matches!(
-        code,
-        ErrorCode::Conflict
-            | ErrorCode::Busy
-            | ErrorCode::ResourceExhausted
-            | ErrorCode::Cancelled
-            | ErrorCode::AdapterFailed
-    )
+    error_definition(code).retryable
 }
 
 /// Returns the stable recommended remediation class for a public error code.
 #[must_use]
 pub const fn error_remediation(code: ErrorCode) -> Remediation {
-    match code {
-        ErrorCode::InvalidArgument => Remediation::CorrectInput,
-        ErrorCode::TypeMismatch => Remediation::CorrectInput,
-        ErrorCode::BindingInvalid => Remediation::CorrectInput,
-        ErrorCode::BindingTypeMismatch => Remediation::CorrectInput,
-        ErrorCode::OperatorForbidden => Remediation::CorrectInput,
-        ErrorCode::InvalidCursor => Remediation::RestartEnumeration,
-        ErrorCode::StaleGeneration => Remediation::RestartEnumeration,
-        ErrorCode::NotFound => Remediation::None,
-        ErrorCode::PermissionDenied => Remediation::None,
-        ErrorCode::Conflict => Remediation::Retry,
-        ErrorCode::Busy => Remediation::Retry,
-        ErrorCode::ResourceExhausted => Remediation::Retry,
-        ErrorCode::Cancelled => Remediation::Retry,
-        ErrorCode::AdapterFailed => Remediation::Retry,
-        ErrorCode::UnsupportedCapability => Remediation::ReduceScope,
-        ErrorCode::IncompleteCoverage => Remediation::ReduceScope,
-        ErrorCode::BudgetExceeded => Remediation::ReduceScope,
-        ErrorCode::CostLimit => Remediation::ReduceScope,
-        ErrorCode::IndexCorrupt => Remediation::RebuildRepository,
-        ErrorCode::MigrationRequired => Remediation::RebuildRepository,
-        ErrorCode::ProtocolMismatch => Remediation::SelectSupportedVersion,
-        ErrorCode::Internal => Remediation::CollectSupportBundle,
-    }
+    error_definition(code).remediation
 }
 
 /// A validated key for a bounded public error detail.
@@ -778,5 +1051,70 @@ mod tests {
         assert!(!error_retryable(ErrorCode::InvalidCursor));
         assert!(!error_retryable(ErrorCode::TypeMismatch));
         assert!(!error_retryable(ErrorCode::CostLimit));
+    }
+
+    #[test]
+    fn normative_registry_is_complete_and_wire_stable() {
+        assert_eq!(ERROR_REGISTRY_VERSION, "1.0");
+        assert_eq!(ERROR_REGISTRY.len(), ErrorCode::ALL.len());
+        for (index, code) in ErrorCode::ALL.into_iter().enumerate() {
+            let definition = error_definition(code);
+            assert_eq!(definition.code, code);
+            assert_eq!(
+                usize::try_from(definition.wire_number).expect("wire number is positive"),
+                index + 1
+            );
+            assert_eq!(
+                ErrorCode::from_wire_number(definition.wire_number),
+                Some(code)
+            );
+            assert_eq!(error_retryable(code), definition.retryable);
+            assert_eq!(error_remediation(code), definition.remediation);
+            assert!(is_safe_message_template(definition.message));
+            assert_eq!(
+                serde_json::to_value(code).expect("code serializes"),
+                serde_json::Value::String(definition.name.to_owned())
+            );
+        }
+        assert_eq!(ErrorCode::from_wire_number(0), None);
+        assert_eq!(ErrorCode::from_wire_number(23), None);
+    }
+
+    #[test]
+    fn versioned_registry_artifact_matches_the_normative_table() {
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/errors/error-registry-1.0.json"
+        ))
+        .expect("checked registry artifact is valid JSON");
+        assert_eq!(artifact["schema_version"], ERROR_REGISTRY_VERSION);
+        assert_eq!(artifact["compatibility"]["details"], "additive");
+        assert_eq!(artifact["compatibility"]["unknown_major"], "reject");
+        let entries = artifact["errors"]
+            .as_array()
+            .expect("checked registry has an errors array");
+        assert_eq!(entries.len(), ERROR_REGISTRY.len());
+        for (entry, definition) in entries.iter().zip(ERROR_REGISTRY) {
+            assert_eq!(entry["code"], definition.name);
+            assert_eq!(entry["wire_number"], definition.wire_number);
+            assert_eq!(entry["message"], definition.message);
+            assert_eq!(entry["retryable"], definition.retryable);
+            assert_eq!(
+                entry["remediation"],
+                format!("{:?}", definition.remediation)
+            );
+        }
+    }
+
+    #[test]
+    fn message_bound_accepts_the_limit_and_rejects_one_byte_more() {
+        let maximum = "x".repeat(MAX_MESSAGE_BYTES);
+        let accepted = PublicError::builder_with_message(ErrorCode::Internal, maximum).build();
+        assert!(accepted.is_ok());
+
+        let oversized = "x".repeat(MAX_MESSAGE_BYTES + 1);
+        assert_eq!(
+            PublicError::builder_with_message(ErrorCode::Internal, oversized).build(),
+            Err(PublicErrorBuildError::InvalidMessageTemplate)
+        );
     }
 }

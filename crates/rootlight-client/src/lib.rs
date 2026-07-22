@@ -6639,33 +6639,12 @@ fn parse_public_error(error: common::PublicError) -> Result<PublicError, ClientE
     if error.retry_after_ms.is_some() && !error.retryable {
         return Err(ClientError::InvalidPublicError);
     }
-    let code = match common::ErrorCode::try_from(error.code)
-        .map_err(|_| ClientError::InvalidPublicError)?
-    {
-        common::ErrorCode::InvalidArgument => ErrorCode::InvalidArgument,
-        common::ErrorCode::NotFound => ErrorCode::NotFound,
-        common::ErrorCode::Conflict => ErrorCode::Conflict,
-        common::ErrorCode::StaleGeneration => ErrorCode::StaleGeneration,
-        common::ErrorCode::UnsupportedCapability => ErrorCode::UnsupportedCapability,
-        common::ErrorCode::IncompleteCoverage => ErrorCode::IncompleteCoverage,
-        common::ErrorCode::BudgetExceeded => ErrorCode::BudgetExceeded,
-        common::ErrorCode::ResourceExhausted => ErrorCode::ResourceExhausted,
-        common::ErrorCode::Cancelled => ErrorCode::Cancelled,
-        common::ErrorCode::AdapterFailed => ErrorCode::AdapterFailed,
-        common::ErrorCode::IndexCorrupt => ErrorCode::IndexCorrupt,
-        common::ErrorCode::MigrationRequired => ErrorCode::MigrationRequired,
-        common::ErrorCode::PermissionDenied => ErrorCode::PermissionDenied,
-        common::ErrorCode::ProtocolMismatch => ErrorCode::ProtocolMismatch,
-        common::ErrorCode::Busy => ErrorCode::Busy,
-        common::ErrorCode::Internal => ErrorCode::Internal,
-        common::ErrorCode::InvalidCursor => ErrorCode::InvalidCursor,
-        common::ErrorCode::TypeMismatch => ErrorCode::TypeMismatch,
-        common::ErrorCode::CostLimit => ErrorCode::CostLimit,
-        common::ErrorCode::OperatorForbidden => ErrorCode::OperatorForbidden,
-        common::ErrorCode::BindingInvalid => ErrorCode::BindingInvalid,
-        common::ErrorCode::BindingTypeMismatch => ErrorCode::BindingTypeMismatch,
-        common::ErrorCode::Unspecified => return Err(ClientError::InvalidPublicError),
-    };
+    let wire_code =
+        common::ErrorCode::try_from(error.code).map_err(|_| ClientError::InvalidPublicError)?;
+    if wire_code == common::ErrorCode::Unspecified {
+        return Err(ClientError::InvalidPublicError);
+    }
+    let code = ErrorCode::from_wire_number(error.code).ok_or(ClientError::InvalidPublicError)?;
     let mut builder = PublicError::builder_with_message(code, error.message);
     if let Some(delay) = error.retry_after_ms {
         builder = builder.retry_after(Duration::from_millis(delay));
@@ -8954,18 +8933,23 @@ mod tests {
     }
 
     #[test]
-    fn protocol_negotiation_rejects_the_frozen_obsolete_minor() {
-        let rejected = validate_server_hello(
-            &daemon::ServerHello {
-                selected_protocol: Some(common::ContractVersion { major: 1, minor: 0 }),
-                capabilities: Vec::new(),
-                error: None,
-                instance_nonce: vec![7; 16],
-            },
-            [7; 16],
-        );
+    fn protocol_negotiation_rejects_obsolete_minor_and_unknown_major() {
+        for version in [
+            common::ContractVersion { major: 1, minor: 0 },
+            common::ContractVersion { major: 2, minor: 0 },
+        ] {
+            let rejected = validate_server_hello(
+                &daemon::ServerHello {
+                    selected_protocol: Some(version),
+                    capabilities: Vec::new(),
+                    error: None,
+                    instance_nonce: vec![7; 16],
+                },
+                [7; 16],
+            );
 
-        assert!(matches!(rejected, Err(ClientError::ProtocolMismatch)));
+            assert!(matches!(rejected, Err(ClientError::ProtocolMismatch)));
+        }
     }
 
     #[test]
@@ -9048,5 +9032,46 @@ mod tests {
         });
 
         assert!(matches!(result, Err(ClientError::InvalidPublicError)));
+    }
+
+    #[test]
+    fn public_error_decoder_accepts_every_registered_code_and_additive_detail() {
+        for definition in rootlight_error::ERROR_REGISTRY {
+            let parsed = parse_public_error(common::PublicError {
+                code: definition.wire_number,
+                message: definition.message.to_owned(),
+                retryable: definition.retryable,
+                retry_after_ms: None,
+                repository: None,
+                operation: None,
+                generation: None,
+                details: [(
+                    "extension_flag".to_owned(),
+                    common::PublicValue {
+                        value: Some(common::public_value::Value::Boolean(true)),
+                    },
+                )]
+                .into(),
+                next_actions: Vec::new(),
+            })
+            .expect("registered code with additive detail decodes");
+
+            assert_eq!(parsed.code(), definition.code);
+            assert_eq!(parsed.message(), definition.message);
+            assert_eq!(parsed.details().len(), 1);
+        }
+
+        let unknown = parse_public_error(common::PublicError {
+            code: 23,
+            message: "unknown error code".to_owned(),
+            retryable: false,
+            retry_after_ms: None,
+            repository: None,
+            operation: None,
+            generation: None,
+            details: Default::default(),
+            next_actions: Vec::new(),
+        });
+        assert!(matches!(unknown, Err(ClientError::InvalidPublicError)));
     }
 }

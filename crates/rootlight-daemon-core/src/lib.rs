@@ -6577,31 +6577,11 @@ fn checked_public_error_from_wire(error: &common::PublicError) -> Option<PublicE
     {
         return None;
     }
-    let code = match common::ErrorCode::try_from(error.code).ok()? {
-        common::ErrorCode::InvalidArgument => ErrorCode::InvalidArgument,
-        common::ErrorCode::NotFound => ErrorCode::NotFound,
-        common::ErrorCode::Conflict => ErrorCode::Conflict,
-        common::ErrorCode::StaleGeneration => ErrorCode::StaleGeneration,
-        common::ErrorCode::UnsupportedCapability => ErrorCode::UnsupportedCapability,
-        common::ErrorCode::IncompleteCoverage => ErrorCode::IncompleteCoverage,
-        common::ErrorCode::BudgetExceeded => ErrorCode::BudgetExceeded,
-        common::ErrorCode::ResourceExhausted => ErrorCode::ResourceExhausted,
-        common::ErrorCode::Cancelled => ErrorCode::Cancelled,
-        common::ErrorCode::AdapterFailed => ErrorCode::AdapterFailed,
-        common::ErrorCode::IndexCorrupt => ErrorCode::IndexCorrupt,
-        common::ErrorCode::MigrationRequired => ErrorCode::MigrationRequired,
-        common::ErrorCode::PermissionDenied => ErrorCode::PermissionDenied,
-        common::ErrorCode::ProtocolMismatch => ErrorCode::ProtocolMismatch,
-        common::ErrorCode::Busy => ErrorCode::Busy,
-        common::ErrorCode::Internal => ErrorCode::Internal,
-        common::ErrorCode::InvalidCursor => ErrorCode::InvalidCursor,
-        common::ErrorCode::TypeMismatch => ErrorCode::TypeMismatch,
-        common::ErrorCode::CostLimit => ErrorCode::CostLimit,
-        common::ErrorCode::OperatorForbidden => ErrorCode::OperatorForbidden,
-        common::ErrorCode::BindingInvalid => ErrorCode::BindingInvalid,
-        common::ErrorCode::BindingTypeMismatch => ErrorCode::BindingTypeMismatch,
-        common::ErrorCode::Unspecified => return None,
-    };
+    let wire_code = common::ErrorCode::try_from(error.code).ok()?;
+    if wire_code == common::ErrorCode::Unspecified {
+        return None;
+    }
+    let code = ErrorCode::from_wire_number(error.code)?;
     let mut builder = PublicError::builder_with_message(code, error.message.clone());
     if let Some(delay) = error.retry_after_ms {
         builder = builder.retry_after(Duration::from_millis(delay));
@@ -8605,32 +8585,9 @@ fn checked_public_error_to_wire(error: &PublicError) -> Result<common::PublicErr
     })
 }
 
-const fn error_code_to_wire(code: ErrorCode) -> Result<common::ErrorCode, ServiceError> {
-    match code {
-        ErrorCode::InvalidArgument => Ok(common::ErrorCode::InvalidArgument),
-        ErrorCode::NotFound => Ok(common::ErrorCode::NotFound),
-        ErrorCode::Conflict => Ok(common::ErrorCode::Conflict),
-        ErrorCode::StaleGeneration => Ok(common::ErrorCode::StaleGeneration),
-        ErrorCode::UnsupportedCapability => Ok(common::ErrorCode::UnsupportedCapability),
-        ErrorCode::IncompleteCoverage => Ok(common::ErrorCode::IncompleteCoverage),
-        ErrorCode::BudgetExceeded => Ok(common::ErrorCode::BudgetExceeded),
-        ErrorCode::ResourceExhausted => Ok(common::ErrorCode::ResourceExhausted),
-        ErrorCode::Cancelled => Ok(common::ErrorCode::Cancelled),
-        ErrorCode::AdapterFailed => Ok(common::ErrorCode::AdapterFailed),
-        ErrorCode::IndexCorrupt => Ok(common::ErrorCode::IndexCorrupt),
-        ErrorCode::MigrationRequired => Ok(common::ErrorCode::MigrationRequired),
-        ErrorCode::PermissionDenied => Ok(common::ErrorCode::PermissionDenied),
-        ErrorCode::ProtocolMismatch => Ok(common::ErrorCode::ProtocolMismatch),
-        ErrorCode::Busy => Ok(common::ErrorCode::Busy),
-        ErrorCode::Internal => Ok(common::ErrorCode::Internal),
-        ErrorCode::InvalidCursor => Ok(common::ErrorCode::InvalidCursor),
-        ErrorCode::TypeMismatch => Ok(common::ErrorCode::TypeMismatch),
-        ErrorCode::CostLimit => Ok(common::ErrorCode::CostLimit),
-        ErrorCode::OperatorForbidden => Ok(common::ErrorCode::OperatorForbidden),
-        ErrorCode::BindingInvalid => Ok(common::ErrorCode::BindingInvalid),
-        ErrorCode::BindingTypeMismatch => Ok(common::ErrorCode::BindingTypeMismatch),
-        _ => Err(ServiceError::UnsupportedPublicErrorVariant),
-    }
+fn error_code_to_wire(code: ErrorCode) -> Result<common::ErrorCode, ServiceError> {
+    common::ErrorCode::try_from(code.wire_number())
+        .map_err(|_| ServiceError::UnsupportedPublicErrorVariant)
 }
 
 fn public_value_to_wire(value: &PublicValue) -> Result<common::PublicValue, ServiceError> {
@@ -13301,6 +13258,25 @@ mod tests {
         assert!(wire.retryable);
         assert_eq!(wire.details.len(), 1);
         assert_eq!(wire.next_actions.len(), 1);
+    }
+
+    #[test]
+    fn every_registered_error_round_trips_through_the_daemon_wire() {
+        for definition in rootlight_error::ERROR_REGISTRY {
+            let mut builder = PublicError::builder(definition.code, definition.message).detail(
+                DetailKey::parse("extension_flag").expect("static key is valid"),
+                PublicValue::Boolean(true),
+            );
+            if definition.retryable {
+                builder = builder.retryable();
+            }
+            let domain = builder.build().expect("registry error builds");
+            let wire = checked_public_error_to_wire(&domain).expect("registry error encodes");
+            let decoded = checked_public_error_from_wire(&wire).expect("registry error decodes");
+
+            assert_eq!(wire.code, definition.wire_number);
+            assert_eq!(decoded, domain);
+        }
     }
 
     #[test]
