@@ -1,0 +1,58 @@
+{
+  "profiles": [
+    {
+      "name": "scout",
+      "tools": [
+        "repo.status",
+        "code.locate",
+        "symbol.explain",
+        "context.pack",
+        "source.read",
+        "query.batch"
+      ]
+    },
+    {
+      "name": "analysis",
+      "tools": [
+        "repo.status",
+        "code.locate",
+        "symbol.explain",
+        "symbol.relationships",
+        "flow.trace",
+        "change.impact",
+        "tests.select",
+        "architecture.overview",
+        "architecture.cycles",
+        "code.dead",
+        "context.pack",
+        "source.read",
+        "query.batch"
+      ]
+    },
+    {
+      "name": "developer",
+      "tools": [
+        "repo.index",
+        "repo.status",
+        "repo.list",
+        "operation.status",
+        "code.locate",
+        "symbol.explain",
+        "symbol.relationships",
+        "flow.trace",
+        "change.impact",
+        "tests.select",
+        "architecture.overview",
+        "architecture.cycles",
+        "code.dead",
+        "history.compare",
+        "plan.change",
+        "context.pack",
+        "source.read",
+        "query.advanced",
+        "query.batch"
+      ]
+    }
+  ],
+  "schema": "rootlight.mcp-compatibility-current/1"
+}

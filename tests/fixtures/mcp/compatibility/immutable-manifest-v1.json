@@ -1,0 +1,42 @@
+{
+  "schema": "rootlight.mcp-compatibility-manifest/1",
+  "algorithm": "sha256",
+  "release_history_sha256": "5f4eec56755c4d7b2e60a38139ba71e82b2301ac33d2fa756fe9051f0c0081bd",
+  "files": [
+    {
+      "path": "current/batch.json",
+      "bytes": 2025,
+      "sha256": "f94d05af62880e860184828033c35d0959b1911a51faa629a20ba6e396a5dfbf"
+    },
+    {
+      "path": "current/catalog.json",
+      "bytes": 1319718,
+      "sha256": "0f4d2aaf47652b82640f7b80da7f925df35d43ed9ad305ed6daca334093353a5"
+    },
+    {
+      "path": "current/error-examples.json",
+      "bytes": 5718,
+      "sha256": "4b8d206429218648febe4c7d1ef000e6f8145f74918d1f784d39e9c8861f99a7"
+    },
+    {
+      "path": "current/policy.json",
+      "bytes": 2067,
+      "sha256": "d7ca590a1e041170f17c0330a3f7d58ac1e9ab67b6ee2dfe53b497f777cf7ed4"
+    },
+    {
+      "path": "current/profiles.json",
+      "bytes": 1212,
+      "sha256": "5b0b1efb6a8cb82b6e4a8a7758fcbdf3a5522b8309c95f7dd48c27228125fa1a"
+    },
+    {
+      "path": "current/success-examples.json",
+      "bytes": 35927,
+      "sha256": "c1f383be1a60871ca10d75aa41e5b3c39b78804186584d1fb7b439c306af1556"
+    },
+    {
+      "path": "release-history-v1.json",
+      "bytes": 276,
+      "sha256": "5f4eec56755c4d7b2e60a38139ba71e82b2301ac33d2fa756fe9051f0c0081bd"
+    }
+  ]
+}

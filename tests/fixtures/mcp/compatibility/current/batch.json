@@ -1,0 +1,89 @@
+{
+  "schema": "rootlight.mcp-compatibility-current/1",
+  "tools": [
+    {
+      "contract_version": "1.0",
+      "eligible": true,
+      "read_only": true,
+      "required_profile": "scout",
+      "tool": "code.locate"
+    },
+    {
+      "contract_version": "1.0",
+      "eligible": true,
+      "read_only": true,
+      "required_profile": "scout",
+      "tool": "symbol.explain"
+    },
+    {
+      "contract_version": "1.0",
+      "eligible": true,
+      "read_only": true,
+      "required_profile": "analysis",
+      "tool": "symbol.relationships"
+    },
+    {
+      "contract_version": "1.0",
+      "eligible": true,
+      "read_only": true,
+      "required_profile": "analysis",
+      "tool": "flow.trace"
+    },
+    {
+      "contract_version": "1.0",
+      "eligible": true,
+      "read_only": true,
+      "required_profile": "analysis",
+      "tool": "change.impact"
+    },
+    {
+      "contract_version": "1.0",
+      "eligible": true,
+      "read_only": true,
+      "required_profile": "analysis",
+      "tool": "tests.select"
+    },
+    {
+      "contract_version": "1.0",
+      "eligible": true,
+      "read_only": true,
+      "required_profile": "analysis",
+      "tool": "architecture.overview"
+    },
+    {
+      "contract_version": "1.0",
+      "eligible": true,
+      "read_only": true,
+      "required_profile": "analysis",
+      "tool": "architecture.cycles"
+    },
+    {
+      "contract_version": "1.0",
+      "eligible": true,
+      "read_only": true,
+      "required_profile": "analysis",
+      "tool": "code.dead"
+    },
+    {
+      "contract_version": "1.0",
+      "eligible": true,
+      "read_only": true,
+      "required_profile": "developer",
+      "tool": "plan.change"
+    },
+    {
+      "contract_version": "1.0",
+      "eligible": true,
+      "read_only": true,
+      "required_profile": "scout",
+      "tool": "context.pack"
+    },
+    {
+      "contract_version": "1.0",
+      "eligible": true,
+      "read_only": true,
+      "required_profile": "scout",
+      "tool": "source.read"
+    }
+  ]
+}

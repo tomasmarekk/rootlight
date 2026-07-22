@@ -1,0 +1,1266 @@
+{
+  "schema": "rootlight.mcp-compatibility-current/1",
+  "tools": [
+    {
+      "input": {
+        "root": "C:/fixture"
+      },
+      "output": {
+        "data": {
+          "accepted_plan": {
+            "estimated_disk_bytes": 0,
+            "mode": "auto",
+            "parent_generation": null,
+            "providers": [],
+            "scope": "repository"
+          },
+          "diagnostics": [],
+          "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv",
+          "published_generation": null,
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+          "state": "queued"
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "repo.index"
+    },
+    {
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [
+            {
+              "language": "rust",
+              "status": "complete",
+              "tier": "A"
+            }
+          ],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "active_generation": {
+            "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+            "parent_generation": null,
+            "semantic_freshness": "current",
+            "structural_freshness": "current"
+          },
+          "alias": null,
+          "coverage": {
+            "indexed_files": 42,
+            "languages": [
+              {
+                "files_indexed": 42,
+                "files_skipped": 0,
+                "language": "rust",
+                "missing_build_context": 0,
+                "tier": "A"
+              }
+            ],
+            "skipped_files": 0,
+            "status": "complete",
+            "total_files": 42
+          },
+          "operations": [],
+          "publication_state": "published",
+          "recommended_actions": [],
+          "repository_state": "ready",
+          "requested_generation": null,
+          "resolved_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by"
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-status-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "repo.status"
+    },
+    {
+      "input": {
+        "max_results": 50,
+        "query": "fixture",
+        "response_profile": "compact",
+        "states": [
+          "ready"
+        ]
+      },
+      "output": {
+        "data": {
+          "repositories": [
+            {
+              "active_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+              "alias": null,
+              "coverage": {
+                "indexed_files": 1,
+                "languages": [
+                  {
+                    "files_indexed": 1,
+                    "files_skipped": 0,
+                    "language": "rust",
+                    "missing_build_context": 0,
+                    "tier": "A"
+                  }
+                ],
+                "skipped_files": 0,
+                "status": "complete",
+                "total_files": 1
+              },
+              "display_name": "fixture",
+              "generation_count": 1,
+              "languages": [
+                "rust"
+              ],
+              "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+              "semantic_freshness": "current",
+              "state": "ready",
+              "structural_freshness": "current"
+            }
+          ],
+          "total_count": 1
+        },
+        "next_cursor": null,
+        "schema_version": "2.0",
+        "snapshot_id": "catalog1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 192,
+          "json_bytes": 768,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "catalog-page-2",
+          "wall_time_ms": 2
+        },
+        "warnings": []
+      },
+      "tool": "repo.list"
+    },
+    {
+      "input": {
+        "operation_id": "op1_aaaaaaaaaaaaaaaaaaaaaaaaadujjxgv"
+      },
+      "output": {
+        "data": {
+          "error": null,
+          "operation": {
+            "kind": "repository_index",
+            "progress": {
+              "completed_units": 1,
+              "total_units": null
+            },
+            "resources": {
+              "files_examined": 1,
+              "peak_rss_bytes": 0,
+              "written_bytes": 0
+            },
+            "revision": 1,
+            "stage": "discovering",
+            "started_at": "2026-07-18T00:00:00Z",
+            "state": "running"
+          },
+          "published_generation": null,
+          "retry_after_ms": null
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "operation.status"
+    },
+    {
+      "input": {
+        "query": "publish",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [
+            {
+              "language": "rust",
+              "status": "complete",
+              "tier": "A"
+            }
+          ],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "matches": [],
+          "query_interpretation": {
+            "modes": [
+              "exact"
+            ],
+            "semantic_available": false,
+            "tokens": [
+              "publish"
+            ]
+          },
+          "suggested_next": []
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-locate-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "code.locate"
+    },
+    {
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "symbol_ids": [
+          "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+        ]
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "detail_handles": [],
+          "symbols": [],
+          "unresolved_ids": [
+            "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+          ]
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "not_applicable",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-explain-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "symbol.explain"
+    },
+    {
+      "input": {
+        "references": [
+          {
+            "source_ref": {
+              "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+              "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+              "line_hint": {
+                "end_line": 1,
+                "start_line": 1
+              },
+              "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+              "span": {
+                "end_byte": 10,
+                "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                "start_byte": 0
+              }
+            }
+          }
+        ],
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [
+            {
+              "language": "rust",
+              "status": "complete",
+              "tier": "A"
+            }
+          ],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "chunks": [
+            {
+              "content": "fn x() {}\n",
+              "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+              "encoding": "utf8",
+              "end_byte": 10,
+              "end_line": 1,
+              "generated": false,
+              "language": "rust",
+              "path": "src/lib.rs",
+              "source_ref": {
+                "content_hash": "b3_rc6zkrxh5srdoiia2cydtoqh5ug2jyctujxicstuvgf2yz377y5zl6hbcu",
+                "generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+                "line_hint": {
+                  "end_line": 1,
+                  "start_line": 1
+                },
+                "repository": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v",
+                "span": {
+                  "end_byte": 10,
+                  "file": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
+                  "start_byte": 0
+                }
+              },
+              "start_byte": 0,
+              "start_line": 1,
+              "trust": "untrusted_repository_data"
+            }
+          ],
+          "elisions": [],
+          "stale_references": [],
+          "total_source_bytes": 10
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "not_applicable",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 10,
+          "trace_id": "trace-source-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "source.read"
+    },
+    {
+      "input": {
+        "relations": [
+          "calls"
+        ],
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "symbol_ids": [
+          "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+        ]
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "groups": [],
+          "totals": {
+            "exact": true,
+            "returned_edges": 0,
+            "total_edges": 0
+          },
+          "unresolved": []
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-symbol-relationships-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "symbol.relationships"
+    },
+    {
+      "input": {
+        "from": {
+          "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+        },
+        "relations": [
+          "calls"
+        ],
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "frontier": {
+            "examined_edges": 0,
+            "reached_nodes": 0,
+            "truncated": false,
+            "unresolved_boundaries": 0
+          },
+          "paths": [],
+          "projection": {
+            "min_confidence": 0,
+            "relations": [
+              "calls"
+            ]
+          }
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-flow-trace-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "flow.trace"
+    },
+    {
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "components": [],
+          "connections": [],
+          "hotspots": [],
+          "views": []
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-architecture-overview-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "architecture.overview"
+    },
+    {
+      "input": {
+        "projection": {
+          "level": "module",
+          "relations": [
+            "calls"
+          ]
+        },
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "break_candidates": [],
+          "components": [],
+          "cycles": []
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-architecture-cycles-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "architecture.cycles"
+    },
+    {
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "blind_spots": [],
+          "candidates": [],
+          "entry_points": {
+            "complete": true,
+            "entry_point_count": 0,
+            "policy": "standard"
+          },
+          "false_positive_controls": []
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-code-dead-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "code.dead"
+    },
+    {
+      "input": {
+        "change": {
+          "symbol_ids": [
+            "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+          ]
+        },
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "impacted": [],
+          "resolved_changes": [
+            {
+              "classification": "body",
+              "file_id": null,
+              "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+            }
+          ],
+          "risk_summary": {
+            "breaking_surface": false,
+            "coverage": "complete",
+            "dynamic_blind_spots": false,
+            "fanout": 0,
+            "level": "none",
+            "reasons": []
+          },
+          "service_impacts": [],
+          "tests": []
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-change-impact-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "change.impact"
+    },
+    {
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "seeds": {
+          "symbols": [
+            "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+          ]
+        }
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "coverage_strategy": {
+            "build_target_signals": false,
+            "direct_edges": false,
+            "history_signals": false,
+            "transitive_signals": false
+          },
+          "gaps": [],
+          "tests": []
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-tests-select-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "tests.select"
+    },
+    {
+      "input": {
+        "base": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+        "head": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "architecture_delta": {
+            "new_boundaries": 0,
+            "new_cross_service_edges": 0,
+            "removed_boundaries": 0,
+            "removed_cross_service_edges": 0
+          },
+          "breaking_candidates": [],
+          "changes": [],
+          "lineage": [],
+          "matched_states": {
+            "base_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+            "coverage": "complete",
+            "head_generation": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by"
+          }
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-history-compare-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "history.compare"
+    },
+    {
+      "input": {
+        "objective": "bug_fix",
+        "objective_text": "fix the defect",
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "targets": [
+          {
+            "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+          }
+        ]
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "affected_scope": {
+            "affected_files": 0,
+            "affected_symbols": 0,
+            "risk_level": "none",
+            "touches_public_surface": false
+          },
+          "context_pack_request": {
+            "files": [],
+            "symbols": []
+          },
+          "open_decisions": [],
+          "plan": [
+            {
+              "action": "reproduce the defect",
+              "depends_on": [],
+              "risks": [],
+              "step": 1,
+              "targets": []
+            }
+          ],
+          "test_plan": []
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-plan-change-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "plan.change"
+    },
+    {
+      "input": {
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "seeds": {
+          "symbols": [
+            "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
+          ]
+        },
+        "task": "explain the publish path",
+        "token_budget": 2000
+      },
+      "output": {
+        "completeness": {
+          "continuation": "unavailable",
+          "guidance": [
+            "refresh_coverage",
+            "unsupported_no_continuation"
+          ],
+          "limiting_resources": [
+            {
+              "kind": "capability",
+              "limit": null,
+              "observed": null
+            },
+            {
+              "kind": "coverage",
+              "limit": null,
+              "observed": null
+            }
+          ],
+          "state": "unsupported_partial"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "followups": [],
+          "items": [],
+          "omitted": [],
+          "pack_id": "pack-1",
+          "planner_version": 1,
+          "request_digest": "ctxreq1_44594c955e4acb72e2557767fd34876879c9e4b240f4f23d5ffee7696e3a9846",
+          "role_coverage": {
+            "complete": false,
+            "objective": "explanation",
+            "objective_rule_version": 1,
+            "roles": [
+              {
+                "missing_reason": "no_evidence",
+                "observed_candidates": 0,
+                "requirement": "required",
+                "role": "definition",
+                "selected_items": 0,
+                "status": "missing_required"
+              },
+              {
+                "observed_candidates": 0,
+                "requirement": "optional",
+                "role": "implementation",
+                "selected_items": 0,
+                "status": "optional_absent"
+              },
+              {
+                "observed_candidates": 0,
+                "requirement": "optional",
+                "role": "caller",
+                "selected_items": 0,
+                "status": "optional_absent"
+              },
+              {
+                "observed_candidates": 0,
+                "requirement": "optional",
+                "role": "test",
+                "selected_items": 0,
+                "status": "optional_absent"
+              },
+              {
+                "observed_candidates": 0,
+                "requirement": "optional",
+                "role": "risk",
+                "selected_items": 0,
+                "status": "optional_absent"
+              },
+              {
+                "missing_reason": "unsupported",
+                "observed_candidates": 0,
+                "requirement": "required",
+                "role": "architecture",
+                "selected_items": 0,
+                "status": "missing_required"
+              },
+              {
+                "observed_candidates": 0,
+                "requirement": "optional",
+                "role": "change",
+                "selected_items": 0,
+                "status": "optional_absent"
+              }
+            ]
+          },
+          "structure": {
+            "dependencies": [],
+            "reading_order": []
+          },
+          "token_accounting": {
+            "by_section": {
+              "definitions": 120
+            },
+            "estimated_total": 120
+          }
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-context-pack-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "context.pack"
+    },
+    {
+      "input": {
+        "query": {
+          "entity": "function",
+          "op": "scan"
+        },
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "columns": [
+            {
+              "column_type": "symbol_id",
+              "name": "symbol"
+            }
+          ],
+          "completeness": "complete",
+          "plan": null,
+          "rows": []
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-query-advanced-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "query.advanced"
+    },
+    {
+      "input": {
+        "operations": [
+          {
+            "arguments": {
+              "query": "publish"
+            },
+            "id": "op_1",
+            "tool": "code.locate"
+          }
+        ],
+        "repository": {
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        }
+      },
+      "output": {
+        "completeness": {
+          "continuation": "not_applicable",
+          "guidance": [],
+          "limiting_resources": [],
+          "state": "complete"
+        },
+        "coverage": {
+          "languages": [],
+          "skipped_inputs": 0,
+          "status": "complete"
+        },
+        "data": {
+          "batch_status": "ok",
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "operation_results": [
+            {
+              "id": "op_1",
+              "next_cursor": null,
+              "status": "ok",
+              "tool": "code.locate",
+              "truncated": false,
+              "warnings": []
+            }
+          ]
+        },
+        "generation": {
+          "generation_id": "gen1_is6sduoy6mt3wwxnzuibgq6rb6zs2jtal4aj2by",
+          "parent_generation": null,
+          "semantic_freshness": "current",
+          "structural_freshness": "current"
+        },
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
+        },
+        "schema_version": "1.0",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "miss",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 1,
+          "source_bytes": 0,
+          "trace_id": "trace-query-batch-1",
+          "wall_time_ms": 1
+        },
+        "warnings": []
+      },
+      "tool": "query.batch"
+    }
+  ]
+}

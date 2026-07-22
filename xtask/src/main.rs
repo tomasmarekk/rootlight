@@ -14,6 +14,7 @@ mod grammar_lock;
 mod ids;
 mod license;
 mod markdown_links;
+mod mcp_compatibility;
 mod mcp_vertical;
 mod policy;
 mod protobuf_compatibility;
@@ -62,6 +63,10 @@ fn run() -> Result<(), XtaskError> {
         Some("mcp-vertical-check") => {
             let options = mcp_vertical::Options::parse(&mut args)?;
             mcp_vertical::check(&options)?;
+        }
+        Some("mcp-compatibility-check") => {
+            let options = mcp_compatibility::Options::parse(&mut args)?;
+            mcp_compatibility::check(&options)?;
         }
         Some("policy-check") | Some("policy") => policy::check()?,
         Some("license-check") => license::check()?,
@@ -178,7 +183,7 @@ fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), X
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-compatibility-check [--fixture-root PATH] [--refresh-current]|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -213,6 +218,8 @@ enum XtaskError {
     License(#[from] license::LicenseError),
     #[error(transparent)]
     MarkdownLinks(#[from] markdown_links::MarkdownLinkError),
+    #[error(transparent)]
+    McpCompatibility(#[from] mcp_compatibility::CompatibilityError),
     #[error(transparent)]
     McpVertical(#[from] mcp_vertical::VerticalError),
     #[error(transparent)]

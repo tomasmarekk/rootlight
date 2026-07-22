@@ -1,0 +1,252 @@
+{
+  "schema": "rootlight.mcp-compatibility-current/1",
+  "tools": [
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "repo.index"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "repo.status"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "repo.list"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "operation.status"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "code.locate"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "symbol.explain"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "symbol.relationships"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "flow.trace"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "change.impact"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "tests.select"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "architecture.overview"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "architecture.cycles"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "code.dead"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "history.compare"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "plan.change"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "context.pack"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "source.read"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "query.advanced"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.0"
+      },
+      "tool": "query.batch"
+    }
+  ]
+}

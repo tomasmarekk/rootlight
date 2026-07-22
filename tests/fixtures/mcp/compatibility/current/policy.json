@@ -1,0 +1,106 @@
+{
+  "cursor": {
+    "current_prefix": "c3.",
+    "legacy_disposition": "unsupported_version",
+    "public_error": "INVALID_CURSOR",
+    "recovery": "restart_enumeration",
+    "unsupported_legacy_prefixes": [
+      "c1.",
+      "c2."
+    ]
+  },
+  "output_projection": {
+    "implemented": false,
+    "older_closed_output_claimed": false
+  },
+  "schema": "rootlight.mcp-compatibility-current/1",
+  "tool_contract_versions": [
+    {
+      "tool": "repo.index",
+      "version": "1.0"
+    },
+    {
+      "tool": "repo.status",
+      "version": "1.0"
+    },
+    {
+      "tool": "repo.list",
+      "version": "2.0"
+    },
+    {
+      "tool": "operation.status",
+      "version": "1.0"
+    },
+    {
+      "tool": "code.locate",
+      "version": "1.0"
+    },
+    {
+      "tool": "symbol.explain",
+      "version": "1.0"
+    },
+    {
+      "tool": "symbol.relationships",
+      "version": "1.0"
+    },
+    {
+      "tool": "flow.trace",
+      "version": "1.0"
+    },
+    {
+      "tool": "change.impact",
+      "version": "1.0"
+    },
+    {
+      "tool": "tests.select",
+      "version": "1.0"
+    },
+    {
+      "tool": "architecture.overview",
+      "version": "1.0"
+    },
+    {
+      "tool": "architecture.cycles",
+      "version": "1.0"
+    },
+    {
+      "tool": "code.dead",
+      "version": "1.0"
+    },
+    {
+      "tool": "history.compare",
+      "version": "1.0"
+    },
+    {
+      "tool": "plan.change",
+      "version": "1.0"
+    },
+    {
+      "tool": "context.pack",
+      "version": "1.0"
+    },
+    {
+      "tool": "source.read",
+      "version": "1.0"
+    },
+    {
+      "tool": "query.advanced",
+      "version": "1.0"
+    },
+    {
+      "tool": "query.batch",
+      "version": "1.0"
+    }
+  ],
+  "tool_version_negotiation": {
+    "implemented": false,
+    "reason": "the public request boundary has no tool-contract version selector",
+    "required_error": "PROTOCOL_MISMATCH",
+    "required_recovery": "select_supported_version",
+    "unsupported_major_evidence": "not_claimed"
+  },
+  "unknown_fields": {
+    "input": "reject",
+    "output": "reject"
+  }
+}

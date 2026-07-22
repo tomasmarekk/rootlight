@@ -48,6 +48,7 @@ jobs:
           cargo run --locked --quiet --package xtask -- architecture-check
           cargo run --locked --quiet --package xtask -- generate --check
           cargo run --locked --quiet --package xtask -- compatibility-check
+          cargo run --locked --quiet --package xtask -- mcp-compatibility-check
           cargo run --locked --quiet --package xtask -- policy-check
           cargo run --locked --quiet --package xtask -- license-check
           cargo run --locked --quiet --package xtask -- markdown-link-check --root tests/fixtures/markdown-links/valid
@@ -196,6 +197,7 @@ jobs:
           cargo run --locked --quiet --package xtask -- architecture-check
           cargo run --locked --quiet --package xtask -- generate --check
           cargo run --locked --quiet --package xtask -- compatibility-check
+          cargo run --locked --quiet --package xtask -- mcp-compatibility-check
           cargo run --locked --quiet --package xtask -- policy-check
 
   current-stable:

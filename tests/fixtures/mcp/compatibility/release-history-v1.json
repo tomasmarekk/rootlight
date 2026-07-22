@@ -1,0 +1,12 @@
+{
+  "schema": "rootlight.mcp-release-history/1",
+  "machine_observation": {
+    "status": "verified",
+    "observed_revision": "63527fb7a79886aa2e0440149d60bb622c3691d5",
+    "observed_release_count": 0
+  },
+  "owner_review": {
+    "status": "pending"
+  },
+  "releases": []
+}
