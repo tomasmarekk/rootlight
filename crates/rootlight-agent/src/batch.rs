@@ -820,7 +820,12 @@ impl BatchService {
             operation.arguments.keys().any(|key| {
                 matches!(
                     key.as_str(),
-                    "repository" | "generation" | "budget" | "cursor" | "response_profile"
+                    "repository"
+                        | "generation"
+                        | "budget"
+                        | "cursor"
+                        | "profile"
+                        | "response_profile"
                 )
             }) || !binding_objects_are_valid(&operation.arguments)
         }) {

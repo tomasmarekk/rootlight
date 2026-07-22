@@ -377,27 +377,23 @@ async fn omitted_timeout_receives_a_bounded_default_before_dispatch() {
 
 #[tokio::test]
 async fn reserved_child_control_keys_fail_before_identity_resolution() {
-    for key in [
-        "repository",
-        "generation",
-        "budget",
-        "cursor",
-        "response_profile",
+    for (tool, key, value) in [
+        (BatchTool::CodeLocate, "repository", Value::Null),
+        (BatchTool::CodeLocate, "generation", Value::Null),
+        (BatchTool::CodeLocate, "budget", Value::Null),
+        (BatchTool::CodeLocate, "cursor", Value::Null),
+        (BatchTool::CodeLocate, "response_profile", json!("standard")),
+        (BatchTool::ChangeImpact, "profile", json!("standard")),
+        (BatchTool::TestsSelect, "profile", json!("evidence")),
     ] {
         let mut arguments = Map::new();
-        arguments.insert(key.to_owned(), Value::Null);
+        arguments.insert(key.to_owned(), value);
         let port = Arc::new(FakePort::with_responses([]));
         let result = BatchService
             .execute(
                 Arc::clone(&port),
                 input(
-                    vec![operation(
-                        "reserved",
-                        BatchTool::CodeLocate,
-                        arguments,
-                        None,
-                        None,
-                    )],
+                    vec![operation("reserved", tool, arguments, None, None)],
                     budget(500),
                 ),
                 repository(),

@@ -23,7 +23,6 @@ use rootlight_mcp_contract::{
 use crate::{
     explain::{finalize_plan, plan_change_plan},
     policy::CancellationSignal,
-    policy::is_compact_profile,
     port::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentResolutionContext,
         AgentResolvedIdentity,
@@ -129,17 +128,13 @@ pub enum PlanChangeError {
 /// # Errors
 ///
 /// Returns [`PlanChangeError`] when the request requires alias resolution,
-/// unsupported context or budget behavior, a non-compact response profile, or
-/// contains no symbol or file target.
+/// unsupported context or budget behavior, or contains no symbol or file
+/// target.
 pub fn normalize_plan_change(input: PlanChangeInput) -> Result<PlanChangeRequest, PlanChangeError> {
     let RepositorySelector::ById(repository) = input.repository else {
         return Err(PlanChangeError::UnsupportedRepository);
     };
-    if input.change_context.is_some()
-        || input.constraints.is_some()
-        || input.budget.is_some()
-        || !is_compact_profile(input.profile)
-    {
+    if input.change_context.is_some() || input.constraints.is_some() || input.budget.is_some() {
         return Err(PlanChangeError::UnsupportedOption);
     }
 
@@ -555,14 +550,19 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_profile_is_rejected_without_an_application() {
-        let mut input = input();
-        input.profile = Some(ResponseProfile::Evidence);
+    fn every_response_profile_is_admitted_without_changing_the_plan() {
+        for profile in [
+            ResponseProfile::Compact,
+            ResponseProfile::Standard,
+            ResponseProfile::Evidence,
+        ] {
+            let mut input = input();
+            input.profile = Some(profile);
+            let request = normalize_plan_change(input).expect("profile is admitted");
 
-        assert_eq!(
-            normalize_plan_change(input),
-            Err(PlanChangeError::UnsupportedOption)
-        );
+            assert_eq!(request.objective(), "bug_fix");
+            assert_eq!(request.target_count(), 2);
+        }
     }
 
     #[test]
