@@ -115,8 +115,9 @@ pub(crate) fn emit(options: &Options) -> Result<(), DiscoveryError> {
                 "tool names and titles",
                 "input and output schemas",
                 "exposure profile membership",
-                "authorization and runtime behavior",
+                "authorization policy",
             ],
+            not_assessed: ["runtime behavior"],
         },
     };
     let mut encoded = serde_json::to_vec_pretty(&report)?;
@@ -365,6 +366,7 @@ struct CompatibilityImpact {
     breaking: bool,
     changed_fields: [&'static str; 4],
     unchanged_contracts: [&'static str; 4],
+    not_assessed: [&'static str; 1],
 }
 
 /// Failure while producing deterministic discovery evidence.
