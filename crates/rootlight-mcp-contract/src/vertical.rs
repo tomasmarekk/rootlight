@@ -586,7 +586,10 @@ pub struct RepoIndexInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 30_000))]
     pub wait_ms: Option<u32>,
-    /// Whether the operation may continue after client disconnect.
+    /// Requests permission to continue after client disconnect.
+    ///
+    /// The current versioned fallback rejects `true` before creating an
+    /// operation because operation and generation handles are process-local.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detached: Option<bool>,
 }
@@ -656,13 +659,13 @@ pub struct Diagnostic {
 pub struct RepoIndexData {
     /// Registered repository identity.
     pub repository_id: RepositoryId,
-    /// Durable operation identity.
+    /// Process-local operation identity.
     pub operation_id: OperationId,
     /// Plan admitted by policy and resource checks.
     pub accepted_plan: IndexPlanSummary,
     /// Current operation state.
     pub state: OperationState,
-    /// Generation published within `wait_ms`, if any.
+    /// Generation published before the attached call returns, if any.
     pub published_generation: RequiredNullable<GenerationId>,
     /// Source-free validation and capability notes.
     #[schemars(length(max = 100))]

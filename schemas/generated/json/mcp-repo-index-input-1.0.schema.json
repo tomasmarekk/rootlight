@@ -17,7 +17,7 @@
       }
     },
     "detached": {
-      "description": "Whether the operation may continue after client disconnect.",
+      "description": "Requests permission to continue after client disconnect.\n\nThe current versioned fallback rejects `true` before creating an\noperation because operation and generation handles are process-local.",
       "type": "boolean"
     },
     "mode": {

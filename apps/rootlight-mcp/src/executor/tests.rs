@@ -1153,7 +1153,7 @@ async fn maps_repository_index_without_replacing_stable_identities() {
             json!({
                 "root": "C:/fixture",
                 "mode": "structural",
-                "detached": true
+                "detached": false
             }),
         )
         .await
@@ -1172,7 +1172,7 @@ async fn maps_repository_index_without_replacing_stable_identities() {
         harness.only_call(),
         ObservedCall::RepositoryIndex(RepositoryIndexPortRequest {
             mode: IndexMode::Structural,
-            detached: true,
+            detached: false,
             ..
         })
     ));
@@ -4984,6 +4984,10 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
             json!({"root": "C:/fixture", "wait_ms": 0}),
         ),
         (
+            VerticalTool::RepoIndex,
+            json!({"root": "C:/fixture", "detached": true}),
+        ),
+        (
             VerticalTool::CodeLocate,
             json!({"repository": {"alias": "fixture"}, "query": "x"}),
         ),
@@ -6246,7 +6250,8 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         }};
     }
 
-    group!(RepoIndex, NormalizedDelta, ["detached", "mode", "root"]);
+    group!(RepoIndex, NormalizedDelta, ["mode", "root"]);
+    group!(RepoIndex, DefaultEquivalent, ["detached"]);
     group!(RepoStatus, NormalizedDelta, ["generation", "repository"]);
     group!(RepoStatus, ExplainPlan, ["explain"]);
     group!(
@@ -6617,7 +6622,7 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[8],
         counts[9],
     );
-    assert_eq!(counts, [132, 3, 61, 24, 16, 5, 10, 10, 1, 1]);
+    assert_eq!(counts, [131, 3, 61, 25, 16, 5, 10, 10, 1, 1]);
     assert_eq!(categorized.len(), 263);
 }
 
@@ -6808,7 +6813,6 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
         false,
     );
     add(VerticalTool::RepoIndex, "mode", json!("structural"), true);
-    add(VerticalTool::RepoIndex, "detached", json!(true), true);
     add(
         VerticalTool::RepoStatus,
         "repository",
@@ -7937,6 +7941,11 @@ fn default_equivalent_cases() -> Vec<DefaultEquivalentCase> {
     let source = wire_source_reference(5, 10, 2, 2);
     let cases = [
         (
+            VerticalTool::RepoIndex,
+            json!({"root": "C:/fixture"}),
+            &[("detached", json!(false))][..],
+        ),
+        (
             VerticalTool::RepoStatus,
             json!({"repository": repository_selector(), "explain": true}),
             &[
@@ -8077,8 +8086,32 @@ async fn accepted_effect_defaults_match_omitted_values() {
     assert_eq!(cases.len(), observed.len(), "duplicate default oracle case");
 
     for case in cases {
-        let outcome = if case.tool == VerticalTool::RepoList {
-            FakeOutcome::RepositoryList(Ok(RepositoryList {
+        let outcome = match case.tool {
+            VerticalTool::RepoIndex => {
+                FakeOutcome::RepositoryIndex(Ok(RepositoryIndexPortResponse::new(
+                    RepositoryIndex {
+                        repository: repository(),
+                        operation: operation(),
+                        state: ClientOperationState::Succeeded,
+                        revision: 8,
+                        parent_generation: None,
+                        published_generation: Some(generation()),
+                        discovered_inputs: 1,
+                        indexed_files: 1,
+                        entities: 1,
+                        elapsed_micros: 1,
+                    },
+                    IndexPlanSummary {
+                        scope: IndexPlanScope::Repository,
+                        mode: IndexMode::Structural,
+                        providers: vec!["treesitter-rust".to_owned()],
+                        parent_generation: RequiredNullable(None),
+                        estimated_disk_bytes: 1,
+                    },
+                    Vec::new(),
+                )))
+            }
+            VerticalTool::RepoList => FakeOutcome::RepositoryList(Ok(RepositoryList {
                 repositories: vec![RepositoryListEntry {
                     repository_id: repository(),
                     active_generation: generation(),
@@ -8087,9 +8120,8 @@ async fn accepted_effect_defaults_match_omitted_values() {
                     semantic_freshness: "current".to_owned(),
                     state: "ready".to_owned(),
                 }],
-            }))
-        } else {
-            FakeOutcome::RepositoryStatus(Ok(repository_status_response()))
+            })),
+            _ => FakeOutcome::RepositoryStatus(Ok(repository_status_response())),
         };
         let harness = Harness::new(outcome);
         let omitted = execute(&harness.executor, case.tool, case.arguments.clone())

@@ -2627,7 +2627,7 @@ mod tests {
             ],
             "review any new generated-rule exclusion"
         );
-        assert_eq!((declared, covered, exclusions.len()), (154, 152, 2));
+        assert_eq!((declared, covered, exclusions.len()), (155, 153, 2));
     }
 
     #[tokio::test]
@@ -2831,6 +2831,23 @@ mod tests {
         }
         assert_eq!(tools[0]["annotations"]["readOnlyHint"], false);
         assert_eq!(tools[0]["annotations"]["idempotentHint"], false);
+        assert_eq!(
+            tools[0]["_meta"][DISCOVERY_METADATA_KEY]["lifecycle"],
+            json!({
+                "version": "1.0",
+                "updateByRepositoryId": false,
+                "acceptedModes": ["auto", "structural"],
+                "scope": "whole_repository",
+                "synchronousTerminal": true,
+                "maxWaitMs": 30_000,
+                "detached": false,
+                "publicIdempotency": "none",
+                "internalOperationRetry": true,
+                "statePersistence": "process_local",
+                "restartBehavior": "reindex_required",
+                "publication": "atomic_on_terminal_success"
+            })
+        );
         assert_eq!(tools[2]["annotations"]["readOnlyHint"], true);
         let operation_status = tools
             .iter()
@@ -2964,8 +2981,8 @@ mod tests {
                     "375f053b0e398da62f8ce55202363f913691c352d38e6ee066faab8043326857".to_owned(),
                 ),
                 (
-                    580_689,
-                    "276fbae4dd12d7871e3d44cc1c91d3d7fe450f4d44861dd0eeae153f7ced4234".to_owned(),
+                    581_615,
+                    "71dd8dd79f3e5ad78a3c2fa16f5a9614460e60ebee65ad7549a9fdd9f7da5609".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"

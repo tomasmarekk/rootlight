@@ -1534,8 +1534,9 @@ impl FirstSliceService {
     /// Publishes or reactivates one prepared generation for standalone use.
     ///
     /// Its final token check is a process-local, nondurable cancellation
-    /// linearization point. The daemon instead stages first, atomically records
-    /// durable journal success, and then invokes [`Self::commit_staged`].
+    /// linearization point. The daemon instead stages first, closes journal
+    /// cancellation admission, and then invokes [`Self::commit_staged`].
+    /// Daemon status remains nonterminal until the generation is queryable.
     ///
     /// # Errors
     ///
@@ -1632,8 +1633,9 @@ impl FirstSliceService {
 
     /// Commits one correctly linearized staged generation.
     ///
-    /// Daemon callers first durably terminalize the owning operation as
-    /// succeeded. Standalone [`Self::publish_prepared`] callers instead use its
+    /// Daemon callers first close cancellation admission in the journal and
+    /// suppress that internal success from public status until this commit
+    /// returns. Standalone [`Self::publish_prepared`] callers instead use its
     /// final nondurable cancellation-token checkpoint. The staging token proves
     /// that capacity and generation/search correlation were already admitted.
     ///

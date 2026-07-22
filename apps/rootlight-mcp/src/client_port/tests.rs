@@ -797,7 +797,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
     let index: RepoIndexOutput = execute(
         &executor,
         VerticalTool::RepoIndex,
-        json!({"root": "C:/fixture", "mode": "auto", "detached": true}),
+        json!({"root": "C:/fixture", "mode": "auto", "detached": false}),
     )
     .await;
     let ToolResponse::Success(index) = index else {
@@ -912,7 +912,7 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
         panic!("first call is repository index");
     };
     assert_eq!(root, "C:/fixture");
-    assert!(*detached);
+    assert!(!*detached);
     assert_eq!(*first_operation, indexed_operation);
     assert!(matches!(
         &calls[1],

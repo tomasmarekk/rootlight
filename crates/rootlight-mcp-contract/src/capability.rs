@@ -181,8 +181,41 @@ pub struct DiscoveryCapabilityMetadata {
     pub batch_shared_budget: bool,
     /// Concise source-free aggregate limitation.
     pub fallback_summary: &'static str,
+    /// Versioned lifecycle semantics for tools that create operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<DiscoveryLifecycleMetadata>,
     /// Reviewed field or value limitations.
     pub limitations: Vec<DiscoveryCapabilityLimit>,
+}
+
+/// Machine-readable lifecycle semantics for an operation-creating tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryLifecycleMetadata {
+    /// Version of this discovery-only lifecycle profile.
+    pub version: &'static str,
+    /// Whether an existing repository identity may select an update target.
+    pub update_by_repository_id: bool,
+    /// Closed indexing modes accepted by the fallback.
+    pub accepted_modes: Vec<&'static str>,
+    /// Closed indexing scope accepted by the fallback.
+    pub scope: &'static str,
+    /// Whether a successful call always returns a terminal result.
+    pub synchronous_terminal: bool,
+    /// Maximum attached call lifetime.
+    pub max_wait_ms: u32,
+    /// Whether work may outlive the submitting connection.
+    pub detached: bool,
+    /// Idempotency guarantee at the public tool boundary.
+    pub public_idempotency: &'static str,
+    /// Whether retrying the same internal operation identity is idempotent.
+    pub internal_operation_retry: bool,
+    /// Persistence scope for operation and generation state.
+    pub state_persistence: &'static str,
+    /// Required recovery action after process restart.
+    pub restart_behavior: &'static str,
+    /// Visibility guarantee for successful publication.
+    pub publication: &'static str,
 }
 
 /// One safe field/value limitation exposed through discovery metadata.
@@ -370,7 +403,12 @@ const fn blocked(path: &'static str, summary: &'static str) -> CapabilityRule {
 const REPO_INDEX_RULES: &[CapabilityRule] = &[
     accepted_fallback("root"),
     accepted_fallback("mode"),
-    accepted_fallback("detached"),
+    implemented("detached", "omission or false selects attached execution"),
+    unsupported_value(
+        "detached",
+        "true",
+        "detached indexing is not served because operation handles are process-local",
+    ),
     unsupported(
         "repository_id",
         "updating a registered repository is not served",
@@ -1107,8 +1145,26 @@ pub fn discovery_metadata(tool: McpTool) -> DiscoveryCapabilityMetadata {
         budget: capability.budget.name(),
         batch_shared_budget: capability.batch_shared_budget,
         fallback_summary: capability.fallback_summary,
+        lifecycle: lifecycle_metadata(tool),
         limitations,
     }
+}
+
+fn lifecycle_metadata(tool: McpTool) -> Option<DiscoveryLifecycleMetadata> {
+    (tool == McpTool::RepoIndex).then_some(DiscoveryLifecycleMetadata {
+        version: "1.0",
+        update_by_repository_id: false,
+        accepted_modes: vec!["auto", "structural"],
+        scope: "whole_repository",
+        synchronous_terminal: true,
+        max_wait_ms: 30_000,
+        detached: false,
+        public_idempotency: "none",
+        internal_operation_retry: true,
+        state_persistence: "process_local",
+        restart_behavior: "reindex_required",
+        publication: "atomic_on_terminal_success",
+    })
 }
 
 const fn build_capabilities() -> [ToolCapability; 19] {
@@ -1297,7 +1353,7 @@ const fn input_shape_hash(tool: McpTool) -> &'static str {
 
 const fn tool_fallback_summary(tool: McpTool) -> &'static str {
     match tool {
-        McpTool::RepoIndex => "bounded process-local generation creation",
+        McpTool::RepoIndex => "bounded attached process-local structural generation creation",
         McpTool::RepoStatus => {
             "bounded process-local status with the active generation and compact coverage"
         }
@@ -1427,6 +1483,19 @@ mod tests {
         assert_eq!(
             scoped_index.error_code,
             Some(ErrorCode::UnsupportedCapability)
+        );
+        let detached_index = repo_index.disposition("detached", Some("true"));
+        assert_eq!(
+            detached_index.status,
+            CapabilityStatus::UnsupportedStableError
+        );
+        assert_eq!(
+            detached_index.error_code,
+            Some(ErrorCode::UnsupportedCapability)
+        );
+        assert_eq!(
+            repo_index.disposition("detached", Some("false")).status,
+            CapabilityStatus::Implemented
         );
 
         let repo_status = CAPABILITIES[McpTool::RepoStatus as usize];
@@ -1563,6 +1632,22 @@ mod tests {
         assert!(operation_status.limitations.is_empty());
 
         let repo_index = discovery_metadata(McpTool::RepoIndex);
+        let lifecycle = repo_index
+            .lifecycle
+            .as_ref()
+            .expect("repo.index exposes its versioned lifecycle profile");
+        assert_eq!(lifecycle.version, "1.0");
+        assert!(!lifecycle.update_by_repository_id);
+        assert_eq!(lifecycle.accepted_modes, ["auto", "structural"]);
+        assert_eq!(lifecycle.scope, "whole_repository");
+        assert!(lifecycle.synchronous_terminal);
+        assert_eq!(lifecycle.max_wait_ms, 30_000);
+        assert!(!lifecycle.detached);
+        assert_eq!(lifecycle.public_idempotency, "none");
+        assert!(lifecycle.internal_operation_retry);
+        assert_eq!(lifecycle.state_persistence, "process_local");
+        assert_eq!(lifecycle.restart_behavior, "reindex_required");
+        assert_eq!(lifecycle.publication, "atomic_on_terminal_success");
         assert!(
             repo_index
                 .limitations
@@ -1570,6 +1655,17 @@ mod tests {
                 .all(|limitation| limitation.field != "root"),
             "accepted allowlist ancestors are not public limitations"
         );
+        assert!(repo_index.limitations.iter().any(|limitation| {
+            limitation.field == "detached"
+                && limitation.value == Some("true")
+                && limitation.status == "unsupported_stable_error"
+                && limitation.error_code == Some(ErrorCode::UnsupportedCapability)
+        }));
+        for tool in McpTool::ALL {
+            if tool != McpTool::RepoIndex {
+                assert!(discovery_metadata(tool).lifecycle.is_none());
+            }
+        }
 
         let batch = discovery_metadata(McpTool::QueryBatch);
         assert_eq!(batch.generation, "batch_inherited");

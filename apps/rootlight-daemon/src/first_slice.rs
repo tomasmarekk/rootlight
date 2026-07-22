@@ -874,7 +874,7 @@ fn retry_index_response(
         .copied()
         .ok_or_else(unsupported_restart_state)?;
     if metadata.publication == PublicationState::FailedClosed {
-        return Err(internal_error());
+        return Err(failed_closed_publication(operation.operation));
     }
     match operation.state {
         OperationState::Queued | OperationState::Running | OperationState::Cancelling => {
@@ -897,11 +897,10 @@ fn retry_index_response(
         }
         OperationState::Succeeded => {}
     }
-    if !matches!(
-        metadata.publication,
-        PublicationState::Staged | PublicationState::Committed
-    ) {
-        return Err(internal_error());
+    match metadata.publication {
+        PublicationState::Staged => return Err(operation_in_progress()),
+        PublicationState::Committed => {}
+        PublicationState::None | PublicationState::FailedClosed => return Err(internal_error()),
     }
     let receipt = metadata.receipt.ok_or_else(internal_error)?;
     Ok(index_response(receipt, &operation))
@@ -973,14 +972,33 @@ fn repository_operation_status(
         .copied()
         .ok_or_else(unsupported_restart_state)?;
     if metadata.publication == PublicationState::FailedClosed {
-        return Err(internal_error());
+        // Journal success closes the cancellation race before the process-local
+        // generation commit. A later commit failure cannot rewrite that durable
+        // terminal record, so the publication projection is authoritative at
+        // the public boundary and exposes the required rebuild recovery.
+        let mut visible = record;
+        visible.state = OperationState::Failed;
+        visible.error = Some(failed_closed_publication(operation));
+        return Ok(daemon::RepositoryOperationStatusResponse {
+            schema_version: Some(schema_version()),
+            operation: Some(operation_record_to_wire(&visible)),
+            published_generation: None,
+            started_unix_ms: metadata.started_unix_ms,
+            peak_rss_bytes: 0,
+            written_bytes: 0,
+            files_examined: metadata
+                .receipt
+                .map_or(0, |receipt| receipt.discovered_inputs),
+            retry_after_ms: None,
+        });
     }
     let published_generation = if record.state == OperationState::Succeeded {
-        if !matches!(
-            metadata.publication,
-            PublicationState::Staged | PublicationState::Committed
-        ) {
-            return Err(internal_error());
+        match metadata.publication {
+            PublicationState::Staged => return Err(operation_in_progress()),
+            PublicationState::Committed => {}
+            PublicationState::None | PublicationState::FailedClosed => {
+                return Err(internal_error());
+            }
         }
         Some(metadata.receipt.ok_or_else(internal_error)?.generation)
     } else {
@@ -2856,6 +2874,17 @@ fn operation_in_progress() -> PublicError {
         .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
 }
 
+fn failed_closed_publication(operation: OperationId) -> PublicError {
+    PublicError::builder(
+        ErrorCode::IndexCorrupt,
+        "repository publication failed before becoming queryable",
+    )
+    .operation(operation)
+    .next_action(NextAction::RebuildRepository)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
+}
+
 fn terminal_operation_error(operation: OperationId, message: &'static str) -> PublicError {
     PublicError::builder(ErrorCode::Cancelled, message)
         .operation(operation)
@@ -3625,7 +3654,7 @@ mod tests {
     }
 
     #[test]
-    fn succeeded_status_observes_staged_receipt_at_commit_boundary() {
+    fn status_cannot_observe_success_before_generation_commit() {
         let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
         let actor =
             JournalActor::start(Arc::clone(&journal), 16, 16).expect("journal actor starts");
@@ -3664,6 +3693,33 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("index reaches success/commit boundary");
 
+        let status = execute_with_timeout(
+            &daemon,
+            FirstSliceIpcRequest::RepositoryOperationStatus(
+                daemon::RepositoryOperationStatusRequest {
+                    schema_version: Some(schema_version()),
+                    operation: Some(operation_to_wire(operation)),
+                    action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                    wait_ms: None,
+                    after_revision: None,
+                },
+            ),
+        )
+        .expect_err("staged publication remains externally in progress");
+        assert_eq!(status.code(), ErrorCode::Busy);
+        assert!(status.retryable());
+        assert_eq!(status.next_actions(), &[NextAction::Retry]);
+
+        release_sender.send(()).expect("publication resumes");
+        let response = index.join().expect("index thread joins");
+        let FirstSliceIpcResponse::RepositoryIndex(indexed) = response else {
+            panic!("repository index response expected");
+        };
+        let repository = indexed.repository.clone().expect("repository is returned");
+        let generation = indexed
+            .published_generation
+            .clone()
+            .expect("generation is returned");
         let status = execute(
             &daemon,
             FirstSliceIpcRequest::RepositoryOperationStatus(
@@ -3677,7 +3733,7 @@ mod tests {
             ),
         );
         let FirstSliceIpcResponse::RepositoryOperationStatus(status) = status else {
-            panic!("operation status response expected");
+            panic!("committed operation status response expected");
         };
         assert_eq!(
             status
@@ -3689,13 +3745,121 @@ mod tests {
         );
         assert!(status.published_generation.is_some());
         assert_eq!(status.files_examined, 1);
+        let locate = execute(
+            &daemon,
+            FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+                schema_version: Some(schema_version()),
+                repository: Some(repository),
+                generation: Some(daemon::GenerationSelector {
+                    selector: Some(daemon::generation_selector::Selector::Generation(
+                        generation,
+                    )),
+                }),
+                query: "answer".to_owned(),
+                mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+                maximum_results: 8,
+            }),
+        );
+        let FirstSliceIpcResponse::CodeLocate(locate) = locate else {
+            panic!("first publicly successful status must name a queryable generation");
+        };
+        assert_eq!(locate.hits.len(), 1);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime builds");
+        drop(daemon);
+        runtime
+            .block_on(workers.stop(tokio::time::Instant::now() + Duration::from_secs(5)))
+            .expect("workers stop");
+        actor.join().expect("journal actor joins");
+    }
 
-        release_sender.send(()).expect("publication resumes");
-        let response = index.join().expect("index thread joins");
-        assert!(matches!(
-            response,
-            FirstSliceIpcResponse::RepositoryIndex(_)
-        ));
+    #[test]
+    fn commit_boundary_failure_reports_failed_and_publishes_nothing() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor =
+            JournalActor::start(Arc::clone(&journal), 16, 16).expect("journal actor starts");
+        let (reached_sender, reached_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let hook = PublicationBoundaryHook {
+            boundary: PublicationBoundary::AfterSuccess,
+            armed: AtomicBool::new(true),
+            reached: reached_sender,
+            release: release_receiver,
+        };
+        let (daemon, workers) = FirstSliceDaemon::start_with_publication_hook(actor.handle(), hook)
+            .expect("host starts");
+        let fixture = TempDir::new().expect("fixture exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn answer() -> u32 { 42 }\n",
+        )
+        .expect("source writes");
+        let operation = OperationId::from_bytes([45; 16]);
+        let index_daemon = daemon.clone();
+        let root = fixture.path().to_string_lossy().into_owned();
+        let retry_root = root.clone();
+        let index = thread::spawn(move || {
+            execute_with_timeout(
+                &index_daemon,
+                FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                    schema_version: Some(schema_version()),
+                    root,
+                    operation: Some(operation_to_wire(operation)),
+                    detached: true,
+                }),
+            )
+        });
+        reached_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("index reaches the commit boundary");
+        drop(release_sender);
+        let failure = index
+            .join()
+            .expect("index thread joins")
+            .expect_err("commit-boundary failure is returned");
+        assert_eq!(failure.code(), ErrorCode::Internal);
+
+        let status = execute(
+            &daemon,
+            FirstSliceIpcRequest::RepositoryOperationStatus(
+                daemon::RepositoryOperationStatusRequest {
+                    schema_version: Some(schema_version()),
+                    operation: Some(operation_to_wire(operation)),
+                    action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                    wait_ms: None,
+                    after_revision: None,
+                },
+            ),
+        );
+        let FirstSliceIpcResponse::RepositoryOperationStatus(status) = status else {
+            panic!("failed-closed operation status response expected");
+        };
+        let failed = status.operation.expect("failed operation is returned");
+        assert_eq!(failed.state, daemon::OperationState::Failed as i32);
+        let error = failed.error.expect("failed publication has a public error");
+        assert_eq!(error.code, common::ErrorCode::IndexCorrupt as i32);
+        assert!(status.published_generation.is_none());
+
+        let follow_up = execute(
+            &daemon,
+            FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
+                schema_version: Some(schema_version()),
+                root: retry_root,
+                operation: Some(operation_to_wire(OperationId::from_bytes([46; 16]))),
+                detached: true,
+            }),
+        );
+        let FirstSliceIpcResponse::RepositoryIndex(follow_up) = follow_up else {
+            panic!("reindex after failed publication succeeds");
+        };
+        assert!(
+            follow_up.parent_generation.is_none(),
+            "failed publication must not become a generation parent"
+        );
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
