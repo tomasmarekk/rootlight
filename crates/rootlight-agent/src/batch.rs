@@ -14,14 +14,14 @@ use std::{
 
 use rootlight_ids::RepositoryId;
 use rootlight_mcp_contract::{
-    McpTool, PublicError, SchemaVersion, TrustClassification,
+    ErrorCode, McpTool, PublicError, SchemaVersion, TrustClassification,
     context::{
         BatchOperation as ContractBatchOperation, BatchOperationResult, BatchOperationStatus,
         BatchStatus, BatchTool, FailurePolicy, QueryBatchData, QueryBatchInput,
     },
     vertical::{
         CacheStatus, CoverageSummary, ReadEnvelope, RequiredNullable, ResolvedRepository,
-        ResponseBudget, UsageSummary,
+        ResponseBudget, ResponseWarning, UsageSummary,
     },
 };
 use serde_json::{Map, Value};
@@ -347,10 +347,17 @@ pub fn resolve_arguments(
     envelopes: &[Option<ReadEnvelope<Value>>],
     input: &QueryBatchInput,
     declared: &[usize],
-) -> Result<Map<String, Value>, BatchExecutionError> {
+) -> Result<ResolvedBatchArguments, BatchExecutionError> {
     let mut arguments = Map::new();
+    let mut had_binding = false;
     for (key, value) in &operation.arguments {
-        let resolved = resolve_binding(value, envelopes, &input.operations, declared)?;
+        let resolved = resolve_binding(
+            value,
+            envelopes,
+            &input.operations,
+            declared,
+            &mut had_binding,
+        )?;
         arguments.insert(key.clone(), resolved);
     }
     arguments.insert(
@@ -363,7 +370,19 @@ pub fn resolve_arguments(
             serde_json::to_value(generation).map_err(|_| BatchExecutionError::Serialization)?,
         );
     }
-    Ok(arguments)
+    Ok(ResolvedBatchArguments {
+        arguments,
+        had_binding,
+    })
+}
+
+/// Resolved child arguments plus whether dependency data was inserted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedBatchArguments {
+    /// JSON arguments ready for dynamic child dispatch.
+    pub arguments: Map<String, Value>,
+    /// Whether at least one typed binding contributed a value.
+    pub had_binding: bool,
 }
 
 /// Shapes one successful child response into a batch operation result.
@@ -474,6 +493,7 @@ fn resolve_binding(
     envelopes: &[Option<ReadEnvelope<Value>>],
     operations: &[ContractBatchOperation],
     declared: &[usize],
+    had_binding: &mut bool,
 ) -> Result<Value, BatchExecutionError> {
     match value {
         Value::Object(map) => {
@@ -492,16 +512,18 @@ fn resolve_binding(
                     .ok_or(BatchExecutionError::InvalidBinding)?;
                 let encoded = serde_json::to_value(envelope)
                     .map_err(|_| BatchExecutionError::Serialization)?;
-                encoded
+                let resolved = encoded
                     .pointer(pointer)
                     .cloned()
-                    .ok_or(BatchExecutionError::InvalidBinding)
+                    .ok_or(BatchExecutionError::InvalidBinding)?;
+                *had_binding = true;
+                Ok(resolved)
             } else {
                 let mut resolved = Map::new();
                 for (key, inner) in map {
                     resolved.insert(
                         key.clone(),
-                        resolve_binding(inner, envelopes, operations, declared)?,
+                        resolve_binding(inner, envelopes, operations, declared, had_binding)?,
                     );
                 }
                 Ok(Value::Object(resolved))
@@ -513,7 +535,13 @@ fn resolve_binding(
                 .try_reserve_exact(items.len())
                 .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
             for inner in items {
-                resolved.push(resolve_binding(inner, envelopes, operations, declared)?);
+                resolved.push(resolve_binding(
+                    inner,
+                    envelopes,
+                    operations,
+                    declared,
+                    had_binding,
+                )?);
             }
             Ok(Value::Array(resolved))
         }
@@ -527,7 +555,8 @@ pub const DEFAULT_BATCH_TOKENS: u16 = 3_000;
 /// Checked public failures injected into transport-neutral batch orchestration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchPublicErrors {
-    invalid_arguments: PublicError,
+    binding_invalid: PublicError,
+    binding_type_mismatch: PublicError,
     operation_failed: PublicError,
     budget_exceeded: PublicError,
 }
@@ -536,20 +565,39 @@ impl BatchPublicErrors {
     /// Creates the source-free public failures used by batch result shaping.
     #[must_use]
     pub const fn new(
-        invalid_arguments: PublicError,
+        binding_invalid: PublicError,
+        binding_type_mismatch: PublicError,
         operation_failed: PublicError,
         budget_exceeded: PublicError,
     ) -> Self {
         Self {
-            invalid_arguments,
+            binding_invalid,
+            binding_type_mismatch,
             operation_failed,
             budget_exceeded,
         }
     }
 }
 
+/// Complete per-operation outcome when no child produced a usable envelope.
+///
+/// The composing adapter adds repository and generation metadata from its
+/// independently pinned status read without promoting child failures to a
+/// top-level domain error.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchUnsuccessfulOutput {
+    /// Results in the original request order.
+    pub operation_results: Vec<BatchOperationResult>,
+    /// Whether any observed child reported truncation.
+    pub truncated: bool,
+    /// Aggregate usage observed before all operations failed.
+    pub usage: UsageSummary,
+    /// Source-free warnings retained from observed child envelopes.
+    pub warnings: Vec<ResponseWarning>,
+}
+
 /// Failure returned by complete transport-neutral batch orchestration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum BatchOrchestrationError {
     /// The request violated a batch invariant.
@@ -563,7 +611,7 @@ pub enum BatchOrchestrationError {
     /// Aggregate resource usage exceeded the parent budget.
     BudgetExceeded,
     /// No operation produced a successful generation-pinned result.
-    NoSuccessfulOperation(Box<PublicError>),
+    NoSuccessfulOperation(Box<BatchUnsuccessfulOutput>),
     /// A child response violated repository or generation invariants.
     InvalidResponse,
     /// A bounded allocation or serialization operation failed.
@@ -652,18 +700,25 @@ impl BatchService {
                 continue;
             }
 
-            let arguments = match resolve_arguments(
+            let resolved = match resolve_arguments(
                 operation,
                 &binding_envelopes,
                 &input,
                 &dependencies[index],
             ) {
-                Ok(arguments) => arguments,
-                Err(_) => {
-                    results[index] = Some(error_result(operation, &errors.invalid_arguments));
+                Ok(resolved) => resolved,
+                Err(BatchExecutionError::InvalidBinding) => {
+                    results[index] = Some(error_result(operation, &errors.binding_invalid));
                     stop_scheduling |= fail_fast;
                     continue;
                 }
+                Err(
+                    BatchExecutionError::DuplicateOperationId
+                    | BatchExecutionError::UnknownDependency,
+                ) => return Err(BatchOrchestrationError::InvalidArguments),
+                Err(
+                    BatchExecutionError::Serialization | BatchExecutionError::MemoryUnavailable,
+                ) => return Err(BatchOrchestrationError::Internal),
             };
             let child_budget =
                 effective_child_budget(&parent_budget, operation.local_budget.as_ref());
@@ -671,7 +726,7 @@ impl BatchService {
                 effective_child_deadline(parent_deadline, child_budget.timeout_ms)?;
             let context =
                 AgentCallContext::new(cancellation.clone(), child_budget.clone(), child_deadline);
-            let request = AgentToolRequest::new(operation.tool, arguments);
+            let request = AgentToolRequest::new(operation.tool, resolved.arguments);
 
             match port.execute(request, context).await {
                 Ok(envelope) => {
@@ -699,7 +754,13 @@ impl BatchService {
                     binding_envelopes[index] = Some(envelope);
                 }
                 Err(AgentPortError::Public(error)) => {
-                    results[index] = Some(error_result(operation, &error));
+                    let public = if resolved.had_binding && error.code() == ErrorCode::TypeMismatch
+                    {
+                        &errors.binding_type_mismatch
+                    } else {
+                        &error
+                    };
+                    results[index] = Some(error_result(operation, public));
                     stop_scheduling |= fail_fast;
                 }
                 Err(AgentPortError::Cancelled) => {
@@ -721,17 +782,24 @@ impl BatchService {
         checkpoint(&cancellation)?;
         check_deadline(parent_deadline)?;
         let operation_results: Vec<BatchOperationResult> = results.into_iter().flatten().collect();
+        let truncated = operation_results.iter().any(|result| result.truncated);
+        let usage = aggregate_usage(&observed_envelopes);
         let Some(source) = binding_envelopes.iter().flatten().next() else {
-            let first_error = operation_results
+            let warnings = observed_envelopes
                 .iter()
-                .find_map(|result| result.error.clone())
-                .unwrap_or(errors.operation_failed);
+                .flatten()
+                .flat_map(|envelope| envelope.warnings.iter().cloned())
+                .collect();
             return Err(BatchOrchestrationError::NoSuccessfulOperation(Box::new(
-                first_error,
+                BatchUnsuccessfulOutput {
+                    operation_results,
+                    truncated,
+                    usage,
+                    warnings,
+                },
             )));
         };
 
-        let truncated = operation_results.iter().any(|result| result.truncated);
         let data = QueryBatchData {
             batch_status: aggregate_status(&operation_results),
             generation_id: source.generation.generation_id,
@@ -753,7 +821,7 @@ impl BatchService {
             data,
             truncated,
             next_cursor: RequiredNullable(None),
-            usage: aggregate_usage(&observed_envelopes),
+            usage,
             warnings: source.warnings.clone(),
             trust: TrustClassification::UntrustedRepositoryData,
         })

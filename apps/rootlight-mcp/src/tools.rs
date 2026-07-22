@@ -16,6 +16,7 @@ use rootlight_mcp_contract::{
     context::{
         BatchOperation, ContextPackInput, QueryAdvancedInput, QueryAstNode, QueryBatchInput,
     },
+    error_definition,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -27,8 +28,13 @@ use super::{
     INVALID_PARAMS, MAX_REQUEST_ID_BYTES, METHOD_NOT_FOUND, OperatingRequest, RequestCancellation,
     RequestHandler, request_meta_is_valid,
 };
-use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL, QueryOperator};
-use crate::batch::{BatchPlan, is_batch_allowed_under_profile, mcp_tool_for_batch};
+use crate::advanced::{
+    AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL, QueryOperator,
+};
+use crate::batch::{
+    BatchPlan, BatchValidationError, is_batch_allowed, is_batch_allowed_under_profile,
+    mcp_tool_for_batch,
+};
 
 #[cfg(test)]
 use rootlight_mcp_contract::context::BatchTool;
@@ -38,7 +44,7 @@ const MAX_TOOL_NAME_BYTES: usize = 128;
 const MAX_REPOSITORY_ROOT_BYTES: usize = 4_096;
 const MAX_CONFIGURATION_PATCH_BYTES: usize = 64 * 1_024;
 const MAX_LOCATE_QUERY_BYTES: usize = 2_048;
-const INVALID_ARGUMENT_MESSAGE: &str = "tool arguments do not match the input schema";
+const INVALID_ARGUMENT_MESSAGE: &str = error_definition(ErrorCode::InvalidArgument).message;
 const RESOURCE_EXHAUSTED_MESSAGE: &str = "tool result exceeds the mcp response limit";
 const MAX_REPO_INDEX_ARGUMENT_BYTES: usize = 96 * 1_024;
 const MAX_OPERATION_STATUS_ARGUMENT_BYTES: usize = 16 * 1_024;
@@ -321,9 +327,11 @@ where
             || !contract.input_validator.is_valid(&arguments_value)
             || !tool_specific_input_limits_are_valid(contract.tool, &arguments_value)
         {
+            let error =
+                classify_schema_error(contract.tool, &arguments_value).unwrap_or(invalid_arguments);
             return cancel_or(
                 &cancellation,
-                tool_error(contract, invalid_arguments)
+                tool_error(contract, error)
                     .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
             );
         }
@@ -338,9 +346,11 @@ where
             }
         };
         if !typed_input_invariants_are_valid(contract.tool, &typed_input, profile) {
+            let error = classify_typed_invariant_error(contract.tool, &typed_input, profile)
+                .unwrap_or(invalid_arguments);
             return cancel_or(
                 &cancellation,
-                tool_error(contract, invalid_arguments)
+                tool_error(contract, error)
                     .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
             );
         }
@@ -652,6 +662,58 @@ fn typed_input_invariants_are_valid(
     }
 }
 
+fn classify_schema_error(tool: VerticalTool, input: &Value) -> Option<PublicError> {
+    if tool == VerticalTool::QueryAdvanced
+        && input
+            .get("query")
+            .is_some_and(query_contains_forbidden_operator)
+    {
+        return Some(domain_error(ErrorCode::OperatorForbidden, "query"));
+    }
+    None
+}
+
+fn query_contains_forbidden_operator(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            if let Some(Value::String(operator)) = object.get("op")
+                && !matches!(
+                    operator.as_str(),
+                    "scan"
+                        | "filter"
+                        | "project"
+                        | "join"
+                        | "aggregate"
+                        | "traverse"
+                        | "sort"
+                        | "limit"
+                )
+            {
+                return true;
+            }
+            object.values().any(query_contains_forbidden_operator)
+        }
+        Value::Array(values) => values.iter().any(query_contains_forbidden_operator),
+        _ => false,
+    }
+}
+
+fn classify_typed_invariant_error(
+    tool: VerticalTool,
+    input: &TypedInput,
+    profile: ExposureProfile,
+) -> Option<PublicError> {
+    match (tool, input) {
+        (VerticalTool::QueryAdvanced, TypedInput::QueryAdvanced(input)) => {
+            advanced_invariant_error(input)
+        }
+        (VerticalTool::QueryBatch, TypedInput::QueryBatch(input)) => {
+            batch_invariant_error(input, profile)
+        }
+        _ => None,
+    }
+}
+
 /// A context pack must anchor to at least one non-empty seed kind.
 fn context_pack_invariants_are_valid(input: &ContextPackInput) -> bool {
     let seeds = &input.seeds;
@@ -679,17 +741,23 @@ fn context_pack_invariants_are_valid(input: &ContextPackInput) -> bool {
 /// Validates the safe query AST: bounded depth, allow-listed operators, static
 /// cost within the hard ceiling, and within any client-supplied cost limit.
 fn advanced_invariants_are_valid(input: &QueryAdvancedInput) -> bool {
+    advanced_invariant_error(input).is_none()
+}
+
+fn advanced_invariant_error(input: &QueryAdvancedInput) -> Option<PublicError> {
     let mut operators = Vec::new();
     let mut depth = 0usize;
     collect_ast_operators(&input.query, &mut operators, &mut depth, 1);
     let max_rows = usize::from(input.max_results.unwrap_or(100));
-    let Ok(plan) = AdvancedQueryPlan::validate(&operators, max_rows, MAX_ADVANCED_TRAVERSAL, depth)
-    else {
-        return false;
-    };
-    input
+    let plan =
+        match AdvancedQueryPlan::validate(&operators, max_rows, MAX_ADVANCED_TRAVERSAL, depth) {
+            Ok(plan) => plan,
+            Err(error) => return Some(advanced_error(error)),
+        };
+    (!input
         .cost_limit
-        .is_none_or(|limit| plan.estimated_cost <= limit)
+        .is_none_or(|limit| plan.estimated_cost <= limit))
+    .then(|| domain_error(ErrorCode::CostLimit, "cost_limit"))
 }
 
 /// Walks the query AST, recording the operator sequence and maximum nesting
@@ -722,23 +790,29 @@ fn collect_ast_operators(
 /// active exposure profile, and bindings that only reference declared
 /// dependencies.
 fn batch_invariants_are_valid(input: &QueryBatchInput, profile: ExposureProfile) -> bool {
+    batch_invariant_error(input, profile).is_none()
+}
+
+fn batch_invariant_error(input: &QueryBatchInput, profile: ExposureProfile) -> Option<PublicError> {
     let operations = &input.operations;
 
     let mut ids: Vec<&str> = operations.iter().map(|op| op.id.as_str()).collect();
     ids.sort_unstable();
     if ids.windows(2).any(|pair| pair[0] == pair[1]) {
-        return false;
+        return Some(domain_error(ErrorCode::InvalidArgument, "operations"));
     }
 
     let tools: Vec<McpTool> = operations
         .iter()
         .map(|op| mcp_tool_for_batch(op.tool))
         .collect();
-    if !tools
-        .iter()
-        .all(|tool| is_batch_allowed_under_profile(*tool, profile))
-    {
-        return false;
+    for tool in &tools {
+        if !is_batch_allowed(*tool) {
+            return Some(domain_error(ErrorCode::OperatorForbidden, "operations"));
+        }
+        if !is_batch_allowed_under_profile(*tool, profile) {
+            return Some(domain_error(ErrorCode::UnsupportedCapability, "operations"));
+        }
     }
 
     let mut dependencies: Vec<Vec<usize>> = Vec::with_capacity(operations.len());
@@ -747,7 +821,7 @@ fn batch_invariants_are_valid(input: &QueryBatchInput, profile: ExposureProfile)
         if let Some(declared) = &operation.depends_on {
             for name in declared {
                 let Some(index) = operations.iter().position(|other| other.id == *name) else {
-                    return false;
+                    return Some(domain_error(ErrorCode::InvalidArgument, "depends_on"));
                 };
                 resolved.push(index);
             }
@@ -755,8 +829,8 @@ fn batch_invariants_are_valid(input: &QueryBatchInput, profile: ExposureProfile)
         dependencies.push(resolved);
     }
 
-    if BatchPlan::validate(&tools, &dependencies).is_err() {
-        return false;
+    if let Err(error) = BatchPlan::validate(&tools, &dependencies) {
+        return Some(batch_validation_error(error));
     }
 
     for (index, operation) in operations.iter().enumerate() {
@@ -765,11 +839,53 @@ fn batch_invariants_are_valid(input: &QueryBatchInput, profile: ExposureProfile)
             &dependencies[index],
             operations,
         ) {
-            return false;
+            return Some(domain_error(ErrorCode::BindingInvalid, "arguments"));
         }
     }
 
-    true
+    None
+}
+
+fn advanced_error(error: AdvancedQueryError) -> PublicError {
+    let (code, field) = match error {
+        AdvancedQueryError::ForbiddenOperator => (ErrorCode::OperatorForbidden, "query"),
+        AdvancedQueryError::TypeMismatch => (ErrorCode::TypeMismatch, "query"),
+        AdvancedQueryError::CostExceeded
+        | AdvancedQueryError::DepthExceeded
+        | AdvancedQueryError::RowLimitExceeded
+        | AdvancedQueryError::TraversalLimitExceeded => (ErrorCode::CostLimit, "query"),
+        AdvancedQueryError::Malformed => (ErrorCode::InvalidArgument, "query"),
+    };
+    domain_error(code, field)
+}
+
+fn batch_validation_error(error: BatchValidationError) -> PublicError {
+    let (code, field) = match error {
+        BatchValidationError::ForbiddenTool | BatchValidationError::NestedBatch => {
+            (ErrorCode::OperatorForbidden, "operations")
+        }
+        BatchValidationError::InvalidBinding => (ErrorCode::BindingInvalid, "arguments"),
+        BatchValidationError::InvalidOperationCount
+        | BatchValidationError::CyclicDependency
+        | BatchValidationError::DepthExceeded
+        | BatchValidationError::InvalidDependencyReference
+        | BatchValidationError::TooManyDependencies => (ErrorCode::InvalidArgument, "operations"),
+    };
+    domain_error(code, field)
+}
+
+fn domain_error(code: ErrorCode, field: &'static str) -> PublicError {
+    let definition = error_definition(code);
+    let mut builder =
+        PublicError::builder(code, definition.message).next_action(NextAction::CorrectField {
+            field: DetailKey::parse(field).expect("static detail key is valid"),
+        });
+    if definition.retryable {
+        builder = builder.retryable();
+    }
+    builder
+        .build()
+        .expect("normative error registry entries satisfy public bounds")
 }
 
 /// Checks that every `$from` binding leaf names a declared dependency of its
@@ -2230,9 +2346,180 @@ mod tests {
         let mut tight = advanced_input(scan());
         tight.cost_limit = Some(1);
         assert!(!advanced_invariants_are_valid(&tight));
+        assert_eq!(
+            advanced_invariant_error(&tight).map(|error| error.code()),
+            Some(ErrorCode::CostLimit)
+        );
         let mut generous = advanced_input(scan());
         generous.cost_limit = Some(1_000);
         assert!(advanced_invariants_are_valid(&generous));
+    }
+
+    #[tokio::test]
+    async fn advanced_forbidden_operator_has_a_stable_domain_code() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "query.advanced",
+                        "arguments": {
+                            "repository": selector(),
+                            "query": {"op": "execute", "command": "ignored"}
+                        }
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+        let result = success(response);
+        assert_eq!(
+            result["structuredContent"]["error"]["code"],
+            "OPERATOR_FORBIDDEN"
+        );
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn advanced_cost_limit_has_a_stable_domain_code() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "query.advanced",
+                        "arguments": {
+                            "repository": selector(),
+                            "query": {"op": "scan", "entity": "function"},
+                            "cost_limit": 1
+                        }
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+        let result = success(response);
+        assert_eq!(result["structuredContent"]["error"]["code"], "COST_LIMIT");
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn batch_plan_and_profile_failures_remain_top_level_domain_errors() {
+        let developer = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let invalid_binding = developer
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "query.batch",
+                        "arguments": {
+                            "repository": selector(),
+                            "operations": [
+                                {
+                                    "id": "find",
+                                    "tool": "code.locate",
+                                    "arguments": {"query": "publish"}
+                                },
+                                {
+                                    "id": "explain",
+                                    "tool": "symbol.explain",
+                                    "arguments": {
+                                        "symbol_ids": [
+                                            {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+        let invalid_binding = success(invalid_binding);
+        assert_eq!(
+            invalid_binding["structuredContent"]["error"]["code"],
+            "BINDING_INVALID"
+        );
+
+        let scout = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Scout)
+            .expect("registry compiles");
+        let hidden = scout
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "query.batch",
+                        "arguments": {
+                            "repository": selector(),
+                            "operations": [
+                                {
+                                    "id": "relations",
+                                    "tool": "symbol.relationships",
+                                    "arguments": {}
+                                }
+                            ]
+                        }
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+        let hidden = success(hidden);
+        assert_eq!(
+            hidden["structuredContent"]["error"]["code"],
+            "UNSUPPORTED_CAPABILITY"
+        );
+        assert_eq!(developer.executor.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(scout.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn versioned_error_goldens_are_checked_source_free_envelopes() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/errors/mcp-error-goldens-1.0.json"
+        ))
+        .expect("checked error goldens are valid JSON");
+        let observed: Vec<ErrorCode> = fixture["envelopes"]
+            .as_array()
+            .expect("golden envelopes are an array")
+            .iter()
+            .map(|envelope| {
+                serde_json::from_value::<ErrorResponse>(envelope.clone())
+                    .expect("golden envelope satisfies the checked Rust contract")
+                    .error
+                    .code()
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            [
+                ErrorCode::InvalidCursor,
+                ErrorCode::TypeMismatch,
+                ErrorCode::BudgetExceeded,
+                ErrorCode::CostLimit,
+                ErrorCode::OperatorForbidden,
+                ErrorCode::BindingInvalid,
+                ErrorCode::BindingTypeMismatch,
+            ]
+        );
+
+        let additive: ErrorResponse = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/errors/mcp-error-envelope-1.0-additive-details.json"
+        ))
+        .expect("additive detail fixture remains compatible");
+        assert_eq!(additive.error.code(), ErrorCode::InvalidCursor);
+        assert_eq!(additive.error.details().len(), 2);
+
+        let encoded = serde_json::to_string(&fixture).expect("goldens serialize");
+        for forbidden in ["C:\\", "/home/", "BEGIN PRIVATE KEY", "gho_"] {
+            assert!(!encoded.contains(forbidden));
+        }
     }
 
     fn pack_input(seeds: ContextSeedSelector) -> ContextPackInput {

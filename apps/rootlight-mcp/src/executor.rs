@@ -13,7 +13,8 @@ use std::{
 
 use rootlight_agent::{
     batch::{
-        BatchOrchestrationError, BatchPlan, BatchPublicErrors, BatchService, mcp_tool_for_batch,
+        BatchExecutionError, BatchOrchestrationError, BatchPlan, BatchPublicErrors, BatchService,
+        BatchUnsuccessfulOutput, BatchValidationError, mcp_tool_for_batch,
         resolve_dependencies as resolve_batch_dependencies, terminal_result,
     },
     change::{
@@ -53,13 +54,15 @@ use rootlight_mcp_contract::intent::{
 };
 use rootlight_mcp_contract::{
     DetailKey, ErrorCode, GenerationSelector, McpTool, NextAction, PublicError,
-    PublicErrorBuildError, RepoIndexInput, RepositorySelector, SafeLabel, SchemaVersion,
-    SourceReadInput, SymbolExplainInput, ToolResponse, TrustClassification, VerticalTool,
+    PublicErrorBuildError, PublicValue, RepoIndexInput, RepositorySelector, SafeLabel,
+    SchemaVersion, SourceReadInput, SymbolExplainInput, ToolResponse, TrustClassification,
+    VerticalTool,
     context::{
         BatchOperationStatus, BatchStatus, BatchTool, ColumnSchema, ColumnType, ContextPackData,
         ContextPackInput, ContextStructure, PlanExplanation, QueryAdvancedData, QueryAdvancedInput,
         QueryBatchData, QueryBatchInput, QueryCompleteness, TokenAccounting,
     },
+    error_definition,
     pagination::{AuthenticatedCursor, CursorContext},
     repository::{
         CoverageReport, LanguageCoverageReport, RepoListData, RepoListInput, RepoStatusData,
@@ -85,7 +88,7 @@ use thiserror::Error;
 use unicode_casefold::UnicodeCaseFold as _;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::advanced::{AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL};
+use crate::advanced::{AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL};
 use crate::{
     RequestCancellation, ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture,
     ToolExecutor,
@@ -94,10 +97,10 @@ use crate::{
 const DEFAULT_LOCATE_RESULTS: u16 = 20;
 const DEFAULT_ADVANCED_RESULTS: u16 = 100;
 const CURRENT_SOURCE_CONTEXT_LINES: u8 = 2;
-const INVALID_ARGUMENT_MESSAGE: &str = "tool arguments are invalid";
-const UNSUPPORTED_MESSAGE: &str = "requested option is not supported";
+const INVALID_ARGUMENT_MESSAGE: &str = error_definition(ErrorCode::InvalidArgument).message;
+const UNSUPPORTED_MESSAGE: &str = error_definition(ErrorCode::UnsupportedCapability).message;
 const BATCH_OPERATION_FAILED_MESSAGE: &str = "batch operation failed";
-const INVALID_CURSOR_MESSAGE: &str = "pagination cursor is invalid or expired";
+const INVALID_CURSOR_MESSAGE: &str = error_definition(ErrorCode::InvalidCursor).message;
 
 /// Future returned by one injected first-slice client-port operation.
 pub type ClientPortFuture<T> =
@@ -1611,7 +1614,7 @@ async fn execute_query_batch<P>(
 where
     P: FirstSliceClientPort,
 {
-    let input: QueryBatchInput = decode_input(arguments)?;
+    let mut input: QueryBatchInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
     let repository = repository_id(input.repository.clone(), unsupported)?;
     if !is_compact_profile(input.response_profile) {
@@ -1627,30 +1630,66 @@ where
         .iter()
         .map(|operation| mcp_tool_for_batch(operation.tool))
         .collect();
-    let dependencies = resolve_batch_dependencies(&input.operations)
-        .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
-    BatchPlan::validate(&tools, &dependencies)
-        .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
+    let dependencies =
+        resolve_batch_dependencies(&input.operations).map_err(batch_dependency_error)?;
+    BatchPlan::validate(&tools, &dependencies).map_err(batch_plan_error)?;
 
     if explain_only {
         let output = explain_query_batch(port, repository, &input, cancellation).await?;
         return serialize_success(output);
     }
-    let budget_exceeded = PublicError::builder(ErrorCode::BudgetExceeded, "batch budget exceeded")
-        .build()
-        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    let status_request =
+        RepositoryStatusPortRequest::new(repository, client_generation(input.generation.clone()));
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation.clone(),
+    )
+    .await?;
+    if status.repository_id != repository {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    input.generation = Some(GenerationSelector::Explicit(status.active_generation));
+
+    let budget_exceeded = domain_error(ErrorCode::BudgetExceeded, None);
     let adapter = Arc::new(McpAgentToolPort {
-        port,
+        port: Arc::clone(&port),
         unsupported: unsupported.clone(),
         invalid_arguments: invalid_arguments.clone(),
     });
-    let errors =
-        BatchPublicErrors::new(invalid_arguments.clone(), operation_failed, budget_exceeded);
-    let output = BatchService
+    let errors = BatchPublicErrors::new(
+        binding_invalid_error(),
+        binding_type_mismatch_error(),
+        operation_failed,
+        budget_exceeded,
+    );
+    let output = match BatchService
         .execute(adapter, input, repository, cancellation, errors)
         .await
-        .map_err(map_batch_orchestration_error)?;
+    {
+        Ok(output) => output,
+        Err(BatchOrchestrationError::NoSuccessfulOperation(output)) => {
+            unsuccessful_batch_envelope(status, *output)?
+        }
+        Err(error) => return Err(map_batch_orchestration_error(error)),
+    };
     serialize_success(output)
+}
+
+fn unsuccessful_batch_envelope(
+    status: client::RepositoryStatus,
+    output: BatchUnsuccessfulOutput,
+) -> Result<ReadEnvelope<QueryBatchData>, ToolExecutionError> {
+    let data = QueryBatchData {
+        batch_status: BatchStatus::Error,
+        generation_id: status.active_generation,
+        operation_results: output.operation_results,
+        explanation: None,
+    };
+    let mut envelope = explain_envelope_from_status(status, data)?;
+    envelope.truncated = output.truncated;
+    envelope.usage = output.usage;
+    envelope.warnings = output.warnings;
+    Ok(envelope)
 }
 
 /// MCP adapter for the client-free agent tool port.
@@ -1773,7 +1812,9 @@ fn map_batch_orchestration_error(error: BatchOrchestrationError) -> ToolExecutio
                 .expect("static batch budget error is valid");
             ToolExecutionError::new(error)
         }
-        BatchOrchestrationError::NoSuccessfulOperation(error) => ToolExecutionError::new(*error),
+        BatchOrchestrationError::NoSuccessfulOperation(_) => {
+            internal(ToolExecutionFailure::Executor)
+        }
         BatchOrchestrationError::Cancelled | BatchOrchestrationError::Internal => {
             internal(ToolExecutionFailure::Executor)
         }
@@ -4319,13 +4360,14 @@ fn normalize_query_advanced(
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let max_rows = usize::from(input.max_results.unwrap_or(DEFAULT_ADVANCED_RESULTS));
-    AdvancedQueryPlan::from_ast(
-        &input.query,
-        max_rows,
-        MAX_ADVANCED_TRAVERSAL,
-        input.cost_limit,
-    )
-    .map_err(|_| ToolExecutionError::new(unsupported.clone()))?;
+    let plan = AdvancedQueryPlan::from_ast(&input.query, max_rows, MAX_ADVANCED_TRAVERSAL, None)
+        .map_err(advanced_query_error)?;
+    if input
+        .cost_limit
+        .is_some_and(|limit| plan.estimated_cost > limit)
+    {
+        return Err(cost_limit_error(plan.estimated_cost, input.cost_limit));
+    }
     let query_ast = serde_json::to_string(&input.query)
         .map_err(|_| ToolExecutionError::new(unsupported.clone()))?;
     Ok(QueryAdvancedPortRequest {
@@ -4445,7 +4487,102 @@ fn decode_input<T>(arguments: Map<String, Value>) -> Result<T, ToolExecutionErro
 where
     T: DeserializeOwned,
 {
-    serde_json::from_value(Value::Object(arguments)).map_err(|_| invalid_input())
+    serde_json::from_value(Value::Object(arguments)).map_err(|_| type_mismatch_error("arguments"))
+}
+
+fn domain_error(code: ErrorCode, field: Option<&'static str>) -> PublicError {
+    let definition = error_definition(code);
+    let mut builder = PublicError::builder(code, definition.message);
+    if definition.retryable {
+        builder = builder.retryable();
+    }
+    if let Some(field) = field {
+        builder = builder.next_action(NextAction::CorrectField {
+            field: DetailKey::parse(field).expect("static detail key is valid"),
+        });
+    } else if code == ErrorCode::InvalidCursor {
+        builder = builder.next_action(NextAction::RestartEnumeration);
+    }
+    builder
+        .build()
+        .expect("normative error registry entries satisfy public bounds")
+}
+
+fn type_mismatch_error(field: &'static str) -> ToolExecutionError {
+    ToolExecutionError::new(domain_error(ErrorCode::TypeMismatch, Some(field)))
+}
+
+fn binding_invalid_error() -> PublicError {
+    domain_error(ErrorCode::BindingInvalid, Some("arguments"))
+}
+
+fn binding_type_mismatch_error() -> PublicError {
+    domain_error(ErrorCode::BindingTypeMismatch, Some("arguments"))
+}
+
+fn batch_dependency_error(error: BatchExecutionError) -> ToolExecutionError {
+    let field = match error {
+        BatchExecutionError::DuplicateOperationId => "operations",
+        BatchExecutionError::UnknownDependency => "depends_on",
+        BatchExecutionError::InvalidBinding => "arguments",
+        BatchExecutionError::Serialization | BatchExecutionError::MemoryUnavailable => {
+            return internal(ToolExecutionFailure::Executor);
+        }
+    };
+    ToolExecutionError::new(domain_error(ErrorCode::InvalidArgument, Some(field)))
+}
+
+fn batch_plan_error(error: BatchValidationError) -> ToolExecutionError {
+    let (code, field) = match error {
+        BatchValidationError::ForbiddenTool | BatchValidationError::NestedBatch => {
+            (ErrorCode::OperatorForbidden, "operations")
+        }
+        BatchValidationError::InvalidBinding => (ErrorCode::BindingInvalid, "arguments"),
+        BatchValidationError::InvalidOperationCount
+        | BatchValidationError::CyclicDependency
+        | BatchValidationError::DepthExceeded
+        | BatchValidationError::InvalidDependencyReference
+        | BatchValidationError::TooManyDependencies => (ErrorCode::InvalidArgument, "operations"),
+    };
+    ToolExecutionError::new(domain_error(code, Some(field)))
+}
+
+fn advanced_query_error(error: AdvancedQueryError) -> ToolExecutionError {
+    let (code, field) = match error {
+        AdvancedQueryError::ForbiddenOperator => (ErrorCode::OperatorForbidden, "query"),
+        AdvancedQueryError::TypeMismatch => (ErrorCode::TypeMismatch, "query"),
+        AdvancedQueryError::CostExceeded
+        | AdvancedQueryError::DepthExceeded
+        | AdvancedQueryError::RowLimitExceeded
+        | AdvancedQueryError::TraversalLimitExceeded => (ErrorCode::CostLimit, "query"),
+        AdvancedQueryError::Malformed => (ErrorCode::InvalidArgument, "query"),
+    };
+    ToolExecutionError::new(domain_error(code, Some(field)))
+}
+
+fn cost_limit_error(estimated_cost: u64, requested_limit: Option<u64>) -> ToolExecutionError {
+    let mut builder = PublicError::builder(
+        ErrorCode::CostLimit,
+        error_definition(ErrorCode::CostLimit).message,
+    )
+    .detail(
+        DetailKey::parse("estimated_cost").expect("static detail key is valid"),
+        PublicValue::Unsigned(estimated_cost),
+    )
+    .next_action(NextAction::CorrectField {
+        field: DetailKey::parse("cost_limit").expect("static detail key is valid"),
+    });
+    if let Some(limit) = requested_limit {
+        builder = builder.detail(
+            DetailKey::parse("cost_limit").expect("static detail key is valid"),
+            PublicValue::Unsigned(limit),
+        );
+    }
+    ToolExecutionError::new(
+        builder
+            .build()
+            .expect("static cost-limit error satisfies public bounds"),
+    )
 }
 
 /// Builds the client-correctable error for malformed tool arguments.
