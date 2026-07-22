@@ -5,7 +5,7 @@
 
 use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 
-use jsonschema::Validator;
+use jsonschema::{Validator, error::ValidationErrorKind};
 use rootlight_mcp_contract::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, DetailKey, ErrorCode, ErrorResponse,
     ExposureProfile, GenerationSelector, McpTool, NextAction, OperationStatusInput,
@@ -13,9 +13,7 @@ use rootlight_mcp_contract::{
     SchemaVersion, SourceReadInput, SourceReadOutput, SymbolExplainInput, SymbolExplainOutput,
     ToolResponse, TrustClassification, VerticalTool,
     capability::{DISCOVERY_METADATA_KEY, discovery_metadata},
-    context::{
-        BatchOperation, ContextPackInput, QueryAdvancedInput, QueryAstNode, QueryBatchInput,
-    },
+    context::{BatchOperation, ContextPackInput, QueryAdvancedInput, QueryBatchInput},
     error_definition,
     pagination::AuthenticatedCursor,
     repository::RepoListInput,
@@ -30,16 +28,14 @@ use super::{
     INVALID_PARAMS, MAX_REQUEST_ID_BYTES, METHOD_NOT_FOUND, OperatingRequest, RequestCancellation,
     RequestHandler, request_meta_is_valid,
 };
-use crate::advanced::{
-    AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL, QueryOperator,
-};
+use crate::advanced::{AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL};
 use crate::batch::{
     BatchPlan, BatchValidationError, is_batch_allowed, is_batch_allowed_under_profile,
     mcp_tool_for_batch,
 };
 
 #[cfg(test)]
-use rootlight_mcp_contract::context::BatchTool;
+use rootlight_mcp_contract::context::{BatchTool, QueryAstNode};
 
 const INTERNAL_ERROR: i32 = -32_603;
 const MAX_TOOL_NAME_BYTES: usize = 128;
@@ -325,23 +321,13 @@ where
             );
         }
         let arguments_value = Value::Object(arguments);
-        if !tool_argument_bytes_are_valid(contract.tool, &arguments_value)
-            || !contract.input_validator.is_valid(&arguments_value)
-            || !tool_specific_input_limits_are_valid(contract.tool, &arguments_value)
-        {
-            let error =
-                classify_schema_error(contract.tool, &arguments_value).unwrap_or(invalid_arguments);
-            return cancel_or(
-                &cancellation,
-                tool_error(contract, error)
-                    .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
-            );
-        }
-        let typed_input = match decode_typed_input(contract.tool, &arguments_value) {
+        let typed_input = match validate_contract_input(contract, &arguments_value, profile) {
             Ok(input) => input,
-            Err(()) => {
-                let error = classify_typed_decode_error(contract.tool, &arguments_value)
-                    .unwrap_or(invalid_arguments);
+            Err(error) => {
+                let error = match error {
+                    MaterializedInputError::Invalid { .. } => invalid_arguments,
+                    MaterializedInputError::Public(error) => *error,
+                };
                 return cancel_or(
                     &cancellation,
                     tool_error(contract, error)
@@ -349,15 +335,6 @@ where
                 );
             }
         };
-        if !typed_input_invariants_are_valid(contract.tool, &typed_input, profile) {
-            let error = classify_typed_invariant_error(contract.tool, &typed_input, profile)
-                .unwrap_or(invalid_arguments);
-            return cancel_or(
-                &cancellation,
-                tool_error(contract, error)
-                    .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
-            );
-        }
         if cancellation.is_cancelled() {
             return HandlerResponse::Cancelled;
         }
@@ -484,6 +461,125 @@ struct ToolContract {
     definition: ToolDefinition,
     input_validator: Validator,
     output_validator: Validator,
+}
+
+/// Reusable pre-execution validator for dynamic batch child requests.
+///
+/// It compiles the same checked contracts and invokes the same byte, JSON
+/// Schema, typed decoding, and cross-field checks as the direct `tools/call`
+/// path.
+pub(crate) struct MaterializedToolValidator {
+    contracts: Arc<[ToolContract]>,
+}
+
+impl MaterializedToolValidator {
+    /// Compiles the checked catalog used by dynamic child validation.
+    pub(crate) fn compile() -> Result<Self, ToolRegistryError> {
+        let mut contracts = Vec::new();
+        contracts
+            .try_reserve_exact(VerticalTool::ALL.len())
+            .map_err(|_| ToolRegistryError::MemoryUnavailable)?;
+        for tool in VerticalTool::ALL {
+            contracts.push(ToolContract::compile(tool)?);
+        }
+        Ok(Self {
+            contracts: contracts.into(),
+        })
+    }
+
+    /// Validates one materialized child request through the direct-call path.
+    pub(crate) fn validate(
+        &self,
+        tool: VerticalTool,
+        arguments: &Map<String, Value>,
+        profile: ExposureProfile,
+    ) -> Result<(), MaterializedInputError> {
+        let contract = self
+            .contracts
+            .iter()
+            .find(|contract| contract.tool == tool)
+            .ok_or(MaterializedInputError::Invalid {
+                instance_path: None,
+            })?;
+        validate_contract_input(contract, &Value::Object(arguments.clone()), profile).map(|_| ())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum MaterializedInputError {
+    /// The request failed strict input validation.
+    Invalid {
+        /// Exact failing instance path when JSON Schema identified one.
+        instance_path: Option<String>,
+    },
+    /// Validation produced a more precise checked domain error.
+    Public(Box<PublicError>),
+}
+
+fn validate_contract_input(
+    contract: &ToolContract,
+    arguments: &Value,
+    profile: ExposureProfile,
+) -> Result<TypedInput, MaterializedInputError> {
+    if !tool_argument_bytes_are_valid(contract.tool, arguments)
+        || !tool_specific_input_limits_are_valid(contract.tool, arguments)
+    {
+        return Err(classify_schema_error(contract.tool, arguments).map_or(
+            MaterializedInputError::Invalid {
+                instance_path: None,
+            },
+            |error| MaterializedInputError::Public(Box::new(error)),
+        ));
+    }
+    if let Err(validation_error) = contract.input_validator.validate(arguments) {
+        return Err(classify_schema_error(contract.tool, arguments).map_or_else(
+            || MaterializedInputError::Invalid {
+                instance_path: schema_error_instance_path(&validation_error),
+            },
+            |error| MaterializedInputError::Public(Box::new(error)),
+        ));
+    }
+    let typed_input = decode_typed_input(contract.tool, arguments).map_err(|()| {
+        classify_typed_decode_error(contract.tool, arguments).map_or(
+            MaterializedInputError::Invalid {
+                instance_path: None,
+            },
+            |error| MaterializedInputError::Public(Box::new(error)),
+        )
+    })?;
+    if !typed_input_invariants_are_valid(contract.tool, &typed_input, profile) {
+        return Err(
+            classify_typed_invariant_error(contract.tool, &typed_input, profile).map_or(
+                MaterializedInputError::Invalid {
+                    instance_path: None,
+                },
+                |error| MaterializedInputError::Public(Box::new(error)),
+            ),
+        );
+    }
+    Ok(typed_input)
+}
+
+fn schema_error_instance_path(error: &jsonschema::ValidationError<'_>) -> Option<String> {
+    let parent = error.instance_path().to_string();
+    match error.kind() {
+        ValidationErrorKind::AdditionalProperties { unexpected } => unexpected
+            .first()
+            .map(|property| json_pointer_child(&parent, property)),
+        ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
+            context
+                .iter()
+                .flatten()
+                .find_map(schema_error_instance_path)
+        }
+        _ if parent.is_empty() => None,
+        _ => Some(parent),
+    }
+}
+
+fn json_pointer_child(parent: &str, segment: &str) -> String {
+    let escaped = segment.replace('~', "~0").replace('/', "~1");
+    format!("{parent}/{escaped}")
 }
 
 impl ToolContract {
@@ -784,12 +880,9 @@ fn advanced_invariants_are_valid(input: &QueryAdvancedInput) -> bool {
 }
 
 fn advanced_invariant_error(input: &QueryAdvancedInput) -> Option<PublicError> {
-    let mut operators = Vec::new();
-    let mut depth = 0usize;
-    collect_ast_operators(&input.query, &mut operators, &mut depth, 1);
     let max_rows = usize::from(input.max_results.unwrap_or(100));
     let plan =
-        match AdvancedQueryPlan::validate(&operators, max_rows, MAX_ADVANCED_TRAVERSAL, depth) {
+        match AdvancedQueryPlan::from_ast(&input.query, max_rows, MAX_ADVANCED_TRAVERSAL, None) {
             Ok(plan) => plan,
             Err(error) => return Some(advanced_error(error)),
         };
@@ -797,31 +890,6 @@ fn advanced_invariant_error(input: &QueryAdvancedInput) -> Option<PublicError> {
         .cost_limit
         .is_none_or(|limit| plan.estimated_cost <= limit))
     .then(|| domain_error(ErrorCode::CostLimit, "cost_limit"))
-}
-
-/// Walks the query AST, recording the operator sequence and maximum nesting
-/// depth used for static cost estimation.
-fn collect_ast_operators(
-    node: &QueryAstNode,
-    operators: &mut Vec<QueryOperator>,
-    depth: &mut usize,
-    current: usize,
-) {
-    *depth = (*depth).max(current);
-    let (operator, children): (QueryOperator, Vec<&QueryAstNode>) = match node {
-        QueryAstNode::Scan { .. } => (QueryOperator::Scan, Vec::new()),
-        QueryAstNode::Filter { input, .. } => (QueryOperator::Filter, vec![input]),
-        QueryAstNode::Project { input, .. } => (QueryOperator::Project, vec![input]),
-        QueryAstNode::Join { left, right, .. } => (QueryOperator::Join, vec![left, right]),
-        QueryAstNode::Aggregate { input, .. } => (QueryOperator::Aggregate, vec![input]),
-        QueryAstNode::Traverse { .. } => (QueryOperator::Traverse, Vec::new()),
-        QueryAstNode::Sort { input, .. } => (QueryOperator::Sort, vec![input]),
-        QueryAstNode::Limit { input, .. } => (QueryOperator::Limit, vec![input]),
-    };
-    operators.push(operator);
-    for child in children {
-        collect_ast_operators(child, operators, depth, current + 1);
-    }
 }
 
 /// Validates the public batch invariants: unique operation ids, an acyclic
@@ -1537,9 +1605,9 @@ mod tests {
         assert_eq!(
             observed,
             [
-                "4bb13c8436822bb2da214e617e8d9e56c767d6ba889cc9746e62e9f2045d26f3",
-                "91288fcc8e75d5a260b0b1e94a4265f3911a47c0f32d12833f4d85ee4ec6f2f1",
-                "c987dea397af689603923eba359a4c6fd084f198d08fb28fa6037278da9f0a11",
+                "4e4a8d5124906f957cb4fc17e480604c56c544538d431296cabfc26770617d82",
+                "44d08592780c613d3f954249fbce500bd181cf65827cde33dcbd696ff7eb36eb",
+                "1760188d0cc118519e3233b45ec4ec2a5c620a0d64b0b23df7c6e96b691882da",
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
         );

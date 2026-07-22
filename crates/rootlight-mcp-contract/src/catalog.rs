@@ -176,7 +176,7 @@ impl McpTool {
                 "Execute a bounded expert query over the documented safe query AST."
             }
             Self::QueryBatch => {
-                "Execute up to sixteen independent or dependency-linked read operations under one pinned generation."
+                "Execute up to sixteen dependency-linked reads under one active generation pinned once; explicit historical selection and complete accounting are fallback-limited."
             }
         }
     }
@@ -471,7 +471,6 @@ mod tests {
                 &["revisions or generations", "semantically"],
             ),
             (McpTool::ContextPack, &["source snippets"]),
-            (McpTool::QueryBatch, &["shared budget"]),
         ];
         for (tool, phrases) in overclaims {
             let description = tool.description();

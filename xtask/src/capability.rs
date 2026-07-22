@@ -832,6 +832,19 @@ mod tests {
     }
 
     #[test]
+    fn unproven_shared_batch_budget_is_rejected() {
+        let mut entry = entry(McpTool::QueryBatch);
+        entry.batch_shared_budget = true;
+        let mut problems = Vec::new();
+        validate_batch_eligibility(&[entry], &mut problems);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| matches!(problem.kind, ProblemKind::UnprovenSharedBatchBudget))
+        );
+    }
+
+    #[test]
     fn schema_field_addition_changes_the_reviewed_shape() {
         let baseline = schema_shape(include_str!(
             "../../tests/fixtures/capability/baseline.schema.json"

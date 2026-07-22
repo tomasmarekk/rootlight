@@ -4,29 +4,30 @@
 //! never fabricates index-plan, freshness, coverage, cache, or trace metadata.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     fmt,
     future::Future,
     pin::Pin,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use rootlight_agent::{
     batch::{
         BatchExecutionError, BatchOrchestrationError, BatchPlan, BatchPublicErrors, BatchService,
-        BatchUnsuccessfulOutput, BatchValidationError, mcp_tool_for_batch,
+        BatchValidationError, mcp_tool_for_batch,
         resolve_dependencies as resolve_batch_dependencies, terminal_result,
     },
     change::{
-        PlanChangeError, PlanChangeRequest, PlanChangeResult, PlanImpactResult,
-        explain_plan_change as shape_plan_change_explanation, normalize_plan_change,
-        shape_plan_change,
+        PlanChangeError, PlanChangePort, PlanChangePortOutput, PlanChangeRequest, PlanChangeResult,
+        PlanChangeService, PlanChangeServiceError, PlanImpactResult,
     },
-    context_pack::{
-        ContextPackPlanRequest, ContextPackPlanner, DefaultContextPackPlanner, context_pack_id,
-    },
+    context_pack::{ContextPackService, ContextPackServiceError},
     policy::is_compact_profile,
-    port::{AgentCallContext, AgentPortError, AgentPortFuture, AgentToolPort, AgentToolRequest},
+    port::{
+        AgentCallContext, AgentIdentityRequest, AgentPortError, AgentPortFuture,
+        AgentResolutionContext, AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
+    },
 };
 use rootlight_client::{
     self as client, CodeLocate, LocateMode, RepositoryIndex, RepositoryList,
@@ -39,9 +40,9 @@ use rootlight_mcp_contract::change::{
     ArchitectureDelta, BreakingCandidate, ChangeClassification, ChangeImpactData,
     ChangeImpactInput, ChangePlanStep, CompareChangeKind, ContextPackRequest, HistoryCompareData,
     HistoryCompareInput, ImpactEntry, ImpactGroup, ImpactRiskSummary, LineageMatch, MatchedStates,
-    PlanChangeData, PlanChangeInput, PlanDecision, RankedTest, RelationPolicy, ResolvedChange,
-    RevisionSelector, RiskLevel, SemanticChange, SemanticChangeKind, TestCandidate,
-    TestCoverageStrategy, TestGap, TestKind, TestsSelectData, TestsSelectInput,
+    PlanChangeInput, PlanDecision, RankedTest, RelationPolicy, ResolvedChange, RevisionSelector,
+    RiskLevel, SemanticChange, SemanticChangeKind, TestCandidate, TestCoverageStrategy, TestGap,
+    TestKind, TestsSelectData, TestsSelectInput,
 };
 use rootlight_mcp_contract::intent::{
     ArchitectureComponent, ArchitectureConnection, ArchitectureCyclesData, ArchitectureCyclesInput,
@@ -58,9 +59,9 @@ use rootlight_mcp_contract::{
     SchemaVersion, SourceReadInput, SymbolExplainInput, ToolResponse, TrustClassification,
     VerticalTool,
     context::{
-        BatchOperationStatus, BatchStatus, BatchTool, ColumnSchema, ColumnType, ContextPackData,
-        ContextPackInput, ContextStructure, PlanExplanation, QueryAdvancedData, QueryAdvancedInput,
-        QueryBatchData, QueryBatchInput, QueryCompleteness, TokenAccounting,
+        BatchOperationStatus, BatchStatus, BatchTool, ColumnSchema, ColumnType, ContextPackInput,
+        PlanExplanation, QueryAdvancedData, QueryAdvancedInput, QueryBatchData, QueryBatchInput,
+        QueryCompleteness,
     },
     error_definition,
     pagination::{AuthenticatedCursor, CursorContext},
@@ -92,6 +93,7 @@ use crate::advanced::{AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_TRAVER
 use crate::{
     RequestCancellation, ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture,
     ToolExecutor,
+    tools::{MaterializedInputError, MaterializedToolValidator},
 };
 
 const DEFAULT_LOCATE_RESULTS: u16 = 20;
@@ -1298,6 +1300,9 @@ pub enum ToolExecutorBuildError {
     /// Secure entropy for the cursor signing key was unavailable.
     #[error("secure cursor signing key initialization failed")]
     CursorKeyInitialization,
+    /// Checked MCP contracts could not be compiled for batch child validation.
+    #[error("batch child validator initialization failed")]
+    BatchValidator(#[source] crate::ToolRegistryError),
 }
 
 /// Process-local material used to authenticate pagination cursors.
@@ -1370,6 +1375,7 @@ pub struct FirstSliceToolExecutor<P> {
     invalid_arguments: PublicError,
     unsupported: PublicError,
     invalid_cursor: PublicError,
+    batch_validator: Arc<MaterializedToolValidator>,
     /// Process-local secret used to authenticate pagination cursors.
     ///
     /// It rotates on process restart, gracefully invalidating outstanding
@@ -1430,11 +1436,15 @@ where
             .next_action(NextAction::RestartEnumeration)
             .build()
             .map_err(ToolExecutorBuildError::InvalidArgumentError)?;
+        let batch_validator = Arc::new(
+            MaterializedToolValidator::compile().map_err(ToolExecutorBuildError::BatchValidator)?,
+        );
         Ok(Self {
             port: Arc::new(port),
             invalid_arguments,
             unsupported,
             invalid_cursor,
+            batch_validator,
             cursor_key,
         })
     }
@@ -1455,6 +1465,7 @@ where
         let unsupported = self.unsupported.clone();
         let invalid_cursor = self.invalid_cursor.clone();
         let cursor_key = self.cursor_key;
+        let batch_validator = Arc::clone(&self.batch_validator);
         Box::pin(async move {
             match tool {
                 VerticalTool::RepoIndex => {
@@ -1478,7 +1489,15 @@ where
                     execute_change_impact(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::PlanChange => {
-                    execute_plan_change(port, arguments, cancellation, &unsupported).await
+                    execute_plan_change(
+                        port,
+                        batch_validator,
+                        arguments,
+                        cancellation,
+                        &unsupported,
+                        &invalid_arguments,
+                    )
+                    .await
                 }
                 VerticalTool::HistoryCompare => {
                     execute_history_compare(port, arguments, cancellation, &unsupported).await
@@ -1505,11 +1524,20 @@ where
                     execute_tests_select(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::ContextPack => {
-                    execute_context_pack(port, arguments, cancellation, &unsupported).await
+                    execute_context_pack(
+                        port,
+                        batch_validator,
+                        arguments,
+                        cancellation,
+                        &unsupported,
+                        &invalid_arguments,
+                    )
+                    .await
                 }
                 VerticalTool::QueryBatch => {
                     execute_query_batch(
                         port,
+                        batch_validator,
                         arguments,
                         cancellation,
                         &unsupported,
@@ -1549,22 +1577,6 @@ impl<P> fmt::Debug for FirstSliceToolExecutor<P> {
     }
 }
 
-/// Fails intent tools that have no production engine behind this bridge yet.
-///
-/// These tools are advertised in the catalog but cannot produce a provable
-/// generation-pinned result here, so they return a checked, schema-valid
-/// capability error instead of fabricating repository or generation identity,
-/// coverage, or data that Rootlight cannot prove. The router validates the
-/// input schema before execution, so malformed requests are rejected before
-/// this point.
-/// Executes a bounded `query.batch` by composing the read tools that already
-/// have a production engine behind this bridge.
-///
-/// Operations run in dependency order under one pinned generation. Subtools
-/// without an engine fail locally with a checked capability error and their
-/// dependents are skipped. The batch pins its generation from the first
-/// successful operation; when nothing succeeds the batch itself fails rather
-/// than fabricating an identity.
 /// Builds the source-free `query.batch` plan without executing retrieval.
 ///
 /// Only repository metadata is read (to pin the shared generation); the batch
@@ -1606,6 +1618,7 @@ where
 
 async fn execute_query_batch<P>(
     port: Arc<P>,
+    batch_validator: Arc<MaterializedToolValidator>,
     arguments: Map<String, Value>,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
@@ -1614,7 +1627,7 @@ async fn execute_query_batch<P>(
 where
     P: FirstSliceClientPort,
 {
-    let mut input: QueryBatchInput = decode_input(arguments)?;
+    let input: QueryBatchInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
     let repository = repository_id(input.repository.clone(), unsupported)?;
     if !is_compact_profile(input.response_profile) {
@@ -1638,63 +1651,25 @@ where
         let output = explain_query_batch(port, repository, &input, cancellation).await?;
         return serialize_success(output);
     }
-    let status_request =
-        RepositoryStatusPortRequest::new(repository, client_generation(input.generation.clone()));
-    let status = await_port(
-        port.repository_status(status_request, cancellation.clone()),
-        cancellation.clone(),
-    )
-    .await?;
-    if status.repository_id != repository {
-        return Err(internal(ToolExecutionFailure::InvalidResponse));
-    }
-    input.generation = Some(GenerationSelector::Explicit(status.active_generation));
-
     let budget_exceeded = domain_error(ErrorCode::BudgetExceeded, None);
     let adapter = Arc::new(McpAgentToolPort {
         port: Arc::clone(&port),
+        validator: batch_validator,
         unsupported: unsupported.clone(),
         invalid_arguments: invalid_arguments.clone(),
     });
-    let errors = BatchPublicErrors::new(
-        binding_invalid_error(),
-        binding_type_mismatch_error(),
-        operation_failed,
-        budget_exceeded,
-    );
-    let output = match BatchService
+    let errors = BatchPublicErrors::new(binding_invalid_error(), operation_failed, budget_exceeded);
+    let output = BatchService
         .execute(adapter, input, repository, cancellation, errors)
         .await
-    {
-        Ok(output) => output,
-        Err(BatchOrchestrationError::NoSuccessfulOperation(output)) => {
-            unsuccessful_batch_envelope(status, *output)?
-        }
-        Err(error) => return Err(map_batch_orchestration_error(error)),
-    };
+        .map_err(map_batch_orchestration_error)?;
     serialize_success(output)
-}
-
-fn unsuccessful_batch_envelope(
-    status: client::RepositoryStatus,
-    output: BatchUnsuccessfulOutput,
-) -> Result<ReadEnvelope<QueryBatchData>, ToolExecutionError> {
-    let data = QueryBatchData {
-        batch_status: BatchStatus::Error,
-        generation_id: status.active_generation,
-        operation_results: output.operation_results,
-        explanation: None,
-    };
-    let mut envelope = explain_envelope_from_status(status, data)?;
-    envelope.truncated = output.truncated;
-    envelope.usage = output.usage;
-    envelope.warnings = output.warnings;
-    Ok(envelope)
 }
 
 /// MCP adapter for the client-free agent tool port.
 struct McpAgentToolPort<P> {
     port: Arc<P>,
+    validator: Arc<MaterializedToolValidator>,
     unsupported: PublicError,
     invalid_arguments: PublicError,
 }
@@ -1703,6 +1678,55 @@ impl<P> AgentToolPort<RequestCancellation> for McpAgentToolPort<P>
 where
     P: FirstSliceClientPort,
 {
+    fn resolve_identity(
+        &self,
+        request: AgentIdentityRequest,
+        context: AgentResolutionContext<RequestCancellation>,
+    ) -> AgentPortFuture<Result<AgentResolvedIdentity, AgentPortError>> {
+        let port = Arc::clone(&self.port);
+        let unsupported = self.unsupported.clone();
+        let deadline = context.deadline();
+        let cancellation = context.into_cancellation();
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(AgentPortError::Cancelled);
+            }
+            let (repository, generation) = request.into_selectors();
+            let repository =
+                repository_id(repository, &unsupported).map_err(map_agent_child_error)?;
+            let requested_generation = generation.clone();
+            let request =
+                RepositoryStatusPortRequest::new(repository, client_generation(generation));
+            let operation = port.repository_status(request, cancellation.clone());
+            let mut cancellation_wait = cancellation.clone();
+            let response = tokio::select! {
+                biased;
+                _ = cancellation_wait.cancelled() => {
+                    return Err(AgentPortError::Cancelled);
+                }
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    return Err(AgentPortError::DeadlineExceeded);
+                }
+                response = operation => response,
+            }
+            .map_err(|_| AgentPortError::Unavailable)?;
+            if response.repository_id != repository {
+                return Err(AgentPortError::InvalidResponse);
+            }
+            if matches!(
+                requested_generation,
+                Some(GenerationSelector::Explicit(expected))
+                    if response.active_generation != expected
+            ) {
+                return Err(AgentPortError::Public(Box::new(domain_error(
+                    ErrorCode::StaleGeneration,
+                    None,
+                ))));
+            }
+            Ok(agent_identity_from_status(response))
+        })
+    }
+
     fn execute(
         &self,
         request: AgentToolRequest,
@@ -1711,22 +1735,104 @@ where
         let port = Arc::clone(&self.port);
         let unsupported = self.unsupported.clone();
         let invalid_arguments = self.invalid_arguments.clone();
+        let validator = Arc::clone(&self.validator);
+        let budget = context.budget().clone();
+        let local_budget = context.local_budget().cloned();
+        let deadline = context.deadline();
+        let local_deadline = context.has_local_deadline();
+        let cancellation = context.into_cancellation();
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(AgentPortError::Cancelled);
+            }
+            let (tool, mut arguments, binding_paths) = request.into_parts();
+            validate_local_child_budget(tool, local_budget.as_ref())
+                .map_err(map_agent_child_error)?;
+            let vertical_tool = vertical_tool_for_batch(tool)
+                .ok_or_else(|| AgentPortError::Public(Box::new(unsupported.clone())))?;
+            validator
+                .validate(
+                    vertical_tool,
+                    &arguments,
+                    rootlight_mcp_contract::ExposureProfile::Developer,
+                )
+                .map_err(|error| {
+                    map_materialized_input_error(error, &binding_paths, &invalid_arguments)
+                })?;
+            apply_child_budget(tool, &budget, &mut arguments).map_err(map_agent_child_error)?;
+            validator
+                .validate(
+                    vertical_tool,
+                    &arguments,
+                    rootlight_mcp_contract::ExposureProfile::Developer,
+                )
+                .map_err(|error| {
+                    map_materialized_input_error(error, &binding_paths, &invalid_arguments)
+                })?;
+            let operation = execute_agent_child(
+                tool,
+                port,
+                validator,
+                arguments,
+                cancellation.clone(),
+                &unsupported,
+                &invalid_arguments,
+            );
+            let response = if let Some(deadline) = deadline {
+                let mut cancellation_wait = cancellation.clone();
+                tokio::select! {
+                    biased;
+                    _ = cancellation_wait.cancelled() => {
+                        return Err(AgentPortError::Cancelled);
+                    }
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                        return Err(if local_deadline {
+                            AgentPortError::LocalDeadlineExceeded
+                        } else {
+                            AgentPortError::DeadlineExceeded
+                        });
+                    }
+                    response = operation => response,
+                }
+            } else {
+                operation.await
+            };
+            let response = response.map_err(map_agent_child_error)?;
+            let envelope: ReadEnvelope<Value> = serde_json::from_value(Value::Object(response))
+                .map_err(|_| AgentPortError::InvalidResponse)?;
+            Ok(envelope)
+        })
+    }
+}
+
+impl<P> PlanChangePort<RequestCancellation> for McpAgentToolPort<P>
+where
+    P: FirstSliceClientPort,
+{
+    fn resolve_identity(
+        &self,
+        request: AgentIdentityRequest,
+        context: AgentResolutionContext<RequestCancellation>,
+    ) -> rootlight_agent::change::PlanChangePortFuture<Result<AgentResolvedIdentity, AgentPortError>>
+    {
+        <Self as AgentToolPort<RequestCancellation>>::resolve_identity(self, request, context)
+    }
+
+    fn plan_change(
+        &self,
+        request: PlanChangeRequest,
+        context: AgentCallContext<RequestCancellation>,
+    ) -> rootlight_agent::change::PlanChangePortFuture<Result<PlanChangePortOutput, AgentPortError>>
+    {
+        let port = Arc::clone(&self.port);
         let deadline = context.deadline();
         let cancellation = context.into_cancellation();
         Box::pin(async move {
             if cancellation.is_cancelled() {
                 return Err(AgentPortError::Cancelled);
             }
-            let tool = request.tool();
-            let arguments = request.into_arguments();
-            let operation = execute_agent_child(
-                tool,
-                port,
-                arguments,
-                cancellation.clone(),
-                &unsupported,
-                &invalid_arguments,
-            );
+            let expected = request.clone();
+            let operation = port.plan_change(request, cancellation.clone());
             let response = if let Some(deadline) = deadline {
                 let mut cancellation_wait = cancellation.clone();
                 tokio::select! {
@@ -1741,18 +1847,215 @@ where
                 }
             } else {
                 operation.await
-            };
-            let response = response.map_err(map_agent_child_error)?;
-            serde_json::from_value(Value::Object(response))
-                .map_err(|_| AgentPortError::InvalidResponse)
+            }
+            .map_err(|_| AgentPortError::Unavailable)?;
+            adapt_plan_change_response(response, &expected).map_err(map_agent_child_error)
         })
     }
+}
+
+fn vertical_tool_for_batch(tool: BatchTool) -> Option<VerticalTool> {
+    match tool {
+        BatchTool::CodeLocate => Some(VerticalTool::CodeLocate),
+        BatchTool::SymbolExplain => Some(VerticalTool::SymbolExplain),
+        BatchTool::SymbolRelationships => Some(VerticalTool::SymbolRelationships),
+        BatchTool::FlowTrace => Some(VerticalTool::FlowTrace),
+        BatchTool::ChangeImpact => Some(VerticalTool::ChangeImpact),
+        BatchTool::TestsSelect => Some(VerticalTool::TestsSelect),
+        BatchTool::ArchitectureOverview => Some(VerticalTool::ArchitectureOverview),
+        BatchTool::ArchitectureCycles => Some(VerticalTool::ArchitectureCycles),
+        BatchTool::CodeDead => Some(VerticalTool::CodeDead),
+        BatchTool::ContextPack => Some(VerticalTool::ContextPack),
+        BatchTool::SourceRead => Some(VerticalTool::SourceRead),
+        BatchTool::PlanChange => None,
+    }
+}
+
+fn apply_child_budget(
+    tool: BatchTool,
+    budget: &ResponseBudget,
+    arguments: &mut Map<String, Value>,
+) -> Result<(), ToolExecutionError> {
+    if budget.evidence_level.is_some() {
+        return Err(unsupported_field("budget"));
+    }
+    match tool {
+        BatchTool::CodeLocate => {
+            lower_numeric_argument(arguments, "max_results", budget.max_results.map(u64::from));
+        }
+        BatchTool::SymbolExplain => {
+            if let Some(limit) = budget.max_results
+                && let Some(Value::Array(symbols)) = arguments.get_mut("symbol_ids")
+            {
+                symbols.truncate(usize::from(limit));
+            }
+        }
+        BatchTool::SymbolRelationships => {
+            lower_numeric_argument(arguments, "max_results", budget.max_results.map(u64::from));
+        }
+        BatchTool::FlowTrace => {
+            lower_numeric_argument(arguments, "max_depth", budget.max_depth.map(u64::from));
+            lower_numeric_argument(arguments, "max_paths", budget.max_paths.map(u64::from));
+            lower_numeric_argument(arguments, "max_paths", budget.max_results.map(u64::from));
+        }
+        BatchTool::ChangeImpact => {
+            lower_numeric_argument(arguments, "max_depth", budget.max_depth.map(u64::from));
+        }
+        BatchTool::TestsSelect => {
+            lower_numeric_argument(arguments, "max_tests", budget.max_results.map(u64::from));
+        }
+        BatchTool::ArchitectureOverview => {
+            lower_numeric_argument(
+                arguments,
+                "max_components",
+                budget.max_results.map(u64::from),
+            );
+        }
+        BatchTool::ArchitectureCycles => {
+            lower_numeric_argument(arguments, "max_cycles", budget.max_results.map(u64::from));
+        }
+        BatchTool::CodeDead => {
+            lower_numeric_argument(
+                arguments,
+                "max_candidates",
+                budget.max_results.map(u64::from),
+            );
+        }
+        BatchTool::ContextPack => {
+            if let Some(tokens) = budget.max_tokens {
+                if tokens < 500 {
+                    return Err(ToolExecutionError::new(domain_error(
+                        ErrorCode::BudgetExceeded,
+                        Some("budget"),
+                    )));
+                }
+                lower_numeric_argument(arguments, "token_budget", Some(u64::from(tokens)));
+            }
+        }
+        BatchTool::SourceRead => {
+            if let Some(limit) = budget.max_results
+                && let Some(Value::Array(references)) = arguments.get_mut("references")
+            {
+                references.truncate(usize::from(limit));
+            }
+        }
+        BatchTool::PlanChange => return Err(unsupported_field("operations")),
+    }
+    Ok(())
+}
+
+fn validate_local_child_budget(
+    tool: BatchTool,
+    local: Option<&ResponseBudget>,
+) -> Result<(), ToolExecutionError> {
+    let Some(local) = local else {
+        return Ok(());
+    };
+    if local.evidence_level.is_some() {
+        return Err(unsupported_field("local_budget_evidence_level"));
+    }
+    if local.max_tokens.is_some() && tool != BatchTool::ContextPack {
+        return Err(unsupported_field("local_budget_max_tokens"));
+    }
+    if local.max_source_bytes.is_some() {
+        return Err(unsupported_field("local_budget_max_source_bytes"));
+    }
+    if local.max_traversal_facts.is_some() {
+        return Err(unsupported_field("local_budget_max_traversal_facts"));
+    }
+    if local.max_depth.is_some() && !matches!(tool, BatchTool::FlowTrace | BatchTool::ChangeImpact)
+    {
+        return Err(unsupported_field("local_budget_max_depth"));
+    }
+    if local.max_paths.is_some() && tool != BatchTool::FlowTrace {
+        return Err(unsupported_field("local_budget_max_paths"));
+    }
+    if local.max_results.is_some()
+        && matches!(tool, BatchTool::ChangeImpact | BatchTool::ContextPack)
+    {
+        return Err(unsupported_field("local_budget_max_results"));
+    }
+    Ok(())
+}
+
+fn lower_numeric_argument(arguments: &mut Map<String, Value>, field: &str, limit: Option<u64>) {
+    let Some(limit) = limit else {
+        return;
+    };
+    match arguments.get_mut(field) {
+        Some(Value::Number(current)) => {
+            if let Some(value) = current.as_u64() {
+                *current = serde_json::Number::from(value.min(limit));
+            }
+        }
+        Some(_) => {}
+        None => {
+            arguments.insert(field.to_owned(), Value::from(limit));
+        }
+    }
+}
+
+fn map_materialized_input_error(
+    error: MaterializedInputError,
+    binding_paths: &[String],
+    invalid_arguments: &PublicError,
+) -> AgentPortError {
+    match error {
+        MaterializedInputError::Invalid { instance_path } => {
+            let public = if instance_path
+                .as_deref()
+                .is_some_and(|path| binding_path_overlaps(path, binding_paths))
+            {
+                binding_type_mismatch_error()
+            } else {
+                invalid_arguments.clone()
+            };
+            AgentPortError::Public(Box::new(public))
+        }
+        MaterializedInputError::Public(error) => {
+            if error.code() == ErrorCode::TypeMismatch
+                && public_error_overlaps_bindings(&error, binding_paths)
+            {
+                AgentPortError::Public(Box::new(binding_type_mismatch_error()))
+            } else {
+                AgentPortError::Public(error)
+            }
+        }
+    }
+}
+
+fn public_error_overlaps_bindings(error: &PublicError, binding_paths: &[String]) -> bool {
+    error.next_actions().iter().any(|action| {
+        let NextAction::CorrectField { field } = action else {
+            return false;
+        };
+        let path = format!("/{}", field.as_str());
+        binding_path_overlaps(&path, binding_paths)
+    })
+}
+
+fn binding_path_overlaps(error_path: &str, binding_paths: &[String]) -> bool {
+    if error_path.is_empty() {
+        return false;
+    }
+    binding_paths.iter().any(|binding_path| {
+        json_pointer_is_ancestor(error_path, binding_path)
+            || json_pointer_is_ancestor(binding_path, error_path)
+    })
+}
+
+fn json_pointer_is_ancestor(ancestor: &str, descendant: &str) -> bool {
+    ancestor == descendant
+        || descendant
+            .strip_prefix(ancestor)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// Maps one admitted child request to its concrete MCP/daemon adapter.
 async fn execute_agent_child<P>(
     tool: BatchTool,
     port: Arc<P>,
+    validator: Arc<MaterializedToolValidator>,
     arguments: Map<String, Value>,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
@@ -1778,15 +2081,37 @@ where
             )
             .await
         }
-        BatchTool::SymbolRelationships
-        | BatchTool::FlowTrace
-        | BatchTool::ChangeImpact
-        | BatchTool::TestsSelect
-        | BatchTool::ArchitectureOverview
-        | BatchTool::ArchitectureCycles
-        | BatchTool::CodeDead
-        | BatchTool::PlanChange
-        | BatchTool::ContextPack => Err(ToolExecutionError::new(unsupported.clone())),
+        BatchTool::SymbolRelationships => {
+            execute_symbol_relationships(port, arguments, cancellation, unsupported).await
+        }
+        BatchTool::FlowTrace => {
+            execute_flow_trace(port, arguments, cancellation, unsupported).await
+        }
+        BatchTool::ChangeImpact => {
+            execute_change_impact(port, arguments, cancellation, unsupported).await
+        }
+        BatchTool::TestsSelect => {
+            execute_tests_select(port, arguments, cancellation, unsupported).await
+        }
+        BatchTool::ArchitectureOverview => {
+            execute_architecture_overview(port, arguments, cancellation, unsupported).await
+        }
+        BatchTool::ArchitectureCycles => {
+            execute_architecture_cycles(port, arguments, cancellation, unsupported).await
+        }
+        BatchTool::CodeDead => execute_code_dead(port, arguments, cancellation, unsupported).await,
+        BatchTool::ContextPack => {
+            execute_context_pack(
+                port,
+                validator,
+                arguments,
+                cancellation,
+                unsupported,
+                invalid_arguments,
+            )
+            .await
+        }
+        BatchTool::PlanChange => Err(ToolExecutionError::new(unsupported.clone())),
     }
 }
 
@@ -1812,9 +2137,7 @@ fn map_batch_orchestration_error(error: BatchOrchestrationError) -> ToolExecutio
                 .expect("static batch budget error is valid");
             ToolExecutionError::new(error)
         }
-        BatchOrchestrationError::NoSuccessfulOperation(_) => {
-            internal(ToolExecutionFailure::Executor)
-        }
+        BatchOrchestrationError::IdentityResolution(error) => ToolExecutionError::new(*error),
         BatchOrchestrationError::Cancelled | BatchOrchestrationError::Internal => {
             internal(ToolExecutionFailure::Executor)
         }
@@ -1823,163 +2146,49 @@ fn map_batch_orchestration_error(error: BatchOrchestrationError) -> ToolExecutio
     }
 }
 
-/// Builds the source-free `context.pack` plan without executing retrieval.
-///
-/// Only repository metadata is read (to pin the generation); no evidence
-/// assembly runs. The plan is deterministic for the normalized request.
-async fn explain_context_pack<P>(
-    port: Arc<P>,
-    repository: RepositoryId,
-    generation: client::GenerationSelector,
-    input: &ContextPackInput,
-    seed_count: usize,
-    cancellation: RequestCancellation,
-) -> Result<ReadEnvelope<ContextPackData>, ToolExecutionError>
-where
-    P: FirstSliceClientPort,
-{
-    let status_request = RepositoryStatusPortRequest::new(repository, generation);
-    let status = await_port(
-        port.repository_status(status_request, cancellation.clone()),
-        cancellation,
-    )
-    .await?;
-    let explanation = rootlight_agent::explain::finalize_plan(
-        rootlight_agent::explain::context_pack_plan(seed_count, input.token_budget),
-        &status.active_generation.to_string(),
-    );
-    let data = ContextPackData {
-        pack_id: context_pack_id(input, status.active_generation),
-        items: Vec::new(),
-        structure: ContextStructure {
-            reading_order: Vec::new(),
-            dependencies: Vec::new(),
-        },
-        omitted: Vec::new(),
-        followups: Vec::new(),
-        token_accounting: TokenAccounting {
-            estimated_total: 0,
-            by_section: BTreeMap::new(),
-        },
-        explanation: Some(explanation),
-    };
-    explain_envelope_from_status(status, data)
-}
-
 async fn execute_context_pack<P>(
     port: Arc<P>,
+    validator: Arc<MaterializedToolValidator>,
     arguments: Map<String, Value>,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
+    invalid_arguments: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
     let input: ContextPackInput = decode_input(arguments)?;
-    let explain_only = input.explain == Some(true);
-    // Alias selectors cannot be resolved behind this bridge.
     let repository = repository_id(input.repository.clone(), unsupported)?;
-
-    // This slice assembles packs from symbol/test seeds only. The other seed
-    // kinds and selection controls are not served; each is rejected by name so
-    // it is never silently ignored.
-    if input.seeds.paths.is_some() {
-        return Err(unsupported_field("paths"));
-    }
-    if input.seeds.routes.is_some() {
-        return Err(unsupported_field("routes"));
-    }
-    if input.seeds.located.is_some() {
-        return Err(unsupported_field("located"));
-    }
-    if input.seeds.change.is_some() {
-        return Err(unsupported_field("change"));
-    }
-    if input.seeds.plan.is_some() {
-        return Err(unsupported_field("plan"));
-    }
-    if input.source_policy.is_some() {
-        return Err(unsupported_field("source_policy"));
-    }
-    if input.sections.is_some() {
-        return Err(unsupported_field("sections"));
-    }
-    if input.diversity.is_some() {
-        return Err(unsupported_field("diversity"));
-    }
-    if input.min_confidence.is_some() {
-        return Err(unsupported_field("min_confidence"));
-    }
-    if input.continuation.is_some() {
-        return Err(unsupported_field("continuation"));
-    }
-
-    let mut seed_symbols: BTreeSet<SymbolId> = BTreeSet::new();
-    if let Some(symbols) = &input.seeds.symbols {
-        seed_symbols.extend(symbols.iter().copied());
-    }
-    if let Some(tests) = &input.seeds.tests {
-        seed_symbols.extend(tests.iter().copied());
-    }
-    if seed_symbols.is_empty() {
-        return Err(ToolExecutionError::new(unsupported.clone()));
-    }
-    // symbol.explain bounds a single request to sixteen symbols.
-    let seed_symbols: BTreeSet<SymbolId> = seed_symbols.into_iter().take(16).collect();
-
-    if explain_only {
-        let generation = client_generation(input.generation.clone());
-        let output = explain_context_pack(
-            port,
-            repository,
-            generation,
-            &input,
-            seed_symbols.len(),
-            cancellation,
-        )
-        .await?;
-        return serialize_success(output);
-    }
-    let mut explain_arguments = Map::new();
-    explain_arguments.insert("repository".to_owned(), serialize_json(&input.repository)?);
-    if let Some(generation) = &input.generation {
-        explain_arguments.insert("generation".to_owned(), serialize_json(generation)?);
-    }
-    explain_arguments.insert("symbol_ids".to_owned(), serialize_json(&seed_symbols)?);
-
-    let explain_output =
-        execute_symbol_explain(port, explain_arguments, cancellation.clone(), unsupported).await?;
-    let explain_envelope: ReadEnvelope<SymbolExplainData> =
-        serde_json::from_value(Value::Object(explain_output))
-            .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
-
-    let planned = DefaultContextPackPlanner
-        .plan(
-            ContextPackPlanRequest {
-                input: &input,
-                generation: explain_envelope.generation.generation_id,
-                symbols: &explain_envelope.data.symbols,
-            },
-            &cancellation,
-        )
-        .map_err(|_| ToolExecutionError::new(unsupported.clone()))?;
-    let envelope = ReadEnvelope {
-        schema_version: SchemaVersion::V1_0,
-        repository: explain_envelope.repository.clone(),
-        generation: explain_envelope.generation.clone(),
-        coverage: explain_envelope.coverage.clone(),
-        data: planned.data,
-        truncated: planned.truncated,
-        next_cursor: RequiredNullable(None),
-        usage: explain_envelope.usage.clone(),
-        warnings: explain_envelope.warnings.clone(),
-        trust: TrustClassification::UntrustedRepositoryData,
-    };
-    serialize_success(envelope)
+    let adapter = Arc::new(McpAgentToolPort {
+        port,
+        validator,
+        unsupported: unsupported.clone(),
+        invalid_arguments: invalid_arguments.clone(),
+    });
+    let output = ContextPackService
+        .execute(adapter, input, repository, cancellation)
+        .await
+        .map_err(|error| map_context_pack_service_error(error, unsupported))?;
+    serialize_success(output)
 }
 
-fn serialize_json<T: Serialize>(value: &T) -> Result<Value, ToolExecutionError> {
-    serde_json::to_value(value).map_err(|_| internal(ToolExecutionFailure::Executor))
+fn map_context_pack_service_error(
+    error: ContextPackServiceError,
+    unsupported: &PublicError,
+) -> ToolExecutionError {
+    match error {
+        ContextPackServiceError::UnsupportedField(field) => unsupported_field(field),
+        ContextPackServiceError::EmptySeeds => ToolExecutionError::new(unsupported.clone()),
+        ContextPackServiceError::Public(error) => ToolExecutionError::new(*error),
+        ContextPackServiceError::DeadlineExceeded => {
+            ToolExecutionError::new(domain_error(ErrorCode::BudgetExceeded, Some("budget")))
+        }
+        ContextPackServiceError::InvalidResponse => internal(ToolExecutionFailure::InvalidResponse),
+        ContextPackServiceError::Cancelled | ContextPackServiceError::Unavailable => {
+            internal(ToolExecutionFailure::Executor)
+        }
+        _ => internal(ToolExecutionFailure::Executor),
+    }
 }
 
 /// Lists the repositories known to the daemon process.
@@ -2634,6 +2843,36 @@ fn explain_envelope_from_status<T>(
         Vec::new(),
     );
     map_read_envelope(context, metadata, data, false)
+}
+
+fn agent_identity_from_status(status: client::RepositoryStatus) -> AgentResolvedIdentity {
+    let coverage = status
+        .coverage
+        .iter()
+        .map(|entry| LanguageCoverage {
+            language: entry.language.clone(),
+            tier: analysis_tier(&entry.tier),
+            status: coverage_status_from_label(&entry.status),
+        })
+        .collect();
+    AgentResolvedIdentity {
+        repository: ResolvedRepository {
+            repository_id: status.repository_id,
+            display_name: status.repository_id.to_string(),
+        },
+        generation: GenerationSummary {
+            generation_id: status.active_generation,
+            parent_generation: RequiredNullable(status.parent_generation),
+            structural_freshness: freshness_from_label(&status.structural_freshness),
+            semantic_freshness: freshness_from_label(&status.semantic_freshness),
+        },
+        coverage: CoverageSummary {
+            status: rootlight_ir::CoverageStatus::Bounded,
+            languages: coverage,
+            skipped_inputs: 0,
+        },
+        warnings: Vec::new(),
+    }
 }
 
 /// Builds the source-free `symbol.explain` plan without executing retrieval.
@@ -4012,67 +4251,63 @@ fn ir_entity_kind_from_label(label: &str) -> Result<IrEntityKind, ToolExecutionE
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
-/// Builds the source-free `plan.change` plan without executing retrieval.
-///
-/// Only repository metadata is read (to pin the generation); no change planning
-/// runs. A single marked placeholder step keeps the bounded plan schema-valid.
-async fn explain_plan_change<P>(
-    port: Arc<P>,
-    request: PlanChangePortRequest,
-    cancellation: RequestCancellation,
-) -> Result<ReadEnvelope<PlanChangeData>, ToolExecutionError>
-where
-    P: FirstSliceClientPort,
-{
-    let status_request = RepositoryStatusPortRequest::new(
-        request.repository(),
-        client_generation_ref(request.generation()),
-    );
-    let status = await_port(
-        port.repository_status(status_request, cancellation.clone()),
-        cancellation,
-    )
-    .await?;
-    let data = shape_plan_change_explanation(&request, status.active_generation);
-    explain_envelope_from_status(status, data)
-}
-
 async fn execute_plan_change<P>(
     port: Arc<P>,
+    validator: Arc<MaterializedToolValidator>,
     arguments: Map<String, Value>,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
+    invalid_arguments: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
     let input: PlanChangeInput = decode_input(arguments)?;
-    let request =
-        normalize_plan_change(input).map_err(|error| map_plan_change_error(error, unsupported))?;
-    if request.explain_only() {
-        let output = explain_plan_change(port, request, cancellation).await?;
-        return serialize_success(output);
-    }
-    let expected = request.clone();
-    let future = port.plan_change(request, cancellation.clone());
-    let response = await_port(future, cancellation).await?;
-    let output = map_plan_change(response, &expected)?;
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(30_000))
+        .ok_or_else(|| internal(ToolExecutionFailure::Executor))?;
+    let adapter = Arc::new(McpAgentToolPort {
+        port,
+        validator,
+        unsupported: unsupported.clone(),
+        invalid_arguments: invalid_arguments.clone(),
+    });
+    let output = PlanChangeService
+        .execute(adapter, input, cancellation, deadline)
+        .await
+        .map_err(|error| map_plan_change_service_error(error, unsupported))?;
     serialize_success(output)
 }
 
-fn map_plan_change_error(error: PlanChangeError, unsupported: &PublicError) -> ToolExecutionError {
+fn map_plan_change_service_error(
+    error: PlanChangeServiceError,
+    unsupported: &PublicError,
+) -> ToolExecutionError {
     match error {
-        PlanChangeError::UnsupportedRepository
-        | PlanChangeError::UnsupportedOption
-        | PlanChangeError::EmptyTargets => ToolExecutionError::new(unsupported.clone()),
-        PlanChangeError::InvalidRisk => internal(ToolExecutionFailure::InvalidResponse),
+        PlanChangeServiceError::Admission(
+            PlanChangeError::UnsupportedRepository
+            | PlanChangeError::UnsupportedOption
+            | PlanChangeError::EmptyTargets,
+        ) => ToolExecutionError::new(unsupported.clone()),
+        PlanChangeServiceError::Admission(PlanChangeError::InvalidRisk)
+        | PlanChangeServiceError::InvalidResponse => {
+            internal(ToolExecutionFailure::InvalidResponse)
+        }
+        PlanChangeServiceError::Public(error) => ToolExecutionError::new(*error),
+        PlanChangeServiceError::DeadlineExceeded => {
+            ToolExecutionError::new(domain_error(ErrorCode::BudgetExceeded, Some("budget")))
+        }
+        PlanChangeServiceError::Cancelled | PlanChangeServiceError::Unavailable => {
+            internal(ToolExecutionFailure::Executor)
+        }
+        _ => internal(ToolExecutionFailure::Executor),
     }
 }
 
-fn map_plan_change(
+fn adapt_plan_change_response(
     response: PlanChangePortResponse,
     request: &PlanChangePortRequest,
-) -> Result<ReadEnvelope<PlanChangeData>, ToolExecutionError> {
+) -> Result<PlanChangePortOutput, ToolExecutionError> {
     validate_query_context(
         &response.result.context,
         request.repository(),
@@ -4115,7 +4350,7 @@ fn map_plan_change(
         });
     }
     let pack = response.result.context_pack_request;
-    let data = shape_plan_change(PlanChangeResult {
+    let result = PlanChangeResult {
         plan,
         affected_scope: PlanImpactResult {
             affected_symbols: scope.affected_symbols,
@@ -4129,9 +4364,20 @@ fn map_plan_change(
             symbols: pack.symbols,
             files: pack.files,
         },
+    };
+    let metadata = map_read_envelope(response.result.context, response.metadata, (), false)?;
+    Ok(PlanChangePortOutput {
+        identity: AgentResolvedIdentity {
+            repository: metadata.repository,
+            generation: metadata.generation,
+            coverage: metadata.coverage,
+            warnings: Vec::new(),
+        },
+        result,
+        usage: metadata.usage,
+        truncated: metadata.truncated,
+        warnings: metadata.warnings,
     })
-    .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
-    map_read_envelope(response.result.context, response.metadata, data, false)
 }
 
 /// Builds the source-free `history.compare` plan without executing retrieval.
@@ -4522,7 +4768,9 @@ fn binding_type_mismatch_error() -> PublicError {
 
 fn batch_dependency_error(error: BatchExecutionError) -> ToolExecutionError {
     let field = match error {
-        BatchExecutionError::DuplicateOperationId => "operations",
+        BatchExecutionError::InvalidOperationId | BatchExecutionError::DuplicateOperationId => {
+            "operations"
+        }
         BatchExecutionError::UnknownDependency => "depends_on",
         BatchExecutionError::InvalidBinding => "arguments",
         BatchExecutionError::Serialization | BatchExecutionError::MemoryUnavailable => {

@@ -90,7 +90,10 @@ pub enum GenerationSemantics {
     ActiveGenerationFallback,
     /// Two immutable generations are selected for structural comparison.
     ComparesGenerations,
-    /// A batch selector is inherited by its nested operations.
+    /// A batch resolves and pins one selector for its nested operations.
+    ///
+    /// Field rules separately describe whether explicit historical selectors
+    /// are currently available.
     BatchInherited,
 }
 
@@ -294,6 +297,30 @@ const fn implemented(path: &'static str, summary: &'static str) -> CapabilityRul
         path,
         value: None,
         status: CapabilityStatus::Implemented,
+        error_code: None,
+        summary,
+    }
+}
+
+const fn implemented_value(
+    path: &'static str,
+    value: &'static str,
+    summary: &'static str,
+) -> CapabilityRule {
+    CapabilityRule {
+        path,
+        value: Some(value),
+        status: CapabilityStatus::Implemented,
+        error_code: None,
+        summary,
+    }
+}
+
+const fn fallback_limited(path: &'static str, summary: &'static str) -> CapabilityRule {
+    CapabilityRule {
+        path,
+        value: None,
+        status: CapabilityStatus::FallbackLimited,
         error_code: None,
         summary,
     }
@@ -782,10 +809,26 @@ const QUERY_BATCH_RULES: &[CapabilityRule] = &[
         "repository.alias",
         "only stable repository identifiers are served",
     ),
-    unsupported("budget", "shared aggregate budgeting is not served"),
+    fallback_limited(
+        "generation",
+        "active is resolved and pinned once; non-active explicit generations fail closed until retained-generation lookup is available",
+    ),
+    implemented_value(
+        "generation",
+        "active",
+        "resolves and pins the active generation once for all nested operations",
+    ),
+    blocked(
+        "budget",
+        "measured child usage is bounded but orchestration and response serialization are not fully charged",
+    ),
     blocked(
         "operations[].local_budget",
-        "local operation budgets are accepted but not propagated to subtools",
+        "intersects representable caps and rejects unsupported child dimensions before work",
+    ),
+    implemented(
+        "operations[].local_budget.timeout_ms",
+        "bounds every child call by the lower local deadline",
     ),
     unsupported_value(
         "response_profile",
@@ -981,8 +1024,8 @@ const fn budget_semantics(tool: McpTool) -> BudgetSemantics {
         | McpTool::CodeDead
         | McpTool::HistoryCompare
         | McpTool::PlanChange
-        | McpTool::SourceRead
-        | McpTool::QueryBatch => BudgetSemantics::Unsupported,
+        | McpTool::SourceRead => BudgetSemantics::Unsupported,
+        McpTool::QueryBatch => BudgetSemantics::PerRequest,
         McpTool::RepoIndex | McpTool::RepoList | McpTool::OperationStatus => BudgetSemantics::None,
     }
 }
@@ -1045,7 +1088,9 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
         McpTool::ContextPack => "bounded evidence assembly under a token budget",
         McpTool::SourceRead => "bounded source ranges as untrusted data",
         McpTool::QueryAdvanced => "bounded safe-AST query",
-        McpTool::QueryBatch => "bounded dependency-ordered reads without a shared budget",
+        McpTool::QueryBatch => {
+            "active generation pinned once; explicit historical selection and complete batch accounting remain fallback-limited"
+        }
     }
 }
 
@@ -1073,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_metadata_does_not_claim_a_shared_budget() {
+    fn batch_metadata_matches_the_canonical_allowlist_and_shared_budget() {
         for entry in &CAPABILITIES {
             assert_eq!(
                 entry.batch_eligible,
@@ -1120,6 +1165,20 @@ mod tests {
                 .status,
             CapabilityStatus::Blocked
         );
+        assert_eq!(
+            batch
+                .disposition("operations[].local_budget.timeout_ms", None)
+                .status,
+            CapabilityStatus::Implemented
+        );
+        assert_eq!(
+            batch.disposition("generation", None).status,
+            CapabilityStatus::FallbackLimited
+        );
+        assert_eq!(
+            batch.disposition("generation", Some("active")).status,
+            CapabilityStatus::Implemented
+        );
     }
 
     #[test]
@@ -1155,6 +1214,21 @@ mod tests {
                 assert!(!encoded.contains(&private_label));
             }
         }
+
+        let batch = discovery_metadata(McpTool::QueryBatch);
+        assert_eq!(batch.generation, "batch_inherited");
+        let generation = batch
+            .limitations
+            .iter()
+            .find(|limitation| limitation.field == "generation")
+            .expect("query.batch discovery exposes its generation limitation");
+        assert_eq!(generation.status, "fallback_limited");
+        assert!(
+            generation
+                .summary
+                .contains("non-active explicit generations")
+        );
+        assert_eq!(generation.error_code, None);
     }
 
     #[test]
