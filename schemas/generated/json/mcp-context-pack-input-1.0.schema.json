@@ -44,6 +44,14 @@
       "description": "Repository or workspace selector.",
       "$ref": "#/$defs/RepositorySelector"
     },
+    "response_profile": {
+      "description": "Representation profile; defaults to compact and never changes evidence truth.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResponseProfile"
+        }
+      ]
+    },
     "sections": {
       "description": "Evidence sections to assemble.",
       "type": "array",
@@ -306,6 +314,26 @@
         {
           "description": "Select by a configured local alias.",
           "$ref": "#/$defs/RepositoryAliasSelector"
+        }
+      ]
+    },
+    "ResponseProfile": {
+      "description": "Requested response representation.",
+      "oneOf": [
+        {
+          "description": "Smallest complete correctness-bearing response.",
+          "type": "string",
+          "const": "compact"
+        },
+        {
+          "description": "More explanatory response within the same hard budgets.",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "Maximum bounded provenance and evidence.",
+          "type": "string",
+          "const": "evidence"
         }
       ]
     },

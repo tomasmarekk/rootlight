@@ -105,6 +105,15 @@
           "maximum": 1000,
           "minimum": 0
         },
+        "signature": {
+          "description": "Bounded repository-derived signature when the source policy permits it.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096,
+          "minLength": 1
+        },
         "snippet": {
           "description": "Bounded source snippet, present only when source inclusion is requested.",
           "anyOf": [
@@ -1365,9 +1374,23 @@
           "maxLength": 524288,
           "minLength": 1
         },
+        "language": {
+          "description": "Bounded language label reported by the source provider.",
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "provenance": {
+          "description": "Checked mechanism that produced the exact source bytes.",
+          "$ref": "#/$defs/SnippetProvenance"
+        },
         "source_ref": {
           "description": "Generation-pinned source reference for the snippet.",
           "$ref": "#/$defs/SourceRef"
+        },
+        "truncated": {
+          "description": "Whether the requested source range was reduced by a byte or token cap.",
+          "type": "boolean"
         },
         "trust": {
           "description": "Trust classification for this repository-derived content.",
@@ -1378,6 +1401,9 @@
       "required": [
         "source_ref",
         "content",
+        "language",
+        "provenance",
+        "truncated",
         "trust"
       ]
     },
@@ -1609,6 +1635,16 @@
           "description": "Tool contract version 1.0.",
           "type": "string",
           "const": "1.0"
+        }
+      ]
+    },
+    "SnippetProvenance": {
+      "description": "Provenance of raw source bytes included in a context pack.",
+      "oneOf": [
+        {
+          "description": "Bytes returned by generation-pinned `source.read`.",
+          "type": "string",
+          "const": "source_read"
         }
       ]
     },

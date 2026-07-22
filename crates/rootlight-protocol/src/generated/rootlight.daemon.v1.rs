@@ -951,31 +951,6 @@ pub struct SymbolExplainResponse {
     #[allow(missing_docs)]
     pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
-#[allow(missing_docs)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum SourceReadEncoding {
-    Utf8 = 0,
-    Bytes = 1,
-}
-impl SourceReadEncoding {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Utf8 => "SOURCE_READ_ENCODING_UTF8",
-            Self::Bytes => "SOURCE_READ_ENCODING_BYTES",
-        }
-    }
-
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "SOURCE_READ_ENCODING_UTF8" => Some(Self::Utf8),
-            "SOURCE_READ_ENCODING_BYTES" => Some(Self::Bytes),
-            _ => None,
-        }
-    }
-}
 /// Requests exact generation-bound source references and bounded presentation.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SourceReadRequest {
@@ -3373,6 +3348,35 @@ impl FirstSliceContinuationGuidance {
             "FIRST_SLICE_GUIDANCE_UNSUPPORTED_NO_CONTINUATION" => {
                 Some(Self::FirstSliceGuidanceUnsupportedNoContinuation)
             }
+            _ => None,
+        }
+    }
+}
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SourceReadEncoding {
+    #[allow(missing_docs)]
+    Utf8 = 0,
+    #[allow(missing_docs)]
+    Bytes = 1,
+}
+impl SourceReadEncoding {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Utf8 => "SOURCE_READ_ENCODING_UTF8",
+            Self::Bytes => "SOURCE_READ_ENCODING_BYTES",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SOURCE_READ_ENCODING_UTF8" => Some(Self::Utf8),
+            "SOURCE_READ_ENCODING_BYTES" => Some(Self::Bytes),
             _ => None,
         }
     }

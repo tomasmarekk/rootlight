@@ -28186,7 +28186,7 @@
             "budget": "token_budget",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded evidence assembly from explicit symbol or file identifiers under a token budget",
+            "fallbackSummary": "bounded profiled evidence assembly with generation-pinned references signatures and source snippets under a token budget",
             "generation": "selects_generation",
             "inputShapeHash": "788f06bf0d8c6ec9718fcf76319af6bb1f7ce470dfa182476265be343b228d4b",
             "limitations": [
@@ -28228,30 +28228,6 @@
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "source_policy",
-                "status": "unsupported_stable_error",
-                "summary": "source selection policy is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "sections",
-                "status": "unsupported_stable_error",
-                "summary": "section selection is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "diversity",
-                "status": "unsupported_stable_error",
-                "summary": "diversity strategy is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "min_confidence",
-                "status": "unsupported_stable_error",
-                "summary": "confidence filtering is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "continuation",
                 "status": "unsupported_stable_error",
                 "summary": "continuation assembly is not served"
@@ -28264,8 +28240,14 @@
               "developer"
             ],
             "responseProfiles": {
-              "mode": "fixed",
-              "representation": "compact"
+              "default": "compact",
+              "mode": "selectable",
+              "supported": [
+                "compact",
+                "standard",
+                "evidence"
+              ],
+              "wireField": "response_profile"
             },
             "status": "fallback_limited"
           }
@@ -28276,7 +28258,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded evidence assembly from explicit symbol or file identifiers under a token budget; path, route, change, located-result, and plan seeds are unsupported.",
+        "description": "Use bounded profiled evidence assembly with generation-pinned references signatures and source snippets under a token budget; selectable response profiles and source policies control representation, while path, route, change, located-result, and plan seeds are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -28505,6 +28487,26 @@
               ],
               "description": "Repository selector accepted by first-slice read tools."
             },
+            "ResponseProfile": {
+              "description": "Requested response representation.",
+              "oneOf": [
+                {
+                  "const": "compact",
+                  "description": "Smallest complete correctness-bearing response.",
+                  "type": "string"
+                },
+                {
+                  "const": "standard",
+                  "description": "More explanatory response within the same hard budgets.",
+                  "type": "string"
+                },
+                {
+                  "const": "evidence",
+                  "description": "Maximum bounded provenance and evidence.",
+                  "type": "string"
+                }
+              ]
+            },
             "SourcePolicy": {
               "description": "How much source detail the assembled pack may include.",
               "oneOf": [
@@ -28578,6 +28580,14 @@
             "repository": {
               "$ref": "#/$defs/RepositorySelector",
               "description": "Repository or workspace selector."
+            },
+            "response_profile": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResponseProfile"
+                }
+              ],
+              "description": "Representation profile; defaults to compact and never changes evidence truth."
             },
             "sections": {
               "description": "Evidence sections to assemble.",
@@ -28713,6 +28723,15 @@
                   "maximum": 1000,
                   "minimum": 0,
                   "type": "integer"
+                },
+                "signature": {
+                  "description": "Bounded repository-derived signature when the source policy permits it.",
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "snippet": {
                   "anyOf": [
@@ -29974,9 +29993,23 @@
                   "minLength": 1,
                   "type": "string"
                 },
+                "language": {
+                  "description": "Bounded language label reported by the source provider.",
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "provenance": {
+                  "$ref": "#/$defs/SnippetProvenance",
+                  "description": "Checked mechanism that produced the exact source bytes."
+                },
                 "source_ref": {
                   "$ref": "#/$defs/SourceRef",
                   "description": "Generation-pinned source reference for the snippet."
+                },
+                "truncated": {
+                  "description": "Whether the requested source range was reduced by a byte or token cap.",
+                  "type": "boolean"
                 },
                 "trust": {
                   "$ref": "#/$defs/TrustClassification",
@@ -29986,6 +30019,9 @@
               "required": [
                 "source_ref",
                 "content",
+                "language",
+                "provenance",
+                "truncated",
                 "trust"
               ],
               "type": "object"
@@ -30217,6 +30253,16 @@
                 {
                   "const": "1.0",
                   "description": "Tool contract version 1.0.",
+                  "type": "string"
+                }
+              ]
+            },
+            "SnippetProvenance": {
+              "description": "Provenance of raw source bytes included in a context pack.",
+              "oneOf": [
+                {
+                  "const": "source_read",
+                  "description": "Bytes returned by generation-pinned `source.read`.",
                   "type": "string"
                 }
               ]
@@ -30471,18 +30517,6 @@
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "context_lines_before",
-                "status": "unsupported_stable_error",
-                "summary": "source context expansion is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "context_lines_after",
-                "status": "unsupported_stable_error",
-                "summary": "source context expansion is not served"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "references[].symbol_id",
                 "status": "unsupported_stable_error",
                 "summary": "symbol selectors are not served by source reads"
@@ -30504,27 +30538,6 @@
                 "field": "references[].end_byte",
                 "status": "unsupported_stable_error",
                 "summary": "file range selectors are not served by source reads"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "merge_overlaps",
-                "status": "unsupported_stable_error",
-                "summary": "overlap merging is not served",
-                "value": "true"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "include_line_numbers",
-                "status": "unsupported_stable_error",
-                "summary": "line-number suppression is not served",
-                "value": "false"
-              },
-              {
-                "errorCode": "UNSUPPORTED_CAPABILITY",
-                "field": "encoding",
-                "status": "unsupported_stable_error",
-                "summary": "base64 source projection is not served",
-                "value": "bytes_base64"
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -30570,7 +30583,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Read bounded source ranges from pinned source references as untrusted data with caller-reduced source and response ceilings; direct file selectors, merging, and base64 output are unsupported.",
+        "description": "Read bounded source ranges from pinned source references as untrusted data using exact UTF-8 or explicit base64 bytes with optional context, canonical overlap merging, line projection, and caller-reduced ceilings; direct file selectors are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -32183,11 +32196,14 @@
                   "type": "integer"
                 },
                 "end_line": {
-                  "description": "One-based last included line.",
+                  "description": "One-based last included line when line projection is enabled.",
                   "format": "uint64",
                   "maximum": 18446744073709551615,
                   "minimum": 0,
-                  "type": "integer"
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 },
                 "generated": {
                   "description": "Whether the indexed file is generated.",
@@ -32217,11 +32233,14 @@
                   "type": "integer"
                 },
                 "start_line": {
-                  "description": "One-based first included line.",
+                  "description": "One-based first included line when line projection is enabled.",
                   "format": "uint64",
                   "maximum": 18446744073709551615,
                   "minimum": 0,
-                  "type": "integer"
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 },
                 "trust": {
                   "$ref": "#/$defs/TrustClassification",
@@ -32233,8 +32252,6 @@
                 "path",
                 "start_byte",
                 "end_byte",
-                "start_line",
-                "end_line",
                 "content",
                 "encoding",
                 "content_hash",

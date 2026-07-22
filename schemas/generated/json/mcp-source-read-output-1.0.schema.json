@@ -1166,8 +1166,11 @@
           "minimum": 0
         },
         "end_line": {
-          "description": "One-based last included line.",
-          "type": "integer",
+          "description": "One-based last included line when line projection is enabled.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
           "maximum": 18446744073709551615,
           "minimum": 0
@@ -1200,8 +1203,11 @@
           "minimum": 0
         },
         "start_line": {
-          "description": "One-based first included line.",
-          "type": "integer",
+          "description": "One-based first included line when line projection is enabled.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
           "maximum": 18446744073709551615,
           "minimum": 0
@@ -1217,8 +1223,6 @@
         "path",
         "start_byte",
         "end_byte",
-        "start_line",
-        "end_line",
         "content",
         "encoding",
         "content_hash",
