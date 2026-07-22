@@ -61,6 +61,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const TRANSPORT_SAMPLES: usize = 20;
 const CANCELLATION_FIXTURE_FILES: usize = 256;
 const CANCELLATION_FIXTURE_FUNCTIONS_PER_FILE: usize = 16;
+// One more than the service retention ceiling proves public stale-snapshot
+// behavior without a clock override or a production mutation endpoint.
+const CATALOG_SNAPSHOT_EVICTION_REQUESTS: usize = 65;
+const CATALOG_BASELINE_NAMES: [&str; 4] = [
+    "catalog-process-alpha",
+    "catalog-process-bravo",
+    "catalog-process-charlie",
+    "catalog-process-delta",
+];
+const CATALOG_INSERTED_NAME: &str = "catalog-process-aardvark";
 const MCP_OUTPUT_QUEUE: usize = 32;
 const MAX_MCP_LINE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CHILD_STDERR_BYTES: usize = 1024 * 1024;
@@ -191,6 +201,13 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     let primary_tool_list = catalog.list_result.clone();
     exercise_protocol_errors(&mut mcp, &mut transcript)?;
     let transport_samples = exercise_transport_samples(&mut mcp, &mut transcript)?;
+    let empty_catalog = list_catalog_page(
+        "catalog.empty",
+        &mut mcp,
+        &catalog,
+        &mut transcript,
+        json!({"max_results": 20, "response_profile": "compact"}),
+    )?;
     let control_client = Client::connect_or_start(&paths, [0x63; 16], ConnectPolicy::ExistingOnly)?;
     let operation_journal = paths.operation_journal_path();
     let cancellation = exercise_attached_cancellation(
@@ -203,6 +220,24 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     )?;
     let hostile_root = exercise_hostile_root(&mut mcp, &catalog, &mut transcript)?;
     wait_until_connections_released(&control_client)?;
+    let one_item_catalog = list_catalog_page(
+        "catalog.one-item",
+        &mut mcp,
+        &catalog,
+        &mut transcript,
+        json!({"max_results": 1, "response_profile": "compact"}),
+    )?;
+    let CatalogExercise {
+        evidence: catalog_evidence,
+        status_evidence: catalog_statuses,
+    } = exercise_repository_catalog(
+        &mut mcp,
+        &catalog,
+        &mut transcript,
+        temporary.path(),
+        empty_catalog,
+        one_item_catalog,
+    )?;
 
     let v1_index = index_repository("v1", &mut mcp, &catalog, &mut transcript, &repository_root)?;
     if v1_index.parent_generation.is_some() {
@@ -424,12 +459,13 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
     let bridge_p95_within_target = bridge_start.p95 <= BRIDGE_P95_TARGET_US;
     let bridge_p99_within_target = bridge_start.p99 <= BRIDGE_P99_TARGET_US;
     let transport_p95_within_target = transport.p95 <= TRANSPORT_P95_TARGET_US;
-    let operation_statuses = vec![
+    let mut operation_statuses = vec![
         cancellation.follow_up_status.clone(),
         v1_index.status_evidence.clone(),
         v2_index.status_evidence.clone(),
         rebuilt_index.status_evidence.clone(),
     ];
+    operation_statuses.extend(catalog_statuses);
     let peak_rss_bytes = operation_statuses
         .iter()
         .map(|status| status.peak_rss_bytes)
@@ -522,6 +558,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
             nested_negation_kept_exact_match_count: discovery_policy.kept_exact_match_count,
             nested_negation_kept_source_read: discovery_policy.kept_source_read,
         },
+        catalog: catalog_evidence,
         process_safety: ProcessSafetyEvidence {
             live_daemon_port_verified_for_all_sessions: true,
             cancellation_fixture_profile: "generated-cancellation-only-rust-v1",
@@ -875,6 +912,519 @@ fn exercise_hostile_root(
         error_message: "tool arguments are invalid",
         identifiers_absent,
         input_redacted: true,
+    })
+}
+
+fn exercise_repository_catalog(
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    temporary_root: &Path,
+    empty: CatalogPageObservation,
+    one_item: CatalogPageObservation,
+) -> Result<CatalogExercise, VerticalError> {
+    require_catalog_shape(&empty, 0, 0, false)?;
+    require_catalog_shape(&one_item, 1, 1, false)?;
+
+    let fixture_root = temporary_root.join("catalog-repositories");
+    let mut baseline_receipts = Vec::new();
+    for (index, name) in CATALOG_BASELINE_NAMES.iter().enumerate() {
+        let root = fixture_root.join(name);
+        prepare_catalog_repository(&root, index)?;
+        baseline_receipts.push(index_repository(
+            &format!("catalog.baseline-{index}"),
+            process,
+            catalog,
+            transcript,
+            &root,
+        )?);
+    }
+
+    let exact = list_catalog_page(
+        "catalog.exact-boundary",
+        process,
+        catalog,
+        transcript,
+        json!({
+            "query": "catalog-process-",
+            "max_results": 4,
+            "response_profile": "compact"
+        }),
+    )?;
+    require_catalog_shape(&exact, 4, 4, false)?;
+    require_catalog_names(&exact, &CATALOG_BASELINE_NAMES)?;
+
+    let normalized_repeat = list_catalog_page(
+        "catalog.normalized-repeat",
+        process,
+        catalog,
+        transcript,
+        json!({
+            "query": "CATALOG-PROCESS-",
+            "states": ["ready", "ready"],
+            "max_results": 4,
+            "response_profile": "compact"
+        }),
+    )?;
+    require_catalog_shape(&normalized_repeat, 4, 4, false)?;
+    if normalized_repeat.entries != exact.entries {
+        return Err(VerticalError::Invariant(
+            "normalized catalog inputs changed the deterministic page",
+        ));
+    }
+
+    let multi_first = list_catalog_page(
+        "catalog.multi-page-1",
+        process,
+        catalog,
+        transcript,
+        json!({
+            "query": "catalog-process-",
+            "max_results": 3,
+            "response_profile": "compact"
+        }),
+    )?;
+    require_catalog_shape(&multi_first, 3, 4, true)?;
+    let multi_final = list_catalog_page(
+        "catalog.multi-page-final",
+        process,
+        catalog,
+        transcript,
+        json!({
+            "query": "catalog-process-",
+            "max_results": 3,
+            "cursor": required_catalog_cursor(&multi_first)?,
+            "response_profile": "compact"
+        }),
+    )?;
+    require_catalog_shape(&multi_final, 1, 4, false)?;
+    require_same_catalog_snapshot(&multi_first, &multi_final)?;
+    let multi_entries = multi_first
+        .entries
+        .iter()
+        .chain(&multi_final.entries)
+        .cloned()
+        .collect::<Vec<_>>();
+    if multi_entries != exact.entries {
+        return Err(VerticalError::Invariant(
+            "multi-page catalog traversal changed deterministic ordering",
+        ));
+    }
+
+    let filtered = list_catalog_page(
+        "catalog.filter-combination",
+        process,
+        catalog,
+        transcript,
+        json!({
+            "query": "ALPHA",
+            "states": ["ready", "ready"],
+            "max_results": 2,
+            "response_profile": "compact"
+        }),
+    )?;
+    require_catalog_shape(&filtered, 1, 1, false)?;
+    require_catalog_names(&filtered, &["catalog-process-alpha"])?;
+    if filtered.entries.iter().any(|entry| entry.state != "ready") {
+        return Err(VerticalError::Invariant(
+            "catalog lifecycle-state filter returned a non-ready repository",
+        ));
+    }
+
+    let empty_states = list_catalog_page(
+        "catalog.empty-state-filter",
+        process,
+        catalog,
+        transcript,
+        json!({
+            "states": [],
+            "max_results": 2,
+            "response_profile": "compact"
+        }),
+    )?;
+    require_catalog_shape(&empty_states, 0, 0, false)?;
+
+    let workspace_arguments = json!({"workspace": "unsupported"});
+    if catalog
+        .validate_input("repo.list", &workspace_arguments)
+        .is_ok()
+    {
+        return Err(VerticalError::Invariant(
+            "repo.list advertised an unsupported workspace filter",
+        ));
+    }
+    // The local schema rejection is deliberately bypassed once so the
+    // production MCP boundary also proves the unknown field fails closed.
+    let workspace = call_tool_unchecked(
+        "catalog.workspace-filter-rejected",
+        process,
+        catalog,
+        transcript,
+        "repo.list",
+        workspace_arguments,
+    )?;
+    require_domain_error(&workspace, "INVALID_ARGUMENT")?;
+
+    let snapshot_first = list_catalog_page(
+        "catalog.snapshot-before-insert",
+        process,
+        catalog,
+        transcript,
+        json!({
+            "query": "catalog-process-",
+            "max_results": 2,
+            "response_profile": "compact"
+        }),
+    )?;
+    require_catalog_shape(&snapshot_first, 2, 4, true)?;
+    let snapshot_cursor = required_catalog_cursor(&snapshot_first)?;
+    let inserted_root = fixture_root.join(CATALOG_INSERTED_NAME);
+    prepare_catalog_repository(&inserted_root, CATALOG_BASELINE_NAMES.len())?;
+    let inserted_receipt = index_repository(
+        "catalog.insert-between-pages",
+        process,
+        catalog,
+        transcript,
+        &inserted_root,
+    )?;
+
+    let snapshot_final = list_catalog_page(
+        "catalog.snapshot-after-insert",
+        process,
+        catalog,
+        transcript,
+        json!({
+            "query": "catalog-process-",
+            "max_results": 2,
+            "cursor": snapshot_cursor.clone(),
+            "response_profile": "compact"
+        }),
+    )?;
+    require_catalog_shape(&snapshot_final, 2, 4, false)?;
+    require_same_catalog_snapshot(&snapshot_first, &snapshot_final)?;
+    let pinned_entries = snapshot_first
+        .entries
+        .iter()
+        .chain(&snapshot_final.entries)
+        .cloned()
+        .collect::<Vec<_>>();
+    if pinned_entries != exact.entries
+        || pinned_entries
+            .iter()
+            .any(|entry| entry.repository_id == inserted_receipt.repository)
+    {
+        return Err(VerticalError::Invariant(
+            "catalog insertion changed membership of a pinned snapshot",
+        ));
+    }
+
+    let refreshed = list_catalog_page(
+        "catalog.refreshed-after-insert",
+        process,
+        catalog,
+        transcript,
+        json!({
+            "query": "catalog-process-",
+            "max_results": 200,
+            "response_profile": "compact"
+        }),
+    )?;
+    require_catalog_shape(&refreshed, 5, 5, false)?;
+    if refreshed
+        .entries
+        .first()
+        .is_none_or(|entry| entry.display_name != CATALOG_INSERTED_NAME)
+        || refreshed
+            .entries
+            .iter()
+            .filter(|entry| entry.repository_id == inserted_receipt.repository)
+            .count()
+            != 1
+    {
+        return Err(VerticalError::Invariant(
+            "fresh catalog snapshot did not include the inserted repository once",
+        ));
+    }
+
+    for (label, arguments) in [
+        (
+            "catalog.cursor-wrong-query",
+            json!({
+                "query": "catalog-process-a",
+                "max_results": 2,
+                "cursor": snapshot_cursor,
+                "response_profile": "compact"
+            }),
+        ),
+        (
+            "catalog.cursor-wrong-state",
+            json!({
+                "query": "catalog-process-",
+                "states": ["ready"],
+                "max_results": 2,
+                "cursor": required_catalog_cursor(&snapshot_first)?,
+                "response_profile": "compact"
+            }),
+        ),
+        (
+            "catalog.cursor-wrong-page-size",
+            json!({
+                "query": "catalog-process-",
+                "max_results": 3,
+                "cursor": required_catalog_cursor(&snapshot_first)?,
+                "response_profile": "compact"
+            }),
+        ),
+    ] {
+        let outcome = call_tool(label, process, catalog, transcript, "repo.list", arguments)?;
+        require_domain_error(&outcome, "INVALID_CURSOR")?;
+    }
+    let unsupported_profile = call_tool(
+        "catalog.unsupported-profile",
+        process,
+        catalog,
+        transcript,
+        "repo.list",
+        json!({
+            "query": "catalog-process-",
+            "max_results": 2,
+            "cursor": required_catalog_cursor(&snapshot_first)?,
+            "response_profile": "standard"
+        }),
+    )?;
+    require_domain_error(&unsupported_profile, "UNSUPPORTED_CAPABILITY")?;
+
+    let tampered_cursor = tamper_cursor(&required_catalog_cursor(&snapshot_first)?)?;
+    let tampered = call_tool(
+        "catalog.tampered-cursor",
+        process,
+        catalog,
+        transcript,
+        "repo.list",
+        json!({
+            "query": "catalog-process-",
+            "max_results": 2,
+            "cursor": tampered_cursor,
+            "response_profile": "compact"
+        }),
+    )?;
+    require_domain_error(&tampered, "INVALID_CURSOR")?;
+
+    let stale_first = list_catalog_page(
+        "catalog.eviction-target",
+        process,
+        catalog,
+        transcript,
+        json!({
+            "query": "catalog-process-",
+            "max_results": 1,
+            "response_profile": "compact"
+        }),
+    )?;
+    let stale_cursor = required_catalog_cursor(&stale_first)?;
+    for index in 0..CATALOG_SNAPSHOT_EVICTION_REQUESTS {
+        let page = list_catalog_page(
+            &format!("catalog.eviction-pressure-{index:02}"),
+            process,
+            catalog,
+            transcript,
+            json!({
+                "query": "catalog-process-",
+                "max_results": 1,
+                "response_profile": "compact"
+            }),
+        )?;
+        require_catalog_shape(&page, 1, 5, true)?;
+    }
+    let stale = call_tool(
+        "catalog.evicted-cursor",
+        process,
+        catalog,
+        transcript,
+        "repo.list",
+        json!({
+            "query": "catalog-process-",
+            "max_results": 1,
+            "cursor": stale_cursor,
+            "response_profile": "compact"
+        }),
+    )?;
+    require_domain_error(&stale, "INVALID_CURSOR")?;
+    if stale.structured["error"]["next_actions"]
+        .as_array()
+        .is_none_or(|actions| {
+            !actions
+                .iter()
+                .any(|action| action["action"] == "restart_enumeration")
+        })
+    {
+        return Err(VerticalError::Invariant(
+            "evicted catalog cursor omitted restart-enumeration guidance",
+        ));
+    }
+
+    let mut status_evidence = baseline_receipts
+        .into_iter()
+        .map(|receipt| receipt.status_evidence)
+        .collect::<Vec<_>>();
+    status_evidence.push(inserted_receipt.status_evidence);
+    Ok(CatalogExercise {
+        evidence: CatalogEvidence {
+            schema_version: "2.0",
+            public_path: "spawned_rootlight_daemon_and_rootlight_mcp_json_rpc",
+            advertised_output_schema_validated_per_call: true,
+            empty_page_rows: empty.entries.len(),
+            one_item_page_rows: one_item.entries.len(),
+            exact_boundary_rows: exact.entries.len(),
+            multi_page_rows: [multi_first.entries.len(), multi_final.entries.len()],
+            deterministic_normalized_page: true,
+            query_state_profile_page_filter_combination: true,
+            unsupported_workspace_rejected_by_input_contract: true,
+            inserted_repository_visible_only_to_fresh_snapshot: true,
+            pinned_snapshot_total_count: snapshot_first.total_count,
+            refreshed_snapshot_total_count: refreshed.total_count,
+            wrong_query_cursor_rejected: true,
+            wrong_state_cursor_rejected: true,
+            wrong_page_size_cursor_rejected: true,
+            wrong_profile_rejected: true,
+            tampered_cursor_rejected: true,
+            evicted_snapshot_cursor_error: "INVALID_CURSOR",
+            evicted_snapshot_restart_action: "restart_enumeration",
+            exact_usage_accounting_checked_on_every_success: true,
+            empty_response_blake3: canonical_blake3(&empty.structured)?,
+            multi_page_response_blake3: canonical_blake3(&json!([
+                multi_first.structured,
+                multi_final.structured
+            ]))?,
+            process_mutations_exercised: ["insert_via_repo.index"],
+            lower_layer_only_coverage: [
+                "rootlight_service::catalog::tests::insertion_deletion_rename_and_reorder_do_not_change_snapshot",
+                "rootlight_service::catalog::tests::repeated_reads_of_one_snapshot_are_identical",
+                "rootlight_service::catalog::tests::expiry_eviction_unknown_and_mismatch_are_distinct",
+                "rootlight_service::catalog::tests::continuation_rejects_wrong_key_and_page_size",
+            ],
+            lower_layer_reason: "public repository lifecycle currently exposes index but no delete, rename, reorder, direct snapshot selector, or test mutation endpoint",
+        },
+        status_evidence,
+    })
+}
+
+fn prepare_catalog_repository(root: &Path, index: usize) -> Result<(), VerticalError> {
+    fs::create_dir_all(root.join("src")).map_err(|source| VerticalError::Io {
+        action: "create catalog process fixture directory",
+        source,
+    })?;
+    let package_name =
+        root.file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(VerticalError::Invariant(
+                "catalog process fixture name was not valid UTF-8",
+            ))?;
+    fs::write(
+        root.join("Cargo.toml"),
+        format!("[package]\nname = \"{package_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+    )
+    .map_err(|source| VerticalError::Io {
+        action: "write catalog process fixture manifest",
+        source,
+    })?;
+    fs::write(
+        root.join("src").join("lib.rs"),
+        format!("pub fn catalog_fixture_{index}() -> usize {{ {index} }}\n"),
+    )
+    .map_err(|source| VerticalError::Io {
+        action: "write catalog process fixture source",
+        source,
+    })
+}
+
+fn list_catalog_page(
+    label: &str,
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    arguments: Value,
+) -> Result<CatalogPageObservation, VerticalError> {
+    let outcome = call_tool(label, process, catalog, transcript, "repo.list", arguments)?;
+    require_tool_success(&outcome, "repo.list")?;
+    CatalogPageObservation::parse(outcome.structured)
+}
+
+fn require_catalog_shape(
+    page: &CatalogPageObservation,
+    rows: usize,
+    total_count: u64,
+    truncated: bool,
+) -> Result<(), VerticalError> {
+    if page.entries.len() == rows
+        && page.total_count == total_count
+        && page.truncated == truncated
+        && page.next_cursor.is_some() == truncated
+    {
+        Ok(())
+    } else {
+        Err(VerticalError::Invariant(
+            "catalog page shape did not match the requested boundary",
+        ))
+    }
+}
+
+fn require_catalog_names(
+    page: &CatalogPageObservation,
+    expected: &[&str],
+) -> Result<(), VerticalError> {
+    let observed = page
+        .entries
+        .iter()
+        .map(|entry| entry.display_name.as_str())
+        .collect::<Vec<_>>();
+    if observed == expected {
+        Ok(())
+    } else {
+        Err(VerticalError::Invariant(
+            "catalog page display-name order was not deterministic",
+        ))
+    }
+}
+
+fn require_same_catalog_snapshot(
+    first: &CatalogPageObservation,
+    continuation: &CatalogPageObservation,
+) -> Result<(), VerticalError> {
+    if first.snapshot_id == continuation.snapshot_id {
+        Ok(())
+    } else {
+        Err(VerticalError::Invariant(
+            "catalog continuation changed immutable snapshot identity",
+        ))
+    }
+}
+
+fn required_catalog_cursor(page: &CatalogPageObservation) -> Result<String, VerticalError> {
+    page.next_cursor.clone().ok_or(VerticalError::Invariant(
+        "truncated catalog page omitted its continuation cursor",
+    ))
+}
+
+fn require_domain_error(outcome: &ToolOutcome, code: &str) -> Result<(), VerticalError> {
+    if outcome.is_error && outcome.structured["error"]["code"] == code {
+        Ok(())
+    } else {
+        Err(VerticalError::Invariant(
+            "catalog request did not return its expected domain error",
+        ))
+    }
+}
+
+fn tamper_cursor(cursor: &str) -> Result<String, VerticalError> {
+    let mut bytes = cursor.as_bytes().to_vec();
+    let last = bytes.last_mut().ok_or(VerticalError::Invariant(
+        "catalog continuation cursor was empty",
+    ))?;
+    *last = if *last == b'a' { b'b' } else { b'a' };
+    String::from_utf8(bytes).map_err(|source| VerticalError::OwnedUtf8 {
+        action: "encode tampered catalog cursor",
+        source,
     })
 }
 
@@ -1353,6 +1903,28 @@ fn call_tool(
     arguments: Value,
 ) -> Result<ToolOutcome, VerticalError> {
     catalog.validate_input(tool, &arguments)?;
+    let exchange = process.request(
+        transcript,
+        label.to_owned(),
+        "tools/call",
+        json!({"name": tool, "arguments": arguments}),
+    )?;
+    if exchange.response.get("error").is_some() {
+        return Err(VerticalError::Invariant(
+            "tools/call returned a JSON-RPC protocol error",
+        ));
+    }
+    catalog.validate_result(tool, &exchange.response)
+}
+
+fn call_tool_unchecked(
+    label: &str,
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    tool: &str,
+    arguments: Value,
+) -> Result<ToolOutcome, VerticalError> {
     let exchange = process.request(
         transcript,
         label.to_owned(),
@@ -2562,6 +3134,113 @@ struct ToolOutcome {
     is_error: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatalogEntryObservation {
+    repository_id: String,
+    display_name: String,
+    state: String,
+}
+
+#[derive(Debug)]
+struct CatalogPageObservation {
+    structured: Value,
+    snapshot_id: String,
+    entries: Vec<CatalogEntryObservation>,
+    total_count: u64,
+    truncated: bool,
+    next_cursor: Option<String>,
+}
+
+impl CatalogPageObservation {
+    fn parse(structured: Value) -> Result<Self, VerticalError> {
+        if structured["schema_version"] != "2.0"
+            || structured["trust"] != "untrusted_repository_data"
+            || structured.get("repository").is_some()
+            || structured.get("generation").is_some()
+            || structured.get("coverage").is_some()
+        {
+            return Err(VerticalError::Invariant(
+                "repo.list did not use its catalog-level version-2 envelope",
+            ));
+        }
+        let snapshot_id = required_string(&structured["snapshot_id"], "catalog snapshot")?;
+        let repositories =
+            structured["data"]["repositories"]
+                .as_array()
+                .ok_or(VerticalError::Invariant(
+                    "catalog response omitted its repository array",
+                ))?;
+        let entries = repositories
+            .iter()
+            .map(|entry| {
+                Ok(CatalogEntryObservation {
+                    repository_id: required_string(
+                        &entry["repository_id"],
+                        "catalog repository ID",
+                    )?,
+                    display_name: required_string(&entry["display_name"], "catalog display name")?,
+                    state: required_string(&entry["state"], "catalog repository state")?,
+                })
+            })
+            .collect::<Result<Vec<_>, VerticalError>>()?;
+        let rows = required_u64(&structured["usage"]["rows"], "catalog usage rows")?;
+        let observed_rows = u64::try_from(entries.len()).map_err(|_| VerticalError::Clock)?;
+        let json_bytes = required_u64(
+            &structured["usage"]["json_bytes"],
+            "catalog usage JSON bytes",
+        )?;
+        let serialized_bytes =
+            u64::try_from(serialized_len(&structured)?).map_err(|_| VerticalError::Clock)?;
+        let tokens = required_u64(
+            &structured["usage"]["estimated_tokens"],
+            "catalog usage estimated tokens",
+        )?;
+        let serialized_tokens =
+            estimated_tokens(usize::try_from(serialized_bytes).map_err(|_| VerticalError::Clock)?);
+        let wall_time_ms = required_u64(
+            &structured["usage"]["wall_time_ms"],
+            "catalog usage wall time",
+        )?;
+        if rows != observed_rows
+            || json_bytes != serialized_bytes
+            || tokens != serialized_tokens
+            || wall_time_ms == 0
+            || structured["usage"]["edges"] != 0
+            || structured["usage"]["source_bytes"] != 0
+            || structured["usage"]["cache_status"] != "not_applicable"
+            || structured["usage"]["trace_id"] != "catalog-page"
+        {
+            return Err(VerticalError::Invariant(
+                "repo.list usage accounting was not exact and measured",
+            ));
+        }
+        let truncated = structured["truncated"]
+            .as_bool()
+            .ok_or(VerticalError::Invariant(
+                "catalog response omitted truncation state",
+            ))?;
+        let next_cursor = optional_string(&structured["next_cursor"])?;
+        if truncated != next_cursor.is_some() {
+            return Err(VerticalError::Invariant(
+                "catalog continuation did not match truncation state",
+            ));
+        }
+        Ok(Self {
+            total_count: required_u64(&structured["data"]["total_count"], "catalog total count")?,
+            structured,
+            snapshot_id,
+            entries,
+            truncated,
+            next_cursor,
+        })
+    }
+}
+
+struct CatalogExercise {
+    evidence: CatalogEvidence,
+    status_evidence: Vec<OperationStatusEvidence>,
+}
+
 #[derive(Debug)]
 struct Exchange {
     response: Value,
@@ -2965,6 +3644,7 @@ struct Summary {
     protocol: ProtocolEvidence,
     environment: EnvironmentEvidence,
     fixture: FixtureEvidence,
+    catalog: CatalogEvidence,
     process_safety: ProcessSafetyEvidence,
     generations: GenerationEvidence,
     measurements: MeasurementEvidence,
@@ -3035,6 +3715,36 @@ struct FixtureEvidence {
     nested_ignored_response_rust_coverage_tier: Option<String>,
     nested_negation_kept_exact_match_count: usize,
     nested_negation_kept_source_read: bool,
+}
+
+#[derive(Serialize)]
+struct CatalogEvidence {
+    schema_version: &'static str,
+    public_path: &'static str,
+    advertised_output_schema_validated_per_call: bool,
+    empty_page_rows: usize,
+    one_item_page_rows: usize,
+    exact_boundary_rows: usize,
+    multi_page_rows: [usize; 2],
+    deterministic_normalized_page: bool,
+    query_state_profile_page_filter_combination: bool,
+    unsupported_workspace_rejected_by_input_contract: bool,
+    inserted_repository_visible_only_to_fresh_snapshot: bool,
+    pinned_snapshot_total_count: u64,
+    refreshed_snapshot_total_count: u64,
+    wrong_query_cursor_rejected: bool,
+    wrong_state_cursor_rejected: bool,
+    wrong_page_size_cursor_rejected: bool,
+    wrong_profile_rejected: bool,
+    tampered_cursor_rejected: bool,
+    evicted_snapshot_cursor_error: &'static str,
+    evicted_snapshot_restart_action: &'static str,
+    exact_usage_accounting_checked_on_every_success: bool,
+    empty_response_blake3: String,
+    multi_page_response_blake3: String,
+    process_mutations_exercised: [&'static str; 1],
+    lower_layer_only_coverage: [&'static str; 4],
+    lower_layer_reason: &'static str,
 }
 
 #[derive(Serialize)]
