@@ -182,7 +182,7 @@
     },
     {
       "path": "xtask/src/main.rs",
-      "blake3": "cf5af8ab204f8ce0bcabea66352fa0ff2217d267ec4aa7a82775ac0b2124c03b"
+      "blake3": "90d931158d8193f9052cae33b109d83cc7218f72d7f077e84b4fae249082eed7"
     },
     {
       "path": "xtask/src/schemas.rs",
