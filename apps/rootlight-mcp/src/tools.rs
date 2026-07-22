@@ -473,13 +473,6 @@ pub(crate) enum CapabilityBindingPolicy {
     /// Validates concrete input values after bindings have been materialized.
     Materialized,
     /// Rejects a binding when its eventual value could select a restricted rule.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reserved for static batch preflight before materialization"
-        )
-    )]
     RejectUnprovenRestrictedBindings,
 }
 

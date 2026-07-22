@@ -738,6 +738,32 @@ fn batch_harness() -> Harness {
     })
 }
 
+fn assert_capability_rejection(
+    error: &ToolExecutionError,
+    code: ErrorCode,
+    field_path: &str,
+    reason: &str,
+) {
+    let public = error.public_error().expect("rejection is public");
+    assert_eq!(public.code(), code);
+    assert_eq!(
+        public
+            .details()
+            .get(&DetailKey::parse("field_path").expect("static key is valid")),
+        Some(&PublicValue::Label(
+            SafeLabel::parse(field_path).expect("field path is valid")
+        ))
+    );
+    assert_eq!(
+        public
+            .details()
+            .get(&DetailKey::parse("capability_reason").expect("static key is valid")),
+        Some(&PublicValue::Label(
+            SafeLabel::parse(reason).expect("reason is valid")
+        ))
+    );
+}
+
 fn executor_failure<T>() -> Result<T, ClientPortError> {
     Err(ClientPortError::Executor)
 }
@@ -1416,7 +1442,7 @@ fn production_batch_mapping_covers_every_canonical_eligible_tool() {
 }
 
 #[tokio::test]
-async fn query_batch_resolves_typed_bindings_between_operations() {
+async fn query_batch_defers_allowed_bindings_until_runtime_materialization() {
     let harness = batch_harness();
     let arguments = json!({
         "repository": {"repository_id": repository()},
@@ -1444,6 +1470,11 @@ async fn query_batch_resolves_typed_bindings_between_operations() {
             .operation_results
             .iter()
             .all(|result| result.status == BatchOperationStatus::Ok)
+    );
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        3,
+        "identity and both child calls prove static preflight deferred the binding"
     );
 }
 
@@ -1678,7 +1709,110 @@ async fn explicit_nonactive_generation_fails_before_child_retrieval() {
 }
 
 #[tokio::test]
-async fn query_batch_keeps_all_subtool_errors_inside_a_pinned_envelope() {
+async fn query_batch_rejects_static_child_capabilities_before_identity_resolution() {
+    let harness = batch_harness();
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "unsupported", "tool": "context.pack", "arguments": {
+                    "seeds": {"paths": ["src/lib.rs"]}
+                }}
+            ]
+        }),
+    )
+    .await
+    .expect_err("the batch is rejected before identity resolution");
+    assert_capability_rejection(
+        &error,
+        ErrorCode::UnsupportedCapability,
+        "operations.0.arguments.seeds.paths.0",
+        "unsupported_field",
+    );
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        0,
+        "static rejection must not cross the client port"
+    );
+}
+
+#[tokio::test]
+async fn query_batch_rejects_unproven_restricted_bindings_before_dependencies() {
+    let harness = batch_harness();
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "find", "tool": "code.locate", "arguments": {
+                    "query": "publish"
+                }},
+                {"id": "restricted", "tool": "source.read", "depends_on": ["find"], "arguments": {
+                    "response_profile": {
+                        "$from": "find",
+                        "pointer": "/data/matches/0/symbol_id"
+                    }
+                }}
+            ]
+        }),
+    )
+    .await
+    .expect_err("an unproven value-restricted binding rejects the batch");
+    assert_capability_rejection(
+        &error,
+        ErrorCode::UnsupportedCapability,
+        "operations.1.arguments.response_profile",
+        "unproven_bound_value",
+    );
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        0,
+        "dependency and identity calls must not start"
+    );
+}
+
+#[tokio::test]
+async fn query_batch_rejects_bound_unsupported_fields_before_dependencies() {
+    let harness = batch_harness();
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "find", "tool": "code.locate", "arguments": {
+                    "query": "publish"
+                }},
+                {"id": "restricted", "tool": "code.locate", "depends_on": ["find"], "arguments": {
+                    "query": "publish",
+                    "min_confidence": {
+                        "$from": "find",
+                        "pointer": "/data/matches/0/symbol_id"
+                    }
+                }}
+            ]
+        }),
+    )
+    .await
+    .expect_err("a bound unsupported field rejects the batch");
+    assert_capability_rejection(
+        &error,
+        ErrorCode::UnsupportedCapability,
+        "operations.1.arguments.min_confidence",
+        "unsupported_field",
+    );
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        0,
+        "dependency and identity calls must not start"
+    );
+}
+
+#[tokio::test]
+async fn query_batch_keeps_runtime_child_errors_inside_a_pinned_envelope() {
     let harness = batch_harness();
     let output = execute(
         &harness.executor,
@@ -1686,17 +1820,16 @@ async fn query_batch_keeps_all_subtool_errors_inside_a_pinned_envelope() {
         json!({
             "repository": {"repository_id": repository()},
             "operations": [
-                {"id": "unsupported", "tool": "code.locate", "arguments": {
-                    "query": "publish",
-                    "kinds": ["function"]
+                {"id": "unavailable", "tool": "symbol.relationships", "arguments": {
+                    "symbol_ids": [symbol()],
+                    "relations": ["calls"]
                 }}
             ]
         }),
     )
     .await
-    .expect("all subtool failures still produce a batch envelope");
-    let output: QueryBatchOutput = decode(output);
-    let ToolResponse::Success(output) = output else {
+    .expect("runtime child failures still produce a batch envelope");
+    let ToolResponse::Success(output) = decode::<QueryBatchOutput>(output) else {
         panic!("expected batch success envelope");
     };
     assert_eq!(output.data.batch_status, BatchStatus::Error);
@@ -1706,13 +1839,93 @@ async fn query_batch_keeps_all_subtool_errors_inside_a_pinned_envelope() {
             .error
             .as_ref()
             .map(PublicError::code),
-        Some(ErrorCode::UnsupportedCapability)
+        Some(ErrorCode::Internal)
     );
     assert_eq!(
         harness.call_count.load(Ordering::Relaxed),
-        1,
-        "only generation pinning reaches the client port"
+        2,
+        "identity and the runtime child both cross the client port"
     );
+}
+
+#[tokio::test]
+async fn query_batch_root_gate_allows_timeout_descendants_but_blocks_max_tokens() {
+    let timeout_harness = batch_harness();
+    let timeout_calls = Arc::clone(&timeout_harness.call_count);
+    let timeout_router = ToolRouter::new(
+        timeout_harness.executor,
+        rootlight_mcp_contract::ExposureProfile::Developer,
+    )
+    .expect("router compiles");
+    let timeout_response = timeout_router
+        .handle(
+            operating_request(json!({
+                "name": "query.batch",
+                "arguments": {
+                    "repository": {"repository_id": repository()},
+                    "operations": [{
+                        "id": "unsupported",
+                        "tool": "context.pack",
+                        "arguments": {"seeds": {"paths": ["src/lib.rs"]}},
+                        "local_budget": {"timeout_ms": 50}
+                    }]
+                }
+            })),
+            cancellation(),
+        )
+        .await;
+    let HandlerResponse::Success(timeout_result) = timeout_response else {
+        panic!("timeout case returns an MCP tool result");
+    };
+    assert_eq!(timeout_result["isError"], true);
+    assert_eq!(
+        timeout_result["structuredContent"]["error"]["details"]["field_path"]["value"],
+        "operations.0.arguments.seeds.paths.0",
+        "the implemented timeout descendant must reach child preflight"
+    );
+    assert_eq!(timeout_calls.load(Ordering::Relaxed), 0);
+
+    let max_tokens_harness = batch_harness();
+    let max_tokens_calls = Arc::clone(&max_tokens_harness.call_count);
+    let max_tokens_router = ToolRouter::new(
+        max_tokens_harness.executor,
+        rootlight_mcp_contract::ExposureProfile::Developer,
+    )
+    .expect("router compiles");
+    let max_tokens_response = max_tokens_router
+        .handle(
+            operating_request(json!({
+                "name": "query.batch",
+                "arguments": {
+                    "repository": {"repository_id": repository()},
+                    "operations": [{
+                        "id": "blocked",
+                        "tool": "code.locate",
+                        "arguments": {"query": "publish"},
+                        "local_budget": {"max_tokens": 100}
+                    }]
+                }
+            })),
+            cancellation(),
+        )
+        .await;
+    let HandlerResponse::Success(max_tokens_result) = max_tokens_response else {
+        panic!("max_tokens case returns an MCP tool result");
+    };
+    assert_eq!(max_tokens_result["isError"], true);
+    assert_eq!(
+        max_tokens_result["structuredContent"]["error"]["code"],
+        "UNSUPPORTED_CAPABILITY"
+    );
+    assert_eq!(
+        max_tokens_result["structuredContent"]["error"]["details"]["field_path"]["value"],
+        "operations.0.local_budget.max_tokens"
+    );
+    assert_eq!(
+        max_tokens_result["structuredContent"]["error"]["details"]["capability_reason"]["value"],
+        "blocked_field"
+    );
+    assert_eq!(max_tokens_calls.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
