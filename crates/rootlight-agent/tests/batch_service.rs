@@ -2,13 +2,19 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use rootlight_agent::{
     batch::{BatchOrchestrationError, BatchPublicErrors, BatchService},
     policy::CancellationSignal,
-    port::{AgentCallContext, AgentPortError, AgentPortFuture, AgentToolPort, AgentToolRequest},
+    port::{
+        AgentCallContext, AgentIdentityRequest, AgentPortError, AgentPortFuture,
+        AgentResolutionContext, AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
+    },
 };
 use rootlight_ids::{GenerationId, RepositoryId};
 use rootlight_ir::CoverageStatus;
@@ -43,6 +49,7 @@ struct RecordedCall {
 struct FakePort {
     responses: Mutex<VecDeque<Result<ReadEnvelope<Value>, AgentPortError>>>,
     calls: Mutex<Vec<RecordedCall>>,
+    identity_calls: AtomicUsize,
 }
 
 impl FakePort {
@@ -52,11 +59,40 @@ impl FakePort {
         Self {
             responses: Mutex::new(responses.into_iter().collect()),
             calls: Mutex::new(Vec::new()),
+            identity_calls: AtomicUsize::new(0),
         }
     }
 }
 
 impl AgentToolPort<TestCancellation> for FakePort {
+    fn resolve_identity(
+        &self,
+        _request: AgentIdentityRequest,
+        _context: AgentResolutionContext<TestCancellation>,
+    ) -> AgentPortFuture<Result<AgentResolvedIdentity, AgentPortError>> {
+        self.identity_calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async {
+            Ok(AgentResolvedIdentity {
+                repository: ResolvedRepository {
+                    repository_id: repository(),
+                    display_name: "fixture".to_owned(),
+                },
+                generation: GenerationSummary {
+                    generation_id: generation(2),
+                    parent_generation: RequiredNullable(None),
+                    structural_freshness: Freshness::Current,
+                    semantic_freshness: Freshness::Current,
+                },
+                coverage: CoverageSummary {
+                    status: CoverageStatus::Bounded,
+                    languages: Vec::new(),
+                    skipped_inputs: 0,
+                },
+                warnings: Vec::new(),
+            })
+        })
+    }
+
     fn execute(
         &self,
         request: AgentToolRequest,
@@ -230,7 +266,132 @@ async fn service_materializes_bindings_and_propagates_policy() {
         json!([])
     );
     assert_eq!(calls[0].budget.max_tokens, Some(1_000));
+    assert_eq!(calls[1].budget.max_tokens, Some(900));
     assert!(calls.iter().all(|call| call.has_deadline));
+    assert_eq!(port.identity_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        calls[0].request.clone().into_arguments()["generation"],
+        json!(generation(2))
+    );
+}
+
+#[tokio::test]
+async fn omitted_timeout_receives_a_bounded_default_before_dispatch() {
+    let mut request = input(
+        vec![operation(
+            "find",
+            BatchTool::CodeLocate,
+            Map::new(),
+            None,
+            None,
+        )],
+        budget(500),
+    );
+    request.budget = None;
+    let port = Arc::new(FakePort::with_responses([Ok(response(
+        generation(2),
+        100,
+        json!({"matches": []}),
+    ))]));
+
+    BatchService
+        .execute(
+            Arc::clone(&port),
+            request,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("default timeout keeps the bounded call admissible");
+
+    let calls = port.calls.lock().expect("call lock is available");
+    let timeout = calls[0]
+        .budget
+        .timeout_ms
+        .expect("default timeout propagates");
+    assert!((1..=rootlight_agent::batch::DEFAULT_BATCH_TIMEOUT_MS).contains(&timeout));
+    assert!(calls[0].has_deadline);
+}
+
+#[tokio::test]
+async fn max_results_counts_returned_objects_instead_of_operations() {
+    let mut request = input(
+        vec![operation(
+            "find",
+            BatchTool::CodeLocate,
+            Map::new(),
+            None,
+            None,
+        )],
+        budget(500),
+    );
+    request.budget.as_mut().expect("test budget").max_results = Some(1);
+    let port = Arc::new(FakePort::with_responses([Ok(response(
+        generation(2),
+        100,
+        json!({"matches": [{}, {}]}),
+    ))]));
+
+    assert_eq!(
+        BatchService
+            .execute(
+                port,
+                request,
+                repository(),
+                TestCancellation(false),
+                errors(),
+            )
+            .await,
+        Err(BatchOrchestrationError::BudgetExceeded)
+    );
+}
+
+#[tokio::test]
+async fn bindings_cannot_read_warnings_or_envelope_metadata() {
+    let mut arguments = Map::new();
+    arguments.insert(
+        "query".to_owned(),
+        json!({"$from": "find", "pointer": "/warnings/0/code"}),
+    );
+    let request = input(
+        vec![
+            operation("find", BatchTool::CodeLocate, Map::new(), None, None),
+            operation(
+                "refine",
+                BatchTool::CodeLocate,
+                arguments,
+                Some(vec!["find"]),
+                None,
+            ),
+        ],
+        budget(500),
+    );
+    let port = Arc::new(FakePort::with_responses([Ok(response(
+        generation(2),
+        100,
+        json!({"matches": []}),
+    ))]));
+
+    let output = BatchService
+        .execute(
+            Arc::clone(&port),
+            request,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("invalid binding remains a per-operation result");
+    assert_eq!(output.data.batch_status, BatchStatus::Partial);
+    assert_eq!(
+        output.data.operation_results[1]
+            .error
+            .as_ref()
+            .map(PublicError::code),
+        Some(ErrorCode::BindingInvalid)
+    );
+    assert_eq!(port.calls.lock().expect("call lock").len(), 1);
 }
 
 #[tokio::test]
@@ -366,16 +527,14 @@ async fn all_child_errors_preserve_complete_per_operation_outcome() {
         Box::new(unsupported),
     ))]));
 
-    let error = BatchService
+    let output = BatchService
         .execute(port, input, repository(), TestCancellation(false), errors())
         .await
-        .expect_err("no successful child returns metadata-free operation outcomes");
-    let BatchOrchestrationError::NoSuccessfulOperation(output) = error else {
-        panic!("expected unsuccessful operation payload");
-    };
-    assert_eq!(output.operation_results.len(), 1);
+        .expect("pinned identity permits a complete all-error batch envelope");
+    assert_eq!(output.data.batch_status, BatchStatus::Error);
+    assert_eq!(output.data.operation_results.len(), 1);
     assert_eq!(
-        output.operation_results[0]
+        output.data.operation_results[0]
             .error
             .as_ref()
             .map(PublicError::code),
@@ -387,8 +546,8 @@ async fn all_child_errors_preserve_complete_per_operation_outcome() {
 async fn bound_child_type_error_uses_binding_specific_code() {
     let mut arguments = Map::new();
     arguments.insert(
-        "query".to_owned(),
-        json!({"$from": "find", "pointer": "/data/matches"}),
+        "search_modes".to_owned(),
+        json!({"$from": "find", "pointer": "/data/matches/0/symbol_id"}),
     );
     let input = input(
         vec![

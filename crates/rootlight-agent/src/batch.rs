@@ -20,7 +20,7 @@ use rootlight_mcp_contract::{
         BatchStatus, BatchTool, FailurePolicy, QueryBatchData, QueryBatchInput,
     },
     vertical::{
-        CacheStatus, CoverageSummary, ReadEnvelope, RequiredNullable, ResolvedRepository,
+        CacheStatus, GenerationSelector, ReadEnvelope, RepositoryIdSelector, RequiredNullable,
         ResponseBudget, ResponseWarning, UsageSummary,
     },
 };
@@ -30,7 +30,10 @@ use crate::{
     policy::{
         BudgetCharge, BudgetLedger, CancellationSignal, ExecutionPolicyError, is_compact_profile,
     },
-    port::{AgentCallContext, AgentPortError, AgentToolPort, AgentToolRequest},
+    port::{
+        AgentCallContext, AgentIdentityRequest, AgentPortError, AgentResolutionContext,
+        AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
+    },
 };
 
 /// Maximum operations accepted in one public batch request.
@@ -503,6 +506,9 @@ fn resolve_binding(
                     .get("pointer")
                     .and_then(Value::as_str)
                     .ok_or(BatchExecutionError::InvalidBinding)?;
+                if !binding_pointer_is_allowed(pointer) {
+                    return Err(BatchExecutionError::InvalidBinding);
+                }
                 let dependency = declared
                     .iter()
                     .find(|&&index| operations[index].id == from_name)
@@ -551,6 +557,37 @@ fn resolve_binding(
 
 /// Default aggregate token ceiling for a batch without an explicit budget.
 pub const DEFAULT_BATCH_TOKENS: u16 = 3_000;
+
+/// Default wall-clock ceiling for a batch without an explicit timeout.
+pub const DEFAULT_BATCH_TIMEOUT_MS: u32 = 30_000;
+
+/// Restricts bindings to typed identifiers and source references under the
+/// child data payload.
+///
+/// The closed leaf set deliberately excludes envelope metadata, warnings,
+/// display text, snippets, rationale, and other repository-controlled strings.
+/// Materialized values still pass the destination tool's strict schema before
+/// dispatch, which verifies target type compatibility.
+fn binding_pointer_is_allowed(pointer: &str) -> bool {
+    let mut segments = pointer.split('/');
+    if segments.next() != Some("") || segments.next() != Some("data") {
+        return false;
+    }
+    let Some(leaf) = segments.rfind(|segment| !segment.is_empty()) else {
+        return false;
+    };
+    matches!(
+        leaf,
+        "symbol_id"
+            | "symbol_ids"
+            | "source_ref"
+            | "source_refs"
+            | "definition"
+            | "nodes"
+            | "test_id"
+            | "pack_id"
+    )
+}
 
 /// Checked public failures injected into transport-neutral batch orchestration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -610,6 +647,8 @@ pub enum BatchOrchestrationError {
     DeadlineExceeded,
     /// Aggregate resource usage exceeded the parent budget.
     BudgetExceeded,
+    /// Repository or generation identity could not be resolved.
+    IdentityResolution(Box<PublicError>),
     /// No operation produced a successful generation-pinned result.
     NoSuccessfulOperation(Box<BatchUnsuccessfulOutput>),
     /// A child response violated repository or generation invariants.
@@ -637,7 +676,7 @@ impl BatchService {
     pub async fn execute<P, C>(
         &self,
         port: Arc<P>,
-        input: QueryBatchInput,
+        mut input: QueryBatchInput,
         repository: RepositoryId,
         cancellation: C,
         errors: BatchPublicErrors,
@@ -664,16 +703,27 @@ impl BatchService {
         if parent_budget.evidence_level.is_some() {
             return Err(BatchOrchestrationError::InvalidArguments);
         }
-        let mut parent_ledger = BudgetLedger::new(Some(parent_budget.clone()));
-        parent_ledger
-            .charge(BudgetCharge {
-                results: u64::try_from(input.operations.len()).unwrap_or(u64::MAX),
-                ..BudgetCharge::default()
-            })
-            .map_err(map_policy_error)?;
-
         let started_at = Instant::now();
-        let parent_deadline = deadline_from(started_at, parent_budget.timeout_ms)?;
+        let parent_deadline = deadline_from(started_at, parent_budget.timeout_ms)?
+            .ok_or(BatchOrchestrationError::Internal)?;
+        let identity = resolve_identity(
+            Arc::clone(&port),
+            &input,
+            cancellation.clone(),
+            parent_deadline,
+        )
+        .await?;
+        if identity.repository.repository_id != repository {
+            return Err(BatchOrchestrationError::InvalidResponse);
+        }
+        input.repository = rootlight_mcp_contract::RepositorySelector::ById(RepositoryIdSelector {
+            repository_id: identity.repository.repository_id,
+        });
+        input.generation = Some(GenerationSelector::Explicit(
+            identity.generation.generation_id,
+        ));
+
+        let mut parent_ledger = BudgetLedger::new(Some(parent_budget.clone()));
         let fail_fast = matches!(input.failure_policy, Some(FailurePolicy::FailFast));
         let count = input.operations.len();
         let mut results: Vec<Option<BatchOperationResult>> = vec![None; count];
@@ -683,7 +733,7 @@ impl BatchService {
 
         for index in plan.execution_order {
             checkpoint(&cancellation)?;
-            check_deadline(parent_deadline)?;
+            check_deadline(Some(parent_deadline))?;
             let operation = &input.operations[index];
             if dependency_failed(&dependencies[index], &results) {
                 results[index] = Some(terminal_result(
@@ -720,32 +770,32 @@ impl BatchService {
                     BatchExecutionError::Serialization | BatchExecutionError::MemoryUnavailable,
                 ) => return Err(BatchOrchestrationError::Internal),
             };
-            let child_budget =
-                effective_child_budget(&parent_budget, operation.local_budget.as_ref());
+            let remaining = remaining_parent_budget(
+                &parent_budget,
+                parent_ledger.consumed(),
+                started_at.elapsed(),
+            )?;
+            let child_budget = effective_child_budget(&remaining, operation.local_budget.as_ref());
             let child_deadline =
-                effective_child_deadline(parent_deadline, child_budget.timeout_ms)?;
+                effective_child_deadline(Some(parent_deadline), child_budget.timeout_ms)?;
             let context =
-                AgentCallContext::new(cancellation.clone(), child_budget.clone(), child_deadline);
-            let request = AgentToolRequest::new(operation.tool, resolved.arguments);
+                AgentCallContext::new(cancellation.clone(), child_budget.clone(), child_deadline)
+                    .with_local_budget(operation.local_budget.clone());
+            let request = AgentToolRequest::new(operation.tool, resolved.arguments)
+                .with_materialized_binding(resolved.had_binding);
 
             match port.execute(request, context).await {
                 Ok(envelope) => {
                     checkpoint(&cancellation)?;
-                    check_deadline(parent_deadline)?;
-                    validate_child_identity(&envelope, repository, &binding_envelopes)?;
+                    check_deadline(Some(parent_deadline))?;
+                    validate_child_identity(&envelope, &identity)?;
 
-                    let charge = charge_for(&envelope.usage);
+                    let charge = charge_for(operation.tool, &envelope);
                     parent_ledger.charge(charge).map_err(map_policy_error)?;
                     observed_envelopes[index] = Some(envelope.clone());
 
                     let mut child_ledger = BudgetLedger::new(Some(child_budget));
-                    if child_ledger
-                        .charge(BudgetCharge {
-                            results: 1,
-                            ..charge
-                        })
-                        .is_err()
-                    {
+                    if child_ledger.charge(charge).is_err() {
                         results[index] = Some(error_result(operation, &errors.budget_exceeded));
                         stop_scheduling |= fail_fast;
                         continue;
@@ -780,49 +830,26 @@ impl BatchService {
         }
 
         checkpoint(&cancellation)?;
-        check_deadline(parent_deadline)?;
+        check_deadline(Some(parent_deadline))?;
         let operation_results: Vec<BatchOperationResult> = results.into_iter().flatten().collect();
         let truncated = operation_results.iter().any(|result| result.truncated);
         let usage = aggregate_usage(&observed_envelopes);
-        let Some(source) = binding_envelopes.iter().flatten().next() else {
-            let warnings = observed_envelopes
-                .iter()
-                .flatten()
-                .flat_map(|envelope| envelope.warnings.iter().cloned())
-                .collect();
-            return Err(BatchOrchestrationError::NoSuccessfulOperation(Box::new(
-                BatchUnsuccessfulOutput {
-                    operation_results,
-                    truncated,
-                    usage,
-                    warnings,
-                },
-            )));
-        };
-
         let data = QueryBatchData {
             batch_status: aggregate_status(&operation_results),
-            generation_id: source.generation.generation_id,
+            generation_id: identity.generation.generation_id,
             operation_results,
             explanation: None,
         };
         Ok(ReadEnvelope {
             schema_version: SchemaVersion::V1_0,
-            repository: ResolvedRepository {
-                repository_id: repository,
-                display_name: source.repository.display_name.clone(),
-            },
-            generation: source.generation.clone(),
-            coverage: CoverageSummary {
-                status: rootlight_ir::CoverageStatus::Bounded,
-                languages: source.coverage.languages.clone(),
-                skipped_inputs: source.coverage.skipped_inputs,
-            },
+            repository: identity.repository,
+            generation: identity.generation,
+            coverage: identity.coverage,
             data,
             truncated,
             next_cursor: RequiredNullable(None),
             usage,
-            warnings: source.warnings.clone(),
+            warnings: identity.warnings,
             trust: TrustClassification::UntrustedRepositoryData,
         })
     }
@@ -845,7 +872,89 @@ fn admitted_parent_budget(requested: Option<&ResponseBudget>) -> ResponseBudget 
             .unwrap_or(DEFAULT_BATCH_TOKENS)
             .min(16_000),
     );
+    admitted.timeout_ms = Some(
+        admitted
+            .timeout_ms
+            .unwrap_or(DEFAULT_BATCH_TIMEOUT_MS)
+            .min(DEFAULT_BATCH_TIMEOUT_MS),
+    );
     admitted
+}
+
+async fn resolve_identity<P, C>(
+    port: Arc<P>,
+    input: &QueryBatchInput,
+    cancellation: C,
+    deadline: Instant,
+) -> Result<AgentResolvedIdentity, BatchOrchestrationError>
+where
+    P: AgentToolPort<C>,
+    C: CancellationSignal + Clone + Send + Sync + 'static,
+{
+    let request = AgentIdentityRequest::new(input.repository.clone(), input.generation.clone());
+    let context = AgentResolutionContext::new(cancellation, deadline);
+    match port.resolve_identity(request, context).await {
+        Ok(identity) => Ok(identity),
+        Err(AgentPortError::Public(error)) => {
+            Err(BatchOrchestrationError::IdentityResolution(error))
+        }
+        Err(AgentPortError::Cancelled) => Err(BatchOrchestrationError::Cancelled),
+        Err(AgentPortError::DeadlineExceeded) => Err(BatchOrchestrationError::DeadlineExceeded),
+        Err(AgentPortError::InvalidResponse) => Err(BatchOrchestrationError::InvalidResponse),
+        Err(AgentPortError::Unavailable) => Err(BatchOrchestrationError::Internal),
+    }
+}
+
+fn remaining_parent_budget(
+    parent: &ResponseBudget,
+    consumed: BudgetCharge,
+    elapsed: Duration,
+) -> Result<ResponseBudget, BatchOrchestrationError> {
+    Ok(ResponseBudget {
+        max_results: remaining_u16(parent.max_results, consumed.results)?,
+        max_tokens: remaining_u16(parent.max_tokens, consumed.tokens)?,
+        max_source_bytes: remaining_u32(parent.max_source_bytes, consumed.source_bytes)?,
+        max_traversal_facts: remaining_u32(parent.max_traversal_facts, consumed.traversal_facts)?,
+        // Depth is a maximum over children, so each child retains the admitted
+        // ceiling rather than receiving an additive remainder.
+        max_depth: parent.max_depth,
+        max_paths: remaining_u16(parent.max_paths, consumed.paths)?,
+        timeout_ms: remaining_u32(
+            parent.timeout_ms,
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        )?,
+        evidence_level: parent.evidence_level,
+    })
+}
+
+fn remaining_u16(
+    limit: Option<u16>,
+    consumed: u64,
+) -> Result<Option<u16>, BatchOrchestrationError> {
+    limit
+        .map(|limit| {
+            let remaining = u64::from(limit).saturating_sub(consumed);
+            u16::try_from(remaining)
+                .ok()
+                .filter(|remaining| *remaining > 0)
+                .ok_or(BatchOrchestrationError::BudgetExceeded)
+        })
+        .transpose()
+}
+
+fn remaining_u32(
+    limit: Option<u32>,
+    consumed: u64,
+) -> Result<Option<u32>, BatchOrchestrationError> {
+    limit
+        .map(|limit| {
+            let remaining = u64::from(limit).saturating_sub(consumed);
+            u32::try_from(remaining)
+                .ok()
+                .filter(|remaining| *remaining > 0)
+                .ok_or(BatchOrchestrationError::BudgetExceeded)
+        })
+        .transpose()
 }
 
 fn effective_child_budget(
@@ -950,29 +1059,70 @@ fn check_deadline(deadline: Option<Instant>) -> Result<(), BatchOrchestrationErr
     }
 }
 
-fn charge_for(usage: &UsageSummary) -> BudgetCharge {
+fn charge_for(tool: BatchTool, envelope: &ReadEnvelope<Value>) -> BudgetCharge {
+    let usage = &envelope.usage;
     BudgetCharge {
-        results: 0,
+        results: returned_result_count(tool, &envelope.data),
         tokens: usage.estimated_tokens,
         source_bytes: usage.source_bytes,
         traversal_facts: usage.edges,
-        depth: 0,
-        paths: 0,
+        depth: returned_depth(tool, &envelope.data),
+        paths: returned_path_count(tool, &envelope.data),
         time_ms: usage.wall_time_ms,
     }
 }
 
+fn returned_result_count(tool: BatchTool, data: &Value) -> u64 {
+    let field = match tool {
+        BatchTool::CodeLocate => "matches",
+        BatchTool::SymbolExplain => "symbols",
+        BatchTool::SymbolRelationships => "groups",
+        BatchTool::FlowTrace => "paths",
+        BatchTool::ChangeImpact => "impacted",
+        BatchTool::TestsSelect => "tests",
+        BatchTool::ArchitectureOverview => "components",
+        BatchTool::ArchitectureCycles => "cycles",
+        BatchTool::CodeDead => "candidates",
+        BatchTool::ContextPack => "items",
+        BatchTool::SourceRead => "chunks",
+        BatchTool::PlanChange => return 0,
+    };
+    data.get(field)
+        .and_then(Value::as_array)
+        .map_or(0, |items| u64::try_from(items.len()).unwrap_or(u64::MAX))
+}
+
+fn returned_path_count(tool: BatchTool, data: &Value) -> u64 {
+    if tool != BatchTool::FlowTrace {
+        return 0;
+    }
+    data.get("paths")
+        .and_then(Value::as_array)
+        .map_or(0, |paths| u64::try_from(paths.len()).unwrap_or(u64::MAX))
+}
+
+fn returned_depth(tool: BatchTool, data: &Value) -> u64 {
+    if tool != BatchTool::FlowTrace {
+        return 0;
+    }
+    data.get("paths")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|path| path.get("nodes").and_then(Value::as_array))
+        .map(|nodes| u64::try_from(nodes.len().saturating_sub(1)).unwrap_or(u64::MAX))
+        .max()
+        .unwrap_or(0)
+}
+
 fn validate_child_identity(
     envelope: &ReadEnvelope<Value>,
-    repository: RepositoryId,
-    completed: &[Option<ReadEnvelope<Value>>],
+    identity: &AgentResolvedIdentity,
 ) -> Result<(), BatchOrchestrationError> {
-    if envelope.repository.repository_id != repository {
+    if envelope.repository.repository_id != identity.repository.repository_id {
         return Err(BatchOrchestrationError::InvalidResponse);
     }
-    if let Some(first) = completed.iter().flatten().next()
-        && envelope.generation.generation_id != first.generation.generation_id
-    {
+    if envelope.generation.generation_id != identity.generation.generation_id {
         return Err(BatchOrchestrationError::InvalidResponse);
     }
     Ok(())

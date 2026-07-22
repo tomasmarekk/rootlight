@@ -7,9 +7,12 @@
 use std::{future::Future, pin::Pin, time::Instant};
 
 use rootlight_mcp_contract::{
-    PublicError,
+    PublicError, RepositorySelector,
     context::BatchTool,
-    vertical::{ReadEnvelope, ResponseBudget},
+    vertical::{
+        CoverageSummary, GenerationSelector, GenerationSummary, ReadEnvelope, ResolvedRepository,
+        ResponseBudget, ResponseWarning,
+    },
 };
 use serde_json::{Map, Value};
 
@@ -17,6 +20,85 @@ use crate::policy::CancellationSignal;
 
 /// Future returned by one client-free agent port operation.
 pub type AgentPortFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+/// Read-only repository and generation identity requested before orchestration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentIdentityRequest {
+    repository: RepositorySelector,
+    generation: Option<GenerationSelector>,
+}
+
+impl AgentIdentityRequest {
+    /// Creates one bounded identity-resolution request.
+    #[must_use]
+    pub const fn new(
+        repository: RepositorySelector,
+        generation: Option<GenerationSelector>,
+    ) -> Self {
+        Self {
+            repository,
+            generation,
+        }
+    }
+
+    /// Consumes the request and returns its public selectors.
+    #[must_use]
+    pub fn into_selectors(self) -> (RepositorySelector, Option<GenerationSelector>) {
+        (self.repository, self.generation)
+    }
+}
+
+/// Immutable context pinned once before any child request is dispatched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentResolvedIdentity {
+    /// Stable repository identity and display label.
+    pub repository: ResolvedRepository,
+    /// Exact immutable generation selected for all child work.
+    pub generation: GenerationSummary,
+    /// Coverage metadata available from the read-only status lookup.
+    pub coverage: CoverageSummary,
+    /// Source-free status warnings retained for aggregate responses.
+    pub warnings: Vec<ResponseWarning>,
+}
+
+/// Cancellation and deadline policy for the identity preflight read.
+#[derive(Debug, Clone)]
+pub struct AgentResolutionContext<C> {
+    cancellation: C,
+    deadline: Instant,
+}
+
+impl<C> AgentResolutionContext<C>
+where
+    C: CancellationSignal,
+{
+    /// Creates one bounded identity-resolution context.
+    #[must_use]
+    pub const fn new(cancellation: C, deadline: Instant) -> Self {
+        Self {
+            cancellation,
+            deadline,
+        }
+    }
+
+    /// Returns the cooperative cancellation signal.
+    #[must_use]
+    pub const fn cancellation(&self) -> &C {
+        &self.cancellation
+    }
+
+    /// Consumes the context and returns its cancellation signal.
+    #[must_use]
+    pub fn into_cancellation(self) -> C {
+        self.cancellation
+    }
+
+    /// Returns the mandatory monotonic preflight deadline.
+    #[must_use]
+    pub const fn deadline(&self) -> Instant {
+        self.deadline
+    }
+}
 
 /// Dynamic read-tool request admitted by batch orchestration.
 ///
@@ -27,19 +109,38 @@ pub type AgentPortFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 pub struct AgentToolRequest {
     tool: BatchTool,
     arguments: Map<String, Value>,
+    materialized_binding: bool,
 }
 
 impl AgentToolRequest {
     /// Creates one admitted dynamic child-tool request.
     #[must_use]
     pub const fn new(tool: BatchTool, arguments: Map<String, Value>) -> Self {
-        Self { tool, arguments }
+        Self {
+            tool,
+            arguments,
+            materialized_binding: false,
+        }
+    }
+
+    /// Marks that at least one argument originated from a typed dependency
+    /// binding.
+    #[must_use]
+    pub const fn with_materialized_binding(mut self, materialized_binding: bool) -> Self {
+        self.materialized_binding = materialized_binding;
+        self
     }
 
     /// Returns the selected child tool.
     #[must_use]
     pub const fn tool(&self) -> BatchTool {
         self.tool
+    }
+
+    /// Reports whether dependency output contributed to the arguments.
+    #[must_use]
+    pub const fn has_materialized_binding(&self) -> bool {
+        self.materialized_binding
     }
 
     /// Consumes the request and returns its validated argument object.
@@ -54,6 +155,7 @@ impl AgentToolRequest {
 pub struct AgentCallContext<C> {
     cancellation: C,
     budget: ResponseBudget,
+    local_budget: Option<ResponseBudget>,
     deadline: Option<Instant>,
 }
 
@@ -67,8 +169,17 @@ where
         Self {
             cancellation,
             budget,
+            local_budget: None,
             deadline,
         }
+    }
+
+    /// Attaches the caller-requested local cap that contributed to the
+    /// effective budget.
+    #[must_use]
+    pub fn with_local_budget(mut self, local_budget: Option<ResponseBudget>) -> Self {
+        self.local_budget = local_budget;
+        self
     }
 
     /// Returns the cooperative cancellation signal.
@@ -87,6 +198,12 @@ where
     #[must_use]
     pub const fn budget(&self) -> &ResponseBudget {
         &self.budget
+    }
+
+    /// Returns the original local cap, when the request declared one.
+    #[must_use]
+    pub const fn local_budget(&self) -> Option<&ResponseBudget> {
+        self.local_budget.as_ref()
     }
 
     /// Returns the earliest parent or child monotonic deadline.
@@ -117,6 +234,17 @@ pub trait AgentToolPort<C>: Send + Sync + 'static
 where
     C: CancellationSignal + Clone + Send + Sync + 'static,
 {
+    /// Resolves repository and generation identity exactly once without source
+    /// retrieval or mutation.
+    ///
+    /// Implementations must race this metadata-only read against the supplied
+    /// cancellation signal and mandatory deadline.
+    fn resolve_identity(
+        &self,
+        request: AgentIdentityRequest,
+        context: AgentResolutionContext<C>,
+    ) -> AgentPortFuture<Result<AgentResolvedIdentity, AgentPortError>>;
+
     /// Executes one already admitted child-tool request.
     ///
     /// Implementations must race the operation against the supplied

@@ -260,6 +260,7 @@ impl FirstSliceClientPort for FakePort {
         let outcome = match &self.outcome {
             FakeOutcome::RepositoryStatus(outcome) => outcome.clone(),
             FakeOutcome::Batch { status, .. } => status.clone(),
+            FakeOutcome::SymbolExplain(Ok(_)) => Ok(repository_status_response()),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1174,6 +1175,9 @@ async fn batch_adapter_propagates_cancellation_before_client_dispatch() {
         .expect("static error is valid");
     let adapter = McpAgentToolPort {
         port: Arc::clone(&harness.executor.port),
+        validator: Arc::new(
+            MaterializedToolValidator::compile().expect("checked contracts compile"),
+        ),
         unsupported: public.clone(),
         invalid_arguments: public,
     };
@@ -1199,6 +1203,89 @@ async fn batch_adapter_propagates_cancellation_before_client_dispatch() {
         Err(AgentPortError::Cancelled)
     );
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn batch_adapter_rejects_unrepresentable_evidence_before_client_dispatch() {
+    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+    let public = PublicError::builder(ErrorCode::InvalidArgument, "invalid batch")
+        .build()
+        .expect("static error is valid");
+    let adapter = McpAgentToolPort {
+        port: Arc::clone(&harness.executor.port),
+        validator: Arc::new(
+            MaterializedToolValidator::compile().expect("checked contracts compile"),
+        ),
+        unsupported: public.clone(),
+        invalid_arguments: public,
+    };
+    let (_sender, receiver) = watch::channel(false);
+    let request = AgentToolRequest::new(
+        BatchTool::CodeLocate,
+        Map::from_iter([
+            (
+                "repository".to_owned(),
+                json!({"repository_id": repository()}),
+            ),
+            ("generation".to_owned(), json!(generation())),
+            ("query".to_owned(), json!("publish")),
+        ]),
+    );
+    let local_budget = ResponseBudget {
+        max_results: None,
+        max_tokens: None,
+        max_source_bytes: None,
+        max_traversal_facts: None,
+        max_depth: None,
+        max_paths: None,
+        timeout_ms: Some(1_000),
+        evidence_level: Some(rootlight_mcp_contract::vertical::ProvenanceLevel::Compact),
+    };
+    let context = AgentCallContext::new(
+        RequestCancellation { receiver },
+        local_budget.clone(),
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+    )
+    .with_local_budget(Some(local_budget));
+
+    let error = adapter
+        .execute(request, context)
+        .await
+        .expect_err("unsupported evidence fails before execution");
+    let AgentPortError::Public(error) = error else {
+        panic!("expected checked unsupported-capability error");
+    };
+    assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn production_batch_mapping_covers_every_canonical_eligible_tool() {
+    let mapped = [
+        (McpTool::CodeLocate, BatchTool::CodeLocate),
+        (McpTool::SymbolExplain, BatchTool::SymbolExplain),
+        (McpTool::SymbolRelationships, BatchTool::SymbolRelationships),
+        (McpTool::FlowTrace, BatchTool::FlowTrace),
+        (McpTool::ChangeImpact, BatchTool::ChangeImpact),
+        (McpTool::TestsSelect, BatchTool::TestsSelect),
+        (
+            McpTool::ArchitectureOverview,
+            BatchTool::ArchitectureOverview,
+        ),
+        (McpTool::ArchitectureCycles, BatchTool::ArchitectureCycles),
+        (McpTool::CodeDead, BatchTool::CodeDead),
+        (McpTool::ContextPack, BatchTool::ContextPack),
+        (McpTool::SourceRead, BatchTool::SourceRead),
+    ];
+    assert_eq!(
+        mapped.map(|(tool, _)| tool),
+        rootlight_mcp_contract::capability::BATCH_ELIGIBLE
+    );
+    for (catalog, batch) in mapped {
+        let vertical = vertical_tool_for_batch(batch).expect("eligible tool has a dispatch target");
+        assert_eq!(vertical.name(), catalog.name());
+    }
+    assert_eq!(vertical_tool_for_batch(BatchTool::PlanChange), None);
 }
 
 #[tokio::test]
@@ -1314,7 +1401,7 @@ async fn query_batch_classifies_bound_value_type_before_subtool_execution() {
             "operations": [
                 {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
                 {"id": "refine", "tool": "code.locate", "depends_on": ["find"], "arguments": {
-                    "query": {"$from": "find", "pointer": "/data/matches"}
+                    "search_modes": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
                 }}
             ]
         }),
@@ -1355,7 +1442,10 @@ async fn query_batch_keeps_all_subtool_errors_inside_a_pinned_envelope() {
         json!({
             "repository": {"repository_id": repository()},
             "operations": [
-                {"id": "rels", "tool": "symbol.relationships", "arguments": {}}
+                {"id": "unsupported", "tool": "code.locate", "arguments": {
+                    "query": "publish",
+                    "kinds": ["function"]
+                }}
             ]
         }),
     )

@@ -782,10 +782,17 @@ const QUERY_BATCH_RULES: &[CapabilityRule] = &[
         "repository.alias",
         "only stable repository identifiers are served",
     ),
-    unsupported("budget", "shared aggregate budgeting is not served"),
+    implemented(
+        "budget",
+        "enforces one aggregate budget from measured child usage",
+    ),
     blocked(
         "operations[].local_budget",
-        "local operation budgets are accepted but not propagated to subtools",
+        "intersects representable caps and rejects unsupported child dimensions before work",
+    ),
+    implemented(
+        "operations[].local_budget.timeout_ms",
+        "bounds every child call by the lower local deadline",
     ),
     unsupported_value(
         "response_profile",
@@ -897,7 +904,7 @@ const fn tool_capability(tool: McpTool) -> ToolCapability {
         pagination: pagination_semantics(tool),
         generation: generation_semantics(tool),
         budget: budget_semantics(tool),
-        batch_shared_budget: false,
+        batch_shared_budget: matches!(tool, McpTool::QueryBatch),
         fallback_summary: tool_fallback_summary(tool),
     }
 }
@@ -981,8 +988,8 @@ const fn budget_semantics(tool: McpTool) -> BudgetSemantics {
         | McpTool::CodeDead
         | McpTool::HistoryCompare
         | McpTool::PlanChange
-        | McpTool::SourceRead
-        | McpTool::QueryBatch => BudgetSemantics::Unsupported,
+        | McpTool::SourceRead => BudgetSemantics::Unsupported,
+        McpTool::QueryBatch => BudgetSemantics::PerRequest,
         McpTool::RepoIndex | McpTool::RepoList | McpTool::OperationStatus => BudgetSemantics::None,
     }
 }
@@ -1045,7 +1052,7 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
         McpTool::ContextPack => "bounded evidence assembly under a token budget",
         McpTool::SourceRead => "bounded source ranges as untrusted data",
         McpTool::QueryAdvanced => "bounded safe-AST query",
-        McpTool::QueryBatch => "bounded dependency-ordered reads without a shared budget",
+        McpTool::QueryBatch => "bounded dependency-ordered reads under one shared budget",
     }
 }
 
@@ -1073,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_metadata_does_not_claim_a_shared_budget() {
+    fn batch_metadata_matches_the_canonical_allowlist_and_shared_budget() {
         for entry in &CAPABILITIES {
             assert_eq!(
                 entry.batch_eligible,
@@ -1081,7 +1088,7 @@ mod tests {
                 "{} batch flag drifted from the allowlist",
                 entry.tool.name()
             );
-            assert!(!entry.batch_shared_budget);
+            assert_eq!(entry.batch_shared_budget, entry.tool == McpTool::QueryBatch);
         }
         assert_eq!(BATCH_ELIGIBLE.len(), 11);
         assert!(!is_batch_eligible(McpTool::QueryBatch));
@@ -1119,6 +1126,12 @@ mod tests {
                 .disposition("operations[].local_budget.max_tokens", None)
                 .status,
             CapabilityStatus::Blocked
+        );
+        assert_eq!(
+            batch
+                .disposition("operations[].local_budget.timeout_ms", None)
+                .status,
+            CapabilityStatus::Implemented
         );
     }
 
