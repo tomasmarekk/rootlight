@@ -397,7 +397,27 @@ fn hash_length_prefixed(hasher: &mut blake3::Hasher, value: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::code_locate_plan;
+    use proptest::prelude::*;
+    use rootlight_mcp_contract::context::PLANNER_VERSION;
+
+    use super::{PlanExplanation, code_locate_plan, finalize_plan, physical_plan_fingerprint};
+
+    fn bounded_plan() -> impl Strategy<Value = PlanExplanation> {
+        (
+            any::<u64>(),
+            proptest::collection::vec("[a-z][a-z0-9_]{0,15}", 0..=6),
+            proptest::collection::vec("[a-z][a-z0-9_: ]{0,23}", 0..=6),
+        )
+            .prop_map(
+                |(estimated_cost, operators, applied_limits)| PlanExplanation {
+                    estimated_cost,
+                    operators,
+                    applied_limits,
+                    planner_version: PLANNER_VERSION,
+                    fingerprint: String::new(),
+                },
+            )
+    }
 
     #[test]
     fn plan_is_deterministic_for_the_same_request() {
@@ -617,5 +637,84 @@ mod tests {
         let plan = repo_list_plan();
         assert_eq!(plan.operators, vec!["repository_listing".to_owned()]);
         assert!(plan.applied_limits.is_empty());
+    }
+
+    proptest! {
+        #[test]
+        fn fingerprint_is_deterministic_for_bounded_plans(
+            plan in bounded_plan(),
+            generation in "[a-z0-9_-]{1,40}",
+        ) {
+            let first = finalize_plan(plan.clone(), &generation);
+            let second = finalize_plan(plan, &generation);
+
+            prop_assert_eq!(first.fingerprint, second.fingerprint);
+        }
+
+        #[test]
+        fn fingerprint_changes_with_the_resolved_generation(
+            plan in bounded_plan(),
+            generation in "[a-z0-9_-]{1,32}",
+            alternate_suffix in "[a-z0-9_-]{1,8}",
+        ) {
+            let alternate = format!("{generation}:{alternate_suffix}");
+            let first = finalize_plan(plan.clone(), &generation);
+            let second = finalize_plan(plan, &alternate);
+
+            prop_assert_ne!(first.fingerprint, second.fingerprint);
+        }
+
+        #[test]
+        fn fingerprint_preserves_operator_order(
+            plan in bounded_plan(),
+            left in "[a-z0-9_]{0,16}",
+            right in "[a-z0-9_]{0,16}",
+            generation in "[a-z0-9_-]{1,40}",
+        ) {
+            let mut forward = plan.clone();
+            forward.operators = vec![format!("left:{left}"), format!("right:{right}")];
+            let mut reversed = plan;
+            reversed.operators = forward.operators.iter().rev().cloned().collect();
+
+            prop_assert_ne!(
+                physical_plan_fingerprint(&forward, &generation),
+                physical_plan_fingerprint(&reversed, &generation),
+            );
+        }
+
+        #[test]
+        fn fingerprint_changes_with_applied_limits(
+            plan in bounded_plan(),
+            limit in any::<u16>(),
+            generation in "[a-z0-9_-]{1,40}",
+        ) {
+            let mut first = plan.clone();
+            first.applied_limits = vec![format!("max_results: {limit}")];
+            let mut second = plan;
+            second.applied_limits = vec![format!("max_results: {}", u32::from(limit) + 1)];
+
+            prop_assert_ne!(
+                physical_plan_fingerprint(&first, &generation),
+                physical_plan_fingerprint(&second, &generation),
+            );
+        }
+
+        #[test]
+        fn fingerprint_has_unambiguous_collection_boundaries(
+            plan in bounded_plan(),
+            left in "[a-z0-9_,]{0,16}",
+            right in "[a-z0-9_,]{0,16}",
+            generation in "[a-z0-9_-]{1,40}",
+        ) {
+            let mut split = plan.clone();
+            split.operators = vec![left.clone(), right.clone()];
+            let mut joined = plan;
+            joined.operators = vec![format!("{left},{right}")];
+
+            prop_assert_ne!(
+                physical_plan_fingerprint(&split, &generation),
+                physical_plan_fingerprint(&joined, &generation),
+            );
+        }
     }
 }
