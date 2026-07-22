@@ -170,6 +170,7 @@ fn baseline_payload(profile: ExposureProfile) -> Result<Value, DiscoveryError> {
                 .and_then(Value::as_object_mut)
                 .ok_or(DiscoveryError::InvalidPayload)?
                 .insert("idempotentHint".to_owned(), Value::Bool(true));
+            restore_repo_index_baseline(object)?;
         }
         if tool == McpTool::RepoList {
             restore_repo_list_baseline(object)?;
@@ -183,6 +184,11 @@ fn baseline_payload(profile: ExposureProfile) -> Result<Value, DiscoveryError> {
             .and_then(|metadata| metadata.get_mut(DISCOVERY_METADATA_KEY))
             .and_then(Value::as_object_mut)
             .ok_or(DiscoveryError::InvalidPayload)?;
+        if tool == McpTool::RepoIndex {
+            // The retained discovery baseline predates machine-readable
+            // operation lifecycle metadata.
+            capability.remove("lifecycle");
+        }
         capability.insert(
             "fallbackSummary".to_owned(),
             Value::String(baseline_fallback_summary(tool).to_owned()),
@@ -198,6 +204,7 @@ fn baseline_payload(profile: ExposureProfile) -> Result<Value, DiscoveryError> {
             !matches!(
                 (tool, field),
                 (McpTool::RepoIndex, Some("scope"))
+                    | (McpTool::RepoIndex, Some("detached"))
                     | (McpTool::RepoStatus, Some("generation"))
                     | (McpTool::ArchitectureCycles, Some("projection.level"))
                     | (
@@ -215,6 +222,53 @@ fn baseline_payload(profile: ExposureProfile) -> Result<Value, DiscoveryError> {
         });
     }
     Ok(payload)
+}
+
+fn restore_repo_index_baseline(
+    definition: &mut serde_json::Map<String, Value>,
+) -> Result<(), DiscoveryError> {
+    let input_properties = definition
+        .get_mut("inputSchema")
+        .and_then(Value::as_object_mut)
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+        .ok_or(DiscoveryError::InvalidPayload)?;
+    input_properties
+        .get_mut("detached")
+        .and_then(Value::as_object_mut)
+        .ok_or(DiscoveryError::InvalidPayload)?
+        .insert(
+            "description".to_owned(),
+            Value::String("Whether the operation may continue after client disconnect.".to_owned()),
+        );
+
+    let output_properties = definition
+        .get_mut("outputSchema")
+        .and_then(Value::as_object_mut)
+        .and_then(|schema| schema.get_mut("$defs"))
+        .and_then(Value::as_object_mut)
+        .and_then(|definitions| definitions.get_mut("RepoIndexData"))
+        .and_then(Value::as_object_mut)
+        .and_then(|data| data.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+        .ok_or(DiscoveryError::InvalidPayload)?;
+    output_properties
+        .get_mut("operation_id")
+        .and_then(Value::as_object_mut)
+        .ok_or(DiscoveryError::InvalidPayload)?
+        .insert(
+            "description".to_owned(),
+            Value::String("Durable operation identity.".to_owned()),
+        );
+    output_properties
+        .get_mut("published_generation")
+        .and_then(Value::as_object_mut)
+        .ok_or(DiscoveryError::InvalidPayload)?
+        .insert(
+            "description".to_owned(),
+            Value::String("Generation published within `wait_ms`, if any.".to_owned()),
+        );
+    Ok(())
 }
 
 fn restore_repo_list_baseline(
