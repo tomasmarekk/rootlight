@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0",
+  "compatibility": {
+    "details": "additive",
+    "unknown_major": "reject"
+  },
+  "errors": [
+    {"code":"INVALID_ARGUMENT","wire_number":1,"message":"tool arguments are invalid","retryable":false,"remediation":"CorrectInput"},
+    {"code":"NOT_FOUND","wire_number":2,"message":"requested entity was not found","retryable":false,"remediation":"None"},
+    {"code":"CONFLICT","wire_number":3,"message":"request conflicts with current state","retryable":true,"remediation":"Retry"},
+    {"code":"STALE_GENERATION","wire_number":4,"message":"selected generation is stale","retryable":false,"remediation":"RestartEnumeration"},
+    {"code":"UNSUPPORTED_CAPABILITY","wire_number":5,"message":"requested capability is unavailable","retryable":false,"remediation":"ReduceScope"},
+    {"code":"INCOMPLETE_COVERAGE","wire_number":6,"message":"requested data is unavailable","retryable":false,"remediation":"ReduceScope"},
+    {"code":"BUDGET_EXCEEDED","wire_number":7,"message":"request budget is exhausted","retryable":false,"remediation":"ReduceScope"},
+    {"code":"RESOURCE_EXHAUSTED","wire_number":8,"message":"bounded resource is exhausted","retryable":true,"remediation":"Retry"},
+    {"code":"CANCELLED","wire_number":9,"message":"operation was cancelled","retryable":true,"remediation":"Retry"},
+    {"code":"ADAPTER_FAILED","wire_number":10,"message":"adapter operation failed","retryable":true,"remediation":"Retry"},
+    {"code":"INDEX_CORRUPT","wire_number":11,"message":"repository index is corrupt","retryable":false,"remediation":"RebuildRepository"},
+    {"code":"MIGRATION_REQUIRED","wire_number":12,"message":"stored data requires migration","retryable":false,"remediation":"RebuildRepository"},
+    {"code":"PERMISSION_DENIED","wire_number":13,"message":"request is denied by policy","retryable":false,"remediation":"None"},
+    {"code":"PROTOCOL_MISMATCH","wire_number":14,"message":"protocol version is incompatible","retryable":false,"remediation":"SelectSupportedVersion"},
+    {"code":"BUSY","wire_number":15,"message":"requested resource is busy","retryable":true,"remediation":"Retry"},
+    {"code":"INTERNAL","wire_number":16,"message":"internal operation failed","retryable":false,"remediation":"CollectSupportBundle"},
+    {"code":"INVALID_CURSOR","wire_number":17,"message":"pagination cursor is invalid or expired","retryable":false,"remediation":"RestartEnumeration"},
+    {"code":"TYPE_MISMATCH","wire_number":18,"message":"tool argument type does not match","retryable":false,"remediation":"CorrectInput"},
+    {"code":"COST_LIMIT","wire_number":19,"message":"query cost limit was exceeded","retryable":false,"remediation":"ReduceScope"},
+    {"code":"OPERATOR_FORBIDDEN","wire_number":20,"message":"query operator is forbidden","retryable":false,"remediation":"CorrectInput"},
+    {"code":"BINDING_INVALID","wire_number":21,"message":"batch binding is invalid","retryable":false,"remediation":"CorrectInput"},
+    {"code":"BINDING_TYPE_MISMATCH","wire_number":22,"message":"batch binding type does not match","retryable":false,"remediation":"CorrectInput"}
+  ]
+}

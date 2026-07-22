@@ -66,4 +66,16 @@ mod tests {
         assert_eq!(decoded.major, 1);
         assert_eq!(decoded.minor, CURRENT_PROTOCOL_MINOR);
     }
+
+    #[test]
+    fn generated_error_codes_match_the_normative_domain_registry() {
+        use generated::common::v1;
+
+        for definition in rootlight_error::ERROR_REGISTRY {
+            let wire = v1::ErrorCode::try_from(definition.wire_number)
+                .expect("registry wire number is generated");
+            assert_eq!(wire.as_str_name(), definition.name);
+        }
+        assert!(v1::ErrorCode::try_from(23).is_err());
+    }
 }
