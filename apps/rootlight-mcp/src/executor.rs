@@ -30,7 +30,7 @@ use rootlight_agent::{
     },
 };
 use rootlight_client::{
-    self as client, CodeLocate, LocateMode, RepositoryIndex, RepositoryList,
+    self as client, CodeLocate, LocateMode, RepositoryCatalogPage, RepositoryIndex,
     RepositoryOperationAction, RepositoryOperationStatus, RepositoryStatus, SourceRead,
     SymbolExplain,
 };
@@ -66,8 +66,9 @@ use rootlight_mcp_contract::{
     error_definition,
     pagination::{AuthenticatedCursor, CursorContext},
     repository::{
-        CoverageReport, LanguageCoverageReport, RepoListData, RepoListInput, RepoStatusData,
-        RepoStatusInput, RepositoryEntry, RepositoryState,
+        CatalogEnvelope, CatalogSnapshotId, CoverageReport, LanguageCoverageReport, RepoListData,
+        RepoListInput, RepoListSchemaVersion, RepoStatusData, RepoStatusInput, RepositoryEntry,
+        RepositoryState,
     },
     vertical::{
         ActiveGeneration, AnalysisTier, CacheStatus, CodeLocateData, CodeLocateInput,
@@ -85,8 +86,6 @@ use rootlight_mcp_contract::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use thiserror::Error;
-use unicode_casefold::UnicodeCaseFold as _;
-use unicode_normalization::UnicodeNormalization;
 
 use crate::advanced::{AdvancedQueryError, AdvancedQueryPlan, MAX_ADVANCED_TRAVERSAL};
 use crate::{
@@ -165,11 +164,11 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
     ) -> ClientPortFuture<SourceReadPortResponse>;
 
     /// Lists the repositories known to the daemon process.
-    fn repository_list(
+    fn repository_catalog_page(
         &self,
-        request: RepositoryListPortRequest,
+        request: RepositoryCatalogPagePortRequest,
         cancellation: RequestCancellation,
-    ) -> ClientPortFuture<RepositoryList>;
+    ) -> ClientPortFuture<RepositoryCatalogPage>;
 
     /// Reads one repository's active generation status.
     fn repository_status(
@@ -266,32 +265,8 @@ pub enum ClientPortError {
     Executor,
 }
 
-/// Normalized `repo.list` request accepted by the current first-slice daemon.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepositoryListPortRequest {
-    max_results: Option<u32>,
-    query: Option<String>,
-}
-
-impl RepositoryListPortRequest {
-    /// Creates a bounded repository list request.
-    #[must_use]
-    pub fn new(max_results: Option<u32>, query: Option<String>) -> Self {
-        Self { max_results, query }
-    }
-
-    /// Returns the optional result bound.
-    #[must_use]
-    pub const fn max_results(&self) -> Option<u32> {
-        self.max_results
-    }
-
-    /// Returns the optional display-name filter.
-    #[must_use]
-    pub fn query(&self) -> Option<&str> {
-        self.query.as_deref()
-    }
-}
+/// Checked daemon catalog-page request used by the MCP boundary.
+pub type RepositoryCatalogPagePortRequest = client::RepositoryCatalogPageRequest;
 
 /// Normalized `repo.status` request accepted by the current first-slice daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2201,11 +2176,7 @@ fn map_context_pack_service_error(
     }
 }
 
-/// Lists the repositories known to the daemon process.
-///
-/// The envelope identity is borrowed from the first listed repository; when no
-/// repository is registered the tool fails with a checked not-found error
-/// rather than fabricating an identity.
+/// Lists one immutable page of repositories known to the daemon process.
 async fn execute_repo_list<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -2216,118 +2187,113 @@ async fn execute_repo_list<P>(
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: RepoListInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
-    // State filtering and non-compact response profiles are not served by this
-    // slice; each is rejected by name rather than silently ignored.
-    if input.states.is_some() {
-        return Err(unsupported_field("states"));
-    }
     if !is_compact_profile(input.response_profile) {
         return Err(unsupported_field("response_profile"));
     }
     let page_size = input.max_results.unwrap_or(DEFAULT_REPO_LIST_RESULTS);
-    let query = normalize_repo_list_query(input.query);
+    let states_were_present = input.states.is_some();
+    let mut states = input.states.unwrap_or_default();
+    states.sort_unstable();
+    states.dedup();
+    let client_states: Vec<_> = states.iter().copied().map(client_catalog_state).collect();
+    let client_states = states_were_present.then_some(client_states);
+    let normalized = client::RepositoryCatalogPageRequest::new(
+        page_size,
+        input.query.as_deref(),
+        client_states.as_deref(),
+        None,
+        None,
+    )
+    .map_err(|_| invalid_input())?;
+    let normalized_query = normalized.normalized_query().map(str::to_owned);
+    let canonical_states = normalized.states().map(<[_]>::to_vec);
+    let plan_context = rootlight_agent::explain::RepoListPlanContext::new(
+        page_size,
+        normalized_query.is_some(),
+        states.iter().copied(),
+        ResponseProfile::Compact,
+    )
+    .map_err(|_| invalid_input())?;
+    let plan = rootlight_agent::explain::repo_list_plan(&plan_context);
 
-    // The daemon returns the full bounded list; the bridge applies the
-    // authenticated page window so the continuation cursor is tamper-protected.
-    let request = RepositoryListPortRequest::new(None, query.clone());
-    let future = port.repository_list(request, cancellation.clone());
-    let mut list = await_port(future, cancellation).await?;
-    list.repositories.sort_by_key(|entry| entry.repository_id);
-
-    let Some(first) = list.repositories.first() else {
-        return Err(ToolExecutionError::new(no_repositories_error()?));
-    };
-
-    let snapshot_id = repo_list_snapshot_id(&list.repositories);
-    let context =
-        repo_list_cursor_context(query.as_deref(), page_size, snapshot_id, cursor_key.key_id);
-    let offset = if explain_only {
-        0
-    } else {
-        match &input.cursor {
-            Some(cursor) => {
-                decode_repo_list_cursor(cursor, &context, &cursor_key.secret, invalid_cursor)?
-            }
-            None => 0,
-        }
-    };
-
-    let total = list.repositories.len();
-    if explain_only {
-        let explanation = repo_list_explanation(&snapshot_id);
-        let total_count = u64::try_from(total).unwrap_or(u64::MAX);
-        let data = RepoListData {
-            repositories: Vec::new(),
-            total_count,
-            explanation: Some(explanation),
-        };
-        let envelope = ReadEnvelope {
-            schema_version: SchemaVersion::V1_0,
-            repository: ResolvedRepository {
-                repository_id: first.repository_id,
-                display_name: first.repository_id.to_string(),
-            },
-            generation: GenerationSummary {
-                generation_id: first.active_generation,
-                parent_generation: RequiredNullable(None),
-                structural_freshness: freshness_from_label(&first.structural_freshness),
-                semantic_freshness: freshness_from_label(&first.semantic_freshness),
-            },
-            coverage: CoverageSummary {
-                status: rootlight_ir::CoverageStatus::Complete,
-                languages: Vec::new(),
-                skipped_inputs: 0,
-            },
-            data,
-            truncated: false,
-            next_cursor: RequiredNullable(None),
-            usage: UsageSummary {
-                rows: 0,
-                edges: 0,
-                source_bytes: 0,
-                json_bytes: 0,
-                estimated_tokens: 0,
-                wall_time_ms: 0,
-                cache_status: CacheStatus::Miss,
-                trace_id: "repo-list".to_owned(),
-            },
-            warnings: Vec::new(),
-            trust: TrustClassification::UntrustedRepositoryData,
-        };
-        return serialize_success(envelope);
-    }
-    let start = offset.min(total);
-    let page_end = start.saturating_add(usize::from(page_size)).min(total);
-    let truncated = page_end < total;
-    let repositories: Vec<RepositoryEntry> = list
-        .repositories
-        .get(start..page_end)
-        .unwrap_or(&[])
-        .iter()
-        .map(|entry| RepositoryEntry {
-            repository_id: entry.repository_id,
-            display_name: entry.repository_id.to_string(),
-            state: repository_state(&entry.state),
-            active_generation: RequiredNullable(Some(entry.active_generation)),
-            generation_count: 1,
-            alias: RequiredNullable(None),
+    // Snapshot bytes are read from the opaque cursor only to construct the
+    // expected context. No daemon lookup occurs until the MAC and every bound
+    // request dimension have been validated.
+    let parsed_cursor = input
+        .cursor
+        .as_ref()
+        .map(|cursor| {
+            AuthenticatedCursor::from_wire(cursor.as_str())
+                .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))
         })
-        .collect();
-    let total_count = u64::try_from(total).unwrap_or(u64::MAX);
-    let data = RepoListData {
-        repositories,
-        total_count,
-        explanation: None,
+        .transpose()?;
+    let cursor_snapshot = parsed_cursor.as_ref().map(AuthenticatedCursor::snapshot_id);
+    let continuation = if let Some(parsed) = parsed_cursor.as_ref() {
+        let snapshot = cursor_snapshot.expect("parsed cursor exposes its snapshot");
+        let context = repo_list_cursor_context(
+            normalized_query.as_deref(),
+            canonical_states.as_deref(),
+            page_size,
+            snapshot,
+            &plan,
+            cursor_key.key_id,
+        );
+        parsed
+            .validate(&context, now_unix_ms(), &cursor_key.secret)
+            .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))?;
+        Some(
+            client::RepositoryCatalogSortKey::from_bytes(parsed.last_sort_key())
+                .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))?,
+        )
+    } else {
+        None
     };
+
+    let snapshot = cursor_snapshot.map(client::RepositoryCatalogSnapshotId::from_bytes);
+    let request = client::RepositoryCatalogPageRequest::new(
+        page_size,
+        normalized_query.as_deref(),
+        canonical_states.as_deref(),
+        snapshot,
+        continuation,
+    )
+    .map_err(|_| invalid_input())?;
+    let future = port.repository_catalog_page(request, cancellation.clone());
+    let page = await_port(future, cancellation).await?;
+    let total_count = page
+        .total_count
+        .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+    let snapshot_bytes = *page.snapshot_id.as_bytes();
+    let snapshot_id = printable_catalog_snapshot(snapshot_bytes)?;
+    let repositories = if explain_only {
+        Vec::new()
+    } else {
+        page.repositories
+            .into_iter()
+            .map(map_catalog_entry)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let rows = u64::try_from(repositories.len())
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+    let truncated = !explain_only && page.truncated;
+    let context = repo_list_cursor_context(
+        normalized_query.as_deref(),
+        canonical_states.as_deref(),
+        page_size,
+        snapshot_bytes,
+        &plan,
+        cursor_key.key_id,
+    );
     let next_cursor = if truncated {
+        let next_after = page
+            .next_after
+            .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
         let next = AuthenticatedCursor::create(
             context,
-            u32::try_from(page_end)
-                .unwrap_or(u32::MAX)
-                .to_le_bytes()
-                .to_vec(),
+            next_after.as_bytes().to_vec(),
             now_unix_ms(),
             &cursor_key.secret,
         )
@@ -2339,40 +2305,93 @@ where
     } else {
         RequiredNullable(None)
     };
-    let envelope = ReadEnvelope {
-        schema_version: SchemaVersion::V1_0,
-        repository: ResolvedRepository {
-            repository_id: first.repository_id,
-            display_name: first.repository_id.to_string(),
-        },
-        generation: GenerationSummary {
-            generation_id: first.active_generation,
-            parent_generation: RequiredNullable(None),
-            structural_freshness: freshness_from_label(&first.structural_freshness),
-            semantic_freshness: freshness_from_label(&first.semantic_freshness),
-        },
-        coverage: CoverageSummary {
-            status: rootlight_ir::CoverageStatus::Complete,
-            languages: Vec::new(),
-            skipped_inputs: 0,
-        },
+    let data = RepoListData {
+        repositories,
+        total_count,
+        explanation: explain_only
+            .then(|| rootlight_agent::explain::finalize_plan(plan, snapshot_id.as_str())),
+    };
+    let envelope = CatalogEnvelope {
+        schema_version: RepoListSchemaVersion::V2_0,
+        snapshot_id,
         data,
         truncated,
         next_cursor,
         usage: UsageSummary {
-            rows: total_count,
+            rows,
             edges: 0,
             source_bytes: 0,
             json_bytes: 0,
             estimated_tokens: 0,
             wall_time_ms: 0,
-            cache_status: CacheStatus::Miss,
-            trace_id: "repo-list".to_owned(),
+            cache_status: CacheStatus::NotApplicable,
+            trace_id: "catalog-page".to_owned(),
         },
         warnings: Vec::new(),
         trust: TrustClassification::UntrustedRepositoryData,
     };
-    serialize_success(envelope)
+    serialize_catalog_success(envelope, started_at)
+}
+
+fn map_catalog_entry(
+    entry: client::RepositoryCatalogEntry,
+) -> Result<RepositoryEntry, ToolExecutionError> {
+    let has_active_generation = entry.active_generation.is_some();
+    let coverage = if entry.coverage.is_empty() {
+        None
+    } else {
+        Some(status_coverage_report_checked(&entry.coverage)?)
+    };
+    Ok(RepositoryEntry {
+        repository_id: entry.repository_id,
+        display_name: entry.display_name,
+        state: catalog_repository_state(entry.state),
+        active_generation: RequiredNullable(entry.active_generation),
+        generation_count: entry.generation_count,
+        alias: RequiredNullable(entry.alias),
+        languages: entry.languages,
+        structural_freshness: RequiredNullable(
+            has_active_generation.then(|| catalog_freshness(entry.structural_freshness)),
+        ),
+        semantic_freshness: RequiredNullable(
+            has_active_generation.then(|| catalog_freshness(entry.semantic_freshness)),
+        ),
+        coverage: RequiredNullable(coverage),
+    })
+}
+
+fn status_coverage_report_checked(
+    entries: &[client::RepositoryCoverageEntry],
+) -> Result<CoverageReport, ToolExecutionError> {
+    let total_files = checked_coverage_sum(entries, |entry| entry.discovered_files)?;
+    let indexed_files = checked_coverage_sum(entries, |entry| entry.indexed_files)?;
+    let languages = entries
+        .iter()
+        .map(|entry| LanguageCoverageReport {
+            language: entry.language.clone(),
+            tier: tier_label(&entry.tier),
+            files_indexed: entry.indexed_files,
+            files_skipped: entry.discovered_files.saturating_sub(entry.indexed_files),
+            missing_build_context: 0,
+        })
+        .collect();
+    Ok(CoverageReport {
+        status: aggregate_coverage_status(entries),
+        languages,
+        total_files,
+        indexed_files,
+        skipped_files: total_files.saturating_sub(indexed_files),
+    })
+}
+
+fn checked_coverage_sum(
+    entries: &[client::RepositoryCoverageEntry],
+    value: impl Fn(&client::RepositoryCoverageEntry) -> u64,
+) -> Result<u64, ToolExecutionError> {
+    entries.iter().try_fold(0_u64, |sum, entry| {
+        sum.checked_add(value(entry))
+            .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))
+    })
 }
 
 /// Default page size for `repo.list`.
@@ -2385,8 +2404,10 @@ const DEFAULT_REPO_LIST_RESULTS: u16 = 20;
 /// ambiguous all-zero sentinels.
 fn repo_list_cursor_context(
     query: Option<&str>,
+    states: Option<&[client::RepositoryCatalogState]>,
     page_size: u16,
     snapshot_id: [u8; 32],
+    plan: &PlanExplanation,
     key_id: u64,
 ) -> CursorContext {
     let repository_digest = domain_hash(b"rootlight.repo-list.repository.v1", &snapshot_id);
@@ -2403,9 +2424,9 @@ fn repo_list_cursor_context(
                 .expect("digest contains a generation identity"),
         ),
         tool: McpTool::RepoList,
-        tool_major_version: 1,
-        query_fingerprint: repo_list_fingerprint(query),
-        plan_fingerprint: repo_list_plan_fingerprint(&snapshot_id),
+        tool_major_version: 2,
+        query_fingerprint: repo_list_fingerprint(query, states, page_size),
+        plan_fingerprint: repo_list_plan_fingerprint(plan, &snapshot_id),
         response_profile: ResponseProfile::Compact,
         snapshot_id,
         page_size,
@@ -2413,9 +2434,13 @@ fn repo_list_cursor_context(
     }
 }
 
-fn repo_list_fingerprint(query: Option<&str>) -> [u8; 32] {
+fn repo_list_fingerprint(
+    query: Option<&str>,
+    states: Option<&[client::RepositoryCatalogState]>,
+    page_size: u16,
+) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"rootlight.repo-list.request.v1");
+    hasher.update(b"rootlight.repo-list.request.v2");
     match query {
         Some(query) => {
             hasher.update(&[1]);
@@ -2425,57 +2450,46 @@ fn repo_list_fingerprint(query: Option<&str>) -> [u8; 32] {
             hasher.update(&[0]);
         }
     }
-    *hasher.finalize().as_bytes()
-}
-
-fn normalize_repo_list_query(query: Option<String>) -> Option<String> {
-    query
-        .map(|value| value.nfd().case_fold().nfc().collect::<String>())
-        .filter(|value| !value.is_empty())
-}
-
-fn repo_list_explanation(snapshot_id: &[u8; 32]) -> PlanExplanation {
-    let catalog_identity = blake3::Hash::from_bytes(*snapshot_id).to_hex();
-    rootlight_agent::explain::finalize_plan(
-        rootlight_agent::explain::repo_list_plan(),
-        catalog_identity.as_str(),
-    )
-}
-
-fn repo_list_plan_fingerprint(snapshot_id: &[u8; 32]) -> [u8; 32] {
-    let catalog_identity = blake3::Hash::from_bytes(*snapshot_id).to_hex();
-    rootlight_agent::explain::physical_plan_fingerprint(
-        &rootlight_agent::explain::repo_list_plan(),
-        catalog_identity.as_str(),
-    )
-}
-
-fn repo_list_snapshot_id(entries: &[client::RepositoryListEntry]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"rootlight.repo-list.snapshot.v1");
-    hasher.update(
-        &u64::try_from(entries.len())
-            .unwrap_or(u64::MAX)
-            .to_le_bytes(),
-    );
-    for entry in entries {
-        hasher.update(entry.repository_id.as_bytes());
-        hasher.update(entry.active_generation.as_bytes());
-        hash_length_prefixed(&mut hasher, entry.state.as_bytes());
-        hash_length_prefixed(&mut hasher, entry.structural_freshness.as_bytes());
-        hash_length_prefixed(&mut hasher, entry.semantic_freshness.as_bytes());
-        let mut languages = entry.languages.clone();
-        languages.sort();
-        hasher.update(
-            &u64::try_from(languages.len())
-                .unwrap_or(u64::MAX)
-                .to_le_bytes(),
-        );
-        for language in languages {
-            hash_length_prefixed(&mut hasher, language.as_bytes());
+    match states {
+        Some(states) => {
+            hasher.update(&[1]);
+            hasher.update(
+                &u64::try_from(states.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
+            for state in states {
+                hash_length_prefixed(&mut hasher, catalog_state_label(*state).as_bytes());
+            }
+        }
+        None => {
+            hasher.update(&[0]);
         }
     }
+    hasher.update(&page_size.to_le_bytes());
+    hasher.update(&2_u16.to_le_bytes());
+    hasher.update(&u32::from(rootlight_agent::explain::REPO_LIST_SORT_VERSION).to_le_bytes());
+    hasher.update(&[0]);
     *hasher.finalize().as_bytes()
+}
+
+fn repo_list_plan_fingerprint(plan: &PlanExplanation, snapshot_id: &[u8; 32]) -> [u8; 32] {
+    let catalog_identity = printable_catalog_snapshot_text(*snapshot_id);
+    rootlight_agent::explain::physical_plan_fingerprint(plan, &catalog_identity)
+}
+
+fn printable_catalog_snapshot(
+    snapshot_id: [u8; 32],
+) -> Result<CatalogSnapshotId, ToolExecutionError> {
+    CatalogSnapshotId::parse(&printable_catalog_snapshot_text(snapshot_id))
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+fn printable_catalog_snapshot_text(snapshot_id: [u8; 32]) -> String {
+    format!(
+        "catalog1_{}",
+        blake3::Hash::from_bytes(snapshot_id).to_hex()
+    )
 }
 
 fn hash_length_prefixed(hasher: &mut blake3::Hasher, value: &[u8]) {
@@ -2490,22 +2504,45 @@ fn domain_hash(domain: &[u8], value: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn decode_repo_list_cursor(
-    cursor: &ContinuationCursor,
-    context: &CursorContext,
-    cursor_key: &[u8; 32],
-    invalid_cursor: &PublicError,
-) -> Result<usize, ToolExecutionError> {
-    let parsed = AuthenticatedCursor::from_wire(cursor.as_str())
-        .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))?;
-    parsed
-        .validate(context, now_unix_ms(), cursor_key)
-        .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))?;
-    let bytes: [u8; 4] = parsed
-        .last_sort_key()
-        .try_into()
-        .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))?;
-    Ok(usize::try_from(u32::from_le_bytes(bytes)).unwrap_or(usize::MAX))
+const fn client_catalog_state(state: RepositoryState) -> client::RepositoryCatalogState {
+    match state {
+        RepositoryState::Ready => client::RepositoryCatalogState::Ready,
+        RepositoryState::Indexing => client::RepositoryCatalogState::Indexing,
+        RepositoryState::Degraded => client::RepositoryCatalogState::Degraded,
+        RepositoryState::Corrupt => client::RepositoryCatalogState::Corrupt,
+        RepositoryState::MigrationRequired => client::RepositoryCatalogState::MigrationRequired,
+        RepositoryState::RebuildRequired => client::RepositoryCatalogState::RebuildRequired,
+    }
+}
+
+const fn catalog_repository_state(state: client::RepositoryCatalogState) -> RepositoryState {
+    match state {
+        client::RepositoryCatalogState::Ready => RepositoryState::Ready,
+        client::RepositoryCatalogState::Indexing => RepositoryState::Indexing,
+        client::RepositoryCatalogState::Degraded => RepositoryState::Degraded,
+        client::RepositoryCatalogState::Corrupt => RepositoryState::Corrupt,
+        client::RepositoryCatalogState::MigrationRequired => RepositoryState::MigrationRequired,
+        client::RepositoryCatalogState::RebuildRequired => RepositoryState::RebuildRequired,
+    }
+}
+
+const fn catalog_state_label(state: client::RepositoryCatalogState) -> &'static str {
+    match state {
+        client::RepositoryCatalogState::Ready => "ready",
+        client::RepositoryCatalogState::Indexing => "indexing",
+        client::RepositoryCatalogState::Degraded => "degraded",
+        client::RepositoryCatalogState::Corrupt => "corrupt",
+        client::RepositoryCatalogState::MigrationRequired => "migration_required",
+        client::RepositoryCatalogState::RebuildRequired => "rebuild_required",
+    }
+}
+
+const fn catalog_freshness(freshness: client::RepositoryCatalogFreshness) -> Freshness {
+    match freshness {
+        client::RepositoryCatalogFreshness::Current => Freshness::Current,
+        client::RepositoryCatalogFreshness::Superseded => Freshness::Superseded,
+        client::RepositoryCatalogFreshness::Stale => Freshness::Stale,
+    }
 }
 
 fn now_unix_ms() -> u64 {
@@ -2612,12 +2649,6 @@ where
     serialize_success(envelope)
 }
 
-fn no_repositories_error() -> Result<PublicError, ToolExecutionError> {
-    PublicError::builder(ErrorCode::NotFound, "no repositories are registered")
-        .build()
-        .map_err(|_| internal(ToolExecutionFailure::Executor))
-}
-
 fn status_coverage_report(entries: &[client::RepositoryCoverageEntry]) -> CoverageReport {
     let languages: Vec<LanguageCoverageReport> = entries
         .iter()
@@ -2643,10 +2674,16 @@ fn status_coverage_report(entries: &[client::RepositoryCoverageEntry]) -> Covera
 fn aggregate_coverage_status(
     entries: &[client::RepositoryCoverageEntry],
 ) -> rootlight_ir::CoverageStatus {
-    if entries.iter().all(|entry| entry.status == "complete") {
-        rootlight_ir::CoverageStatus::Complete
-    } else {
+    if entries.iter().any(|entry| entry.status == "unknown") {
+        rootlight_ir::CoverageStatus::Unknown
+    } else if entries.iter().any(|entry| entry.status == "sampled") {
+        rootlight_ir::CoverageStatus::Sampled
+    } else if entries.iter().any(|entry| entry.status == "bounded") {
         rootlight_ir::CoverageStatus::Bounded
+    } else if entries.is_empty() {
+        rootlight_ir::CoverageStatus::Unknown
+    } else {
+        rootlight_ir::CoverageStatus::Complete
     }
 }
 
@@ -5594,6 +5631,43 @@ where
         return Err(internal(ToolExecutionFailure::Executor));
     };
     Ok(output)
+}
+
+fn serialize_catalog_success(
+    mut output: CatalogEnvelope<RepoListData>,
+    started_at: Instant,
+) -> Result<Map<String, Value>, ToolExecutionError> {
+    for _ in 0..8 {
+        // This timestamp covers decode, cursor validation, daemon I/O, mapping,
+        // and prior accounting passes. The final serde conversion is excluded
+        // because including work performed after a serialized timestamp would
+        // make an exact self-describing payload impossible.
+        output.usage.wall_time_ms = u64::try_from(started_at.elapsed().as_micros())
+            .unwrap_or(u64::MAX)
+            .div_ceil(1_000);
+        let value = serde_json::to_value(ToolResponse::Success(&output))
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        let serialized =
+            serde_json::to_vec(&value).map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        let json_bytes = u64::try_from(serialized.len())
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        let estimated_tokens =
+            rootlight_mcp_contract::accounting::estimate_tokens(serialized.len());
+        if output.usage.json_bytes == json_bytes
+            && output.usage.estimated_tokens == estimated_tokens
+        {
+            let Value::Object(output) = value else {
+                return Err(internal(ToolExecutionFailure::Executor));
+            };
+            return Ok(output);
+        }
+        // Both counters are serialized into the measured document. Iterating
+        // to a fixed point keeps the reported byte count exact across digit
+        // width changes without excluding the accounting fields themselves.
+        output.usage.json_bytes = json_bytes;
+        output.usage.estimated_tokens = estimated_tokens;
+    }
+    Err(internal(ToolExecutionFailure::Executor))
 }
 
 fn map_port_error(error: ClientPortError) -> ToolExecutionError {
