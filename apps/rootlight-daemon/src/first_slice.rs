@@ -86,6 +86,7 @@ enum WorkerCommand {
 
 struct PublicationBoundaryHook {
     boundary: PublicationBoundary,
+    fail_commit: AtomicBool,
     armed: AtomicBool,
     reached: SyncSender<()>,
     release: Receiver<()>,
@@ -117,6 +118,10 @@ impl PublicationBoundaryHook {
         self.release
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| internal_error())
+    }
+
+    fn fail_commit(&self) -> bool {
+        self.fail_commit.swap(false, Ordering::AcqRel)
     }
 }
 
@@ -770,7 +775,15 @@ fn repository_index(
                 lock_metadata(metadata)?.fail_closed(operation);
                 return Err(error);
             }
-            let receipt = match service.commit_staged(staged) {
+            let commit = if publication_hook.is_some_and(PublicationBoundaryHook::fail_commit) {
+                match service.discard_staged(staged) {
+                    Ok(()) => Err(FirstSliceError::Retention),
+                    Err(error) => Err(error),
+                }
+            } else {
+                service.commit_staged(staged)
+            };
+            let receipt = match commit {
                 Ok(receipt) if receipt == staged_receipt => receipt,
                 Ok(_) | Err(_) => {
                     lock_metadata(metadata)?.fail_closed(operation);
@@ -3354,6 +3367,7 @@ mod tests {
         let (release_sender, release_receiver) = mpsc::sync_channel(1);
         let hook = PublicationBoundaryHook {
             boundary,
+            fail_commit: AtomicBool::new(false),
             armed: AtomicBool::new(true),
             reached: reached_sender,
             release: release_receiver,
@@ -3662,6 +3676,7 @@ mod tests {
         let (release_sender, release_receiver) = mpsc::sync_channel(1);
         let hook = PublicationBoundaryHook {
             boundary: PublicationBoundary::AfterSuccess,
+            fail_commit: AtomicBool::new(false),
             armed: AtomicBool::new(true),
             reached: reached_sender,
             release: release_receiver,
@@ -3784,6 +3799,7 @@ mod tests {
         let (release_sender, release_receiver) = mpsc::sync_channel(1);
         let hook = PublicationBoundaryHook {
             boundary: PublicationBoundary::AfterSuccess,
+            fail_commit: AtomicBool::new(true),
             armed: AtomicBool::new(true),
             reached: reached_sender,
             release: release_receiver,
@@ -3815,7 +3831,7 @@ mod tests {
         reached_receiver
             .recv_timeout(Duration::from_secs(5))
             .expect("index reaches the commit boundary");
-        drop(release_sender);
+        release_sender.send(()).expect("commit attempt resumes");
         let failure = index
             .join()
             .expect("index thread joins")
@@ -3880,6 +3896,7 @@ mod tests {
         let (release_sender, release_receiver) = mpsc::sync_channel(1);
         let hook = PublicationBoundaryHook {
             boundary: PublicationBoundary::BeforeCompletion,
+            fail_commit: AtomicBool::new(false),
             armed: AtomicBool::new(true),
             reached: reached_sender,
             release: release_receiver,
