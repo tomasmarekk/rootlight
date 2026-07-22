@@ -1,27 +1,85 @@
-//! Canonical capability registry for the nineteen public MCP tools.
+//! Canonical capability registry for Rootlight's public MCP boundary.
 //!
-//! One authoritative, machine-readable entry per tool records the contract
-//! version, batch eligibility, explain support, handler availability, and the
-//! honest runtime disposition. The registry is the single source of truth that
-//! the catalog, the batch allowlist, profile membership, and the agent
-//! acceptance matrix are validated against, so the schema, router, executor, and
-//! fixtures cannot drift independently. It describes what the runtime can
-//! currently do; it is not itself proof that behavior passes acceptance.
+//! The registry records tool-level discovery facts and field/value-level
+//! runtime dispositions. The capability gate combines these declarations with
+//! the generated input schemas, so adding a field or enum value without
+//! reviewing its runtime behavior fails deterministically. Declarations remain
+//! an honest inventory, not a substitute for process-level acceptance tests.
 
-use crate::MCP_SCHEMA_VERSION;
-use crate::catalog::McpTool;
+use crate::catalog::{ExposureProfile, McpTool};
+use crate::{ErrorCode, MCP_SCHEMA_VERSION};
 
-/// How a tool capability is currently satisfied at runtime.
+/// How a public capability is currently satisfied at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityStatus {
     /// Fully implemented and accepted with process evidence.
     Implemented,
-    /// Accepted by the schema but rejected before execution with a stable error.
+    /// Rejected before execution with the attached stable public error.
     UnsupportedStableError,
-    /// Available only within a documented bounded fallback.
+    /// Available only within the attached bounded fallback.
     FallbackLimited,
-    /// Not available; blocked pending evidence or design.
+    /// Accepted by the schema but not safely or observably implemented.
     Blocked,
+}
+
+/// An exception to a tool's default field disposition.
+///
+/// Rules use generated-schema paths such as `budget.max_tokens` and
+/// `operations[].local_budget`. A value of `None` applies to the field and its
+/// descendants; a value-specific rule takes precedence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityRule {
+    /// Generated-schema field path.
+    pub path: &'static str,
+    /// Optional JSON enum, const, or boolean value.
+    pub value: Option<&'static str>,
+    /// Runtime disposition for this field or value.
+    pub status: CapabilityStatus,
+    /// Stable public error returned before execution, when applicable.
+    pub error_code: Option<ErrorCode>,
+    /// Source-free explanation of the limitation or supported behavior.
+    pub summary: &'static str,
+}
+
+/// Pagination behavior advertised for one tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaginationSemantics {
+    /// The input contract has no continuation field.
+    None,
+    /// The cursor is authenticated and bound to the request shape.
+    AuthenticatedCursor,
+    /// The schema exposes a cursor that is rejected before execution.
+    UnsupportedCursor,
+}
+
+/// Generation behavior advertised for one tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationSemantics {
+    /// The operation is not generation-bound.
+    None,
+    /// The operation creates and may publish a new generation.
+    CreatesGeneration,
+    /// The request selects an active or explicit immutable generation.
+    SelectsGeneration,
+    /// The request accepts a selector, but the current adapter returns active.
+    ActiveGenerationFallback,
+    /// Two immutable generations are selected for structural comparison.
+    ComparesGenerations,
+    /// A batch selector is inherited by its nested operations.
+    BatchInherited,
+}
+
+/// Budget behavior advertised for one tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetSemantics {
+    /// The public input has no budget control.
+    None,
+    /// At least one request budget dimension is enforced.
+    PerRequest,
+    /// A dedicated token budget bounds the assembled response.
+    TokenBudget,
+    /// A schema-level budget exists but is rejected by the current executor.
+    Unsupported,
 }
 
 /// One tool's canonical capability entry.
@@ -31,25 +89,620 @@ pub struct ToolCapability {
     pub tool: McpTool,
     /// Contract schema version this entry is written against.
     pub contract_version: &'static str,
+    /// SHA-256 of sorted generated input field paths and closed values.
+    pub input_shape_hash: &'static str,
+    /// Profiles that expose this tool, in ascending privilege order.
+    pub profiles: &'static [ExposureProfile],
     /// Whether the tool may appear inside a public `query.batch`.
     pub batch_eligible: bool,
     /// Whether the tool exposes a source-free explain plan.
     pub explain_supported: bool,
     /// Whether a process-level handler currently exists.
     pub handler_available: bool,
-    /// Honest runtime disposition.
+    /// Honest aggregate runtime disposition.
     pub status: CapabilityStatus,
-    /// Source-free, concise fallback description safe for public discovery.
+    /// Disposition inherited by fields without a more specific rule.
+    pub default_field_status: CapabilityStatus,
+    /// Field and value exceptions reviewed against the current executor.
+    pub rules: &'static [CapabilityRule],
+    /// Public pagination behavior.
+    pub pagination: PaginationSemantics,
+    /// Public generation behavior.
+    pub generation: GenerationSemantics,
+    /// Public budget behavior.
+    pub budget: BudgetSemantics,
+    /// Whether `query.batch` enforces one shared aggregate budget.
+    pub batch_shared_budget: bool,
+    /// Source-free, concise fallback description safe for discovery.
     pub fallback_summary: &'static str,
 }
 
+impl ToolCapability {
+    /// Resolves the reviewed disposition for one generated field or value.
+    ///
+    /// Value-specific rules win over exact field rules, and exact field rules
+    /// win over ancestor rules. Unlisted fields inherit the conservative tool
+    /// default, while the shape hash ensures that schema additions still
+    /// require an explicit registry review.
+    #[must_use]
+    pub fn disposition(self, path: &str, value: Option<&str>) -> CapabilityRule {
+        if let Some(value) = value
+            && let Some(rule) = self
+                .rules
+                .iter()
+                .find(|rule| rule.path == path && rule.value == Some(value))
+        {
+            return *rule;
+        }
+        if let Some(rule) = self
+            .rules
+            .iter()
+            .filter(|rule| rule.value.is_none() && path_is_within(path, rule.path))
+            .max_by_key(|rule| rule.path.len())
+        {
+            return *rule;
+        }
+        CapabilityRule {
+            path: "",
+            value: None,
+            status: self.default_field_status,
+            error_code: None,
+            summary: self.fallback_summary,
+        }
+    }
+}
+
+fn path_is_within(path: &str, ancestor: &str) -> bool {
+    path == ancestor
+        || path
+            .strip_prefix(ancestor)
+            .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with("[]"))
+}
+
+const SCOUT_PROFILES: &[ExposureProfile] = &[
+    ExposureProfile::Scout,
+    ExposureProfile::Analysis,
+    ExposureProfile::Developer,
+];
+const ANALYSIS_PROFILES: &[ExposureProfile] =
+    &[ExposureProfile::Analysis, ExposureProfile::Developer];
+const DEVELOPER_PROFILES: &[ExposureProfile] = &[ExposureProfile::Developer];
+
+const fn unsupported(path: &'static str, summary: &'static str) -> CapabilityRule {
+    CapabilityRule {
+        path,
+        value: None,
+        status: CapabilityStatus::UnsupportedStableError,
+        error_code: Some(ErrorCode::UnsupportedCapability),
+        summary,
+    }
+}
+
+const fn unsupported_value(
+    path: &'static str,
+    value: &'static str,
+    summary: &'static str,
+) -> CapabilityRule {
+    CapabilityRule {
+        path,
+        value: Some(value),
+        status: CapabilityStatus::UnsupportedStableError,
+        error_code: Some(ErrorCode::UnsupportedCapability),
+        summary,
+    }
+}
+
+const fn implemented(path: &'static str, summary: &'static str) -> CapabilityRule {
+    CapabilityRule {
+        path,
+        value: None,
+        status: CapabilityStatus::Implemented,
+        error_code: None,
+        summary,
+    }
+}
+
+const fn blocked(path: &'static str, summary: &'static str) -> CapabilityRule {
+    CapabilityRule {
+        path,
+        value: None,
+        status: CapabilityStatus::Blocked,
+        error_code: None,
+        summary,
+    }
+}
+
+const REPO_INDEX_RULES: &[CapabilityRule] = &[
+    unsupported(
+        "repository_id",
+        "updating a registered repository is not served",
+    ),
+    unsupported(
+        "requested_tiers",
+        "explicit analysis-tier selection is not served",
+    ),
+    unsupported(
+        "configuration_patch",
+        "configuration patching is not served",
+    ),
+    unsupported("wait_ms", "synchronous index waiting is not served"),
+    unsupported_value("mode", "deep", "deep indexing is not served"),
+    unsupported_value("mode", "rebuild", "rebuild indexing is not served"),
+];
+
+const REPO_STATUS_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported(
+        "coverage_detail",
+        "granular coverage projection is not served",
+    ),
+    unsupported("require_freshness", "freshness gates are not served"),
+    unsupported_value(
+        "include_operations",
+        "true",
+        "active-operation projection is not served",
+    ),
+    unsupported("budget", "custom response budgets are not served"),
+    unsupported_value(
+        "response_profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const REPO_LIST_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    implemented("cursor", "uses an authenticated request-bound continuation"),
+    blocked(
+        "query",
+        "query is cursor-bound but does not filter opaque repository identities",
+    ),
+    unsupported("states", "repository-state filtering is not served"),
+    unsupported_value(
+        "response_profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const CODE_LOCATE_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("kinds", "kind filtering is not served"),
+    unsupported("scope", "structural scope filtering is not served"),
+    unsupported("languages", "language filtering is not served"),
+    unsupported(
+        "related_to",
+        "relationship-constrained lookup is not served",
+    ),
+    unsupported("min_confidence", "confidence filtering is not served"),
+    unsupported("cursor", "continuation paging is not served"),
+    unsupported("budget.max_tokens", "token budgeting is not served"),
+    unsupported(
+        "budget.max_source_bytes",
+        "source-byte budgeting is not served",
+    ),
+    unsupported(
+        "budget.max_traversal_facts",
+        "traversal-fact budgeting is not served",
+    ),
+    unsupported("budget.max_depth", "depth budgeting is not served"),
+    unsupported("budget.max_paths", "path budgeting is not served"),
+    unsupported("budget.timeout_ms", "timeout budgeting is not served"),
+    unsupported("budget.evidence_level", "evidence projection is not served"),
+    unsupported_value(
+        "search_modes[]",
+        "docs",
+        "documentation search is not served",
+    ),
+    unsupported_value("search_modes[]", "path", "path search is not served"),
+    unsupported_value(
+        "search_modes[]",
+        "semantic",
+        "semantic search is not served",
+    ),
+    unsupported_value(
+        "search_modes[]",
+        "structural",
+        "structural search is not served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const SYMBOL_EXPLAIN_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("sections", "section selection is not served"),
+    unsupported(
+        "relation_sample_limit",
+        "custom relation samples are not served",
+    ),
+    unsupported(
+        "source_preview_lines",
+        "custom source previews are not served",
+    ),
+    unsupported("budget", "custom response budgets are not served"),
+    unsupported_value(
+        "include_provenance",
+        "full",
+        "full provenance projection is not served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("scope", "structural scope filtering is not served"),
+    unsupported_value(
+        "include_candidates",
+        "true",
+        "ambiguous candidate projection is not served",
+    ),
+    unsupported("budget", "custom response budgets are not served"),
+    unsupported("cursor", "continuation paging is not served"),
+    unsupported_value(
+        "response_profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const FLOW_TRACE_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported_value(
+        "cross_repository",
+        "true",
+        "cross-repository traversal is not served",
+    ),
+    unsupported(
+        "path_policy",
+        "explicit path selection policy is not served",
+    ),
+    unsupported("budget", "custom response budgets are not served"),
+    unsupported("from.route_id", "route endpoints are not served"),
+    unsupported("from.service_id", "service endpoints are not served"),
+    unsupported(
+        "from.database_object_id",
+        "database endpoints are not served",
+    ),
+    unsupported("to.route_id", "route endpoints are not served"),
+    unsupported("to.service_id", "service endpoints are not served"),
+    unsupported("to.database_object_id", "database endpoints are not served"),
+    unsupported_value(
+        "response_profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const CHANGE_IMPACT_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("scope", "structural scope filtering is not served"),
+    unsupported("budget", "custom response budgets are not served"),
+    unsupported(
+        "change.working_tree",
+        "working-tree diff resolution is not served",
+    ),
+    unsupported(
+        "change.revision_range",
+        "revision-range resolution is not served",
+    ),
+    unsupported_value(
+        "include_history",
+        "true",
+        "history-derived signals are not served",
+    ),
+    unsupported_value(
+        "relation_policy",
+        "conservative",
+        "conservative relation expansion is not served",
+    ),
+    unsupported_value(
+        "profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const TESTS_SELECT_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("budget", "custom response budgets are not served"),
+    unsupported("execution_budget", "execution-time budgeting is not served"),
+    unsupported("frameworks", "framework filtering is not served"),
+    unsupported("seeds.paths", "path seeds are not served"),
+    unsupported("seeds.change", "change seeds are not served"),
+    unsupported("seeds.build_targets", "build-target seeds are not served"),
+    unsupported_value(
+        "profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const ARCHITECTURE_OVERVIEW_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("scope", "structural scope filtering is not served"),
+    unsupported("detail", "explicit detail projection is not served"),
+    unsupported("budget", "custom response budgets are not served"),
+    unsupported_value("views[]", "build", "build view is not served"),
+    unsupported_value("views[]", "communities", "community view is not served"),
+    unsupported_value("views[]", "data", "data view is not served"),
+    unsupported_value("views[]", "modules", "module view is not served"),
+    unsupported_value("views[]", "ownership", "ownership view is not served"),
+    unsupported_value("views[]", "packages", "package view is not served"),
+    unsupported_value("views[]", "services", "service view is not served"),
+    unsupported_value(
+        "response_profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const ARCHITECTURE_CYCLES_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("scope", "structural scope filtering is not served"),
+    unsupported("rank_by", "cycle ranking strategy is not served"),
+    unsupported("budget", "custom response budgets are not served"),
+    unsupported_value(
+        "response_profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const CODE_DEAD_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("scope", "structural scope filtering is not served"),
+    unsupported("budget", "custom response budgets are not served"),
+    unsupported_value(
+        "response_profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const HISTORY_COMPARE_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("scope", "structural scope filtering is not served"),
+    unsupported_value(
+        "include_unchanged_context",
+        "true",
+        "unchanged-context projection is not served",
+    ),
+    unsupported("budget", "custom response budgets are not served"),
+    unsupported("base.git", "git revision resolution is not served"),
+    unsupported("head.git", "git revision resolution is not served"),
+    unsupported_value(
+        "profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const PLAN_CHANGE_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("change_context", "change-context resolution is not served"),
+    unsupported("constraints", "user constraint evaluation is not served"),
+    unsupported("budget", "custom response budgets are not served"),
+    unsupported_value(
+        "profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const CONTEXT_PACK_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("seeds.paths", "path seeds are not served"),
+    unsupported("seeds.routes", "route seeds are not served"),
+    unsupported("seeds.located", "located-result seeds are not served"),
+    unsupported("seeds.change", "change seeds are not served"),
+    unsupported("seeds.plan", "plan seeds are not served"),
+    unsupported("source_policy", "source selection policy is not served"),
+    unsupported("sections", "section selection is not served"),
+    unsupported("diversity", "diversity strategy is not served"),
+    unsupported("min_confidence", "confidence filtering is not served"),
+    unsupported("continuation", "continuation assembly is not served"),
+    implemented("token_budget", "bounds assembled context tokens"),
+];
+
+const SOURCE_READ_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported_value("merge_overlaps", "true", "overlap merging is not served"),
+    unsupported(
+        "max_source_bytes",
+        "custom source-byte bounds are not served",
+    ),
+    unsupported_value(
+        "include_line_numbers",
+        "false",
+        "line-number suppression is not served",
+    ),
+    unsupported_value(
+        "encoding",
+        "bytes_base64",
+        "base64 source projection is not served",
+    ),
+    unsupported("budget", "custom response budgets are not served"),
+    unsupported_value(
+        "response_profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
+const QUERY_ADVANCED_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("cursor", "continuation paging is not served"),
+    unsupported("parameters", "bound query parameters are not served"),
+    implemented(
+        "cost_limit",
+        "rejects plans above the requested static cost ceiling",
+    ),
+    implemented("max_results", "bounds returned query rows"),
+    implemented("max_depth", "bounds accepted query nesting"),
+];
+
+const QUERY_BATCH_RULES: &[CapabilityRule] = &[
+    implemented("explain", "returns a deterministic source-free plan"),
+    unsupported(
+        "repository.alias",
+        "only stable repository identifiers are served",
+    ),
+    unsupported("budget", "shared aggregate budgeting is not served"),
+    blocked(
+        "operations[].local_budget",
+        "local operation budgets are accepted but not propagated to subtools",
+    ),
+    unsupported_value(
+        "response_profile",
+        "evidence",
+        "only compact response projection is served",
+    ),
+    unsupported_value(
+        "response_profile",
+        "standard",
+        "only compact response projection is served",
+    ),
+];
+
 /// The closed set of tools permitted inside a public `query.batch`.
-///
-/// This is the single source of truth for batch eligibility. The batch
-/// validator aliases this list rather than maintaining a parallel one, so
-/// eligibility cannot drift between the registry and the runtime. Mutation
-/// tools, repository or operation polling, nested batches, `history.compare`,
-/// `query.advanced`, and cross-generation operations are excluded.
 pub const BATCH_ELIGIBLE: [McpTool; 11] = [
     McpTool::CodeLocate,
     McpTool::SymbolExplain,
@@ -81,46 +734,163 @@ pub const fn is_batch_eligible(tool: McpTool) -> bool {
 pub const CAPABILITIES: [ToolCapability; 19] = build_capabilities();
 
 const fn build_capabilities() -> [ToolCapability; 19] {
-    let mut entries = [ToolCapability {
-        tool: McpTool::RepoIndex,
-        contract_version: MCP_SCHEMA_VERSION,
-        batch_eligible: false,
-        explain_supported: false,
-        handler_available: false,
-        status: CapabilityStatus::Blocked,
-        fallback_summary: "",
-    }; 19];
+    let mut entries = [tool_capability(McpTool::RepoIndex); 19];
     let mut index = 0;
     while index < McpTool::ALL.len() {
-        let tool = McpTool::ALL[index];
-        entries[index] = ToolCapability {
-            tool,
-            contract_version: MCP_SCHEMA_VERSION,
-            batch_eligible: is_batch_eligible(tool),
-            explain_supported: false,
-            handler_available: true,
-            status: tool_status(tool),
-            fallback_summary: tool_fallback_summary(tool),
-        };
+        entries[index] = tool_capability(McpTool::ALL[index]);
         index += 1;
     }
     entries
 }
 
-const fn tool_status(_tool: McpTool) -> CapabilityStatus {
-    // Every public tool currently ships as a bounded process-local first slice:
-    // a handler exists and is schema-valid, but full acceptance is blocked
-    // pending the remediation work tracked by the capability matrix. No tool is
-    // marked Implemented until process evidence accepts it, and none is marked
-    // Blocked because every tool has a reachable bounded handler.
-    CapabilityStatus::FallbackLimited
+const fn tool_capability(tool: McpTool) -> ToolCapability {
+    ToolCapability {
+        tool,
+        contract_version: MCP_SCHEMA_VERSION,
+        input_shape_hash: input_shape_hash(tool),
+        profiles: tool_profiles(tool),
+        batch_eligible: is_batch_eligible(tool),
+        explain_supported: !matches!(tool, McpTool::RepoIndex | McpTool::OperationStatus),
+        handler_available: true,
+        status: CapabilityStatus::FallbackLimited,
+        default_field_status: CapabilityStatus::FallbackLimited,
+        rules: tool_rules(tool),
+        pagination: pagination_semantics(tool),
+        generation: generation_semantics(tool),
+        budget: budget_semantics(tool),
+        batch_shared_budget: false,
+        fallback_summary: tool_fallback_summary(tool),
+    }
+}
+
+const fn tool_profiles(tool: McpTool) -> &'static [ExposureProfile] {
+    match tool {
+        McpTool::RepoStatus
+        | McpTool::CodeLocate
+        | McpTool::SymbolExplain
+        | McpTool::ContextPack
+        | McpTool::SourceRead
+        | McpTool::QueryBatch => SCOUT_PROFILES,
+        McpTool::SymbolRelationships
+        | McpTool::FlowTrace
+        | McpTool::ChangeImpact
+        | McpTool::TestsSelect
+        | McpTool::ArchitectureOverview
+        | McpTool::ArchitectureCycles
+        | McpTool::CodeDead => ANALYSIS_PROFILES,
+        _ => DEVELOPER_PROFILES,
+    }
+}
+
+const fn tool_rules(tool: McpTool) -> &'static [CapabilityRule] {
+    match tool {
+        McpTool::RepoIndex => REPO_INDEX_RULES,
+        McpTool::RepoStatus => REPO_STATUS_RULES,
+        McpTool::RepoList => REPO_LIST_RULES,
+        McpTool::OperationStatus => &[],
+        McpTool::CodeLocate => CODE_LOCATE_RULES,
+        McpTool::SymbolExplain => SYMBOL_EXPLAIN_RULES,
+        McpTool::SymbolRelationships => SYMBOL_RELATIONSHIPS_RULES,
+        McpTool::FlowTrace => FLOW_TRACE_RULES,
+        McpTool::ChangeImpact => CHANGE_IMPACT_RULES,
+        McpTool::TestsSelect => TESTS_SELECT_RULES,
+        McpTool::ArchitectureOverview => ARCHITECTURE_OVERVIEW_RULES,
+        McpTool::ArchitectureCycles => ARCHITECTURE_CYCLES_RULES,
+        McpTool::CodeDead => CODE_DEAD_RULES,
+        McpTool::HistoryCompare => HISTORY_COMPARE_RULES,
+        McpTool::PlanChange => PLAN_CHANGE_RULES,
+        McpTool::ContextPack => CONTEXT_PACK_RULES,
+        McpTool::SourceRead => SOURCE_READ_RULES,
+        McpTool::QueryAdvanced => QUERY_ADVANCED_RULES,
+        McpTool::QueryBatch => QUERY_BATCH_RULES,
+    }
+}
+
+const fn pagination_semantics(tool: McpTool) -> PaginationSemantics {
+    match tool {
+        McpTool::RepoList => PaginationSemantics::AuthenticatedCursor,
+        McpTool::CodeLocate | McpTool::SymbolRelationships | McpTool::QueryAdvanced => {
+            PaginationSemantics::UnsupportedCursor
+        }
+        _ => PaginationSemantics::None,
+    }
+}
+
+const fn generation_semantics(tool: McpTool) -> GenerationSemantics {
+    match tool {
+        McpTool::RepoIndex => GenerationSemantics::CreatesGeneration,
+        McpTool::RepoStatus => GenerationSemantics::ActiveGenerationFallback,
+        McpTool::RepoList | McpTool::OperationStatus => GenerationSemantics::None,
+        McpTool::HistoryCompare => GenerationSemantics::ComparesGenerations,
+        McpTool::QueryBatch => GenerationSemantics::BatchInherited,
+        _ => GenerationSemantics::SelectsGeneration,
+    }
+}
+
+const fn budget_semantics(tool: McpTool) -> BudgetSemantics {
+    match tool {
+        McpTool::CodeLocate | McpTool::QueryAdvanced => BudgetSemantics::PerRequest,
+        McpTool::ContextPack => BudgetSemantics::TokenBudget,
+        McpTool::RepoStatus
+        | McpTool::SymbolExplain
+        | McpTool::SymbolRelationships
+        | McpTool::FlowTrace
+        | McpTool::ChangeImpact
+        | McpTool::TestsSelect
+        | McpTool::ArchitectureOverview
+        | McpTool::ArchitectureCycles
+        | McpTool::CodeDead
+        | McpTool::HistoryCompare
+        | McpTool::PlanChange
+        | McpTool::SourceRead
+        | McpTool::QueryBatch => BudgetSemantics::Unsupported,
+        McpTool::RepoIndex | McpTool::RepoList | McpTool::OperationStatus => BudgetSemantics::None,
+    }
+}
+
+const fn input_shape_hash(tool: McpTool) -> &'static str {
+    match tool {
+        McpTool::RepoIndex => "ca3b1fcc7237dea36cfb927003b8a97b39baeefe2ef08cd0c8f116d6381f160d",
+        McpTool::RepoStatus => "4c74ff8e95f44eb590430a3a603fbb6248a18e590fc6026989d99ed8d696796e",
+        McpTool::RepoList => "5f2a9e3fe96343fa1e75e8c4151d07cbc38ca6b1935ee7a8fadfd9defa9759b7",
+        McpTool::OperationStatus => {
+            "9703820cfd7dba86a224059c47287e73e06876df4d3245375fef88489f2554f3"
+        }
+        McpTool::CodeLocate => "bdd2589fdad0697156bc225ccf4ebdb9257ccc8f95234c35dd9ae3c52d06fdad",
+        McpTool::SymbolExplain => {
+            "698666081b80d3b8a031dcc103b74f5281dd0caa073d42ff3ee1679c21cf41a7"
+        }
+        McpTool::SymbolRelationships => {
+            "8023c0c362d18ed970b5a0d5ff8af700c986fd9ab186663fbd1e29ba07cd201a"
+        }
+        McpTool::FlowTrace => "b228a48614c0069f4347b6c9ce4040a8532db4c7a17a83b6d52108d50fcb1360",
+        McpTool::ChangeImpact => "93aded61e1aa507496fd7179a636e8c0f1f8384a9304750d20f98d41ab03f717",
+        McpTool::TestsSelect => "6d468db8eb4ce2585faf489f3de96fa2a326af799024e8a2bd741d417ee9c846",
+        McpTool::ArchitectureOverview => {
+            "86c25ac4db8505c1754dba09d9c73d122541095f69edc75b7f6851fdc9fa253a"
+        }
+        McpTool::ArchitectureCycles => {
+            "081ec741b4821a67453a0161a900577670faf06eb2ee7c1ff8d681c743875879"
+        }
+        McpTool::CodeDead => "5a0fb3d5c1812d6ab023e4764e786dac63ec294e01d06466ae5f7e4e992c9f0b",
+        McpTool::HistoryCompare => {
+            "ca8734f87fb7a3c7e8215c19ff295d9ba37092ab4e9288f6f5f7e993fe5c777c"
+        }
+        McpTool::PlanChange => "6f2e2f974582a6025e15233d36ce798742089e8bb055c726b63c3258a27ef411",
+        McpTool::ContextPack => "788f06bf0d8c6ec9718fcf76319af6bb1f7ce470dfa182476265be343b228d4b",
+        McpTool::SourceRead => "df1472b995ed8d489d9abafb8adc95ab0b5da699beb3ed29dcc16b7293de32f8",
+        McpTool::QueryAdvanced => {
+            "d36c896849df560f106e59b4ddbe27259dfa93071481572edb909698e348d77e"
+        }
+        McpTool::QueryBatch => "7a9e82cf00569c6df57b9cf733703517e918ce5fbc0143c88c61514ef82fb927",
+    }
 }
 
 const fn tool_fallback_summary(tool: McpTool) -> &'static str {
     match tool {
         McpTool::RepoIndex => "bounded generation creation; durable publication inactive",
-        McpTool::RepoStatus => "bounded process-local status; freshness and coverage structural",
-        McpTool::RepoList => "bounded catalog listing",
+        McpTool::RepoStatus => "bounded process-local status; active generation returned",
+        McpTool::RepoList => "bounded catalog listing with authenticated continuation",
         McpTool::OperationStatus => "bounded operation read and cancel",
         McpTool::CodeLocate => "bounded structural and lexical matching",
         McpTool::SymbolExplain => "bounded semantic evidence",
@@ -136,7 +906,7 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
         McpTool::ContextPack => "bounded evidence assembly under a token budget",
         McpTool::SourceRead => "bounded source ranges as untrusted data",
         McpTool::QueryAdvanced => "bounded safe-AST query",
-        McpTool::QueryBatch => "bounded batched reads under one generation and shared budget",
+        McpTool::QueryBatch => "bounded dependency-ordered reads without a shared budget",
     }
 }
 
@@ -147,25 +917,24 @@ const fn tool_as_u8(tool: McpTool) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BATCH_ELIGIBLE, CAPABILITIES, CapabilityStatus, McpTool, is_batch_eligible};
+    use super::{
+        BATCH_ELIGIBLE, CAPABILITIES, CapabilityStatus, GenerationSemantics, McpTool,
+        PaginationSemantics, is_batch_eligible,
+    };
+    use crate::ErrorCode;
 
     #[test]
-    fn registry_covers_exactly_the_nineteen_catalog_tools_in_order() {
-        assert_eq!(CAPABILITIES.len(), 19);
+    fn registry_covers_exactly_the_catalog_in_order() {
+        assert_eq!(CAPABILITIES.len(), McpTool::ALL.len());
         for (entry, tool) in CAPABILITIES.iter().zip(McpTool::ALL) {
             assert_eq!(entry.tool, tool, "registry order must match the catalog");
-        }
-    }
-
-    #[test]
-    fn every_entry_targets_the_current_contract_version() {
-        for entry in &CAPABILITIES {
             assert_eq!(entry.contract_version, crate::MCP_SCHEMA_VERSION);
+            assert_ne!(entry.input_shape_hash, "");
         }
     }
 
     #[test]
-    fn batch_eligibility_field_matches_the_single_source() {
+    fn batch_metadata_does_not_claim_a_shared_budget() {
         for entry in &CAPABILITIES {
             assert_eq!(
                 entry.batch_eligible,
@@ -173,42 +942,59 @@ mod tests {
                 "{} batch flag drifted from the allowlist",
                 entry.tool.name()
             );
+            assert!(!entry.batch_shared_budget);
         }
         assert_eq!(BATCH_ELIGIBLE.len(), 11);
+        assert!(!is_batch_eligible(McpTool::QueryBatch));
     }
 
     #[test]
-    fn batch_eligible_tools_are_read_only() {
-        for tool in BATCH_ELIGIBLE {
-            assert!(
-                tool.read_only(),
-                "{} in batch must be read-only",
-                tool.name()
+    fn explain_and_generation_metadata_match_the_public_surface() {
+        for entry in &CAPABILITIES {
+            assert_eq!(
+                entry.explain_supported,
+                !matches!(entry.tool, McpTool::RepoIndex | McpTool::OperationStatus)
             );
         }
-        assert!(!is_batch_eligible(McpTool::RepoIndex));
-        assert!(!is_batch_eligible(McpTool::QueryBatch));
-        assert!(!is_batch_eligible(McpTool::HistoryCompare));
-        assert!(!is_batch_eligible(McpTool::QueryAdvanced));
+        let status = CAPABILITIES[McpTool::RepoStatus as usize];
+        assert_eq!(
+            status.generation,
+            GenerationSemantics::ActiveGenerationFallback
+        );
     }
 
     #[test]
-    fn every_entry_has_a_handler_or_explicit_pre_execution_disposition() {
+    fn known_silent_fields_are_explicitly_blocked() {
+        let repo_list = CAPABILITIES[McpTool::RepoList as usize];
+        assert_eq!(
+            repo_list.disposition("query", None).status,
+            CapabilityStatus::Blocked
+        );
+        assert_eq!(
+            repo_list.pagination,
+            PaginationSemantics::AuthenticatedCursor
+        );
+        let batch = CAPABILITIES[McpTool::QueryBatch as usize];
+        assert_eq!(
+            batch
+                .disposition("operations[].local_budget.max_tokens", None)
+                .status,
+            CapabilityStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn unsupported_values_carry_stable_error_metadata() {
         for entry in &CAPABILITIES {
-            let has_explicit_disposition = matches!(
-                entry.status,
-                CapabilityStatus::UnsupportedStableError | CapabilityStatus::Blocked
-            );
-            assert!(
-                entry.handler_available || has_explicit_disposition,
-                "{} lacks a handler and an explicit disposition",
-                entry.tool.name()
-            );
-            assert!(
-                !entry.fallback_summary.is_empty(),
-                "{} has an empty fallback summary",
-                entry.tool.name()
-            );
+            for rule in entry.rules {
+                assert!(!rule.path.is_empty());
+                assert!(!rule.summary.is_empty());
+                if rule.status == CapabilityStatus::UnsupportedStableError {
+                    assert_eq!(rule.error_code, Some(ErrorCode::UnsupportedCapability));
+                } else {
+                    assert_eq!(rule.error_code, None);
+                }
+            }
         }
     }
 }
