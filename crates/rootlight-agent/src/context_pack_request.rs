@@ -334,6 +334,30 @@ impl CanonicalContextPackRequest {
         self.token_budget
     }
 
+    /// Returns the canonical source inclusion policy.
+    #[must_use]
+    pub const fn source_policy(&self) -> SourcePolicy {
+        self.source_policy
+    }
+
+    /// Returns canonical evidence sections in stable order.
+    #[must_use]
+    pub fn sections(&self) -> &[ContextSection] {
+        &self.sections
+    }
+
+    /// Returns the canonical diversity policy.
+    #[must_use]
+    pub const fn diversity(&self) -> Diversity {
+        self.diversity
+    }
+
+    /// Returns the minimum admitted evidence confidence.
+    #[must_use]
+    pub const fn min_confidence(&self) -> u16 {
+        self.min_confidence
+    }
+
     /// Returns the complete domain-separated request digest.
     #[must_use]
     pub const fn digest_bytes(&self) -> [u8; 32] {

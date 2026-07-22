@@ -31,6 +31,11 @@ use rootlight_mcp_contract::{
 use serde_json::Map;
 
 use crate::{
+    context_evidence::{
+        ContextEvidenceCollectionError, ContextEvidenceCollector, ContextEvidenceCorpus,
+        ContextEvidencePort, ContextEvidenceProviderRegistry, EvidenceProviderOmissionReason,
+        EvidenceProviderPlanError,
+    },
     context_pack_request::{
         CanonicalContextPackRequest, CanonicalContextPackRequestError, normalize_task,
     },
@@ -228,6 +233,9 @@ pub enum ContextPackPlanningError {
     /// Request cancellation or a shared budget stopped planning.
     #[error(transparent)]
     Policy(#[from] ExecutionPolicyError),
+    /// Planner completeness could not represent observed provider state.
+    #[error("context-pack planner produced invalid completeness")]
+    InvalidCompleteness,
 }
 
 /// Transport-neutral input for one complete context-pack planning pass.
@@ -246,6 +254,29 @@ pub struct PlannedContextPack {
     pub data: ContextPackData,
     /// Whether planning omitted evidence due to a bound.
     pub truncated: bool,
+    /// Planner-owned completeness merged from evidence providers and selection.
+    pub completeness: ResultCompleteness,
+}
+
+#[derive(Debug, Clone)]
+struct ContextCandidateMetadata {
+    symbol_id: Option<rootlight_ids::SymbolId>,
+    source_ref: Option<rootlight_ir::SourceRef>,
+    trust: TrustClassification,
+}
+
+/// Failure returned by the typed multi-provider context-pack path.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ContextEvidencePlanningError {
+    /// Canonical provider selection exceeded a hard plan invariant.
+    #[error(transparent)]
+    ProviderPlan(#[from] EvidenceProviderPlanError),
+    /// Provider collection returned unsafe evidence or exceeded policy.
+    #[error(transparent)]
+    Collection(#[from] ContextEvidenceCollectionError),
+    /// Candidate optimization or materialization failed.
+    #[error(transparent)]
+    Planning(#[from] ContextPackPlanningError),
 }
 
 /// Planner boundary for complete context-pack shaping.
@@ -281,16 +312,20 @@ where
     ) -> Result<PlannedContextPack, ContextPackPlanningError> {
         checkpoint(cancellation)?;
 
-        let mut definitions = BTreeMap::new();
+        let mut metadata = BTreeMap::new();
         let mut candidates = Vec::new();
         candidates
             .try_reserve_exact(request.symbols.len())
             .map_err(|_| PackError::MemoryUnavailable)?;
         for explanation in request.symbols {
             checkpoint(cancellation)?;
-            definitions.insert(
+            metadata.insert(
                 explanation.symbol_id.to_string(),
-                explanation.definition.clone(),
+                ContextCandidateMetadata {
+                    symbol_id: Some(explanation.symbol_id),
+                    source_ref: Some(explanation.definition.clone()),
+                    trust: explanation.trust,
+                },
             );
             let signature_bytes = explanation.signature.as_ref().map_or(0, String::len);
             // Exact UTF-8 bytes are a conservative provider-neutral token
@@ -321,9 +356,123 @@ where
             ..BudgetCharge::default()
         })?;
 
+        let completeness = planner_completeness(pack.truncated)?;
         Ok(PlannedContextPack {
-            data: context_pack_data(request.request, &pack, &definitions),
+            data: context_pack_data(request.request, &pack, &metadata),
             truncated: pack.truncated,
+            completeness,
+        })
+    }
+}
+
+impl DefaultContextPackPlanner {
+    /// Executes the deterministic provider registry and plans a typed evidence
+    /// corpus without invoking public MCP transport recursively.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContextEvidencePlanningError`] when provider selection,
+    /// collection, validation, accounting, or optimization fails.
+    pub async fn collect_and_plan<P, C>(
+        &self,
+        port: &P,
+        request: &CanonicalContextPackRequest,
+        cancellation: C,
+        deadline: Instant,
+    ) -> Result<PlannedContextPack, ContextEvidencePlanningError>
+    where
+        P: ContextEvidencePort<C>,
+        C: CancellationSignal + Clone + Send + Sync + 'static,
+    {
+        let provider_plan = ContextEvidenceProviderRegistry.plan(request)?;
+        let corpus = ContextEvidenceCollector
+            .collect(
+                port,
+                request,
+                &provider_plan,
+                cancellation.clone(),
+                deadline,
+            )
+            .await?;
+        self.plan_corpus(request, &corpus, &cancellation)
+            .map_err(Into::into)
+    }
+
+    /// Optimizes one already validated typed provider corpus.
+    ///
+    /// Provider usage is retained in the same parent ledger before output
+    /// materialization is charged, so the final pack cannot exceed the request
+    /// token ceiling after retrieval work has already consumed capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContextPackPlanningError`] when cancellation, the remaining
+    /// shared budget, or pack selection prevents safe materialization.
+    pub fn plan_corpus<C>(
+        &self,
+        request: &CanonicalContextPackRequest,
+        corpus: &ContextEvidenceCorpus,
+        cancellation: &C,
+    ) -> Result<PlannedContextPack, ContextPackPlanningError>
+    where
+        C: CancellationSignal,
+    {
+        checkpoint(cancellation)?;
+        let mut metadata = BTreeMap::new();
+        let mut candidates = Vec::new();
+        candidates
+            .try_reserve_exact(corpus.candidates.len())
+            .map_err(|_| PackError::MemoryUnavailable)?;
+        for candidate in &corpus.candidates {
+            checkpoint(cancellation)?;
+            let identity = candidate.id().as_str().to_owned();
+            let source_ref = candidate.source_refs().first().cloned();
+            let source_path = source_ref.as_ref().map_or_else(
+                || candidate.dedup_key().as_str().to_owned(),
+                |source| source.span().file().to_string(),
+            );
+            metadata.insert(
+                identity.clone(),
+                ContextCandidateMetadata {
+                    symbol_id: candidate.symbol_id(),
+                    source_ref,
+                    trust: candidate.trust(),
+                },
+            );
+            candidates.push(EvidenceCandidate {
+                identity,
+                role: candidate.role(),
+                relevance: candidate.relevance(),
+                confidence: candidate.confidence(),
+                estimated_tokens: u32::try_from(candidate.cost().tokens).unwrap_or(u32::MAX),
+                source_path,
+            });
+        }
+
+        let mut budget = corpus.budget().clone();
+        let available_tokens = u32::try_from(budget.remaining().tokens).unwrap_or(u32::MAX);
+        let pack = optimize_pack(request.objective(), &mut candidates, available_tokens)?;
+        budget.charge(BudgetCharge {
+            results: u64::try_from(pack.items.len()).unwrap_or(u64::MAX),
+            tokens: u64::from(pack.total_tokens),
+            ..BudgetCharge::default()
+        })?;
+        checkpoint(cancellation)?;
+
+        let mut data = context_pack_data(request, &pack, &metadata);
+        append_provider_omissions(&mut data.omitted, corpus);
+        let completeness = corpus_completeness(corpus, pack.truncated)?;
+        let truncated = completeness.state == CompletenessState::Truncated
+            || completeness.limiting_resources.iter().any(|resource| {
+                !matches!(
+                    resource.kind,
+                    LimitingResourceKind::Capability | LimitingResourceKind::Coverage
+                )
+            });
+        Ok(PlannedContextPack {
+            data,
+            truncated,
+            completeness,
         })
     }
 }
@@ -569,7 +718,8 @@ impl ContextPackService {
             )
             .map_err(|_| ContextPackServiceError::Unavailable)?;
         let truncated = envelope.truncated || planned.truncated;
-        let completeness = context_pack_completeness(&envelope.completeness, planned.truncated)?;
+        let completeness =
+            context_pack_completeness(&envelope.completeness, &planned.completeness)?;
         Ok(ReadEnvelope {
             schema_version: SchemaVersion::V1_0,
             repository: identity.repository,
@@ -588,23 +738,74 @@ impl ContextPackService {
 
 fn context_pack_completeness(
     child: &ResultCompleteness,
-    planner_truncated: bool,
+    planner: &ResultCompleteness,
 ) -> Result<ResultCompleteness, ContextPackServiceError> {
-    if !planner_truncated {
-        return Ok(child.clone());
+    child
+        .merge(planner)
+        .map_err(|_| ContextPackServiceError::InvalidResponse)
+}
+
+fn planner_completeness(truncated: bool) -> Result<ResultCompleteness, ContextPackPlanningError> {
+    if !truncated {
+        return Ok(ResultCompleteness::complete());
     }
-    let state = child.state.max(CompletenessState::Truncated);
-    let mut resources = child.limiting_resources.clone();
-    resources.push(LimitingResource::kind(
-        LimitingResourceKind::EstimatedTokens,
-    ));
-    let mut guidance = child
-        .guidance
-        .iter()
-        .copied()
-        .filter(|value| *value != ContinuationGuidance::UseCursor)
-        .collect::<Vec<_>>();
-    guidance.push(ContinuationGuidance::SplitRequest);
+    ResultCompleteness::new(
+        CompletenessState::Truncated,
+        vec![LimitingResource::kind(
+            LimitingResourceKind::EstimatedTokens,
+        )],
+        ContinuationAvailability::Unavailable,
+        vec![ContinuationGuidance::SplitRequest],
+    )
+    .map_err(|_| ContextPackPlanningError::InvalidCompleteness)
+}
+
+fn corpus_completeness(
+    corpus: &ContextEvidenceCorpus,
+    pack_truncated: bool,
+) -> Result<ResultCompleteness, ContextPackPlanningError> {
+    let mut state = if pack_truncated {
+        CompletenessState::Truncated
+    } else {
+        CompletenessState::Complete
+    };
+    let mut resources = if pack_truncated {
+        vec![LimitingResource::kind(
+            LimitingResourceKind::EstimatedTokens,
+        )]
+    } else {
+        Vec::new()
+    };
+    let mut guidance = if pack_truncated {
+        vec![ContinuationGuidance::SplitRequest]
+    } else {
+        Vec::new()
+    };
+
+    for omission in &corpus.omissions {
+        match omission.reason {
+            EvidenceProviderOmissionReason::NoEvidence
+            | EvidenceProviderOmissionReason::LowConfidence => {}
+            EvidenceProviderOmissionReason::Truncated | EvidenceProviderOmissionReason::Budget => {
+                state = state.max(CompletenessState::Truncated);
+                resources.extend(omission.limiting_resources.iter().copied());
+                guidance.push(ContinuationGuidance::SplitRequest);
+            }
+            EvidenceProviderOmissionReason::Unsupported => {
+                state = state.max(CompletenessState::UnsupportedPartial);
+                resources.extend(omission.limiting_resources.iter().copied());
+                guidance.push(ContinuationGuidance::UnsupportedNoContinuation);
+            }
+            EvidenceProviderOmissionReason::Unavailable => {
+                state = CompletenessState::Indeterminate;
+                resources.extend(omission.limiting_resources.iter().copied());
+                guidance.push(ContinuationGuidance::RefreshCoverage);
+            }
+        }
+    }
+    if state == CompletenessState::Complete {
+        return Ok(ResultCompleteness::complete());
+    }
     resources.sort_unstable();
     resources.dedup_by_key(|resource| resource.kind);
     guidance.sort_unstable();
@@ -615,7 +816,7 @@ fn context_pack_completeness(
         ContinuationAvailability::Unavailable,
         guidance,
     )
-    .map_err(|_| ContextPackServiceError::InvalidResponse)
+    .map_err(|_| ContextPackPlanningError::InvalidCompleteness)
 }
 
 fn context_service_checkpoint<C>(
@@ -862,19 +1063,26 @@ pub fn context_pack_id(request: &CanonicalContextPackRequest) -> ContextPackId {
 fn context_pack_data(
     request: &CanonicalContextPackRequest,
     pack: &PackResult,
-    definitions: &BTreeMap<String, rootlight_ir::SourceRef>,
+    metadata: &BTreeMap<String, ContextCandidateMetadata>,
 ) -> ContextPackData {
     let items = pack
         .items
         .iter()
-        .map(|item| ContextItem {
-            role: contract_role(item.candidate.role),
-            symbol_id: item.candidate.identity.parse().ok(),
-            source_ref: definitions.get(&item.candidate.identity).cloned(),
-            score: item.candidate.relevance,
-            tokens: item.candidate.estimated_tokens,
-            trust: TrustClassification::UntrustedRepositoryData,
-            snippet: None,
+        .map(|item| {
+            let metadata = metadata.get(&item.candidate.identity);
+            ContextItem {
+                role: contract_role(item.candidate.role),
+                symbol_id: metadata
+                    .and_then(|value| value.symbol_id)
+                    .or_else(|| item.candidate.identity.parse().ok()),
+                source_ref: metadata.and_then(|value| value.source_ref.clone()),
+                score: item.candidate.relevance,
+                tokens: item.candidate.estimated_tokens,
+                trust: metadata.map_or(TrustClassification::UntrustedRepositoryData, |value| {
+                    value.trust
+                }),
+                snippet: None,
+            }
         })
         .collect();
 
@@ -938,6 +1146,31 @@ fn context_pack_data(
             by_section: BTreeMap::new(),
         },
         explanation: None,
+    }
+}
+
+fn append_provider_omissions(omitted: &mut Vec<OmissionSummary>, corpus: &ContextEvidenceCorpus) {
+    for provider_omission in &corpus.omissions {
+        let label = match provider_omission.reason {
+            EvidenceProviderOmissionReason::NoEvidence => "provider_no_evidence",
+            EvidenceProviderOmissionReason::Truncated => "provider_truncated",
+            EvidenceProviderOmissionReason::Unsupported => "provider_unsupported",
+            EvidenceProviderOmissionReason::Unavailable => "provider_unavailable",
+            EvidenceProviderOmissionReason::Budget => "provider_budget",
+            EvidenceProviderOmissionReason::LowConfidence => "provider_low_confidence",
+        };
+        let Ok(reason) = SafeLabel::parse(label) else {
+            continue;
+        };
+        if let Some(existing) = omitted.iter_mut().find(|value| value.reason == reason) {
+            existing.count = existing.count.saturating_add(provider_omission.count);
+        } else if omitted.len() < MAX_OMISSIONS {
+            omitted.push(OmissionSummary {
+                reason,
+                count: provider_omission.count,
+                continuation: None,
+            });
+        }
     }
 }
 
@@ -1150,8 +1383,10 @@ mod tests {
 
     #[test]
     fn token_truncation_reports_the_token_resource() {
-        let completeness = context_pack_completeness(&ResultCompleteness::complete(), true)
-            .expect("token truncation remains a valid completeness state");
+        let planner = super::planner_completeness(true)
+            .expect("planner truncation remains a valid completeness state");
+        let completeness = context_pack_completeness(&ResultCompleteness::complete(), &planner)
+            .expect("child and planner completeness merge");
         assert!(
             completeness
                 .limiting_resources
