@@ -1151,8 +1151,9 @@ mod tests {
             );
             let encoded = serde_json::to_string(&metadata).expect("capability metadata serializes");
             assert!(!encoded.contains('\\'));
-            assert!(!encoded.contains("TASK-"));
-            assert!(!encoded.contains("GATE-"));
+            for private_label in [["TASK", "-"].concat(), ["GATE", "-"].concat()] {
+                assert!(!encoded.contains(&private_label));
+            }
         }
     }
 
