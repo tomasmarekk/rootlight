@@ -14,6 +14,7 @@ mod model;
 mod parser;
 mod sampler;
 mod semantic_contract;
+mod token_accounting;
 
 pub use bundle::{
     BundleError, BundleLimits, OperationalEvent, OperationalLog, OperationalLogRecord,
@@ -46,6 +47,10 @@ pub use semantic_contract::{
     SEMANTIC_EVIDENCE_MAX_BYTES, SEMANTIC_EVIDENCE_MAX_EXPECTATIONS,
     SEMANTIC_EVIDENCE_SCHEMA_VERSION, SemanticEvidence, SemanticEvidenceError,
     build_semantic_evidence, encode_semantic_evidence, encode_semantic_evidence_envelope,
+};
+pub use token_accounting::{
+    ActualTokenizerIdentity, TOKEN_ACCOUNTING_SCHEMA_VERSION, TokenAccountingError, TokenInputKind,
+    TokenMeasurement, TokenTotals, WorkflowTokenAccounting, sha256_hex,
 };
 
 /// Result-bundle schema version written and verified by this crate.
