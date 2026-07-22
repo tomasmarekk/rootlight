@@ -12,6 +12,9 @@ pub const MAX_CURSOR_BYTES: usize = 4_096;
 /// Cursor validity window in milliseconds.
 const CURSOR_TTL_MS: u64 = 300_000;
 
+/// Maximum accepted clock skew between a cursor's issue time and server time.
+const CLOCK_SKEW_MS: u64 = 30_000;
+
 /// Errors returned during cursor creation or validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CursorError {
@@ -36,6 +39,9 @@ pub enum CursorError {
     /// The cursor integrity check failed.
     #[error("cursor integrity check failed")]
     IntegrityFailed,
+    /// The cursor claims an issue time unreasonably far in the future.
+    #[error("cursor issued in the future")]
+    IssuedInTheFuture,
 }
 
 /// Bound context that a cursor is pinned to.
@@ -122,6 +128,11 @@ impl AuthenticatedCursor {
         {
             return Err(CursorError::QueryMismatch);
         }
+        // Reject cursors issued unreasonably in the future instead of relying
+        // on saturating arithmetic, which would silently accept them.
+        if self.issued_at_ms > now_ms.saturating_add(CLOCK_SKEW_MS) {
+            return Err(CursorError::IssuedInTheFuture);
+        }
         let elapsed = now_ms.saturating_sub(self.issued_at_ms);
         if elapsed > CURSOR_TTL_MS {
             return Err(CursorError::Expired);
@@ -132,7 +143,7 @@ impl AuthenticatedCursor {
             self.issued_at_ms,
             server_key,
         );
-        if expected_tag != self.tag {
+        if !constant_time_tag_eq(&expected_tag, &self.tag) {
             return Err(CursorError::IntegrityFailed);
         }
         Ok(())
@@ -305,6 +316,16 @@ fn leak_tool_name(name: &str) -> Result<&'static str, CursorError> {
         }
     }
     Err(CursorError::Malformed)
+}
+
+/// Compares two integrity tags in constant time so a mismatch does not leak the
+/// first differing byte through a timing side channel.
+fn constant_time_tag_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
+    let mut difference = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        difference |= a ^ b;
+    }
+    difference == 0
 }
 
 /// Computes the BLAKE3 keyed integrity tag for a cursor.
@@ -538,5 +559,35 @@ mod tests {
         let cursor_a = AuthenticatedCursor::create(context.clone(), vec![10], 5_000, &key);
         let cursor_b = AuthenticatedCursor::create(context, vec![10], 5_000, &key);
         assert_eq!(cursor_a.to_wire(), cursor_b.to_wire());
+    }
+
+    #[test]
+    fn cursor_rejects_future_issue_time_beyond_skew() {
+        let key = [42; 32];
+        let context = test_context();
+        let cursor = AuthenticatedCursor::create(context.clone(), vec![], 1_000_000, &key);
+        assert_eq!(
+            cursor.validate(&context, 1_000_000 - 60_000, &key),
+            Err(CursorError::IssuedInTheFuture)
+        );
+    }
+
+    #[test]
+    fn cursor_accepts_issue_time_within_clock_skew() {
+        let key = [42; 32];
+        let context = test_context();
+        let cursor = AuthenticatedCursor::create(context.clone(), vec![], 1_000_000, &key);
+        assert!(cursor.validate(&context, 1_000_000 - 10_000, &key).is_ok());
+    }
+
+    #[test]
+    fn constant_time_tag_comparison_agrees_with_equality() {
+        let a = [7u8; 32];
+        let mut b = [7u8; 32];
+        assert!(super::constant_time_tag_eq(&a, &b));
+        b[31] = 8;
+        assert!(!super::constant_time_tag_eq(&a, &b));
+        b[0] = 9;
+        assert!(!super::constant_time_tag_eq(&a, &b));
     }
 }
