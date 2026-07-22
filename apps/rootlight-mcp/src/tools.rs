@@ -1384,8 +1384,10 @@ pub enum ToolRegistryError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use rootlight_mcp_contract::capability::CAPABILITIES;
     use serde_json::json;
     use tokio::sync::watch;
 
@@ -1582,6 +1584,75 @@ mod tests {
             batch["_meta"][DISCOVERY_METADATA_KEY]["batchSharedBudget"],
             false
         );
+    }
+
+    #[tokio::test]
+    async fn registry_entries_reach_a_handler_or_checked_pre_execution_error() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let discovery = success(
+            router
+                .handle(request("tools/list", json!({})), cancellation())
+                .await,
+        );
+        let listed = discovery["tools"]
+            .as_array()
+            .expect("tools/list returns an array");
+        for intent in [
+            "code.locate",
+            "change.impact",
+            "architecture.overview",
+            "history.compare",
+            "context.pack",
+            "query.batch",
+        ] {
+            let metadata = listed
+                .iter()
+                .find(|tool| tool["name"] == intent)
+                .unwrap_or_else(|| panic!("{intent} is discoverable"))["_meta"]
+                [DISCOVERY_METADATA_KEY]
+                .clone();
+            assert_eq!(metadata["status"], "fallback_limited");
+            assert!(
+                metadata["fallbackSummary"]
+                    .as_str()
+                    .is_some_and(|summary| summary.starts_with("bounded"))
+            );
+            assert!(metadata["limitations"].as_array().is_some());
+        }
+
+        let mut routed = BTreeSet::new();
+        for capability in &CAPABILITIES {
+            let calls_before = router.executor.calls.load(Ordering::Relaxed);
+            let response = router
+                .handle(
+                    request(
+                        "tools/call",
+                        json!({"name": capability.tool.name(), "arguments": {}}),
+                    ),
+                    cancellation(),
+                )
+                .await;
+            let calls_after = router.executor.calls.load(Ordering::Relaxed);
+            if calls_after == calls_before {
+                let HandlerResponse::Success(result) = response else {
+                    panic!(
+                        "{} was neither routed nor rejected by its checked tool contract",
+                        capability.tool.name()
+                    );
+                };
+                assert_eq!(result["isError"], true);
+                let error: ErrorResponse =
+                    serde_json::from_value(result["structuredContent"].clone())
+                        .expect("pre-execution rejection uses the checked error contract");
+                assert_eq!(error.error.code(), ErrorCode::InvalidArgument);
+            }
+            assert!(
+                routed.insert(capability.tool.name()),
+                "registry tool is unique"
+            );
+        }
+        assert_eq!(routed.len(), CAPABILITIES.len());
     }
 
     #[tokio::test]
