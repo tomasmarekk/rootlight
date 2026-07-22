@@ -708,6 +708,11 @@
           "maximum": 10000000,
           "minimum": 0
         },
+        "fingerprint": {
+          "description": "Stable physical-plan fingerprint bound to the plan and pinned generation.",
+          "type": "string",
+          "maxLength": 128
+        },
         "operators": {
           "description": "Ordered operator names in the physical plan.",
           "type": "array",
@@ -717,13 +722,22 @@
             "minLength": 1
           },
           "maxItems": 64
+        },
+        "planner_version": {
+          "description": "Planner version that produced the plan; part of the fingerprint input.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 1000,
+          "minimum": 0
         }
       },
       "additionalProperties": false,
       "required": [
         "estimated_cost",
         "operators",
-        "applied_limits"
+        "applied_limits",
+        "planner_version",
+        "fingerprint"
       ]
     },
     "PublicError": {

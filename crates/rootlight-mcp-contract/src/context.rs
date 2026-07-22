@@ -799,6 +799,34 @@ pub struct PlanExplanation {
     /// Applied limit descriptions.
     #[schemars(length(max = 16), inner(length(min = 1, max = 256)))]
     pub applied_limits: Vec<String>,
+    /// Planner version that produced the plan; part of the fingerprint input.
+    #[schemars(range(max = 1000))]
+    pub planner_version: u32,
+    /// Stable physical-plan fingerprint bound to the plan and pinned generation.
+    #[schemars(length(max = 128))]
+    pub fingerprint: String,
+}
+
+/// Version of the source-free planner that produces explain plans.
+///
+/// Bumped whenever plan construction changes meaningfully so fingerprints taken
+/// under different planner versions never collide.
+pub const PLANNER_VERSION: u32 = 1;
+
+impl PlanExplanation {
+    /// Creates a plan explanation carrying the current planner version and an
+    /// empty fingerprint. The domain layer binds the stable fingerprint to a
+    /// pinned generation before the plan is exposed.
+    #[must_use]
+    pub fn new(estimated_cost: u64, operators: Vec<String>, applied_limits: Vec<String>) -> Self {
+        Self {
+            estimated_cost,
+            operators,
+            applied_limits,
+            planner_version: PLANNER_VERSION,
+            fingerprint: String::new(),
+        }
+    }
 }
 
 /// Completeness classification for an advanced query result.

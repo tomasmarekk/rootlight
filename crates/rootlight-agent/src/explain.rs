@@ -5,7 +5,7 @@
 //! before spending work. Plan construction is deterministic for a normalized
 //! request and never reads repository source.
 
-use rootlight_mcp_contract::context::PlanExplanation;
+use rootlight_mcp_contract::context::{PLANNER_VERSION, PlanExplanation};
 
 /// Estimated cost units per planned match for `code.locate`.
 const LOCATE_COST_PER_RESULT: u64 = 8;
@@ -67,6 +67,8 @@ pub fn code_locate_plan(exact: bool, max_results: u32) -> PlanExplanation {
         estimated_cost: u64::from(max_results).saturating_mul(LOCATE_COST_PER_RESULT),
         operators: vec![operator.to_owned()],
         applied_limits: vec![format!("max_results: {max_results}")],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -82,6 +84,8 @@ pub fn symbol_explain_plan(symbol_count: usize) -> PlanExplanation {
         estimated_cost: cost,
         operators: vec!["symbol_lookup".to_owned()],
         applied_limits: vec![format!("symbols: {symbol_count}")],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -97,6 +101,8 @@ pub fn source_read_plan(reference_count: usize) -> PlanExplanation {
         estimated_cost: cost,
         operators: vec!["source_read".to_owned()],
         applied_limits: vec![format!("references: {reference_count}")],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -117,6 +123,8 @@ pub fn symbol_relationships_plan(seed_count: usize, max_results: Option<u32>) ->
         estimated_cost: cost,
         operators: vec!["relationship_expansion".to_owned()],
         applied_limits,
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -136,6 +144,8 @@ pub fn flow_trace_plan(max_depth: Option<u8>, max_paths: Option<u16>) -> PlanExp
         estimated_cost: cost,
         operators: vec!["path_traversal".to_owned()],
         applied_limits,
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -152,6 +162,8 @@ pub fn change_impact_plan(changed_count: usize) -> PlanExplanation {
         estimated_cost: cost,
         operators: vec!["change_analysis".to_owned()],
         applied_limits: vec![format!("changed_inputs: {changed_count}")],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -166,6 +178,8 @@ pub fn tests_select_plan(max_tests: Option<u16>) -> PlanExplanation {
         estimated_cost: cost,
         operators: vec!["test_selection".to_owned()],
         applied_limits: vec![format!("max_tests: {tests}")],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -180,6 +194,8 @@ pub fn architecture_overview_plan(max_components: Option<u16>) -> PlanExplanatio
         estimated_cost: cost,
         operators: vec!["architecture_mapping".to_owned()],
         applied_limits: vec![format!("max_components: {components}")],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -194,6 +210,8 @@ pub fn architecture_cycles_plan(max_cycles: Option<u16>) -> PlanExplanation {
         estimated_cost: cost,
         operators: vec!["cycle_detection".to_owned()],
         applied_limits: vec![format!("max_cycles: {cycles}")],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -209,6 +227,8 @@ pub fn code_dead_plan(max_candidates: Option<u16>) -> PlanExplanation {
         estimated_cost: cost,
         operators: vec!["reachability_analysis".to_owned()],
         applied_limits: vec![format!("max_candidates: {candidates}")],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -223,6 +243,8 @@ pub fn history_compare_plan(max_results: Option<u16>) -> PlanExplanation {
         estimated_cost: cost,
         operators: vec!["revision_comparison".to_owned()],
         applied_limits: vec![format!("max_results: {results}")],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -241,6 +263,8 @@ pub fn plan_change_plan(max_steps: Option<u8>, target_count: usize) -> PlanExpla
         estimated_cost: cost,
         operators: vec!["change_planning".to_owned()],
         applied_limits: vec![format!("max_steps: {steps}"), format!("targets: {targets}")],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -254,6 +278,8 @@ pub fn repo_status_plan() -> PlanExplanation {
         estimated_cost: STATUS_READ_COST,
         operators: vec!["status_read".to_owned()],
         applied_limits: Vec::new(),
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
 }
 
@@ -274,7 +300,40 @@ pub fn context_pack_plan(seed_count: usize, token_budget: u16) -> PlanExplanatio
             format!("seeds: {seeds}"),
             format!("token_budget: {token_budget}"),
         ],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
     }
+}
+
+/// Binds a stable physical-plan fingerprint to a plan for a pinned generation.
+///
+/// The fingerprint is a deterministic BLAKE3 digest over the planner version,
+/// pinned generation, estimated cost, ordered operators, and applied limits, so
+/// identical normalized requests on the same generation yield the same
+/// fingerprint while a different generation or plan never collides. It is never
+/// random.
+#[must_use]
+pub fn finalize_plan(mut plan: PlanExplanation, generation: &str) -> PlanExplanation {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&plan.planner_version.to_le_bytes());
+    hasher.update(b"\x00");
+    hasher.update(generation.as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(&plan.estimated_cost.to_le_bytes());
+    hasher.update(b"\x00");
+    for operator in &plan.operators {
+        hasher.update(operator.as_bytes());
+        hasher.update(b",");
+    }
+    hasher.update(b"\x00");
+    for limit in &plan.applied_limits {
+        hasher.update(limit.as_bytes());
+        hasher.update(b",");
+    }
+    let hex = hasher.finalize().to_hex();
+    let short: String = hex.chars().take(32).collect();
+    plan.fingerprint = format!("plan1_{short}");
+    plan
 }
 
 #[cfg(test)]
@@ -439,5 +498,25 @@ mod tests {
             plan.applied_limits,
             vec!["seeds: 3".to_owned(), "token_budget: 1000".to_owned()]
         );
+    }
+
+    #[test]
+    fn finalize_plan_fingerprint_is_deterministic() {
+        use super::{code_locate_plan, finalize_plan};
+        let a = finalize_plan(code_locate_plan(false, 20), "gen-1");
+        let b = finalize_plan(code_locate_plan(false, 20), "gen-1");
+        assert_eq!(a.fingerprint, b.fingerprint);
+        assert!(a.fingerprint.starts_with("plan1_"));
+        assert_eq!(a.planner_version, b.planner_version);
+    }
+
+    #[test]
+    fn finalize_plan_fingerprint_binds_generation_and_plan() {
+        use super::{code_locate_plan, finalize_plan};
+        let base = finalize_plan(code_locate_plan(false, 20), "gen-1");
+        let other_generation = finalize_plan(code_locate_plan(false, 20), "gen-2");
+        let other_plan = finalize_plan(code_locate_plan(true, 20), "gen-1");
+        assert_ne!(base.fingerprint, other_generation.fingerprint);
+        assert_ne!(base.fingerprint, other_plan.fingerprint);
     }
 }

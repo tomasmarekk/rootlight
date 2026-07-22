@@ -1942,7 +1942,10 @@ where
         cancellation,
     )
     .await?;
-    let explanation = rootlight_agent::explain::context_pack_plan(seed_count, input.token_budget);
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::context_pack_plan(seed_count, input.token_budget),
+        &status.active_generation.to_string(),
+    );
     let data = ContextPackData {
         pack_id: pack_id(input, status.active_generation),
         items: Vec::new(),
@@ -2475,7 +2478,12 @@ where
         coverage: status_coverage_report(&status.coverage),
         operations: Vec::new(),
         recommended_actions: Vec::new(),
-        explanation: explain_only.then(rootlight_agent::explain::repo_status_plan),
+        explanation: explain_only.then(|| {
+            rootlight_agent::explain::finalize_plan(
+                rootlight_agent::explain::repo_status_plan(),
+                &status.active_generation.to_string(),
+            )
+        }),
     };
     let envelope = ReadEnvelope {
         schema_version: SchemaVersion::V1_0,
@@ -2687,9 +2695,12 @@ where
             return Err(internal(ToolExecutionFailure::InvalidResponse));
         }
     };
-    let explanation = rootlight_agent::explain::code_locate_plan(
-        matches!(request.mode, LocateMode::Exact),
-        request.maximum_results,
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::code_locate_plan(
+            matches!(request.mode, LocateMode::Exact),
+            request.maximum_results,
+        ),
+        &status.active_generation.to_string(),
     );
     let data = CodeLocateData {
         matches: Vec::new(),
@@ -2769,7 +2780,10 @@ where
         cancellation,
     )
     .await?;
-    let explanation = rootlight_agent::explain::symbol_explain_plan(request.symbols.len());
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::symbol_explain_plan(request.symbols.len()),
+        &status.active_generation.to_string(),
+    );
     let data = SymbolExplainData {
         symbols: Vec::new(),
         unresolved_ids: Vec::new(),
@@ -2797,7 +2811,10 @@ where
         cancellation,
     )
     .await?;
-    let explanation = rootlight_agent::explain::source_read_plan(request.references.len());
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::source_read_plan(request.references.len()),
+        &status.active_generation.to_string(),
+    );
     let data = SourceReadData {
         chunks: Vec::new(),
         stale_references: Vec::new(),
@@ -2827,9 +2844,12 @@ where
         cancellation,
     )
     .await?;
-    let explanation = rootlight_agent::explain::symbol_relationships_plan(
-        request.seeds.len(),
-        request.max_results.map(u32::from),
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::symbol_relationships_plan(
+            request.seeds.len(),
+            request.max_results.map(u32::from),
+        ),
+        &status.active_generation.to_string(),
     );
     let data = SymbolRelationshipsData {
         groups: Vec::new(),
@@ -3041,8 +3061,10 @@ where
         cancellation,
     )
     .await?;
-    let explanation =
-        rootlight_agent::explain::flow_trace_plan(request.max_depth, request.max_paths);
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::flow_trace_plan(request.max_depth, request.max_paths),
+        &status.active_generation.to_string(),
+    );
     let data = FlowTraceData {
         paths: Vec::new(),
         frontier: FrontierSummary {
@@ -3231,7 +3253,10 @@ where
         cancellation,
     )
     .await?;
-    let explanation = rootlight_agent::explain::architecture_cycles_plan(request.max_cycles);
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::architecture_cycles_plan(request.max_cycles),
+        &status.active_generation.to_string(),
+    );
     let data = ArchitectureCyclesData {
         components: Vec::new(),
         cycles: Vec::new(),
@@ -3398,7 +3423,10 @@ where
         cancellation,
     )
     .await?;
-    let explanation = rootlight_agent::explain::code_dead_plan(request.max_candidates);
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::code_dead_plan(request.max_candidates),
+        &status.active_generation.to_string(),
+    );
     let data = CodeDeadData {
         candidates: Vec::new(),
         entry_points: EntryPointSummary {
@@ -3568,7 +3596,10 @@ where
         cancellation,
     )
     .await?;
-    let explanation = rootlight_agent::explain::architecture_overview_plan(request.max_components);
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::architecture_overview_plan(request.max_components),
+        &status.active_generation.to_string(),
+    );
     let data = ArchitectureOverviewData {
         components: Vec::new(),
         connections: Vec::new(),
@@ -3741,7 +3772,10 @@ where
         cancellation,
     )
     .await?;
-    let explanation = rootlight_agent::explain::tests_select_plan(request.max_tests);
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::tests_select_plan(request.max_tests),
+        &status.active_generation.to_string(),
+    );
     let data = TestsSelectData {
         tests: Vec::new(),
         coverage_strategy: TestCoverageStrategy {
@@ -3908,7 +3942,10 @@ where
         .changed_symbols
         .len()
         .saturating_add(request.changed_paths.len());
-    let explanation = rootlight_agent::explain::change_impact_plan(changed_count);
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::change_impact_plan(changed_count),
+        &status.active_generation.to_string(),
+    );
     let data = ChangeImpactData {
         resolved_changes: Vec::new(),
         impacted: Vec::new(),
@@ -4120,7 +4157,10 @@ where
         .target_symbols
         .len()
         .saturating_add(request.target_files.len());
-    let explanation = rootlight_agent::explain::plan_change_plan(request.max_steps, target_count);
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::plan_change_plan(request.max_steps, target_count),
+        &status.active_generation.to_string(),
+    );
     let data = PlanChangeData {
         plan: vec![ChangePlanStep {
             step: 1,
@@ -4304,7 +4344,10 @@ where
         cancellation,
     )
     .await?;
-    let explanation = rootlight_agent::explain::history_compare_plan(request.max_results);
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::history_compare_plan(request.max_results),
+        &status.active_generation.to_string(),
+    );
     let data = HistoryCompareData {
         matched_states: MatchedStates {
             base_generation: request.base,
@@ -4604,6 +4647,10 @@ fn map_query_advanced(
         return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
     let rows = response.result.rows;
+    let generation_label = match &request.generation {
+        client::GenerationSelector::Generation(id) => id.to_string(),
+        client::GenerationSelector::Active => "active".to_owned(),
+    };
     let plan = match response.result.plan {
         Some(plan) => {
             if plan.estimated_cost > 10_000_000
@@ -4612,11 +4659,11 @@ fn map_query_advanced(
             {
                 return Err(internal(ToolExecutionFailure::InvalidResponse));
             }
-            RequiredNullable(Some(PlanExplanation {
-                estimated_cost: plan.estimated_cost,
-                operators: plan.operators,
-                applied_limits: plan.applied_limits,
-            }))
+            let explanation = rootlight_agent::explain::finalize_plan(
+                PlanExplanation::new(plan.estimated_cost, plan.operators, plan.applied_limits),
+                &generation_label,
+            );
+            RequiredNullable(Some(explanation))
         }
         None => RequiredNullable(None),
     };

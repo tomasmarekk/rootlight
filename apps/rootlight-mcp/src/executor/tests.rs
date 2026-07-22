@@ -3391,10 +3391,64 @@ async fn code_locate_explain_returns_a_plan_without_retrieval() {
     );
     let explanation = output.data.explanation.expect("explain returns a plan");
     assert_eq!(explanation.operators, vec!["lexical_scan".to_owned()]);
+    assert!(
+        explanation.fingerprint.starts_with("plan1_"),
+        "explain binds a stable plan fingerprint"
+    );
     assert_eq!(
         harness.call_count.load(Ordering::Relaxed),
         1,
         "only the metadata status call runs, no locate retrieval"
+    );
+}
+
+#[tokio::test]
+async fn explain_fingerprint_is_stable_for_identical_requests() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
+        repository_id: repository(),
+        active_generation: generation(),
+        parent_generation: None,
+        structural_freshness: "current".to_owned(),
+        semantic_freshness: "current".to_owned(),
+        state: "ready".to_owned(),
+        coverage: vec![],
+    })));
+    let arguments =
+        json!({"repository": {"repository_id": repository()}, "query": "publish", "explain": true});
+    let first: CodeLocateOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::CodeLocate,
+            arguments.clone(),
+        )
+        .await
+        .expect("explain executes"),
+    );
+    let second: CodeLocateOutput = decode(
+        execute(&harness.executor, VerticalTool::CodeLocate, arguments)
+            .await
+            .expect("explain executes again"),
+    );
+    let ToolResponse::Success(first) = first else {
+        panic!("expected explain success");
+    };
+    let ToolResponse::Success(second) = second else {
+        panic!("expected explain success");
+    };
+    let first_fingerprint = first
+        .data
+        .explanation
+        .expect("explain returns a plan")
+        .fingerprint;
+    let second_fingerprint = second
+        .data
+        .explanation
+        .expect("explain returns a plan")
+        .fingerprint;
+    assert!(first_fingerprint.starts_with("plan1_"));
+    assert_eq!(
+        first_fingerprint, second_fingerprint,
+        "identical normalized requests on a pinned generation yield one fingerprint"
     );
 }
 
