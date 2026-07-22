@@ -36,6 +36,24 @@ const ACCOUNTING_INPUT_SCHEMA: &str = "rootlight.mcp-budget-conformance-input/1"
 const MAX_REPORT_BYTES: usize = 2 * 1024 * 1024;
 const NORMALIZATION: &str = "none_exact_utf8";
 const FRAMING: &str = "canonical_compact_json_without_accounting_measurement";
+const RUNTIME_REPORT_SCHEMA: &str = "rootlight.mcp-budget-runtime/1";
+const CANCELLATION_REPORT_SCHEMA: &str = "rootlight.mcp-cancellation-process/1";
+const RUNTIME_COVERED_TOOLS: [&str; 14] = [
+    "code.locate",
+    "symbol.explain",
+    "symbol.relationships",
+    "flow.trace",
+    "change.impact",
+    "tests.select",
+    "architecture.overview",
+    "architecture.cycles",
+    "code.dead",
+    "history.compare",
+    "plan.change",
+    "context.pack",
+    "source.read",
+    "query.advanced",
+];
 
 const SOURCE_PROOFS: [SourceProofDeclaration; 4] = [
     SourceProofDeclaration {
@@ -50,6 +68,7 @@ const SOURCE_PROOFS: [SourceProofDeclaration; 4] = [
         symbols: &[
             "execution_enforces_cancellation_and_exact_output_bounds",
             "plans_and_execution_enforce_all_query_resource_families",
+            "symbol_relationships_enforces_plan_and_serialization_limits",
         ],
     },
     SourceProofDeclaration {
@@ -91,6 +110,9 @@ const LEDGER_RESOURCES: [BudgetResource; 11] = [
 pub(crate) struct Options {
     fixture_root: PathBuf,
     refresh: bool,
+    runtime_report: Option<PathBuf>,
+    cancellation_report: Option<PathBuf>,
+    output: Option<PathBuf>,
 }
 
 impl Options {
@@ -100,6 +122,9 @@ impl Options {
     ) -> Result<Self, BudgetConformanceError> {
         let mut fixture_root = None;
         let mut refresh = false;
+        let mut runtime_report = None;
+        let mut cancellation_report = None;
+        let mut output = None;
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "--fixture-root" if fixture_root.is_none() => {
@@ -109,22 +134,74 @@ impl Options {
                         )?));
                 }
                 "--refresh" if !refresh => refresh = true,
+                "--runtime-report" if runtime_report.is_none() => {
+                    runtime_report =
+                        Some(PathBuf::from(arguments.next().ok_or(
+                            BudgetConformanceError::MissingArgument("--runtime-report"),
+                        )?));
+                }
+                "--cancellation-report" if cancellation_report.is_none() => {
+                    cancellation_report = Some(PathBuf::from(arguments.next().ok_or(
+                        BudgetConformanceError::MissingArgument("--cancellation-report"),
+                    )?));
+                }
+                "--output" if output.is_none() => {
+                    output =
+                        Some(PathBuf::from(arguments.next().ok_or(
+                            BudgetConformanceError::MissingArgument("--output"),
+                        )?));
+                }
                 _ => return Err(BudgetConformanceError::UnexpectedArgument(argument)),
             }
         }
-        Ok(Self {
+        let options = Self {
             fixture_root: fixture_root.unwrap_or_else(default_fixture_root),
             refresh,
-        })
+            runtime_report,
+            cancellation_report,
+            output,
+        };
+        let runtime_option_count = [
+            options.runtime_report.is_some(),
+            options.cancellation_report.is_some(),
+            options.output.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+        if runtime_option_count != 0 && runtime_option_count != 3 {
+            return Err(BudgetConformanceError::RuntimeArgumentsRequiredTogether);
+        }
+        if options.refresh && runtime_option_count != 0 {
+            return Err(BudgetConformanceError::RefreshWithRuntimeEvidence);
+        }
+        Ok(options)
     }
 }
 
 /// Checks the retained report or refreshes it from canonical offline inputs.
 pub(crate) fn check(options: &Options) -> Result<(), BudgetConformanceError> {
     let report_path = options.fixture_root.join(REPORT_FILE);
+    if let (Some(runtime_path), Some(cancellation_path), Some(output_path)) = (
+        options.runtime_report.as_deref(),
+        options.cancellation_report.as_deref(),
+        options.output.as_deref(),
+    ) {
+        let source_revision = current_source_revision()?;
+        let runtime_reports =
+            validate_runtime_reports(runtime_path, cancellation_path, &source_revision)?;
+        let runtime_cases = runtime_reports.runtime_cases;
+        let report = build_report(&source_revision, Some(runtime_reports))?;
+        write_report(output_path, &report)?;
+        println!(
+            "budget runtime conformance verified for {} tools at {}",
+            runtime_cases, source_revision
+        );
+        return Ok(());
+    }
     if options.refresh {
         let source_revision = current_source_revision()?;
-        let report = build_report(&source_revision)?;
+        let report = build_report(&source_revision, None)?;
         fs::create_dir_all(&options.fixture_root).map_err(|source| BudgetConformanceError::Io {
             path: options.fixture_root.clone(),
             source,
@@ -146,7 +223,7 @@ pub(crate) fn check(options: &Options) -> Result<(), BudgetConformanceError> {
     let encoded = read_bounded(&report_path)?;
     let retained: BudgetConformanceReport = serde_json::from_slice(&encoded)?;
     validate_revision(&retained.source_revision)?;
-    let observed = build_report(&retained.source_revision)?;
+    let observed = build_report(&retained.source_revision, None)?;
     if retained != observed {
         return Err(BudgetConformanceError::ReportDrift {
             expected: sha256_hex(&serde_json::to_vec(&retained)?),
@@ -165,9 +242,13 @@ fn default_fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/mcp/budget-conformance")
 }
 
-fn build_report(source_revision: &str) -> Result<BudgetConformanceReport, BudgetConformanceError> {
+fn build_report(
+    source_revision: &str,
+    runtime_reports: Option<RuntimeReportEvidence>,
+) -> Result<BudgetConformanceReport, BudgetConformanceError> {
     validate_revision(source_revision)?;
-    let tools = capability_inventory()?;
+    let has_runtime_evidence = runtime_reports.is_some();
+    let tools = capability_inventory(has_runtime_evidence)?;
     let ledger_boundaries = ledger_boundary_cases()?;
     let effective_limits = effective_limit_evidence()?;
     let completeness = completeness_evidence()?;
@@ -182,6 +263,7 @@ fn build_report(source_revision: &str) -> Result<BudgetConformanceReport, Budget
         completeness: &completeness,
         source_proofs: &source_proofs,
         runtime_evidence: &runtime_evidence,
+        runtime_reports: runtime_reports.as_ref(),
     };
     let accounting_input = serde_json::to_vec(&input)?;
     let tokenizer = O200kTokenizer::new()?;
@@ -208,19 +290,25 @@ fn build_report(source_revision: &str) -> Result<BudgetConformanceReport, Budget
         completeness,
         source_proofs,
         runtime_evidence,
+        runtime_reports,
         token_accounting,
         residual_approximations: vec![
             "runtime hard token admission uses a deterministic provider-neutral estimate"
                 .to_owned(),
             "actual o200k tokens are offline evidence and are not a universal runtime ceiling"
                 .to_owned(),
-            "cancellation proofs assert prompt stop and no publication but do not claim a retained latency sample"
-                .to_owned(),
+            if has_runtime_evidence {
+                "cancellation latency is sampled for representative active daemon analyses, not every budgeted tool".to_owned()
+            } else {
+                "source-bound cancellation proofs do not claim a retained latency sample".to_owned()
+            },
         ],
     })
 }
 
-fn capability_inventory() -> Result<Vec<ToolBudgetInventory>, BudgetConformanceError> {
+fn capability_inventory(
+    has_runtime_evidence: bool,
+) -> Result<Vec<ToolBudgetInventory>, BudgetConformanceError> {
     if CAPABILITIES.len() != McpTool::ALL.len() {
         return Err(BudgetConformanceError::CapabilityCount {
             expected: McpTool::ALL.len(),
@@ -243,8 +331,12 @@ fn capability_inventory() -> Result<Vec<ToolBudgetInventory>, BudgetConformanceE
                     .iter()
                     .map(|dimension| (*dimension).to_owned())
                     .collect(),
-                runtime_trigger_coverage: runtime_trigger_coverage(tool, capability.budget)
-                    .to_owned(),
+                runtime_trigger_coverage: runtime_trigger_coverage(
+                    tool,
+                    capability.budget,
+                    has_runtime_evidence,
+                )
+                .to_owned(),
                 omitted_client_budget_disposition: omitted_budget_disposition(capability.budget)
                     .to_owned(),
             })
@@ -301,11 +393,20 @@ fn declared_tool_dimensions(tool: McpTool, semantics: BudgetSemantics) -> &'stat
     }
 }
 
-const fn runtime_trigger_coverage(tool: McpTool, semantics: BudgetSemantics) -> &'static str {
+fn runtime_trigger_coverage(
+    tool: McpTool,
+    semantics: BudgetSemantics,
+    has_runtime_evidence: bool,
+) -> &'static str {
     match (tool, semantics) {
         (McpTool::QueryBatch, BudgetSemantics::PerRequest) => "covered_source_bound",
         (_, BudgetSemantics::Unsupported) => "unsupported",
         (_, BudgetSemantics::None) => "not_applicable",
+        (_, BudgetSemantics::PerRequest | BudgetSemantics::TokenBudget)
+            if has_runtime_evidence && RUNTIME_COVERED_TOOLS.contains(&tool.name()) =>
+        {
+            "covered_real_process"
+        }
         (_, BudgetSemantics::PerRequest | BudgetSemantics::TokenBudget) => "not_measured",
     }
 }
@@ -593,6 +694,141 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, BudgetConformanceError> {
     Ok(bytes)
 }
 
+fn write_report(
+    path: &Path,
+    report: &BudgetConformanceReport,
+) -> Result<(), BudgetConformanceError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|source| BudgetConformanceError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut encoded = serde_json::to_vec_pretty(report)?;
+    encoded.push(b'\n');
+    if encoded.len() > MAX_REPORT_BYTES {
+        return Err(BudgetConformanceError::ReportTooLarge {
+            path: path.to_path_buf(),
+            maximum: MAX_REPORT_BYTES,
+        });
+    }
+    fs::write(path, encoded).map_err(|source| BudgetConformanceError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn validate_runtime_reports(
+    runtime_path: &Path,
+    cancellation_path: &Path,
+    source_revision: &str,
+) -> Result<RuntimeReportEvidence, BudgetConformanceError> {
+    let runtime_bytes = read_bounded(runtime_path)?;
+    let runtime: RuntimeBudgetReport = serde_json::from_slice(&runtime_bytes)?;
+    if runtime.schema != RUNTIME_REPORT_SCHEMA || runtime.source_revision != source_revision {
+        return Err(BudgetConformanceError::RuntimeReport(
+            "runtime schema or exact source revision differs",
+        ));
+    }
+    if runtime.fixture.name != "budget-runtime-repository-v1"
+        || !valid_digest(&runtime.fixture.sha256)
+        || runtime.fixture.regular_files == 0
+        || runtime.process_boundary.daemon != "rootlight-daemon supervised stdio"
+        || runtime.process_boundary.mcp != "rootlight-mcp JSON-RPC stdio"
+        || runtime.process_boundary.indexed_generations != 2
+        || runtime.tokenizer.name != "o200k_base"
+        || runtime.tokenizer.implementation != "tiktoken-rs"
+        || runtime.tokenizer.implementation_version != "0.12.0"
+        || runtime.cases.len() != RUNTIME_COVERED_TOOLS.len()
+    {
+        return Err(BudgetConformanceError::RuntimeReport(
+            "runtime metadata is incomplete or unexpected",
+        ));
+    }
+    for (index, observation) in runtime.cases.iter().enumerate() {
+        let expected_tool = RUNTIME_COVERED_TOOLS[index];
+        let (expected_trigger, expected_code) = if expected_tool == "context.pack" {
+            ("token_budget", "BUDGET_EXCEEDED")
+        } else if expected_tool == "query.advanced" {
+            ("cost_limit", "COST_LIMIT")
+        } else {
+            ("budget.max_tokens", "BUDGET_EXCEEDED")
+        };
+        if observation.tool != expected_tool
+            || observation.trigger != expected_trigger
+            || observation.limit == 0
+            || observation.limited.error_code != expected_code
+            || !valid_measurement(&observation.baseline)
+            || !valid_measurement(&observation.limited.measurement())
+        {
+            return Err(BudgetConformanceError::RuntimeReport(
+                "runtime tool observation failed conformance",
+            ));
+        }
+    }
+
+    let cancellation_bytes = read_bounded(cancellation_path)?;
+    let cancellation: CancellationProcessReport = serde_json::from_slice(&cancellation_bytes)?;
+    if cancellation.schema != CANCELLATION_REPORT_SCHEMA
+        || cancellation.source_revision != source_revision
+        || cancellation.process_boundary.daemon != "rootlight-daemon supervised stdio"
+        || cancellation.process_boundary.mcp != "rootlight-mcp JSON-RPC stdio"
+        || cancellation.cases.len() != 2
+    {
+        return Err(BudgetConformanceError::RuntimeReport(
+            "cancellation metadata is incomplete or unexpected",
+        ));
+    }
+    for (index, observation) in cancellation.cases.iter().enumerate() {
+        let expected_tool = ["architecture.cycles", "query.advanced"][index];
+        if observation.tool != expected_tool
+            || observation.cancellation_reason != "client_request"
+            || !observation.hook_entry_observed
+            || !observation.cancellation_observed
+            || observation.cancellation_latency_us > observation.cancellation_bound_us
+            || observation.follow_up_latency_us > observation.follow_up_bound_us
+            || observation.late_response_window_ms < 250
+            || !observation.no_json_rpc_response_published
+            || !observation.lane_reusable
+            || observation.work_after_cancel != "none_observed"
+        {
+            return Err(BudgetConformanceError::RuntimeReport(
+                "cancellation observation failed conformance",
+            ));
+        }
+    }
+
+    Ok(RuntimeReportEvidence {
+        runtime_schema: runtime.schema,
+        runtime_sha256: sha256_hex(&runtime_bytes),
+        runtime_cases: runtime.cases.len(),
+        cancellation_schema: cancellation.schema,
+        cancellation_sha256: sha256_hex(&cancellation_bytes),
+        cancellation_cases: cancellation.cases.len(),
+        exact_source_revision: true,
+    })
+}
+
+fn valid_measurement(measurement: &RuntimeMeasurement) -> bool {
+    let Ok(bytes) = usize::try_from(measurement.serialized_json_bytes) else {
+        return false;
+    };
+    measurement.serialized_json_bytes > 0
+        && measurement.public_estimated_tokens == estimate_tokens(bytes)
+        && measurement.actual_o200k_tokens > 0
+        && valid_digest(&measurement.structured_sha256)
+}
+
+fn valid_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 const fn charge_for(resource: BudgetResource, value: u64) -> BudgetCharge {
     let mut charge = BudgetCharge {
         rows: 0,
@@ -729,6 +965,8 @@ struct BudgetConformanceReport {
     completeness: Vec<CompletenessEvidence>,
     source_proofs: Vec<SourceProof>,
     runtime_evidence: Vec<RuntimeEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_reports: Option<RuntimeReportEvidence>,
     token_accounting: TokenAccountingEvidence,
     residual_approximations: Vec<String>,
 }
@@ -743,6 +981,8 @@ struct AccountingInput<'a> {
     completeness: &'a [CompletenessEvidence],
     source_proofs: &'a [SourceProof],
     runtime_evidence: &'a [RuntimeEvidence],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_reports: Option<&'a RuntimeReportEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -811,6 +1051,126 @@ struct RuntimeEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RuntimeReportEvidence {
+    runtime_schema: String,
+    runtime_sha256: String,
+    runtime_cases: usize,
+    cancellation_schema: String,
+    cancellation_sha256: String,
+    cancellation_cases: usize,
+    exact_source_revision: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeBudgetReport {
+    schema: String,
+    source_revision: String,
+    fixture: RuntimeFixture,
+    process_boundary: RuntimeProcessBoundary,
+    tokenizer: RuntimeTokenizer,
+    cases: Vec<RuntimeToolObservation>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeFixture {
+    name: String,
+    sha256: String,
+    regular_files: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeProcessBoundary {
+    daemon: String,
+    mcp: String,
+    indexed_generations: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeTokenizer {
+    name: String,
+    implementation: String,
+    implementation_version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeToolObservation {
+    tool: String,
+    trigger: String,
+    limit: u64,
+    baseline: RuntimeMeasurement,
+    limited: RuntimeLimitMeasurement,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeMeasurement {
+    serialized_json_bytes: u64,
+    public_estimated_tokens: u64,
+    actual_o200k_tokens: u64,
+    structured_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeLimitMeasurement {
+    error_code: String,
+    serialized_json_bytes: u64,
+    public_estimated_tokens: u64,
+    actual_o200k_tokens: u64,
+    structured_sha256: String,
+}
+
+impl RuntimeLimitMeasurement {
+    fn measurement(&self) -> RuntimeMeasurement {
+        RuntimeMeasurement {
+            serialized_json_bytes: self.serialized_json_bytes,
+            public_estimated_tokens: self.public_estimated_tokens,
+            actual_o200k_tokens: self.actual_o200k_tokens,
+            structured_sha256: self.structured_sha256.clone(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancellationProcessReport {
+    schema: String,
+    source_revision: String,
+    process_boundary: CancellationProcessBoundary,
+    cases: Vec<CancellationObservation>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancellationProcessBoundary {
+    daemon: String,
+    mcp: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancellationObservation {
+    tool: String,
+    cancellation_reason: String,
+    hook_entry_observed: bool,
+    cancellation_observed: bool,
+    cancellation_latency_us: u64,
+    cancellation_bound_us: u64,
+    follow_up_latency_us: u64,
+    follow_up_bound_us: u64,
+    late_response_window_ms: u64,
+    no_json_rpc_response_published: bool,
+    lane_reusable: bool,
+    work_after_cancel: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TokenAccountingEvidence {
     tokenizer: ActualTokenizerIdentity,
     input_schema: String,
@@ -837,6 +1197,15 @@ pub(crate) enum BudgetConformanceError {
     /// An unknown or duplicate option was supplied.
     #[error("unexpected budget-conformance argument: {0}")]
     UnexpectedArgument(String),
+    /// Runtime reports and their merged output must be supplied as one unit.
+    #[error("--runtime-report, --cancellation-report, and --output are required together")]
+    RuntimeArgumentsRequiredTogether,
+    /// Offline fixture refresh cannot consume runtime evidence.
+    #[error("--refresh cannot be combined with runtime evidence")]
+    RefreshWithRuntimeEvidence,
+    /// A real-process report did not satisfy its strict evidence contract.
+    #[error("runtime budget evidence is invalid: {0}")]
+    RuntimeReport(&'static str),
     /// The canonical capability registry has an unexpected length.
     #[error("capability count differs: expected {expected}, observed {observed}")]
     CapabilityCount {
@@ -937,6 +1306,7 @@ mod tests {
         let defaults = Options::parse(&mut std::iter::empty())
             .expect("default budget-conformance options parse");
         assert!(!defaults.refresh);
+        assert!(defaults.runtime_report.is_none());
 
         let refreshed = Options::parse(
             &mut ["--fixture-root", "target/budget-fixture", "--refresh"]
@@ -953,6 +1323,32 @@ mod tests {
             Options::parse(&mut ["--refresh", "--refresh"].into_iter().map(str::to_owned)),
             Err(BudgetConformanceError::UnexpectedArgument(_))
         ));
+
+        let runtime = Options::parse(
+            &mut [
+                "--runtime-report",
+                "target/runtime.json",
+                "--cancellation-report",
+                "target/cancellation.json",
+                "--output",
+                "target/conformance.json",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("complete runtime evidence options parse");
+        assert_eq!(
+            runtime.runtime_report,
+            Some(std::path::PathBuf::from("target/runtime.json"))
+        );
+        assert!(matches!(
+            Options::parse(
+                &mut ["--runtime-report", "target/runtime.json"]
+                    .into_iter()
+                    .map(str::to_owned)
+            ),
+            Err(BudgetConformanceError::RuntimeArgumentsRequiredTogether)
+        ));
     }
 
     #[test]
@@ -961,6 +1357,9 @@ mod tests {
         let refresh = Options {
             fixture_root: directory.path().to_path_buf(),
             refresh: true,
+            runtime_report: None,
+            cancellation_report: None,
+            output: None,
         };
         check(&refresh).expect("budget-conformance report refreshes");
         assert!(directory.path().join(REPORT_FILE).is_file());
@@ -968,6 +1367,9 @@ mod tests {
         let verify = Options {
             fixture_root: directory.path().to_path_buf(),
             refresh: false,
+            runtime_report: None,
+            cancellation_report: None,
+            output: None,
         };
         check(&verify).expect("fresh report passes the default gate");
     }
@@ -978,6 +1380,9 @@ mod tests {
         let refresh = Options {
             fixture_root: directory.path().to_path_buf(),
             refresh: true,
+            runtime_report: None,
+            cancellation_report: None,
+            output: None,
         };
         check(&refresh).expect("budget-conformance report refreshes");
         let path = directory.path().join(REPORT_FILE);
@@ -994,6 +1399,9 @@ mod tests {
         let verify = Options {
             fixture_root: directory.path().to_path_buf(),
             refresh: false,
+            runtime_report: None,
+            cancellation_report: None,
+            output: None,
         };
         assert!(matches!(
             check(&verify),

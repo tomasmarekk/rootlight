@@ -1,6 +1,6 @@
 {
   "schema": "rootlight.mcp-budget-conformance/1",
-  "source_revision": "bc14db05b0a0ebcedd7500a72236318d362e6d01",
+  "source_revision": "a73128e1f9ec87721f478471c308eac2fa43eaca",
   "tools": [
     {
       "tool": "repo.index",
@@ -538,15 +538,16 @@
     },
     {
       "file": "crates/rootlight-query/tests/query_slice.rs",
-      "sha256": "a4d26a90a527202ef24278517449b5931f7421e8001351493dfab48c84fa852b",
+      "sha256": "7a32f0746f95896e7f7f48ac0d317a1be497a88cab02e6267f5229214ccaea31",
       "symbols": [
         "execution_enforces_cancellation_and_exact_output_bounds",
-        "plans_and_execution_enforce_all_query_resource_families"
+        "plans_and_execution_enforce_all_query_resource_families",
+        "symbol_relationships_enforces_plan_and_serialization_limits"
       ]
     },
     {
       "file": "apps/rootlight-mcp/src/executor/tests.rs",
-      "sha256": "4c45400b1c186ee5bf7dcbc2e4f1479914a40cfa1fbb649d99a894f717551b7c",
+      "sha256": "e6949092a237ab20d8df6a4f8525f244c697c372330b4b7058b9084bfbe72e37",
       "symbols": [
         "analytical_budget_lowers_every_public_resource_dimension",
         "omitted_analytical_budget_transports_the_complete_server_ceiling",
@@ -558,7 +559,7 @@
     },
     {
       "file": "apps/rootlight-daemon/src/first_slice.rs",
-      "sha256": "d4480683606ca55117ea59f3b6a93767b7b138a3009711851c0df904fcbadffe",
+      "sha256": "07cee08413db1f83bfc244a8177e83a3bf769156444eaa869dfaef0a8f0819b5",
       "symbols": [
         "peer_cancellation_leaves_work_lane_reusable_before_publication",
         "commit_boundary_failure_reports_failed_and_publishes_nothing"
@@ -592,16 +593,16 @@
       "asset_sha256": "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
     },
     "input_schema": "rootlight.mcp-budget-conformance-input/1",
-    "input_sha256": "f6ac43757214df590a2cc7f3448f3fbc4cdd0a8001ffebb013662dad69e1843e",
-    "serialized_bytes": 13081,
-    "deterministic_estimated_tokens": 3271,
-    "actual_tokens": 2977,
+    "input_sha256": "53b1d1b5038bb0bfe57e50506a0311fcb778912123dacb991ae88292aa00c208",
+    "serialized_bytes": 13143,
+    "deterministic_estimated_tokens": 3286,
+    "actual_tokens": 2990,
     "normalization": "none_exact_utf8",
     "framing": "canonical_compact_json_without_accounting_measurement"
   },
   "residual_approximations": [
     "runtime hard token admission uses a deterministic provider-neutral estimate",
     "actual o200k tokens are offline evidence and are not a universal runtime ceiling",
-    "cancellation proofs assert prompt stop and no publication but do not claim a retained latency sample"
+    "source-bound cancellation proofs do not claim a retained latency sample"
   ]
 }

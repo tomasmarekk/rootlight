@@ -28,7 +28,9 @@ unicode-normalization.workspace = true
 proptest.workspace = true
 rootlight-ipc = { path = "../../crates/rootlight-ipc" }
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
+tiktoken-rs.workspace = true
 
 [lints]
 workspace = true
