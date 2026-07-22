@@ -7,6 +7,7 @@
 //! an honest inventory, not a substitute for process-level acceptance tests.
 
 use crate::ErrorCode;
+use crate::batch::{BATCH_TOOL_REGISTRY, batch_descriptor_for_tool};
 use crate::catalog::{ExposureProfile, McpTool};
 use crate::vertical::ResponseProfile;
 use serde::Serialize;
@@ -1060,13 +1061,6 @@ const QUERY_BATCH_RULES: &[CapabilityRule] = &[
         "active",
         "resolves and pins the active generation once for all nested operations",
     ),
-    CapabilityRule {
-        path: "operations[].tool",
-        value: Some("plan.change"),
-        status: CapabilityStatus::UnsupportedStableError,
-        error_code: Some(ErrorCode::OperatorForbidden),
-        summary: "change planning is not eligible for public batch execution",
-    },
     blocked(
         "budget",
         "measured child usage is bounded but orchestration and response serialization are not fully charged",
@@ -1092,31 +1086,25 @@ const QUERY_BATCH_RULES: &[CapabilityRule] = &[
 ];
 
 /// The closed set of tools permitted inside a public `query.batch`.
-pub const BATCH_ELIGIBLE: [McpTool; 11] = [
-    McpTool::CodeLocate,
-    McpTool::SymbolExplain,
-    McpTool::SymbolRelationships,
-    McpTool::FlowTrace,
-    McpTool::ChangeImpact,
-    McpTool::TestsSelect,
-    McpTool::ArchitectureOverview,
-    McpTool::ArchitectureCycles,
-    McpTool::CodeDead,
-    McpTool::ContextPack,
-    McpTool::SourceRead,
-];
+pub const BATCH_ELIGIBLE: [McpTool; 12] = build_batch_eligible();
+
+const fn build_batch_eligible() -> [McpTool; 12] {
+    let mut tools = [McpTool::CodeLocate; 12];
+    let mut index = 0;
+    while index < BATCH_TOOL_REGISTRY.len() {
+        tools[index] = BATCH_TOOL_REGISTRY[index].tool;
+        index += 1;
+    }
+    tools
+}
 
 /// Reports whether a tool is permitted inside a public batch.
 #[must_use]
 pub const fn is_batch_eligible(tool: McpTool) -> bool {
-    let mut index = 0;
-    while index < BATCH_ELIGIBLE.len() {
-        if tool_as_u8(BATCH_ELIGIBLE[index]) == tool_as_u8(tool) {
-            return true;
-        }
-        index += 1;
+    match batch_descriptor_for_tool(tool) {
+        Some(descriptor) => descriptor.eligible,
+        None => false,
     }
-    false
 }
 
 /// The canonical capability registry, one entry per tool in catalog order.
@@ -1784,7 +1772,8 @@ mod tests {
                 entry.tool.name()
             );
         }
-        assert_eq!(BATCH_ELIGIBLE.len(), 11);
+        assert_eq!(BATCH_ELIGIBLE.len(), 12);
+        assert!(is_batch_eligible(McpTool::PlanChange));
         assert!(!is_batch_eligible(McpTool::QueryBatch));
     }
 
@@ -1870,14 +1859,11 @@ mod tests {
             batch.disposition("generation", Some("active")).status,
             CapabilityStatus::Implemented
         );
-        let forbidden_plan = batch.disposition("operations[].tool", Some("plan.change"));
         assert_eq!(
-            forbidden_plan.status,
-            CapabilityStatus::UnsupportedStableError
-        );
-        assert_eq!(
-            forbidden_plan.error_code,
-            Some(ErrorCode::OperatorForbidden)
+            batch
+                .disposition("operations[].tool", Some("plan.change"))
+                .status,
+            CapabilityStatus::FallbackLimited
         );
 
         let cycles = CAPABILITIES[McpTool::ArchitectureCycles as usize];

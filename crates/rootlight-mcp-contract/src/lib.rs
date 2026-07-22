@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod accounting;
+pub mod batch;
 pub mod capability;
 pub mod catalog;
 pub mod change;

@@ -335,7 +335,10 @@ pub enum FailurePolicy {
 /// Serialized with dotted public tool names. Mutation tools, polling, nested
 /// batches, `history.compare`, `query.advanced`, cross-generation operations,
 /// and unbounded fanout are forbidden.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[repr(u8)]
 pub enum BatchTool {
     /// Bounded structural or lexical code search.
     #[serde(rename = "code.locate")]
@@ -364,7 +367,7 @@ pub enum BatchTool {
     /// Dead-code detection.
     #[serde(rename = "code.dead")]
     CodeDead,
-    /// Reserved change-planning identifier; not eligible for public batch execution.
+    /// Bounded change planning.
     #[serde(rename = "plan.change")]
     PlanChange,
     /// Context pack assembly.
@@ -373,6 +376,43 @@ pub enum BatchTool {
     /// Generation-pinned source range reads.
     #[serde(rename = "source.read")]
     SourceRead,
+}
+
+impl BatchTool {
+    /// Complete public batch-tool catalog in stable wire-schema order.
+    pub const ALL: [Self; 12] = [
+        Self::CodeLocate,
+        Self::SymbolExplain,
+        Self::SymbolRelationships,
+        Self::FlowTrace,
+        Self::ChangeImpact,
+        Self::TestsSelect,
+        Self::ArchitectureOverview,
+        Self::ArchitectureCycles,
+        Self::CodeDead,
+        Self::PlanChange,
+        Self::ContextPack,
+        Self::SourceRead,
+    ];
+
+    /// Stable dotted tool name used by the public batch wire contract.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::CodeLocate => "code.locate",
+            Self::SymbolExplain => "symbol.explain",
+            Self::SymbolRelationships => "symbol.relationships",
+            Self::FlowTrace => "flow.trace",
+            Self::ChangeImpact => "change.impact",
+            Self::TestsSelect => "tests.select",
+            Self::ArchitectureOverview => "architecture.overview",
+            Self::ArchitectureCycles => "architecture.cycles",
+            Self::CodeDead => "code.dead",
+            Self::PlanChange => "plan.change",
+            Self::ContextPack => "context.pack",
+            Self::SourceRead => "source.read",
+        }
+    }
 }
 
 /// A restricted typed binding that copies one declared output field from a
