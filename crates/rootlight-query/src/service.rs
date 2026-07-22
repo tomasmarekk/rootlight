@@ -2053,7 +2053,7 @@ struct AdvancedRowSet {
 
 /// Executes a bounded advanced query against the pinned generation document.
 ///
-/// The supported operator subset is materialized into typed rows; unsupported
+/// Supported operators are materialized into typed rows; unsupported traversal
 /// patterns yield honest non-empty columns with empty rows. The plan
 /// explanation is always derived so an `explain` request can return it without
 /// materializing rows.
@@ -2173,8 +2173,8 @@ fn build_advanced_query(
 
 /// Whether an advanced AST can be served by the supported operator subset.
 ///
-/// Join, aggregate, and traversal operators are not served in this slice and
-/// yield an honest unsupported result rather than fabricated rows.
+/// Traversal remains unavailable until its relation projection can be derived
+/// from the pinned graph without weakening its declared edge and depth bounds.
 fn advanced_ast_supported(node: &AdvancedAstNode) -> bool {
     match node {
         AdvancedAstNode::Scan { .. } => true,
@@ -2182,9 +2182,11 @@ fn advanced_ast_supported(node: &AdvancedAstNode) -> bool {
         | AdvancedAstNode::Project { input, .. }
         | AdvancedAstNode::Sort { input, .. }
         | AdvancedAstNode::Limit { input, .. } => advanced_ast_supported(input),
-        AdvancedAstNode::Join { .. }
-        | AdvancedAstNode::Aggregate { .. }
-        | AdvancedAstNode::Traverse { .. } => false,
+        AdvancedAstNode::Join { left, right, .. } => {
+            advanced_ast_supported(left) && advanced_ast_supported(right)
+        }
+        AdvancedAstNode::Aggregate { input, .. } => advanced_ast_supported(input),
+        AdvancedAstNode::Traverse { .. } => false,
     }
 }
 
@@ -2202,21 +2204,26 @@ fn advanced_derive_columns(node: &AdvancedAstNode) -> Vec<AdvancedColumnSchema> 
             let inner = advanced_derive_columns(input);
             advanced_project_schema(&inner, columns)
         }
-        AdvancedAstNode::Join { left, .. } => advanced_derive_columns(left),
+        AdvancedAstNode::Join { left, right, .. } => {
+            let left = advanced_derive_columns(left);
+            let right = advanced_derive_columns(right);
+            advanced_join_schema(&left, &right)
+        }
         AdvancedAstNode::Aggregate {
+            input,
             group_by,
             aggregations,
-            ..
         } => {
+            let input = advanced_derive_columns(input);
             let mut columns = Vec::new();
             for name in group_by {
                 columns.push(AdvancedColumnSchema {
                     name: name.clone(),
-                    column_type: AdvancedColumnType::Text,
+                    column_type: advanced_column_type(&input, name),
                 });
             }
             for aggregation in aggregations {
-                columns.push(advanced_aggregate_column(aggregation));
+                columns.push(advanced_aggregate_column(aggregation, &input));
             }
             if columns.is_empty() {
                 columns.push(advanced_default_id_column());
@@ -2271,7 +2278,10 @@ fn advanced_default_id_column() -> AdvancedColumnSchema {
 }
 
 /// Output column for one aggregate function.
-fn advanced_aggregate_column(aggregation: &AdvancedAggregateFunction) -> AdvancedColumnSchema {
+fn advanced_aggregate_column(
+    aggregation: &AdvancedAggregateFunction,
+    input: &[AdvancedColumnSchema],
+) -> AdvancedColumnSchema {
     match aggregation {
         AdvancedAggregateFunction::Count => AdvancedColumnSchema {
             name: "count".to_owned(),
@@ -2283,13 +2293,33 @@ fn advanced_aggregate_column(aggregation: &AdvancedAggregateFunction) -> Advance
         },
         AdvancedAggregateFunction::Min { field } => AdvancedColumnSchema {
             name: format!("min_{field}"),
-            column_type: AdvancedColumnType::Text,
+            column_type: advanced_column_type(input, field),
         },
         AdvancedAggregateFunction::Max { field } => AdvancedColumnSchema {
             name: format!("max_{field}"),
-            column_type: AdvancedColumnType::Text,
+            column_type: advanced_column_type(input, field),
         },
     }
+}
+
+fn advanced_column_type(columns: &[AdvancedColumnSchema], name: &str) -> AdvancedColumnType {
+    columns
+        .iter()
+        .find(|column| column.name == name)
+        .map_or(AdvancedColumnType::Text, |column| column.column_type)
+}
+
+fn advanced_join_schema(
+    left: &[AdvancedColumnSchema],
+    right: &[AdvancedColumnSchema],
+) -> Vec<AdvancedColumnSchema> {
+    let mut columns = left.to_vec();
+    for column in right {
+        if !columns.iter().any(|existing| existing.name == column.name) {
+            columns.push(column.clone());
+        }
+    }
+    columns
 }
 
 /// Projects an inner schema onto the requested column names.
@@ -2318,9 +2348,7 @@ fn advanced_project_schema(
 
 /// Evaluates a supported advanced AST node into a typed row set.
 ///
-/// Returns the row set and whether a limit already truncated the rows. Join,
-/// aggregate, and traverse nodes are rejected because the caller gates them
-/// with [`advanced_ast_supported`].
+/// Returns the row set and whether a limit already truncated the rows.
 fn eval_advanced_node(
     document: &NormalizedIrDocument,
     node: &AdvancedAstNode,
@@ -2367,9 +2395,26 @@ fn eval_advanced_node(
             }
             Ok((set, truncated))
         }
-        AdvancedAstNode::Join { .. }
-        | AdvancedAstNode::Aggregate { .. }
-        | AdvancedAstNode::Traverse { .. } => Err(QueryError::PlanRejected {
+        AdvancedAstNode::Join { left, right, on } => {
+            let (left, left_truncated) =
+                eval_advanced_node(document, left, file_paths, control, tracker)?;
+            let (right, right_truncated) =
+                eval_advanced_node(document, right, file_paths, control, tracker)?;
+            let joined = advanced_join_rows(left, right, on, control, tracker)?;
+            Ok((joined, left_truncated || right_truncated))
+        }
+        AdvancedAstNode::Aggregate {
+            input,
+            group_by,
+            aggregations,
+        } => {
+            let (input, truncated) =
+                eval_advanced_node(document, input, file_paths, control, tracker)?;
+            let aggregated =
+                advanced_aggregate_rows(input, group_by, aggregations, control, tracker)?;
+            Ok((aggregated, truncated))
+        }
+        AdvancedAstNode::Traverse { .. } => Err(QueryError::PlanRejected {
             resource: QueryResource::Results,
         }),
     }
@@ -2473,6 +2518,225 @@ fn advanced_project_rows(set: AdvancedRowSet, columns: &[String]) -> AdvancedRow
     AdvancedRowSet {
         columns: schema,
         rows,
+    }
+}
+
+fn advanced_join_rows(
+    left: AdvancedRowSet,
+    right: AdvancedRowSet,
+    on: &str,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+) -> Result<AdvancedRowSet, QueryError> {
+    let left_key = left.columns.iter().find(|column| column.name == on);
+    let right_key = right.columns.iter().find(|column| column.name == on);
+    if left_key
+        .zip(right_key)
+        .is_none_or(|(left, right)| left.column_type != right.column_type)
+    {
+        return Err(QueryError::PlanRejected {
+            resource: QueryResource::Results,
+        });
+    }
+
+    let columns = advanced_join_schema(&left.columns, &right.columns);
+    let mut rows = Vec::new();
+    for left_row in &left.rows {
+        let Some(left_value) = left_row.get(on) else {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        };
+        for right_row in &right.rows {
+            control.check()?;
+            tracker.add_edges(1)?;
+            if right_row.get(on) != Some(left_value) {
+                continue;
+            }
+            let mut joined = left_row.clone();
+            for (name, value) in right_row {
+                if let Some(existing) = joined.get(name) {
+                    if existing != value {
+                        return Err(QueryError::PlanRejected {
+                            resource: QueryResource::Results,
+                        });
+                    }
+                } else {
+                    joined.insert(name.clone(), value.clone());
+                }
+            }
+            try_push(&mut rows, joined)?;
+        }
+    }
+    Ok(AdvancedRowSet { columns, rows })
+}
+
+enum AdvancedAggregateState {
+    Count(i64),
+    Sum(i64),
+    Min(Option<AdvancedValue>),
+    Max(Option<AdvancedValue>),
+}
+
+fn advanced_aggregate_rows(
+    input: AdvancedRowSet,
+    group_by: &[String],
+    aggregations: &[AdvancedAggregateFunction],
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+) -> Result<AdvancedRowSet, QueryError> {
+    if group_by
+        .iter()
+        .chain(
+            aggregations
+                .iter()
+                .filter_map(|aggregation| match aggregation {
+                    AdvancedAggregateFunction::Count => None,
+                    AdvancedAggregateFunction::Sum { field }
+                    | AdvancedAggregateFunction::Min { field }
+                    | AdvancedAggregateFunction::Max { field } => Some(field),
+                }),
+        )
+        .any(|name| !input.columns.iter().any(|column| &column.name == name))
+    {
+        return Err(QueryError::PlanRejected {
+            resource: QueryResource::Results,
+        });
+    }
+
+    let columns = {
+        let mut columns = Vec::new();
+        try_reserve(
+            &mut columns,
+            group_by.len().saturating_add(aggregations.len()),
+        )?;
+        for name in group_by {
+            columns.push(AdvancedColumnSchema {
+                name: name.clone(),
+                column_type: advanced_column_type(&input.columns, name),
+            });
+        }
+        for aggregation in aggregations {
+            columns.push(advanced_aggregate_column(aggregation, &input.columns));
+        }
+        columns
+    };
+    let mut groups: BTreeMap<Vec<AdvancedValue>, Vec<AdvancedAggregateState>> = BTreeMap::new();
+    for row in &input.rows {
+        control.check()?;
+        tracker.add_edges(1)?;
+        let mut key = Vec::new();
+        try_reserve(&mut key, group_by.len())?;
+        for name in group_by {
+            let Some(value) = row.get(name) else {
+                return Err(QueryError::PlanRejected {
+                    resource: QueryResource::Results,
+                });
+            };
+            key.push(value.clone());
+        }
+        if !groups.contains_key(&key) {
+            groups.insert(key.clone(), initial_aggregate_states(aggregations)?);
+        }
+        let states = groups.get_mut(&key).ok_or(QueryError::PlanRejected {
+            resource: QueryResource::Results,
+        })?;
+        update_aggregate_states(states, aggregations, row)?;
+    }
+
+    let mut rows = Vec::new();
+    try_reserve(&mut rows, groups.len())?;
+    for (key, states) in groups {
+        let mut row = BTreeMap::new();
+        for (name, value) in group_by.iter().zip(key) {
+            row.insert(name.clone(), value);
+        }
+        for (column, state) in columns.iter().skip(group_by.len()).zip(states) {
+            row.insert(column.name.clone(), aggregate_state_value(state)?);
+        }
+        rows.push(row);
+    }
+    Ok(AdvancedRowSet { columns, rows })
+}
+
+fn initial_aggregate_states(
+    aggregations: &[AdvancedAggregateFunction],
+) -> Result<Vec<AdvancedAggregateState>, QueryError> {
+    let mut states = Vec::new();
+    try_reserve(&mut states, aggregations.len())?;
+    for aggregation in aggregations {
+        states.push(match aggregation {
+            AdvancedAggregateFunction::Count => AdvancedAggregateState::Count(0),
+            AdvancedAggregateFunction::Sum { .. } => AdvancedAggregateState::Sum(0),
+            AdvancedAggregateFunction::Min { .. } => AdvancedAggregateState::Min(None),
+            AdvancedAggregateFunction::Max { .. } => AdvancedAggregateState::Max(None),
+        });
+    }
+    Ok(states)
+}
+
+fn update_aggregate_states(
+    states: &mut [AdvancedAggregateState],
+    aggregations: &[AdvancedAggregateFunction],
+    row: &BTreeMap<String, AdvancedValue>,
+) -> Result<(), QueryError> {
+    for (state, aggregation) in states.iter_mut().zip(aggregations) {
+        match (state, aggregation) {
+            (AdvancedAggregateState::Count(count), AdvancedAggregateFunction::Count) => {
+                *count = count.checked_add(1).ok_or(QueryError::PlanRejected {
+                    resource: QueryResource::Results,
+                })?;
+            }
+            (AdvancedAggregateState::Sum(total), AdvancedAggregateFunction::Sum { field }) => {
+                let Some(AdvancedValue::Integer(value)) = row.get(field) else {
+                    return Err(QueryError::PlanRejected {
+                        resource: QueryResource::Results,
+                    });
+                };
+                *total = total.checked_add(*value).ok_or(QueryError::PlanRejected {
+                    resource: QueryResource::Results,
+                })?;
+            }
+            (AdvancedAggregateState::Min(current), AdvancedAggregateFunction::Min { field }) => {
+                let Some(value) = row.get(field) else {
+                    return Err(QueryError::PlanRejected {
+                        resource: QueryResource::Results,
+                    });
+                };
+                if current.as_ref().is_none_or(|minimum| value < minimum) {
+                    *current = Some(value.clone());
+                }
+            }
+            (AdvancedAggregateState::Max(current), AdvancedAggregateFunction::Max { field }) => {
+                let Some(value) = row.get(field) else {
+                    return Err(QueryError::PlanRejected {
+                        resource: QueryResource::Results,
+                    });
+                };
+                if current.as_ref().is_none_or(|maximum| value > maximum) {
+                    *current = Some(value.clone());
+                }
+            }
+            _ => {
+                return Err(QueryError::PlanRejected {
+                    resource: QueryResource::Results,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn aggregate_state_value(state: AdvancedAggregateState) -> Result<AdvancedValue, QueryError> {
+    match state {
+        AdvancedAggregateState::Count(value) | AdvancedAggregateState::Sum(value) => {
+            Ok(AdvancedValue::Integer(value))
+        }
+        AdvancedAggregateState::Min(value) | AdvancedAggregateState::Max(value) => {
+            value.ok_or(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            })
+        }
     }
 }
 
@@ -8624,7 +8888,7 @@ mod tests {
     }
 
     #[test]
-    fn advanced_unsupported_aggregate_returns_honest_unsupported() {
+    fn advanced_aggregate_groups_and_counts_rows_deterministically() {
         let document = advanced_document();
         let ast = AdvancedAstNode::Aggregate {
             input: Box::new(scan_functions()),
@@ -8634,15 +8898,48 @@ mod tests {
         let plan = advanced_plan(ast, false, 100);
         let built = run_advanced(&document, &plan);
 
-        // Honest: non-empty columns, no fabricated rows.
-        assert_eq!(built.completeness, AdvancedCompleteness::Unsupported);
-        assert!(built.execution.is_unsupported_partial());
+        assert_eq!(built.completeness, AdvancedCompleteness::Complete);
+        assert!(built.execution.is_complete());
         assert_eq!(
-            built.execution.limiting_resources(),
-            &[QueryResource::Capability]
+            built.columns,
+            vec![
+                AdvancedColumnSchema {
+                    name: "kind".to_owned(),
+                    column_type: AdvancedColumnType::Text,
+                },
+                AdvancedColumnSchema {
+                    name: "count".to_owned(),
+                    column_type: AdvancedColumnType::Integer,
+                },
+            ]
         );
-        assert!(built.rows.is_empty());
-        assert!(!built.columns.is_empty());
+        assert_eq!(built.rows.len(), 1);
+        assert_eq!(built.rows[0]["kind"], serde_json::json!("function"));
+        assert_eq!(built.rows[0]["count"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn advanced_join_uses_a_bounded_shared_key_and_stable_row_order() {
+        let document = advanced_document();
+        let ast = AdvancedAstNode::Join {
+            left: Box::new(scan_functions()),
+            right: Box::new(scan_functions()),
+            on: "id".to_owned(),
+        };
+        let plan = advanced_plan(ast, false, 100);
+        let built = run_advanced(&document, &plan);
+
+        assert_eq!(built.completeness, AdvancedCompleteness::Complete);
+        assert!(built.execution.is_complete());
+        assert_eq!(built.rows.len(), 2);
+        assert_eq!(
+            built.rows[0]["id"],
+            serde_json::Value::String(symbol(11).to_string())
+        );
+        assert_eq!(
+            built.rows[1]["id"],
+            serde_json::Value::String(symbol(13).to_string())
+        );
     }
 
     #[test]
