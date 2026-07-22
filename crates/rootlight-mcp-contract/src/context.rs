@@ -155,7 +155,9 @@ pub struct ContextPackInput {
 }
 
 /// Role of one evidence item within the assembled context pack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceRole {
     /// Primary definition of a target or closely related symbol.
@@ -172,6 +174,317 @@ pub enum EvidenceRole {
     Architecture,
     /// Recent change history relevant to the target.
     Change,
+}
+
+/// Version of the objective-to-role policy enforced by `context.pack`.
+///
+/// A policy change alters pack completeness and is therefore bound into the
+/// canonical request digest and pack identity.
+pub const OBJECTIVE_ROLE_POLICY_VERSION: u32 = 1;
+
+/// Task class inferred from the normalized `context.pack` objective.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPackObjective {
+    /// Fix a defect in target behavior.
+    BugFix,
+    /// Restructure existing behavior without changing its contract.
+    Refactor,
+    /// Explain existing behavior.
+    Explanation,
+    /// Move behavior to a new API, platform, or representation.
+    Migration,
+    /// Review behavior, risk, or security.
+    Review,
+}
+
+impl ContextPackObjective {
+    /// Returns the roles that must be selected for a complete pack.
+    #[must_use]
+    pub const fn required_roles(self) -> &'static [EvidenceRole] {
+        match self {
+            Self::BugFix => &[
+                EvidenceRole::Definition,
+                EvidenceRole::Implementation,
+                EvidenceRole::Test,
+            ],
+            Self::Refactor => &[
+                EvidenceRole::Definition,
+                EvidenceRole::Caller,
+                EvidenceRole::Test,
+            ],
+            Self::Explanation => &[EvidenceRole::Definition, EvidenceRole::Architecture],
+            Self::Migration => &[
+                EvidenceRole::Definition,
+                EvidenceRole::Caller,
+                EvidenceRole::Change,
+            ],
+            Self::Review => &[
+                EvidenceRole::Change,
+                EvidenceRole::Definition,
+                EvidenceRole::Risk,
+            ],
+        }
+    }
+
+    /// Returns the roles accepted but not required for a complete pack.
+    #[must_use]
+    pub const fn optional_roles(self) -> &'static [EvidenceRole] {
+        match self {
+            Self::BugFix => &[
+                EvidenceRole::Caller,
+                EvidenceRole::Risk,
+                EvidenceRole::Architecture,
+                EvidenceRole::Change,
+            ],
+            Self::Refactor => &[
+                EvidenceRole::Implementation,
+                EvidenceRole::Risk,
+                EvidenceRole::Architecture,
+                EvidenceRole::Change,
+            ],
+            Self::Explanation => &[
+                EvidenceRole::Implementation,
+                EvidenceRole::Caller,
+                EvidenceRole::Test,
+                EvidenceRole::Risk,
+                EvidenceRole::Change,
+            ],
+            Self::Migration => &[
+                EvidenceRole::Implementation,
+                EvidenceRole::Test,
+                EvidenceRole::Risk,
+                EvidenceRole::Architecture,
+            ],
+            Self::Review => &[
+                EvidenceRole::Implementation,
+                EvidenceRole::Caller,
+                EvidenceRole::Test,
+                EvidenceRole::Architecture,
+            ],
+        }
+    }
+}
+
+/// Whether one evidence role is mandatory for the inferred objective.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleRequirement {
+    /// The pack is incomplete unless at least one item is selected.
+    Required,
+    /// The role may improve the pack but does not determine completeness.
+    Optional,
+}
+
+/// Selection outcome for one objective role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleCoverageStatus {
+    /// At least one candidate with this role was selected.
+    Satisfied,
+    /// A required role has no selected candidate.
+    MissingRequired,
+    /// An optional role has no selected candidate.
+    OptionalAbsent,
+}
+
+/// Stable observed reason that a required role is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingRequiredRoleReason {
+    /// No provider invocation or omission observation exists for the role.
+    NotSearched,
+    /// The provider completed an exhaustive search without matching evidence.
+    NoEvidence,
+    /// The provider does not support the requested evidence domain.
+    Unsupported,
+    /// The provider was expected to support the domain but was unavailable.
+    Unavailable,
+    /// A provider resource limit stopped an otherwise supported search.
+    Truncated,
+    /// Matching evidence was filtered below the admitted confidence threshold.
+    LowConfidence,
+    /// Provider admission or final pack selection exhausted the shared budget.
+    Budget,
+}
+
+/// Profile-independent coverage facts for one accepted evidence role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoleCoverageEntry {
+    /// Evidence role evaluated under the objective policy.
+    pub role: EvidenceRole,
+    /// Whether the objective requires this role.
+    pub requirement: RoleRequirement,
+    /// Selected, missing-required, or optional-absent state.
+    pub status: RoleCoverageStatus,
+    /// Number of typed provider candidates observed before selection.
+    #[schemars(range(max = 100_000))]
+    pub observed_candidates: u32,
+    /// Number of candidates retained in the final pack.
+    #[schemars(range(max = 200))]
+    pub selected_items: u16,
+    /// Stable reason for a missing required role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_reason: Option<MissingRequiredRoleReason>,
+}
+
+/// Objective-policy and required-role truth retained under every profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, try_from = "UncheckedRoleCoverageSummary")]
+pub struct RoleCoverageSummary {
+    /// Inferred task objective whose policy was evaluated.
+    objective: ContextPackObjective,
+    /// Version of the objective-to-role rules.
+    #[schemars(range(min = 1, max = 1000))]
+    objective_rule_version: u32,
+    /// Derived truth: every required entry is satisfied.
+    complete: bool,
+    /// Exactly one deterministic entry for each accepted role.
+    #[schemars(length(min = 7, max = 7))]
+    roles: Vec<RoleCoverageEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UncheckedRoleCoverageSummary {
+    objective: ContextPackObjective,
+    #[schemars(range(min = 1, max = 1000))]
+    objective_rule_version: u32,
+    complete: bool,
+    #[schemars(length(min = 7, max = 7))]
+    roles: Vec<RoleCoverageEntry>,
+}
+
+/// Semantic validation failure for role-coverage output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RoleCoverageError {
+    /// Entries do not exactly match the accepted objective policy.
+    #[error("role coverage does not match the objective role policy")]
+    PolicyMismatch,
+    /// Serialized completeness differs from required-role entries.
+    #[error("role coverage complete flag is not derived from required entries")]
+    InconsistentCompleteness,
+}
+
+impl RoleCoverageSummary {
+    /// Creates a summary and derives completeness from required entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RoleCoverageError`] when roles are missing, duplicated, or
+    /// inconsistent with the selected objective policy.
+    pub fn new(
+        objective: ContextPackObjective,
+        roles: Vec<RoleCoverageEntry>,
+    ) -> Result<Self, RoleCoverageError> {
+        validate_role_entries(objective, &roles)?;
+        let complete = roles.iter().all(|entry| {
+            entry.requirement != RoleRequirement::Required
+                || entry.status == RoleCoverageStatus::Satisfied
+        });
+        Ok(Self {
+            objective,
+            objective_rule_version: OBJECTIVE_ROLE_POLICY_VERSION,
+            complete,
+            roles,
+        })
+    }
+
+    /// Returns the inferred task objective.
+    #[must_use]
+    pub const fn objective(&self) -> ContextPackObjective {
+        self.objective
+    }
+
+    /// Returns the role-policy version bound into the pack identity.
+    #[must_use]
+    pub const fn objective_rule_version(&self) -> u32 {
+        self.objective_rule_version
+    }
+
+    /// Returns whether every required role has a selected item.
+    #[must_use]
+    pub const fn complete(&self) -> bool {
+        self.complete
+    }
+
+    /// Returns deterministic per-role observations.
+    #[must_use]
+    pub fn roles(&self) -> &[RoleCoverageEntry] {
+        &self.roles
+    }
+}
+
+impl TryFrom<UncheckedRoleCoverageSummary> for RoleCoverageSummary {
+    type Error = RoleCoverageError;
+
+    fn try_from(value: UncheckedRoleCoverageSummary) -> Result<Self, Self::Error> {
+        validate_role_entries(value.objective, &value.roles)?;
+        let derived = value.roles.iter().all(|entry| {
+            entry.requirement != RoleRequirement::Required
+                || entry.status == RoleCoverageStatus::Satisfied
+        });
+        if value.complete != derived
+            || value.objective_rule_version != OBJECTIVE_ROLE_POLICY_VERSION
+        {
+            return Err(RoleCoverageError::InconsistentCompleteness);
+        }
+        Ok(Self {
+            objective: value.objective,
+            objective_rule_version: value.objective_rule_version,
+            complete: derived,
+            roles: value.roles,
+        })
+    }
+}
+
+fn validate_role_entries(
+    objective: ContextPackObjective,
+    entries: &[RoleCoverageEntry],
+) -> Result<(), RoleCoverageError> {
+    const ALL_ROLES: [EvidenceRole; 7] = [
+        EvidenceRole::Definition,
+        EvidenceRole::Implementation,
+        EvidenceRole::Caller,
+        EvidenceRole::Test,
+        EvidenceRole::Risk,
+        EvidenceRole::Architecture,
+        EvidenceRole::Change,
+    ];
+    if entries.len() != ALL_ROLES.len() {
+        return Err(RoleCoverageError::PolicyMismatch);
+    }
+    for (entry, expected_role) in entries.iter().zip(ALL_ROLES) {
+        let requirement = if objective.required_roles().contains(&expected_role) {
+            RoleRequirement::Required
+        } else {
+            RoleRequirement::Optional
+        };
+        let valid_state = match (requirement, entry.status) {
+            (RoleRequirement::Required, RoleCoverageStatus::Satisfied) => {
+                entry.selected_items > 0 && entry.missing_reason.is_none()
+            }
+            (RoleRequirement::Required, RoleCoverageStatus::MissingRequired) => {
+                entry.selected_items == 0 && entry.missing_reason.is_some()
+            }
+            (RoleRequirement::Optional, RoleCoverageStatus::Satisfied) => {
+                entry.selected_items > 0 && entry.missing_reason.is_none()
+            }
+            (RoleRequirement::Optional, RoleCoverageStatus::OptionalAbsent) => {
+                entry.selected_items == 0 && entry.missing_reason.is_none()
+            }
+            _ => false,
+        };
+        if entry.role != expected_role
+            || entry.requirement != requirement
+            || u32::from(entry.selected_items) > entry.observed_candidates
+            || !valid_state
+        {
+            return Err(RoleCoverageError::PolicyMismatch);
+        }
+    }
+    Ok(())
 }
 
 /// A bounded source snippet wrapped as untrusted repository data.
@@ -302,6 +615,8 @@ pub struct ContextPackData {
     /// Ordered, deduplicated evidence items in deterministic rank order.
     #[schemars(length(max = 200))]
     pub items: Vec<ContextItem>,
+    /// Objective-specific required and optional role coverage.
+    pub role_coverage: RoleCoverageSummary,
     /// Rootlight-generated reading order and dependency notes.
     pub structure: ContextStructure,
     /// Summarized evidence excluded by budget, confidence, or diversity.
@@ -965,7 +1280,13 @@ pub type QueryAdvancedOutput = ToolResponse<ReadEnvelope<QueryAdvancedData>>;
 
 #[cfg(test)]
 mod tests {
-    use super::{PLANNER_VERSION, PlanExplanation};
+    use std::collections::BTreeSet;
+
+    use super::{
+        ContextPackObjective, EvidenceRole, OBJECTIVE_ROLE_POLICY_VERSION, PLANNER_VERSION,
+        PlanExplanation, RoleCoverageEntry, RoleCoverageStatus, RoleCoverageSummary,
+        RoleRequirement,
+    };
 
     #[test]
     fn new_plans_carry_the_current_planner_version() {
@@ -973,5 +1294,145 @@ mod tests {
 
         assert_eq!(PLANNER_VERSION, 2);
         assert_eq!(plan.planner_version, PLANNER_VERSION);
+    }
+
+    #[test]
+    fn objective_role_policy_is_versioned_complete_and_disjoint() {
+        let all_roles = BTreeSet::from([
+            EvidenceRole::Definition,
+            EvidenceRole::Implementation,
+            EvidenceRole::Caller,
+            EvidenceRole::Test,
+            EvidenceRole::Risk,
+            EvidenceRole::Architecture,
+            EvidenceRole::Change,
+        ]);
+        let cases = [
+            (
+                ContextPackObjective::BugFix,
+                vec![
+                    EvidenceRole::Definition,
+                    EvidenceRole::Implementation,
+                    EvidenceRole::Test,
+                ],
+                vec![
+                    EvidenceRole::Caller,
+                    EvidenceRole::Risk,
+                    EvidenceRole::Architecture,
+                    EvidenceRole::Change,
+                ],
+            ),
+            (
+                ContextPackObjective::Refactor,
+                vec![
+                    EvidenceRole::Definition,
+                    EvidenceRole::Caller,
+                    EvidenceRole::Test,
+                ],
+                vec![
+                    EvidenceRole::Implementation,
+                    EvidenceRole::Risk,
+                    EvidenceRole::Architecture,
+                    EvidenceRole::Change,
+                ],
+            ),
+            (
+                ContextPackObjective::Explanation,
+                vec![EvidenceRole::Definition, EvidenceRole::Architecture],
+                vec![
+                    EvidenceRole::Implementation,
+                    EvidenceRole::Caller,
+                    EvidenceRole::Test,
+                    EvidenceRole::Risk,
+                    EvidenceRole::Change,
+                ],
+            ),
+            (
+                ContextPackObjective::Migration,
+                vec![
+                    EvidenceRole::Definition,
+                    EvidenceRole::Caller,
+                    EvidenceRole::Change,
+                ],
+                vec![
+                    EvidenceRole::Implementation,
+                    EvidenceRole::Test,
+                    EvidenceRole::Risk,
+                    EvidenceRole::Architecture,
+                ],
+            ),
+            (
+                ContextPackObjective::Review,
+                vec![
+                    EvidenceRole::Change,
+                    EvidenceRole::Definition,
+                    EvidenceRole::Risk,
+                ],
+                vec![
+                    EvidenceRole::Implementation,
+                    EvidenceRole::Caller,
+                    EvidenceRole::Test,
+                    EvidenceRole::Architecture,
+                ],
+            ),
+        ];
+        for (objective, expected_required, expected_optional) in cases {
+            assert_eq!(objective.required_roles(), expected_required);
+            assert_eq!(objective.optional_roles(), expected_optional);
+            let required = objective
+                .required_roles()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let optional = objective
+                .optional_roles()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            assert!(required.is_disjoint(&optional));
+            assert_eq!(
+                required.union(&optional).copied().collect::<BTreeSet<_>>(),
+                all_roles
+            );
+        }
+        assert_eq!(OBJECTIVE_ROLE_POLICY_VERSION, 1);
+    }
+
+    #[test]
+    fn role_coverage_deserialization_rejects_an_independent_complete_flag() {
+        let objective = ContextPackObjective::BugFix;
+        let roles = [
+            EvidenceRole::Definition,
+            EvidenceRole::Implementation,
+            EvidenceRole::Caller,
+            EvidenceRole::Test,
+            EvidenceRole::Risk,
+            EvidenceRole::Architecture,
+            EvidenceRole::Change,
+        ]
+        .into_iter()
+        .map(|role| RoleCoverageEntry {
+            role,
+            requirement: if objective.required_roles().contains(&role) {
+                RoleRequirement::Required
+            } else {
+                RoleRequirement::Optional
+            },
+            status: RoleCoverageStatus::Satisfied,
+            observed_candidates: 1,
+            selected_items: 1,
+            missing_reason: None,
+        })
+        .collect();
+        let coverage = RoleCoverageSummary::new(objective, roles).expect("valid coverage summary");
+        assert!(coverage.complete());
+        assert_eq!(
+            coverage.objective_rule_version(),
+            OBJECTIVE_ROLE_POLICY_VERSION
+        );
+
+        let mut encoded = serde_json::to_value(coverage).expect("coverage serializes");
+        encoded["complete"] = serde_json::Value::Bool(false);
+        assert!(serde_json::from_value::<RoleCoverageSummary>(encoded).is_err());
     }
 }

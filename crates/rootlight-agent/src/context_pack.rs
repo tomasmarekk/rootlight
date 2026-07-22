@@ -20,8 +20,11 @@ use rootlight_mcp_contract::{
         LimitingResourceKind, ResultCompleteness,
     },
     context::{
-        ContextItem, ContextPackData, ContextPackId, ContextPackInput, ContextStructure,
-        EvidenceRole as ContractEvidenceRole, OmissionSummary, TokenAccounting, ToolSuggestion,
+        ContextItem, ContextPackData, ContextPackId, ContextPackInput,
+        ContextPackObjective as ContractContextPackObjective, ContextStructure,
+        EvidenceRole as ContractEvidenceRole, MissingRequiredRoleReason, OmissionSummary,
+        RoleCoverageEntry, RoleCoverageError, RoleCoverageStatus, RoleCoverageSummary,
+        RoleRequirement, TokenAccounting, ToolSuggestion,
     },
     vertical::{GenerationSelector, ReadEnvelope, RequiredNullable, SymbolExplanation},
 };
@@ -29,8 +32,8 @@ use rootlight_mcp_contract::{
 use crate::{
     context_evidence::{
         ContextEvidenceCollectionError, ContextEvidenceCollector, ContextEvidenceCorpus,
-        ContextEvidencePort, ContextEvidenceProviderRegistry, EvidenceProviderOmissionReason,
-        EvidenceProviderPlanError,
+        ContextEvidencePort, ContextEvidenceProviderRegistry, EvidenceProviderOmission,
+        EvidenceProviderOmissionReason, EvidenceProviderPlanError,
     },
     context_pack_request::{
         CanonicalContextPackRequest, CanonicalContextPackRequestError, normalize_task,
@@ -232,6 +235,9 @@ pub enum ContextPackPlanningError {
     /// Planner completeness could not represent observed provider state.
     #[error("context-pack planner produced invalid completeness")]
     InvalidCompleteness,
+    /// Objective-role coverage could not represent provider observations.
+    #[error("context-pack planner produced invalid role coverage")]
+    InvalidRoleCoverage,
 }
 
 /// Transport-neutral input for one complete context-pack planning pass.
@@ -354,9 +360,29 @@ where
             ..BudgetCharge::default()
         })?;
 
-        let completeness = planner_completeness(pack.truncated)?;
+        let selected_roles = pack
+            .items
+            .iter()
+            .map(|item| item.candidate.role)
+            .collect::<Vec<_>>();
+        let observed_roles = candidates
+            .iter()
+            .map(|candidate| candidate.role)
+            .collect::<Vec<_>>();
+        let role_coverage = evaluate_role_coverage(
+            request.request.objective(),
+            &selected_roles,
+            &observed_roles,
+            &[],
+        )
+        .map_err(|_| ContextPackPlanningError::InvalidRoleCoverage)?;
+        let completeness = planner_completeness(pack.truncated)?
+            .merge(&role_coverage_completeness(&role_coverage)?)
+            .map_err(|_| ContextPackPlanningError::InvalidCompleteness)?;
+        let mut data = context_pack_data(request.request, &pack, &metadata, role_coverage.clone());
+        append_role_followups(&mut data.followups, &role_coverage);
         Ok(PlannedContextPack {
-            data: context_pack_data(request.request, &pack, &metadata),
+            data,
             truncated: pack.truncated,
             completeness,
             usage: budget.consumed(),
@@ -458,9 +484,27 @@ impl DefaultContextPackPlanner {
         })?;
         checkpoint(cancellation)?;
 
-        let mut data = context_pack_data(request, &pack, &metadata);
+        let selected_roles = pack
+            .items
+            .iter()
+            .map(|item| item.candidate.role)
+            .collect::<Vec<_>>();
+        let observed_roles = corpus
+            .candidates
+            .iter()
+            .map(|candidate| candidate.role())
+            .collect::<Vec<_>>();
+        let role_coverage = evaluate_role_coverage(
+            request.objective(),
+            &selected_roles,
+            &observed_roles,
+            &corpus.omissions,
+        )
+        .map_err(|_| ContextPackPlanningError::InvalidRoleCoverage)?;
+        let mut data = context_pack_data(request, &pack, &metadata, role_coverage.clone());
         append_provider_omissions(&mut data.omitted, corpus);
-        let completeness = corpus_completeness(corpus, pack.truncated)?;
+        append_role_followups(&mut data.followups, &role_coverage);
+        let completeness = corpus_completeness(corpus, pack.truncated, &role_coverage)?;
         let truncated = completeness.state == CompletenessState::Truncated
             || completeness.limiting_resources.iter().any(|resource| {
                 !matches!(
@@ -616,17 +660,24 @@ impl ContextPackService {
         .map_err(map_canonical_request_error)?;
         if input.explain == Some(true) {
             let explanation = context_pack_plan(&canonical);
+            let role_coverage = evaluate_role_coverage(canonical.objective(), &[], &[], &[])
+                .map_err(|_| ContextPackServiceError::InvalidResponse)?;
+            let completeness = role_coverage_completeness(&role_coverage)
+                .map_err(|_| ContextPackServiceError::InvalidResponse)?;
+            let mut followups = Vec::new();
+            append_role_followups(&mut followups, &role_coverage);
             let data = ContextPackData {
                 pack_id: context_pack_id(&canonical),
                 request_digest: canonical.request_digest(),
                 planner_version: rootlight_mcp_contract::context::PLANNER_VERSION,
                 items: Vec::new(),
+                role_coverage,
                 structure: ContextStructure {
                     reading_order: Vec::new(),
                     dependencies: Vec::new(),
                 },
                 omitted: Vec::new(),
-                followups: Vec::new(),
+                followups,
                 token_accounting: TokenAccounting {
                     estimated_total: 0,
                     by_section: BTreeMap::new(),
@@ -640,7 +691,7 @@ impl ContextPackService {
                 coverage: identity.coverage,
                 data,
                 truncated: false,
-                completeness: ResultCompleteness::complete(),
+                completeness,
                 next_cursor: RequiredNullable(None),
                 usage: empty_usage("context-pack-explain"),
                 warnings: identity.warnings,
@@ -698,6 +749,7 @@ fn planner_completeness(truncated: bool) -> Result<ResultCompleteness, ContextPa
 fn corpus_completeness(
     corpus: &ContextEvidenceCorpus,
     pack_truncated: bool,
+    role_coverage: &RoleCoverageSummary,
 ) -> Result<ResultCompleteness, ContextPackPlanningError> {
     let mut state = if pack_truncated {
         CompletenessState::Truncated
@@ -738,8 +790,72 @@ fn corpus_completeness(
             }
         }
     }
+    let role_completeness = role_coverage_completeness(role_coverage)?;
+    state = state.max(role_completeness.state);
+    resources.extend(role_completeness.limiting_resources);
+    guidance.extend(role_completeness.guidance);
     if state == CompletenessState::Complete {
         return Ok(ResultCompleteness::complete());
+    }
+    resources.sort_unstable();
+    resources.dedup_by_key(|resource| resource.kind);
+    guidance.sort_unstable();
+    guidance.dedup();
+    ResultCompleteness::new(
+        state,
+        resources,
+        ContinuationAvailability::Unavailable,
+        guidance,
+    )
+    .map_err(|_| ContextPackPlanningError::InvalidCompleteness)
+}
+
+fn role_coverage_completeness(
+    coverage: &RoleCoverageSummary,
+) -> Result<ResultCompleteness, ContextPackPlanningError> {
+    if coverage.complete() {
+        return Ok(ResultCompleteness::complete());
+    }
+    let mut state = CompletenessState::Complete;
+    let mut resources = Vec::new();
+    let mut guidance = Vec::new();
+    for entry in coverage
+        .roles()
+        .iter()
+        .filter(|entry| entry.status == RoleCoverageStatus::MissingRequired)
+    {
+        match entry.missing_reason {
+            Some(MissingRequiredRoleReason::Budget) => {
+                state = state.max(CompletenessState::Truncated);
+                resources.push(LimitingResource::kind(
+                    LimitingResourceKind::EstimatedTokens,
+                ));
+                guidance.push(ContinuationGuidance::IncreaseBudgetWithinLimit);
+            }
+            Some(MissingRequiredRoleReason::Truncated) => {
+                state = state.max(CompletenessState::Truncated);
+                resources.push(LimitingResource::kind(LimitingResourceKind::Results));
+                guidance.push(ContinuationGuidance::SplitRequest);
+            }
+            Some(MissingRequiredRoleReason::Unsupported) => {
+                state = state.max(CompletenessState::UnsupportedPartial);
+                resources.push(LimitingResource::kind(LimitingResourceKind::Capability));
+                guidance.push(ContinuationGuidance::UnsupportedNoContinuation);
+            }
+            Some(MissingRequiredRoleReason::NoEvidence)
+            | Some(MissingRequiredRoleReason::LowConfidence) => {
+                state = state.max(CompletenessState::UnsupportedPartial);
+                resources.push(LimitingResource::kind(LimitingResourceKind::Coverage));
+                guidance.push(ContinuationGuidance::RefreshCoverage);
+            }
+            Some(MissingRequiredRoleReason::Unavailable)
+            | Some(MissingRequiredRoleReason::NotSearched)
+            | None => {
+                state = CompletenessState::Indeterminate;
+                resources.push(LimitingResource::kind(LimitingResourceKind::Coverage));
+                guidance.push(ContinuationGuidance::RefreshCoverage);
+            }
+        }
     }
     resources.sort_unstable();
     resources.dedup_by_key(|resource| resource.kind);
@@ -842,6 +958,9 @@ fn map_evidence_planning_error(error: ContextEvidencePlanningError) -> ContextPa
                 ContextPackServiceError::Unavailable
             }
             ContextPackPlanningError::InvalidCompleteness => {
+                ContextPackServiceError::InvalidResponse
+            }
+            ContextPackPlanningError::InvalidRoleCoverage => {
                 ContextPackServiceError::InvalidResponse
             }
         },
@@ -1037,10 +1156,120 @@ pub fn context_pack_id(request: &CanonicalContextPackRequest) -> ContextPackId {
     request.pack_id()
 }
 
+/// Evaluates required-role truth independently of response presentation.
+///
+/// Selected and observed roles may contain duplicates; counts are retained in
+/// the public summary. Provider omissions supply the observed reason for a
+/// required role that has no selected candidate.
+///
+/// # Errors
+///
+/// Returns [`RoleCoverageError`] only if the derived entries violate the
+/// versioned public role policy.
+pub fn evaluate_role_coverage(
+    objective: PackObjective,
+    selected_roles: &[EvidenceRole],
+    observed_roles: &[EvidenceRole],
+    omissions: &[EvidenceProviderOmission],
+) -> Result<RoleCoverageSummary, RoleCoverageError> {
+    const ALL_ROLES: [EvidenceRole; 7] = [
+        EvidenceRole::Definition,
+        EvidenceRole::Implementation,
+        EvidenceRole::Caller,
+        EvidenceRole::Test,
+        EvidenceRole::Risk,
+        EvidenceRole::Architecture,
+        EvidenceRole::Change,
+    ];
+    let mut entries = Vec::with_capacity(ALL_ROLES.len());
+    for role in ALL_ROLES {
+        let selected_items = u16::try_from(
+            selected_roles
+                .iter()
+                .filter(|selected| **selected == role)
+                .count(),
+        )
+        .unwrap_or(u16::MAX);
+        let observed_candidates = u32::try_from(
+            observed_roles
+                .iter()
+                .filter(|observed| **observed == role)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        let requirement = if objective.required_roles().contains(&role) {
+            RoleRequirement::Required
+        } else {
+            RoleRequirement::Optional
+        };
+        let (status, missing_reason) = if selected_items > 0 {
+            (RoleCoverageStatus::Satisfied, None)
+        } else if requirement == RoleRequirement::Optional {
+            (RoleCoverageStatus::OptionalAbsent, None)
+        } else {
+            (
+                RoleCoverageStatus::MissingRequired,
+                Some(missing_required_role_reason(
+                    role,
+                    observed_candidates,
+                    omissions,
+                )),
+            )
+        };
+        entries.push(RoleCoverageEntry {
+            role: contract_role(role),
+            requirement,
+            status,
+            observed_candidates,
+            selected_items,
+            missing_reason,
+        });
+    }
+    RoleCoverageSummary::new(contract_objective(objective), entries)
+}
+
+fn missing_required_role_reason(
+    role: EvidenceRole,
+    observed_candidates: u32,
+    omissions: &[EvidenceProviderOmission],
+) -> MissingRequiredRoleReason {
+    if observed_candidates > 0 {
+        return MissingRequiredRoleReason::Budget;
+    }
+    omissions
+        .iter()
+        .filter(|omission| omission.role == role)
+        .map(|omission| match omission.reason {
+            EvidenceProviderOmissionReason::Budget => MissingRequiredRoleReason::Budget,
+            EvidenceProviderOmissionReason::Truncated => MissingRequiredRoleReason::Truncated,
+            EvidenceProviderOmissionReason::Unavailable => MissingRequiredRoleReason::Unavailable,
+            EvidenceProviderOmissionReason::Unsupported => MissingRequiredRoleReason::Unsupported,
+            EvidenceProviderOmissionReason::LowConfidence => {
+                MissingRequiredRoleReason::LowConfidence
+            }
+            EvidenceProviderOmissionReason::NoEvidence => MissingRequiredRoleReason::NoEvidence,
+        })
+        .max_by_key(|reason| missing_reason_priority(*reason))
+        .unwrap_or(MissingRequiredRoleReason::NotSearched)
+}
+
+const fn missing_reason_priority(reason: MissingRequiredRoleReason) -> u8 {
+    match reason {
+        MissingRequiredRoleReason::NotSearched => 0,
+        MissingRequiredRoleReason::NoEvidence => 1,
+        MissingRequiredRoleReason::LowConfidence => 2,
+        MissingRequiredRoleReason::Unsupported => 3,
+        MissingRequiredRoleReason::Unavailable => 4,
+        MissingRequiredRoleReason::Truncated => 5,
+        MissingRequiredRoleReason::Budget => 6,
+    }
+}
+
 fn context_pack_data(
     request: &CanonicalContextPackRequest,
     pack: &PackResult,
     metadata: &BTreeMap<String, ContextCandidateMetadata>,
+    role_coverage: RoleCoverageSummary,
 ) -> ContextPackData {
     let items = pack
         .items
@@ -1112,6 +1341,7 @@ fn context_pack_data(
         request_digest: request.request_digest(),
         planner_version: rootlight_mcp_contract::context::PLANNER_VERSION,
         items,
+        role_coverage,
         structure: ContextStructure {
             reading_order,
             dependencies: Vec::new(),
@@ -1148,6 +1378,65 @@ fn append_provider_omissions(omitted: &mut Vec<OmissionSummary>, corpus: &Contex
                 continuation: None,
             });
         }
+    }
+}
+
+fn append_role_followups(followups: &mut Vec<ToolSuggestion>, coverage: &RoleCoverageSummary) {
+    for entry in coverage
+        .roles()
+        .iter()
+        .filter(|entry| entry.status == RoleCoverageStatus::MissingRequired)
+    {
+        let Some(reason) = entry.missing_reason else {
+            continue;
+        };
+        let message = format!(
+            "retrieve missing {} evidence after {}",
+            role_label(entry.role),
+            missing_reason_label(reason)
+        );
+        let Ok(reason) = SourceFreeMessage::parse(&message) else {
+            continue;
+        };
+        followups.push(ToolSuggestion {
+            tool: role_followup_tool(entry.role).to_owned(),
+            reason,
+            continuation: None,
+        });
+    }
+}
+
+const fn role_followup_tool(role: ContractEvidenceRole) -> &'static str {
+    match role {
+        ContractEvidenceRole::Definition => "symbol.explain",
+        ContractEvidenceRole::Implementation => "source.read",
+        ContractEvidenceRole::Caller => "symbol.relationships",
+        ContractEvidenceRole::Test => "tests.select",
+        ContractEvidenceRole::Risk => "change.impact",
+        ContractEvidenceRole::Architecture => "architecture.overview",
+        ContractEvidenceRole::Change => "history.compare",
+    }
+}
+
+const fn missing_reason_label(reason: MissingRequiredRoleReason) -> &'static str {
+    match reason {
+        MissingRequiredRoleReason::NotSearched => "not searched",
+        MissingRequiredRoleReason::NoEvidence => "no evidence",
+        MissingRequiredRoleReason::Unsupported => "unsupported provider",
+        MissingRequiredRoleReason::Unavailable => "unavailable provider",
+        MissingRequiredRoleReason::Truncated => "truncated search",
+        MissingRequiredRoleReason::LowConfidence => "low confidence",
+        MissingRequiredRoleReason::Budget => "budget limit",
+    }
+}
+
+const fn contract_objective(objective: PackObjective) -> ContractContextPackObjective {
+    match objective {
+        PackObjective::BugFix => ContractContextPackObjective::BugFix,
+        PackObjective::Refactor => ContractContextPackObjective::Refactor,
+        PackObjective::Explanation => ContractContextPackObjective::Explanation,
+        PackObjective::Migration => ContractContextPackObjective::Migration,
+        PackObjective::Review => ContractContextPackObjective::Review,
     }
 }
 
@@ -1191,16 +1480,28 @@ mod tests {
     use super::{
         ContextPackPlanRequest, ContextPackPlanner, DefaultContextPackPlanner, EvidenceCandidate,
         EvidenceRole, MAX_PACK_TOKENS, MIN_PACK_TOKENS, PackError, PackObjective,
-        context_pack_completeness, context_pack_id, objective_for_task, optimize_pack,
+        append_role_followups, context_pack_completeness, context_pack_id, contract_role,
+        evaluate_role_coverage, objective_for_task, optimize_pack, role_coverage_completeness,
     };
-    use crate::{context_pack_request::CanonicalContextPackRequest, policy::NeverCancelled};
+    use crate::{
+        context_evidence::{
+            EvidenceProvider, EvidenceProviderOmission, EvidenceProviderOmissionReason,
+        },
+        context_pack_request::CanonicalContextPackRequest,
+        policy::NeverCancelled,
+    };
+    use proptest::prelude::*;
     use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
     use rootlight_ir::{LineRange, SourceRef, SourceSpan};
     use rootlight_mcp_contract::{
         RepositorySelector, TrustClassification,
-        completeness::{LimitingResourceKind, ResultCompleteness},
-        context::{ContextPackInput, ContextSeedSelector},
-        vertical::{EntityKind, RelationSummary, RepositoryIdSelector, SymbolExplanation},
+        completeness::{CompletenessState, LimitingResourceKind, ResultCompleteness},
+        context::{
+            ContextPackInput, ContextSeedSelector, MissingRequiredRoleReason, RoleCoverageStatus,
+        },
+        vertical::{
+            EntityKind, RelationSummary, RepositoryIdSelector, ResponseProfile, SymbolExplanation,
+        },
     };
 
     fn candidate(id: &str, role: EvidenceRole, relevance: u16, tokens: u32) -> EvidenceCandidate {
@@ -1212,6 +1513,29 @@ mod tests {
             estimated_tokens: tokens,
             source_path: format!("src/{id}.rs"),
         }
+    }
+
+    fn omission(
+        role: EvidenceRole,
+        reason: EvidenceProviderOmissionReason,
+    ) -> EvidenceProviderOmission {
+        EvidenceProviderOmission {
+            provider: EvidenceProvider::Definition,
+            role,
+            reason,
+            count: 1,
+            limiting_resources: Vec::new(),
+        }
+    }
+
+    fn objectives() -> [PackObjective; 5] {
+        [
+            PackObjective::BugFix,
+            PackObjective::Refactor,
+            PackObjective::Explanation,
+            PackObjective::Migration,
+            PackObjective::Review,
+        ]
     }
 
     fn context_input(symbol: SymbolId) -> ContextPackInput {
@@ -1455,13 +1779,7 @@ mod tests {
 
     #[test]
     fn all_objectives_have_required_roles() {
-        for objective in [
-            PackObjective::BugFix,
-            PackObjective::Refactor,
-            PackObjective::Explanation,
-            PackObjective::Migration,
-            PackObjective::Review,
-        ] {
+        for objective in objectives() {
             assert!(
                 !objective.required_roles().is_empty(),
                 "{objective:?} must have required roles"
@@ -1473,6 +1791,217 @@ mod tests {
                     || objective.required_roles().contains(&EvidenceRole::Change),
                 "{objective:?} must require Definition or Change"
             );
+        }
+    }
+
+    #[test]
+    fn objective_role_coverage_goldens_cover_complete_and_incomplete_packs() {
+        for objective in objectives() {
+            let selected = objective.required_roles().to_vec();
+            let complete = evaluate_role_coverage(objective, &selected, &selected, &[])
+                .expect("required roles form a valid complete golden");
+            assert!(complete.complete(), "{objective:?} complete golden");
+
+            let missing_role = objective.required_roles()[0];
+            let selected = objective.required_roles()[1..].to_vec();
+            let incomplete = evaluate_role_coverage(
+                objective,
+                &selected,
+                &selected,
+                &[omission(
+                    missing_role,
+                    EvidenceProviderOmissionReason::NoEvidence,
+                )],
+            )
+            .expect("missing-role golden remains representable");
+            assert!(!incomplete.complete(), "{objective:?} incomplete golden");
+            let entry = incomplete
+                .roles()
+                .iter()
+                .find(|entry| entry.role == contract_role(missing_role))
+                .expect("every accepted role has one coverage entry");
+            assert_eq!(entry.status, RoleCoverageStatus::MissingRequired);
+            assert_eq!(
+                entry.missing_reason,
+                Some(MissingRequiredRoleReason::NoEvidence)
+            );
+        }
+    }
+
+    #[test]
+    fn missing_required_role_reason_matrix_preserves_provider_observations() {
+        let objective = PackObjective::BugFix;
+        let role = EvidenceRole::Implementation;
+        let cases = [
+            (None, Vec::new(), MissingRequiredRoleReason::NotSearched),
+            (
+                Some(EvidenceProviderOmissionReason::NoEvidence),
+                Vec::new(),
+                MissingRequiredRoleReason::NoEvidence,
+            ),
+            (
+                Some(EvidenceProviderOmissionReason::Unsupported),
+                Vec::new(),
+                MissingRequiredRoleReason::Unsupported,
+            ),
+            (
+                Some(EvidenceProviderOmissionReason::Unavailable),
+                Vec::new(),
+                MissingRequiredRoleReason::Unavailable,
+            ),
+            (
+                Some(EvidenceProviderOmissionReason::Truncated),
+                Vec::new(),
+                MissingRequiredRoleReason::Truncated,
+            ),
+            (
+                Some(EvidenceProviderOmissionReason::LowConfidence),
+                Vec::new(),
+                MissingRequiredRoleReason::LowConfidence,
+            ),
+            (None, vec![role], MissingRequiredRoleReason::Budget),
+        ];
+        for (omission_reason, observed, expected) in cases {
+            let omissions = omission_reason
+                .map(|reason| vec![omission(role, reason)])
+                .unwrap_or_default();
+            let coverage = evaluate_role_coverage(objective, &[], &observed, &omissions)
+                .expect("reason matrix is representable");
+            let entry = coverage
+                .roles()
+                .iter()
+                .find(|entry| entry.role == contract_role(role))
+                .expect("implementation role is present");
+            assert_eq!(entry.missing_reason, Some(expected));
+            assert!(!coverage.complete());
+        }
+    }
+
+    #[test]
+    fn truncated_observation_takes_precedence_over_empty_search() {
+        let role = EvidenceRole::Implementation;
+        let coverage = evaluate_role_coverage(
+            PackObjective::BugFix,
+            &[],
+            &[],
+            &[
+                omission(role, EvidenceProviderOmissionReason::NoEvidence),
+                omission(role, EvidenceProviderOmissionReason::Truncated),
+            ],
+        )
+        .expect("combined provider observations are representable");
+        let entry = coverage
+            .roles()
+            .iter()
+            .find(|entry| entry.role == contract_role(role))
+            .expect("implementation role is present");
+        assert_eq!(
+            entry.missing_reason,
+            Some(MissingRequiredRoleReason::Truncated)
+        );
+    }
+
+    #[test]
+    fn missing_required_roles_drive_completeness_and_followups() {
+        let coverage = evaluate_role_coverage(
+            PackObjective::BugFix,
+            &[EvidenceRole::Definition],
+            &[EvidenceRole::Definition],
+            &[
+                omission(
+                    EvidenceRole::Implementation,
+                    EvidenceProviderOmissionReason::Unsupported,
+                ),
+                omission(
+                    EvidenceRole::Test,
+                    EvidenceProviderOmissionReason::LowConfidence,
+                ),
+            ],
+        )
+        .expect("missing required roles remain representable");
+        let completeness =
+            role_coverage_completeness(&coverage).expect("coverage completeness is valid");
+        assert_eq!(completeness.state, CompletenessState::UnsupportedPartial);
+        assert!(
+            completeness
+                .limiting_resources
+                .iter()
+                .any(|resource| { resource.kind == LimitingResourceKind::Capability })
+        );
+        assert!(
+            completeness
+                .limiting_resources
+                .iter()
+                .any(|resource| { resource.kind == LimitingResourceKind::Coverage })
+        );
+
+        let mut followups = Vec::new();
+        append_role_followups(&mut followups, &coverage);
+        assert_eq!(followups.len(), 2);
+        assert!(
+            followups
+                .iter()
+                .any(|followup| followup.tool == "source.read")
+        );
+        assert!(
+            followups
+                .iter()
+                .any(|followup| followup.tool == "tests.select")
+        );
+    }
+
+    #[test]
+    fn role_coverage_truth_is_profile_invariant() {
+        let selected = PackObjective::Review.required_roles().to_vec();
+        let coverage = evaluate_role_coverage(PackObjective::Review, &selected, &selected, &[])
+            .expect("review coverage is representable");
+        let expected = serde_json::to_value(&coverage).expect("coverage serializes");
+
+        for profile in [
+            ResponseProfile::Compact,
+            ResponseProfile::Standard,
+            ResponseProfile::Evidence,
+        ] {
+            let projected = match profile {
+                ResponseProfile::Compact
+                | ResponseProfile::Standard
+                | ResponseProfile::Evidence => coverage.clone(),
+            };
+            assert_eq!(
+                serde_json::to_value(projected).expect("profile coverage serializes"),
+                expected
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn removing_any_required_selected_role_cannot_leave_complete(
+            objective_index in 0usize..5,
+            required_index in 0usize..3,
+        ) {
+            let objective = objectives()[objective_index];
+            let required = objective.required_roles();
+            let removed = required[required_index % required.len()];
+            let selected = required
+                .iter()
+                .copied()
+                .filter(|role| *role != removed)
+                .collect::<Vec<_>>();
+            let coverage = evaluate_role_coverage(
+                objective,
+                &selected,
+                &selected,
+                &[omission(removed, EvidenceProviderOmissionReason::NoEvidence)],
+            )
+            .expect("property input follows the objective policy");
+
+            prop_assert!(!coverage.complete());
+            let missing_is_visible = coverage.roles().iter().any(|entry| {
+                entry.role == contract_role(removed)
+                    && entry.status == RoleCoverageStatus::MissingRequired
+            });
+            prop_assert!(missing_is_visible);
         }
     }
 
@@ -1504,6 +2033,12 @@ mod tests {
         );
         assert_eq!(planned.data.items.len(), 1);
         assert_eq!(planned.data.items[0].symbol_id, Some(symbol));
+        assert!(!planned.data.role_coverage.complete());
+        assert_eq!(
+            planned.data.role_coverage.objective_rule_version(),
+            rootlight_mcp_contract::context::OBJECTIVE_ROLE_POLICY_VERSION
+        );
+        assert_ne!(planned.completeness.state, CompletenessState::Complete);
         let expected_token_ceiling = symbols[0]
             .signature
             .as_ref()

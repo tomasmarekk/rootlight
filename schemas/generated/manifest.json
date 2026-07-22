@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "8ff3989a4380a3dcd9b598d300bff741e92115f896bf1c80c3222f22b37b469d"
+      "blake3": "6da8d60e8bbd1772739348f5f6c262b5f06ada73cd10f49387e048492be71de9"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
@@ -50,7 +50,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/context.rs",
-      "blake3": "d1a9aeff2e8cf9bc0bba590e641edcfb97be47da6145140c8fe77b84cd2642c5"
+      "blake3": "74c45fb9cc891eef040cfb63bdca6d91ef1ec6e179ae0a35df6d46a1cab56aae"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/intent.rs",
@@ -170,7 +170,7 @@
     },
     {
       "path": "tests/fixtures/mcp/1.0/tool-contracts.json",
-      "blake3": "7b56f327bfdcf6cf0784576215d710f4e44e2085c9a31ca27f977f4e232df596"
+      "blake3": "11730cf71dc1c7780a91ee10c82edd8f02e237c0a5a3feadd26e005f2ffcadfe"
     },
     {
       "path": "tests/fixtures/mcp/1.0/tool-transcript.jsonl",
@@ -186,7 +186,7 @@
     },
     {
       "path": "xtask/src/main.rs",
-      "blake3": "ab2e874c411111d0f8e95083fcdb07e32555b4bfae3ae39df5f17dcfbcd648e1"
+      "blake3": "158ed8f83ede01a50861851767416b49f3a9c50726ded81bea102554be0b1049"
     },
     {
       "path": "xtask/src/schemas.rs",
@@ -276,7 +276,7 @@
     },
     {
       "path": "schemas/generated/json/mcp-context-pack-output-1.0.schema.json",
-      "blake3": "c0eb58adb3eeac2d08d5dd44fca613037aa4ca306d243d61890e618126cb5117"
+      "blake3": "912794dd7db01ed23d62761e955452b19478b8c4805638a1966ae902fba6c087"
     },
     {
       "path": "schemas/generated/json/mcp-error-response-1.0.schema.json",

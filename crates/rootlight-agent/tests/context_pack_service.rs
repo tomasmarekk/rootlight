@@ -444,6 +444,12 @@ async fn execution_propagates_policy_and_shapes_child_response() {
     assert!(!calls[0].cancelled);
     assert!(calls[0].deadline > Instant::now());
     assert_eq!(output.usage.estimated_tokens, 64);
+    assert!(!output.data.role_coverage.complete());
+    assert_ne!(
+        output.completeness.state,
+        rootlight_mcp_contract::completeness::CompletenessState::Complete
+    );
+    assert!(!output.data.followups.is_empty());
     assert_eq!(output.generation.generation_id, generation(2));
     let encoded = serde_json::to_value(output).expect("context-pack envelope serializes");
     serde_json::from_value::<ReadEnvelope<ContextPackData>>(encoded)

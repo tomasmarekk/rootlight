@@ -214,6 +214,10 @@
           "maxLength": 72,
           "minLength": 72
         },
+        "role_coverage": {
+          "description": "Objective-specific required and optional role coverage.",
+          "$ref": "#/$defs/RoleCoverageSummary"
+        },
         "structure": {
           "description": "Rootlight-generated reading order and dependency notes.",
           "$ref": "#/$defs/ContextStructure"
@@ -229,6 +233,7 @@
         "request_digest",
         "planner_version",
         "items",
+        "role_coverage",
         "structure",
         "omitted",
         "followups",
@@ -240,6 +245,36 @@
       "type": "string",
       "maxLength": 128,
       "minLength": 1
+    },
+    "ContextPackObjective": {
+      "description": "Task class inferred from the normalized `context.pack` objective.",
+      "oneOf": [
+        {
+          "description": "Fix a defect in target behavior.",
+          "type": "string",
+          "const": "bug_fix"
+        },
+        {
+          "description": "Restructure existing behavior without changing its contract.",
+          "type": "string",
+          "const": "refactor"
+        },
+        {
+          "description": "Explain existing behavior.",
+          "type": "string",
+          "const": "explanation"
+        },
+        {
+          "description": "Move behavior to a new API, platform, or representation.",
+          "type": "string",
+          "const": "migration"
+        },
+        {
+          "description": "Review behavior, risk, or security.",
+          "type": "string",
+          "const": "review"
+        }
+      ]
     },
     "ContextStructure": {
       "description": "Rootlight-generated structure guidance that never contains repository content.",
@@ -794,6 +829,46 @@
       "required": [
         "start_line",
         "end_line"
+      ]
+    },
+    "MissingRequiredRoleReason": {
+      "description": "Stable observed reason that a required role is missing.",
+      "oneOf": [
+        {
+          "description": "No provider invocation or omission observation exists for the role.",
+          "type": "string",
+          "const": "not_searched"
+        },
+        {
+          "description": "The provider completed an exhaustive search without matching evidence.",
+          "type": "string",
+          "const": "no_evidence"
+        },
+        {
+          "description": "The provider does not support the requested evidence domain.",
+          "type": "string",
+          "const": "unsupported"
+        },
+        {
+          "description": "The provider was expected to support the domain but was unavailable.",
+          "type": "string",
+          "const": "unavailable"
+        },
+        {
+          "description": "A provider resource limit stopped an otherwise supported search.",
+          "type": "string",
+          "const": "truncated"
+        },
+        {
+          "description": "Matching evidence was filtered below the admitted confidence threshold.",
+          "type": "string",
+          "const": "low_confidence"
+        },
+        {
+          "description": "Provider admission or final pack selection exhausted the shared budget.",
+          "type": "string",
+          "const": "budget"
+        }
       ]
     },
     "NextAction": {
@@ -1399,6 +1474,125 @@
         "limiting_resources",
         "continuation",
         "guidance"
+      ]
+    },
+    "RoleCoverageEntry": {
+      "description": "Profile-independent coverage facts for one accepted evidence role.",
+      "type": "object",
+      "properties": {
+        "missing_reason": {
+          "description": "Stable reason for a missing required role.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MissingRequiredRoleReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_candidates": {
+          "description": "Number of typed provider candidates observed before selection.",
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 100000,
+          "minimum": 0
+        },
+        "requirement": {
+          "description": "Whether the objective requires this role.",
+          "$ref": "#/$defs/RoleRequirement"
+        },
+        "role": {
+          "description": "Evidence role evaluated under the objective policy.",
+          "$ref": "#/$defs/EvidenceRole"
+        },
+        "selected_items": {
+          "description": "Number of candidates retained in the final pack.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 200,
+          "minimum": 0
+        },
+        "status": {
+          "description": "Selected, missing-required, or optional-absent state.",
+          "$ref": "#/$defs/RoleCoverageStatus"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "requirement",
+        "status",
+        "observed_candidates",
+        "selected_items"
+      ]
+    },
+    "RoleCoverageStatus": {
+      "description": "Selection outcome for one objective role.",
+      "oneOf": [
+        {
+          "description": "At least one candidate with this role was selected.",
+          "type": "string",
+          "const": "satisfied"
+        },
+        {
+          "description": "A required role has no selected candidate.",
+          "type": "string",
+          "const": "missing_required"
+        },
+        {
+          "description": "An optional role has no selected candidate.",
+          "type": "string",
+          "const": "optional_absent"
+        }
+      ]
+    },
+    "RoleCoverageSummary": {
+      "description": "Objective-policy and required-role truth retained under every profile.",
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "objective": {
+          "$ref": "#/$defs/ContextPackObjective"
+        },
+        "objective_rule_version": {
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RoleCoverageEntry"
+          },
+          "maxItems": 7,
+          "minItems": 7
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "objective",
+        "objective_rule_version",
+        "complete",
+        "roles"
+      ]
+    },
+    "RoleRequirement": {
+      "description": "Whether one evidence role is mandatory for the inferred objective.",
+      "oneOf": [
+        {
+          "description": "The pack is incomplete unless at least one item is selected.",
+          "type": "string",
+          "const": "required"
+        },
+        {
+          "description": "The role may improve the pack but does not determine completeness.",
+          "type": "string",
+          "const": "optional"
+        }
       ]
     },
     "SafeLabel": {

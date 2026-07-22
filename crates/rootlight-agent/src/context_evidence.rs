@@ -1312,12 +1312,11 @@ fn provider_reservation(provider: EvidenceProvider, max_candidates: u16) -> Budg
         EvidenceProvider::Source | EvidenceProvider::Implementation => results * 2_048,
         _ => results * 256,
     };
-    let traversal_facts = match provider {
-        EvidenceProvider::Relationships
-        | EvidenceProvider::Architecture
-        | EvidenceProvider::ChangeImpact => results * 8,
-        _ => results,
-    };
+    // Every daemon response may account structural edges even when the
+    // adapter ultimately emits a non-relationship role. Reserve the protocol
+    // maximum per returned candidate so measured child usage cannot exceed the
+    // parent allocation merely because identity resolution traversed edges.
+    let traversal_facts = results * 8;
     BudgetCharge {
         rows: results.saturating_mul(8),
         results,
@@ -1857,7 +1856,8 @@ mod tests {
             planned.data.items[0].trust,
             TrustClassification::UntrustedRepositoryData
         );
-        assert_eq!(planned.completeness, ResultCompleteness::complete());
+        assert!(!planned.data.role_coverage.complete());
+        assert_eq!(planned.completeness.state, CompletenessState::Indeterminate);
     }
 
     #[tokio::test]
@@ -1937,7 +1937,7 @@ mod tests {
             .plan_corpus(&request, &corpus, &NeverCancelled)
             .expect("partial corpus remains materializable");
         assert!(planned.truncated);
-        assert_eq!(planned.completeness.state, CompletenessState::Truncated);
+        assert_eq!(planned.completeness.state, CompletenessState::Indeterminate);
         assert!(
             planned
                 .completeness

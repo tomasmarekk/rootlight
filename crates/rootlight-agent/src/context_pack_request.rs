@@ -6,7 +6,8 @@ use rootlight_ids::{GenerationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
     RepositorySelector,
     context::{
-        ContextPackId, ContextPackInput, ContextSection, Diversity, PLANNER_VERSION, SourcePolicy,
+        ContextPackId, ContextPackInput, ContextSection, Diversity, OBJECTIVE_ROLE_POLICY_VERSION,
+        PLANNER_VERSION, SourcePolicy,
     },
     vertical::{ContinuationCursor, GenerationSelector, ResponseProfile},
 };
@@ -386,6 +387,7 @@ impl CanonicalContextPackRequest {
         let mut hasher =
             blake3::Hasher::new_derive_key("rootlight.context-pack.canonical-request.v1");
         hasher.update(&PLANNER_VERSION.to_le_bytes());
+        hasher.update(&OBJECTIVE_ROLE_POLICY_VERSION.to_le_bytes());
         hash_bytes(&mut hasher, self.repository.as_bytes());
         hash_bytes(&mut hasher, self.generation.as_bytes());
         hasher.update(&[self.objective.tag()]);
@@ -883,7 +885,7 @@ mod tests {
         let request = canonical(&input());
         assert_eq!(
             request.request_digest(),
-            "ctxreq1_44594c955e4acb72e2557767fd34876879c9e4b240f4f23d5ffee7696e3a9846"
+            "ctxreq1_ff1d38f951697a25f45bf734d4fa15b409471051e9286fafc18c442ef0207a55"
         );
         assert_eq!(
             request.pack_id().as_str(),

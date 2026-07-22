@@ -1018,6 +1018,64 @@
           "request_digest": "ctxreq1_44594c955e4acb72e2557767fd34876879c9e4b240f4f23d5ffee7696e3a9846",
           "planner_version": 1,
           "items": [],
+          "role_coverage": {
+            "objective": "explanation",
+            "objective_rule_version": 1,
+            "complete": false,
+            "roles": [
+              {
+                "role": "definition",
+                "requirement": "required",
+                "status": "missing_required",
+                "observed_candidates": 0,
+                "selected_items": 0,
+                "missing_reason": "no_evidence"
+              },
+              {
+                "role": "implementation",
+                "requirement": "optional",
+                "status": "optional_absent",
+                "observed_candidates": 0,
+                "selected_items": 0
+              },
+              {
+                "role": "caller",
+                "requirement": "optional",
+                "status": "optional_absent",
+                "observed_candidates": 0,
+                "selected_items": 0
+              },
+              {
+                "role": "test",
+                "requirement": "optional",
+                "status": "optional_absent",
+                "observed_candidates": 0,
+                "selected_items": 0
+              },
+              {
+                "role": "risk",
+                "requirement": "optional",
+                "status": "optional_absent",
+                "observed_candidates": 0,
+                "selected_items": 0
+              },
+              {
+                "role": "architecture",
+                "requirement": "required",
+                "status": "missing_required",
+                "observed_candidates": 0,
+                "selected_items": 0,
+                "missing_reason": "unsupported"
+              },
+              {
+                "role": "change",
+                "requirement": "optional",
+                "status": "optional_absent",
+                "observed_candidates": 0,
+                "selected_items": 0
+              }
+            ]
+          },
           "structure": {
             "reading_order": [],
             "dependencies": []
@@ -1033,10 +1091,24 @@
         },
         "truncated": false,
         "completeness": {
-          "state": "complete",
-          "limiting_resources": [],
-          "continuation": "not_applicable",
-          "guidance": []
+          "state": "unsupported_partial",
+          "limiting_resources": [
+            {
+              "kind": "capability",
+              "limit": null,
+              "observed": null
+            },
+            {
+              "kind": "coverage",
+              "limit": null,
+              "observed": null
+            }
+          ],
+          "continuation": "unavailable",
+          "guidance": [
+            "refresh_coverage",
+            "unsupported_no_continuation"
+          ]
         },
         "next_cursor": null,
         "usage": {
