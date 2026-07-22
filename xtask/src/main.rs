@@ -19,6 +19,7 @@ mod policy;
 mod protobuf_compatibility;
 mod schemas;
 mod source_hygiene;
+mod token_accounting;
 mod tool_discovery;
 
 use std::{env, error::Error as _, process::ExitCode};
@@ -80,6 +81,14 @@ fn run() -> Result<(), XtaskError> {
         Some("tool-discovery-evidence") => {
             let options = tool_discovery::Options::parse(&mut args)?;
             tool_discovery::emit(&options)?;
+        }
+        Some("token-accounting-report") => {
+            let options = token_accounting::Options::parse(&mut args)?;
+            token_accounting::emit(&options)?;
+        }
+        Some("token-accounting-check") => {
+            let report = token_accounting::parse_report_path(&mut args)?;
+            token_accounting::check(&report)?;
         }
         Some("unsafe-check") => {
             let fixture_root = parse_required_fixture_root(&mut args)?;
@@ -169,7 +178,7 @@ fn git_metadata_command(args: &mut impl Iterator<Item = String>) -> Result<(), X
 #[derive(Debug, thiserror::Error)]
 enum XtaskError {
     #[error(
-        "usage: cargo xtask <architecture-check|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
+        "usage: cargo xtask <architecture-check|capability-check [--output-dir PATH --source-revision REV]|compatibility-check|daemon-lifecycle-check --bin-dir PATH|mcp-vertical-check --bin-dir PATH [--output-dir PATH>|disposition-check --root PATH|freeze-daemon-protocol|id-vectors|generate [--check]|internal-id-check <--commit-msg-file PATH|--range REV|--event PATH>|license-check|markdown-link-check --root PATH|policy-check|token-accounting-report --output-dir PATH --source-revision REV|token-accounting-check --report PATH|tool-discovery-evidence --output-dir PATH --source-revision REV|unsafe-check --fixture-root PATH>"
     )]
     MissingCommand,
     #[error("unknown xtask command: {0}")]
@@ -210,6 +219,8 @@ enum XtaskError {
     Policy(#[from] policy::PolicyError),
     #[error(transparent)]
     ToolDiscovery(#[from] tool_discovery::DiscoveryError),
+    #[error(transparent)]
+    TokenAccounting(#[from] token_accounting::TokenAccountingError),
     #[error(transparent)]
     Schemas(#[from] schemas::SchemaError),
 }
