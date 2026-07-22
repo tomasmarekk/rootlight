@@ -31,8 +31,8 @@ pub const TELEMETRY_SCHEMA_VERSION: u32 = 1;
 pub const MAX_SUPPORT_ARCHIVE_BYTES: usize = 768 * 1024;
 /// Maximum JSON payload accepted for one support entry.
 pub const MAX_SUPPORT_ENTRY_BYTES: usize = 128 * 1024;
-/// Stricter maximum for one normalized telemetry entry.
-pub const MAX_TELEMETRY_ENTRY_BYTES: usize = 64 * 1024;
+/// Maximum JSON payload accepted for one normalized telemetry entry.
+pub const MAX_TELEMETRY_ENTRY_BYTES: usize = MAX_SUPPORT_ENTRY_BYTES;
 /// Maximum recent structured log records retained in memory.
 pub const RECENT_LOG_CAPACITY: usize = 64;
 /// Maximum recent completed spans retained in memory.
@@ -1810,6 +1810,46 @@ mod tests {
             snapshot.traces.last().map(|span| span.sequence),
             Some(u64::try_from(THREADS * SPANS_PER_THREAD).expect("test span count fits u64"))
         );
+    }
+
+    #[test]
+    fn full_telemetry_rings_fit_the_support_entry_bound() {
+        let telemetry = Arc::new(Telemetry::default());
+        for index in 0..=RECENT_LOG_CAPACITY {
+            telemetry.record_cancellation_attempt(
+                [u8::try_from(index).expect("test index fits u8"); 16],
+                CancellationAuditAuthority::InternalResourceLimit,
+                CancellationAuditOutcome::Failed,
+                Some(ErrorCode::ResourceExhausted),
+            );
+        }
+        for _ in 0..=RECENT_TRACE_CAPACITY {
+            telemetry
+                .start_span(SpanKind::IpcRequest {
+                    method: ControlMethod::QueryAdvanced,
+                })
+                .finish(
+                    TelemetryOutcome::Abandoned,
+                    Some(ErrorCode::ResourceExhausted),
+                );
+        }
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.logs.len(), RECENT_LOG_CAPACITY);
+        assert_eq!(snapshot.traces.len(), RECENT_TRACE_CAPACITY);
+        let mut encoded = serde_json::to_vec_pretty(&snapshot).expect("telemetry serializes");
+        encoded.push(b'\n');
+        assert!(
+            encoded.len() <= MAX_TELEMETRY_ENTRY_BYTES,
+            "bounded telemetry needs {} bytes, limit is {MAX_TELEMETRY_ENTRY_BYTES}",
+            encoded.len()
+        );
+
+        let mut input = input();
+        input.protocol_version = ProtocolVersion::V1_5;
+        input.telemetry = Some(snapshot);
+        build_support_bundle_for_schema(&input, SupportBundleSchema::V3)
+            .expect("full bounded telemetry builds a support archive");
     }
 
     #[test]
