@@ -9,15 +9,18 @@ use std::{
 };
 
 use rootlight_agent::{
-    batch::{BatchOrchestrationError, BatchPublicErrors, BatchService, resolve_arguments},
+    batch::{
+        BatchExecutionError, BatchOrchestrationError, BatchPublicErrors, BatchService,
+        resolve_arguments,
+    },
     policy::CancellationSignal,
     port::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentPortFuture,
         AgentResolutionContext, AgentResolvedIdentity, AgentToolPort, AgentToolRequest,
     },
 };
-use rootlight_ids::{GenerationId, RepositoryId};
-use rootlight_ir::CoverageStatus;
+use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
+use rootlight_ir::{CoverageStatus, SourceRef, SourceSpan};
 use rootlight_mcp_contract::{
     ErrorCode, PublicError, RepositorySelector, SchemaVersion, TrustClassification,
     context::{BatchOperation, BatchOperationStatus, BatchStatus, BatchTool, QueryBatchInput},
@@ -128,6 +131,20 @@ fn generation(byte: u8) -> GenerationId {
     GenerationId::from_bytes([byte; 20])
 }
 
+fn symbol(byte: u8) -> SymbolId {
+    SymbolId::from_bytes([byte; 20])
+}
+
+fn source_ref(generation: GenerationId) -> SourceRef {
+    SourceRef::new(
+        repository(),
+        generation,
+        SourceSpan::new(FileId::from_bytes([4; 20]), 0, 32).expect("fixture source span is valid"),
+        ContentHash::from_bytes([5; 32]),
+        None,
+    )
+}
+
 fn response(generation: GenerationId, tokens: u64, data: Value) -> ReadEnvelope<Value> {
     ReadEnvelope {
         schema_version: SchemaVersion::V1_0,
@@ -224,28 +241,26 @@ fn errors() -> BatchPublicErrors {
 }
 
 #[test]
-fn many_bindings_resolve_directly_from_data_and_record_exact_destinations() {
+fn typed_scalar_bindings_resolve_and_record_exact_destinations() {
     let mut arguments = Map::new();
-    for index in 0..64 {
-        arguments.insert(
-            format!("field_{index}"),
-            json!({"$from": "find", "pointer": "/data/matches/0/symbol_id"}),
-        );
-    }
     arguments.insert(
-        "field/slash".to_owned(),
-        json!({"$from": "find", "pointer": "/data/matches/0/symbol_id"}),
+        "from".to_owned(),
+        json!({
+            "symbol_id": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
+        }),
     );
     arguments.insert(
-        "field~tilde".to_owned(),
-        json!({"$from": "find", "pointer": "/data/matches/0/symbol_id"}),
+        "to".to_owned(),
+        json!({
+            "symbol_id": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
+        }),
     );
     let request = input(
         vec![
             operation("find", BatchTool::CodeLocate, Map::new(), None, None),
             operation(
                 "refine",
-                BatchTool::CodeLocate,
+                BatchTool::FlowTrace,
                 arguments,
                 Some(vec!["find"]),
                 None,
@@ -257,32 +272,184 @@ fn many_bindings_resolve_directly_from_data_and_record_exact_destinations() {
         Some(response(
             generation(2),
             100,
-            json!({"matches": [{"symbol_id": "symbol"}]}),
+            json!({"matches": [{"symbol_id": symbol(3)}]}),
         )),
         None,
     ];
 
-    let resolved = resolve_arguments(&request.operations[1], &envelopes, &request, &[0])
-        .expect("bounded bindings resolve from the dependency data value");
-    assert_eq!(resolved.materialized_binding_paths.len(), 66);
-    assert_eq!(resolved.arguments["field_0"], json!("symbol"));
-    assert!(
-        resolved
-            .materialized_binding_paths
-            .iter()
-            .any(|path| path == "/field_63")
+    let resolved = resolve_arguments(
+        &request.operations[1],
+        &envelopes,
+        &request,
+        &[0],
+        repository(),
+        generation(2),
+    )
+    .expect("typed bindings resolve from the dependency data value");
+    assert_eq!(
+        resolved.materialized_binding_paths,
+        ["/from/symbol_id", "/to/symbol_id"]
     );
-    assert!(
-        resolved
-            .materialized_binding_paths
-            .iter()
-            .any(|path| path == "/field~1slash")
+    assert_eq!(resolved.arguments["from"]["symbol_id"], json!(symbol(3)));
+    assert_eq!(resolved.arguments["to"]["symbol_id"], json!(symbol(3)));
+}
+
+#[test]
+fn runtime_binding_values_enforce_type_cardinality_and_identity() {
+    let cases = [
+        (
+            BatchTool::CodeLocate,
+            json!({"matches": [{"symbol_id": 7}]}),
+            BatchTool::FlowTrace,
+            json!({
+                "from": {
+                    "symbol_id": {
+                        "$from": "source",
+                        "pointer": "/data/matches/0/symbol_id"
+                    }
+                }
+            }),
+            BatchExecutionError::BindingTypeMismatch,
+        ),
+        (
+            BatchTool::FlowTrace,
+            json!({"paths": [{"nodes": [symbol(3)]}]}),
+            BatchTool::SymbolExplain,
+            json!({
+                "symbol_ids": {
+                    "$from": "source",
+                    "pointer": "/data/paths/0/nodes"
+                }
+            }),
+            BatchExecutionError::BindingCardinalityMismatch,
+        ),
+        (
+            BatchTool::SymbolExplain,
+            json!({"symbols": [{"definition": source_ref(generation(3))}]}),
+            BatchTool::SourceRead,
+            json!({
+                "references": [{
+                    "source_ref": {
+                        "$from": "source",
+                        "pointer": "/data/symbols/0/definition"
+                    }
+                }]
+            }),
+            BatchExecutionError::BindingIdentityMismatch,
+        ),
+    ];
+
+    for (source_tool, source_data, target_tool, arguments, expected) in cases {
+        let Value::Object(arguments) = arguments else {
+            panic!("fixture arguments are objects");
+        };
+        let request = input(
+            vec![
+                operation("source", source_tool, Map::new(), None, None),
+                operation("target", target_tool, arguments, Some(vec!["source"]), None),
+            ],
+            budget(500),
+        );
+        let envelopes = vec![Some(response(generation(2), 100, source_data)), None];
+
+        assert_eq!(
+            resolve_arguments(
+                &request.operations[1],
+                &envelopes,
+                &request,
+                &[0],
+                repository(),
+                generation(2),
+            ),
+            Err(expected)
+        );
+    }
+}
+
+#[test]
+fn missing_optional_and_empty_collection_are_distinct() {
+    let binding = json!({
+        "$from": "source",
+        "pointer": "/data/plan/0/targets"
+    });
+    let Value::Object(empty_arguments) = json!({
+        "seeds": {"symbols": binding}
+    }) else {
+        panic!("fixture arguments are objects");
+    };
+    let empty_request = input(
+        vec![
+            operation("source", BatchTool::PlanChange, Map::new(), None, None),
+            operation(
+                "target",
+                BatchTool::ContextPack,
+                empty_arguments,
+                Some(vec!["source"]),
+                None,
+            ),
+        ],
+        budget(500),
     );
-    assert!(
-        resolved
-            .materialized_binding_paths
-            .iter()
-            .any(|path| path == "/field~0tilde")
+    let empty_envelopes = vec![
+        Some(response(
+            generation(2),
+            100,
+            json!({"plan": [{"targets": []}]}),
+        )),
+        None,
+    ];
+    let empty = resolve_arguments(
+        &empty_request.operations[1],
+        &empty_envelopes,
+        &empty_request,
+        &[0],
+        repository(),
+        generation(2),
+    )
+    .expect("an explicitly empty collection is a valid zero-cardinality seed");
+    assert_eq!(empty.arguments["seeds"]["symbols"], json!([]));
+
+    let Value::Object(missing_arguments) = json!({
+        "from": {
+            "symbol_id": {
+                "$from": "source",
+                "pointer": "/data/matches/0/symbol_id"
+            }
+        }
+    }) else {
+        panic!("fixture arguments are objects");
+    };
+    let missing_request = input(
+        vec![
+            operation("source", BatchTool::CodeLocate, Map::new(), None, None),
+            operation(
+                "target",
+                BatchTool::FlowTrace,
+                missing_arguments,
+                Some(vec!["source"]),
+                None,
+            ),
+        ],
+        budget(500),
+    );
+    let missing_envelopes = vec![
+        Some(response(
+            generation(2),
+            100,
+            json!({"matches": [{"symbol_id": null}]}),
+        )),
+        None,
+    ];
+    assert_eq!(
+        resolve_arguments(
+            &missing_request.operations[1],
+            &missing_envelopes,
+            &missing_request,
+            &[0],
+            repository(),
+            generation(2),
+        ),
+        Err(BatchExecutionError::MissingBindingValue)
     );
 }
 
@@ -291,23 +458,27 @@ async fn service_materializes_bindings_and_propagates_policy() {
     let mut second_arguments = Map::new();
     second_arguments.insert(
         "symbol_ids".to_owned(),
-        json!({"$from": "find", "pointer": "/data/symbol_ids"}),
+        json!({"$from": "trace", "pointer": "/data/paths/0/nodes"}),
     );
     let input = input(
         vec![
-            operation("find", BatchTool::CodeLocate, Map::new(), None, None),
+            operation("trace", BatchTool::FlowTrace, Map::new(), None, None),
             operation(
                 "explain",
                 BatchTool::SymbolExplain,
                 second_arguments,
-                Some(vec!["find"]),
+                Some(vec!["trace"]),
                 None,
             ),
         ],
         budget(1_000),
     );
     let port = Arc::new(FakePort::with_responses([
-        Ok(response(generation(2), 100, json!({"symbol_ids": []}))),
+        Ok(response(
+            generation(2),
+            100,
+            json!({"paths": [{"nodes": [symbol(3), symbol(4)]}]}),
+        )),
         Ok(response(generation(2), 100, json!({"symbols": []}))),
     ]));
 
@@ -328,7 +499,7 @@ async fn service_materializes_bindings_and_propagates_policy() {
     assert_eq!(calls.len(), 2);
     assert_eq!(
         calls[1].request.clone().into_arguments()["symbol_ids"],
-        json!([])
+        json!([symbol(3), symbol(4)])
     );
     assert_eq!(calls[0].budget.max_tokens, Some(1_000));
     assert_eq!(calls[1].budget.max_tokens, Some(900));
@@ -1054,7 +1225,7 @@ async fn all_child_errors_preserve_complete_per_operation_outcome() {
 }
 
 #[tokio::test]
-async fn generic_port_type_error_is_not_broadly_reclassified_as_a_binding_error() {
+async fn incompatible_binding_types_fail_before_identity_resolution() {
     let mut arguments = Map::new();
     arguments.insert(
         "search_modes".to_owned(),
@@ -1073,28 +1244,18 @@ async fn generic_port_type_error_is_not_broadly_reclassified_as_a_binding_error(
         ],
         budget(500),
     );
-    let type_mismatch = PublicError::builder(ErrorCode::TypeMismatch, "value has the wrong type")
-        .build()
-        .expect("static error is valid");
-    let port = Arc::new(FakePort::with_responses([
-        Ok(response(
-            generation(2),
-            100,
-            json!({"matches": [{"symbol_id": "symbol"}]}),
-        )),
-        Err(AgentPortError::Public(Box::new(type_mismatch))),
-    ]));
+    let port = Arc::new(FakePort::with_responses([]));
 
-    let output = BatchService
-        .execute(port, input, repository(), TestCancellation(false), errors())
-        .await
-        .expect("the independent successful child preserves the batch envelope");
-    assert_eq!(output.data.batch_status, BatchStatus::Partial);
-    assert_eq!(
-        output.data.operation_results[1]
-            .error
-            .as_ref()
-            .map(PublicError::code),
-        Some(ErrorCode::TypeMismatch)
-    );
+    let result = BatchService
+        .execute(
+            Arc::clone(&port),
+            input,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await;
+    assert_eq!(result, Err(BatchOrchestrationError::InvalidArguments));
+    assert_eq!(port.identity_calls.load(Ordering::Relaxed), 0);
+    assert!(port.calls.lock().expect("call lock").is_empty());
 }

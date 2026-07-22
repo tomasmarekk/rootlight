@@ -415,11 +415,13 @@ impl BatchTool {
     }
 }
 
-/// A restricted typed binding that copies one declared output field from a
-/// completed dependency operation into a schema-compatible input field.
+/// A restricted typed binding from one declared dependency operation.
 ///
-/// Wildcards, filters, expressions, templates, array expansion, and references
-/// to warnings or untrusted text are forbidden.
+/// The legacy-compatible `pointer` spelling is retained for the `1.0` wire
+/// contract, but only paths translated by the versioned typed binding registry
+/// are accepted. It is not a general JSON Pointer: wildcards, filters,
+/// expressions, templates, array expansion, envelope metadata, warnings, and
+/// repository-controlled free text are forbidden.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BatchBinding {
@@ -427,7 +429,7 @@ pub struct BatchBinding {
     #[serde(rename = "$from")]
     #[schemars(length(min = 1, max = 32))]
     pub from: String,
-    /// Bounded RFC 6901 JSON Pointer into the completed operation response.
+    /// Registry-reviewed compatibility path naming one typed output slot.
     #[schemars(length(min = 1, max = 1024))]
     pub pointer: String,
 }

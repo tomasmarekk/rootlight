@@ -35,7 +35,7 @@ pub struct BatchBudgetPolicy {
     pub evidence_level: bool,
 }
 
-/// Typed output fields from which a dependency binding may read.
+/// Stable semantic name of a reviewed dependency-output slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BatchBindingSource {
     /// One stable symbol identifier.
@@ -56,20 +56,110 @@ pub enum BatchBindingSource {
     PackId,
 }
 
-/// How materialized binding values are admitted at the child input boundary.
+/// Runtime representation carried by a typed binding slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BatchBindingTargetPolicy {
-    /// Accept only leaves proven compatible by the child's strict input schema.
-    StrictInputSchemaLeaf,
+pub enum BatchBindingValueType {
+    /// One stable symbol identifier.
+    SymbolId,
+    /// A bounded collection of stable symbol identifiers.
+    SymbolIds,
+    /// One generation-pinned source reference.
+    SourceRef,
+    /// A bounded collection of generation-pinned source references.
+    SourceRefs,
+    /// One bounded Rootlight-owned test identifier.
+    TestId,
+    /// One bounded Rootlight-owned context-pack identifier.
+    PackId,
+}
+
+/// Cardinality contract for a source or destination binding slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchBindingCardinality {
+    /// Exactly one non-null value.
+    Scalar,
+    /// A collection whose size is checked before child execution.
+    Collection {
+        /// Smallest accepted collection size.
+        min: u16,
+        /// Largest accepted collection size.
+        max: u16,
+    },
+}
+
+/// Trust class assigned after reviewing a structured output field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchBindingTrust {
+    /// A Rootlight-validated stable identifier, safe as structured data.
+    TypedIdentifier,
+    /// A source reference cryptographically bound to repository content.
+    GenerationPinnedReference,
+    /// An opaque Rootlight-owned identifier with no command semantics.
+    OpaqueRootlightIdentifier,
+}
+
+/// Relationship between a binding value and the batch's pinned identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchBindingGeneration {
+    /// The value is valid only for the one repository and generation pinned by the batch.
+    PinnedBatchIdentity,
+}
+
+/// One segment in a registry-reviewed compatibility path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchBindingPathSegment {
+    /// Exact JSON object field.
+    Field(&'static str),
+    /// Bounded array index.
+    Index {
+        /// Exclusive upper bound for the index.
+        max_exclusive: u16,
+    },
+}
+
+/// One typed output slot exposed by a batch subtool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchBindingSourceSlot {
+    /// Stable semantic source name.
+    pub source: BatchBindingSource,
+    /// Compatibility path relative to the response `data` object.
+    pub path: &'static [BatchBindingPathSegment],
+    /// Runtime value representation.
+    pub value_type: BatchBindingValueType,
+    /// Declared output cardinality.
+    pub cardinality: BatchBindingCardinality,
+    /// Reviewed trust class.
+    pub trust: BatchBindingTrust,
+    /// Generation binding carried by the value.
+    pub generation: BatchBindingGeneration,
+    /// Whether a successful response may omit or null this slot.
+    pub optional: bool,
+    /// Whether the slot may cross into another child input.
+    pub composable: bool,
+}
+
+/// One schema-compatible input slot that may receive a typed binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchBindingTargetSlot {
+    /// Destination path relative to child arguments.
+    pub path: &'static [BatchBindingPathSegment],
+    /// Required runtime value representation.
+    pub value_type: BatchBindingValueType,
+    /// Destination cardinality and collection bound.
+    pub cardinality: BatchBindingCardinality,
+    /// Trust classes permitted at this destination.
+    pub accepted_trust: &'static [BatchBindingTrust],
 }
 
 /// Binding policy enforced for one batch adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchBindingPolicy {
+    /// Translator version applied to the compatibility wire form.
+    pub translator_version: &'static str,
     /// Closed set of typed dependency-output leaves that may be read.
-    pub sources: &'static [BatchBindingSource],
-    /// Validation applied to the destination after materialization.
-    pub target: BatchBindingTargetPolicy,
+    pub sources: &'static [BatchBindingSourceSlot],
+    /// Closed set of schema-compatible destinations that may receive bindings.
+    pub targets: &'static [BatchBindingTargetSlot],
 }
 
 /// How a child response representation is selected inside a batch.
@@ -138,16 +228,6 @@ const FULL_BUDGET: &[BatchBudgetDimension] = &[
 ];
 const CONTEXT_BUDGET: &[BatchBudgetDimension] =
     &[BatchBudgetDimension::Tokens, BatchBudgetDimension::Timeout];
-const TYPED_BINDING_SOURCES: &[BatchBindingSource] = &[
-    BatchBindingSource::SymbolId,
-    BatchBindingSource::SymbolIds,
-    BatchBindingSource::SourceRef,
-    BatchBindingSource::SourceRefs,
-    BatchBindingSource::Definition,
-    BatchBindingSource::Nodes,
-    BatchBindingSource::TestId,
-    BatchBindingSource::PackId,
-];
 const COMPACT: &[ResponseProfile] = &[ResponseProfile::Compact];
 const ANALYTICAL: &[ResponseProfile] = &[
     ResponseProfile::Compact,
@@ -163,10 +243,356 @@ const CONTEXT_BUDGET_POLICY: BatchBudgetPolicy = BatchBudgetPolicy {
     locally_reducible: CONTEXT_BUDGET,
     evidence_level: false,
 };
-const TYPED_BINDING_POLICY: BatchBindingPolicy = BatchBindingPolicy {
-    sources: TYPED_BINDING_SOURCES,
-    target: BatchBindingTargetPolicy::StrictInputSchemaLeaf,
+
+/// Version of the typed translator applied to the legacy-compatible wire form.
+pub const BATCH_BINDING_TRANSLATOR_VERSION: &str = "1.0";
+
+use BatchBindingCardinality::{Collection, Scalar};
+use BatchBindingGeneration::PinnedBatchIdentity;
+use BatchBindingPathSegment::{Field, Index};
+use BatchBindingTrust::{GenerationPinnedReference, OpaqueRootlightIdentifier, TypedIdentifier};
+use BatchBindingValueType::{
+    PackId as PackIdValue, SourceRef as SourceRefValue, SourceRefs as SourceRefsValue,
+    SymbolId as SymbolIdValue, SymbolIds as SymbolIdsValue, TestId as TestIdValue,
 };
+
+const IDENTITY_TRUST: &[BatchBindingTrust] = &[TypedIdentifier];
+const SOURCE_TRUST: &[BatchBindingTrust] = &[GenerationPinnedReference];
+
+const fn source_slot(
+    source: BatchBindingSource,
+    path: &'static [BatchBindingPathSegment],
+    value_type: BatchBindingValueType,
+    cardinality: BatchBindingCardinality,
+    trust: BatchBindingTrust,
+    optional: bool,
+) -> BatchBindingSourceSlot {
+    BatchBindingSourceSlot {
+        source,
+        path,
+        value_type,
+        cardinality,
+        trust,
+        generation: PinnedBatchIdentity,
+        optional,
+        composable: true,
+    }
+}
+
+const fn informational_source_slot(
+    source: BatchBindingSource,
+    path: &'static [BatchBindingPathSegment],
+    value_type: BatchBindingValueType,
+    cardinality: BatchBindingCardinality,
+    trust: BatchBindingTrust,
+    optional: bool,
+) -> BatchBindingSourceSlot {
+    let mut slot = source_slot(source, path, value_type, cardinality, trust, optional);
+    slot.composable = false;
+    slot
+}
+
+const fn target_slot(
+    path: &'static [BatchBindingPathSegment],
+    value_type: BatchBindingValueType,
+    cardinality: BatchBindingCardinality,
+    accepted_trust: &'static [BatchBindingTrust],
+) -> BatchBindingTargetSlot {
+    BatchBindingTargetSlot {
+        path,
+        value_type,
+        cardinality,
+        accepted_trust,
+    }
+}
+
+const CODE_LOCATE_SOURCES: &[BatchBindingSourceSlot] = &[
+    source_slot(
+        BatchBindingSource::SymbolId,
+        &[
+            Field("matches"),
+            Index { max_exclusive: 200 },
+            Field("symbol_id"),
+        ],
+        SymbolIdValue,
+        Scalar,
+        TypedIdentifier,
+        true,
+    ),
+    source_slot(
+        BatchBindingSource::SourceRef,
+        &[
+            Field("matches"),
+            Index { max_exclusive: 200 },
+            Field("source_ref"),
+        ],
+        SourceRefValue,
+        Scalar,
+        GenerationPinnedReference,
+        true,
+    ),
+];
+const SYMBOL_EXPLAIN_SOURCES: &[BatchBindingSourceSlot] = &[
+    source_slot(
+        BatchBindingSource::SymbolId,
+        &[
+            Field("symbols"),
+            Index { max_exclusive: 16 },
+            Field("symbol_id"),
+        ],
+        SymbolIdValue,
+        Scalar,
+        TypedIdentifier,
+        false,
+    ),
+    source_slot(
+        BatchBindingSource::Definition,
+        &[
+            Field("symbols"),
+            Index { max_exclusive: 16 },
+            Field("definition"),
+        ],
+        SourceRefValue,
+        Scalar,
+        GenerationPinnedReference,
+        false,
+    ),
+];
+const FLOW_TRACE_SOURCES: &[BatchBindingSourceSlot] = &[source_slot(
+    BatchBindingSource::Nodes,
+    &[Field("paths"), Index { max_exclusive: 100 }, Field("nodes")],
+    SymbolIdsValue,
+    Collection { min: 2, max: 9 },
+    TypedIdentifier,
+    false,
+)];
+const TESTS_SELECT_SOURCES: &[BatchBindingSourceSlot] = &[informational_source_slot(
+    BatchBindingSource::TestId,
+    &[
+        Field("tests"),
+        Index { max_exclusive: 500 },
+        Field("test_id"),
+    ],
+    TestIdValue,
+    Scalar,
+    OpaqueRootlightIdentifier,
+    false,
+)];
+const CODE_DEAD_SOURCES: &[BatchBindingSourceSlot] = &[
+    source_slot(
+        BatchBindingSource::SymbolId,
+        &[
+            Field("candidates"),
+            Index { max_exclusive: 500 },
+            Field("symbol_id"),
+        ],
+        SymbolIdValue,
+        Scalar,
+        TypedIdentifier,
+        false,
+    ),
+    informational_source_slot(
+        BatchBindingSource::SourceRefs,
+        &[
+            Field("candidates"),
+            Index { max_exclusive: 500 },
+            Field("source_refs"),
+        ],
+        SourceRefsValue,
+        Collection { min: 0, max: 8 },
+        GenerationPinnedReference,
+        false,
+    ),
+];
+const PLAN_CHANGE_SOURCES: &[BatchBindingSourceSlot] = &[source_slot(
+    BatchBindingSource::SymbolIds,
+    &[
+        Field("plan"),
+        Index { max_exclusive: 100 },
+        Field("targets"),
+    ],
+    SymbolIdsValue,
+    Collection { min: 0, max: 32 },
+    TypedIdentifier,
+    false,
+)];
+const CONTEXT_PACK_SOURCES: &[BatchBindingSourceSlot] = &[
+    informational_source_slot(
+        BatchBindingSource::PackId,
+        &[Field("pack_id")],
+        PackIdValue,
+        Scalar,
+        OpaqueRootlightIdentifier,
+        false,
+    ),
+    source_slot(
+        BatchBindingSource::SymbolId,
+        &[
+            Field("items"),
+            Index { max_exclusive: 200 },
+            Field("symbol_id"),
+        ],
+        SymbolIdValue,
+        Scalar,
+        TypedIdentifier,
+        true,
+    ),
+    source_slot(
+        BatchBindingSource::SourceRef,
+        &[
+            Field("items"),
+            Index { max_exclusive: 200 },
+            Field("source_ref"),
+        ],
+        SourceRefValue,
+        Scalar,
+        GenerationPinnedReference,
+        true,
+    ),
+];
+const SOURCE_READ_SOURCES: &[BatchBindingSourceSlot] = &[source_slot(
+    BatchBindingSource::SourceRef,
+    &[
+        Field("chunks"),
+        Index { max_exclusive: 32 },
+        Field("source_ref"),
+    ],
+    SourceRefValue,
+    Scalar,
+    GenerationPinnedReference,
+    false,
+)];
+
+const SYMBOL_SCOPE_TARGET: BatchBindingTargetSlot = target_slot(
+    &[Field("scope"), Field("symbols")],
+    SymbolIdsValue,
+    Collection { min: 1, max: 64 },
+    IDENTITY_TRUST,
+);
+const CODE_LOCATE_TARGETS: &[BatchBindingTargetSlot] = &[
+    target_slot(
+        &[Field("related_to")],
+        SymbolIdsValue,
+        Collection { min: 1, max: 16 },
+        IDENTITY_TRUST,
+    ),
+    SYMBOL_SCOPE_TARGET,
+];
+const SYMBOL_EXPLAIN_TARGETS: &[BatchBindingTargetSlot] = &[target_slot(
+    &[Field("symbol_ids")],
+    SymbolIdsValue,
+    Collection { min: 1, max: 16 },
+    IDENTITY_TRUST,
+)];
+const SYMBOL_RELATIONSHIPS_TARGETS: &[BatchBindingTargetSlot] = &[
+    target_slot(
+        &[Field("symbol_ids")],
+        SymbolIdsValue,
+        Collection { min: 1, max: 64 },
+        IDENTITY_TRUST,
+    ),
+    SYMBOL_SCOPE_TARGET,
+];
+const FLOW_TRACE_TARGETS: &[BatchBindingTargetSlot] = &[
+    target_slot(
+        &[Field("from"), Field("symbol_id")],
+        SymbolIdValue,
+        Scalar,
+        IDENTITY_TRUST,
+    ),
+    target_slot(
+        &[Field("to"), Field("symbol_id")],
+        SymbolIdValue,
+        Scalar,
+        IDENTITY_TRUST,
+    ),
+];
+const CHANGE_IMPACT_TARGETS: &[BatchBindingTargetSlot] = &[target_slot(
+    &[Field("change"), Field("symbol_ids")],
+    SymbolIdsValue,
+    Collection { min: 1, max: 256 },
+    IDENTITY_TRUST,
+)];
+const TESTS_SELECT_TARGETS: &[BatchBindingTargetSlot] = &[
+    target_slot(
+        &[Field("seeds"), Field("symbols")],
+        SymbolIdsValue,
+        Collection { min: 1, max: 64 },
+        IDENTITY_TRUST,
+    ),
+    target_slot(
+        &[Field("seeds"), Field("change"), Field("symbol_ids")],
+        SymbolIdsValue,
+        Collection { min: 1, max: 256 },
+        IDENTITY_TRUST,
+    ),
+];
+const SYMBOL_SCOPE_TARGETS: &[BatchBindingTargetSlot] = &[SYMBOL_SCOPE_TARGET];
+const PLAN_CHANGE_TARGETS: &[BatchBindingTargetSlot] = &[
+    target_slot(
+        &[
+            Field("targets"),
+            Index { max_exclusive: 64 },
+            Field("symbol_id"),
+        ],
+        SymbolIdValue,
+        Scalar,
+        IDENTITY_TRUST,
+    ),
+    target_slot(
+        &[Field("change_context"), Field("symbol_ids")],
+        SymbolIdsValue,
+        Collection { min: 1, max: 256 },
+        IDENTITY_TRUST,
+    ),
+];
+const CONTEXT_PACK_TARGETS: &[BatchBindingTargetSlot] = &[
+    target_slot(
+        &[Field("seeds"), Field("symbols")],
+        SymbolIdsValue,
+        Collection { min: 0, max: 32 },
+        IDENTITY_TRUST,
+    ),
+    target_slot(
+        &[Field("seeds"), Field("tests")],
+        SymbolIdsValue,
+        Collection { min: 0, max: 32 },
+        IDENTITY_TRUST,
+    ),
+];
+const SOURCE_READ_TARGETS: &[BatchBindingTargetSlot] = &[
+    target_slot(
+        &[
+            Field("references"),
+            Index { max_exclusive: 32 },
+            Field("source_ref"),
+        ],
+        SourceRefValue,
+        Scalar,
+        SOURCE_TRUST,
+    ),
+    target_slot(
+        &[
+            Field("references"),
+            Index { max_exclusive: 32 },
+            Field("symbol_id"),
+        ],
+        SymbolIdValue,
+        Scalar,
+        IDENTITY_TRUST,
+    ),
+];
+
+const fn binding_policy(
+    sources: &'static [BatchBindingSourceSlot],
+    targets: &'static [BatchBindingTargetSlot],
+) -> BatchBindingPolicy {
+    BatchBindingPolicy {
+        translator_version: BATCH_BINDING_TRANSLATOR_VERSION,
+        sources,
+        targets,
+    }
+}
 
 const fn selectable(
     wire_field: &'static str,
@@ -186,6 +612,7 @@ const fn descriptor(
     required_profile: ExposureProfile,
     response_profiles: BatchResponseProfilePolicy,
     budget: BatchBudgetPolicy,
+    bindings: BatchBindingPolicy,
 ) -> BatchToolDescriptor {
     BatchToolDescriptor {
         batch_tool,
@@ -197,7 +624,7 @@ const fn descriptor(
         eligible: true,
         response_profiles,
         budget,
-        bindings: TYPED_BINDING_POLICY,
+        bindings,
     }
 }
 
@@ -210,6 +637,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         ExposureProfile::Scout,
         selectable("response_profile", ANALYTICAL),
         FULL_BUDGET_POLICY,
+        binding_policy(CODE_LOCATE_SOURCES, CODE_LOCATE_TARGETS),
     ),
     descriptor(
         BatchTool::SymbolExplain,
@@ -218,6 +646,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         ExposureProfile::Scout,
         selectable("response_profile", ANALYTICAL),
         FULL_BUDGET_POLICY,
+        binding_policy(SYMBOL_EXPLAIN_SOURCES, SYMBOL_EXPLAIN_TARGETS),
     ),
     descriptor(
         BatchTool::SymbolRelationships,
@@ -226,6 +655,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         ExposureProfile::Analysis,
         selectable("response_profile", ANALYTICAL),
         FULL_BUDGET_POLICY,
+        binding_policy(&[], SYMBOL_RELATIONSHIPS_TARGETS),
     ),
     descriptor(
         BatchTool::FlowTrace,
@@ -234,6 +664,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         ExposureProfile::Analysis,
         selectable("response_profile", ANALYTICAL),
         FULL_BUDGET_POLICY,
+        binding_policy(FLOW_TRACE_SOURCES, FLOW_TRACE_TARGETS),
     ),
     descriptor(
         BatchTool::ChangeImpact,
@@ -242,6 +673,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         ExposureProfile::Analysis,
         selectable("profile", ANALYTICAL),
         FULL_BUDGET_POLICY,
+        binding_policy(&[], CHANGE_IMPACT_TARGETS),
     ),
     descriptor(
         BatchTool::TestsSelect,
@@ -250,6 +682,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         ExposureProfile::Analysis,
         selectable("profile", ANALYTICAL),
         FULL_BUDGET_POLICY,
+        binding_policy(TESTS_SELECT_SOURCES, TESTS_SELECT_TARGETS),
     ),
     descriptor(
         BatchTool::ArchitectureOverview,
@@ -258,6 +691,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         ExposureProfile::Analysis,
         selectable("response_profile", ANALYTICAL),
         FULL_BUDGET_POLICY,
+        binding_policy(&[], SYMBOL_SCOPE_TARGETS),
     ),
     descriptor(
         BatchTool::ArchitectureCycles,
@@ -266,6 +700,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         ExposureProfile::Analysis,
         selectable("response_profile", ANALYTICAL),
         FULL_BUDGET_POLICY,
+        binding_policy(&[], SYMBOL_SCOPE_TARGETS),
     ),
     descriptor(
         BatchTool::CodeDead,
@@ -274,6 +709,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         ExposureProfile::Analysis,
         selectable("response_profile", ANALYTICAL),
         FULL_BUDGET_POLICY,
+        binding_policy(CODE_DEAD_SOURCES, SYMBOL_SCOPE_TARGETS),
     ),
     descriptor(
         BatchTool::PlanChange,
@@ -282,6 +718,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         ExposureProfile::Developer,
         selectable("profile", ANALYTICAL),
         FULL_BUDGET_POLICY,
+        binding_policy(PLAN_CHANGE_SOURCES, PLAN_CHANGE_TARGETS),
     ),
     descriptor(
         BatchTool::ContextPack,
@@ -290,6 +727,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         ExposureProfile::Scout,
         BatchResponseProfilePolicy::Fixed(ResponseProfile::Compact),
         CONTEXT_BUDGET_POLICY,
+        binding_policy(CONTEXT_PACK_SOURCES, CONTEXT_PACK_TARGETS),
     ),
     descriptor(
         BatchTool::SourceRead,
@@ -298,6 +736,7 @@ pub const BATCH_TOOL_REGISTRY: [BatchToolDescriptor; 12] = [
         ExposureProfile::Scout,
         selectable("response_profile", COMPACT),
         FULL_BUDGET_POLICY,
+        binding_policy(SOURCE_READ_SOURCES, SOURCE_READ_TARGETS),
     ),
 ];
 
@@ -329,8 +768,9 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        BATCH_TOOL_REGISTRY, BatchBindingSource, BatchBudgetDimension, BatchResponseProfilePolicy,
-        batch_descriptor, batch_descriptor_for_tool,
+        BATCH_BINDING_TRANSLATOR_VERSION, BATCH_TOOL_REGISTRY, BatchBindingSource,
+        BatchBudgetDimension, BatchResponseProfilePolicy, batch_descriptor,
+        batch_descriptor_for_tool,
     };
     use crate::capability::{ResponseProfileSupport, capability_for};
     use crate::context::BatchTool;
@@ -429,6 +869,7 @@ mod tests {
 
     #[test]
     fn budget_and_binding_policies_are_explicit_for_every_adapter() {
+        let mut declared_sources = BTreeSet::new();
         for descriptor in BATCH_TOOL_REGISTRY {
             assert!(
                 descriptor
@@ -443,19 +884,52 @@ mod tests {
                     .contains(&BatchBudgetDimension::Timeout)
             );
             assert!(!descriptor.budget.evidence_level);
-            assert!(
-                descriptor
-                    .bindings
-                    .sources
-                    .contains(&BatchBindingSource::SymbolId)
+            assert_eq!(
+                descriptor.bindings.translator_version,
+                BATCH_BINDING_TRANSLATOR_VERSION
             );
-            assert!(
-                descriptor
-                    .bindings
-                    .sources
-                    .contains(&BatchBindingSource::SourceRef)
-            );
+            for source in descriptor.bindings.sources {
+                assert!(!source.path.is_empty());
+                declared_sources.insert(source.source);
+            }
+            for target in descriptor.bindings.targets {
+                assert!(!target.path.is_empty());
+                assert!(!target.accepted_trust.is_empty());
+            }
         }
+        assert_eq!(
+            declared_sources,
+            BTreeSet::from([
+                BatchBindingSource::SymbolId,
+                BatchBindingSource::SymbolIds,
+                BatchBindingSource::SourceRef,
+                BatchBindingSource::SourceRefs,
+                BatchBindingSource::Definition,
+                BatchBindingSource::Nodes,
+                BatchBindingSource::TestId,
+                BatchBindingSource::PackId,
+            ])
+        );
+        assert!(
+            BATCH_TOOL_REGISTRY
+                .iter()
+                .flat_map(|descriptor| descriptor.bindings.sources)
+                .any(|source| source.composable)
+        );
+        assert!(
+            BATCH_TOOL_REGISTRY
+                .iter()
+                .flat_map(|descriptor| descriptor.bindings.sources)
+                .filter(|source| {
+                    matches!(
+                        source.source,
+                        BatchBindingSource::SourceRefs
+                            | BatchBindingSource::TestId
+                            | BatchBindingSource::PackId
+                    )
+                })
+                .all(|source| !source.composable)
+        );
         let context = batch_descriptor(BatchTool::ContextPack);
         assert_eq!(
             context.budget.locally_reducible,

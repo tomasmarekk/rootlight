@@ -12,9 +12,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rootlight_ids::RepositoryId;
+use rootlight_ids::{GenerationId, RepositoryId, SymbolId};
+use rootlight_ir::SourceRef;
 use rootlight_mcp_contract::{
     McpTool, PublicError, SchemaVersion, TrustClassification,
+    batch::{
+        BatchBindingCardinality, BatchBindingPathSegment, BatchBindingSourceSlot,
+        BatchBindingTargetSlot, BatchBindingValueType, batch_descriptor,
+    },
     completeness::{
         CompletenessState, ContinuationAvailability, ContinuationGuidance, LimitingResource,
         LimitingResourceKind, ResultCompleteness,
@@ -102,6 +107,18 @@ pub enum BatchExecutionError {
     /// A typed binding does not resolve through a declared completed dependency.
     #[error("batch binding does not resolve through a completed dependency")]
     InvalidBinding,
+    /// A successful dependency omitted an optional typed slot selected by the binding.
+    #[error("batch binding selected a missing optional value")]
+    MissingBindingValue,
+    /// A dependency returned a value outside its typed slot contract.
+    #[error("batch binding value has the wrong type")]
+    BindingTypeMismatch,
+    /// A dependency returned a collection outside the target slot bounds.
+    #[error("batch binding collection violates its cardinality contract")]
+    BindingCardinalityMismatch,
+    /// A generation-pinned source reference does not match the batch identity.
+    #[error("batch binding source identity does not match the pinned batch")]
+    BindingIdentityMismatch,
     /// A batch-inherited field could not be represented as JSON.
     #[error("batch inherited field could not be serialized")]
     Serialization,
@@ -367,20 +384,25 @@ pub fn resolve_arguments(
     envelopes: &[Option<ReadEnvelope<Value>>],
     input: &QueryBatchInput,
     declared: &[usize],
+    expected_repository: RepositoryId,
+    expected_generation: GenerationId,
 ) -> Result<ResolvedBatchArguments, BatchExecutionError> {
     let mut arguments = Map::new();
     let mut materialized_binding_paths = Vec::new();
-    for (key, value) in &operation.arguments {
-        let destination = append_pointer("", key)?;
-        let resolved = resolve_binding(
-            value,
+    {
+        let mut resolver = BindingResolver {
             envelopes,
-            &input.operations,
+            operations: &input.operations,
             declared,
-            &destination,
-            &mut materialized_binding_paths,
-        )?;
-        arguments.insert(key.clone(), resolved);
+            target_tool: operation.tool,
+            materialized_binding_paths: &mut materialized_binding_paths,
+            expected_repository,
+            expected_generation,
+        };
+        for (key, value) in &operation.arguments {
+            let destination = append_pointer("", key)?;
+            arguments.insert(key.clone(), resolver.resolve(value, &destination)?);
+        }
     }
     arguments.insert(
         "repository".to_owned(),
@@ -554,75 +576,72 @@ fn aggregate_completeness(
     .map_err(|_| BatchOrchestrationError::InvalidResponse)
 }
 
-fn resolve_binding(
-    value: &Value,
-    envelopes: &[Option<ReadEnvelope<Value>>],
-    operations: &[ContractBatchOperation],
-    declared: &[usize],
-    destination: &str,
-    materialized_binding_paths: &mut Vec<String>,
-) -> Result<Value, BatchExecutionError> {
-    match value {
-        Value::Object(map) => {
-            if let Some((from_name, pointer)) = binding_reference(map)? {
-                let dependency = declared
-                    .iter()
-                    .find(|&&index| operations[index].id == from_name)
-                    .ok_or(BatchExecutionError::InvalidBinding)?;
-                let envelope = envelopes[*dependency]
-                    .as_ref()
-                    .ok_or(BatchExecutionError::InvalidBinding)?;
-                let data_pointer = pointer
-                    .strip_prefix("/data")
-                    .ok_or(BatchExecutionError::InvalidBinding)?;
-                let resolved = envelope
-                    .data
-                    .pointer(data_pointer)
-                    .cloned()
-                    .ok_or(BatchExecutionError::InvalidBinding)?;
-                materialized_binding_paths
-                    .try_reserve(1)
-                    .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
-                materialized_binding_paths.push(destination.to_owned());
-                Ok(resolved)
-            } else {
-                let mut resolved = Map::new();
-                for (key, inner) in map {
-                    let child_destination = append_pointer(destination, key)?;
-                    resolved.insert(
-                        key.clone(),
-                        resolve_binding(
-                            inner,
-                            envelopes,
-                            operations,
-                            declared,
-                            &child_destination,
-                            materialized_binding_paths,
-                        )?,
-                    );
+struct BindingResolver<'a> {
+    envelopes: &'a [Option<ReadEnvelope<Value>>],
+    operations: &'a [ContractBatchOperation],
+    declared: &'a [usize],
+    target_tool: BatchTool,
+    materialized_binding_paths: &'a mut Vec<String>,
+    expected_repository: RepositoryId,
+    expected_generation: GenerationId,
+}
+
+impl BindingResolver<'_> {
+    fn resolve(&mut self, value: &Value, destination: &str) -> Result<Value, BatchExecutionError> {
+        match value {
+            Value::Object(map) => {
+                if let Some((from_name, pointer)) = binding_reference(map)? {
+                    let dependency = self
+                        .declared
+                        .iter()
+                        .find(|&&index| self.operations[index].id == from_name)
+                        .ok_or(BatchExecutionError::InvalidBinding)?;
+                    let envelope = self.envelopes[*dependency]
+                        .as_ref()
+                        .ok_or(BatchExecutionError::InvalidBinding)?;
+                    if envelope.trust != TrustClassification::UntrustedRepositoryData {
+                        return Err(BatchExecutionError::InvalidBinding);
+                    }
+                    let source_tool = self.operations[*dependency].tool;
+                    let source = translate_source_binding(source_tool, pointer)?;
+                    let target = translate_target_binding(self.target_tool, destination)?;
+                    validate_binding_pair(source.slot, target)?;
+                    let resolved =
+                        extract_typed_source(&envelope.data, source.slot, &source.indices)?.clone();
+                    validate_runtime_binding(
+                        &resolved,
+                        source.slot,
+                        target,
+                        self.expected_repository,
+                        self.expected_generation,
+                    )?;
+                    self.materialized_binding_paths
+                        .try_reserve(1)
+                        .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
+                    self.materialized_binding_paths.push(destination.to_owned());
+                    Ok(resolved)
+                } else {
+                    let mut resolved = Map::new();
+                    for (key, inner) in map {
+                        let child_destination = append_pointer(destination, key)?;
+                        resolved.insert(key.clone(), self.resolve(inner, &child_destination)?);
+                    }
+                    Ok(Value::Object(resolved))
                 }
-                Ok(Value::Object(resolved))
             }
-        }
-        Value::Array(items) => {
-            let mut resolved = Vec::new();
-            resolved
-                .try_reserve_exact(items.len())
-                .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
-            for (index, inner) in items.iter().enumerate() {
-                let child_destination = append_pointer(destination, &index.to_string())?;
-                resolved.push(resolve_binding(
-                    inner,
-                    envelopes,
-                    operations,
-                    declared,
-                    &child_destination,
-                    materialized_binding_paths,
-                )?);
+            Value::Array(items) => {
+                let mut resolved = Vec::new();
+                resolved
+                    .try_reserve_exact(items.len())
+                    .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
+                for (index, inner) in items.iter().enumerate() {
+                    let child_destination = append_pointer(destination, &index.to_string())?;
+                    resolved.push(self.resolve(inner, &child_destination)?);
+                }
+                Ok(Value::Array(resolved))
             }
-            Ok(Value::Array(resolved))
+            scalar => Ok(scalar.clone()),
         }
-        scalar => Ok(scalar.clone()),
     }
 }
 
@@ -661,27 +680,316 @@ fn binding_reference(
         .ok_or(BatchExecutionError::InvalidBinding)?;
     if !batch_operation_id_is_valid(from)
         || !(1..=1024).contains(&pointer.len())
-        || !binding_pointer_is_allowed(pointer)
+        || !pointer.starts_with('/')
     {
         return Err(BatchExecutionError::InvalidBinding);
     }
     Ok(Some((from, pointer)))
 }
 
-fn binding_objects_are_valid(arguments: &Map<String, Value>) -> bool {
-    arguments.values().all(binding_value_is_valid)
+/// Validates every binding edge against the typed source and destination registry.
+///
+/// This check is independent of child results and therefore runs before
+/// identity resolution or any child dispatch.
+///
+/// # Errors
+///
+/// Returns [`BatchExecutionError::InvalidBinding`] for undeclared sources,
+/// unregistered compatibility paths, incompatible types, cardinalities, or
+/// trust classes.
+pub fn validate_typed_bindings(
+    input: &QueryBatchInput,
+    dependencies: &[Vec<usize>],
+) -> Result<(), BatchExecutionError> {
+    if dependencies.len() != input.operations.len() {
+        return Err(BatchExecutionError::InvalidBinding);
+    }
+    for (index, operation) in input.operations.iter().enumerate() {
+        for (key, value) in &operation.arguments {
+            let destination = append_pointer("", key)?;
+            validate_typed_binding_value(
+                value,
+                operation.tool,
+                &destination,
+                &input.operations,
+                &dependencies[index],
+            )?;
+        }
+    }
+    Ok(())
 }
 
-fn binding_value_is_valid(value: &Value) -> bool {
+fn validate_typed_binding_value(
+    value: &Value,
+    target_tool: BatchTool,
+    destination: &str,
+    operations: &[ContractBatchOperation],
+    declared: &[usize],
+) -> Result<(), BatchExecutionError> {
     match value {
-        Value::Object(map) => match binding_reference(map) {
-            Ok(Some(_)) => true,
-            Ok(None) => map.values().all(binding_value_is_valid),
-            Err(_) => false,
-        },
-        Value::Array(items) => items.iter().all(binding_value_is_valid),
-        _ => true,
+        Value::Object(map) => {
+            if let Some((from_name, pointer)) = binding_reference(map)? {
+                let dependency = declared
+                    .iter()
+                    .find(|&&index| operations[index].id == from_name)
+                    .ok_or(BatchExecutionError::InvalidBinding)?;
+                let source = translate_source_binding(operations[*dependency].tool, pointer)?;
+                let target = translate_target_binding(target_tool, destination)?;
+                validate_binding_pair(source.slot, target)
+            } else {
+                for (key, inner) in map {
+                    let child_destination = append_pointer(destination, key)?;
+                    validate_typed_binding_value(
+                        inner,
+                        target_tool,
+                        &child_destination,
+                        operations,
+                        declared,
+                    )?;
+                }
+                Ok(())
+            }
+        }
+        Value::Array(items) => {
+            for (index, inner) in items.iter().enumerate() {
+                let child_destination = append_pointer(destination, &index.to_string())?;
+                validate_typed_binding_value(
+                    inner,
+                    target_tool,
+                    &child_destination,
+                    operations,
+                    declared,
+                )?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
+}
+
+struct TypedSourceBinding<'a> {
+    slot: &'a BatchBindingSourceSlot,
+    indices: Vec<usize>,
+}
+
+fn translate_source_binding(
+    tool: BatchTool,
+    pointer: &str,
+) -> Result<TypedSourceBinding<'static>, BatchExecutionError> {
+    let segments = compatibility_segments(pointer, true)?;
+    for slot in batch_descriptor(tool).bindings.sources {
+        if let Some(indices) = match_typed_path(slot.path, &segments)? {
+            return Ok(TypedSourceBinding { slot, indices });
+        }
+    }
+    Err(BatchExecutionError::InvalidBinding)
+}
+
+fn translate_target_binding(
+    tool: BatchTool,
+    destination: &str,
+) -> Result<&'static BatchBindingTargetSlot, BatchExecutionError> {
+    let segments = compatibility_segments(destination, false)?;
+    for target in batch_descriptor(tool).bindings.targets {
+        if match_typed_path(target.path, &segments)?.is_some() {
+            return Ok(target);
+        }
+    }
+    Err(BatchExecutionError::InvalidBinding)
+}
+
+fn compatibility_segments(pointer: &str, source: bool) -> Result<Vec<&str>, BatchExecutionError> {
+    if !(1..=1024).contains(&pointer.len()) || pointer.contains('~') {
+        return Err(BatchExecutionError::InvalidBinding);
+    }
+    let mut raw = pointer.split('/');
+    if raw.next() != Some("") {
+        return Err(BatchExecutionError::InvalidBinding);
+    }
+    if source && raw.next() != Some("data") {
+        return Err(BatchExecutionError::InvalidBinding);
+    }
+    let mut segments = Vec::new();
+    segments
+        .try_reserve(pointer.matches('/').count())
+        .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
+    for segment in raw {
+        if segment.is_empty() {
+            return Err(BatchExecutionError::InvalidBinding);
+        }
+        segments.push(segment);
+    }
+    Ok(segments)
+}
+
+fn match_typed_path(
+    pattern: &[BatchBindingPathSegment],
+    segments: &[&str],
+) -> Result<Option<Vec<usize>>, BatchExecutionError> {
+    if pattern.len() != segments.len() {
+        return Ok(None);
+    }
+    let mut indices = Vec::new();
+    indices
+        .try_reserve(pattern.len())
+        .map_err(|_| BatchExecutionError::MemoryUnavailable)?;
+    for (expected, actual) in pattern.iter().zip(segments) {
+        match expected {
+            BatchBindingPathSegment::Field(field) if *field == *actual => {}
+            BatchBindingPathSegment::Index { max_exclusive } => {
+                if actual.len() > 1 && actual.starts_with('0') {
+                    return Ok(None);
+                }
+                let Ok(index) = actual.parse::<usize>() else {
+                    return Ok(None);
+                };
+                if index >= usize::from(*max_exclusive) {
+                    return Ok(None);
+                }
+                indices.push(index);
+            }
+            BatchBindingPathSegment::Field(_) => return Ok(None),
+        }
+    }
+    Ok(Some(indices))
+}
+
+fn validate_binding_pair(
+    source: &BatchBindingSourceSlot,
+    target: &BatchBindingTargetSlot,
+) -> Result<(), BatchExecutionError> {
+    if !source.composable
+        || source.value_type != target.value_type
+        || !target.accepted_trust.contains(&source.trust)
+        || !matches!(
+            (source.cardinality, target.cardinality),
+            (
+                BatchBindingCardinality::Scalar,
+                BatchBindingCardinality::Scalar
+            ) | (
+                BatchBindingCardinality::Collection { .. },
+                BatchBindingCardinality::Collection { .. }
+            )
+        )
+    {
+        return Err(BatchExecutionError::InvalidBinding);
+    }
+    Ok(())
+}
+
+fn extract_typed_source<'a>(
+    data: &'a Value,
+    slot: &BatchBindingSourceSlot,
+    indices: &[usize],
+) -> Result<&'a Value, BatchExecutionError> {
+    let mut current = data;
+    let mut index_cursor = 0;
+    for segment in slot.path {
+        current = match segment {
+            BatchBindingPathSegment::Field(field) => current
+                .as_object()
+                .and_then(|object| object.get(*field))
+                .ok_or(BatchExecutionError::MissingBindingValue)?,
+            BatchBindingPathSegment::Index { .. } => {
+                let index = *indices
+                    .get(index_cursor)
+                    .ok_or(BatchExecutionError::InvalidBinding)?;
+                index_cursor += 1;
+                current
+                    .as_array()
+                    .and_then(|array| array.get(index))
+                    .ok_or(BatchExecutionError::MissingBindingValue)?
+            }
+        };
+    }
+    if current.is_null() {
+        return Err(BatchExecutionError::MissingBindingValue);
+    }
+    Ok(current)
+}
+
+fn validate_runtime_binding(
+    value: &Value,
+    source: &BatchBindingSourceSlot,
+    target: &BatchBindingTargetSlot,
+    expected_repository: RepositoryId,
+    expected_generation: GenerationId,
+) -> Result<(), BatchExecutionError> {
+    validate_cardinality(value, source.cardinality)?;
+    validate_cardinality(value, target.cardinality)?;
+    match source.value_type {
+        BatchBindingValueType::SymbolId => {
+            serde_json::from_value::<SymbolId>(value.clone())
+                .map_err(|_| BatchExecutionError::BindingTypeMismatch)?;
+        }
+        BatchBindingValueType::SymbolIds => {
+            serde_json::from_value::<Vec<SymbolId>>(value.clone())
+                .map_err(|_| BatchExecutionError::BindingTypeMismatch)?;
+        }
+        BatchBindingValueType::SourceRef => {
+            let source_ref = serde_json::from_value::<SourceRef>(value.clone())
+                .map_err(|_| BatchExecutionError::BindingTypeMismatch)?;
+            validate_source_identity(&source_ref, expected_repository, expected_generation)?;
+        }
+        BatchBindingValueType::SourceRefs => {
+            let source_refs = serde_json::from_value::<Vec<SourceRef>>(value.clone())
+                .map_err(|_| BatchExecutionError::BindingTypeMismatch)?;
+            for source_ref in &source_refs {
+                validate_source_identity(source_ref, expected_repository, expected_generation)?;
+            }
+        }
+        BatchBindingValueType::TestId => {
+            let value = value
+                .as_str()
+                .ok_or(BatchExecutionError::BindingTypeMismatch)?;
+            if !(1..=512).contains(&value.len()) {
+                return Err(BatchExecutionError::BindingTypeMismatch);
+            }
+        }
+        BatchBindingValueType::PackId => {
+            let value = value
+                .as_str()
+                .ok_or(BatchExecutionError::BindingTypeMismatch)?;
+            if !(1..=128).contains(&value.len()) {
+                return Err(BatchExecutionError::BindingTypeMismatch);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_cardinality(
+    value: &Value,
+    cardinality: BatchBindingCardinality,
+) -> Result<(), BatchExecutionError> {
+    match cardinality {
+        BatchBindingCardinality::Scalar if !value.is_array() && !value.is_null() => Ok(()),
+        BatchBindingCardinality::Scalar => Err(BatchExecutionError::BindingCardinalityMismatch),
+        BatchBindingCardinality::Collection { min, max } => {
+            let length = value
+                .as_array()
+                .map(Vec::len)
+                .ok_or(BatchExecutionError::BindingCardinalityMismatch)?;
+            if (usize::from(min)..=usize::from(max)).contains(&length) {
+                Ok(())
+            } else {
+                Err(BatchExecutionError::BindingCardinalityMismatch)
+            }
+        }
+    }
+}
+
+fn validate_source_identity(
+    source_ref: &SourceRef,
+    expected_repository: RepositoryId,
+    expected_generation: GenerationId,
+) -> Result<(), BatchExecutionError> {
+    if source_ref.repository() != expected_repository
+        || source_ref.generation() != expected_generation
+    {
+        return Err(BatchExecutionError::BindingIdentityMismatch);
+    }
+    Ok(())
 }
 
 /// Default aggregate token ceiling for a batch without an explicit budget.
@@ -689,55 +997,6 @@ pub const DEFAULT_BATCH_TOKENS: u16 = 3_000;
 
 /// Default wall-clock ceiling for a batch without an explicit timeout.
 pub const DEFAULT_BATCH_TIMEOUT_MS: u32 = 30_000;
-
-/// Restricts bindings to typed identifiers and source references under the
-/// child data payload.
-///
-/// The closed leaf set deliberately excludes envelope metadata, warnings,
-/// display text, snippets, rationale, and other repository-controlled strings.
-/// Materialized values still pass the destination tool's strict schema before
-/// dispatch, which verifies target type compatibility.
-fn binding_pointer_is_allowed(pointer: &str) -> bool {
-    let mut segments = pointer.split('/').peekable();
-    if segments.next() != Some("") || segments.next() != Some("data") {
-        return false;
-    }
-    let mut saw_leaf = false;
-    while let Some(segment) = segments.next() {
-        if segment.is_empty() || segment.contains('~') || saw_leaf {
-            return false;
-        }
-        let is_last = segments.peek().is_none();
-        if is_last {
-            saw_leaf = matches!(
-                segment,
-                "symbol_id"
-                    | "symbol_ids"
-                    | "source_ref"
-                    | "source_refs"
-                    | "definition"
-                    | "nodes"
-                    | "test_id"
-                    | "pack_id"
-            );
-        } else if !segment.bytes().all(|byte| byte.is_ascii_digit())
-            && !matches!(
-                segment,
-                "matches"
-                    | "symbols"
-                    | "paths"
-                    | "nodes"
-                    | "tests"
-                    | "components"
-                    | "cycles"
-                    | "candidates"
-            )
-        {
-            return false;
-        }
-    }
-    saw_leaf
-}
 
 /// Checked public failures injected into transport-neutral batch orchestration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -828,12 +1087,14 @@ impl BatchService {
                         | "profile"
                         | "response_profile"
                 )
-            }) || !binding_objects_are_valid(&operation.arguments)
+            })
         }) {
             return Err(BatchOrchestrationError::InvalidArguments);
         }
 
         let dependencies = resolve_dependencies(&input.operations).map_err(map_execution_error)?;
+        validate_typed_bindings(&input, &dependencies)
+            .map_err(|_| BatchOrchestrationError::InvalidArguments)?;
         let tools: Vec<McpTool> = input
             .operations
             .iter()
@@ -898,9 +1159,17 @@ impl BatchService {
                 &binding_envelopes,
                 &input,
                 &dependencies[index],
+                identity.repository.repository_id,
+                identity.generation.generation_id,
             ) {
                 Ok(resolved) => resolved,
-                Err(BatchExecutionError::InvalidBinding) => {
+                Err(
+                    BatchExecutionError::InvalidBinding
+                    | BatchExecutionError::MissingBindingValue
+                    | BatchExecutionError::BindingTypeMismatch
+                    | BatchExecutionError::BindingCardinalityMismatch
+                    | BatchExecutionError::BindingIdentityMismatch,
+                ) => {
                     results[index] = Some(error_result(operation, &errors.binding_invalid));
                     stop_scheduling |= fail_fast;
                     continue;
@@ -1392,7 +1661,11 @@ fn map_execution_error(error: BatchExecutionError) -> BatchOrchestrationError {
         BatchExecutionError::InvalidOperationId
         | BatchExecutionError::DuplicateOperationId
         | BatchExecutionError::UnknownDependency
-        | BatchExecutionError::InvalidBinding => BatchOrchestrationError::InvalidArguments,
+        | BatchExecutionError::InvalidBinding
+        | BatchExecutionError::MissingBindingValue
+        | BatchExecutionError::BindingTypeMismatch
+        | BatchExecutionError::BindingCardinalityMismatch
+        | BatchExecutionError::BindingIdentityMismatch => BatchOrchestrationError::InvalidArguments,
         BatchExecutionError::Serialization | BatchExecutionError::MemoryUnavailable => {
             BatchOrchestrationError::Internal
         }
@@ -1412,11 +1685,12 @@ mod tests {
         BatchExecutionError, BatchPlan, BatchValidationError, DEFAULT_BATCH_TOKENS, DeadlineSource,
         MAX_BATCH_DEPTH, MAX_BATCH_OPERATIONS, admitted_parent_budget, aggregate_status,
         effective_child_deadline, is_batch_allowed, is_batch_allowed_under_profile,
-        resolve_dependencies, terminal_result,
+        resolve_dependencies, terminal_result, validate_binding_pair,
     };
     use crate::policy::BudgetLimits;
     use rootlight_mcp_contract::{
         ExposureProfile, McpTool,
+        batch::BatchBindingCardinality,
         context::{
             BatchOperation as ContractBatchOperation, BatchOperationStatus, BatchStatus, BatchTool,
         },
@@ -1633,6 +1907,50 @@ mod tests {
             resolve_dependencies(&unknown),
             Err(BatchExecutionError::UnknownDependency)
         );
+    }
+
+    #[test]
+    fn binding_registry_matrix_matches_the_typed_compatibility_rule() {
+        let registry = rootlight_mcp_contract::batch::BATCH_TOOL_REGISTRY;
+        let mut compatible_pairs = 0usize;
+        for source_tool in registry {
+            for source in source_tool.bindings.sources {
+                let mut source_has_target = false;
+                for target_tool in registry {
+                    for target in target_tool.bindings.targets {
+                        let same_cardinality_class = matches!(
+                            (source.cardinality, target.cardinality),
+                            (
+                                BatchBindingCardinality::Scalar,
+                                BatchBindingCardinality::Scalar
+                            ) | (
+                                BatchBindingCardinality::Collection { .. },
+                                BatchBindingCardinality::Collection { .. }
+                            )
+                        );
+                        let expected = source.composable
+                            && source.value_type == target.value_type
+                            && target.accepted_trust.contains(&source.trust)
+                            && same_cardinality_class;
+                        assert_eq!(
+                            validate_binding_pair(source, target).is_ok(),
+                            expected,
+                            "registry compatibility drifted for {:?} -> {:?}",
+                            source.source,
+                            target_tool.batch_tool
+                        );
+                        source_has_target |= expected;
+                        compatible_pairs += usize::from(expected);
+                    }
+                }
+                assert_eq!(
+                    source_has_target, source.composable,
+                    "composable source {:?} must have a typed destination",
+                    source.source
+                );
+            }
+        }
+        assert!(compatible_pairs > 0);
     }
 
     #[test]

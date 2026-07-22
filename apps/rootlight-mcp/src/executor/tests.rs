@@ -124,9 +124,20 @@ enum FakeOutcome {
         status: Box<Result<RepositoryStatus, ClientPortError>>,
         locate: Result<CodeLocatePortResponse, ClientPortError>,
     },
+    BatchGenerationRace {
+        status: Box<Result<RepositoryStatus, ClientPortError>>,
+        locate: Result<CodeLocatePortResponse, ClientPortError>,
+        active_generation: Arc<Mutex<GenerationId>>,
+        locate_calls: Arc<AtomicUsize>,
+    },
+    BatchLocateSequence {
+        status: Box<Result<RepositoryStatus, ClientPortError>>,
+        locate: Arc<Mutex<VecDeque<Result<CodeLocatePortResponse, ClientPortError>>>>,
+    },
     BatchPlanChange {
         status: Box<Result<RepositoryStatus, ClientPortError>>,
-        plan_change: Result<PlanChangePortResponse, ClientPortError>,
+        locate: Result<CodeLocatePortResponse, ClientPortError>,
+        plan_change: Box<Result<PlanChangePortResponse, ClientPortError>>,
     },
     BatchContextPack {
         status: Box<Result<RepositoryStatus, ClientPortError>>,
@@ -443,6 +454,25 @@ impl FirstSliceClientPort for FakePort {
                 .pop_front()
                 .expect("fake locate sequence is not exhausted"),
             FakeOutcome::Batch { locate, .. } => locate.clone(),
+            FakeOutcome::BatchGenerationRace {
+                locate,
+                active_generation,
+                locate_calls,
+                ..
+            } => {
+                if locate_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    *active_generation
+                        .lock()
+                        .expect("fake active generation is not poisoned") = alternate_generation();
+                }
+                locate.clone()
+            }
+            FakeOutcome::BatchLocateSequence { locate, .. } => locate
+                .lock()
+                .expect("fake batch locate sequence is not poisoned")
+                .pop_front()
+                .expect("fake batch locate sequence is not exhausted"),
+            FakeOutcome::BatchPlanChange { locate, .. } => locate.clone(),
             FakeOutcome::BatchPendingLocate { .. } => {
                 return Box::pin(std::future::pending());
             }
@@ -515,6 +545,8 @@ impl FirstSliceClientPort for FakePort {
         let outcome = match &self.outcome {
             FakeOutcome::RepositoryStatus(outcome) => outcome.clone(),
             FakeOutcome::Batch { status, .. } => status.as_ref().clone(),
+            FakeOutcome::BatchGenerationRace { status, .. }
+            | FakeOutcome::BatchLocateSequence { status, .. } => status.as_ref().clone(),
             FakeOutcome::BatchPlanChange { status, .. } => status.as_ref().clone(),
             FakeOutcome::BatchContextPack { status, .. } => status.as_ref().clone(),
             FakeOutcome::BatchPendingLocate { status } => status.as_ref().clone(),
@@ -653,7 +685,7 @@ impl FirstSliceClientPort for FakePort {
         )));
         let outcome = match &self.outcome {
             FakeOutcome::PlanChange(outcome) => outcome.clone(),
-            FakeOutcome::BatchPlanChange { plan_change, .. } => plan_change.clone(),
+            FakeOutcome::BatchPlanChange { plan_change, .. } => plan_change.as_ref().clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -2563,10 +2595,264 @@ async fn query_batch_composes_locate_subtools_under_one_pinned_generation() {
 }
 
 #[tokio::test]
+async fn query_batch_identity_survives_active_generation_race() {
+    let active_generation = Arc::new(Mutex::new(generation()));
+    let locate_calls = Arc::new(AtomicUsize::new(0));
+    let harness = Harness::new(FakeOutcome::BatchGenerationRace {
+        status: Box::new(Ok(repository_status_response())),
+        locate: Ok(locate_response()),
+        active_generation: Arc::clone(&active_generation),
+        locate_calls: Arc::clone(&locate_calls),
+    });
+
+    let output: QueryBatchOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::QueryBatch,
+            json!({
+                "repository": {"repository_id": repository()},
+                "generation": "active",
+                "operations": [
+                    {"id": "before_publish", "tool": "code.locate", "arguments": {"query": "publish"}},
+                    {"id": "after_publish", "tool": "code.locate", "arguments": {"query": "stage"}}
+                ]
+            }),
+        )
+        .await
+        .expect("generation publication cannot move a pinned batch"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch success");
+    };
+
+    assert_eq!(output.data.batch_status, BatchStatus::Ok);
+    assert_eq!(output.repository.repository_id, repository());
+    assert_eq!(output.generation.generation_id, generation());
+    assert_eq!(output.data.generation_id, generation());
+    assert_eq!(
+        *active_generation
+            .lock()
+            .expect("fake active generation is not poisoned"),
+        alternate_generation(),
+        "the fake publishes a new active generation during child execution"
+    );
+    assert_eq!(locate_calls.load(Ordering::SeqCst), 2);
+
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, ObservedCall::RepositoryStatus(_)))
+            .count(),
+        1,
+        "an accepted batch resolves repository and generation exactly once"
+    );
+    let child_generations: Vec<_> = calls
+        .iter()
+        .filter_map(|call| match call {
+            ObservedCall::CodeLocate(request) => Some(request.generation()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        child_generations,
+        vec![
+            ClientGenerationSelector::Generation(generation()),
+            ClientGenerationSelector::Generation(generation()),
+        ],
+        "every child receives the original exact generation"
+    );
+}
+
+#[tokio::test]
+async fn query_batch_identity_survives_first_operation_failure() {
+    let harness = batch_harness();
+    let output: QueryBatchOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::QueryBatch,
+            json!({
+                "repository": {"repository_id": repository()},
+                "generation": "active",
+                "operations": [
+                    {
+                        "id": "fails",
+                        "tool": "symbol.relationships",
+                        "arguments": {"symbol_ids": [symbol()], "relations": ["calls"]}
+                    },
+                    {
+                        "id": "succeeds",
+                        "tool": "code.locate",
+                        "arguments": {"query": "publish"}
+                    }
+                ]
+            }),
+        )
+        .await
+        .expect("independent work continues after a child failure"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected pinned batch envelope");
+    };
+
+    assert_eq!(output.data.batch_status, BatchStatus::Partial);
+    assert_eq!(output.repository.repository_id, repository());
+    assert_eq!(output.generation.generation_id, generation());
+    assert_eq!(output.data.generation_id, generation());
+    assert_eq!(
+        output.data.operation_results[0].status,
+        BatchOperationStatus::Error
+    );
+    assert_eq!(
+        output.data.operation_results[1].status,
+        BatchOperationStatus::Ok
+    );
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, ObservedCall::RepositoryStatus(_)))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn query_batch_identity_rejects_wrong_child_without_mixed_aggregate() {
+    let mut wrong_repository = locate_response();
+    wrong_repository.result.context.repository = alternate_repository();
+    let mut wrong_generation = locate_response();
+    wrong_generation.result.context.generation = alternate_generation();
+
+    for wrong_response in [wrong_repository, wrong_generation] {
+        let responses = Arc::new(Mutex::new(VecDeque::from([
+            Ok(wrong_response),
+            Ok(locate_response()),
+        ])));
+        let harness = Harness::new(FakeOutcome::BatchLocateSequence {
+            status: Box::new(Ok(repository_status_response())),
+            locate: Arc::clone(&responses),
+        });
+        let error = execute(
+            &harness.executor,
+            VerticalTool::QueryBatch,
+            json!({
+                "repository": {"repository_id": repository()},
+                "operations": [
+                    {"id": "wrong", "tool": "code.locate", "arguments": {"query": "publish"}},
+                    {"id": "would_be_valid", "tool": "code.locate", "arguments": {"query": "stage"}}
+                ]
+            }),
+        )
+        .await
+        .expect_err("a mismatched child identity fails the complete aggregate");
+
+        assert_eq!(error.failure(), Some(ToolExecutionFailure::InvalidResponse));
+        assert!(error.public_error().is_none());
+        assert_eq!(
+            responses
+                .lock()
+                .expect("fake batch locate sequence is not poisoned")
+                .len(),
+            1,
+            "no later child is published after an identity-integrity failure"
+        );
+        let calls = harness
+            .calls
+            .lock()
+            .expect("fake call recorder is not poisoned");
+        assert_eq!(calls.len(), 2);
+        assert!(matches!(calls[0], ObservedCall::RepositoryStatus(_)));
+        assert!(matches!(calls[1], ObservedCall::CodeLocate(_)));
+    }
+}
+
+#[tokio::test]
+async fn query_batch_identity_preserves_retirement_and_corruption_errors() {
+    for code in [ErrorCode::StaleGeneration, ErrorCode::IndexCorrupt] {
+        let public = PublicError::builder(code, error_definition(code).message)
+            .repository(repository())
+            .generation(generation())
+            .build()
+            .expect("registered generation failure is a valid public error");
+        let harness = Harness::new(FakeOutcome::Batch {
+            status: Box::new(Ok(repository_status_response())),
+            locate: Err(ClientPortError::Public(Box::new(public))),
+        });
+        let output: QueryBatchOutput = decode(
+            execute(
+                &harness.executor,
+                VerticalTool::QueryBatch,
+                json!({
+                    "repository": {"repository_id": repository()},
+                    "operations": [
+                        {"id": "read", "tool": "code.locate", "arguments": {"query": "publish"}}
+                    ]
+                }),
+            )
+            .await
+            .expect("a checked pinned-generation failure remains in the batch envelope"),
+        );
+        let ToolResponse::Success(output) = output else {
+            panic!("expected checked batch envelope");
+        };
+
+        assert_eq!(output.data.batch_status, BatchStatus::Error);
+        assert_eq!(output.repository.repository_id, repository());
+        assert_eq!(output.generation.generation_id, generation());
+        assert_eq!(
+            output.data.operation_results[0]
+                .error
+                .as_ref()
+                .map(PublicError::code),
+            Some(code)
+        );
+        assert_eq!(harness.call_count.load(Ordering::Relaxed), 2);
+    }
+
+    let retired = PublicError::builder(
+        ErrorCode::StaleGeneration,
+        error_definition(ErrorCode::StaleGeneration).message,
+    )
+    .repository(repository())
+    .generation(generation())
+    .build()
+    .expect("registered stale-generation failure is valid");
+    let harness = Harness::new(FakeOutcome::Batch {
+        status: Box::new(Err(ClientPortError::Public(Box::new(retired)))),
+        locate: Ok(locate_response()),
+    });
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "not_run", "tool": "code.locate", "arguments": {"query": "publish"}}
+            ]
+        }),
+    )
+    .await
+    .expect_err("a retired generation at preflight prevents child execution");
+    assert_eq!(
+        error.public_error().map(PublicError::code),
+        Some(ErrorCode::StaleGeneration)
+    );
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn query_batch_executes_plan_change_under_the_pinned_identity() {
     let harness = Harness::new(FakeOutcome::BatchPlanChange {
         status: Box::new(Ok(repository_status_response())),
-        plan_change: Ok(batch_plan_change_response()),
+        locate: Err(ClientPortError::Executor),
+        plan_change: Box::new(Ok(batch_plan_change_response())),
     });
     let output: QueryBatchOutput = decode(
         execute(
@@ -3025,14 +3311,22 @@ fn production_batch_mapping_covers_every_canonical_eligible_tool() {
 
 #[tokio::test]
 async fn query_batch_defers_allowed_bindings_until_runtime_materialization() {
-    let harness = batch_harness();
+    let harness = Harness::new(FakeOutcome::BatchPlanChange {
+        status: Box::new(Ok(repository_status_response())),
+        locate: Ok(locate_response()),
+        plan_change: Box::new(Ok(batch_plan_change_response())),
+    });
     let arguments = json!({
         "repository": {"repository_id": repository()},
         "generation": "active",
         "operations": [
             {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
-            {"id": "refine", "tool": "code.locate", "depends_on": ["find"], "arguments": {
-                "query": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
+            {"id": "refine", "tool": "plan.change", "depends_on": ["find"], "arguments": {
+                "objective": "bug_fix",
+                "objective_text": "fix the defect",
+                "targets": [{
+                    "symbol_id": {"$from": "find", "pointer": "/data/matches/0/symbol_id"}
+                }]
             }}
         ]
     });
@@ -3100,7 +3394,11 @@ async fn query_batch_skips_dependents_of_an_unavailable_subtool() {
 
 #[tokio::test]
 async fn query_batch_keeps_invalid_binding_inside_the_operation_result() {
-    let harness = batch_harness();
+    let harness = Harness::new(FakeOutcome::BatchPlanChange {
+        status: Box::new(Ok(repository_status_response())),
+        locate: Ok(locate_response()),
+        plan_change: Box::new(Ok(batch_plan_change_response())),
+    });
     let output = execute(
         &harness.executor,
         VerticalTool::QueryBatch,
@@ -3108,8 +3406,12 @@ async fn query_batch_keeps_invalid_binding_inside_the_operation_result() {
             "repository": {"repository_id": repository()},
             "operations": [
                 {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
-                {"id": "refine", "tool": "code.locate", "depends_on": ["find"], "arguments": {
-                    "query": {"$from": "find", "pointer": "/data/matches/99/symbol_id"}
+                {"id": "refine", "tool": "plan.change", "depends_on": ["find"], "arguments": {
+                    "objective": "bug_fix",
+                    "objective_text": "fix the defect",
+                    "targets": [{
+                        "symbol_id": {"$from": "find", "pointer": "/data/matches/99/symbol_id"}
+                    }]
                 }}
             ]
         }),
@@ -3131,9 +3433,9 @@ async fn query_batch_keeps_invalid_binding_inside_the_operation_result() {
 }
 
 #[tokio::test]
-async fn query_batch_classifies_bound_value_type_before_subtool_execution() {
+async fn query_batch_rejects_incompatible_binding_types_during_static_preflight() {
     let harness = batch_harness();
-    let output = execute(
+    let error = execute(
         &harness.executor,
         VerticalTool::QueryBatch,
         json!({
@@ -3151,39 +3453,18 @@ async fn query_batch_classifies_bound_value_type_before_subtool_execution() {
         }),
     )
     .await
-    .expect("a bound type failure stays inside the batch envelope");
-    let output: QueryBatchOutput = decode(output);
-    let ToolResponse::Success(output) = output else {
-        panic!("expected batch success envelope");
-    };
-    assert_eq!(output.data.batch_status, BatchStatus::Partial);
+    .expect_err("an incompatible binding pair fails static preflight");
     assert_eq!(
-        output.data.operation_results[1]
-            .error
-            .as_ref()
-            .map(PublicError::code),
-        Some(ErrorCode::BindingTypeMismatch)
+        error.public_error().map(PublicError::code),
+        Some(ErrorCode::InvalidArgument)
     );
-    assert_eq!(
-        output.data.operation_results[2].status,
-        BatchOperationStatus::SkippedDependency,
-        "a later dependent is not scheduled after materialized validation fails"
-    );
-    assert_eq!(
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+    assert!(
         harness
             .calls
             .lock()
             .expect("fake call recorder is not poisoned")
-            .iter()
-            .filter(|call| matches!(call, ObservedCall::CodeLocate(_)))
-            .count(),
-        1,
-        "the type-invalid dependent operation must not cross the client port"
-    );
-    assert_eq!(
-        harness.call_count.load(Ordering::Relaxed),
-        2,
-        "only identity resolution and the successful dependency reach the daemon"
+            .is_empty()
     );
 }
 
@@ -7397,6 +7678,100 @@ async fn query_batch_explain_returns_a_plan_without_retrieval() {
         1,
         "only the metadata status call runs, no batch dispatch"
     );
+}
+
+async fn batch_explain_fingerprint(harness: &Harness, arguments: Value) -> String {
+    let output: QueryBatchOutput = decode(
+        execute(&harness.executor, VerticalTool::QueryBatch, arguments)
+            .await
+            .expect("batch explain succeeds"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch explain success");
+    };
+    output
+        .data
+        .explanation
+        .expect("batch explain returns a physical plan")
+        .fingerprint
+}
+
+#[tokio::test]
+async fn query_batch_identity_fingerprint_binds_and_normalizes_equivalent_json() {
+    let base = Harness::new(FakeOutcome::RepositoryStatus(Ok(
+        repository_status_response(),
+    )));
+    let first = batch_explain_fingerprint(
+        &base,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [{
+                "id": "find",
+                "tool": "code.locate",
+                "arguments": {"query": "publish", "max_results": 20}
+            }],
+            "explain": true
+        }),
+    )
+    .await;
+    let equivalent = batch_explain_fingerprint(
+        &base,
+        json!({
+            "explain": true,
+            "generation": "active",
+            "operations": [{
+                "arguments": {"max_results": 20, "query": "publish"},
+                "tool": "code.locate",
+                "id": "find"
+            }],
+            "repository": {"repository_id": repository()}
+        }),
+    )
+    .await;
+
+    let mut other_repository_status = repository_status_response();
+    other_repository_status.repository_id = alternate_repository();
+    let other_repository = Harness::new(FakeOutcome::RepositoryStatus(Ok(other_repository_status)));
+    let other_repository_fingerprint = batch_explain_fingerprint(
+        &other_repository,
+        json!({
+            "repository": {"repository_id": alternate_repository()},
+            "operations": [{
+                "id": "find",
+                "tool": "code.locate",
+                "arguments": {"query": "publish", "max_results": 20}
+            }],
+            "explain": true
+        }),
+    )
+    .await;
+
+    let mut other_generation_status = repository_status_response();
+    other_generation_status.resolved_generation = alternate_generation();
+    other_generation_status.active_generation = alternate_generation();
+    let other_generation = Harness::new(FakeOutcome::RepositoryStatus(Ok(other_generation_status)));
+    let other_generation_fingerprint = batch_explain_fingerprint(
+        &other_generation,
+        json!({
+            "repository": {"repository_id": repository()},
+            "generation": alternate_generation(),
+            "operations": [{
+                "id": "find",
+                "tool": "code.locate",
+                "arguments": {"query": "publish", "max_results": 20}
+            }],
+            "explain": true
+        }),
+    )
+    .await;
+
+    assert!(first.starts_with("plan1_"));
+    assert_eq!(
+        first, equivalent,
+        "field ordering and an explicit active default are canonicalized"
+    );
+    assert_ne!(first, other_repository_fingerprint);
+    assert_ne!(first, other_generation_fingerprint);
 }
 
 #[tokio::test]

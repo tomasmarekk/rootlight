@@ -5,6 +5,7 @@
 //! before spending work. Plan construction is deterministic for a normalized
 //! request and never reads repository source.
 
+use rootlight_ids::{GenerationId, RepositoryId};
 use rootlight_mcp_contract::{
     context::{PLANNER_VERSION, PlanExplanation},
     repository::RepositoryState,
@@ -500,10 +501,30 @@ pub fn query_advanced_plan(plan: &AdvancedQueryPlan) -> PlanExplanation {
 #[must_use]
 pub fn finalize_plan(mut plan: PlanExplanation, generation: &str) -> PlanExplanation {
     let fingerprint = physical_plan_fingerprint(&plan, generation);
+    set_public_fingerprint(&mut plan, fingerprint);
+    plan
+}
+
+/// Binds a plan fingerprint to one exact repository and generation identity.
+///
+/// Batch plans use this domain-separated form because the same generation
+/// identifier in another repository must not authorize the same execution
+/// context.
+#[must_use]
+pub fn finalize_plan_for_identity(
+    mut plan: PlanExplanation,
+    repository: RepositoryId,
+    generation: GenerationId,
+) -> PlanExplanation {
+    let fingerprint = physical_plan_fingerprint_for_identity(&plan, repository, generation);
+    set_public_fingerprint(&mut plan, fingerprint);
+    plan
+}
+
+fn set_public_fingerprint(plan: &mut PlanExplanation, fingerprint: [u8; 32]) {
     let hex = blake3::Hash::from_bytes(fingerprint).to_hex();
     let short: String = hex.chars().take(32).collect();
     plan.fingerprint = format!("plan1_{short}");
-    plan
 }
 
 /// Computes the canonical full-width physical-plan fingerprint.
@@ -517,6 +538,25 @@ pub fn physical_plan_fingerprint(plan: &PlanExplanation, generation: &str) -> [u
     hasher.update(b"rootlight.physical-plan.v1");
     hasher.update(&plan.planner_version.to_le_bytes());
     hash_length_prefixed(&mut hasher, generation.as_bytes());
+    hash_plan_fields(&mut hasher, plan);
+    *hasher.finalize().as_bytes()
+}
+
+fn physical_plan_fingerprint_for_identity(
+    plan: &PlanExplanation,
+    repository: RepositoryId,
+    generation: GenerationId,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.physical-plan.identity.v1");
+    hasher.update(&plan.planner_version.to_le_bytes());
+    hash_length_prefixed(&mut hasher, repository.as_bytes());
+    hash_length_prefixed(&mut hasher, generation.as_bytes());
+    hash_plan_fields(&mut hasher, plan);
+    *hasher.finalize().as_bytes()
+}
+
+fn hash_plan_fields(hasher: &mut blake3::Hasher, plan: &PlanExplanation) {
     hasher.update(&plan.estimated_cost.to_le_bytes());
     hasher.update(
         &u64::try_from(plan.operators.len())
@@ -524,7 +564,7 @@ pub fn physical_plan_fingerprint(plan: &PlanExplanation, generation: &str) -> [u
             .to_le_bytes(),
     );
     for operator in &plan.operators {
-        hash_length_prefixed(&mut hasher, operator.as_bytes());
+        hash_length_prefixed(hasher, operator.as_bytes());
     }
     hasher.update(
         &u64::try_from(plan.applied_limits.len())
@@ -532,9 +572,8 @@ pub fn physical_plan_fingerprint(plan: &PlanExplanation, generation: &str) -> [u
             .to_le_bytes(),
     );
     for limit in &plan.applied_limits {
-        hash_length_prefixed(&mut hasher, limit.as_bytes());
+        hash_length_prefixed(hasher, limit.as_bytes());
     }
-    *hasher.finalize().as_bytes()
 }
 
 fn hash_length_prefixed(hasher: &mut blake3::Hasher, value: &[u8]) {
@@ -749,6 +788,27 @@ mod tests {
         let other_plan = finalize_plan(code_locate_plan(true, 20), "gen-1");
         assert_ne!(base.fingerprint, other_generation.fingerprint);
         assert_ne!(base.fingerprint, other_plan.fingerprint);
+    }
+
+    #[test]
+    fn identity_fingerprint_binds_repository_and_generation() {
+        use rootlight_ids::{GenerationId, RepositoryId};
+
+        use super::{code_locate_plan, finalize_plan_for_identity};
+
+        let plan = code_locate_plan(false, 20);
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let base = finalize_plan_for_identity(plan.clone(), repository, generation);
+        let equivalent = finalize_plan_for_identity(plan.clone(), repository, generation);
+        let other_repository =
+            finalize_plan_for_identity(plan.clone(), RepositoryId::from_bytes([3; 16]), generation);
+        let other_generation =
+            finalize_plan_for_identity(plan, repository, GenerationId::from_bytes([4; 20]));
+
+        assert_eq!(base.fingerprint, equivalent.fingerprint);
+        assert_ne!(base.fingerprint, other_repository.fingerprint);
+        assert_ne!(base.fingerprint, other_generation.fingerprint);
     }
 
     #[test]

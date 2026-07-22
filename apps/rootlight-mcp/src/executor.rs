@@ -1806,9 +1806,10 @@ where
         cancellation,
     )
     .await?;
-    let explanation = rootlight_agent::explain::finalize_plan(
+    let explanation = rootlight_agent::explain::finalize_plan_for_identity(
         rootlight_agent::explain::query_batch_plan(input.operations.len()),
-        &status.resolved_generation.to_string(),
+        status.repository_id,
+        status.resolved_generation,
     );
     let operation_results = input
         .operations
@@ -1954,7 +1955,13 @@ where
                 }
                 response = operation => response,
             }
-            .map_err(|_| AgentPortError::Unavailable)?;
+            .map_err(|error| match error {
+                ClientPortError::Public(error) => AgentPortError::Public(error),
+                ClientPortError::InvalidResponse => AgentPortError::InvalidResponse,
+                ClientPortError::Transport | ClientPortError::Executor => {
+                    AgentPortError::Unavailable
+                }
+            })?;
             if response.repository_id != repository {
                 return Err(AgentPortError::InvalidResponse);
             }
@@ -5891,7 +5898,11 @@ fn batch_dependency_error(error: BatchExecutionError) -> ToolExecutionError {
         BatchExecutionError::UnknownDependency => {
             MappedDomainFailure::invalid_argument("depends_on")
         }
-        BatchExecutionError::InvalidBinding => MappedDomainFailure::binding_invalid(),
+        BatchExecutionError::InvalidBinding
+        | BatchExecutionError::MissingBindingValue
+        | BatchExecutionError::BindingTypeMismatch
+        | BatchExecutionError::BindingCardinalityMismatch
+        | BatchExecutionError::BindingIdentityMismatch => MappedDomainFailure::binding_invalid(),
         BatchExecutionError::Serialization | BatchExecutionError::MemoryUnavailable => {
             return internal(ToolExecutionFailure::Executor);
         }
