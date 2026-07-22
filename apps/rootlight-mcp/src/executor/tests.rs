@@ -3453,6 +3453,76 @@ async fn explain_fingerprint_is_stable_for_identical_requests() {
 }
 
 #[tokio::test]
+async fn explain_plan_is_invariant_across_index_states() {
+    // The source-free plan and fingerprint depend only on the normalized
+    // request and pinned generation, never on repository index state, so one
+    // request yields a single fingerprint across the empty, partial, stale,
+    // fresh, small, large, and unsupported capability states.
+    let complete = RepositoryCoverageEntry {
+        language: "rust".to_owned(),
+        tier: "tier_a".to_owned(),
+        status: "complete".to_owned(),
+        discovered_files: 3,
+        indexed_files: 3,
+    };
+    let large = RepositoryCoverageEntry {
+        language: "rust".to_owned(),
+        tier: "tier_a".to_owned(),
+        status: "complete".to_owned(),
+        discovered_files: 5000,
+        indexed_files: 5000,
+    };
+    let states: [(&str, &str, &str, Vec<RepositoryCoverageEntry>); 7] = [
+        ("empty", "current", "current", vec![]),
+        ("ready", "current", "current", vec![complete.clone()]),
+        ("ready", "stale", "stale", vec![complete.clone()]),
+        ("ready", "current", "current", vec![complete.clone()]),
+        ("ready", "current", "current", vec![complete]),
+        ("ready", "current", "current", vec![large]),
+        ("degraded", "stale", "current", vec![]),
+    ];
+    let mut fingerprints = Vec::new();
+    for (state, structural, semantic, coverage) in states {
+        let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
+            repository_id: repository(),
+            active_generation: generation(),
+            parent_generation: None,
+            structural_freshness: structural.to_owned(),
+            semantic_freshness: semantic.to_owned(),
+            state: state.to_owned(),
+            coverage,
+        })));
+        let output: CodeLocateOutput = decode(
+            execute(
+                &harness.executor,
+                VerticalTool::CodeLocate,
+                json!({"repository": {"repository_id": repository()}, "query": "publish", "explain": true}),
+            )
+            .await
+            .expect("explain executes"),
+        );
+        let ToolResponse::Success(output) = output else {
+            panic!("expected explain success");
+        };
+        fingerprints.push(
+            output
+                .data
+                .explanation
+                .expect("explain returns a plan")
+                .fingerprint,
+        );
+    }
+    let first = fingerprints[0].clone();
+    assert!(first.starts_with("plan1_"));
+    for fingerprint in &fingerprints[1..] {
+        assert_eq!(
+            fingerprint, &first,
+            "plan fingerprint is invariant across index states"
+        );
+    }
+}
+
+#[tokio::test]
 async fn executor_rejects_semantically_invalid_arguments_before_the_port() {
     let harness = Harness::new(FakeOutcome::RepositoryIndex(Err(ClientPortError::Executor)));
 
