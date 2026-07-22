@@ -9,17 +9,18 @@ use crate::catalog::{ExposureProfile, McpTool};
 use crate::vertical::VerticalTool;
 use serde_json::{Map, Value};
 
-/// Token estimate uses the conservative 4-bytes-per-token heuristic.
-const BYTES_PER_TOKEN: usize = 4;
+/// Token estimate uses a stable four-bytes-per-token comparison ratio.
+const ESTIMATED_BYTES_PER_TOKEN: usize = 4;
 
 /// Estimates token count from serialized byte length.
 ///
-/// This is a deterministic, tokenizer-independent estimate suitable for
-/// budget enforcement and regression detection. Actual tokenizer counts
-/// are recorded in benchmark evidence separately.
+/// This is a deterministic, tokenizer-independent estimate for regression
+/// comparisons. It is neither an actual tokenizer measurement nor a
+/// conservative upper bound; hard byte-level limits remain authoritative when
+/// provider tokenization is unavailable.
 #[must_use]
 pub const fn estimate_tokens(bytes: usize) -> u64 {
-    bytes.div_ceil(BYTES_PER_TOKEN) as u64
+    bytes.div_ceil(ESTIMATED_BYTES_PER_TOKEN) as u64
 }
 
 /// Complete accounting for one `tools/list` response under a profile.
@@ -44,7 +45,7 @@ pub struct InvocationAccounting {
     pub response_bytes: usize,
     /// Raw source bytes included in the response before JSON escaping.
     pub source_bytes: u64,
-    /// Estimated total tokens for the invocation.
+    /// Estimated request-plus-response tokens for the invocation.
     pub estimated_tokens: u64,
 }
 
@@ -52,9 +53,9 @@ impl InvocationAccounting {
     /// Creates accounting from measured byte counts.
     #[must_use]
     pub fn from_bytes(request_bytes: usize, response_bytes: usize, source_bytes: u64) -> Self {
-        let total_bytes = request_bytes
-            .saturating_add(response_bytes)
-            .saturating_add(usize::try_from(source_bytes).unwrap_or(usize::MAX));
+        // Source bytes are attribution within the serialized response. Adding
+        // them again would count the same returned content twice.
+        let total_bytes = request_bytes.saturating_add(response_bytes);
         Self {
             request_bytes,
             response_bytes,
@@ -196,7 +197,7 @@ mod tests {
     use serde_json::{Map, Value};
 
     #[test]
-    fn token_estimate_is_deterministic_and_conservative() {
+    fn token_estimate_is_deterministic_and_explicitly_ratio_based() {
         assert_eq!(estimate_tokens(0), 0);
         assert_eq!(estimate_tokens(1), 1);
         assert_eq!(estimate_tokens(4), 1);
@@ -227,7 +228,7 @@ mod tests {
         assert_eq!(accounting.request_bytes, 100);
         assert_eq!(accounting.response_bytes, 500);
         assert_eq!(accounting.source_bytes, 200);
-        assert_eq!(accounting.estimated_tokens, estimate_tokens(800));
+        assert_eq!(accounting.estimated_tokens, estimate_tokens(600));
     }
 
     #[test]
