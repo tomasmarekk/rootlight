@@ -1251,6 +1251,7 @@ fn charge_for(
 ) -> Result<BudgetCharge, BatchOrchestrationError> {
     let usage = &envelope.usage;
     Ok(BudgetCharge {
+        rows: usage.rows,
         results: returned_result_count(tool, &envelope.data)?,
         tokens: usage.estimated_tokens,
         // The public envelope currently exposes only its deterministic estimate.

@@ -32,6 +32,8 @@ impl CancellationSignal for NeverCancelled {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BudgetResource {
+    /// Logical rows inspected or materialized.
+    Rows,
     /// Returned result objects.
     Results,
     /// Deterministic conservative output-token estimate.
@@ -56,12 +58,14 @@ pub enum BudgetResource {
 
 /// One resource charge made by an agent planner or shaper.
 ///
-/// Results, both token counters, source bytes, traversal facts, paths, response
-/// bytes, and owned memory are additive. Depth and wall time are high-water
-/// marks. `tokens` remains the deterministic estimate used for admission;
-/// `actual_tokens` records tokenizer output only when that measurement exists.
+/// Rows, results, both token counters, source bytes, traversal facts, paths,
+/// response bytes, and owned memory are additive. Depth and wall time are
+/// high-water marks. `tokens` remains the deterministic estimate used for
+/// admission; `actual_tokens` records tokenizer output only when available.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BudgetCharge {
+    /// Logical rows inspected or materialized.
+    pub rows: u64,
     /// Returned result objects.
     pub results: u64,
     /// Deterministic conservative output-token estimate.
@@ -109,6 +113,7 @@ impl BudgetLimits {
         let query = QueryBudget::new();
         let time_ms = u64::try_from(query.max_duration().as_millis()).unwrap_or(u64::MAX);
         Self::from_maximums(BudgetCharge {
+            rows: query.max_rows(),
             results: query.max_results(),
             tokens: query.max_tokens(),
             // A supported byte-level tokenizer cannot emit more tokens than
@@ -134,6 +139,7 @@ impl BudgetLimits {
     #[must_use]
     pub const fn limit(self, resource: BudgetResource) -> u64 {
         match resource {
+            BudgetResource::Rows => self.maximums.rows,
             BudgetResource::Results => self.maximums.results,
             BudgetResource::Tokens => self.maximums.tokens,
             BudgetResource::ActualTokens => self.maximums.actual_tokens,
@@ -290,6 +296,7 @@ impl BudgetLedger {
         Self {
             limits,
             consumed: BudgetCharge {
+                rows: 0,
                 results: 0,
                 tokens: 0,
                 actual_tokens: 0,
@@ -302,6 +309,7 @@ impl BudgetLedger {
                 time_ms: 0,
             },
             reserved: BudgetCharge {
+                rows: 0,
                 results: 0,
                 tokens: 0,
                 actual_tokens: 0,
@@ -634,6 +642,7 @@ pub const fn is_compact_profile(profile: Option<ResponseProfile>) -> bool {
 
 const fn minimum_charge(left: BudgetCharge, right: BudgetCharge) -> BudgetCharge {
     BudgetCharge {
+        rows: min_u64(left.rows, right.rows),
         results: min_u64(left.results, right.results),
         tokens: min_u64(left.tokens, right.tokens),
         actual_tokens: min_u64(left.actual_tokens, right.actual_tokens),
@@ -653,6 +662,10 @@ const fn min_u64(left: u64, right: u64) -> u64 {
 
 fn combined_usage(left: BudgetCharge, right: BudgetCharge) -> Result<BudgetCharge, BudgetResource> {
     Ok(BudgetCharge {
+        rows: left
+            .rows
+            .checked_add(right.rows)
+            .ok_or(BudgetResource::Rows)?,
         results: left
             .results
             .checked_add(right.results)
@@ -692,6 +705,10 @@ fn combined_usage(left: BudgetCharge, right: BudgetCharge) -> Result<BudgetCharg
 
 fn remaining_capacity(limits: BudgetCharge, used: BudgetCharge) -> BudgetCharge {
     BudgetCharge {
+        rows: limits
+            .rows
+            .checked_sub(used.rows)
+            .expect("admitted rows never exceed their limit"),
         results: limits
             .results
             .checked_sub(used.results)
@@ -730,7 +747,9 @@ fn remaining_capacity(limits: BudgetCharge, used: BudgetCharge) -> BudgetCharge 
 }
 
 fn first_exceeded(used: BudgetCharge, limits: BudgetCharge) -> Option<BudgetResource> {
-    if used.results > limits.results {
+    if used.rows > limits.rows {
+        Some(BudgetResource::Rows)
+    } else if used.results > limits.results {
         Some(BudgetResource::Results)
     } else if used.tokens > limits.tokens {
         Some(BudgetResource::Tokens)
@@ -785,6 +804,7 @@ mod tests {
     fn charge_for(resource: BudgetResource, value: u64) -> BudgetCharge {
         let mut charge = BudgetCharge::default();
         match resource {
+            BudgetResource::Rows => charge.rows = value,
             BudgetResource::Results => charge.results = value,
             BudgetResource::Tokens => charge.tokens = value,
             BudgetResource::ActualTokens => charge.actual_tokens = value,
@@ -815,6 +835,7 @@ mod tests {
         let query = QueryBudget::new();
         let maximums = BudgetLimits::server_ceiling().maximums();
 
+        assert_eq!(maximums.rows, query.max_rows());
         assert_eq!(maximums.results, query.max_results());
         assert_eq!(maximums.tokens, query.max_tokens());
         assert_eq!(maximums.actual_tokens, query.max_json_bytes());
@@ -833,6 +854,7 @@ mod tests {
     #[test]
     fn client_fields_only_reduce_server_limits() {
         let requested = response_budget(BudgetCharge {
+            rows: u64::MAX,
             results: 2_000,
             tokens: 100,
             actual_tokens: 100,
@@ -849,6 +871,7 @@ mod tests {
         assert_eq!(
             limits,
             BudgetCharge {
+                rows: 250_000,
                 results: 1_000,
                 tokens: 100,
                 actual_tokens: 1_048_576,
@@ -879,6 +902,7 @@ mod tests {
     #[test]
     fn exact_limit_is_accepted_and_one_above_is_atomic() {
         let limits = BudgetLimits::from_maximums(BudgetCharge {
+            rows: 1,
             results: 1,
             tokens: 1,
             actual_tokens: 1,
@@ -933,6 +957,7 @@ mod tests {
     #[test]
     fn every_dimension_accepts_below_and_exact_but_rejects_one_above() {
         let resources = [
+            BudgetResource::Rows,
             BudgetResource::Results,
             BudgetResource::Tokens,
             BudgetResource::ActualTokens,
@@ -993,6 +1018,7 @@ mod tests {
     #[test]
     fn checked_overflow_reports_each_additive_resource_without_mutation() {
         let resources = [
+            BudgetResource::Rows,
             BudgetResource::Results,
             BudgetResource::Tokens,
             BudgetResource::ActualTokens,
@@ -1024,6 +1050,7 @@ mod tests {
         let mut ledger =
             BudgetLedger::from_limits(BudgetLimits::from_maximums(BudgetCharge::default()));
         let charge = BudgetCharge {
+            rows: 1,
             results: 1,
             tokens: 1,
             actual_tokens: 1,
@@ -1040,7 +1067,7 @@ mod tests {
             assert_eq!(
                 ledger.charge(charge),
                 Err(ExecutionPolicyError::BudgetExceeded {
-                    resource: BudgetResource::Results,
+                    resource: BudgetResource::Rows,
                 })
             );
         }
@@ -1190,6 +1217,7 @@ mod tests {
     #[test]
     fn child_allocation_is_bounded_and_commits_only_measured_usage() {
         let parent_limits = BudgetLimits::from_maximums(BudgetCharge {
+            rows: 30,
             results: 20,
             tokens: 100,
             actual_tokens: 100,
@@ -1202,6 +1230,7 @@ mod tests {
             time_ms: 1_000,
         });
         let tool_limits = BudgetLimits::from_maximums(BudgetCharge {
+            rows: 25,
             results: 10,
             tokens: 90,
             actual_tokens: 85,
@@ -1214,6 +1243,7 @@ mod tests {
             time_ms: 900,
         });
         let local = response_budget(BudgetCharge {
+            rows: u64::MAX,
             results: 9,
             tokens: 80,
             actual_tokens: 80,
@@ -1242,6 +1272,7 @@ mod tests {
         assert_eq!(
             child.limits().maximums(),
             BudgetCharge {
+                rows: 25,
                 results: 9,
                 tokens: 75,
                 actual_tokens: 80,
@@ -1339,6 +1370,7 @@ mod tests {
             local_time in 0_u32..=30_000,
         ) {
             let parent_charge = BudgetCharge {
+                rows: u64::from(parent_facts),
                 results: u64::from(parent_results),
                 tokens: u64::from(parent_tokens),
                 actual_tokens: u64::from(parent_tokens),
@@ -1351,6 +1383,7 @@ mod tests {
                 time_ms: u64::from(parent_time),
             };
             let tool_charge = BudgetCharge {
+                rows: u64::from(tool_facts),
                 results: u64::from(tool_results),
                 tokens: u64::from(tool_tokens),
                 actual_tokens: u64::from(tool_tokens),
@@ -1363,6 +1396,7 @@ mod tests {
                 time_ms: u64::from(tool_time),
             };
             let local_charge = BudgetCharge {
+                rows: u64::MAX,
                 results: u64::from(local_results),
                 tokens: u64::from(local_tokens),
                 actual_tokens: u64::MAX,
@@ -1378,6 +1412,7 @@ mod tests {
                 BudgetLedger::from_limits(BudgetLimits::from_maximums(parent_charge));
             parent
                 .charge(BudgetCharge {
+                    rows: parent_charge.rows / 2,
                     results: parent_charge.results / 2,
                     tokens: parent_charge.tokens / 2,
                     actual_tokens: parent_charge.actual_tokens / 2,
@@ -1410,6 +1445,7 @@ mod tests {
         ) {
             let maximum = u64::from(first) + u64::from(second);
             let limits = BudgetLimits::from_maximums(BudgetCharge {
+                rows: maximum,
                 tokens: maximum,
                 actual_tokens: maximum,
                 json_bytes: maximum,
@@ -1419,6 +1455,7 @@ mod tests {
             let mut ledger = BudgetLedger::from_limits(limits);
             ledger
                 .charge(BudgetCharge {
+                    rows: u64::from(first),
                     tokens: u64::from(first),
                     actual_tokens: u64::from(first),
                     json_bytes: u64::from(first),
@@ -1428,6 +1465,7 @@ mod tests {
                 .expect("first charge is within constructed limit");
             ledger
                 .charge(BudgetCharge {
+                    rows: u64::from(second),
                     tokens: u64::from(second),
                     actual_tokens: u64::from(second),
                     json_bytes: u64::from(second),
@@ -1436,10 +1474,12 @@ mod tests {
                 })
                 .expect("aggregate charge equals constructed limit");
 
+            prop_assert_eq!(ledger.consumed().rows, maximum);
             prop_assert_eq!(ledger.consumed().tokens, maximum);
             prop_assert_eq!(ledger.consumed().actual_tokens, maximum);
             prop_assert_eq!(ledger.consumed().json_bytes, maximum);
             prop_assert_eq!(ledger.consumed().memory_bytes, maximum);
+            prop_assert_eq!(ledger.remaining().rows, 0);
             prop_assert_eq!(ledger.remaining().tokens, 0);
             prop_assert_eq!(ledger.remaining().actual_tokens, 0);
             prop_assert_eq!(ledger.remaining().json_bytes, 0);
