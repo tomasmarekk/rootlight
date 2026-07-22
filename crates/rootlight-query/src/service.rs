@@ -27,19 +27,20 @@ use crate::model::{
     ChangeImpactRiskLevel, ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadBlindSpot,
     CodeDeadEntryPointPolicy, CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult,
     CodeDeadSuppressionRule, CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent,
-    CyclePath, DeadCodeCandidate, DeadCodeClassification, FlowTraceEdge, FlowTraceFrontier,
-    FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult, HistoryArchitectureDelta,
-    HistoryChangeKind, HistoryComparePlan, HistoryCompareResult, HistorySemanticChangeKind,
-    ImpactEntryRecord, ImpactGroupRecord, LineageMatchRecord, LocateHit, LocateMode,
-    PlanChangeContextPack, PlanChangeDecision, PlanChangeImpactSummary, PlanChangeObjective,
-    PlanChangePlan, PlanChangeResult, PlanChangeStepRecord, PlanEstimate, PlanExplanation,
-    PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource, QueryResponse, QueryUsage,
-    RankedTestSelection, RelationDirection, RelationFamily, RelationshipEdgeTarget,
-    RelationshipGroup, RepositoryDataTrust, ResolvedChangeRecord, SemanticChangeRecord,
-    SourceChunkResult, SourceReadPlan, SourceReadQueryResult, SymbolExplainPlan,
-    SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult, TestsSelectCoverage,
-    TestsSelectGap, TestsSelectKind, TestsSelectPlan, TestsSelectResult, TokenAccountingProfile,
-    checked_add, checked_u128_to_u64, checked_usize_to_u64, ensure_estimate, search_mode,
+    CyclePath, DeadCodeCandidate, DeadCodeClassification, ExecutionCompleteness, FlowTraceEdge,
+    FlowTraceFrontier, FlowTracePath, FlowTracePlan, FlowTraceProjection, FlowTraceResult,
+    HistoryArchitectureDelta, HistoryChangeKind, HistoryComparePlan, HistoryCompareResult,
+    HistorySemanticChangeKind, ImpactEntryRecord, ImpactGroupRecord, LineageMatchRecord, LocateHit,
+    LocateMode, PlanChangeContextPack, PlanChangeDecision, PlanChangeImpactSummary,
+    PlanChangeObjective, PlanChangePlan, PlanChangeResult, PlanChangeStepRecord, PlanEstimate,
+    PlanExplanation, PlanKind, QueryBudget, QueryError, QueryOperator, QueryResource,
+    QueryResponse, QueryUsage, RankedTestSelection, RelationDirection, RelationFamily,
+    RelationshipEdgeTarget, RelationshipGroup, RepositoryDataTrust, ResolvedChangeRecord,
+    SemanticChangeRecord, SourceChunkResult, SourceReadPlan, SourceReadQueryResult,
+    SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan, SymbolRelationshipsResult,
+    TestsSelectCoverage, TestsSelectGap, TestsSelectKind, TestsSelectPlan, TestsSelectResult,
+    TokenAccountingProfile, checked_add, checked_u128_to_u64, checked_usize_to_u64,
+    ensure_estimate, search_mode,
 };
 
 /// Daemon-independent typed query service pinned to normalized IR and lexical data.
@@ -258,12 +259,14 @@ where
         if next_page_offset.is_some() {
             record_limit(&mut limiting_resources, QueryResource::Results)?;
         }
+        let execution = authoritative_execution(&limiting_resources);
         let data = CodeLocateResult {
             generation: self.generation.metadata().generation(),
             hits: located,
             matched_candidates,
             coverage,
-            truncated: !limiting_resources.is_empty(),
+            truncated: execution.is_truncated(),
+            execution,
             limiting_resources,
             next_page_offset,
         };
@@ -445,6 +448,7 @@ where
             )?
             .0
         };
+        let execution = authoritative_execution(&limiting_resources);
         let data = SymbolExplainResult {
             generation: self.generation.metadata().generation(),
             entity: entity.clone(),
@@ -452,7 +456,8 @@ where
             occurrences,
             provenance: provenance.clone(),
             coverage,
-            truncated: !limiting_resources.is_empty(),
+            truncated: execution.is_truncated(),
+            execution,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
@@ -662,13 +667,16 @@ where
         if next_page_offset.is_some() {
             record_limit(&mut limiting_resources, QueryResource::Results)?;
         }
-        let truncated = scan_truncated || next_page_offset.is_some();
+        let execution = authoritative_execution(&limiting_resources);
+        let truncated = execution.is_truncated();
+        debug_assert_eq!(truncated, scan_truncated || next_page_offset.is_some());
         let data = SymbolRelationshipsResult {
             generation: self.generation.metadata().generation(),
             groups,
             returned_edges: u32::try_from(returned_edges).unwrap_or(u32::MAX),
             total_edges: u32::try_from(total_edges).unwrap_or(u32::MAX),
             exact: !scan_truncated,
+            execution,
             truncated,
             limiting_resources,
             next_page_offset,
@@ -807,6 +815,8 @@ where
         if scan_truncated {
             frontier.truncated = true;
         }
+        let execution = authoritative_execution(&limiting_resources);
+        debug_assert_eq!(frontier.truncated, execution.is_truncated());
 
         let data = FlowTraceResult {
             generation: self.generation.metadata().generation(),
@@ -816,6 +826,7 @@ where
                 families: plan.families.clone(),
                 min_confidence: plan.min_confidence,
             },
+            execution,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
@@ -939,6 +950,7 @@ where
             &mut limiting_resources,
             &control,
         )?;
+        let execution = authoritative_execution(&limiting_resources);
 
         let data = ArchitectureCyclesResult {
             generation: self.generation.metadata().generation(),
@@ -949,6 +961,7 @@ where
                 families: plan.families.clone(),
                 min_confidence: plan.min_confidence,
             },
+            execution,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
@@ -1061,6 +1074,7 @@ where
             &mut limiting_resources,
             &control,
         )?;
+        let execution = authoritative_execution(&limiting_resources);
 
         let data = CodeDeadResult {
             generation: self.generation.metadata().generation(),
@@ -1068,6 +1082,7 @@ where
             entry_points: analysis.entry_points,
             blind_spots: analysis.blind_spots,
             suppression_rules: analysis.suppression_rules,
+            execution,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
@@ -1181,6 +1196,7 @@ where
             &mut tracker,
             &mut limiting_resources,
         )?;
+        let execution = authoritative_execution(&limiting_resources);
 
         let data = ArchitectureOverviewResult {
             generation: self.generation.metadata().generation(),
@@ -1188,6 +1204,7 @@ where
             connections: overview.connections,
             hotspots: overview.hotspots,
             views: overview.views,
+            execution,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
@@ -1299,12 +1316,14 @@ where
             &mut tracker,
             &mut limiting_resources,
         )?;
+        let execution = authoritative_execution(&limiting_resources);
 
         let data = TestsSelectResult {
             generation: self.generation.metadata().generation(),
             tests: selection.tests,
             coverage_strategy: selection.coverage_strategy,
             gaps: selection.gaps,
+            execution,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
@@ -1439,6 +1458,7 @@ where
             &mut tracker,
             &mut limiting_resources,
         )?;
+        let execution = authoritative_execution(&limiting_resources);
 
         let data = ChangeImpactResult {
             generation: self.generation.metadata().generation(),
@@ -1446,6 +1466,7 @@ where
             impacted: analysis.impacted,
             tests: analysis.tests,
             risk_summary: analysis.risk_summary,
+            execution,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
@@ -1568,6 +1589,7 @@ where
             &mut tracker,
             &mut limiting_resources,
         )?;
+        let execution = authoritative_execution(&limiting_resources);
 
         let data = PlanChangeResult {
             generation: self.generation.metadata().generation(),
@@ -1576,6 +1598,7 @@ where
             test_plan: analysis.test_plan,
             open_decisions: analysis.open_decisions,
             context_pack_request: analysis.context_pack_request,
+            execution,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
@@ -1687,6 +1710,7 @@ where
             &mut tracker,
             &mut limiting_resources,
         )?;
+        let execution = authoritative_execution(&limiting_resources);
 
         let data = HistoryCompareResult {
             base_generation: plan.base_generation,
@@ -1696,6 +1720,7 @@ where
             architecture_delta: analysis.architecture_delta,
             breaking_candidates: analysis.breaking_candidates,
             lineage: analysis.lineage,
+            execution,
             limiting_resources,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
@@ -1826,6 +1851,7 @@ where
             columns: built.columns,
             rows,
             plan: plan.explain.then_some(built.plan),
+            execution: built.execution,
             completeness: built.completeness,
             limiting_resources,
             next_page_offset: built.next_page_offset,
@@ -1970,6 +1996,7 @@ where
         let data = SourceReadQueryResult {
             generation: result.generation,
             chunks,
+            execution: ExecutionCompleteness::complete(),
         };
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
     }
@@ -2013,6 +2040,7 @@ struct AdvancedBuild {
     columns: Vec<AdvancedColumnSchema>,
     rows: Vec<serde_json::Value>,
     plan: AdvancedPlanExplanation,
+    execution: ExecutionCompleteness,
     completeness: AdvancedCompleteness,
     next_page_offset: Option<u64>,
 }
@@ -2058,22 +2086,30 @@ fn build_advanced_query(
         let completeness = if supported {
             AdvancedCompleteness::Complete
         } else {
+            note_advanced_limit(limiting_resources, QueryResource::Capability);
             AdvancedCompleteness::Unsupported
         };
         return Ok(AdvancedBuild {
             columns,
             rows: Vec::new(),
             plan: explanation,
+            execution: if supported {
+                ExecutionCompleteness::complete()
+            } else {
+                unsupported_execution(limiting_resources)
+            },
             completeness,
             next_page_offset: None,
         });
     }
 
     if !supported {
+        note_advanced_limit(limiting_resources, QueryResource::Capability);
         return Ok(AdvancedBuild {
             columns,
             rows: Vec::new(),
             plan: explanation,
+            execution: unsupported_execution(limiting_resources),
             completeness: AdvancedCompleteness::Unsupported,
             next_page_offset: None,
         });
@@ -2117,11 +2153,19 @@ fn build_advanced_query(
     } else {
         AdvancedCompleteness::Complete
     };
+    let execution = match completeness {
+        AdvancedCompleteness::Complete => ExecutionCompleteness::complete(),
+        AdvancedCompleteness::Paged | AdvancedCompleteness::Truncated => {
+            authoritative_execution(limiting_resources)
+        }
+        AdvancedCompleteness::Unsupported => unsupported_execution(limiting_resources),
+    };
 
     Ok(AdvancedBuild {
         columns: set.columns,
         rows,
         plan: explanation,
+        execution,
         completeness,
         next_page_offset,
     })
@@ -2825,6 +2869,7 @@ fn walk_flow(
     }
     if path_edges.len() >= usize::from(max_depth) {
         if adjacency.get(&node).is_some_and(|edges| !edges.is_empty()) {
+            record_limit(state.limiting_resources, QueryResource::Depth)?;
             state.depth_cut = true;
         }
         return Ok(());
@@ -2835,6 +2880,7 @@ fn walk_flow(
     };
     for edge in neighbors {
         if state.paths.len() >= max_paths {
+            record_limit(state.limiting_resources, QueryResource::Paths)?;
             state.truncated = true;
             return Ok(());
         }
@@ -3063,6 +3109,9 @@ fn build_architecture_overview(
         let right_count = file_members.get(right).map_or(0, BTreeSet::len);
         right_count.cmp(&left_count).then_with(|| left.cmp(right))
     });
+    if component_files.len() > plan.max_components {
+        record_limit(limiting_resources, QueryResource::Results)?;
+    }
     component_files.truncate(plan.max_components);
     let reported: BTreeSet<FileId> = component_files.iter().copied().collect();
 
@@ -3865,6 +3914,13 @@ fn impact_closure(
     while let Some((node, distance, confidence, via)) = queue.pop_front() {
         control.check()?;
         if distance >= max_depth {
+            if dependents.get(&node).is_some_and(|edges| {
+                edges.iter().any(|(subject, _, _)| {
+                    !roots.contains(subject) && !visited.contains_key(subject)
+                })
+            }) {
+                record_limit(limiting_resources, QueryResource::Depth)?;
+            }
             continue;
         }
         let next_distance = distance.saturating_add(1);
@@ -4233,7 +4289,7 @@ fn build_plan_change(
     let affected_scope =
         plan_change_impact_summary(&resolved_targets, &closure, &entity_file, &entity_public);
 
-    let plan_steps = build_plan_change_steps(
+    let (plan_steps, steps_truncated) = build_plan_change_steps(
         plan.objective,
         &resolved_targets,
         &closure,
@@ -4241,6 +4297,9 @@ fn build_plan_change(
         &affected_scope,
         plan.max_steps,
     );
+    if steps_truncated {
+        record_limit(limiting_resources, QueryResource::Results)?;
+    }
 
     let open_decisions = plan_change_decisions(plan.objective, &affected_scope);
 
@@ -4375,7 +4434,7 @@ fn build_plan_change_steps(
     test_symbols: &[SymbolId],
     affected_scope: &PlanChangeImpactSummary,
     max_steps: usize,
-) -> Vec<PlanChangeStepRecord> {
+) -> (Vec<PlanChangeStepRecord>, bool) {
     let target_symbols: Vec<SymbolId> = resolved_targets
         .iter()
         .copied()
@@ -4512,8 +4571,9 @@ fn build_plan_change_steps(
             }
         }
     }
+    let truncated = steps.len() > max_steps;
     steps.truncate(max_steps);
-    steps
+    (steps, truncated)
 }
 
 /// Builds one source-free ordered plan step.
@@ -4800,6 +4860,9 @@ fn build_history_compare(
             .cmp(&left.significance)
             .then_with(|| left.symbol_id.cmp(&right.symbol_id))
     });
+    if changes.len() > plan.max_results {
+        record_limit(limiting_resources, QueryResource::Results)?;
+    }
     changes.truncate(plan.max_results);
 
     breaking.sort_by(|left, right| {
@@ -4808,13 +4871,20 @@ fn build_history_compare(
             .cmp(&left.0)
             .then_with(|| left.1.symbol_id.cmp(&right.1.symbol_id))
     });
+    let breaking_limit = plan.max_results.min(HISTORY_COMPARE_MAX_BREAKING);
+    if breaking.len() > breaking_limit {
+        record_limit(limiting_resources, QueryResource::Results)?;
+    }
     let breaking_candidates: Vec<BreakingCandidateRecord> = breaking
         .into_iter()
-        .take(plan.max_results.min(HISTORY_COMPARE_MAX_BREAKING))
+        .take(breaking_limit)
         .map(|(_, candidate)| candidate)
         .collect();
 
     // Lineage was emitted in deterministic identity order; cap it.
+    if lineage.len() > plan.max_results {
+        record_limit(limiting_resources, QueryResource::Results)?;
+    }
     lineage.truncate(plan.max_results);
 
     let coverage = if plan.base_generation == plan.explanation.generation {
@@ -5861,6 +5931,31 @@ fn collect_coverage_partial(
     Ok((coverage, truncated))
 }
 
+/// Finalizes successful supported execution from the resources observed by the
+/// authoritative query producer.
+fn authoritative_execution(limiting_resources: &[QueryResource]) -> ExecutionCompleteness {
+    let Some((primary, additional)) = limiting_resources.split_first() else {
+        return ExecutionCompleteness::complete();
+    };
+    ExecutionCompleteness::truncated(*primary, additional.iter().copied())
+}
+
+/// Finalizes a known unsupported semantic result without permitting an empty
+/// unsupported cause list.
+fn unsupported_execution(limiting_resources: &[QueryResource]) -> ExecutionCompleteness {
+    debug_assert!(
+        limiting_resources.contains(&QueryResource::Capability),
+        "unsupported advanced execution records the capability boundary"
+    );
+    let Some((primary, additional)) = limiting_resources.split_first() else {
+        return ExecutionCompleteness::unsupported_partial(
+            QueryResource::Capability,
+            std::iter::empty(),
+        );
+    };
+    ExecutionCompleteness::unsupported_partial(*primary, additional.iter().copied())
+}
+
 fn record_limit(
     limiting_resources: &mut Vec<QueryResource>,
     resource: QueryResource,
@@ -6092,6 +6187,7 @@ impl UsageTracker {
             QueryResource::JsonBytes => self.budget.max_json_bytes,
             QueryResource::Tokens => self.budget.max_tokens,
             QueryResource::MemoryBytes => self.budget.max_memory_bytes,
+            QueryResource::Depth | QueryResource::Paths | QueryResource::Capability => u64::MAX,
         };
         if value > limit {
             Err(QueryError::BudgetExceeded { resource, limit })
@@ -6109,6 +6205,9 @@ impl UsageTracker {
             QueryResource::MemoryBytes => (self.memory_bytes, self.budget.max_memory_bytes),
             QueryResource::JsonBytes => (0, self.budget.max_json_bytes),
             QueryResource::Tokens => (0, self.budget.max_tokens),
+            QueryResource::Depth | QueryResource::Paths | QueryResource::Capability => {
+                (0, u64::MAX)
+            }
         };
         current
             .checked_add(amount)
@@ -6248,7 +6347,7 @@ mod tests {
         to: Option<SymbolId>,
         max_depth: u8,
         max_paths: usize,
-    ) -> (Vec<FlowTracePath>, FlowTraceFrontier) {
+    ) -> (Vec<FlowTracePath>, FlowTraceFrontier, ExecutionCompleteness) {
         let budget = QueryBudget::new();
         let mut tracker = UsageTracker::new(budget);
         let mut limiting_resources = Vec::new();
@@ -6258,7 +6357,7 @@ mod tests {
                 .expect("test deadline is representable"),
         );
         let control = QueryControl::new(&cancellation, budget.max_duration);
-        trace_flow(
+        let (paths, frontier) = trace_flow(
             adjacency,
             from,
             to,
@@ -6268,7 +6367,9 @@ mod tests {
             &mut limiting_resources,
             &control,
         )
-        .expect("bounded trace succeeds")
+        .expect("bounded trace succeeds");
+        let execution = authoritative_execution(&limiting_resources);
+        (paths, frontier, execution)
     }
 
     #[test]
@@ -6278,7 +6379,7 @@ mod tests {
             (a, vec![edge(b, RelationFamily::Calls, 900)]),
             (b, vec![edge(c, RelationFamily::Calls, 800)]),
         ]);
-        let (paths, frontier) = run_trace(&adjacency, a, None, 3, 10);
+        let (paths, frontier, execution) = run_trace(&adjacency, a, None, 3, 10);
 
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0].nodes, vec![a, b]);
@@ -6295,6 +6396,7 @@ mod tests {
         assert_eq!(frontier.examined_edges, 2);
         assert!(!frontier.truncated);
         assert_eq!(frontier.unresolved_boundaries, 0);
+        assert!(execution.is_complete());
     }
 
     #[test]
@@ -6304,7 +6406,7 @@ mod tests {
             (a, vec![edge(b, RelationFamily::Calls, 900)]),
             (b, vec![edge(c, RelationFamily::Calls, 800)]),
         ]);
-        let (paths, _) = run_trace(&adjacency, a, Some(c), 3, 10);
+        let (paths, _, execution) = run_trace(&adjacency, a, Some(c), 3, 10);
 
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].nodes, vec![a, b, c]);
@@ -6313,6 +6415,7 @@ mod tests {
                 .iter()
                 .all(|path| *path.nodes.last().expect("path has nodes") == c)
         );
+        assert!(execution.is_complete());
     }
 
     #[test]
@@ -6322,7 +6425,7 @@ mod tests {
             (a, vec![edge(b, RelationFamily::Calls, 500)]),
             (b, vec![edge(a, RelationFamily::Calls, 500)]),
         ]);
-        let (paths, frontier) = run_trace(&adjacency, a, None, 8, 100);
+        let (paths, frontier, execution) = run_trace(&adjacency, a, None, 8, 100);
 
         assert_eq!(paths.len(), 2);
         let cyclic = paths
@@ -6333,6 +6436,7 @@ mod tests {
         assert!(paths.iter().any(|path| !path.cyclic));
         assert_eq!(frontier.reached_nodes, 2);
         assert!(!frontier.truncated);
+        assert!(execution.is_complete());
     }
 
     #[test]
@@ -6343,13 +6447,15 @@ mod tests {
             (b, vec![edge(c, RelationFamily::Calls, 900)]),
             (c, vec![edge(d, RelationFamily::Calls, 900)]),
         ]);
-        let (paths, frontier) = run_trace(&adjacency, a, None, 2, 100);
+        let (paths, frontier, execution) = run_trace(&adjacency, a, None, 2, 100);
 
         assert_eq!(paths.len(), 2);
         assert!(paths.iter().all(|path| path.nodes.len() <= 3));
         assert!(frontier.truncated);
         assert_eq!(frontier.reached_nodes, 3);
         assert_eq!(frontier.unresolved_boundaries, 1);
+        assert!(execution.is_truncated());
+        assert_eq!(execution.limiting_resources(), &[QueryResource::Depth]);
     }
 
     #[test]
@@ -6362,10 +6468,12 @@ mod tests {
                 edge(c, RelationFamily::Calls, 900),
             ],
         )]);
-        let (paths, frontier) = run_trace(&adjacency, a, None, 3, 1);
+        let (paths, frontier, execution) = run_trace(&adjacency, a, None, 3, 1);
 
         assert_eq!(paths.len(), 1);
         assert!(frontier.truncated);
+        assert!(execution.is_truncated());
+        assert_eq!(execution.limiting_resources(), &[QueryResource::Paths]);
     }
 
     #[test]
@@ -6440,6 +6548,15 @@ mod tests {
         max_cycles: usize,
         include_self_cycles: bool,
     ) -> (Vec<CycleComponent>, Vec<CyclePath>, Vec<CycleBreak>) {
+        run_detect_with_execution(adjacency, min_size, max_cycles, include_self_cycles).0
+    }
+
+    fn run_detect_with_execution(
+        adjacency: &BTreeMap<SymbolId, Vec<CycleAdjEdge>>,
+        min_size: u8,
+        max_cycles: usize,
+        include_self_cycles: bool,
+    ) -> (CycleDetection, ExecutionCompleteness) {
         let plan = cycle_plan(min_size, max_cycles, include_self_cycles);
         let mut tracker = UsageTracker::new(plan.budget);
         let mut limiting_resources = Vec::new();
@@ -6449,14 +6566,16 @@ mod tests {
                 .expect("test deadline is representable"),
         );
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
-        detect_cycles(
+        let analysis = detect_cycles(
             adjacency,
             &plan,
             &mut tracker,
             &mut limiting_resources,
             &control,
         )
-        .expect("bounded cycle detection succeeds")
+        .expect("bounded cycle detection succeeds");
+        let execution = authoritative_execution(&limiting_resources);
+        (analysis, execution)
     }
 
     #[test]
@@ -6599,10 +6718,13 @@ mod tests {
             (c, vec![cycle_edge(d, 900)]),
             (d, vec![cycle_edge(c, 900)]),
         ]);
-        let (components, cycles, breaks) = run_detect(&adjacency, 2, 1, false);
+        let ((components, cycles, breaks), execution) =
+            run_detect_with_execution(&adjacency, 2, 1, false);
         assert_eq!(components.len(), 1);
         assert_eq!(cycles.len(), 1);
         assert_eq!(breaks.len(), 1);
+        assert!(execution.is_truncated());
+        assert_eq!(execution.limiting_resources(), &[QueryResource::Results]);
     }
 
     // -----------------------------------------------------------------
@@ -6649,6 +6771,14 @@ mod tests {
         entry_points: &BTreeSet<SymbolId>,
         max_candidates: usize,
     ) -> Vec<DeadCodeCandidate> {
+        run_dead_with_execution(graph, entry_points, max_candidates).0
+    }
+
+    fn run_dead_with_execution(
+        graph: &DeadGraph,
+        entry_points: &BTreeSet<SymbolId>,
+        max_candidates: usize,
+    ) -> (Vec<DeadCodeCandidate>, ExecutionCompleteness) {
         let document = NormalizedIrDocument::empty(
             RepositoryId::from_bytes([0; 16]),
             GenerationId::from_bytes([0; 20]),
@@ -6664,7 +6794,7 @@ mod tests {
                 .expect("test deadline is representable"),
         );
         let control = QueryControl::new(&cancellation, budget.max_duration);
-        detect_dead_candidates(
+        let candidates = detect_dead_candidates(
             &document,
             graph,
             entry_points,
@@ -6675,7 +6805,9 @@ mod tests {
             &mut limiting_resources,
             &control,
         )
-        .expect("bounded dead-code detection succeeds")
+        .expect("bounded dead-code detection succeeds");
+        let execution = authoritative_execution(&limiting_resources);
+        (candidates, execution)
     }
 
     #[test]
@@ -6767,9 +6899,11 @@ mod tests {
         );
         let graph = dead_graph(&[(a, b, 900), (c, d, 900), (e, f, 900)]);
         let entry_points = BTreeSet::from([a]);
-        let candidates = run_dead(&graph, &entry_points, 1);
+        let (candidates, execution) = run_dead_with_execution(&graph, &entry_points, 1);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].symbol_id, c);
+        assert!(execution.is_truncated());
+        assert_eq!(execution.limiting_resources(), &[QueryResource::Results]);
     }
 
     #[test]
@@ -6974,6 +7108,13 @@ mod tests {
         document: &NormalizedIrDocument,
         plan: &ArchitectureOverviewPlan,
     ) -> ArchitectureOverviewAnalysis {
+        run_overview_with_execution(document, plan).0
+    }
+
+    fn run_overview_with_execution(
+        document: &NormalizedIrDocument,
+        plan: &ArchitectureOverviewPlan,
+    ) -> (ArchitectureOverviewAnalysis, ExecutionCompleteness) {
         let mut tracker = UsageTracker::new(plan.budget);
         let mut limiting_resources = Vec::new();
         let cancellation = Cancellation::with_deadline(
@@ -6982,14 +7123,16 @@ mod tests {
                 .expect("test deadline is representable"),
         );
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
-        build_architecture_overview(
+        let overview = build_architecture_overview(
             document,
             plan,
             &control,
             &mut tracker,
             &mut limiting_resources,
         )
-        .expect("bounded architecture overview succeeds")
+        .expect("bounded architecture overview succeeds");
+        let execution = authoritative_execution(&limiting_resources);
+        (overview, execution)
     }
 
     #[test]
@@ -7134,7 +7277,7 @@ mod tests {
         add_calls(&mut document, 110, 13, 11, 900);
 
         let plan = overview_plan(2, true, 0, Vec::new());
-        let overview = run_overview(&document, &plan);
+        let (overview, execution) = run_overview_with_execution(&document, &plan);
 
         assert_eq!(overview.components.len(), 2);
         assert_eq!(overview.components[0].id, file_id(1).to_string());
@@ -7142,6 +7285,8 @@ mod tests {
         // File 3 is unreported, so its connection is excluded.
         assert!(overview.connections.is_empty());
         assert!(overview.hotspots.is_empty());
+        assert!(execution.is_truncated());
+        assert_eq!(execution.limiting_resources(), &[QueryResource::Results]);
     }
 
     #[test]
@@ -7261,6 +7406,13 @@ mod tests {
         document: &NormalizedIrDocument,
         plan: &TestsSelectPlan,
     ) -> TestsSelectAnalysis {
+        run_tests_select_with_execution(document, plan).0
+    }
+
+    fn run_tests_select_with_execution(
+        document: &NormalizedIrDocument,
+        plan: &TestsSelectPlan,
+    ) -> (TestsSelectAnalysis, ExecutionCompleteness) {
         let mut tracker = UsageTracker::new(plan.budget);
         let mut limiting_resources = Vec::new();
         let cancellation = Cancellation::with_deadline(
@@ -7269,14 +7421,16 @@ mod tests {
                 .expect("test deadline is representable"),
         );
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
-        build_tests_select(
+        let selection = build_tests_select(
             document,
             plan,
             &control,
             &mut tracker,
             &mut limiting_resources,
         )
-        .expect("bounded tests select succeeds")
+        .expect("bounded tests select succeeds");
+        let execution = authoritative_execution(&limiting_resources);
+        (selection, execution)
     }
 
     #[test]
@@ -7369,12 +7523,14 @@ mod tests {
         add_entity(&mut document, 23, 1, EntityKind::Test);
 
         let plan = tests_select_plan(BTreeSet::from([symbol(11)]), Vec::new(), 2, false);
-        let selection = run_tests_select(&document, &plan);
+        let (selection, execution) = run_tests_select_with_execution(&document, &plan);
 
         // All three tests are co-located; the cap keeps the lowest identities.
         assert_eq!(selection.tests.len(), 2);
         assert_eq!(selection.tests[0].test_id, symbol(21));
         assert_eq!(selection.tests[1].test_id, symbol(22));
+        assert!(execution.is_truncated());
+        assert_eq!(execution.limiting_resources(), &[QueryResource::Results]);
     }
 
     #[test]
@@ -7514,6 +7670,13 @@ mod tests {
         document: &NormalizedIrDocument,
         plan: &ChangeImpactPlan,
     ) -> ChangeImpactAnalysis {
+        run_change_impact_with_execution(document, plan).0
+    }
+
+    fn run_change_impact_with_execution(
+        document: &NormalizedIrDocument,
+        plan: &ChangeImpactPlan,
+    ) -> (ChangeImpactAnalysis, ExecutionCompleteness) {
         let mut tracker = UsageTracker::new(plan.budget);
         let mut limiting_resources = Vec::new();
         let cancellation = Cancellation::with_deadline(
@@ -7522,14 +7685,16 @@ mod tests {
                 .expect("test deadline is representable"),
         );
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
-        build_change_impact(
+        let analysis = build_change_impact(
             document,
             plan,
             &control,
             &mut tracker,
             &mut limiting_resources,
         )
-        .expect("bounded change impact succeeds")
+        .expect("bounded change impact succeeds");
+        let execution = authoritative_execution(&limiting_resources);
+        (analysis, execution)
     }
 
     #[test]
@@ -7593,13 +7758,15 @@ mod tests {
 
         // A depth of one admits only the direct caller.
         let plan = change_impact_plan(BTreeSet::from([symbol(11)]), Vec::new(), 1, 0, false, 500);
-        let analysis = run_change_impact(&document, &plan);
+        let (analysis, execution) = run_change_impact_with_execution(&document, &plan);
 
         let dependents = &analysis.impacted[0].dependents;
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].symbol_id, symbol(12));
         assert_eq!(dependents[0].distance, 1);
         assert_eq!(analysis.risk_summary.fanout, 1);
+        assert!(execution.is_truncated());
+        assert_eq!(execution.limiting_resources(), &[QueryResource::Depth]);
     }
 
     #[test]
@@ -7761,6 +7928,13 @@ mod tests {
         document: &NormalizedIrDocument,
         plan: &PlanChangePlan,
     ) -> PlanChangeAnalysis {
+        run_plan_change_with_execution(document, plan).0
+    }
+
+    fn run_plan_change_with_execution(
+        document: &NormalizedIrDocument,
+        plan: &PlanChangePlan,
+    ) -> (PlanChangeAnalysis, ExecutionCompleteness) {
         let mut tracker = UsageTracker::new(plan.budget);
         let mut limiting_resources = Vec::new();
         let cancellation = Cancellation::with_deadline(
@@ -7769,14 +7943,16 @@ mod tests {
                 .expect("test deadline is representable"),
         );
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
-        build_plan_change(
+        let analysis = build_plan_change(
             document,
             plan,
             &control,
             &mut tracker,
             &mut limiting_resources,
         )
-        .expect("bounded plan change succeeds")
+        .expect("bounded plan change succeeds");
+        let execution = authoritative_execution(&limiting_resources);
+        (analysis, execution)
     }
 
     #[test]
@@ -7850,13 +8026,15 @@ mod tests {
             BTreeSet::new(),
             2,
         );
-        let analysis = run_plan_change(&document, &plan);
+        let (analysis, execution) = run_plan_change_with_execution(&document, &plan);
 
         assert_eq!(analysis.plan.len(), 2);
         assert_eq!(analysis.plan[0].step, 1);
         assert_eq!(analysis.plan[1].step, 2);
         // Truncation keeps every dependency reference valid.
         assert!(analysis.plan[1].depends_on.iter().all(|dep| *dep <= 2));
+        assert!(execution.is_truncated());
+        assert_eq!(execution.limiting_resources(), &[QueryResource::Results]);
     }
 
     #[test]
@@ -8011,6 +8189,14 @@ mod tests {
         head: &NormalizedIrDocument,
         plan: &HistoryComparePlan,
     ) -> HistoryCompareAnalysis {
+        run_history_compare_with_execution(base, head, plan).0
+    }
+
+    fn run_history_compare_with_execution(
+        base: &NormalizedIrDocument,
+        head: &NormalizedIrDocument,
+        plan: &HistoryComparePlan,
+    ) -> (HistoryCompareAnalysis, ExecutionCompleteness) {
         let mut tracker = UsageTracker::new(plan.budget);
         let mut limiting_resources = Vec::new();
         let cancellation = Cancellation::with_deadline(
@@ -8019,7 +8205,7 @@ mod tests {
                 .expect("test deadline is representable"),
         );
         let control = QueryControl::new(&cancellation, plan.budget.max_duration);
-        build_history_compare(
+        let analysis = build_history_compare(
             base,
             head,
             plan,
@@ -8027,7 +8213,9 @@ mod tests {
             &mut tracker,
             &mut limiting_resources,
         )
-        .expect("bounded history compare succeeds")
+        .expect("bounded history compare succeeds");
+        let execution = authoritative_execution(&limiting_resources);
+        (analysis, execution)
     }
 
     #[test]
@@ -8157,7 +8345,7 @@ mod tests {
             BTreeSet::new(),
             100,
         );
-        let analysis = run_history_compare(&document, &document, &plan);
+        let (analysis, execution) = run_history_compare_with_execution(&document, &document, &plan);
 
         assert!(analysis.changes.is_empty());
         assert!(analysis.breaking_candidates.is_empty());
@@ -8166,6 +8354,7 @@ mod tests {
         assert_eq!(analysis.architecture_delta.new_boundaries, 0);
         assert_eq!(analysis.architecture_delta.removed_boundaries, 0);
         assert_eq!(analysis.coverage, CoverageStatus::Complete);
+        assert!(execution.is_complete());
         // Both identities survive as honest, non-rename lineage matches.
         assert_eq!(analysis.lineage.len(), 2);
         assert!(analysis.lineage.iter().all(|lineage| {
@@ -8220,7 +8409,7 @@ mod tests {
             BTreeSet::new(),
             2,
         );
-        let analysis = run_history_compare(&base, &head, &plan);
+        let (analysis, execution) = run_history_compare_with_execution(&base, &head, &plan);
 
         assert_eq!(analysis.changes.len(), 2);
         assert!(
@@ -8229,6 +8418,9 @@ mod tests {
                 .iter()
                 .all(|change| change.kind == HistorySemanticChangeKind::Added)
         );
+        assert_ne!(analysis.coverage, CoverageStatus::Complete);
+        assert!(execution.is_truncated());
+        assert_eq!(execution.limiting_resources(), &[QueryResource::Results]);
     }
 
     #[test]
@@ -8359,6 +8551,7 @@ mod tests {
         let built = run_advanced(&document, &plan);
 
         assert_eq!(built.completeness, AdvancedCompleteness::Complete);
+        assert!(built.execution.is_complete());
         assert_eq!(
             built.columns,
             vec![
@@ -8443,6 +8636,11 @@ mod tests {
 
         // Honest: non-empty columns, no fabricated rows.
         assert_eq!(built.completeness, AdvancedCompleteness::Unsupported);
+        assert!(built.execution.is_unsupported_partial());
+        assert_eq!(
+            built.execution.limiting_resources(),
+            &[QueryResource::Capability]
+        );
         assert!(built.rows.is_empty());
         assert!(!built.columns.is_empty());
     }
@@ -8461,6 +8659,11 @@ mod tests {
         let built = run_advanced(&document, &plan);
 
         assert_eq!(built.completeness, AdvancedCompleteness::Unsupported);
+        assert!(built.execution.is_unsupported_partial());
+        assert_eq!(
+            built.execution.limiting_resources(),
+            &[QueryResource::Capability]
+        );
         assert!(built.rows.is_empty());
         assert!(!built.columns.is_empty());
     }
@@ -8472,6 +8675,8 @@ mod tests {
         let built = run_advanced(&document, &plan);
 
         assert_eq!(built.completeness, AdvancedCompleteness::Paged);
+        assert!(built.execution.is_truncated());
+        assert_eq!(built.execution.limiting_resources(), &[QueryResource::Rows]);
         assert_eq!(built.rows.len(), 1);
         assert_eq!(built.next_page_offset, Some(1));
     }
@@ -8494,10 +8699,12 @@ mod tests {
             match page.next_page_offset {
                 Some(next) => {
                     assert_eq!(page.completeness, AdvancedCompleteness::Paged);
+                    assert!(page.execution.is_truncated());
                     offset = usize::try_from(next).expect("test offset fits");
                 }
                 None => {
                     assert_eq!(page.completeness, AdvancedCompleteness::Complete);
+                    assert!(page.execution.is_complete());
                     break;
                 }
             }

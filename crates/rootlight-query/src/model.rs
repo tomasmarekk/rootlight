@@ -173,6 +173,122 @@ pub enum QueryResource {
     Tokens,
     /// Variable-sized response memory.
     MemoryBytes,
+    /// Maximum traversal depth.
+    Depth,
+    /// Maximum number of materialized paths.
+    Paths,
+    /// Unsupported query capability or semantic operation.
+    Capability,
+}
+
+/// Authoritative execution-completeness state produced by the query layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ExecutionCompletenessState {
+    /// The supported query domain was evaluated without an execution limit.
+    Complete,
+    /// A known execution limit stopped a bounded partial result.
+    Truncated,
+    /// A known portion of the requested semantics is unsupported.
+    UnsupportedPartial,
+}
+
+/// Authoritative execution completeness and the resources that caused partiality.
+///
+/// Execution completeness is independent from semantic coverage and continuation
+/// availability. Truncated and unsupported-partial values always contain at
+/// least one limiting resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionCompleteness {
+    state: ExecutionCompletenessState,
+    limiting_resources: Vec<QueryResource>,
+}
+
+impl ExecutionCompleteness {
+    /// Creates an authoritative complete result.
+    #[must_use]
+    pub const fn complete() -> Self {
+        Self {
+            state: ExecutionCompletenessState::Complete,
+            limiting_resources: Vec::new(),
+        }
+    }
+
+    /// Creates an authoritative truncated result with at least one cause.
+    ///
+    /// Repeated resources are removed while preserving their first observed
+    /// order.
+    #[must_use]
+    pub fn truncated(
+        primary: QueryResource,
+        additional: impl IntoIterator<Item = QueryResource>,
+    ) -> Self {
+        Self::partial(ExecutionCompletenessState::Truncated, primary, additional)
+    }
+
+    /// Creates an authoritative unsupported-partial result with at least one cause.
+    ///
+    /// Repeated resources are removed while preserving their first observed
+    /// order.
+    #[must_use]
+    pub fn unsupported_partial(
+        primary: QueryResource,
+        additional: impl IntoIterator<Item = QueryResource>,
+    ) -> Self {
+        Self::partial(
+            ExecutionCompletenessState::UnsupportedPartial,
+            primary,
+            additional,
+        )
+    }
+
+    /// Returns the closed execution-completeness state.
+    #[must_use]
+    pub const fn state(&self) -> ExecutionCompletenessState {
+        self.state
+    }
+
+    /// Returns the limiting resources in deterministic first-observed order.
+    #[must_use]
+    pub fn limiting_resources(&self) -> &[QueryResource] {
+        &self.limiting_resources
+    }
+
+    /// Reports whether a known execution limit stopped a bounded prefix.
+    #[must_use]
+    pub const fn is_truncated(&self) -> bool {
+        matches!(self.state, ExecutionCompletenessState::Truncated)
+    }
+
+    /// Reports whether the supported query domain was evaluated completely.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        matches!(self.state, ExecutionCompletenessState::Complete)
+    }
+
+    /// Reports whether a known semantic portion could not be evaluated.
+    #[must_use]
+    pub const fn is_unsupported_partial(&self) -> bool {
+        matches!(self.state, ExecutionCompletenessState::UnsupportedPartial)
+    }
+
+    fn partial(
+        state: ExecutionCompletenessState,
+        primary: QueryResource,
+        additional: impl IntoIterator<Item = QueryResource>,
+    ) -> Self {
+        let mut limiting_resources = vec![primary];
+        for resource in additional {
+            if !limiting_resources.contains(&resource) {
+                limiting_resources.push(resource);
+            }
+        }
+        Self {
+            state,
+            limiting_resources,
+        }
+    }
 }
 
 /// Intent represented by a deterministic query plan.
@@ -686,9 +802,11 @@ pub struct CodeLocateResult {
     pub matched_candidates: u64,
     /// Deduplicated coverage evidence relevant to returned entities.
     pub coverage: Vec<CoverageRecord>,
-    /// Whether a result or resource limit stopped complete materialization.
+    /// Authoritative execution completeness.
+    pub execution: ExecutionCompleteness,
+    /// Compatibility projection of [`ExecutionCompleteness::is_truncated`].
     pub truncated: bool,
-    /// Resource limits that stopped work, in deterministic execution order.
+    /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].
     pub limiting_resources: Vec<QueryResource>,
     /// Offset of the next deterministic page when more matches remain.
     pub next_page_offset: Option<u64>,
@@ -709,9 +827,11 @@ pub struct SymbolExplainResult {
     pub provenance: ProvenanceRecord,
     /// Coverage evidence relevant to the entity.
     pub coverage: Vec<CoverageRecord>,
-    /// Whether a resource limit stopped any optional scan.
+    /// Authoritative execution completeness.
+    pub execution: ExecutionCompleteness,
+    /// Compatibility projection of [`ExecutionCompleteness::is_truncated`].
     pub truncated: bool,
-    /// Resource limits that stopped optional scans, in deterministic scan order.
+    /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled names and labels.
     pub trust: RepositoryDataTrust,
@@ -756,9 +876,11 @@ pub struct SymbolRelationshipsResult {
     pub total_edges: u32,
     /// Whether the counts are exact or lower bounds.
     pub exact: bool,
-    /// Whether a resource limit stopped complete materialization.
+    /// Authoritative execution completeness.
+    pub execution: ExecutionCompleteness,
+    /// Compatibility projection of [`ExecutionCompleteness::is_truncated`].
     pub truncated: bool,
-    /// Resource limits that stopped work, in deterministic execution order.
+    /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].
     pub limiting_resources: Vec<QueryResource>,
     /// Offset of the next deterministic page when more edges remain.
     pub next_page_offset: Option<u64>,
@@ -823,7 +945,9 @@ pub struct FlowTraceResult {
     pub frontier: FlowTraceFrontier,
     /// Actual relation projection used.
     pub projection: FlowTraceProjection,
-    /// Resource limits that stopped work, in deterministic execution order.
+    /// Authoritative execution completeness.
+    pub execution: ExecutionCompleteness,
+    /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.
     pub trust: RepositoryDataTrust,
@@ -888,7 +1012,9 @@ pub struct ArchitectureCyclesResult {
     pub break_candidates: Vec<CycleBreak>,
     /// Actual relation projection used.
     pub projection: ArchitectureCyclesProjection,
-    /// Resource limits that stopped work, in deterministic execution order.
+    /// Authoritative execution completeness.
+    pub execution: ExecutionCompleteness,
+    /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.
     pub trust: RepositoryDataTrust,
@@ -1015,7 +1141,9 @@ pub struct ArchitectureOverviewResult {
     pub hotspots: Vec<ArchitectureHotspot>,
     /// Derived-view algorithm metadata in deterministic order.
     pub views: Vec<ArchitectureOverviewDerivedView>,
-    /// Resource limits that stopped work, in deterministic execution order.
+    /// Authoritative execution completeness.
+    pub execution: ExecutionCompleteness,
+    /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.
     pub trust: RepositoryDataTrust,
@@ -1144,7 +1272,9 @@ pub struct TestsSelectResult {
     pub coverage_strategy: TestsSelectCoverage,
     /// Honest coverage gaps in deterministic order.
     pub gaps: Vec<TestsSelectGap>,
-    /// Resource limits that stopped work, in deterministic execution order.
+    /// Authoritative execution completeness.
+    pub execution: ExecutionCompleteness,
+    /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.
     pub trust: RepositoryDataTrust,
@@ -1341,7 +1471,9 @@ pub struct ChangeImpactResult {
     pub tests: Vec<ChangeImpactTestCandidate>,
     /// Aggregate risk summary.
     pub risk_summary: ChangeImpactRiskSummary,
-    /// Resource limits that stopped work, in deterministic execution order.
+    /// Authoritative execution completeness.
+    pub execution: ExecutionCompleteness,
+    /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.
     pub trust: RepositoryDataTrust,
@@ -1475,7 +1607,9 @@ pub struct PlanChangeResult {
     pub open_decisions: Vec<PlanChangeDecision>,
     /// Ready follow-up context-pack arguments.
     pub context_pack_request: PlanChangeContextPack,
-    /// Resource limits that stopped work, in deterministic execution order.
+    /// Authoritative execution completeness.
+    pub execution: ExecutionCompleteness,
+    /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.
     pub trust: RepositoryDataTrust,
@@ -1676,7 +1810,9 @@ pub struct HistoryCompareResult {
     pub breaking_candidates: Vec<BreakingCandidateRecord>,
     /// Entity lineage matches in deterministic identity order.
     pub lineage: Vec<LineageMatchRecord>,
-    /// Resource limits that stopped work, in deterministic execution order.
+    /// Authoritative execution completeness.
+    pub execution: ExecutionCompleteness,
+    /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.
     pub trust: RepositoryDataTrust,
@@ -1833,7 +1969,9 @@ pub struct CodeDeadResult {
     pub blind_spots: Vec<CodeDeadBlindSpot>,
     /// Applied false-positive suppression rules in deterministic order.
     pub suppression_rules: Vec<CodeDeadSuppressionRule>,
-    /// Resource limits that stopped work, in deterministic execution order.
+    /// Authoritative execution completeness.
+    pub execution: ExecutionCompleteness,
+    /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].
     pub limiting_resources: Vec<QueryResource>,
     /// Mandatory trust marker for repository-controlled values.
     pub trust: RepositoryDataTrust,
@@ -1873,6 +2011,8 @@ pub struct SourceReadQueryResult {
     pub generation: GenerationId,
     /// Verified chunks in selector order.
     pub chunks: Vec<SourceChunkResult>,
+    /// Authoritative execution completeness for the atomic source read.
+    pub execution: ExecutionCompleteness,
 }
 
 /// Default maximum rows returned by an advanced query.
@@ -2574,9 +2714,11 @@ pub struct AdvancedQueryResult {
     pub rows: Vec<serde_json::Value>,
     /// Operators, estimates, and applied limits when explain was requested.
     pub plan: Option<AdvancedPlanExplanation>,
-    /// Whether the result is complete, paged, truncated, or unsupported.
+    /// Authoritative execution completeness.
+    pub execution: ExecutionCompleteness,
+    /// Compatibility projection retaining the original advanced classification.
     pub completeness: AdvancedCompleteness,
-    /// Resource limits that stopped work, in deterministic execution order.
+    /// Compatibility projection of [`ExecutionCompleteness::limiting_resources`].
     pub limiting_resources: Vec<QueryResource>,
     /// Offset of the next deterministic page when more rows remain.
     pub next_page_offset: Option<u64>,
@@ -2743,4 +2885,76 @@ pub(crate) fn ensure_estimate(
 
 pub(crate) fn search_mode(mode: LocateMode) -> SearchMode {
     mode.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExecutionCompleteness, ExecutionCompletenessState, QueryResource};
+
+    const RESOURCES: [QueryResource; 10] = [
+        QueryResource::Rows,
+        QueryResource::Edges,
+        QueryResource::Results,
+        QueryResource::SourceBytes,
+        QueryResource::JsonBytes,
+        QueryResource::Tokens,
+        QueryResource::MemoryBytes,
+        QueryResource::Depth,
+        QueryResource::Paths,
+        QueryResource::Capability,
+    ];
+
+    #[test]
+    fn complete_execution_has_no_limiting_resource() {
+        let execution = ExecutionCompleteness::complete();
+
+        assert_eq!(execution.state(), ExecutionCompletenessState::Complete);
+        assert!(execution.is_complete());
+        assert!(!execution.is_truncated());
+        assert!(!execution.is_unsupported_partial());
+        assert!(execution.limiting_resources().is_empty());
+    }
+
+    #[test]
+    fn partial_execution_always_has_unique_limiting_resources() {
+        for primary in RESOURCES {
+            let additional =
+                RESOURCES
+                    .into_iter()
+                    .chain([primary, QueryResource::Depth, QueryResource::Paths]);
+            for execution in [
+                ExecutionCompleteness::truncated(primary, additional.clone()),
+                ExecutionCompleteness::unsupported_partial(primary, additional),
+            ] {
+                assert!(!execution.limiting_resources().is_empty());
+                assert_eq!(execution.limiting_resources().first(), Some(&primary));
+                for (index, resource) in execution.limiting_resources().iter().enumerate() {
+                    assert!(
+                        !execution.limiting_resources()[..index].contains(resource),
+                        "resource {resource:?} is unique"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn execution_states_follow_increasing_partiality() {
+        assert!(ExecutionCompletenessState::Complete < ExecutionCompletenessState::Truncated);
+        assert!(
+            ExecutionCompletenessState::Truncated < ExecutionCompletenessState::UnsupportedPartial
+        );
+    }
+
+    #[test]
+    fn depth_and_path_resources_have_stable_wire_labels() {
+        assert_eq!(
+            serde_json::to_string(&QueryResource::Depth).expect("depth serializes"),
+            "\"depth\""
+        );
+        assert_eq!(
+            serde_json::to_string(&QueryResource::Paths).expect("paths serializes"),
+            "\"paths\""
+        );
+    }
 }

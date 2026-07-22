@@ -13,8 +13,9 @@ use rootlight_ir::{
     SourceSpan, decode_ir_document,
 };
 use rootlight_query::{
-    GenerationSet, LocateMode, PlanKind, QueryBudget, QueryError, QueryResource, QueryResponse,
-    QueryService, RepositoryDataTrust, TokenAccountingProfile, project_lexical_documents,
+    ExecutionCompletenessState, GenerationSet, LocateMode, PlanKind, QueryBudget, QueryError,
+    QueryResource, QueryResponse, QueryService, RepositoryDataTrust, TokenAccountingProfile,
+    project_lexical_documents,
 };
 use rootlight_search::{
     BuildBudget, LexicalSearch, QueryViolation, SearchBudget, SearchError, SearchHit,
@@ -294,6 +295,11 @@ fn locate_and_explain_use_deterministic_typed_plans() {
     assert_eq!(located.data.matched_candidates, 1);
     assert!(!located.data.truncated);
     assert_eq!(
+        located.data.execution.state(),
+        ExecutionCompletenessState::Complete
+    );
+    assert!(located.data.execution.limiting_resources().is_empty());
+    assert_eq!(
         located.data.hits[0].trust,
         RepositoryDataTrust::UntrustedRepositoryData
     );
@@ -314,6 +320,11 @@ fn locate_and_explain_use_deterministic_typed_plans() {
     );
     assert!(explained.usage.results >= 2);
     assert!(!explained.data.truncated);
+    assert_eq!(
+        explained.data.execution.state(),
+        ExecutionCompletenessState::Complete
+    );
+    assert!(explained.data.execution.limiting_resources().is_empty());
     assert_exact_response_accounting(&explained);
 }
 
@@ -488,10 +499,18 @@ fn bounded_queries_mark_deterministic_partial_results() {
         .execute_code_locate(&locate_plan, &Cancellation::new())
         .expect("bounded locate returns a partial prefix");
     assert!(located.data.truncated);
+    assert_eq!(
+        located.data.execution.state(),
+        ExecutionCompletenessState::Truncated
+    );
     assert_eq!(located.data.matched_candidates, 2);
     assert_eq!(
         located.data.limiting_resources,
         vec![QueryResource::Results]
+    );
+    assert_eq!(
+        located.data.execution.limiting_resources(),
+        located.data.limiting_resources
     );
 
     let explain_service = QueryService::new(&snapshot, &search).expect("generation inputs agree");
@@ -508,7 +527,15 @@ fn bounded_queries_mark_deterministic_partial_results() {
         .execute_symbol_explain(&explain_plan, &Cancellation::new())
         .expect("repeated partial scan succeeds");
     assert!(first.data.truncated);
+    assert_eq!(
+        first.data.execution.state(),
+        ExecutionCompletenessState::Truncated
+    );
     assert_eq!(first.data.limiting_resources, vec![QueryResource::Rows]);
+    assert_eq!(
+        first.data.execution.limiting_resources(),
+        first.data.limiting_resources
+    );
     assert_eq!(first.data, second.data);
     assert_eq!(first.usage.rows, 2);
 }
@@ -541,8 +568,16 @@ fn code_locate_hard_coverage_limit_suppresses_page_continuation() {
         .expect("hard coverage truncation returns an honest partial result");
 
     assert!(response.data.truncated);
+    assert_eq!(
+        response.data.execution.state(),
+        ExecutionCompletenessState::Truncated
+    );
     assert_eq!(response.data.next_page_offset, None);
     assert_eq!(response.data.limiting_resources, vec![QueryResource::Rows]);
+    assert_eq!(
+        response.data.execution.limiting_resources(),
+        response.data.limiting_resources
+    );
 }
 
 #[test]
