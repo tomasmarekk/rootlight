@@ -723,6 +723,9 @@ pub struct CodeLocateRequest {
     #[prost(uint32, tag = "6")]
     #[allow(missing_docs)]
     pub maximum_results: u32,
+    #[prost(uint64, tag = "7")]
+    #[allow(missing_docs)]
+    pub page_offset: u64,
 }
 /// One typed lexical lookup result.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -781,6 +784,9 @@ pub struct CodeLocateResponse {
     #[prost(bool, tag = "5")]
     #[allow(missing_docs)]
     pub truncated: bool,
+    #[prost(uint64, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub next_page_offset: ::core::option::Option<u64>,
 }
 /// Requests bounded explanations for stable symbols.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1230,6 +1236,9 @@ pub struct SymbolRelationshipsRequest {
     #[prost(uint32, optional, tag = "8")]
     #[allow(missing_docs)]
     pub max_results: ::core::option::Option<u32>,
+    #[prost(uint64, tag = "9")]
+    #[allow(missing_docs)]
+    pub page_offset: u64,
 }
 /// One typed relationship target within a seed-relation group.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1289,6 +1298,9 @@ pub struct SymbolRelationshipsResponse {
     #[prost(bool, tag = "7")]
     #[allow(missing_docs)]
     pub truncated: bool,
+    #[prost(uint64, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub next_page_offset: ::core::option::Option<u64>,
 }
 /// Requests bounded directed paths between stable symbols.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2287,6 +2299,9 @@ pub struct AdvancedQueryRequest {
     #[prost(uint64, optional, tag = "8")]
     #[allow(missing_docs)]
     pub cost_limit: ::core::option::Option<u64>,
+    #[prost(uint64, tag = "9")]
+    #[allow(missing_docs)]
+    pub page_offset: u64,
 }
 /// One typed column definition in an advanced query result schema.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2335,6 +2350,9 @@ pub struct AdvancedQueryResponse {
     #[prost(string, tag = "6")]
     #[allow(missing_docs)]
     pub completeness: ::prost::alloc::string::String,
+    #[prost(uint64, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub next_page_offset: ::core::option::Option<u64>,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]

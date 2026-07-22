@@ -534,7 +534,7 @@ fn validate_cross_cutting_metadata(
     }
 
     let has_cursor = shape.contains_key("cursor");
-    let pagination_has_cursor = !matches!(entry.pagination, PaginationSemantics::None);
+    let pagination_has_cursor = entry.pagination == PaginationSemantics::AuthenticatedCursor;
     if has_cursor != pagination_has_cursor {
         problems.push(Problem::new(
             entry.tool.name(),
@@ -544,15 +544,6 @@ fn validate_cross_cutting_metadata(
             },
         ));
     }
-    if entry.pagination == PaginationSemantics::UnsupportedCursor
-        && entry.disposition("cursor", None).status != CapabilityStatus::UnsupportedStableError
-    {
-        problems.push(Problem::new(
-            entry.tool.name(),
-            ProblemKind::UnsupportedCursorWithoutRule,
-        ));
-    }
-
     let has_generation = shape.contains_key("generation");
     let generation_shape_matches = match entry.generation {
         GenerationSemantics::None | GenerationSemantics::CreatesGeneration => !has_generation,
@@ -1403,7 +1394,6 @@ enum ProblemKind {
         has_cursor: bool,
         semantics: String,
     },
-    UnsupportedCursorWithoutRule,
     GenerationDrift {
         has_generation: bool,
         semantics: String,
@@ -1542,10 +1532,6 @@ impl std::fmt::Display for Problem {
             } => write!(
                 formatter,
                 "pagination semantics {semantics} disagree with cursor presence {has_cursor}"
-            ),
-            ProblemKind::UnsupportedCursorWithoutRule => write!(
-                formatter,
-                "unsupported cursor lacks an UNSUPPORTED_CAPABILITY field rule"
             ),
             ProblemKind::GenerationDrift {
                 has_generation,

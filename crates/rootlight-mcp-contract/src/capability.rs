@@ -74,12 +74,18 @@ impl CapabilityRule {
 /// Pagination behavior advertised for one tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaginationSemantics {
-    /// The input contract has no continuation field.
-    None,
+    /// The operation does not return a read result.
+    NotApplicable,
     /// The cursor is authenticated and bound to the request shape.
     AuthenticatedCursor,
-    /// The schema exposes a cursor that is rejected before execution.
-    UnsupportedCursor,
+    /// The result is complete within its fixed construction bound.
+    BoundedComplete,
+    /// Truncation is explicit and callers must narrow the request.
+    ExplicitTruncation,
+    /// More detail is retrieved through a separately authenticated handle.
+    ProgressiveHandle,
+    /// Batch children preserve their own continuation semantics.
+    ChildContinuations,
 }
 
 impl PaginationSemantics {
@@ -87,9 +93,12 @@ impl PaginationSemantics {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::None => "none",
+            Self::NotApplicable => "not_applicable",
             Self::AuthenticatedCursor => "authenticated_cursor",
-            Self::UnsupportedCursor => "unsupported_cursor",
+            Self::BoundedComplete => "bounded_complete",
+            Self::ExplicitTruncation => "explicit_truncation",
+            Self::ProgressiveHandle => "progressive_handle",
+            Self::ChildContinuations => "child_continuations",
         }
     }
 }
@@ -525,6 +534,7 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
     accepted_fallback("budget"),
     accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
+    implemented("cursor", "uses an authenticated request-bound continuation"),
     unsupported(
         "repository.alias",
         "only stable repository identifiers are served",
@@ -537,7 +547,6 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
         "relationship-constrained lookup is not served",
     ),
     unsupported("min_confidence", "confidence filtering is not served"),
-    unsupported("cursor", "continuation paging is not served"),
     unsupported("budget.max_tokens", "token budgeting is not served"),
     unsupported(
         "budget.max_source_bytes",
@@ -628,6 +637,7 @@ const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
     accepted_fallback("max_results"),
     accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
+    implemented("cursor", "uses an authenticated request-bound continuation"),
     unsupported(
         "repository.alias",
         "only stable repository identifiers are served",
@@ -639,7 +649,6 @@ const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
         "ambiguous candidate projection is not served",
     ),
     unsupported("budget", "custom response budgets are not served"),
-    unsupported("cursor", "continuation paging is not served"),
     unsupported_value(
         "response_profile",
         "evidence",
@@ -1033,11 +1042,11 @@ const QUERY_ADVANCED_RULES: &[CapabilityRule] = &[
     accepted_fallback("generation"),
     accepted_fallback("query"),
     implemented("explain", "returns a deterministic source-free plan"),
+    implemented("cursor", "uses an authenticated request-bound continuation"),
     unsupported(
         "repository.alias",
         "only stable repository identifiers are served",
     ),
-    unsupported("cursor", "continuation paging is not served"),
     unsupported("parameters", "bound query parameters are not served"),
     implemented(
         "cost_limit",
@@ -1294,11 +1303,23 @@ const fn tool_rules(tool: McpTool) -> &'static [CapabilityRule] {
 
 const fn pagination_semantics(tool: McpTool) -> PaginationSemantics {
     match tool {
-        McpTool::RepoList => PaginationSemantics::AuthenticatedCursor,
-        McpTool::CodeLocate | McpTool::SymbolRelationships | McpTool::QueryAdvanced => {
-            PaginationSemantics::UnsupportedCursor
-        }
-        _ => PaginationSemantics::None,
+        McpTool::RepoIndex => PaginationSemantics::NotApplicable,
+        McpTool::RepoList
+        | McpTool::CodeLocate
+        | McpTool::SymbolRelationships
+        | McpTool::QueryAdvanced => PaginationSemantics::AuthenticatedCursor,
+        McpTool::RepoStatus | McpTool::OperationStatus => PaginationSemantics::BoundedComplete,
+        McpTool::SymbolExplain | McpTool::ContextPack => PaginationSemantics::ProgressiveHandle,
+        McpTool::QueryBatch => PaginationSemantics::ChildContinuations,
+        McpTool::FlowTrace
+        | McpTool::ChangeImpact
+        | McpTool::TestsSelect
+        | McpTool::ArchitectureOverview
+        | McpTool::ArchitectureCycles
+        | McpTool::CodeDead
+        | McpTool::HistoryCompare
+        | McpTool::PlanChange
+        | McpTool::SourceRead => PaginationSemantics::ExplicitTruncation,
     }
 }
 
@@ -1702,6 +1723,71 @@ mod tests {
                 .contains("non-active explicit generations")
         );
         assert_eq!(generation.error_code, None);
+    }
+
+    #[test]
+    fn every_tool_has_an_explicit_pagination_classification() {
+        let expected = [
+            (McpTool::RepoIndex, PaginationSemantics::NotApplicable),
+            (
+                McpTool::OperationStatus,
+                PaginationSemantics::BoundedComplete,
+            ),
+            (McpTool::RepoList, PaginationSemantics::AuthenticatedCursor),
+            (McpTool::RepoStatus, PaginationSemantics::BoundedComplete),
+            (
+                McpTool::CodeLocate,
+                PaginationSemantics::AuthenticatedCursor,
+            ),
+            (
+                McpTool::SymbolExplain,
+                PaginationSemantics::ProgressiveHandle,
+            ),
+            (
+                McpTool::SymbolRelationships,
+                PaginationSemantics::AuthenticatedCursor,
+            ),
+            (McpTool::FlowTrace, PaginationSemantics::ExplicitTruncation),
+            (
+                McpTool::ChangeImpact,
+                PaginationSemantics::ExplicitTruncation,
+            ),
+            (
+                McpTool::TestsSelect,
+                PaginationSemantics::ExplicitTruncation,
+            ),
+            (
+                McpTool::ArchitectureOverview,
+                PaginationSemantics::ExplicitTruncation,
+            ),
+            (
+                McpTool::ArchitectureCycles,
+                PaginationSemantics::ExplicitTruncation,
+            ),
+            (McpTool::CodeDead, PaginationSemantics::ExplicitTruncation),
+            (McpTool::ContextPack, PaginationSemantics::ProgressiveHandle),
+            (
+                McpTool::QueryAdvanced,
+                PaginationSemantics::AuthenticatedCursor,
+            ),
+            (McpTool::QueryBatch, PaginationSemantics::ChildContinuations),
+            (
+                McpTool::HistoryCompare,
+                PaginationSemantics::ExplicitTruncation,
+            ),
+            (McpTool::PlanChange, PaginationSemantics::ExplicitTruncation),
+            (McpTool::SourceRead, PaginationSemantics::ExplicitTruncation),
+        ];
+
+        assert_eq!(expected.len(), McpTool::ALL.len());
+        for (tool, semantics) in expected {
+            assert_eq!(
+                CAPABILITIES[tool as usize].pagination,
+                semantics,
+                "{} has the wrong public pagination classification",
+                tool.name()
+            );
+        }
     }
 
     #[test]

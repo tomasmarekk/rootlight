@@ -7,7 +7,7 @@ use rootlight_mcp::{
     ToolExecutionFuture, ToolExecutor, ToolRouter, serve,
 };
 use rootlight_mcp_contract::{
-    ErrorCode, OperationStatusOutput, PublicError, RepoIndexOutput, VerticalTool,
+    ErrorCode, ExposureProfile, OperationStatusOutput, PublicError, RepoIndexOutput, VerticalTool,
 };
 use serde_json::{Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -20,6 +20,7 @@ impl ToolExecutor for TranscriptExecutor {
         &self,
         tool: VerticalTool,
         _arguments: Map<String, Value>,
+        _exposure_profile: ExposureProfile,
         _cancellation: RequestCancellation,
     ) -> ToolExecutionFuture {
         Box::pin(async move {

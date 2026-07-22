@@ -421,6 +421,7 @@ message CodeLocateRequest {
   string query = 4;
   FirstSliceLocateMode mode = 5;
   uint32 maximum_results = 6;
+  uint64 page_offset = 7;
 }
 
 // One typed lexical lookup result.
@@ -445,6 +446,7 @@ message CodeLocateResponse {
   repeated FirstSliceLocateHit hits = 3;
   uint64 matched_candidates = 4;
   bool truncated = 5;
+  optional uint64 next_page_offset = 6;
 }
 
 // Requests bounded explanations for stable symbols.
@@ -640,6 +642,7 @@ message SymbolRelationshipsRequest {
   optional string direction = 6;
   optional uint32 min_confidence = 7;
   optional uint32 max_results = 8;
+  uint64 page_offset = 9;
 }
 
 // One typed relationship target within a seed-relation group.
@@ -667,6 +670,7 @@ message SymbolRelationshipsResponse {
   uint64 total_edges = 5;
   bool exact = 6;
   bool truncated = 7;
+  optional uint64 next_page_offset = 8;
 }
 
 // Requests bounded directed paths between stable symbols.
@@ -1127,6 +1131,7 @@ message AdvancedQueryRequest {
   optional uint32 max_results = 6;
   optional uint32 max_depth = 7;
   optional uint64 cost_limit = 8;
+  uint64 page_offset = 9;
 }
 
 // One typed column definition in an advanced query result schema.
@@ -1151,4 +1156,5 @@ message AdvancedQueryResponse {
   repeated string rows = 4;
   FirstSliceAdvancedPlan plan = 5;
   string completeness = 6;
+  optional uint64 next_page_offset = 7;
 }

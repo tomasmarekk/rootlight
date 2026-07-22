@@ -54,10 +54,10 @@ use rootlight_mcp_contract::intent::{
     SymbolRelationshipsInput, TraceEdge, TracePath,
 };
 use rootlight_mcp_contract::{
-    DetailKey, ErrorCode, GenerationSelector, McpTool, NextAction, PublicError,
+    DetailKey, ErrorCode, ExposureProfile, GenerationSelector, McpTool, NextAction, PublicError,
     PublicErrorBuildError, PublicValue, RepoIndexInput, RepositorySelector, SafeLabel,
-    SchemaVersion, SourceReadInput, SymbolExplainInput, ToolResponse, TrustClassification,
-    VerticalTool,
+    SchemaVersion, SourceFreeMessage, SourceReadInput, SymbolExplainInput, ToolResponse,
+    TrustClassification, VerticalTool,
     context::{
         BatchOperationStatus, BatchStatus, BatchTool, ColumnSchema, ColumnType, ContextPackInput,
         PlanExplanation, QueryAdvancedData, QueryAdvancedInput, QueryBatchData, QueryBatchInput,
@@ -80,9 +80,8 @@ use rootlight_mcp_contract::{
         OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary, QueryInterpretation,
         ReadEnvelope, RepoIndexData, RepoIndexSuccess, RequiredNullable, ResolvedRepository,
         ResponseBudget, ResponseProfile, ResponseWarning, SearchMode, SourceChunk, SourceElision,
-        SourceEncoding, SourceEncodingRequest, SourceFreeMessage, SourceReadData,
-        SourceReadSelector, StaleSourceReference, SymbolExplainData, SymbolExplanation,
-        UsageSummary,
+        SourceEncoding, SourceEncodingRequest, SourceReadData, SourceReadSelector,
+        StaleSourceReference, SymbolExplainData, SymbolExplanation, UsageSummary,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -444,6 +443,7 @@ pub struct CodeLocatePortRequest {
     query: String,
     mode: LocateMode,
     maximum_results: u32,
+    page_offset: u64,
 }
 
 impl CodeLocatePortRequest {
@@ -476,6 +476,12 @@ impl CodeLocatePortRequest {
     pub const fn maximum_results(&self) -> u32 {
         self.maximum_results
     }
+
+    /// Returns the deterministic page offset.
+    #[must_use]
+    pub const fn page_offset(&self) -> u64 {
+        self.page_offset
+    }
 }
 
 impl fmt::Debug for CodeLocatePortRequest {
@@ -487,6 +493,7 @@ impl fmt::Debug for CodeLocatePortRequest {
             .field("query_bytes", &self.query.len())
             .field("mode", &self.mode)
             .field("maximum_results", &self.maximum_results)
+            .field("page_offset", &self.page_offset)
             .finish()
     }
 }
@@ -586,6 +593,7 @@ pub struct SymbolRelationshipsPortRequest {
     direction: Option<String>,
     min_confidence: Option<u16>,
     max_results: Option<u16>,
+    page_offset: u64,
 }
 
 impl SymbolRelationshipsPortRequest {
@@ -629,6 +637,12 @@ impl SymbolRelationshipsPortRequest {
     #[must_use]
     pub const fn max_results(&self) -> Option<u16> {
         self.max_results
+    }
+
+    /// Returns the deterministic page offset.
+    #[must_use]
+    pub const fn page_offset(&self) -> u64 {
+        self.page_offset
     }
 }
 
@@ -1156,6 +1170,7 @@ pub struct QueryAdvancedPortRequest {
     max_results: Option<u16>,
     max_depth: Option<u8>,
     cost_limit: Option<u64>,
+    page_offset: u64,
 }
 
 impl QueryAdvancedPortRequest {
@@ -1199,6 +1214,12 @@ impl QueryAdvancedPortRequest {
     #[must_use]
     pub const fn cost_limit(&self) -> Option<u64> {
         self.cost_limit
+    }
+
+    /// Returns the deterministic page offset.
+    #[must_use]
+    pub const fn page_offset(&self) -> u64 {
+        self.page_offset
     }
 }
 
@@ -1468,6 +1489,7 @@ where
         &self,
         tool: VerticalTool,
         arguments: Map<String, Value>,
+        exposure_profile: ExposureProfile,
         cancellation: RequestCancellation,
     ) -> ToolExecutionFuture {
         let port = Arc::clone(&self.port);
@@ -1492,8 +1514,15 @@ where
                     execute_repo_status(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::RepoList => {
-                    execute_repo_list(port, arguments, cancellation, &invalid_cursor, cursor_key)
-                        .await
+                    execute_repo_list(
+                        port,
+                        arguments,
+                        exposure_profile,
+                        cancellation,
+                        &invalid_cursor,
+                        cursor_key,
+                    )
+                    .await
                 }
                 VerticalTool::ChangeImpact => {
                     execute_change_impact(port, arguments, cancellation, &unsupported).await
@@ -1503,9 +1532,12 @@ where
                         port,
                         batch_validator,
                         arguments,
+                        exposure_profile,
                         cancellation,
                         &unsupported,
                         &invalid_arguments,
+                        &invalid_cursor,
+                        cursor_key,
                     )
                     .await
                 }
@@ -1513,10 +1545,28 @@ where
                     execute_history_compare(port, arguments, cancellation, &unsupported).await
                 }
                 VerticalTool::QueryAdvanced => {
-                    execute_query_advanced(port, arguments, cancellation, &unsupported).await
+                    execute_query_advanced(
+                        port,
+                        arguments,
+                        exposure_profile,
+                        cancellation,
+                        &unsupported,
+                        &invalid_cursor,
+                        cursor_key,
+                    )
+                    .await
                 }
                 VerticalTool::SymbolRelationships => {
-                    execute_symbol_relationships(port, arguments, cancellation, &unsupported).await
+                    execute_symbol_relationships(
+                        port,
+                        arguments,
+                        exposure_profile,
+                        cancellation,
+                        &unsupported,
+                        &invalid_cursor,
+                        cursor_key,
+                    )
+                    .await
                 }
                 VerticalTool::FlowTrace => {
                     execute_flow_trace(port, arguments, cancellation, &unsupported).await
@@ -1538,9 +1588,12 @@ where
                         port,
                         batch_validator,
                         arguments,
+                        exposure_profile,
                         cancellation,
                         &unsupported,
                         &invalid_arguments,
+                        &invalid_cursor,
+                        cursor_key,
                     )
                     .await
                 }
@@ -1549,9 +1602,12 @@ where
                         port,
                         batch_validator,
                         arguments,
+                        exposure_profile,
                         cancellation,
                         &unsupported,
                         &invalid_arguments,
+                        &invalid_cursor,
+                        cursor_key,
                     )
                     .await
                 }
@@ -1559,7 +1615,16 @@ where
                     execute_operation_status(port, arguments, cancellation).await
                 }
                 VerticalTool::CodeLocate => {
-                    execute_code_locate(port, arguments, cancellation, &unsupported).await
+                    execute_code_locate(
+                        port,
+                        arguments,
+                        exposure_profile,
+                        cancellation,
+                        &unsupported,
+                        &invalid_cursor,
+                        cursor_key,
+                    )
+                    .await
                 }
                 VerticalTool::SymbolExplain => {
                     execute_symbol_explain(port, arguments, cancellation, &unsupported).await
@@ -1626,13 +1691,20 @@ where
     explain_envelope_from_status(status, data)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the batch boundary carries checked validators, public errors, and cursor state explicitly"
+)]
 async fn execute_query_batch<P>(
     port: Arc<P>,
     batch_validator: Arc<MaterializedToolValidator>,
     arguments: Map<String, Value>,
+    exposure_profile: ExposureProfile,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
     invalid_arguments: &PublicError,
+    invalid_cursor: &PublicError,
+    cursor_key: CursorSigningKey,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
@@ -1668,6 +1740,9 @@ where
         validator: batch_validator,
         unsupported: unsupported.clone(),
         invalid_arguments: invalid_arguments.clone(),
+        invalid_cursor: invalid_cursor.clone(),
+        exposure_profile,
+        cursor_key,
     });
     let errors = BatchPublicErrors::new(binding_invalid_error(), operation_failed, budget_exceeded);
     let output = BatchService
@@ -1704,6 +1779,9 @@ struct McpAgentToolPort<P> {
     validator: Arc<MaterializedToolValidator>,
     unsupported: PublicError,
     invalid_arguments: PublicError,
+    invalid_cursor: PublicError,
+    exposure_profile: ExposureProfile,
+    cursor_key: CursorSigningKey,
 }
 
 impl<P> AgentToolPort<RequestCancellation> for McpAgentToolPort<P>
@@ -1764,6 +1842,9 @@ where
         let port = Arc::clone(&self.port);
         let unsupported = self.unsupported.clone();
         let invalid_arguments = self.invalid_arguments.clone();
+        let invalid_cursor = self.invalid_cursor.clone();
+        let exposure_profile = self.exposure_profile;
+        let cursor_key = self.cursor_key;
         let validator = Arc::clone(&self.validator);
         let budget = context.budget().clone();
         let local_budget = context.local_budget().cloned();
@@ -1780,21 +1861,13 @@ where
             let vertical_tool = vertical_tool_for_batch(tool)
                 .ok_or_else(|| AgentPortError::Public(Box::new(unsupported.clone())))?;
             validator
-                .validate(
-                    vertical_tool,
-                    &arguments,
-                    rootlight_mcp_contract::ExposureProfile::Developer,
-                )
+                .validate(vertical_tool, &arguments, exposure_profile)
                 .map_err(|error| {
                     map_materialized_input_error(error, &binding_paths, &invalid_arguments)
                 })?;
             apply_child_budget(tool, &budget, &mut arguments).map_err(map_agent_child_error)?;
             validator
-                .validate(
-                    vertical_tool,
-                    &arguments,
-                    rootlight_mcp_contract::ExposureProfile::Developer,
-                )
+                .validate(vertical_tool, &arguments, exposure_profile)
                 .map_err(|error| {
                     map_materialized_input_error(error, &binding_paths, &invalid_arguments)
                 })?;
@@ -1803,9 +1876,12 @@ where
                 port,
                 validator,
                 arguments,
+                exposure_profile,
                 cancellation.clone(),
                 &unsupported,
                 &invalid_arguments,
+                &invalid_cursor,
+                cursor_key,
             );
             let response = if let Some(deadline) = deadline {
                 let mut cancellation_wait = cancellation.clone();
@@ -2080,21 +2156,37 @@ fn json_pointer_is_ancestor(ancestor: &str, descendant: &str) -> bool {
 }
 
 /// Maps one admitted child request to its concrete MCP/daemon adapter.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the child boundary carries checked validators, public errors, and cursor state explicitly"
+)]
 async fn execute_agent_child<P>(
     tool: BatchTool,
     port: Arc<P>,
     validator: Arc<MaterializedToolValidator>,
     arguments: Map<String, Value>,
+    exposure_profile: ExposureProfile,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
     invalid_arguments: &PublicError,
+    invalid_cursor: &PublicError,
+    cursor_key: CursorSigningKey,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
     match tool {
         BatchTool::CodeLocate => {
-            execute_code_locate(port, arguments, cancellation, unsupported).await
+            execute_code_locate(
+                port,
+                arguments,
+                exposure_profile,
+                cancellation,
+                unsupported,
+                invalid_cursor,
+                cursor_key,
+            )
+            .await
         }
         BatchTool::SymbolExplain => {
             execute_symbol_explain(port, arguments, cancellation, unsupported).await
@@ -2110,7 +2202,16 @@ where
             .await
         }
         BatchTool::SymbolRelationships => {
-            execute_symbol_relationships(port, arguments, cancellation, unsupported).await
+            execute_symbol_relationships(
+                port,
+                arguments,
+                exposure_profile,
+                cancellation,
+                unsupported,
+                invalid_cursor,
+                cursor_key,
+            )
+            .await
         }
         BatchTool::FlowTrace => {
             execute_flow_trace(port, arguments, cancellation, unsupported).await
@@ -2133,9 +2234,12 @@ where
                 port,
                 validator,
                 arguments,
+                exposure_profile,
                 cancellation,
                 unsupported,
                 invalid_arguments,
+                invalid_cursor,
+                cursor_key,
             )
             .await
         }
@@ -2171,13 +2275,20 @@ fn map_batch_orchestration_error(error: BatchOrchestrationError) -> ToolExecutio
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "context assembly carries checked validators, public errors, and cursor state explicitly"
+)]
 async fn execute_context_pack<P>(
     port: Arc<P>,
     validator: Arc<MaterializedToolValidator>,
     arguments: Map<String, Value>,
+    exposure_profile: ExposureProfile,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
     invalid_arguments: &PublicError,
+    invalid_cursor: &PublicError,
+    cursor_key: CursorSigningKey,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
@@ -2189,6 +2300,9 @@ where
         validator,
         unsupported: unsupported.clone(),
         invalid_arguments: invalid_arguments.clone(),
+        invalid_cursor: invalid_cursor.clone(),
+        exposure_profile,
+        cursor_key,
     });
     let output = ContextPackService
         .execute(adapter, input, repository, cancellation)
@@ -2220,6 +2334,7 @@ fn map_context_pack_service_error(
 async fn execute_repo_list<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
+    exposure_profile: ExposureProfile,
     cancellation: RequestCancellation,
     invalid_cursor: &PublicError,
     cursor_key: CursorSigningKey,
@@ -2279,6 +2394,7 @@ where
             page_size,
             snapshot,
             &plan,
+            exposure_profile,
             cursor_key.key_id,
         );
         parsed
@@ -2325,6 +2441,7 @@ where
         page_size,
         snapshot_bytes,
         &plan,
+        exposure_profile,
         cursor_key.key_id,
     );
     let next_cursor = if truncated {
@@ -2448,6 +2565,7 @@ fn repo_list_cursor_context(
     page_size: u16,
     snapshot_id: [u8; 32],
     plan: &PlanExplanation,
+    exposure_profile: ExposureProfile,
     key_id: u64,
 ) -> CursorContext {
     let repository_digest = domain_hash(b"rootlight.repo-list.repository.v1", &snapshot_id);
@@ -2468,6 +2586,7 @@ fn repo_list_cursor_context(
         query_fingerprint: repo_list_fingerprint(query, states, page_size),
         plan_fingerprint: repo_list_plan_fingerprint(plan, &snapshot_id),
         response_profile: ResponseProfile::Compact,
+        exposure_profile,
         snapshot_id,
         page_size,
         key_id,
@@ -2542,6 +2661,224 @@ fn domain_hash(domain: &[u8], value: &[u8]) -> [u8; 32] {
     hasher.update(domain);
     hash_length_prefixed(&mut hasher, value);
     *hasher.finalize().as_bytes()
+}
+
+fn parse_repository_cursor(
+    cursor: Option<&ContinuationCursor>,
+    invalid_cursor: &PublicError,
+) -> Result<Option<AuthenticatedCursor>, ToolExecutionError> {
+    cursor
+        .map(|cursor| {
+            AuthenticatedCursor::from_wire(cursor.as_str())
+                .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))
+        })
+        .transpose()
+}
+
+fn pin_request_generation(
+    generation: &mut client::GenerationSelector,
+    cursor: &AuthenticatedCursor,
+    invalid_cursor: &PublicError,
+) -> Result<(), ToolExecutionError> {
+    match *generation {
+        client::GenerationSelector::Active => {
+            *generation = client::GenerationSelector::Generation(cursor.generation());
+            Ok(())
+        }
+        client::GenerationSelector::Generation(requested) if requested == cursor.generation() => {
+            Ok(())
+        }
+        client::GenerationSelector::Generation(_) => {
+            Err(ToolExecutionError::new(invalid_cursor.clone()))
+        }
+    }
+}
+
+fn decode_page_offset(
+    bytes: &[u8],
+    invalid_cursor: &PublicError,
+) -> Result<u64, ToolExecutionError> {
+    let offset = bytes
+        .try_into()
+        .map(u64::from_be_bytes)
+        .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))?;
+    if offset == 0 {
+        return Err(ToolExecutionError::new(invalid_cursor.clone()));
+    }
+    Ok(offset)
+}
+
+fn validate_repository_cursor(
+    cursor: &AuthenticatedCursor,
+    context: &CursorContext,
+    invalid_cursor: &PublicError,
+    cursor_key: CursorSigningKey,
+) -> Result<(), ToolExecutionError> {
+    cursor
+        .validate(context, now_unix_ms(), &cursor_key.secret)
+        .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))
+}
+
+fn create_page_cursor(
+    next_offset: Option<u64>,
+    context: CursorContext,
+    cursor_key: CursorSigningKey,
+) -> Result<Option<ContinuationCursor>, ToolExecutionError> {
+    next_offset
+        .map(|offset| {
+            let cursor = AuthenticatedCursor::create(
+                context,
+                offset.to_be_bytes().to_vec(),
+                now_unix_ms(),
+                &cursor_key.secret,
+            )
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+            ContinuationCursor::parse(&cursor.to_wire())
+                .map_err(|_| internal(ToolExecutionFailure::Executor))
+        })
+        .transpose()
+}
+
+fn repository_snapshot_id(repository: RepositoryId, generation: GenerationId) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rootlight.repository-generation.snapshot.v1");
+    hasher.update(repository.as_bytes());
+    hasher.update(generation.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the cursor context must bind every independent public request dimension"
+)]
+fn repository_cursor_context(
+    tool: McpTool,
+    repository: RepositoryId,
+    generation: GenerationId,
+    exposure_profile: ExposureProfile,
+    page_size: u16,
+    query_fingerprint: [u8; 32],
+    plan_fingerprint: [u8; 32],
+    key_id: u64,
+) -> CursorContext {
+    CursorContext {
+        repository,
+        generation,
+        tool,
+        tool_major_version: 1,
+        query_fingerprint,
+        plan_fingerprint,
+        response_profile: ResponseProfile::Compact,
+        exposure_profile,
+        snapshot_id: repository_snapshot_id(repository, generation),
+        page_size,
+        key_id,
+    }
+}
+
+fn code_locate_cursor_context(
+    request: &CodeLocatePortRequest,
+    generation: GenerationId,
+    exposure_profile: ExposureProfile,
+    key_id: u64,
+) -> CursorContext {
+    let mut request_hasher = blake3::Hasher::new();
+    request_hasher.update(b"rootlight.code-locate.request.v1");
+    request_hasher.update(request.repository.as_bytes());
+    request_hasher.update(request.query.as_bytes());
+    request_hasher.update(&[locate_mode_tag(request.mode)]);
+    request_hasher.update(&request.maximum_results.to_le_bytes());
+    let query_fingerprint = *request_hasher.finalize().as_bytes();
+    let mut plan_material = Vec::from(query_fingerprint);
+    plan_material.extend_from_slice(b"lexical-rank-desc-symbol-id-asc.v1");
+    repository_cursor_context(
+        McpTool::CodeLocate,
+        request.repository,
+        generation,
+        exposure_profile,
+        u16::try_from(request.maximum_results).expect("public locate page size is at most 200"),
+        query_fingerprint,
+        domain_hash(b"rootlight.code-locate.plan.v1", &plan_material),
+        key_id,
+    )
+}
+
+fn locate_mode_tag(mode: LocateMode) -> u8 {
+    match mode {
+        LocateMode::Exact => 0,
+        LocateMode::Prefix => 1,
+        LocateMode::Text => 2,
+        LocateMode::SafeRegex => 3,
+        LocateMode::Glob => 4,
+    }
+}
+
+fn symbol_relationships_cursor_context(
+    request: &SymbolRelationshipsPortRequest,
+    generation: GenerationId,
+    exposure_profile: ExposureProfile,
+    key_id: u64,
+) -> CursorContext {
+    let mut request_hasher = blake3::Hasher::new();
+    request_hasher.update(b"rootlight.symbol-relationships.request.v1");
+    request_hasher.update(request.repository.as_bytes());
+    for seed in &request.seeds {
+        request_hasher.update(seed.as_bytes());
+    }
+    for relation in &request.relations {
+        request_hasher.update(relation.as_bytes());
+        request_hasher.update(&[0]);
+    }
+    request_hasher.update(request.direction.as_deref().unwrap_or("natural").as_bytes());
+    request_hasher.update(&request.min_confidence.unwrap_or(700).to_le_bytes());
+    request_hasher.update(&request.max_results.unwrap_or(50).to_le_bytes());
+    let query_fingerprint = *request_hasher.finalize().as_bytes();
+    let mut plan_material = Vec::from(query_fingerprint);
+    plan_material.extend_from_slice(b"seed-family-direction-target-confidence.v1");
+    repository_cursor_context(
+        McpTool::SymbolRelationships,
+        request.repository,
+        generation,
+        exposure_profile,
+        request.max_results.unwrap_or(50),
+        query_fingerprint,
+        domain_hash(b"rootlight.symbol-relationships.plan.v1", &plan_material),
+        key_id,
+    )
+}
+
+fn query_advanced_cursor_context(
+    request: &QueryAdvancedPortRequest,
+    generation: GenerationId,
+    exposure_profile: ExposureProfile,
+    key_id: u64,
+) -> CursorContext {
+    let mut request_hasher = blake3::Hasher::new();
+    request_hasher.update(b"rootlight.query-advanced.request.v1");
+    request_hasher.update(request.repository.as_bytes());
+    request_hasher.update(request.query_ast.as_bytes());
+    request_hasher.update(&[u8::from(request.explain.unwrap_or(false))]);
+    request_hasher.update(
+        &request
+            .max_results
+            .unwrap_or(DEFAULT_ADVANCED_RESULTS)
+            .to_le_bytes(),
+    );
+    request_hasher.update(&request.max_depth.unwrap_or(3).to_le_bytes());
+    request_hasher.update(&request.cost_limit.unwrap_or(u64::MAX).to_le_bytes());
+    let query_fingerprint = *request_hasher.finalize().as_bytes();
+    let mut plan_material = Vec::from(query_fingerprint);
+    plan_material.extend_from_slice(b"typed-ast-explicit-sort-stable-input-order.v1");
+    repository_cursor_context(
+        McpTool::QueryAdvanced,
+        request.repository,
+        generation,
+        exposure_profile,
+        request.max_results.unwrap_or(DEFAULT_ADVANCED_RESULTS),
+        query_fingerprint,
+        domain_hash(b"rootlight.query-advanced.plan.v1", &plan_material),
+        key_id,
+    )
 }
 
 const fn client_catalog_state(state: RepositoryState) -> client::RepositoryCatalogState {
@@ -2933,15 +3270,33 @@ where
 async fn execute_code_locate<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
+    exposure_profile: ExposureProfile,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
+    invalid_cursor: &PublicError,
+    cursor_key: CursorSigningKey,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
     let input: CodeLocateInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
-    let request = normalize_code_locate(input, unsupported)?;
+    if explain_only && input.cursor.is_some() {
+        return Err(ToolExecutionError::new(invalid_cursor.clone()));
+    }
+    let cursor = input.cursor.clone();
+    let mut request = normalize_code_locate(input, unsupported)?;
+    if let Some(parsed) = parse_repository_cursor(cursor.as_ref(), invalid_cursor)? {
+        pin_request_generation(&mut request.generation, &parsed, invalid_cursor)?;
+        request.page_offset = decode_page_offset(parsed.last_sort_key(), invalid_cursor)?;
+        let context = code_locate_cursor_context(
+            &request,
+            parsed.generation(),
+            exposure_profile,
+            cursor_key.key_id,
+        );
+        validate_repository_cursor(&parsed, &context, invalid_cursor, cursor_key)?;
+    }
     if explain_only {
         let output = explain_code_locate(port, request, cancellation).await?;
         return serialize_success(output);
@@ -2949,7 +3304,13 @@ where
     let expected = request.clone();
     let future = port.code_locate(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
-    let output = map_code_locate(response, &expected)?;
+    let generation = response.result.context.generation;
+    let next_cursor = create_page_cursor(
+        response.result.next_page_offset,
+        code_locate_cursor_context(&expected, generation, exposure_profile, cursor_key.key_id),
+        cursor_key,
+    )?;
+    let output = map_code_locate(response, &expected, next_cursor)?;
     serialize_success(output)
 }
 
@@ -3043,7 +3404,7 @@ fn explain_envelope_from_status<T>(
         "explain".to_owned(),
         Vec::new(),
     );
-    map_read_envelope(context, metadata, data, false)
+    map_read_envelope(context, metadata, data, false, None)
 }
 
 fn agent_identity_from_status(status: client::RepositoryStatus) -> AgentResolvedIdentity {
@@ -3204,15 +3565,33 @@ where
 async fn execute_symbol_relationships<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
+    exposure_profile: ExposureProfile,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
+    invalid_cursor: &PublicError,
+    cursor_key: CursorSigningKey,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
     let input: SymbolRelationshipsInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
-    let request = normalize_symbol_relationships(input, unsupported)?;
+    if explain_only && input.cursor.is_some() {
+        return Err(ToolExecutionError::new(invalid_cursor.clone()));
+    }
+    let cursor = input.cursor.clone();
+    let mut request = normalize_symbol_relationships(input, unsupported)?;
+    if let Some(parsed) = parse_repository_cursor(cursor.as_ref(), invalid_cursor)? {
+        pin_request_generation(&mut request.generation, &parsed, invalid_cursor)?;
+        request.page_offset = decode_page_offset(parsed.last_sort_key(), invalid_cursor)?;
+        let context = symbol_relationships_cursor_context(
+            &request,
+            parsed.generation(),
+            exposure_profile,
+            cursor_key.key_id,
+        );
+        validate_repository_cursor(&parsed, &context, invalid_cursor, cursor_key)?;
+    }
     if explain_only {
         let output = explain_symbol_relationships(port, request, cancellation).await?;
         return serialize_success(output);
@@ -3220,7 +3599,18 @@ where
     let expected = request.clone();
     let future = port.symbol_relationships(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
-    let output = map_symbol_relationships(response, &expected)?;
+    let generation = response.result.context.generation;
+    let next_cursor = create_page_cursor(
+        response.result.next_page_offset,
+        symbol_relationships_cursor_context(
+            &expected,
+            generation,
+            exposure_profile,
+            cursor_key.key_id,
+        ),
+        cursor_key,
+    )?;
+    let output = map_symbol_relationships(response, &expected, next_cursor)?;
     serialize_success(output)
 }
 
@@ -3229,12 +3619,11 @@ fn normalize_symbol_relationships(
     unsupported: &PublicError,
 ) -> Result<SymbolRelationshipsPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Structural scope, ambiguous candidates, paging, and custom budgets are not
+    // Structural scope, ambiguous candidates, and custom budgets are not
     // served by this slice.
     if input.scope.is_some()
         || input.include_candidates == Some(true)
         || input.budget.is_some()
-        || input.cursor.is_some()
         || !is_compact_profile(input.response_profile)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
@@ -3258,18 +3647,21 @@ fn normalize_symbol_relationships(
         direction,
         min_confidence: input.min_confidence,
         max_results: input.max_results,
+        page_offset: 0,
     })
 }
 
 fn map_symbol_relationships(
     response: SymbolRelationshipsPortResponse,
     request: &SymbolRelationshipsPortRequest,
+    next_cursor: Option<ContinuationCursor>,
 ) -> Result<ReadEnvelope<SymbolRelationshipsData>, ToolExecutionError> {
     validate_query_context(
         &response.result.context,
         request.repository,
         request.generation,
     )?;
+    let next_page_offset = response.result.next_page_offset;
     let mut groups = Vec::new();
     groups
         .try_reserve_exact(response.result.groups.len())
@@ -3307,10 +3699,38 @@ fn map_symbol_relationships(
             total_count,
         });
     }
+    let mapped_returned_edges = groups.iter().try_fold(0_u64, |total, group| {
+        total
+            .checked_add(
+                u64::try_from(group.items.len())
+                    .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+            )
+            .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))
+    })?;
     let returned_edges = u32::try_from(response.result.returned_edges)
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
     let total_edges = u32::try_from(response.result.total_edges)
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?;
+    let returned_end = request
+        .page_offset
+        .checked_add(u64::from(returned_edges))
+        .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+    if response.result.returned_edges != mapped_returned_edges
+        || response.result.returned_edges > response.result.total_edges
+        || (!response.result.truncated
+            && (!response.result.exact
+                || next_page_offset.is_some()
+                || returned_end != response.result.total_edges))
+        || next_page_offset.is_some_and(|next| {
+            !response.result.exact
+                || !response.result.truncated
+                || next != returned_end
+                || next >= response.result.total_edges
+        })
+        || next_cursor.is_some() != next_page_offset.is_some()
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
     let data = SymbolRelationshipsData {
         groups,
         unresolved: Vec::new(),
@@ -3326,6 +3746,7 @@ fn map_symbol_relationships(
         response.metadata,
         data,
         response.result.truncated,
+        next_cursor,
     )
 }
 
@@ -3546,6 +3967,7 @@ fn map_flow_trace(
         response.metadata,
         data,
         frontier.truncated,
+        None,
     )
 }
 
@@ -3716,7 +4138,13 @@ fn map_architecture_cycles(
     };
     // The requested cycle cap is an explicit bound honored by the daemon; this
     // slice does not surface separate budget-truncation through the wire.
-    map_read_envelope(response.result.context, response.metadata, data, false)
+    map_read_envelope(
+        response.result.context,
+        response.metadata,
+        data,
+        false,
+        None,
+    )
 }
 
 /// Builds the source-free `code.dead` plan without executing retrieval.
@@ -3873,7 +4301,13 @@ fn map_code_dead(
     };
     // The requested candidate cap is an explicit bound honored by the daemon;
     // this slice does not surface separate budget-truncation through the wire.
-    map_read_envelope(response.result.context, response.metadata, data, false)
+    map_read_envelope(
+        response.result.context,
+        response.metadata,
+        data,
+        false,
+        None,
+    )
 }
 
 fn entry_point_policy_label(policy: EntryPointPolicy) -> Result<String, ToolExecutionError> {
@@ -4056,7 +4490,13 @@ fn map_architecture_overview(
     };
     // The requested component cap is an explicit bound honored by the daemon;
     // this slice does not surface separate budget-truncation through the wire.
-    map_read_envelope(response.result.context, response.metadata, data, false)
+    map_read_envelope(
+        response.result.context,
+        response.metadata,
+        data,
+        false,
+        None,
+    )
 }
 
 fn architecture_view_label(view: ArchitectureView) -> Result<String, ToolExecutionError> {
@@ -4222,7 +4662,13 @@ fn map_tests_select(
     };
     // The requested test cap is an explicit bound honored by the daemon; this
     // slice does not surface separate budget-truncation through the wire.
-    map_read_envelope(response.result.context, response.metadata, data, false)
+    map_read_envelope(
+        response.result.context,
+        response.metadata,
+        data,
+        false,
+        None,
+    )
 }
 
 fn test_kind_label(kind: TestKind) -> Result<String, ToolExecutionError> {
@@ -4432,7 +4878,13 @@ fn map_change_impact(
         },
         explanation: None,
     };
-    map_read_envelope(response.result.context, response.metadata, data, false)
+    map_read_envelope(
+        response.result.context,
+        response.metadata,
+        data,
+        false,
+        None,
+    )
 }
 
 fn change_classification_from_label(
@@ -4452,13 +4904,20 @@ fn ir_entity_kind_from_label(label: &str) -> Result<IrEntityKind, ToolExecutionE
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "change planning carries checked validators, public errors, and cursor state explicitly"
+)]
 async fn execute_plan_change<P>(
     port: Arc<P>,
     validator: Arc<MaterializedToolValidator>,
     arguments: Map<String, Value>,
+    exposure_profile: ExposureProfile,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
     invalid_arguments: &PublicError,
+    invalid_cursor: &PublicError,
+    cursor_key: CursorSigningKey,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
@@ -4472,6 +4931,9 @@ where
         validator,
         unsupported: unsupported.clone(),
         invalid_arguments: invalid_arguments.clone(),
+        invalid_cursor: invalid_cursor.clone(),
+        exposure_profile,
+        cursor_key,
     });
     let output = PlanChangeService
         .execute(adapter, input, cancellation, deadline)
@@ -4566,7 +5028,7 @@ fn adapt_plan_change_response(
             files: pack.files,
         },
     };
-    let metadata = map_read_envelope(response.result.context, response.metadata, (), false)?;
+    let metadata = map_read_envelope(response.result.context, response.metadata, (), false, None)?;
     Ok(PlanChangePortOutput {
         identity: AgentResolvedIdentity {
             repository: metadata.repository,
@@ -4766,7 +5228,13 @@ fn map_history_compare(
         lineage,
         explanation: None,
     };
-    map_read_envelope(response.result.context, response.metadata, data, false)
+    map_read_envelope(
+        response.result.context,
+        response.metadata,
+        data,
+        false,
+        None,
+    )
 }
 
 fn semantic_change_kind_from_label(label: &str) -> Result<SemanticChangeKind, ToolExecutionError> {
@@ -4777,18 +5245,42 @@ fn semantic_change_kind_from_label(label: &str) -> Result<SemanticChangeKind, To
 async fn execute_query_advanced<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
+    exposure_profile: ExposureProfile,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
+    invalid_cursor: &PublicError,
+    cursor_key: CursorSigningKey,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
     let input: QueryAdvancedInput = decode_input(arguments)?;
-    let request = normalize_query_advanced(input, unsupported)?;
+    if input.explain == Some(true) && input.cursor.is_some() {
+        return Err(ToolExecutionError::new(invalid_cursor.clone()));
+    }
+    let cursor = input.cursor.clone();
+    let mut request = normalize_query_advanced(input, unsupported)?;
+    if let Some(parsed) = parse_repository_cursor(cursor.as_ref(), invalid_cursor)? {
+        pin_request_generation(&mut request.generation, &parsed, invalid_cursor)?;
+        request.page_offset = decode_page_offset(parsed.last_sort_key(), invalid_cursor)?;
+        let context = query_advanced_cursor_context(
+            &request,
+            parsed.generation(),
+            exposure_profile,
+            cursor_key.key_id,
+        );
+        validate_repository_cursor(&parsed, &context, invalid_cursor, cursor_key)?;
+    }
     let expected = request.clone();
     let future = port.query_advanced(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
-    let output = map_query_advanced(response, &expected)?;
+    let generation = response.result.context.generation;
+    let next_cursor = create_page_cursor(
+        response.result.next_page_offset,
+        query_advanced_cursor_context(&expected, generation, exposure_profile, cursor_key.key_id),
+        cursor_key,
+    )?;
+    let output = map_query_advanced(response, &expected, next_cursor)?;
     serialize_success(output)
 }
 
@@ -4797,12 +5289,11 @@ fn normalize_query_advanced(
     unsupported: &PublicError,
 ) -> Result<QueryAdvancedPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Paging cursors and bound parameters are not served by this slice.
-    if input.cursor.is_some()
-        || input
-            .parameters
-            .as_ref()
-            .is_some_and(|parameters| !parameters.is_empty())
+    // Bound parameters are not served by this slice.
+    if input
+        .parameters
+        .as_ref()
+        .is_some_and(|parameters| !parameters.is_empty())
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -4825,12 +5316,14 @@ fn normalize_query_advanced(
         max_results: input.max_results,
         max_depth: input.max_depth,
         cost_limit: input.cost_limit,
+        page_offset: 0,
     })
 }
 
 fn map_query_advanced(
     response: QueryAdvancedPortResponse,
     request: &QueryAdvancedPortRequest,
+    next_cursor: Option<ContinuationCursor>,
 ) -> Result<ReadEnvelope<QueryAdvancedData>, ToolExecutionError> {
     validate_query_context(
         &response.result.context,
@@ -4850,9 +5343,19 @@ fn map_query_advanced(
             column_type: column_type_from_label(&column.column_type)?,
         });
     }
-    if response.result.rows.len() > 1_000 {
+    let next_page_offset = response.result.next_page_offset;
+    if response.result.rows.len()
+        > usize::from(request.max_results.unwrap_or(DEFAULT_ADVANCED_RESULTS))
+    {
         return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
+    let returned_end = request
+        .page_offset
+        .checked_add(
+            u64::try_from(response.result.rows.len())
+                .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+        )
+        .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
     let rows = response.result.rows;
     let resolved_generation = response.result.context.generation.to_string();
     let plan = match response.result.plan {
@@ -4872,14 +5375,29 @@ fn map_query_advanced(
         None => RequiredNullable(None),
     };
     let completeness = query_completeness_from_label(&response.result.completeness)?;
-    let truncated = matches!(completeness, QueryCompleteness::Truncated);
+    if matches!(completeness, QueryCompleteness::Paged) != next_page_offset.is_some()
+        || next_page_offset.is_some_and(|next| next != returned_end || next <= request.page_offset)
+        || next_cursor.is_some() != next_page_offset.is_some()
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    let truncated = matches!(
+        completeness,
+        QueryCompleteness::Paged | QueryCompleteness::Truncated
+    );
     let data = QueryAdvancedData {
         columns,
         rows,
         plan,
         completeness,
     };
-    map_read_envelope(response.result.context, response.metadata, data, truncated)
+    map_read_envelope(
+        response.result.context,
+        response.metadata,
+        data,
+        truncated,
+        next_cursor,
+    )
 }
 
 fn column_type_from_label(label: &str) -> Result<ColumnType, ToolExecutionError> {
@@ -5064,7 +5582,6 @@ fn normalize_code_locate(
         || input.languages.is_some()
         || input.related_to.is_some()
         || input.min_confidence.is_some()
-        || input.cursor.is_some()
         || !is_compact_profile(input.response_profile)
         || budget_has_unsupported_locate_limits(input.budget.as_ref())
     {
@@ -5083,6 +5600,7 @@ fn normalize_code_locate(
         query: input.query,
         mode,
         maximum_results: u32::from(maximum_results),
+        page_offset: 0,
     })
 }
 
@@ -5322,15 +5840,32 @@ fn map_operation_status(
 fn map_code_locate(
     response: CodeLocatePortResponse,
     request: &CodeLocatePortRequest,
+    next_cursor: Option<ContinuationCursor>,
 ) -> Result<ReadEnvelope<CodeLocateData>, ToolExecutionError> {
     validate_query_context(
         &response.result.context,
         request.repository,
         request.generation,
     )?;
+    let returned_end = request
+        .page_offset
+        .checked_add(
+            u64::try_from(response.result.hits.len())
+                .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+        )
+        .ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+    let next_page_offset = response.result.next_page_offset;
     if response.result.hits.len()
         > usize::try_from(request.maximum_results)
             .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?
+        || response.result.matched_candidates < returned_end
+        || (!response.result.truncated && response.result.matched_candidates != returned_end)
+        || next_page_offset.is_some_and(|next| {
+            !response.result.truncated
+                || next != returned_end
+                || next >= response.result.matched_candidates
+        })
+        || next_cursor.is_some() != next_page_offset.is_some()
         || response.query_tokens.len() > 128
         || response
             .query_tokens
@@ -5397,6 +5932,7 @@ fn map_code_locate(
         response.metadata,
         data,
         response.result.truncated,
+        next_cursor,
     )
 }
 
@@ -5466,6 +6002,7 @@ fn map_symbol_explain(
         response.metadata,
         data,
         response.result.truncated,
+        None,
     )
 }
 
@@ -5561,6 +6098,7 @@ fn map_source_read(
         response.metadata,
         data,
         response.result.truncated,
+        None,
     )
 }
 
@@ -5569,6 +6107,7 @@ fn map_read_envelope<T>(
     mut metadata: ReadResponseMetadata,
     data: T,
     truncated: bool,
+    next_cursor: Option<ContinuationCursor>,
 ) -> Result<ReadEnvelope<T>, ToolExecutionError> {
     if !safe_display_name(&metadata.display_name) || !safe_label(&metadata.trace_id, 128) {
         return Err(internal(ToolExecutionFailure::InvalidResponse));
@@ -5586,6 +6125,14 @@ fn map_read_envelope<T>(
             .any(|pair| pair[0].language == pair[1].language)
     {
         return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    if truncated && next_cursor.is_none() {
+        metadata.warnings.push(ResponseWarning {
+            code: SafeLabel::parse("non_pageable_truncation")
+                .expect("built-in warning code satisfies the safe-label contract"),
+            message: SourceFreeMessage::parse("narrow the request scope and retry")
+                .expect("built-in warning text satisfies the source-free contract"),
+        });
     }
     metadata.warnings.sort_by(|left, right| {
         left.code
@@ -5613,7 +6160,7 @@ fn map_read_envelope<T>(
         },
         data,
         truncated,
-        next_cursor: RequiredNullable(None),
+        next_cursor: RequiredNullable(next_cursor),
         usage: UsageSummary {
             rows: context.usage.rows,
             edges: context.usage.edges,

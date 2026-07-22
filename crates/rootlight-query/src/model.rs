@@ -351,6 +351,7 @@ pub struct CodeLocatePlan {
     pub(crate) query: String,
     pub(crate) mode: LocateMode,
     pub(crate) max_results: usize,
+    pub(crate) page_offset: usize,
     pub(crate) search_budget: SearchBudget,
     pub(crate) budget: QueryBudget,
     pub(crate) explanation: PlanExplanation,
@@ -563,6 +564,7 @@ pub struct SymbolRelationshipsPlan {
     pub(crate) direction: Option<RelationDirection>,
     pub(crate) min_confidence: u16,
     pub(crate) max_results: usize,
+    pub(crate) page_offset: usize,
     pub(crate) budget: QueryBudget,
     pub(crate) explanation: PlanExplanation,
 }
@@ -688,6 +690,8 @@ pub struct CodeLocateResult {
     pub truncated: bool,
     /// Resource limits that stopped work, in deterministic execution order.
     pub limiting_resources: Vec<QueryResource>,
+    /// Offset of the next deterministic page when more matches remain.
+    pub next_page_offset: Option<u64>,
 }
 
 /// Data returned by a `symbol.explain` plan.
@@ -756,6 +760,8 @@ pub struct SymbolRelationshipsResult {
     pub truncated: bool,
     /// Resource limits that stopped work, in deterministic execution order.
     pub limiting_resources: Vec<QueryResource>,
+    /// Offset of the next deterministic page when more edges remain.
+    pub next_page_offset: Option<u64>,
     /// Mandatory trust marker for repository-controlled values.
     pub trust: RepositoryDataTrust,
 }
@@ -2371,6 +2377,7 @@ pub struct AdvancedQueryPlan {
     pub(crate) ast: AdvancedAstNode,
     pub(crate) operators: Vec<AdvancedOperator>,
     pub(crate) max_rows: usize,
+    pub(crate) page_offset: usize,
     pub(crate) max_traversal: usize,
     pub(crate) depth: usize,
     pub(crate) estimated_cost: u64,
@@ -2571,6 +2578,8 @@ pub struct AdvancedQueryResult {
     pub completeness: AdvancedCompleteness,
     /// Resource limits that stopped work, in deterministic execution order.
     pub limiting_resources: Vec<QueryResource>,
+    /// Offset of the next deterministic page when more rows remain.
+    pub next_page_offset: Option<u64>,
     /// Mandatory trust marker for repository-controlled values.
     pub trust: RepositoryDataTrust,
 }

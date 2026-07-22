@@ -602,6 +602,8 @@ pub struct CodeLocate {
     pub matched_candidates: u64,
     /// Whether the response was cut by a bound.
     pub truncated: bool,
+    /// Offset of the next deterministic page when more matches remain.
+    pub next_page_offset: Option<u64>,
 }
 
 /// One compact generation-pinned symbol explanation.
@@ -1237,6 +1239,8 @@ pub struct SymbolRelationships {
     pub exact: bool,
     /// Whether the response was cut by a bound.
     pub truncated: bool,
+    /// Offset of the next deterministic page when more edges remain.
+    pub next_page_offset: Option<u64>,
 }
 
 /// One evidence-bearing edge within a traced path.
@@ -1811,6 +1815,8 @@ pub struct AdvancedQuery {
     pub plan: Option<AdvancedPlan>,
     /// Completeness label: `complete`, `paged`, `truncated`, or `unsupported`.
     pub completeness: String,
+    /// Offset of the next deterministic page when more rows remain.
+    pub next_page_offset: Option<u64>,
 }
 
 /// Validated total deadline budget for one asynchronous daemon request.
@@ -2400,6 +2406,7 @@ impl Client {
         query: &str,
         mode: LocateMode,
         maximum_results: u32,
+        page_offset: u64,
     ) -> Result<CodeLocate, ClientError> {
         match self.request(build_code_locate_request(
             repository,
@@ -2407,10 +2414,15 @@ impl Client {
             query,
             mode,
             maximum_results,
+            page_offset,
         )?)? {
-            daemon::response_envelope::Response::CodeLocate(response) => {
-                parse_code_locate(response, repository, generation, maximum_results)
-            }
+            daemon::response_envelope::Response::CodeLocate(response) => parse_code_locate(
+                response,
+                repository,
+                generation,
+                maximum_results,
+                page_offset,
+            ),
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -2428,6 +2440,10 @@ impl Client {
     ///
     /// Returns [`ClientError`] for invalid query bounds, unavailable protocol
     /// support, transport failure, timeout, or a malformed or uncorrelated response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded asynchronous lookup dimension"
+    )]
     pub async fn code_locate_async(
         &self,
         repository: RepositoryId,
@@ -2435,18 +2451,30 @@ impl Client {
         query: &str,
         mode: LocateMode,
         maximum_results: u32,
+        page_offset: u64,
         timeout: RequestTimeout,
     ) -> Result<CodeLocate, ClientError> {
         match self
             .request_async(
-                build_code_locate_request(repository, generation, query, mode, maximum_results)?,
+                build_code_locate_request(
+                    repository,
+                    generation,
+                    query,
+                    mode,
+                    maximum_results,
+                    page_offset,
+                )?,
                 timeout,
             )
             .await?
         {
-            daemon::response_envelope::Response::CodeLocate(response) => {
-                parse_code_locate(response, repository, generation, maximum_results)
-            }
+            daemon::response_envelope::Response::CodeLocate(response) => parse_code_locate(
+                response,
+                repository,
+                generation,
+                maximum_results,
+                page_offset,
+            ),
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -2774,6 +2802,7 @@ impl Client {
         direction: Option<&str>,
         min_confidence: Option<u16>,
         max_results: Option<u16>,
+        page_offset: u64,
     ) -> Result<SymbolRelationships, ClientError> {
         match self.request(build_symbol_relationships_request(
             repository,
@@ -2783,9 +2812,17 @@ impl Client {
             direction,
             min_confidence,
             max_results,
+            page_offset,
         )?)? {
             daemon::response_envelope::Response::SymbolRelationships(response) => {
-                parse_symbol_relationships(response, repository, generation, seeds)
+                parse_symbol_relationships(
+                    response,
+                    repository,
+                    generation,
+                    seeds,
+                    max_results,
+                    page_offset,
+                )
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -2818,6 +2855,7 @@ impl Client {
         direction: Option<&str>,
         min_confidence: Option<u16>,
         max_results: Option<u16>,
+        page_offset: u64,
         timeout: RequestTimeout,
     ) -> Result<SymbolRelationships, ClientError> {
         match self
@@ -2830,13 +2868,21 @@ impl Client {
                     direction,
                     min_confidence,
                     max_results,
+                    page_offset,
                 )?,
                 timeout,
             )
             .await?
         {
             daemon::response_envelope::Response::SymbolRelationships(response) => {
-                parse_symbol_relationships(response, repository, generation, seeds)
+                parse_symbol_relationships(
+                    response,
+                    repository,
+                    generation,
+                    seeds,
+                    max_results,
+                    page_offset,
+                )
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -3552,6 +3598,7 @@ impl Client {
         max_results: Option<u16>,
         max_depth: Option<u8>,
         cost_limit: Option<u64>,
+        page_offset: u64,
     ) -> Result<AdvancedQuery, ClientError> {
         match self.request(build_advanced_query_request(
             repository,
@@ -3561,9 +3608,10 @@ impl Client {
             max_results,
             max_depth,
             cost_limit,
+            page_offset,
         )?)? {
             daemon::response_envelope::Response::AdvancedQuery(response) => {
-                parse_advanced_query(response, repository, generation)
+                parse_advanced_query(response, repository, generation, max_results, page_offset)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -3596,6 +3644,7 @@ impl Client {
         max_results: Option<u16>,
         max_depth: Option<u8>,
         cost_limit: Option<u64>,
+        page_offset: u64,
         timeout: RequestTimeout,
     ) -> Result<AdvancedQuery, ClientError> {
         match self
@@ -3608,13 +3657,14 @@ impl Client {
                     max_results,
                     max_depth,
                     cost_limit,
+                    page_offset,
                 )?,
                 timeout,
             )
             .await?
         {
             daemon::response_envelope::Response::AdvancedQuery(response) => {
-                parse_advanced_query(response, repository, generation)
+                parse_advanced_query(response, repository, generation, max_results, page_offset)
             }
             _ => Err(ClientError::UnexpectedResponse),
         }
@@ -4855,6 +4905,7 @@ fn build_code_locate_request(
     query: &str,
     mode: LocateMode,
     maximum_results: u32,
+    page_offset: u64,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
     if query.is_empty() || query.len() > 2048 || !(1..=200).contains(&maximum_results) {
         return Err(ClientError::InvalidFirstSliceRequest);
@@ -4867,6 +4918,7 @@ fn build_code_locate_request(
             query: query.to_owned(),
             mode: locate_mode_to_wire(mode) as i32,
             maximum_results,
+            page_offset,
         },
     ))
 }
@@ -5024,6 +5076,10 @@ fn build_repository_status_request(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one bounded relationships query dimension"
+)]
 fn build_symbol_relationships_request(
     repository: RepositoryId,
     generation: GenerationSelector,
@@ -5032,6 +5088,7 @@ fn build_symbol_relationships_request(
     direction: Option<&str>,
     min_confidence: Option<u16>,
     max_results: Option<u16>,
+    page_offset: u64,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
     if seeds.is_empty()
         || seeds.len() > 64
@@ -5075,6 +5132,7 @@ fn build_symbol_relationships_request(
             direction: direction.map(str::to_owned),
             min_confidence: min_confidence.map(u32::from),
             max_results: max_results.map(u32::from),
+            page_offset,
         },
     ))
 }
@@ -5689,6 +5747,8 @@ fn parse_symbol_relationships(
     repository: RepositoryId,
     selector: GenerationSelector,
     seeds: &[SymbolId],
+    max_results: Option<u16>,
+    page_offset: u64,
 ) -> Result<SymbolRelationships, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let context = parse_query_context(response.context, repository, selector)?;
@@ -5746,10 +5806,22 @@ fn parse_symbol_relationships(
             total_count: group.total_count,
         });
     }
+    let returned_end = page_offset
+        .checked_add(returned_edges)
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
     if returned_edges != response.returned_edges
+        || returned_edges > u64::from(max_results.unwrap_or(50))
         || response.returned_edges > response.total_edges
-        || response.exact == response.truncated
-        || (!response.truncated && response.returned_edges != response.total_edges)
+        || (!response.truncated
+            && (!response.exact
+                || response.next_page_offset.is_some()
+                || returned_end != response.total_edges))
+        || response.next_page_offset.is_some_and(|next| {
+            !response.exact
+                || !response.truncated
+                || next != returned_end
+                || next >= response.total_edges
+        })
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
@@ -5760,6 +5832,7 @@ fn parse_symbol_relationships(
         total_edges: response.total_edges,
         exact: response.exact,
         truncated: response.truncated,
+        next_page_offset: response.next_page_offset,
     })
 }
 
@@ -7024,6 +7097,10 @@ fn parse_history_compare(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one bounded advanced query dimension"
+)]
 fn build_advanced_query_request(
     repository: RepositoryId,
     generation: GenerationSelector,
@@ -7032,6 +7109,7 @@ fn build_advanced_query_request(
     max_results: Option<u16>,
     max_depth: Option<u8>,
     cost_limit: Option<u64>,
+    page_offset: u64,
 ) -> Result<daemon::request_envelope::Request, ClientError> {
     if query_ast.is_empty() || query_ast.len() > 65_536 {
         return Err(ClientError::InvalidFirstSliceRequest);
@@ -7052,6 +7130,7 @@ fn build_advanced_query_request(
             max_results: max_results.map(u32::from),
             max_depth: max_depth.map(u32::from),
             cost_limit,
+            page_offset,
         },
     ))
 }
@@ -7060,6 +7139,8 @@ fn parse_advanced_query(
     response: daemon::AdvancedQueryResponse,
     repository: RepositoryId,
     selector: GenerationSelector,
+    max_results: Option<u16>,
+    page_offset: u64,
 ) -> Result<AdvancedQuery, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let context = parse_query_context(response.context, repository, selector)?;
@@ -7083,9 +7164,14 @@ fn parse_advanced_query(
             column_type: column.column_type,
         });
     }
-    if response.rows.len() > 1_000 {
+    if response.rows.len() > usize::from(max_results.unwrap_or(100)) {
         return Err(ClientError::InvalidResponseCorrelation);
     }
+    let returned_rows =
+        u64::try_from(response.rows.len()).map_err(|_| ClientError::InvalidResponseCorrelation)?;
+    let returned_end = page_offset
+        .checked_add(returned_rows)
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
     let mut rows = Vec::new();
     rows.try_reserve_exact(response.rows.len())
         .map_err(|_| ClientError::ResponseAllocationFailed)?;
@@ -7110,7 +7196,13 @@ fn parse_advanced_query(
         }
         None => None,
     };
-    if response.completeness.is_empty() || response.completeness.len() > 32 {
+    if response.completeness.is_empty()
+        || response.completeness.len() > 32
+        || (response.completeness == "paged") != response.next_page_offset.is_some()
+        || response
+            .next_page_offset
+            .is_some_and(|next| next != returned_end || next <= page_offset)
+    {
         return Err(ClientError::InvalidResponseCorrelation);
     }
     Ok(AdvancedQuery {
@@ -7119,6 +7211,7 @@ fn parse_advanced_query(
         rows,
         plan,
         completeness: response.completeness,
+        next_page_offset: response.next_page_offset,
     })
 }
 
@@ -7127,16 +7220,23 @@ fn parse_code_locate(
     repository: RepositoryId,
     selector: GenerationSelector,
     maximum_results: u32,
+    page_offset: u64,
 ) -> Result<CodeLocate, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let context = parse_query_context(response.context, repository, selector)?;
     let returned_results =
         u64::try_from(response.hits.len()).map_err(|_| ClientError::InvalidResponseCorrelation)?;
+    let returned_end = page_offset
+        .checked_add(returned_results)
+        .ok_or(ClientError::InvalidResponseCorrelation)?;
     if response.hits.len()
         > usize::try_from(maximum_results).map_err(|_| ClientError::InvalidResponseCorrelation)?
-        || response.matched_candidates < returned_results
-        || !response.truncated && response.matched_candidates != returned_results
+        || response.matched_candidates < returned_end
+        || !response.truncated && response.matched_candidates != returned_end
         || context.usage.results < returned_results
+        || response.next_page_offset.is_some_and(|next| {
+            !response.truncated || next != returned_end || next >= response.matched_candidates
+        })
     {
         return Err(ClientError::InvalidResponseCorrelation);
     }
@@ -7171,6 +7271,7 @@ fn parse_code_locate(
         hits,
         matched_candidates: response.matched_candidates,
         truncated: response.truncated,
+        next_page_offset: response.next_page_offset,
     })
 }
 
@@ -8220,6 +8321,7 @@ mod tests {
             }],
             matched_candidates: 1,
             truncated: false,
+            next_page_offset: None,
         }
     }
 
@@ -8394,6 +8496,7 @@ mod tests {
             test_repository(),
             GenerationSelector::Active,
             1,
+            0,
         )
         .expect("locate fixture parses");
         let expected_explain = parse_symbol_explain(
@@ -8451,6 +8554,7 @@ mod tests {
                     "answer",
                     LocateMode::Exact,
                     1,
+                    0,
                     timeout,
                 )
                 .await
@@ -8632,6 +8736,7 @@ mod tests {
                     "answer",
                     LocateMode::Exact,
                     1,
+                    0,
                     timeout,
                 )
                 .await
@@ -9462,6 +9567,7 @@ mod tests {
                 "",
                 LocateMode::Exact,
                 1,
+                0,
             ),
             Err(ClientError::InvalidFirstSliceRequest)
         ));
@@ -9644,6 +9750,7 @@ mod tests {
             }],
             matched_candidates: 1,
             truncated: false,
+            next_page_offset: None,
         };
         assert!(
             parse_code_locate(
@@ -9651,6 +9758,7 @@ mod tests {
                 test_repository(),
                 GenerationSelector::Active,
                 1,
+                0,
             )
             .is_ok()
         );
@@ -9660,6 +9768,7 @@ mod tests {
                 test_repository(),
                 GenerationSelector::Generation(test_generation()),
                 1,
+                0,
             )
             .is_ok()
         );
@@ -9671,6 +9780,7 @@ mod tests {
                 test_repository(),
                 GenerationSelector::Active,
                 1,
+                0,
             ),
             Err(ClientError::InvalidResponseCorrelation)
         ));
@@ -9681,6 +9791,7 @@ mod tests {
                 test_repository(),
                 GenerationSelector::Active,
                 1,
+                0,
             )
             .is_ok()
         );
@@ -9699,6 +9810,7 @@ mod tests {
                 test_repository(),
                 GenerationSelector::Active,
                 1,
+                0,
             ),
             Err(ClientError::InvalidResponseCorrelation)
         ));
@@ -9714,6 +9826,7 @@ mod tests {
                 test_repository(),
                 GenerationSelector::Active,
                 1,
+                0,
             ),
             Err(ClientError::InvalidResponseCorrelation)
         ));
@@ -9729,6 +9842,7 @@ mod tests {
                 test_repository(),
                 GenerationSelector::Active,
                 1,
+                0,
             ),
             Err(ClientError::InvalidResponseCorrelation)
         ));

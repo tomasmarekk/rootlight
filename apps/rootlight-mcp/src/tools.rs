@@ -70,6 +70,7 @@ pub trait ToolExecutor: Send + Sync + 'static {
         &self,
         tool: VerticalTool,
         arguments: Map<String, Value>,
+        exposure_profile: ExposureProfile,
         cancellation: RequestCancellation,
     ) -> ToolExecutionFuture;
 }
@@ -340,7 +341,7 @@ where
         };
 
         let execution = executor
-            .execute(contract.tool, arguments, cancellation.clone())
+            .execute(contract.tool, arguments, profile, cancellation.clone())
             .await;
         if cancellation.is_cancelled() {
             return HandlerResponse::Cancelled;
@@ -1714,6 +1715,7 @@ mod tests {
             &self,
             tool: VerticalTool,
             _arguments: Map<String, Value>,
+            _exposure_profile: ExposureProfile,
             _cancellation: RequestCancellation,
         ) -> ToolExecutionFuture {
             self.calls.fetch_add(1, Ordering::Relaxed);
@@ -1756,6 +1758,7 @@ mod tests {
             &self,
             _tool: VerticalTool,
             _arguments: Map<String, Value>,
+            _exposure_profile: ExposureProfile,
             _cancellation: RequestCancellation,
         ) -> ToolExecutionFuture {
             let result = self.result.clone();
@@ -1774,6 +1777,7 @@ mod tests {
             &self,
             _tool: VerticalTool,
             _arguments: Map<String, Value>,
+            _exposure_profile: ExposureProfile,
             _cancellation: RequestCancellation,
         ) -> ToolExecutionFuture {
             let sender = self.sender.clone();
@@ -2627,7 +2631,7 @@ mod tests {
             ],
             "review any new generated-rule exclusion"
         );
-        assert_eq!((declared, covered, exclusions.len()), (154, 152, 2));
+        assert_eq!((declared, covered, exclusions.len()), (151, 149, 2));
     }
 
     #[tokio::test]
@@ -2866,6 +2870,37 @@ mod tests {
             repo_list["_meta"][DISCOVERY_METADATA_KEY]["pagination"],
             "authenticated_cursor"
         );
+        let expected_pagination = [
+            ("repo.index", "not_applicable"),
+            ("operation.status", "bounded_complete"),
+            ("repo.list", "authenticated_cursor"),
+            ("repo.status", "bounded_complete"),
+            ("code.locate", "authenticated_cursor"),
+            ("symbol.explain", "progressive_handle"),
+            ("symbol.relationships", "authenticated_cursor"),
+            ("flow.trace", "explicit_truncation"),
+            ("change.impact", "explicit_truncation"),
+            ("tests.select", "explicit_truncation"),
+            ("architecture.overview", "explicit_truncation"),
+            ("architecture.cycles", "explicit_truncation"),
+            ("code.dead", "explicit_truncation"),
+            ("context.pack", "progressive_handle"),
+            ("query.advanced", "authenticated_cursor"),
+            ("query.batch", "child_continuations"),
+            ("history.compare", "explicit_truncation"),
+            ("plan.change", "explicit_truncation"),
+            ("source.read", "explicit_truncation"),
+        ];
+        for (name, semantics) in expected_pagination {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect("every catalog tool is listed");
+            assert_eq!(
+                tool["_meta"][DISCOVERY_METADATA_KEY]["pagination"], semantics,
+                "{name} has stale pagination discovery"
+            );
+        }
         let batch = tools
             .iter()
             .find(|tool| tool["name"] == "query.batch")
@@ -2973,16 +3008,16 @@ mod tests {
             observed,
             [
                 (
-                    195_358,
-                    "3955d91953b5e2c26d61644ad1f490f3b9314b64946d42a449f658dc4434f3a4".to_owned(),
+                    195_256,
+                    "31cf37a72a7a5889c1179ff1bfcb23cc1355d1232fdf9ff70fca36845e479c6d".to_owned(),
                 ),
                 (
-                    427_060,
-                    "93e5b6dc23d24a27050be6351544adf854d73a97e7ad455e7418adf606c8d70b".to_owned(),
+                    426_912,
+                    "2dd85e32682ff2f8521680200293bf2499bc18d78f926ac31a9eac0b6ba238d5".to_owned(),
                 ),
                 (
-                    582_696,
-                    "cc4e58fd3ee57357ebc5c55a251de6862fbba68cb34870c7b744bf4d04739dd3".to_owned(),
+                    582_392,
+                    "b5855e5d5ea1c06160ee955368b2ffcfeda53b6ec49726a019340b69e8625d7e".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"

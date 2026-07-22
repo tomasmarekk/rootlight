@@ -60,6 +60,10 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<RepositoryOperationStatus>;
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the client boundary carries each bounded lookup dimension explicitly"
+    )]
     fn code_locate(
         &self,
         repository: RepositoryId,
@@ -67,6 +71,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         query: String,
         mode: LocateMode,
         maximum_results: u32,
+        page_offset: u64,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<CodeLocate>;
 
@@ -111,6 +116,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         direction: Option<String>,
         min_confidence: Option<u16>,
         max_results: Option<u16>,
+        page_offset: u64,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<SymbolRelationships>;
 
@@ -249,6 +255,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         max_results: Option<u16>,
         max_depth: Option<u8>,
         cost_limit: Option<u64>,
+        page_offset: u64,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<AdvancedQuery>;
 }
@@ -302,6 +309,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         query: String,
         mode: LocateMode,
         maximum_results: u32,
+        page_offset: u64,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<CodeLocate> {
         let client = Arc::clone(&self.client);
@@ -313,6 +321,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     &query,
                     mode,
                     maximum_results,
+                    page_offset,
                     timeout,
                 )
                 .await
@@ -384,6 +393,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         direction: Option<String>,
         min_confidence: Option<u16>,
         max_results: Option<u16>,
+        page_offset: u64,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<SymbolRelationships> {
         let client = Arc::clone(&self.client);
@@ -397,6 +407,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     direction.as_deref(),
                     min_confidence,
                     max_results,
+                    page_offset,
                     timeout,
                 )
                 .await
@@ -626,6 +637,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
         max_results: Option<u16>,
         max_depth: Option<u8>,
         cost_limit: Option<u64>,
+        page_offset: u64,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<AdvancedQuery> {
         let client = Arc::clone(&self.client);
@@ -639,6 +651,7 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
                     max_results,
                     max_depth,
                     cost_limit,
+                    page_offset,
                     timeout,
                 )
                 .await
@@ -751,6 +764,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.query().to_owned(),
                     request.mode(),
                     request.maximum_results(),
+                    request.page_offset(),
                     request_timeout()?,
                 )
                 .await
@@ -862,6 +876,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.direction().map(str::to_owned),
                     request.min_confidence(),
                     request.max_results(),
+                    request.page_offset(),
                     request_timeout()?,
                 )
                 .await
@@ -1092,6 +1107,7 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
                     request.max_results(),
                     request.max_depth(),
                     request.cost_limit(),
+                    request.page_offset(),
                     request_timeout()?,
                 )
                 .await

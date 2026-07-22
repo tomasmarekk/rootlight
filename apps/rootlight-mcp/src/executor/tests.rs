@@ -96,6 +96,7 @@ enum FakeOutcome {
     },
     OperationStatus(Result<RepositoryOperationStatus, ClientPortError>),
     CodeLocate(Result<CodeLocatePortResponse, ClientPortError>),
+    CodeLocateSequence(Arc<Mutex<VecDeque<Result<CodeLocatePortResponse, ClientPortError>>>>),
     PendingCodeLocate,
     SymbolExplain(Result<SymbolExplainPortResponse, ClientPortError>),
     SourceRead(Result<SourceReadPortResponse, ClientPortError>),
@@ -105,6 +106,9 @@ enum FakeOutcome {
     ),
     RepositoryStatus(Result<RepositoryStatus, ClientPortError>),
     SymbolRelationships(Result<SymbolRelationshipsPortResponse, ClientPortError>),
+    SymbolRelationshipsSequence(
+        Arc<Mutex<VecDeque<Result<SymbolRelationshipsPortResponse, ClientPortError>>>>,
+    ),
     FlowTrace(Result<FlowTracePortResponse, ClientPortError>),
     ArchitectureCycles(Result<ArchitectureCyclesPortResponse, ClientPortError>),
     CodeDead(Result<CodeDeadPortResponse, ClientPortError>),
@@ -114,6 +118,7 @@ enum FakeOutcome {
     PlanChange(Result<PlanChangePortResponse, ClientPortError>),
     HistoryCompare(Result<HistoryComparePortResponse, ClientPortError>),
     QueryAdvanced(Result<QueryAdvancedPortResponse, ClientPortError>),
+    QueryAdvancedSequence(Arc<Mutex<VecDeque<Result<QueryAdvancedPortResponse, ClientPortError>>>>),
     Batch {
         status: Box<Result<RepositoryStatus, ClientPortError>>,
         locate: Result<CodeLocatePortResponse, ClientPortError>,
@@ -400,6 +405,11 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::CodeLocate(request));
         let outcome = match &self.outcome {
             FakeOutcome::CodeLocate(outcome) => outcome.clone(),
+            FakeOutcome::CodeLocateSequence(outcomes) => outcomes
+                .lock()
+                .expect("fake locate sequence is not poisoned")
+                .pop_front()
+                .expect("fake locate sequence is not exhausted"),
             FakeOutcome::Batch { locate, .. } => locate.clone(),
             FakeOutcome::BatchPendingLocate { .. } => {
                 return Box::pin(std::future::pending());
@@ -481,6 +491,11 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::SymbolRelationships(request));
         let outcome = match &self.outcome {
             FakeOutcome::SymbolRelationships(outcome) => outcome.clone(),
+            FakeOutcome::SymbolRelationshipsSequence(outcomes) => outcomes
+                .lock()
+                .expect("fake relationships sequence is not poisoned")
+                .pop_front()
+                .expect("fake relationships sequence is not exhausted"),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -598,6 +613,11 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::QueryAdvanced(request));
         let outcome = match &self.outcome {
             FakeOutcome::QueryAdvanced(outcome) => outcome.clone(),
+            FakeOutcome::QueryAdvancedSequence(outcomes) => outcomes
+                .lock()
+                .expect("fake advanced sequence is not poisoned")
+                .pop_front()
+                .expect("fake advanced sequence is not exhausted"),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -665,10 +685,21 @@ async fn execute(
     tool: VerticalTool,
     arguments: Value,
 ) -> Result<Map<String, Value>, ToolExecutionError> {
+    execute_as(executor, tool, arguments, ExposureProfile::Developer).await
+}
+
+async fn execute_as(
+    executor: &impl ToolExecutor,
+    tool: VerticalTool,
+    arguments: Value,
+    exposure_profile: ExposureProfile,
+) -> Result<Map<String, Value>, ToolExecutionError> {
     let Value::Object(arguments) = arguments else {
         panic!("test arguments are objects");
     };
-    executor.execute(tool, arguments, cancellation()).await
+    executor
+        .execute(tool, arguments, exposure_profile, cancellation())
+        .await
 }
 
 fn decode<T: DeserializeOwned>(output: Map<String, Value>) -> T {
@@ -912,9 +943,74 @@ fn locate_response() -> CodeLocatePortResponse {
             }],
             matched_candidates: 1,
             truncated: false,
+            next_page_offset: None,
         },
         metadata("trace-locate-1"),
         vec!["publish".to_owned()],
+    )
+}
+
+fn locate_page(
+    symbol_id: SymbolId,
+    label: &str,
+    next_page_offset: Option<u64>,
+) -> CodeLocatePortResponse {
+    let mut response = locate_response();
+    response.result.hits[0].symbol = symbol_id;
+    response.result.hits[0].identifier = label.to_owned();
+    response.result.hits[0].qualified_name = format!("crate::{label}");
+    response.result.matched_candidates = 3;
+    response.result.truncated = next_page_offset.is_some();
+    response.result.next_page_offset = next_page_offset;
+    response
+}
+
+fn relationships_page(
+    target: SymbolId,
+    next_page_offset: Option<u64>,
+) -> SymbolRelationshipsPortResponse {
+    SymbolRelationshipsPortResponse::new(
+        ClientRelationships {
+            context: context(1, 0),
+            groups: vec![ClientRelationshipGroup {
+                seed: symbol(),
+                relation: "calls".to_owned(),
+                direction: "outbound".to_owned(),
+                items: vec![ClientRelationshipTarget {
+                    symbol: target,
+                    confidence: 900,
+                    source_refs: vec![source_reference(0, 10, 1, 1)],
+                }],
+                total_count: 3,
+            }],
+            returned_edges: 1,
+            total_edges: 3,
+            exact: true,
+            truncated: next_page_offset.is_some(),
+            next_page_offset,
+        },
+        metadata("trace-rel-page"),
+    )
+}
+
+fn advanced_page(row_id: &str, next_page_offset: Option<u64>) -> QueryAdvancedPortResponse {
+    QueryAdvancedPortResponse::new(
+        ClientAdvancedQuery {
+            context: context(1, 0),
+            columns: vec![ClientAdvancedColumn {
+                name: "id".to_owned(),
+                column_type: "symbol_id".to_owned(),
+            }],
+            rows: vec![json!({"id": row_id})],
+            plan: None,
+            completeness: if next_page_offset.is_some() {
+                "paged".to_owned()
+            } else {
+                "complete".to_owned()
+            },
+            next_page_offset,
+        },
+        metadata("trace-advanced-page"),
     )
 }
 
@@ -964,6 +1060,499 @@ fn assert_canonical_budget_error(error: &PublicError) {
             field: DetailKey::parse("budget").expect("static detail key is valid"),
         }]
     );
+}
+
+fn pagination_arguments(tool: VerticalTool) -> Value {
+    match tool {
+        VerticalTool::CodeLocate => json!({
+            "repository": {"repository_id": repository()},
+            "query": "publish",
+            "search_modes": ["exact"],
+            "max_results": 2
+        }),
+        VerticalTool::SymbolRelationships => json!({
+            "repository": {"repository_id": repository()},
+            "symbol_ids": [symbol()],
+            "relations": ["calls"],
+            "max_results": 2
+        }),
+        VerticalTool::QueryAdvanced => json!({
+            "repository": {"repository_id": repository()},
+            "query": {"op": "scan", "entity": "function"},
+            "max_results": 2
+        }),
+        _ => panic!("fixture supports only repository read pagination"),
+    }
+}
+
+fn pagination_cursor_context(
+    tool: VerticalTool,
+    arguments: Value,
+    exposure_profile: ExposureProfile,
+    key_id: u64,
+) -> CursorContext {
+    let Value::Object(arguments) = arguments else {
+        panic!("pagination arguments are objects");
+    };
+    let unsupported = PublicError::builder(ErrorCode::UnsupportedCapability, UNSUPPORTED_MESSAGE)
+        .build()
+        .expect("static unsupported error is valid");
+    match tool {
+        VerticalTool::CodeLocate => {
+            let input: CodeLocateInput =
+                decode_input(arguments).expect("code locate fixture decodes");
+            let request =
+                normalize_code_locate(input, &unsupported).expect("code locate fixture normalizes");
+            code_locate_cursor_context(&request, generation(), exposure_profile, key_id)
+        }
+        VerticalTool::SymbolRelationships => {
+            let input: SymbolRelationshipsInput =
+                decode_input(arguments).expect("relationships fixture decodes");
+            let request = normalize_symbol_relationships(input, &unsupported)
+                .expect("relationships fixture normalizes");
+            symbol_relationships_cursor_context(&request, generation(), exposure_profile, key_id)
+        }
+        VerticalTool::QueryAdvanced => {
+            let input: QueryAdvancedInput =
+                decode_input(arguments).expect("advanced fixture decodes");
+            let request =
+                normalize_query_advanced(input, &unsupported).expect("advanced fixture normalizes");
+            query_advanced_cursor_context(&request, generation(), exposure_profile, key_id)
+        }
+        _ => panic!("fixture supports only repository read pagination"),
+    }
+}
+
+fn issue_pagination_cursor(
+    tool: VerticalTool,
+    arguments: Value,
+    exposure_profile: ExposureProfile,
+    signing_key: CursorSigningKey,
+    issued_at_ms: u64,
+    stale_plan: bool,
+) -> String {
+    let mut context =
+        pagination_cursor_context(tool, arguments, exposure_profile, signing_key.key_id);
+    if stale_plan {
+        context.plan_fingerprint = [0xA5; 32];
+    }
+    AuthenticatedCursor::create(
+        context,
+        1_u64.to_be_bytes().to_vec(),
+        issued_at_ms,
+        &signing_key.secret,
+    )
+    .expect("pagination cursor fixture is valid")
+    .to_wire()
+}
+
+fn with_argument(mut arguments: Value, field: &str, value: Value) -> Value {
+    arguments
+        .as_object_mut()
+        .expect("pagination arguments are objects")
+        .insert(field.to_owned(), value);
+    arguments
+}
+
+fn pagination_failure(tool: VerticalTool) -> FakeOutcome {
+    match tool {
+        VerticalTool::CodeLocate => FakeOutcome::CodeLocate(Err(ClientPortError::Executor)),
+        VerticalTool::SymbolRelationships => {
+            FakeOutcome::SymbolRelationships(Err(ClientPortError::Executor))
+        }
+        VerticalTool::QueryAdvanced => FakeOutcome::QueryAdvanced(Err(ClientPortError::Executor)),
+        _ => panic!("fixture supports only repository read pagination"),
+    }
+}
+
+#[tokio::test]
+async fn repository_read_cursors_bind_every_cross_tool_execution_dimension() {
+    const KEY_MATERIAL: [u8; 32] = [0x5C; 32];
+    let signing_key =
+        CursorSigningKey::deterministic(KEY_MATERIAL).expect("test signing key is valid");
+    let registered: std::collections::BTreeSet<_> = accepted_field_evidence()
+        .into_iter()
+        .filter(|evidence| evidence.oracle == AcceptedFieldOracle::CursorContinuation)
+        .flat_map(|evidence| {
+            evidence
+                .fields
+                .iter()
+                .copied()
+                .map(move |field| (evidence.tool.name(), field))
+        })
+        .collect();
+    assert_eq!(
+        registered,
+        std::collections::BTreeSet::from([
+            ("code.locate", "cursor"),
+            ("query.advanced", "cursor"),
+            ("symbol.relationships", "cursor"),
+        ])
+    );
+
+    for tool in [
+        VerticalTool::CodeLocate,
+        VerticalTool::SymbolRelationships,
+        VerticalTool::QueryAdvanced,
+    ] {
+        let base = pagination_arguments(tool);
+        let valid_cursor = issue_pagination_cursor(
+            tool,
+            base.clone(),
+            ExposureProfile::Developer,
+            signing_key,
+            now_unix_ms(),
+            false,
+        );
+        let expired_cursor = issue_pagination_cursor(
+            tool,
+            base.clone(),
+            ExposureProfile::Developer,
+            signing_key,
+            now_unix_ms().saturating_sub(400_000),
+            false,
+        );
+        let stale_plan_cursor = issue_pagination_cursor(
+            tool,
+            base.clone(),
+            ExposureProfile::Developer,
+            signing_key,
+            now_unix_ms(),
+            true,
+        );
+        let mut tampered_cursor = valid_cursor.clone().into_bytes();
+        let final_byte = tampered_cursor
+            .last_mut()
+            .expect("cursor has an encoded payload");
+        *final_byte = if *final_byte == b'A' { b'B' } else { b'A' };
+        let tampered_cursor = String::from_utf8(tampered_cursor).expect("base64url remains UTF-8");
+
+        let query_mutation = match tool {
+            VerticalTool::CodeLocate => {
+                with_argument(base.clone(), "query", json!("different_query"))
+            }
+            VerticalTool::SymbolRelationships => {
+                with_argument(base.clone(), "relations", json!(["references"]))
+            }
+            VerticalTool::QueryAdvanced => with_argument(
+                base.clone(),
+                "query",
+                json!({"op": "scan", "entity": "file"}),
+            ),
+            _ => unreachable!("tool set is closed above"),
+        };
+        let cases = [
+            (
+                "exposure profile",
+                with_argument(base.clone(), "cursor", json!(valid_cursor.clone())),
+                ExposureProfile::Analysis,
+            ),
+            (
+                "effective page size",
+                with_argument(
+                    with_argument(base.clone(), "max_results", json!(3)),
+                    "cursor",
+                    json!(valid_cursor.clone()),
+                ),
+                ExposureProfile::Developer,
+            ),
+            (
+                "query and physical plan",
+                with_argument(query_mutation, "cursor", json!(valid_cursor.clone())),
+                ExposureProfile::Developer,
+            ),
+            (
+                "generation",
+                with_argument(
+                    with_argument(base.clone(), "generation", json!(alternate_generation())),
+                    "cursor",
+                    json!(valid_cursor.clone()),
+                ),
+                ExposureProfile::Developer,
+            ),
+            (
+                "expired token",
+                with_argument(base.clone(), "cursor", json!(expired_cursor)),
+                ExposureProfile::Developer,
+            ),
+            (
+                "tampered token",
+                with_argument(base.clone(), "cursor", json!(tampered_cursor)),
+                ExposureProfile::Developer,
+            ),
+            (
+                "stale physical plan",
+                with_argument(base, "cursor", json!(stale_plan_cursor)),
+                ExposureProfile::Developer,
+            ),
+        ];
+
+        for (dimension, arguments, exposure_profile) in cases {
+            let harness = Harness::with_cursor_key(pagination_failure(tool), KEY_MATERIAL);
+            let error = execute_as(&harness.executor, tool, arguments, exposure_profile)
+                .await
+                .expect_err("mutated cursor is rejected");
+            assert_eq!(
+                error.public_error().map(PublicError::code),
+                Some(ErrorCode::InvalidCursor),
+                "{tool:?} failed to bind {dimension}"
+            );
+            assert_eq!(
+                harness.call_count.load(Ordering::Relaxed),
+                0,
+                "{tool:?} performed daemon work for {dimension}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn repository_read_pages_match_golden_sequences_without_gaps() {
+    const KEY_MATERIAL: [u8; 32] = [0x6D; 32];
+    let locate_ids = [symbol(), missing_symbol(), SymbolId::from_bytes([3; 20])];
+    let locate_outcomes = locate_ids
+        .iter()
+        .zip([Some(1), Some(2), None])
+        .enumerate()
+        .map(|(index, (symbol_id, next))| {
+            Ok(locate_page(*symbol_id, &format!("item_{index}"), next))
+        })
+        .collect();
+    let locate_harness = Harness::with_cursor_key(
+        FakeOutcome::CodeLocateSequence(Arc::new(Mutex::new(locate_outcomes))),
+        KEY_MATERIAL,
+    );
+    let mut locate_arguments = with_argument(
+        pagination_arguments(VerticalTool::CodeLocate),
+        "max_results",
+        json!(1),
+    );
+    let mut observed_locate = Vec::new();
+    loop {
+        let output: CodeLocateOutput = decode(
+            execute(
+                &locate_harness.executor,
+                VerticalTool::CodeLocate,
+                locate_arguments.clone(),
+            )
+            .await
+            .expect("code locate page succeeds"),
+        );
+        let ToolResponse::Success(page) = output else {
+            panic!("expected code locate success");
+        };
+        observed_locate.push(
+            page.data.matches[0]
+                .symbol_id
+                .expect("fixture locate item is a symbol"),
+        );
+        match page.next_cursor.0 {
+            Some(cursor) => {
+                assert!(page.truncated);
+                locate_arguments = with_argument(locate_arguments, "cursor", json!(cursor));
+            }
+            None => {
+                assert!(!page.truncated);
+                break;
+            }
+        }
+    }
+    assert_eq!(observed_locate, locate_ids);
+
+    let relationship_targets = [
+        missing_symbol(),
+        SymbolId::from_bytes([3; 20]),
+        SymbolId::from_bytes([4; 20]),
+    ];
+    let relationship_outcomes = relationship_targets
+        .iter()
+        .zip([Some(1), Some(2), None])
+        .map(|(target, next)| Ok(relationships_page(*target, next)))
+        .collect();
+    let relationship_harness = Harness::with_cursor_key(
+        FakeOutcome::SymbolRelationshipsSequence(Arc::new(Mutex::new(relationship_outcomes))),
+        KEY_MATERIAL,
+    );
+    let mut relationship_arguments = with_argument(
+        pagination_arguments(VerticalTool::SymbolRelationships),
+        "max_results",
+        json!(1),
+    );
+    let mut observed_relationships = Vec::new();
+    loop {
+        let output: SymbolRelationshipsOutput = decode(
+            execute(
+                &relationship_harness.executor,
+                VerticalTool::SymbolRelationships,
+                relationship_arguments.clone(),
+            )
+            .await
+            .expect("relationships page succeeds"),
+        );
+        let ToolResponse::Success(page) = output else {
+            panic!("expected relationships success");
+        };
+        observed_relationships.push(page.data.groups[0].items[0].symbol_id);
+        match page.next_cursor.0 {
+            Some(cursor) => {
+                assert!(page.truncated);
+                relationship_arguments =
+                    with_argument(relationship_arguments, "cursor", json!(cursor));
+            }
+            None => {
+                assert!(!page.truncated);
+                break;
+            }
+        }
+    }
+    assert_eq!(observed_relationships, relationship_targets);
+
+    let advanced_ids = ["row_a", "row_b", "row_c"];
+    let advanced_outcomes = advanced_ids
+        .iter()
+        .zip([Some(1), Some(2), None])
+        .map(|(row_id, next)| Ok(advanced_page(row_id, next)))
+        .collect();
+    let advanced_harness = Harness::with_cursor_key(
+        FakeOutcome::QueryAdvancedSequence(Arc::new(Mutex::new(advanced_outcomes))),
+        KEY_MATERIAL,
+    );
+    let mut advanced_arguments = with_argument(
+        pagination_arguments(VerticalTool::QueryAdvanced),
+        "max_results",
+        json!(1),
+    );
+    let mut observed_advanced = Vec::new();
+    loop {
+        let output: QueryAdvancedOutput = decode(
+            execute(
+                &advanced_harness.executor,
+                VerticalTool::QueryAdvanced,
+                advanced_arguments.clone(),
+            )
+            .await
+            .expect("advanced page succeeds"),
+        );
+        let ToolResponse::Success(page) = output else {
+            panic!("expected advanced success");
+        };
+        observed_advanced.push(
+            page.data.rows[0]["id"]
+                .as_str()
+                .expect("fixture id is text")
+                .to_owned(),
+        );
+        match page.next_cursor.0 {
+            Some(cursor) => {
+                assert!(page.truncated);
+                assert_eq!(page.data.completeness, QueryCompleteness::Paged);
+                advanced_arguments = with_argument(advanced_arguments, "cursor", json!(cursor));
+            }
+            None => {
+                assert!(!page.truncated);
+                assert_eq!(page.data.completeness, QueryCompleteness::Complete);
+                break;
+            }
+        }
+    }
+    assert_eq!(observed_advanced, advanced_ids);
+
+    let offsets = |harness: &Harness| {
+        harness
+            .calls
+            .lock()
+            .expect("fake call recorder is not poisoned")
+            .iter()
+            .map(|call| match call {
+                ObservedCall::CodeLocate(request) => request.page_offset(),
+                ObservedCall::SymbolRelationships(request) => request.page_offset(),
+                ObservedCall::QueryAdvanced(request) => request.page_offset(),
+                _ => panic!("pagination fixture recorded an unrelated call"),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(offsets(&locate_harness), [0, 1, 2]);
+    assert_eq!(offsets(&relationship_harness), [0, 1, 2]);
+    assert_eq!(offsets(&advanced_harness), [0, 1, 2]);
+}
+
+#[tokio::test]
+async fn hard_limits_never_masquerade_as_page_continuations() {
+    for resource in ["candidates", "returned_text_bytes"] {
+        let budget = PublicError::builder(
+            ErrorCode::BudgetExceeded,
+            error_definition(ErrorCode::BudgetExceeded).message,
+        )
+        .detail(
+            DetailKey::parse("resource").expect("static detail key is valid"),
+            PublicValue::Label(SafeLabel::parse(resource).expect("static resource label is valid")),
+        )
+        .next_action(NextAction::CorrectField {
+            field: DetailKey::parse("budget").expect("static detail key is valid"),
+        })
+        .build()
+        .expect("budget error fixture is checked");
+        let harness = Harness::new(FakeOutcome::CodeLocate(Err(ClientPortError::Public(
+            Box::new(budget),
+        ))));
+        let error = execute(
+            &harness.executor,
+            VerticalTool::CodeLocate,
+            pagination_arguments(VerticalTool::CodeLocate),
+        )
+        .await
+        .expect_err("hard search limit remains a domain error");
+        assert_eq!(
+            error.public_error().map(PublicError::code),
+            Some(ErrorCode::BudgetExceeded)
+        );
+        assert_eq!(harness.call_count.load(Ordering::Relaxed), 1);
+    }
+
+    let mut relationships = relationships_page(missing_symbol(), None);
+    relationships.result.exact = false;
+    relationships.result.truncated = true;
+    let relationship_harness = Harness::new(FakeOutcome::SymbolRelationships(Ok(relationships)));
+    let relationship_output: SymbolRelationshipsOutput = decode(
+        execute(
+            &relationship_harness.executor,
+            VerticalTool::SymbolRelationships,
+            pagination_arguments(VerticalTool::SymbolRelationships),
+        )
+        .await
+        .expect("hard-truncated relationships response maps"),
+    );
+    let ToolResponse::Success(relationship_page) = relationship_output else {
+        panic!("expected relationships success");
+    };
+    assert!(relationship_page.truncated);
+    assert!(relationship_page.next_cursor.0.is_none());
+    assert!(relationship_page.warnings.iter().any(|warning| {
+        warning.code.as_str() == "non_pageable_truncation"
+            && warning.message.as_str() == "narrow the request scope and retry"
+    }));
+
+    let mut advanced = advanced_page("partial", None);
+    advanced.result.completeness = "truncated".to_owned();
+    let advanced_harness = Harness::new(FakeOutcome::QueryAdvanced(Ok(advanced)));
+    let advanced_output: QueryAdvancedOutput = decode(
+        execute(
+            &advanced_harness.executor,
+            VerticalTool::QueryAdvanced,
+            pagination_arguments(VerticalTool::QueryAdvanced),
+        )
+        .await
+        .expect("hard-truncated advanced response maps"),
+    );
+    let ToolResponse::Success(advanced_page) = advanced_output else {
+        panic!("expected advanced success");
+    };
+    assert!(advanced_page.truncated);
+    assert!(advanced_page.next_cursor.0.is_none());
+    assert!(advanced_page.warnings.iter().any(|warning| {
+        warning.code.as_str() == "non_pageable_truncation"
+            && warning.message.as_str() == "narrow the request scope and retry"
+    }));
 }
 
 fn assert_capability_rejection(
@@ -1437,6 +2026,58 @@ async fn query_batch_composes_locate_subtools_under_one_pinned_generation() {
 }
 
 #[tokio::test]
+async fn query_batch_preserves_child_page_continuations() {
+    let harness = Harness::with_cursor_key(
+        FakeOutcome::Batch {
+            status: Box::new(Ok(repository_status_response())),
+            locate: Ok(locate_page(symbol(), "publish", Some(1))),
+        },
+        [0x71; 32],
+    );
+    let output: QueryBatchOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::QueryBatch,
+            json!({
+                "repository": {"repository_id": repository()},
+                "generation": "active",
+                "operations": [
+                    {
+                        "id": "find",
+                        "tool": "code.locate",
+                        "arguments": {"query": "publish", "max_results": 1}
+                    }
+                ]
+            }),
+        )
+        .await
+        .expect("batch page succeeds"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch success");
+    };
+    let child = &output.data.operation_results[0];
+    assert_eq!(child.status, BatchOperationStatus::Ok);
+    assert!(child.truncated);
+    assert!(
+        child.next_cursor.0.is_some(),
+        "batch shaping must preserve the child continuation"
+    );
+
+    let offsets: Vec<_> = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned")
+        .iter()
+        .filter_map(|call| match call {
+            ObservedCall::CodeLocate(request) => Some(request.page_offset()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offsets, [0]);
+}
+
+#[tokio::test]
 async fn every_retained_example_reaches_runtime_without_capability_rejection() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/mcp/1.0/tool-contracts.json"
@@ -1560,6 +2201,9 @@ async fn batch_adapter_propagates_cancellation_before_client_dispatch() {
         ),
         unsupported: public.clone(),
         invalid_arguments: public,
+        invalid_cursor: harness.executor.invalid_cursor.clone(),
+        exposure_profile: ExposureProfile::Developer,
+        cursor_key: harness.executor.cursor_key,
     };
     let (_sender, receiver) = watch::channel(true);
     let request = AgentToolRequest::new(BatchTool::CodeLocate, Map::new());
@@ -1598,6 +2242,9 @@ async fn batch_adapter_rejects_unrepresentable_evidence_before_client_dispatch()
         ),
         unsupported: public.clone(),
         invalid_arguments: public,
+        invalid_cursor: harness.executor.invalid_cursor.clone(),
+        exposure_profile: ExposureProfile::Developer,
+        cursor_key: harness.executor.cursor_key,
     };
     let (_sender, receiver) = watch::channel(false);
     let request = AgentToolRequest::new(
@@ -1672,6 +2319,9 @@ async fn batch_adapter_preserves_local_and_parent_deadline_provenance() {
             ),
             unsupported: public.clone(),
             invalid_arguments: public,
+            invalid_cursor: harness.executor.invalid_cursor.clone(),
+            exposure_profile: ExposureProfile::Developer,
+            cursor_key: harness.executor.cursor_key,
         };
         let request = AgentToolRequest::new(
             BatchTool::CodeLocate,
@@ -3202,7 +3852,15 @@ async fn every_repo_list_cursor_failure_category_maps_to_invalid_cursor() {
         rootlight_agent::explain::RepoListPlanContext::new(2, false, [], ResponseProfile::Compact)
             .expect("test plan context is valid");
     let plan = rootlight_agent::explain::repo_list_plan(&plan_context);
-    let base = repo_list_cursor_context(None, None, 2, snapshot, &plan, signing_key.key_id);
+    let base = repo_list_cursor_context(
+        None,
+        None,
+        2,
+        snapshot,
+        &plan,
+        ExposureProfile::Developer,
+        signing_key.key_id,
+    );
     let wire = |context: CursorContext, issued_at_ms| {
         AuthenticatedCursor::create(
             context,
@@ -3250,7 +3908,15 @@ async fn every_repo_list_cursor_failure_category_maps_to_invalid_cursor() {
         (
             "future issue time",
             wire(
-                repo_list_cursor_context(None, None, 2, snapshot, &plan, signing_key.key_id),
+                repo_list_cursor_context(
+                    None,
+                    None,
+                    2,
+                    snapshot,
+                    &plan,
+                    ExposureProfile::Developer,
+                    signing_key.key_id,
+                ),
                 now_unix_ms().saturating_add(60_000),
             ),
         ),
@@ -3584,6 +4250,7 @@ async fn symbol_relationships_maps_groups_and_totals() {
             total_edges: 1,
             exact: true,
             truncated: false,
+            next_page_offset: None,
         },
         metadata("trace-rel-1"),
     );
@@ -4475,6 +5142,7 @@ async fn query_advanced_maps_columns_rows_and_completeness() {
             rows: vec![json!({"id": "sym"})],
             plan: None,
             completeness: "complete".to_owned(),
+            next_page_offset: None,
         },
         metadata("query-advanced-1"),
     );
@@ -4534,6 +5202,7 @@ fn advanced_plan_response(
                 ],
             }),
             completeness: "complete".to_owned(),
+            next_page_offset: None,
         },
         metadata("query-advanced-plan"),
     )
@@ -4653,7 +5322,7 @@ async fn query_advanced_generation_mismatch_fails_closed_before_plan_mapping() {
 }
 
 #[tokio::test]
-async fn query_advanced_rejects_a_paging_cursor() {
+async fn query_advanced_rejects_a_malformed_paging_cursor() {
     let harness = Harness::new(FakeOutcome::QueryAdvanced(Err(ClientPortError::Executor)));
     let error = execute(
         &harness.executor,
@@ -4665,12 +5334,11 @@ async fn query_advanced_rejects_a_paging_cursor() {
         }),
     )
     .await
-    .expect_err("paging cursor is rejected before the port");
+    .expect_err("malformed paging cursor is rejected before the port");
     let public = error
         .public_error()
-        .expect("unsupported option is a checked public error");
-    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
-    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
+        .expect("cursor failure is a checked public error");
+    assert_eq!(public.code(), ErrorCode::InvalidCursor);
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
 }
 
@@ -5149,10 +5817,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::CodeLocate,
             json!({"repository": {"repository_id": repository()}, "query": "x", "budget": {"evidence_level": "compact"}}),
-        ),
-        (
-            VerticalTool::CodeLocate,
-            json!({"repository": {"repository_id": repository()}, "query": "x", "cursor": "opaque"}),
         ),
         (
             VerticalTool::CodeLocate,
@@ -6325,6 +6989,7 @@ enum AcceptedFieldOracle {
     BatchRuntime,
     LocalTimeout,
     FixedDiscriminator,
+    CursorContinuation,
 }
 
 #[derive(Debug)]
@@ -6398,6 +7063,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     );
     group!(CodeLocate, ExplainPlan, ["explain"]);
     group!(CodeLocate, DefaultEquivalent, ["response_profile"]);
+    group!(CodeLocate, CursorContinuation, ["cursor"]);
     group!(
         SymbolExplain,
         NormalizedDelta,
@@ -6429,6 +7095,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         DefaultEquivalent,
         ["include_candidates", "response_profile"]
     );
+    group!(SymbolRelationships, CursorContinuation, ["cursor"]);
     group!(
         FlowTrace,
         NormalizedDelta,
@@ -6600,6 +7267,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         ]
     );
     group!(QueryAdvanced, StructuredQueryAst, ["query"]);
+    group!(QueryAdvanced, CursorContinuation, ["cursor"]);
     group!(QueryBatch, BatchRuntime, ["failure_policy", "repository"]);
     group_excluding!(
         QueryBatch,
@@ -6674,7 +7342,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "b40621af5e35564e20d7de7000b8c5271f85ad21e059606576cc9a85bbef96a0",
+        "733c43141d03da16229d4959186f5e71f653741029c327f1fd80b0cb88340b51",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -6714,6 +7382,7 @@ fn accepted_schema_paths_have_effect_evidence() {
         AcceptedFieldOracle::BatchRuntime,
         AcceptedFieldOracle::LocalTimeout,
         AcceptedFieldOracle::FixedDiscriminator,
+        AcceptedFieldOracle::CursorContinuation,
     ]
     .map(|oracle| {
         categorized
@@ -6722,7 +7391,7 @@ fn accepted_schema_paths_have_effect_evidence() {
             .count()
     });
     println!(
-        "accepted_paths={} normalized_delta={} structured_variant={} structured_query_ast={} default_equivalent={} explain_plan={} output_selection={} context_runtime={} batch_runtime={} local_timeout={} fixed_discriminator={}",
+        "accepted_paths={} normalized_delta={} structured_variant={} structured_query_ast={} default_equivalent={} explain_plan={} output_selection={} context_runtime={} batch_runtime={} local_timeout={} fixed_discriminator={} cursor_continuation={}",
         categorized.len(),
         counts[0],
         counts[1],
@@ -6734,9 +7403,10 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[7],
         counts[8],
         counts[9],
+        counts[10],
     );
-    assert_eq!(counts, [131, 3, 61, 27, 16, 5, 10, 10, 1, 1]);
-    assert_eq!(categorized.len(), 265);
+    assert_eq!(counts, [131, 3, 61, 27, 16, 5, 10, 10, 1, 1, 3]);
+    assert_eq!(categorized.len(), 268);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -8747,6 +9417,7 @@ async fn accepted_effect_query_advanced_controls_change_the_normalized_request()
             rows: vec![json!({"id": "sym"})],
             plan: None,
             completeness: "complete".to_owned(),
+            next_page_offset: None,
         },
         metadata("query-advanced-controls"),
     );

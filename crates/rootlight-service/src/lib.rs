@@ -1905,6 +1905,7 @@ impl FirstSliceService {
         query: String,
         mode: LocateMode,
         maximum_results: usize,
+        page_offset: usize,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<CodeLocateResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
@@ -1912,12 +1913,15 @@ impl FirstSliceService {
             .generations
             .query(generation)
             .map_err(|_| FirstSliceError::Query)?;
+        let mut search_budget = SearchBudget::default();
+        search_budget.max_results = search_budget.max_results.max(maximum_results);
         let plan = service
             .plan_code_locate(
                 query,
                 mode,
                 maximum_results,
-                SearchBudget::default(),
+                page_offset,
+                search_budget,
                 QueryBudget::new(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
@@ -1974,6 +1978,7 @@ impl FirstSliceService {
         direction: Option<RelationDirection>,
         min_confidence: u16,
         max_results: usize,
+        page_offset: usize,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<SymbolRelationshipsResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
@@ -1988,6 +1993,7 @@ impl FirstSliceService {
                 direction,
                 min_confidence,
                 max_results,
+                page_offset,
                 QueryBudget::new(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
@@ -2355,6 +2361,7 @@ impl FirstSliceService {
         ast: AdvancedAstNode,
         explain: bool,
         max_results: usize,
+        page_offset: usize,
         max_depth: usize,
         max_traversal: usize,
         cost_limit: Option<u64>,
@@ -2370,6 +2377,7 @@ impl FirstSliceService {
                 ast,
                 explain,
                 max_results,
+                page_offset,
                 max_depth,
                 max_traversal,
                 cost_limit,
@@ -4288,6 +4296,7 @@ mod tests {
                 "answer".to_owned(),
                 LocateMode::Exact,
                 1,
+                0,
                 &deadline(),
             )
             .expect("first answer locates");
@@ -4316,6 +4325,7 @@ mod tests {
                 "answer".to_owned(),
                 LocateMode::Exact,
                 1,
+                0,
                 &deadline(),
             )
             .expect("second answer locates");
@@ -4398,6 +4408,7 @@ mod tests {
                 "answer".to_owned(),
                 LocateMode::Exact,
                 8,
+                0,
                 &cancellation,
             )
             .expect("v1 answer locate succeeds");
@@ -4424,6 +4435,7 @@ mod tests {
                 "kept_after_negation".to_owned(),
                 LocateMode::Exact,
                 8,
+                0,
                 &cancellation,
             )
             .expect("negated nested source locate succeeds");
@@ -4478,6 +4490,7 @@ mod tests {
                 "answer".to_owned(),
                 LocateMode::Exact,
                 8,
+                0,
                 &cancellation,
             )
             .expect("v2 answer locate succeeds");
@@ -4508,6 +4521,7 @@ mod tests {
                 "answer".to_owned(),
                 LocateMode::Exact,
                 8,
+                0,
                 &cancellation,
             )
             .expect("prior generation remains queryable");
@@ -4676,6 +4690,7 @@ mod tests {
                         query.clone(),
                         LocateMode::Exact,
                         64,
+                        0,
                         cancellation,
                     )
                     .expect("equivalence locate query succeeds");
@@ -4895,6 +4910,7 @@ mod tests {
                     (*query).to_owned(),
                     LocateMode::Exact,
                     8,
+                    0,
                     cancellation,
                 )
                 .expect("excluded Vertical slice query succeeds");
