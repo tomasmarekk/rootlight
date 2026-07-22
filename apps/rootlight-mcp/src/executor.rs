@@ -2719,7 +2719,7 @@ fn map_context_pack_service_error(
         ContextPackServiceError::UnsupportedField(field) => unsupported_field(field),
         ContextPackServiceError::EmptySeeds => ToolExecutionError::new(unsupported.clone()),
         ContextPackServiceError::Public(error) => ToolExecutionError::new(*error),
-        ContextPackServiceError::DeadlineExceeded => {
+        ContextPackServiceError::DeadlineExceeded | ContextPackServiceError::BudgetExceeded => {
             ToolExecutionError::new(authoritative_error(MappedDomainFailure::budget_exceeded()))
         }
         ContextPackServiceError::InvalidResponse => internal(ToolExecutionFailure::InvalidResponse),

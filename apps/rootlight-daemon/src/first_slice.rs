@@ -3487,6 +3487,11 @@ fn service_error(error: FirstSliceError) -> PublicError {
             "first-slice resource limit was reached",
             true,
         ),
+        FirstSliceError::BudgetExceeded => (
+            ErrorCode::BudgetExceeded,
+            "first-slice execution budget is exhausted",
+            false,
+        ),
         FirstSliceError::Query => (ErrorCode::NotFound, "query target was not found", false),
         FirstSliceError::Adapter => (
             ErrorCode::AdapterFailed,
@@ -3724,6 +3729,14 @@ mod tests {
     use rootlight_operations::{ClientInstanceId, OperationJournal, OperationStage, RecoveryClass};
     use std::{fs, time::Duration};
     use tempfile::TempDir;
+
+    #[test]
+    fn first_slice_budget_exhaustion_keeps_its_public_error_code() {
+        let error = service_error(FirstSliceError::BudgetExceeded);
+
+        assert_eq!(error.code(), ErrorCode::BudgetExceeded);
+        assert!(!error.retryable());
+    }
 
     #[test]
     fn source_reference_merging_is_transitive_and_permutation_invariant() {

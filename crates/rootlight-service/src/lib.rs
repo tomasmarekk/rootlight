@@ -3350,6 +3350,9 @@ pub enum FirstSliceError {
     /// A query plan or execution failed.
     #[error("first-slice query failed")]
     Query,
+    /// A query or source-read budget rejected planning or execution.
+    #[error("first-slice execution budget was exceeded")]
+    BudgetExceeded,
     /// The process-local repository registration is unavailable.
     #[error("first-slice repository was not found")]
     RepositoryNotFound,
@@ -4367,6 +4370,15 @@ fn map_source_error(error: SourceError, cancellation: &Cancellation) -> FirstSli
     }
     match error {
         SourceError::Cancelled(reason) => FirstSliceError::Cancelled(reason),
+        SourceError::InvalidBudget
+        | SourceError::SelectorLimit
+        | SourceError::ContextLimit
+        | SourceError::SnapshotBudgetExceeded
+        | SourceError::MetadataStringLimitExceeded
+        | SourceError::MetadataBudgetExceeded
+        | SourceError::SourceBudgetExceeded
+        | SourceError::ResponseMemoryBudgetExceeded
+        | SourceError::MemoryUnavailable => FirstSliceError::BudgetExceeded,
         _ => FirstSliceError::Source,
     }
 }
@@ -4377,6 +4389,12 @@ fn map_query_error(error: QueryError, cancellation: &Cancellation) -> FirstSlice
     }
     match error {
         QueryError::Cancelled(reason) => FirstSliceError::Cancelled(reason),
+        QueryError::InvalidBudget { .. }
+        | QueryError::InvalidDurationBudget { .. }
+        | QueryError::PlanRejected { .. }
+        | QueryError::BudgetExceeded { .. }
+        | QueryError::MemoryUnavailable => FirstSliceError::BudgetExceeded,
+        QueryError::Source(source) => map_source_error(source, cancellation),
         _ => FirstSliceError::Query,
     }
 }
@@ -4595,6 +4613,31 @@ mod tests {
         "pub fn answer() -> u32 {\n    42\n}\n\npub fn helper() -> u32 {\n    7\n}\n";
     const EQUIVALENCE_BODY_EDIT: &str =
         "pub fn answer() -> u32 {\n    43\n}\n\npub fn helper() -> u32 {\n    7\n}\n";
+
+    #[test]
+    fn query_and_source_budget_failures_remain_distinct() {
+        let cancellation = Cancellation::new();
+        assert_eq!(
+            map_query_error(
+                QueryError::PlanRejected {
+                    resource: rootlight_query::QueryResource::Results,
+                },
+                &cancellation,
+            ),
+            FirstSliceError::BudgetExceeded
+        );
+        assert_eq!(
+            map_query_error(
+                QueryError::Source(SourceError::SourceBudgetExceeded),
+                &cancellation,
+            ),
+            FirstSliceError::BudgetExceeded
+        );
+        assert_eq!(
+            map_query_error(QueryError::SymbolNotFound, &cancellation),
+            FirstSliceError::Query
+        );
+    }
     const EQUIVALENCE_SURFACE_EDIT: &str =
         "pub fn answer() -> u32 {\n    43\n}\n\npub fn renamed() -> u32 {\n    7\n}\n";
 
