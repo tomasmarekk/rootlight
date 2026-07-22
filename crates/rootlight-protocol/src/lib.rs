@@ -20,9 +20,31 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 /// authenticated operation submission and cannot satisfy the current contract.
 pub const MINIMUM_PROTOCOL_MINOR: u32 = 1;
 /// Latest daemon protocol implemented by the current client and server.
-pub const CURRENT_PROTOCOL_MINOR: u32 = 6;
+pub const CURRENT_PROTOCOL_MINOR: u32 = 7;
 /// Current production protocol contract version.
-pub const PROTOCOL_VERSION: &str = "1.6";
+pub const PROTOCOL_VERSION: &str = "1.7";
+/// Schema version for a complete effective first-slice request budget.
+pub const FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION: u32 = 1;
+/// Hard transport admission maximum for logical rows.
+pub const MAX_FIRST_SLICE_BUDGET_ROWS: u64 = 1_000_000;
+/// Hard transport admission maximum for traversed edges.
+pub const MAX_FIRST_SLICE_BUDGET_EDGES: u64 = 1_000_000;
+/// Hard transport admission maximum for returned results.
+pub const MAX_FIRST_SLICE_BUDGET_RESULTS: u64 = 10_000;
+/// Hard transport admission maximum for returned source bytes.
+pub const MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES: u64 = 512 * 1024;
+/// Hard transport admission maximum for serialized JSON bytes.
+pub const MAX_FIRST_SLICE_BUDGET_JSON_BYTES: u64 = 4 * 1024 * 1024;
+/// Hard transport admission maximum for conservative estimated tokens.
+pub const MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS: u64 = 4 * 1024 * 1024;
+/// Hard transport admission maximum for owned response memory.
+pub const MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES: u64 = 128 * 1024 * 1024;
+/// Hard transport admission maximum for query duration.
+pub const MAX_FIRST_SLICE_BUDGET_DURATION_MICROS: u64 = 10_000_000;
+/// Hard transport admission maximum for traversal depth.
+pub const MAX_FIRST_SLICE_BUDGET_DEPTH: u64 = 16;
+/// Hard transport admission maximum for returned paths.
+pub const MAX_FIRST_SLICE_BUDGET_PATHS: u64 = 1_000;
 
 #[cfg(test)]
 mod tests {
@@ -77,5 +99,53 @@ mod tests {
             assert_eq!(wire.as_str_name(), definition.name);
         }
         assert!(v1::ErrorCode::try_from(23).is_err());
+    }
+
+    #[test]
+    fn effective_budget_and_usage_extensions_round_trip() {
+        use generated::daemon::v1;
+
+        let envelope = v1::RequestEnvelope {
+            request_id: 7,
+            instance_nonce: vec![3; 16],
+            timeout_ms: Some(1_000),
+            effective_budget: Some(v1::FirstSliceEffectiveBudget {
+                schema_version: FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
+                rows: 10,
+                edges: 20,
+                results: 3,
+                source_bytes: 4_096,
+                json_bytes: 8_192,
+                estimated_tokens: 2_048,
+                memory_bytes: 16_384,
+                duration_micros: 500_000,
+                depth: Some(4),
+                paths: Some(5),
+            }),
+            request: Some(v1::request_envelope::Request::Health(v1::HealthRequest {})),
+        };
+        let encoded = envelope.encode_to_vec();
+        let decoded =
+            v1::RequestEnvelope::decode(encoded.as_slice()).expect("request envelope decodes");
+        assert_eq!(decoded, envelope);
+
+        let usage = v1::FirstSliceQueryUsage {
+            rows: 1,
+            edges: 2,
+            results: 3,
+            source_bytes: 4,
+            json_bytes: 5,
+            estimated_tokens: 6,
+            elapsed_micros: 7,
+            token_accounting: Some(
+                v1::FirstSliceTokenAccountingProfile::FirstSliceTokenAccountingUtf8ByteUpperBoundV1
+                    as i32,
+            ),
+            memory_bytes: Some(8),
+        };
+        let encoded = usage.encode_to_vec();
+        let decoded =
+            v1::FirstSliceQueryUsage::decode(encoded.as_slice()).expect("query usage decodes");
+        assert_eq!(decoded, usage);
     }
 }

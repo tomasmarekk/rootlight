@@ -1204,6 +1204,7 @@ mod tests {
             request_id,
             instance_nonce: vec![7; 16],
             timeout_ms: None,
+            effective_budget: None,
             request: Some(request_envelope::Request::Health(HealthRequest {})),
         }
     }

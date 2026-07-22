@@ -42,7 +42,12 @@ use rootlight_operations::{
     OperationState, OperationSubmission, PlanHash, Progress, RecoveryClass, SubmissionOutcome,
 };
 use rootlight_protocol::{
-    CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR, PROTOCOL_VERSION,
+    CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
+    MAX_FIRST_SLICE_BUDGET_DEPTH, MAX_FIRST_SLICE_BUDGET_DURATION_MICROS,
+    MAX_FIRST_SLICE_BUDGET_EDGES, MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS,
+    MAX_FIRST_SLICE_BUDGET_JSON_BYTES, MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES,
+    MAX_FIRST_SLICE_BUDGET_PATHS, MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
+    MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES, MINIMUM_PROTOCOL_MINOR, PROTOCOL_VERSION,
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
 use unicode_casefold::UnicodeCaseFold as _;
@@ -289,8 +294,87 @@ pub struct FirstSliceIpcContext {
     pub cancellation: rootlight_operations::Cancellation,
     /// Absolute monotonic deadline enforced by the daemon transport.
     pub deadline: Instant,
+    /// Optional complete client-reduced budget validated by the transport.
+    pub effective_budget: Option<FirstSliceEffectiveBudget>,
     /// Admission state that linearizes peer cancellation with index publication.
     pub index_admission: Option<FirstSliceAdmission>,
+}
+
+/// Complete effective resource ceilings admitted for one first-slice request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstSliceEffectiveBudget {
+    rows: u64,
+    edges: u64,
+    results: u64,
+    source_bytes: u64,
+    json_bytes: u64,
+    estimated_tokens: u64,
+    memory_bytes: u64,
+    duration: Duration,
+    depth: Option<u64>,
+    paths: Option<u64>,
+}
+
+impl FirstSliceEffectiveBudget {
+    /// Returns the admitted logical-row ceiling.
+    #[must_use]
+    pub const fn rows(self) -> u64 {
+        self.rows
+    }
+
+    /// Returns the admitted traversed-edge ceiling.
+    #[must_use]
+    pub const fn edges(self) -> u64 {
+        self.edges
+    }
+
+    /// Returns the admitted returned-result ceiling.
+    #[must_use]
+    pub const fn results(self) -> u64 {
+        self.results
+    }
+
+    /// Returns the admitted source-byte ceiling.
+    #[must_use]
+    pub const fn source_bytes(self) -> u64 {
+        self.source_bytes
+    }
+
+    /// Returns the admitted serialized JSON-byte ceiling.
+    #[must_use]
+    pub const fn json_bytes(self) -> u64 {
+        self.json_bytes
+    }
+
+    /// Returns the admitted conservative estimated-token ceiling.
+    #[must_use]
+    pub const fn estimated_tokens(self) -> u64 {
+        self.estimated_tokens
+    }
+
+    /// Returns the admitted owned-memory ceiling.
+    #[must_use]
+    pub const fn memory_bytes(self) -> u64 {
+        self.memory_bytes
+    }
+
+    /// Returns the admitted monotonic execution duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.duration
+    }
+
+    /// Returns the optional admitted traversal-depth ceiling.
+    #[must_use]
+    pub const fn depth(self) -> Option<u64> {
+        self.depth
+    }
+
+    /// Returns the optional admitted returned-path ceiling.
+    #[must_use]
+    pub const fn paths(self) -> Option<u64> {
+        self.paths
+    }
 }
 
 const ADMISSION_PENDING: u8 = 0;
@@ -5069,6 +5153,13 @@ impl ControlService {
             daemon::response_envelope::Response::Error(public_error_to_wire(&permission_denied(
                 "daemon instance nonce does not match",
             )))
+        } else if envelope.effective_budget.is_some() {
+            let error = if selected_protocol_minor < 7 {
+                protocol_mismatch("effective budgets need protocol minor seven")
+            } else {
+                invalid_argument("effective budgets require a first-slice request")
+            };
+            daemon::response_envelope::Response::Error(public_error_to_wire(&error))
         } else {
             match request_from_wire(
                 envelope.request,
@@ -5314,6 +5405,11 @@ impl RequestTiming {
             deadline: started.checked_add(timeout),
         }
     }
+
+    fn transport_timeout(self) -> Option<Duration> {
+        self.deadline
+            .and_then(|deadline| deadline.checked_duration_since(self.started))
+    }
 }
 
 async fn cancel_peer_abandoned_index(
@@ -5334,6 +5430,7 @@ async fn cancel_peer_abandoned_index(
         selected_protocol_minor,
         cancellation: Cancellation::with_deadline(deadline),
         deadline,
+        effective_budget: None,
         index_admission: None,
     };
     // This independent control-lane request shortens cancellation latency.
@@ -5421,20 +5518,42 @@ async fn dispatch_async(
             request_deadline.unwrap_or_else(|| unreachable!("deadline was checked above"));
         match first_slice_request_from_wire(envelope.request) {
             Ok(Some(request)) => {
-                dispatch_first_slice(
-                    first_slice,
-                    request,
-                    context.client_instance_id,
+                match first_slice_effective_budget_from_wire(
+                    envelope.effective_budget.as_ref(),
                     context.selected_protocol_minor,
-                    request_deadline,
-                    context.cancellation,
-                    context.index_admission,
-                )
-                .await
+                    context.timing.transport_timeout(),
+                ) {
+                    Ok(effective_budget) => {
+                        dispatch_first_slice(
+                            first_slice,
+                            request,
+                            FirstSliceIpcContext {
+                                client_instance_id: context.client_instance_id,
+                                selected_protocol_minor: context.selected_protocol_minor,
+                                cancellation: context.cancellation,
+                                deadline: request_deadline,
+                                effective_budget,
+                                index_admission: context.index_admission,
+                            },
+                        )
+                        .await
+                    }
+                    Err(error) => daemon::response_envelope::Response::Error(public_error_to_wire(
+                        error.as_ref(),
+                    )),
+                }
             }
             Ok(None) => daemon::response_envelope::Response::Error(public_error_to_wire(
                 &invalid_argument("daemon request is missing"),
             )),
+            Err(_) if envelope.effective_budget.is_some() => {
+                let error = if context.selected_protocol_minor < 7 {
+                    protocol_mismatch("effective budgets need protocol minor seven")
+                } else {
+                    invalid_argument("effective budgets require a first-slice request")
+                };
+                daemon::response_envelope::Response::Error(public_error_to_wire(&error))
+            }
             Err(request) => {
                 match request_from_wire(
                     Some(request),
@@ -5657,14 +5776,84 @@ fn first_slice_request_from_wire(
     }
 }
 
+fn first_slice_effective_budget_from_wire(
+    budget: Option<&daemon::FirstSliceEffectiveBudget>,
+    selected_protocol_minor: u32,
+    transport_timeout: Option<Duration>,
+) -> Result<Option<FirstSliceEffectiveBudget>, Box<PublicError>> {
+    let Some(budget) = budget else {
+        return Ok(None);
+    };
+    if selected_protocol_minor < 7 {
+        return Err(Box::new(protocol_mismatch(
+            "effective budgets need protocol minor seven",
+        )));
+    }
+    if budget.schema_version != FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION {
+        return Err(Box::new(invalid_argument(
+            "effective budget schema is invalid",
+        )));
+    }
+    for (value, maximum) in [
+        (budget.rows, MAX_FIRST_SLICE_BUDGET_ROWS),
+        (budget.edges, MAX_FIRST_SLICE_BUDGET_EDGES),
+        (budget.results, MAX_FIRST_SLICE_BUDGET_RESULTS),
+        (budget.source_bytes, MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES),
+        (budget.json_bytes, MAX_FIRST_SLICE_BUDGET_JSON_BYTES),
+        (
+            budget.estimated_tokens,
+            MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS,
+        ),
+        (budget.memory_bytes, MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES),
+        (
+            budget.duration_micros,
+            MAX_FIRST_SLICE_BUDGET_DURATION_MICROS,
+        ),
+    ] {
+        if value == 0 || value > maximum {
+            return Err(Box::new(invalid_argument(
+                "effective budget limits are invalid",
+            )));
+        }
+    }
+    if budget
+        .depth
+        .is_some_and(|depth| depth == 0 || depth > MAX_FIRST_SLICE_BUDGET_DEPTH)
+        || budget
+            .paths
+            .is_some_and(|paths| paths == 0 || paths > MAX_FIRST_SLICE_BUDGET_PATHS)
+    {
+        return Err(Box::new(invalid_argument(
+            "effective budget limits are invalid",
+        )));
+    }
+    let duration = Duration::from_micros(budget.duration_micros);
+    let Some(transport_timeout) = transport_timeout else {
+        return Err(Box::new(request_timed_out()));
+    };
+    if duration > transport_timeout {
+        return Err(Box::new(invalid_argument(
+            "effective budget duration exceeds the transport deadline",
+        )));
+    }
+    Ok(Some(FirstSliceEffectiveBudget {
+        rows: budget.rows,
+        edges: budget.edges,
+        results: budget.results,
+        source_bytes: budget.source_bytes,
+        json_bytes: budget.json_bytes,
+        estimated_tokens: budget.estimated_tokens,
+        memory_bytes: budget.memory_bytes,
+        duration,
+        depth: budget.depth,
+        paths: budget.paths,
+    }))
+}
+
 async fn dispatch_first_slice(
     handler: &dyn FirstSliceIpcHandler,
     request: FirstSliceIpcRequest,
-    client_instance_id: ClientInstanceId,
-    selected_protocol_minor: u32,
-    deadline: Instant,
-    cancellation: Cancellation,
-    index_admission: Option<FirstSliceAdmission>,
+    context: FirstSliceIpcContext,
 ) -> daemon::response_envelope::Response {
     let required_protocol_minor =
         if matches!(&request, FirstSliceIpcRequest::RepositoryCatalogPage(_)) {
@@ -5672,7 +5861,7 @@ async fn dispatch_first_slice(
         } else {
             5
         };
-    if selected_protocol_minor < required_protocol_minor {
+    if context.selected_protocol_minor < required_protocol_minor {
         let message = if required_protocol_minor == 6 {
             "repository catalog pages need protocol minor six"
         } else {
@@ -5685,19 +5874,17 @@ async fn dispatch_first_slice(
     if let Err(error) = validate_first_slice_request(&request) {
         return daemon::response_envelope::Response::Error(public_error_to_wire(error.as_ref()));
     }
-    if !cancellation.has_deadline()
-        && cancellation.extend_deadline(deadline).is_err()
-        && cancellation.reason().is_none()
+    if !context.cancellation.has_deadline()
+        && context
+            .cancellation
+            .extend_deadline(context.deadline)
+            .is_err()
+        && context.cancellation.reason().is_none()
     {
         return daemon::response_envelope::Response::Error(public_error_to_wire(&internal_error()));
     }
-    let context = FirstSliceIpcContext {
-        client_instance_id,
-        selected_protocol_minor,
-        cancellation: cancellation.clone(),
-        deadline,
-        index_admission,
-    };
+    let cancellation = context.cancellation.clone();
+    let deadline = context.deadline;
     // Retain the already-bounded request so the daemon can reject an internal
     // handler response that is well typed but belongs to another identity.
     let correlation_request = request.clone();
@@ -9338,9 +9525,161 @@ mod tests {
         }
     }
 
+    fn wire_effective_budget() -> daemon::FirstSliceEffectiveBudget {
+        daemon::FirstSliceEffectiveBudget {
+            schema_version: FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
+            rows: 100,
+            edges: 100,
+            results: 10,
+            source_bytes: 1_024,
+            json_bytes: 2_048,
+            estimated_tokens: 512,
+            memory_bytes: 4_096,
+            duration_micros: 500_000,
+            depth: Some(4),
+            paths: Some(8),
+        }
+    }
+
+    #[test]
+    fn effective_budget_requires_minor_seven_and_complete_valid_limits() {
+        let budget = wire_effective_budget();
+        assert!(matches!(
+            first_slice_effective_budget_from_wire(
+                Some(&budget),
+                6,
+                Some(Duration::from_secs(1))
+            ),
+            Err(error) if error.code() == ErrorCode::ProtocolMismatch
+        ));
+        assert!(
+            first_slice_effective_budget_from_wire(Some(&budget), 7, Some(Duration::from_secs(1)))
+                .expect("valid budget is admitted")
+                .is_some()
+        );
+
+        let mut wrong_schema = budget;
+        wrong_schema.schema_version = 0;
+        assert!(
+            first_slice_effective_budget_from_wire(
+                Some(&wrong_schema),
+                7,
+                Some(Duration::from_secs(1))
+            )
+            .is_err()
+        );
+
+        type BudgetSetter = fn(&mut daemon::FirstSliceEffectiveBudget, u64);
+        let dimensions: &[(u64, BudgetSetter)] = &[
+            (MAX_FIRST_SLICE_BUDGET_ROWS, |budget, value| {
+                budget.rows = value;
+            }),
+            (MAX_FIRST_SLICE_BUDGET_EDGES, |budget, value| {
+                budget.edges = value;
+            }),
+            (MAX_FIRST_SLICE_BUDGET_RESULTS, |budget, value| {
+                budget.results = value;
+            }),
+            (MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES, |budget, value| {
+                budget.source_bytes = value;
+            }),
+            (MAX_FIRST_SLICE_BUDGET_JSON_BYTES, |budget, value| {
+                budget.json_bytes = value;
+            }),
+            (MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS, |budget, value| {
+                budget.estimated_tokens = value;
+            }),
+            (MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES, |budget, value| {
+                budget.memory_bytes = value;
+            }),
+            (MAX_FIRST_SLICE_BUDGET_DURATION_MICROS, |budget, value| {
+                budget.duration_micros = value;
+            }),
+        ];
+        for (maximum, replace) in dimensions {
+            for accepted in [maximum - 1, *maximum] {
+                let mut boundary = budget;
+                replace(&mut boundary, accepted);
+                assert!(
+                    first_slice_effective_budget_from_wire(
+                        Some(&boundary),
+                        7,
+                        Some(Duration::from_secs(10))
+                    )
+                    .is_ok()
+                );
+            }
+            for rejected in [0, maximum + 1] {
+                let mut boundary = budget;
+                replace(&mut boundary, rejected);
+                assert!(
+                    first_slice_effective_budget_from_wire(
+                        Some(&boundary),
+                        7,
+                        Some(Duration::from_secs(10))
+                    )
+                    .is_err()
+                );
+            }
+        }
+
+        let optional_dimensions: &[(u64, BudgetSetter)] = &[
+            (
+                MAX_FIRST_SLICE_BUDGET_DEPTH,
+                |budget: &mut daemon::FirstSliceEffectiveBudget, value| {
+                    budget.depth = Some(value);
+                },
+            ),
+            (
+                MAX_FIRST_SLICE_BUDGET_PATHS,
+                |budget: &mut daemon::FirstSliceEffectiveBudget, value| {
+                    budget.paths = Some(value);
+                },
+            ),
+        ];
+        for &(maximum, replace) in optional_dimensions {
+            for accepted in [maximum - 1, maximum] {
+                let mut boundary = budget;
+                replace(&mut boundary, accepted);
+                assert!(
+                    first_slice_effective_budget_from_wire(
+                        Some(&boundary),
+                        7,
+                        Some(Duration::from_secs(1))
+                    )
+                    .is_ok()
+                );
+            }
+            for rejected in [0, maximum + 1] {
+                let mut boundary = budget;
+                replace(&mut boundary, rejected);
+                assert!(
+                    first_slice_effective_budget_from_wire(
+                        Some(&boundary),
+                        7,
+                        Some(Duration::from_secs(1))
+                    )
+                    .is_err()
+                );
+            }
+        }
+
+        let mut exceeds_transport = budget;
+        exceeds_transport.duration_micros = 500_001;
+        assert!(
+            first_slice_effective_budget_from_wire(
+                Some(&exceeds_transport),
+                7,
+                Some(Duration::from_micros(500_000))
+            )
+            .is_err()
+        );
+    }
+
     #[derive(Debug, Default)]
     struct DeadlineCapturingFirstSlice {
         observed: Mutex<Option<Instant>>,
+        budget: Mutex<Option<FirstSliceEffectiveBudget>>,
     }
 
     impl FirstSliceIpcHandler for DeadlineCapturingFirstSlice {
@@ -9353,6 +9692,7 @@ mod tests {
                 .observed
                 .lock()
                 .expect("deadline capture lock is healthy") = Some(context.deadline);
+            *self.budget.lock().expect("budget capture lock is healthy") = context.effective_budget;
             Box::pin(async { Err(first_slice_unavailable()) })
         }
     }
@@ -9635,6 +9975,7 @@ mod tests {
                 request_id: 83,
                 instance_nonce: vec![7; 16],
                 timeout_ms: Some(1_000),
+                effective_budget: None,
                 request: Some(daemon::request_envelope::Request::RepositoryIndex(
                     daemon::RepositoryIndexRequest {
                         schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
@@ -9744,6 +10085,7 @@ mod tests {
                 request_id: 84,
                 instance_nonce: vec![7; 16],
                 timeout_ms: Some(1_000),
+                effective_budget: None,
                 request: Some(daemon::request_envelope::Request::RepositoryIndex(
                     daemon::RepositoryIndexRequest {
                         schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
@@ -10089,6 +10431,7 @@ mod tests {
             request_id: 1,
             instance_nonce: vec![7; 16],
             timeout_ms: Some(100),
+            effective_budget: None,
             request: Some(daemon::request_envelope::Request::Health(
                 daemon::HealthRequest {},
             )),
@@ -10128,9 +10471,73 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn invalid_effective_budget_is_rejected_before_handler_work() {
+        let journal = Arc::new(OperationJournal::open_in_memory().expect("journal opens"));
+        let actor = JournalActor::start(Arc::clone(&journal), 4, 4).expect("actor starts");
+        let service = ControlService::new(journal, [7; 16]);
+        let (submissions, _receiver) = tokio::sync::mpsc::channel(4);
+        let commands = OrchestratorSenders::new(submissions);
+        let handler = DisconnectRecordingFirstSlice::default();
+        let mut budget = wire_effective_budget();
+        budget.schema_version = 0;
+        let envelope = daemon::RequestEnvelope {
+            request_id: 93,
+            instance_nonce: vec![7; 16],
+            timeout_ms: Some(1_000),
+            effective_budget: Some(budget),
+            request: Some(
+                daemon::request_envelope::Request::RepositoryOperationStatus(
+                    daemon::RepositoryOperationStatusRequest {
+                        schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+                        operation: Some(common::OperationId {
+                            value: vec![93; 16],
+                        }),
+                        action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                        wait_ms: None,
+                        after_revision: None,
+                    },
+                ),
+            ),
+        };
+        let context = test_dispatch_context(&service, &envelope, ClientInstanceId::SYSTEM);
+
+        let response = dispatch_async(
+            &service,
+            &actor.handle(),
+            &commands,
+            &handler,
+            envelope,
+            context,
+        )
+        .await;
+        assert!(matches!(
+            response.response,
+            Some(daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            })) if code == common::ErrorCode::InvalidArgument as i32
+        ));
+        assert!(
+            handler
+                .requests
+                .lock()
+                .expect("request capture lock is healthy")
+                .is_empty()
+        );
+        actor.join().expect("actor joins");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn first_slice_dispatch_preserves_outer_absolute_deadline() {
         let handler = DeadlineCapturingFirstSlice::default();
         let deadline = Instant::now() + Duration::from_secs(1);
+        let effective_budget = first_slice_effective_budget_from_wire(
+            Some(&wire_effective_budget()),
+            PROTOCOL_MINOR,
+            Some(Duration::from_secs(1)),
+        )
+        .expect("budget validates")
+        .expect("budget is present");
         let request = FirstSliceIpcRequest::RepositoryOperationStatus(
             daemon::RepositoryOperationStatusRequest {
                 schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
@@ -10146,11 +10553,14 @@ mod tests {
         let response = dispatch_first_slice(
             &handler,
             request,
-            ClientInstanceId::from_bytes([92; 16]),
-            PROTOCOL_MINOR,
-            deadline,
-            Cancellation::new(),
-            None,
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::from_bytes([92; 16]),
+                selected_protocol_minor: PROTOCOL_MINOR,
+                cancellation: Cancellation::new(),
+                deadline,
+                effective_budget: Some(effective_budget),
+                index_admission: None,
+            },
         )
         .await;
 
@@ -10164,6 +10574,13 @@ mod tests {
                 .lock()
                 .expect("deadline capture lock is healthy"),
             Some(deadline)
+        );
+        assert_eq!(
+            *handler
+                .budget
+                .lock()
+                .expect("budget capture lock is healthy"),
+            Some(effective_budget)
         );
     }
 
@@ -10231,6 +10648,7 @@ mod tests {
             request_id: 90,
             instance_nonce: vec![7; 16],
             timeout_ms: Some(20),
+            effective_budget: None,
             request: Some(daemon::request_envelope::Request::OperationCancel(
                 daemon::OperationCancelRequest {
                     operation: Some(common::OperationId {
@@ -10259,6 +10677,7 @@ mod tests {
             request_id: 91,
             instance_nonce: vec![7; 16],
             timeout_ms: Some(20),
+            effective_budget: None,
             request: Some(daemon::request_envelope::Request::OperationLeaseRenew(
                 daemon::OperationLeaseRenewRequest {
                     operation: Some(common::OperationId {
@@ -10310,6 +10729,7 @@ mod tests {
             request_id: 9,
             instance_nonce: vec![7; 16],
             timeout_ms: None,
+            effective_budget: None,
             request: Some(daemon::request_envelope::Request::Health(
                 daemon::HealthRequest {},
             )),
@@ -11856,6 +12276,7 @@ mod tests {
                     request_id: 1,
                     instance_nonce: vec![7; 16],
                     timeout_ms: None,
+                    effective_budget: None,
                     request: Some(daemon::request_envelope::Request::OperationSubmit(
                         daemon::OperationSubmitRequest {
                             operation: Some(common::OperationId {
@@ -11897,6 +12318,7 @@ mod tests {
                     request_id: 2,
                     instance_nonce: vec![7; 16],
                     timeout_ms: None,
+                    effective_budget: None,
                     request: Some(daemon::request_envelope::Request::OperationCancel(
                         daemon::OperationCancelRequest {
                             operation: Some(common::OperationId {
@@ -12001,6 +12423,7 @@ mod tests {
             request_id: 1,
             instance_nonce: vec![7; 16],
             timeout_ms: Some(1),
+            effective_budget: None,
             request: Some(daemon::request_envelope::Request::OperationCancel(
                 daemon::OperationCancelRequest {
                     operation: Some(common::OperationId {
@@ -13627,12 +14050,14 @@ mod tests {
             request_id: 15,
             instance_nonce: vec![7; 16],
             timeout_ms: Some(0),
+            effective_budget: None,
             request: Some(request.clone()),
         });
         let stale = service.dispatch(daemon::RequestEnvelope {
             request_id: 16,
             instance_nonce: vec![6; 16],
             timeout_ms: Some(1_000),
+            effective_budget: None,
             request: Some(request),
         });
 
@@ -13659,6 +14084,7 @@ mod tests {
             request_id: 17,
             instance_nonce: vec![7; 16],
             timeout_ms: Some(1_000),
+            effective_budget: None,
             request: Some(daemon::request_envelope::Request::OperationSubmit(
                 daemon::OperationSubmitRequest {
                     operation: Some(common::OperationId { value: vec![8; 16] }),
@@ -13846,6 +14272,7 @@ mod tests {
             request_id: 1,
             instance_nonce: vec![7; 16],
             timeout_ms: Some(1_000),
+            effective_budget: None,
             request: Some(daemon::request_envelope::Request::OperationCancel(
                 daemon::OperationCancelRequest {
                     operation: Some(common::OperationId {
@@ -14156,21 +14583,27 @@ mod tests {
         let legacy = dispatch_first_slice(
             &UnavailableFirstSliceIpcHandler,
             request.clone(),
-            ClientInstanceId::SYSTEM,
-            5,
-            deadline,
-            Cancellation::new(),
-            None,
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::SYSTEM,
+                selected_protocol_minor: 5,
+                cancellation: Cancellation::new(),
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            },
         )
         .await;
         let current = dispatch_first_slice(
             &UnavailableFirstSliceIpcHandler,
             request,
-            ClientInstanceId::SYSTEM,
-            6,
-            deadline,
-            Cancellation::new(),
-            None,
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::SYSTEM,
+                selected_protocol_minor: 6,
+                cancellation: Cancellation::new(),
+                deadline,
+                effective_budget: None,
+                index_admission: None,
+            },
         )
         .await;
         assert!(matches!(
@@ -14299,6 +14732,8 @@ mod tests {
                 json_bytes: 0,
                 estimated_tokens: 0,
                 elapsed_micros: 1,
+                token_accounting: None,
+                memory_bytes: None,
             }),
         }
     }
@@ -14537,6 +14972,7 @@ mod tests {
             query: "answer".to_owned(),
             mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
             maximum_results: 2,
+            page_offset: 0,
         });
         let locate_hit =
             |symbol_byte: u8, source: &daemon::FirstSliceSourceRef| daemon::FirstSliceLocateHit {
@@ -14560,6 +14996,8 @@ mod tests {
             hits: vec![locate_hit(6, &first_source), locate_hit(7, &second_source)],
             matched_candidates: 2,
             truncated: false,
+            next_page_offset: None,
+            completeness: None,
         };
         assert!(first_slice_response_correlates(
             &locate_request,
@@ -14600,6 +15038,7 @@ mod tests {
             query: "answer".to_owned(),
             mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
             maximum_results: 2,
+            page_offset: 0,
         });
         assert!(first_slice_response_correlates(
             &pinned_locate_request,
@@ -14658,6 +15097,7 @@ mod tests {
             }],
             unresolved_symbols: vec![symbols[1].clone()],
             truncated: false,
+            completeness: None,
         };
         assert!(first_slice_response_correlates(
             &explain_request,
@@ -14703,6 +15143,7 @@ mod tests {
             ],
             total_source_bytes: 6,
             truncated: false,
+            completeness: None,
         };
         assert!(first_slice_response_correlates(
             &source_request,

@@ -30,7 +30,12 @@ use rootlight_observability::{
     build_support_bundle_for_schema,
 };
 use rootlight_protocol::{
-    CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR,
+    CURRENT_PROTOCOL_MINOR, FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
+    MAX_FIRST_SLICE_BUDGET_DEPTH, MAX_FIRST_SLICE_BUDGET_DURATION_MICROS,
+    MAX_FIRST_SLICE_BUDGET_EDGES, MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS,
+    MAX_FIRST_SLICE_BUDGET_JSON_BYTES, MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES,
+    MAX_FIRST_SLICE_BUDGET_PATHS, MAX_FIRST_SLICE_BUDGET_RESULTS, MAX_FIRST_SLICE_BUDGET_ROWS,
+    MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES, MINIMUM_PROTOCOL_MINOR,
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
 use rootlight_runtime::{LaunchLock, RuntimePaths};
@@ -481,8 +486,20 @@ pub struct QueryUsage {
     pub json_bytes: u64,
     /// Estimated tokenizer usage.
     pub estimated_tokens: u64,
+    /// Versioned accounting profile, absent on legacy daemon responses.
+    pub token_accounting: Option<TokenAccountingProfile>,
+    /// Measured variable response memory, absent on legacy daemon responses.
+    pub memory_bytes: Option<u64>,
     /// Monotonic query duration.
     pub elapsed_micros: u64,
+}
+
+/// Versioned method used to derive estimated tokenizer usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenAccountingProfile {
+    /// Counts every serialized UTF-8 byte as one possible tokenizer token.
+    Utf8ByteUpperBoundV1,
 }
 
 /// Repository, generation, coverage, and usage correlation for one query.
@@ -1990,6 +2007,126 @@ impl TryFrom<Duration> for RequestTimeout {
 
     fn try_from(duration: Duration) -> Result<Self, Self::Error> {
         Self::new(duration)
+    }
+}
+
+/// Complete values used to construct a validated daemon effective budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveBudgetLimits {
+    /// Maximum logical rows inspected or materialized.
+    pub rows: u64,
+    /// Maximum typed edges inspected or traversed.
+    pub edges: u64,
+    /// Maximum records returned.
+    pub results: u64,
+    /// Maximum raw source bytes returned.
+    pub source_bytes: u64,
+    /// Maximum serialized JSON bytes returned.
+    pub json_bytes: u64,
+    /// Maximum conservative estimated tokens returned.
+    pub estimated_tokens: u64,
+    /// Maximum variable bytes owned by the response.
+    pub memory_bytes: u64,
+    /// Maximum monotonic execution duration.
+    pub duration: Duration,
+    /// Optional maximum traversal depth.
+    pub depth: Option<u64>,
+    /// Optional maximum returned path count.
+    pub paths: Option<u64>,
+}
+
+/// A complete client-reduced resource budget accepted by daemon protocol 1.7.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveBudget(EffectiveBudgetLimits);
+
+impl EffectiveBudget {
+    /// Validates a complete set of resource ceilings against transport maxima.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::InvalidEffectiveBudget`] when any required
+    /// ceiling is zero or exceeds the daemon protocol hard maximum, an optional
+    /// traversal ceiling is invalid, or the duration cannot be represented.
+    pub fn new(limits: EffectiveBudgetLimits) -> Result<Self, ClientError> {
+        let duration_micros = u64::try_from(limits.duration.as_micros())
+            .map_err(|_| ClientError::InvalidEffectiveBudget)?;
+        for (value, maximum) in [
+            (limits.rows, MAX_FIRST_SLICE_BUDGET_ROWS),
+            (limits.edges, MAX_FIRST_SLICE_BUDGET_EDGES),
+            (limits.results, MAX_FIRST_SLICE_BUDGET_RESULTS),
+            (limits.source_bytes, MAX_FIRST_SLICE_BUDGET_SOURCE_BYTES),
+            (limits.json_bytes, MAX_FIRST_SLICE_BUDGET_JSON_BYTES),
+            (
+                limits.estimated_tokens,
+                MAX_FIRST_SLICE_BUDGET_ESTIMATED_TOKENS,
+            ),
+            (limits.memory_bytes, MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES),
+            (duration_micros, MAX_FIRST_SLICE_BUDGET_DURATION_MICROS),
+        ] {
+            if value == 0 || value > maximum {
+                return Err(ClientError::InvalidEffectiveBudget);
+            }
+        }
+        if limits
+            .depth
+            .is_some_and(|depth| depth == 0 || depth > MAX_FIRST_SLICE_BUDGET_DEPTH)
+            || limits
+                .paths
+                .is_some_and(|paths| paths == 0 || paths > MAX_FIRST_SLICE_BUDGET_PATHS)
+        {
+            return Err(ClientError::InvalidEffectiveBudget);
+        }
+        Ok(Self(limits))
+    }
+
+    /// Returns the complete validated resource ceilings.
+    #[must_use]
+    pub const fn limits(self) -> EffectiveBudgetLimits {
+        self.0
+    }
+}
+
+/// Transport options for one synchronous or asynchronous daemon request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RequestOptions {
+    timeout: Option<RequestTimeout>,
+    effective_budget: Option<EffectiveBudget>,
+}
+
+impl RequestOptions {
+    /// Creates options that retain the client's default transport deadline.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            timeout: None,
+            effective_budget: None,
+        }
+    }
+
+    /// Uses an explicit total transport deadline.
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: RequestTimeout) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Sends a complete client-reduced effective budget.
+    #[must_use]
+    pub const fn with_effective_budget(mut self, budget: EffectiveBudget) -> Self {
+        self.effective_budget = Some(budget);
+        self
+    }
+
+    /// Returns the configured transport timeout, when explicitly selected.
+    #[must_use]
+    pub const fn timeout(self) -> Option<RequestTimeout> {
+        self.timeout
+    }
+
+    /// Returns the configured effective budget, when present.
+    #[must_use]
+    pub const fn effective_budget(self) -> Option<EffectiveBudget> {
+        self.effective_budget
     }
 }
 
@@ -3734,7 +3871,7 @@ impl Client {
         cost_limit: Option<u64>,
         page_offset: u64,
     ) -> Result<AdvancedQuery, ClientError> {
-        match self.request(build_advanced_query_request(
+        self.advanced_query_with_options(
             repository,
             generation,
             query_ast,
@@ -3743,7 +3880,45 @@ impl Client {
             max_depth,
             cost_limit,
             page_offset,
-        )?)? {
+            RequestOptions::new(),
+        )
+    }
+
+    /// Executes one bounded advanced query with explicit transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query or budget bounds, unavailable
+    /// protocol support, transport failure, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded advanced query or transport dimension"
+    )]
+    pub fn advanced_query_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query_ast: &str,
+        explain: Option<bool>,
+        max_results: Option<u16>,
+        max_depth: Option<u8>,
+        cost_limit: Option<u64>,
+        page_offset: u64,
+        options: RequestOptions,
+    ) -> Result<AdvancedQuery, ClientError> {
+        match self.request_with_options(
+            build_advanced_query_request(
+                repository,
+                generation,
+                query_ast,
+                explain,
+                max_results,
+                max_depth,
+                cost_limit,
+                page_offset,
+            )?,
+            options,
+        )? {
             daemon::response_envelope::Response::AdvancedQuery(response) => {
                 parse_advanced_query(response, repository, generation, max_results, page_offset)
             }
@@ -3781,8 +3956,51 @@ impl Client {
         page_offset: u64,
         timeout: RequestTimeout,
     ) -> Result<AdvancedQuery, ClientError> {
+        self.advanced_query_async_with_options(
+            repository,
+            generation,
+            query_ast,
+            explain,
+            max_results,
+            max_depth,
+            cost_limit,
+            page_offset,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously executes one bounded advanced query with explicit
+    /// transport options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query or budget bounds, unavailable
+    /// protocol support, transport failure, timeout, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded advanced query or transport dimension"
+    )]
+    pub async fn advanced_query_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query_ast: &str,
+        explain: Option<bool>,
+        max_results: Option<u16>,
+        max_depth: Option<u8>,
+        cost_limit: Option<u64>,
+        page_offset: u64,
+        options: RequestOptions,
+    ) -> Result<AdvancedQuery, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_advanced_query_request(
                     repository,
                     generation,
@@ -3793,7 +4011,7 @@ impl Client {
                     cost_limit,
                     page_offset,
                 )?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -3808,7 +4026,15 @@ impl Client {
         &self,
         request: daemon::request_envelope::Request,
     ) -> Result<daemon::response_envelope::Response, ClientError> {
-        self.request_with_protocol(request)
+        self.request_with_options(request, RequestOptions::new())
+    }
+
+    fn request_with_options(
+        &self,
+        request: daemon::request_envelope::Request,
+        options: RequestOptions,
+    ) -> Result<daemon::response_envelope::Response, ClientError> {
+        self.request_with_protocol_and_options(request, options)
             .map(|(response, _)| response)
     }
 
@@ -3816,33 +4042,48 @@ impl Client {
         &self,
         request: daemon::request_envelope::Request,
     ) -> Result<(daemon::response_envelope::Response, u32), ClientError> {
+        self.request_with_protocol_and_options(request, RequestOptions::new())
+    }
+
+    fn request_with_protocol_and_options(
+        &self,
+        request: daemon::request_envelope::Request,
+        options: RequestOptions,
+    ) -> Result<(daemon::response_envelope::Response, u32), ClientError> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         if request_id == 0 {
             return Err(ClientError::RequestIdExhausted);
         }
+        let timeout = request_options_timeout(options);
+        let io_timeout = timeout
+            .checked_add(Duration::from_secs(1))
+            .ok_or(ClientError::InvalidRequestTimeout)?;
+        let codec = FrameCodec::new(rootlight_ipc::MAX_FRAME_BYTES, io_timeout)?;
+        let timeout_ms = request_timeout_ms(timeout)?;
+        let effective_budget = effective_budget_to_wire(options.effective_budget, timeout)?;
+        ensure_budget_within_transport_timeout(effective_budget.as_ref(), timeout)?;
         let mut stream = connect(&self.endpoint)?;
         write_client_hello(
-            self.codec,
+            codec,
             &mut stream,
             &client_hello(self.instance_nonce, self.client_instance_id),
         )?;
-        let hello = read_server_hello(self.codec, &mut stream)?;
+        let hello = read_server_hello(codec, &mut stream)?;
         let selected_protocol_minor = validate_server_hello(&hello, self.instance_nonce)?;
         ensure_request_supported(&request, selected_protocol_minor)?;
+        ensure_effective_budget_supported(effective_budget.as_ref(), selected_protocol_minor)?;
         write_request(
-            self.codec,
+            codec,
             &mut stream,
             &daemon::RequestEnvelope {
                 request_id,
                 instance_nonce: self.instance_nonce.to_vec(),
-                timeout_ms: Some(
-                    u32::try_from(DEFAULT_REQUEST_TIMEOUT.as_millis())
-                        .map_err(|_| ClientError::InvalidRequestTimeout)?,
-                ),
+                timeout_ms: Some(timeout_ms),
+                effective_budget,
                 request: Some(request),
             },
         )?;
-        let response = read_response(self.codec, &mut stream)?;
+        let response = read_response(codec, &mut stream)?;
         match correlated_response(response, request_id)? {
             daemon::response_envelope::Response::Error(error) => {
                 Err(ClientError::Public(Box::new(parse_public_error(error)?)))
@@ -3856,12 +4097,26 @@ impl Client {
         request: daemon::request_envelope::Request,
         timeout: RequestTimeout,
     ) -> Result<daemon::response_envelope::Response, ClientError> {
-        let deadline = TokioInstant::now()
-            .checked_add(timeout.duration())
-            .ok_or(ClientError::InvalidRequestTimeout)?;
-        let codec = FrameCodec::new(rootlight_ipc::MAX_FRAME_BYTES, timeout.duration())?;
-        match tokio::time::timeout_at(deadline, self.request_async_until(request, deadline, codec))
+        self.request_async_with_options(request, RequestOptions::new().with_timeout(timeout))
             .await
+    }
+
+    async fn request_async_with_options(
+        &self,
+        request: daemon::request_envelope::Request,
+        options: RequestOptions,
+    ) -> Result<daemon::response_envelope::Response, ClientError> {
+        let timeout = request_options_timeout(options);
+        let deadline = TokioInstant::now()
+            .checked_add(timeout)
+            .ok_or(ClientError::InvalidRequestTimeout)?;
+        let codec = FrameCodec::new(rootlight_ipc::MAX_FRAME_BYTES, timeout)?;
+        let effective_budget = effective_budget_to_wire(options.effective_budget, timeout)?;
+        match tokio::time::timeout_at(
+            deadline,
+            self.request_async_until(request, effective_budget, deadline, codec),
+        )
+        .await
         {
             Ok(response) => finish_async_request(deadline, TokioInstant::now(), response),
             Err(_) => Err(ClientError::RequestTimedOut),
@@ -3871,6 +4126,7 @@ impl Client {
     async fn request_async_until(
         &self,
         request: daemon::request_envelope::Request,
+        effective_budget: Option<daemon::FirstSliceEffectiveBudget>,
         deadline: TokioInstant,
         codec: FrameCodec,
     ) -> Result<daemon::response_envelope::Response, ClientError> {
@@ -3891,7 +4147,12 @@ impl Client {
         let hello = read_server_hello_async(codec, &mut stream).await?;
         let selected_protocol_minor = validate_server_hello(&hello, self.instance_nonce)?;
         ensure_request_supported(&request, selected_protocol_minor)?;
+        ensure_effective_budget_supported(effective_budget.as_ref(), selected_protocol_minor)?;
         let timeout_ms = remaining_timeout_ms(deadline, TokioInstant::now())?;
+        ensure_budget_within_transport_timeout(
+            effective_budget.as_ref(),
+            Duration::from_millis(u64::from(timeout_ms)),
+        )?;
         write_request_async(
             codec,
             &mut stream,
@@ -3899,6 +4160,7 @@ impl Client {
                 request_id,
                 instance_nonce: self.instance_nonce.to_vec(),
                 timeout_ms: Some(timeout_ms),
+                effective_budget,
                 request: Some(request),
             },
         )
@@ -3911,6 +4173,74 @@ impl Client {
             response => Ok(response),
         }
     }
+}
+
+fn request_options_timeout(options: RequestOptions) -> Duration {
+    options
+        .timeout
+        .map_or(DEFAULT_REQUEST_TIMEOUT, RequestTimeout::duration)
+}
+
+fn request_timeout_ms(timeout: Duration) -> Result<u32, ClientError> {
+    let milliseconds =
+        u32::try_from(timeout.as_millis()).map_err(|_| ClientError::InvalidRequestTimeout)?;
+    if milliseconds == 0 {
+        return Err(ClientError::InvalidRequestTimeout);
+    }
+    Ok(milliseconds)
+}
+
+fn effective_budget_to_wire(
+    budget: Option<EffectiveBudget>,
+    transport_timeout: Duration,
+) -> Result<Option<daemon::FirstSliceEffectiveBudget>, ClientError> {
+    let Some(budget) = budget else {
+        return Ok(None);
+    };
+    let limits = budget.limits();
+    if limits.duration > transport_timeout {
+        return Err(ClientError::InvalidEffectiveBudget);
+    }
+    let duration_micros = u64::try_from(limits.duration.as_micros())
+        .map_err(|_| ClientError::InvalidEffectiveBudget)?;
+    Ok(Some(daemon::FirstSliceEffectiveBudget {
+        schema_version: FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION,
+        rows: limits.rows,
+        edges: limits.edges,
+        results: limits.results,
+        source_bytes: limits.source_bytes,
+        json_bytes: limits.json_bytes,
+        estimated_tokens: limits.estimated_tokens,
+        memory_bytes: limits.memory_bytes,
+        duration_micros,
+        depth: limits.depth,
+        paths: limits.paths,
+    }))
+}
+
+fn ensure_budget_within_transport_timeout(
+    budget: Option<&daemon::FirstSliceEffectiveBudget>,
+    transport_timeout: Duration,
+) -> Result<(), ClientError> {
+    let Some(budget) = budget else {
+        return Ok(());
+    };
+    let transport_micros = u64::try_from(transport_timeout.as_micros())
+        .map_err(|_| ClientError::InvalidRequestTimeout)?;
+    if budget.duration_micros > transport_micros {
+        return Err(ClientError::InvalidEffectiveBudget);
+    }
+    Ok(())
+}
+
+fn ensure_effective_budget_supported(
+    budget: Option<&daemon::FirstSliceEffectiveBudget>,
+    selected_protocol_minor: u32,
+) -> Result<(), ClientError> {
+    if budget.is_some() && selected_protocol_minor < 7 {
+        return Err(ClientError::ProtocolFeatureUnavailable);
+    }
+    Ok(())
 }
 
 fn correlated_response(
@@ -7912,8 +8242,23 @@ fn parse_query_usage(
         source_bytes: usage.source_bytes,
         json_bytes: usage.json_bytes,
         estimated_tokens: usage.estimated_tokens,
+        token_accounting: usage
+            .token_accounting
+            .map(parse_token_accounting_profile)
+            .transpose()?,
+        memory_bytes: usage.memory_bytes,
         elapsed_micros: usage.elapsed_micros,
     })
+}
+
+fn parse_token_accounting_profile(value: i32) -> Result<TokenAccountingProfile, ClientError> {
+    match daemon::FirstSliceTokenAccountingProfile::try_from(value) {
+        Ok(
+            daemon::FirstSliceTokenAccountingProfile::FirstSliceTokenAccountingUtf8ByteUpperBoundV1,
+        ) => Ok(TokenAccountingProfile::Utf8ByteUpperBoundV1),
+        Ok(daemon::FirstSliceTokenAccountingProfile::FirstSliceTokenAccountingUnspecified)
+        | Err(_) => Err(ClientError::InvalidResponseCorrelation),
+    }
 }
 
 fn parse_source_reference(
@@ -8318,6 +8663,9 @@ pub enum ClientError {
     /// Relative request timeout could not be represented.
     #[error("daemon request timeout is invalid")]
     InvalidRequestTimeout,
+    /// A complete effective budget violated a protocol hard maximum.
+    #[error("daemon effective budget is invalid")]
+    InvalidEffectiveBudget,
     /// An asynchronous daemon request exceeded its total caller-level budget.
     #[error("daemon request timed out")]
     RequestTimedOut,
@@ -8602,6 +8950,8 @@ mod tests {
                 json_bytes: 0,
                 estimated_tokens: 0,
                 elapsed_micros: 1,
+                token_accounting: None,
+                memory_bytes: None,
             }),
         }
     }
@@ -8835,6 +9185,124 @@ mod tests {
             assert!(std::error::Error::source(&error).is_none());
             assert!(!error.to_string().contains("secret.rs"));
         }
+    }
+
+    fn valid_effective_budget_limits() -> EffectiveBudgetLimits {
+        EffectiveBudgetLimits {
+            rows: 100,
+            edges: 100,
+            results: 10,
+            source_bytes: 1_024,
+            json_bytes: 2_048,
+            estimated_tokens: 512,
+            memory_bytes: 4_096,
+            duration: Duration::from_millis(500),
+            depth: Some(4),
+            paths: Some(8),
+        }
+    }
+
+    #[test]
+    fn effective_budget_validates_and_encodes_complete_limits() {
+        let limits = valid_effective_budget_limits();
+        let budget = EffectiveBudget::new(limits).expect("budget validates");
+        assert_eq!(budget.limits(), limits);
+
+        let wire = effective_budget_to_wire(Some(budget), Duration::from_secs(1))
+            .expect("budget encodes")
+            .expect("budget is present");
+        assert_eq!(
+            wire.schema_version,
+            FIRST_SLICE_EFFECTIVE_BUDGET_SCHEMA_VERSION
+        );
+        assert_eq!(wire.rows, limits.rows);
+        assert_eq!(wire.edges, limits.edges);
+        assert_eq!(wire.results, limits.results);
+        assert_eq!(wire.source_bytes, limits.source_bytes);
+        assert_eq!(wire.json_bytes, limits.json_bytes);
+        assert_eq!(wire.estimated_tokens, limits.estimated_tokens);
+        assert_eq!(wire.memory_bytes, limits.memory_bytes);
+        assert_eq!(wire.duration_micros, 500_000);
+        assert_eq!(wire.depth, limits.depth);
+        assert_eq!(wire.paths, limits.paths);
+        assert!(
+            ensure_effective_budget_supported(Some(&wire), 6).is_err(),
+            "older negotiated minors cannot silently drop the budget"
+        );
+        assert!(ensure_effective_budget_supported(Some(&wire), 7).is_ok());
+        assert!(
+            ensure_budget_within_transport_timeout(Some(&wire), Duration::from_micros(499_999))
+                .is_err()
+        );
+
+        let mut invalid = limits;
+        invalid.rows = 0;
+        assert!(matches!(
+            EffectiveBudget::new(invalid),
+            Err(ClientError::InvalidEffectiveBudget)
+        ));
+        let mut invalid = limits;
+        invalid.memory_bytes = MAX_FIRST_SLICE_BUDGET_MEMORY_BYTES + 1;
+        assert!(matches!(
+            EffectiveBudget::new(invalid),
+            Err(ClientError::InvalidEffectiveBudget)
+        ));
+        let mut invalid = limits;
+        invalid.depth = Some(0);
+        assert!(matches!(
+            EffectiveBudget::new(invalid),
+            Err(ClientError::InvalidEffectiveBudget)
+        ));
+        let mut invalid = limits;
+        invalid.duration = Duration::from_micros(MAX_FIRST_SLICE_BUDGET_DURATION_MICROS + 1);
+        assert!(matches!(
+            EffectiveBudget::new(invalid),
+            Err(ClientError::InvalidEffectiveBudget)
+        ));
+    }
+
+    #[test]
+    fn query_usage_preserves_legacy_absence_and_versioned_counters() {
+        let legacy = parse_query_usage(Some(daemon::FirstSliceQueryUsage {
+            rows: 1,
+            edges: 2,
+            results: 3,
+            source_bytes: 4,
+            json_bytes: 5,
+            estimated_tokens: 6,
+            elapsed_micros: 7,
+            token_accounting: None,
+            memory_bytes: None,
+        }))
+        .expect("legacy usage remains valid");
+        assert_eq!(legacy.token_accounting, None);
+        assert_eq!(legacy.memory_bytes, None);
+
+        let current = parse_query_usage(Some(daemon::FirstSliceQueryUsage {
+            token_accounting: Some(
+                daemon::FirstSliceTokenAccountingProfile::FirstSliceTokenAccountingUtf8ByteUpperBoundV1
+                    as i32,
+            ),
+            memory_bytes: Some(8),
+            ..daemon::FirstSliceQueryUsage::default()
+        }))
+        .expect("current usage remains valid");
+        assert_eq!(
+            current.token_accounting,
+            Some(TokenAccountingProfile::Utf8ByteUpperBoundV1)
+        );
+        assert_eq!(current.memory_bytes, Some(8));
+
+        assert!(
+            parse_query_usage(Some(daemon::FirstSliceQueryUsage {
+                token_accounting: Some(
+                    daemon::FirstSliceTokenAccountingProfile::FirstSliceTokenAccountingUnspecified
+                        as i32,
+                ),
+                ..daemon::FirstSliceQueryUsage::default()
+            }))
+            .is_err()
+        );
     }
 
     #[test]

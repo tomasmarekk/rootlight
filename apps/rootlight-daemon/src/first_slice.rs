@@ -2683,6 +2683,11 @@ fn query_context(
             json_bytes: usage.json_bytes,
             estimated_tokens: usage.estimated_tokens,
             elapsed_micros: usage.elapsed_micros,
+            token_accounting: Some(
+                daemon::FirstSliceTokenAccountingProfile::FirstSliceTokenAccountingUtf8ByteUpperBoundV1
+                    as i32,
+            ),
+            memory_bytes: Some(usage.memory_bytes),
         }),
     }
 }
@@ -3494,6 +3499,7 @@ mod tests {
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
             deadline,
+            effective_budget: None,
             index_admission: None,
         };
         let response = repository_status(service, &handle, &metadata, &runtime, request, &context);
@@ -3654,6 +3660,7 @@ mod tests {
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
             deadline,
+            effective_budget: None,
             index_admission: None,
         };
         let mut request = status_request(repository, None);
@@ -3727,6 +3734,7 @@ mod tests {
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
             deadline,
+            effective_budget: None,
             index_admission: None,
         };
         let mut request = status_request(repository, None);
@@ -3784,6 +3792,7 @@ mod tests {
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
             deadline,
+            effective_budget: None,
             index_admission: None,
         };
         let (reached_sender, _reached_receiver) = mpsc::sync_channel(1);
@@ -4167,6 +4176,7 @@ mod tests {
                 selected_protocol_minor: 5,
                 cancellation,
                 deadline,
+                effective_budget: None,
                 index_admission: Some(admission),
             };
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -4692,6 +4702,7 @@ mod tests {
                 selected_protocol_minor: 5,
                 cancellation: rootlight_operations::Cancellation::with_deadline(deadline),
                 deadline,
+                effective_budget: None,
                 index_admission: None,
             };
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -4896,6 +4907,7 @@ mod tests {
                 selected_protocol_minor: 5,
                 cancellation: Cancellation::with_deadline(deadline),
                 deadline,
+                effective_budget: None,
                 index_admission: None,
             },
         )
@@ -4959,6 +4971,7 @@ mod tests {
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: rootlight_operations::Cancellation::with_deadline(deadline),
             deadline,
+            effective_budget: None,
             index_admission: None,
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -4980,6 +4993,7 @@ mod tests {
             selected_protocol_minor: 5,
             cancellation: rootlight_operations::Cancellation::with_deadline(deadline),
             deadline,
+            effective_budget: None,
             index_admission: None,
         };
         let runtime = tokio::runtime::Builder::new_current_thread()

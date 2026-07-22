@@ -25,6 +25,7 @@ message RequestEnvelope {
   uint64 request_id = 1;
   bytes instance_nonce = 2;
   optional uint32 timeout_ms = 3;
+  optional FirstSliceEffectiveBudget effective_budget = 4;
   oneof request {
     HealthRequest health = 10;
     OperationStatusRequest operation_status = 11;
@@ -52,6 +53,21 @@ message RequestEnvelope {
     AdvancedQueryRequest advanced_query = 46;
     RepositoryCatalogPageRequest repository_catalog_page = 47;
   }
+}
+
+// Complete validated resource ceilings for one first-slice request.
+message FirstSliceEffectiveBudget {
+  uint32 schema_version = 1;
+  uint64 rows = 2;
+  uint64 edges = 3;
+  uint64 results = 4;
+  uint64 source_bytes = 5;
+  uint64 json_bytes = 6;
+  uint64 estimated_tokens = 7;
+  uint64 memory_bytes = 8;
+  uint64 duration_micros = 9;
+  optional uint64 depth = 10;
+  optional uint64 paths = 11;
 }
 
 // Bounded response envelope paired with one request identifier.
@@ -399,6 +415,14 @@ message FirstSliceQueryUsage {
   uint64 json_bytes = 5;
   uint64 estimated_tokens = 6;
   uint64 elapsed_micros = 7;
+  optional FirstSliceTokenAccountingProfile token_accounting = 8;
+  optional uint64 memory_bytes = 9;
+}
+
+// Versioned method used to derive an estimated token count.
+enum FirstSliceTokenAccountingProfile {
+  FIRST_SLICE_TOKEN_ACCOUNTING_UNSPECIFIED = 0;
+  FIRST_SLICE_TOKEN_ACCOUNTING_UTF8_BYTE_UPPER_BOUND_V1 = 1;
 }
 
 // Common repository, generation, coverage, and usage correlation.

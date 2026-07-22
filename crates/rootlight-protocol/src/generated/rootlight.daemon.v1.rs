@@ -47,6 +47,9 @@ pub struct RequestEnvelope {
     #[prost(uint32, optional, tag = "3")]
     #[allow(missing_docs)]
     pub timeout_ms: ::core::option::Option<u32>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub effective_budget: ::core::option::Option<FirstSliceEffectiveBudget>,
     #[prost(
         oneof = "request_envelope::Request",
         tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47"
@@ -135,6 +138,43 @@ pub mod request_envelope {
         #[allow(missing_docs)]
         RepositoryCatalogPage(super::RepositoryCatalogPageRequest),
     }
+}
+/// Complete validated resource ceilings for one first-slice request.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceEffectiveBudget {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: u32,
+    #[prost(uint64, tag = "2")]
+    #[allow(missing_docs)]
+    pub rows: u64,
+    #[prost(uint64, tag = "3")]
+    #[allow(missing_docs)]
+    pub edges: u64,
+    #[prost(uint64, tag = "4")]
+    #[allow(missing_docs)]
+    pub results: u64,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub source_bytes: u64,
+    #[prost(uint64, tag = "6")]
+    #[allow(missing_docs)]
+    pub json_bytes: u64,
+    #[prost(uint64, tag = "7")]
+    #[allow(missing_docs)]
+    pub estimated_tokens: u64,
+    #[prost(uint64, tag = "8")]
+    #[allow(missing_docs)]
+    pub memory_bytes: u64,
+    #[prost(uint64, tag = "9")]
+    #[allow(missing_docs)]
+    pub duration_micros: u64,
+    #[prost(uint64, optional, tag = "10")]
+    #[allow(missing_docs)]
+    pub depth: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "11")]
+    #[allow(missing_docs)]
+    pub paths: ::core::option::Option<u64>,
 }
 /// Bounded response envelope paired with one request identifier.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -669,6 +709,12 @@ pub struct FirstSliceQueryUsage {
     #[prost(uint64, tag = "7")]
     #[allow(missing_docs)]
     pub elapsed_micros: u64,
+    #[prost(enumeration = "FirstSliceTokenAccountingProfile", optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub token_accounting: ::core::option::Option<i32>,
+    #[prost(uint64, optional, tag = "9")]
+    #[allow(missing_docs)]
+    pub memory_bytes: ::core::option::Option<u64>,
 }
 /// Common repository, generation, coverage, and usage correlation.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2960,6 +3006,44 @@ impl FirstSliceCoverageStatus {
             "FIRST_SLICE_COVERAGE_BOUNDED" => Some(Self::FirstSliceCoverageBounded),
             "FIRST_SLICE_COVERAGE_SAMPLED" => Some(Self::FirstSliceCoverageSampled),
             "FIRST_SLICE_COVERAGE_UNKNOWN" => Some(Self::FirstSliceCoverageUnknown),
+            _ => None,
+        }
+    }
+}
+/// Versioned method used to derive an estimated token count.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FirstSliceTokenAccountingProfile {
+    #[allow(missing_docs)]
+    FirstSliceTokenAccountingUnspecified = 0,
+    #[allow(missing_docs)]
+    FirstSliceTokenAccountingUtf8ByteUpperBoundV1 = 1,
+}
+impl FirstSliceTokenAccountingProfile {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::FirstSliceTokenAccountingUnspecified => {
+                "FIRST_SLICE_TOKEN_ACCOUNTING_UNSPECIFIED"
+            }
+            Self::FirstSliceTokenAccountingUtf8ByteUpperBoundV1 => {
+                "FIRST_SLICE_TOKEN_ACCOUNTING_UTF8_BYTE_UPPER_BOUND_V1"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FIRST_SLICE_TOKEN_ACCOUNTING_UNSPECIFIED" => {
+                Some(Self::FirstSliceTokenAccountingUnspecified)
+            }
+            "FIRST_SLICE_TOKEN_ACCOUNTING_UTF8_BYTE_UPPER_BOUND_V1" => {
+                Some(Self::FirstSliceTokenAccountingUtf8ByteUpperBoundV1)
+            }
             _ => None,
         }
     }
