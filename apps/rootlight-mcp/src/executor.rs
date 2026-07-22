@@ -2800,9 +2800,6 @@ fn map_context_pack_service_error(
         ContextPackServiceError::DeadlineExceeded | ContextPackServiceError::BudgetExceeded => {
             ToolExecutionError::new(authoritative_error(MappedDomainFailure::budget_exceeded()))
         }
-        ContextPackServiceError::BudgetExceeded => {
-            ToolExecutionError::new(authoritative_error(MappedDomainFailure::budget_exceeded()))
-        }
         ContextPackServiceError::InvalidResponse => internal(ToolExecutionFailure::InvalidResponse),
         ContextPackServiceError::Cancelled | ContextPackServiceError::Unavailable => {
             internal(ToolExecutionFailure::Executor)
