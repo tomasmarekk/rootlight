@@ -6379,8 +6379,12 @@ fn normalize_source_read(
         .unwrap_or(SourceEncodingRequest::Utf8LosslessWhenValid);
     let context_lines_before = input.context_lines_before.unwrap_or(0);
     let context_lines_after = input.context_lines_after.unwrap_or(0);
+    let include_line_numbers = input.include_line_numbers.unwrap_or(matches!(
+        encoding,
+        SourceEncodingRequest::Utf8LosslessWhenValid
+    ));
     if matches!(encoding, SourceEncodingRequest::BytesBase64)
-        && (context_lines_before != 0 || context_lines_after != 0)
+        && (context_lines_before != 0 || context_lines_after != 0 || include_line_numbers)
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -6432,7 +6436,7 @@ fn normalize_source_read(
         context_lines_before,
         context_lines_after,
         merge_overlaps: input.merge_overlaps.unwrap_or(false),
-        include_line_numbers: input.include_line_numbers.unwrap_or(true),
+        include_line_numbers,
         encoding,
     })
 }
@@ -6708,7 +6712,7 @@ fn map_symbol_explain(
         }
         previous_unresolved = Some(*unresolved);
     }
-    if accounted != requested {
+    if accounted != requested && !response.result.truncated {
         return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
 

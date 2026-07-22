@@ -4568,6 +4568,38 @@ async fn maps_symbol_explain_with_compact_provenance_and_unresolved_ids() {
 }
 
 #[tokio::test]
+async fn maps_truncated_symbol_explain_without_reclassifying_omitted_ids() {
+    let mut response = explain_response(source_reference(4, 12, 2, 2));
+    response.result.unresolved_symbols.clear();
+    response.result.truncated = true;
+    response.result.execution_completeness = truncated_execution(
+        client::LimitingResourceKind::Results,
+        client::ContinuationGuidance::SplitRequest,
+    );
+    let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
+    let output: SymbolExplainOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::SymbolExplain,
+            json!({
+                "repository": {"repository_id": repository()},
+                "symbol_ids": [symbol(), missing_symbol()]
+            }),
+        )
+        .await
+        .expect("bounded symbol explanation maps"),
+    );
+
+    let ToolResponse::Success(output) = output else {
+        panic!("expected bounded symbol explanation success");
+    };
+    assert!(output.truncated);
+    assert_eq!(output.data.symbols.len(), 1);
+    assert!(output.data.unresolved_ids.is_empty());
+    assert_eq!(output.completeness.state, CompletenessState::Truncated);
+}
+
+#[tokio::test]
 async fn context_pack_assembles_definition_evidence_under_budget() {
     let response = explain_response(source_reference(4, 12, 2, 2));
     let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
@@ -7569,7 +7601,6 @@ async fn maps_exact_binary_source_as_canonical_base64_without_line_metadata() {
             json!({
                 "repository": {"repository_id": repository()},
                 "references": [{"source_ref": wire_source_reference(4, 6, 2, 2)}],
-                "include_line_numbers": false,
                 "encoding": "bytes_base64"
             }),
         )
@@ -7585,6 +7616,10 @@ async fn maps_exact_binary_source_as_canonical_base64_without_line_metadata() {
     assert_eq!(output.data.chunks[0].start_line, None);
     assert_eq!(output.data.chunks[0].end_line, None);
     assert!(output.data.chunks[0].source_ref.line_hint().is_none());
+    let ObservedCall::SourceRead(request) = harness.only_call() else {
+        panic!("expected source read request");
+    };
+    assert!(!request.include_line_numbers());
 }
 
 #[tokio::test]
