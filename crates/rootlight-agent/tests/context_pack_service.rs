@@ -19,8 +19,8 @@ use rootlight_agent::{
     context_evidence::{
         ContextEvidenceCallContext, ContextEvidencePort, ContextEvidencePortError,
         ContextEvidencePortErrorKind, ContextSourceMaterial, ContextSourceOutput,
-        ContextSourceRequest, EvidenceCandidateDraft, EvidenceProvenance, EvidenceProvider,
-        EvidenceProviderInvocation, EvidenceProviderOutput,
+        ContextSourceRequest, EvidenceProvider, EvidenceProviderInvocation,
+        EvidenceProviderObservation, EvidenceProviderObservationKind, EvidenceProviderOutput,
     },
     context_pack::{CONTEXT_PACK_TIMEOUT_MS, ContextPackService, ContextPackServiceError},
     policy::{BudgetCharge, CancellationSignal},
@@ -154,7 +154,7 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
                 })
             });
         }
-        let candidates = (0..self.definition_candidates)
+        let observations = (0..self.definition_candidates)
             .map(|index| {
                 let byte = u8::try_from(index).unwrap_or(u8::MAX).saturating_add(3);
                 let candidate_symbol = SymbolId::from_bytes([byte; 20]);
@@ -166,24 +166,16 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
                     ContentHash::from_bytes([byte; 32]),
                     Some(LineRange::new(1, 2).expect("fixture line range is valid")),
                 );
-                EvidenceCandidateDraft {
-                    repository: invocation.repository(),
-                    generation: invocation.generation(),
-                    invocation: invocation.id().clone(),
-                    provider: invocation.provider(),
-                    role: invocation.role(),
-                    provenance: EvidenceProvenance::Graph,
+                EvidenceProviderObservation {
+                    kind: EvidenceProviderObservationKind::Primary,
                     symbol_id: Some(candidate_symbol),
                     identity: candidate_symbol.to_string(),
-                    relevance: 900_u16.saturating_sub(u16::try_from(index).unwrap_or(u16::MAX)),
-                    confidence: 900,
-                    cost: BudgetCharge {
-                        results: 1,
-                        tokens: self.candidate_tokens,
-                        ..BudgetCharge::default()
-                    },
+                    observed_score: Some(
+                        900_u16.saturating_sub(u16::try_from(index).unwrap_or(u16::MAX)),
+                    ),
+                    estimated_tokens: self.candidate_tokens,
+                    source_bytes: 0,
                     source_refs: vec![definition],
-                    dependencies: Vec::new(),
                 }
             })
             .collect::<Vec<_>>();
@@ -191,7 +183,7 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
             repository: invocation.repository(),
             generation: invocation.generation(),
             invocation: invocation.id().clone(),
-            candidates,
+            observations,
             completeness: rootlight_mcp_contract::completeness::ResultCompleteness::complete(),
             usage: BudgetCharge {
                 results: u64::try_from(self.definition_candidates).unwrap_or(u64::MAX),

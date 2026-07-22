@@ -28,8 +28,8 @@ use rootlight_agent::{
     },
     context_evidence::{
         ContextEvidenceCallContext, ContextEvidencePort, ContextEvidencePortError,
-        ContextEvidencePortErrorKind, EvidenceAnchor, EvidenceCandidateDraft, EvidenceProvenance,
-        EvidenceProvider, EvidenceProviderInvocation, EvidenceProviderOutput,
+        ContextEvidencePortErrorKind, EvidenceAnchor, EvidenceProvider, EvidenceProviderInvocation,
+        EvidenceProviderObservation, EvidenceProviderObservationKind, EvidenceProviderOutput,
     },
     context_pack::{ContextPackService, ContextPackServiceError},
     context_pack_request::CanonicalContextPackRequest,
