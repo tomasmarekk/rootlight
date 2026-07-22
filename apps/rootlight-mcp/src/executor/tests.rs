@@ -14,8 +14,9 @@ use std::{
 
 use proptest::prelude::*;
 use rootlight_client::{
-    AdvancedColumn as ClientAdvancedColumn, AdvancedQuery as ClientAdvancedQuery,
-    AnalysisTier as ClientTier, ArchitectureCycles as ClientArchitectureCycles,
+    AdvancedColumn as ClientAdvancedColumn, AdvancedPlan as ClientAdvancedPlan,
+    AdvancedQuery as ClientAdvancedQuery, AnalysisTier as ClientTier,
+    ArchitectureCycles as ClientArchitectureCycles,
     ArchitectureOverview as ClientArchitectureOverview,
     ArchitectureOverviewComponent as ClientArchitectureComponent,
     ArchitectureOverviewConnection as ClientArchitectureConnection,
@@ -2865,6 +2866,29 @@ async fn repo_status_maps_active_generation_and_coverage() {
 }
 
 #[tokio::test]
+async fn repo_status_rejects_explicit_generation_before_active_fallback() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(
+        repository_status_response(),
+    )));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::RepoStatus,
+        json!({
+            "repository": {"repository_id": repository()},
+            "generation": generation()
+        }),
+    )
+    .await
+    .expect_err("historical status selection is unsupported");
+    let public = error
+        .public_error()
+        .expect("unsupported generation is a checked public error");
+
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn symbol_relationships_maps_groups_and_totals() {
     let response = SymbolRelationshipsPortResponse::new(
         ClientRelationships {
@@ -3808,6 +3832,148 @@ async fn query_advanced_maps_columns_rows_and_completeness() {
     assert_eq!(request.max_results(), None);
     assert_eq!(request.explain(), None);
     assert!(request.query_ast().contains("scan"));
+}
+
+fn advanced_plan_response(
+    resolved_generation: GenerationId,
+    active_generation: bool,
+) -> QueryAdvancedPortResponse {
+    let mut query_context = context(0, 0);
+    query_context.generation = resolved_generation;
+    query_context.active_generation = active_generation;
+    QueryAdvancedPortResponse::new(
+        ClientAdvancedQuery {
+            context: query_context,
+            columns: vec![ClientAdvancedColumn {
+                name: "id".to_owned(),
+                column_type: "symbol_id".to_owned(),
+            }],
+            rows: Vec::new(),
+            plan: Some(ClientAdvancedPlan {
+                estimated_cost: 222,
+                operators: vec!["Scan".to_owned(), "Filter".to_owned(), "Limit".to_owned()],
+                applied_limits: vec![
+                    "max_results: 20".to_owned(),
+                    "max_traversal: 100000".to_owned(),
+                ],
+            }),
+            completeness: "complete".to_owned(),
+        },
+        metadata("query-advanced-plan"),
+    )
+}
+
+async fn advanced_plan_fingerprint(
+    harness: &Harness,
+    generation_selector: Option<GenerationId>,
+) -> String {
+    let mut arguments = json!({
+        "repository": {"repository_id": repository()},
+        "query": {"op": "scan", "entity": "function"},
+        "explain": true
+    });
+    if let Some(generation_selector) = generation_selector {
+        arguments["generation"] = json!(generation_selector);
+    }
+    let output: QueryAdvancedOutput = decode(
+        execute(&harness.executor, VerticalTool::QueryAdvanced, arguments)
+            .await
+            .expect("advanced explain maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected query advanced success");
+    };
+    output
+        .data
+        .plan
+        .0
+        .expect("explain response includes a plan")
+        .fingerprint
+}
+
+#[tokio::test]
+async fn query_advanced_plan_is_deterministic_for_the_same_resolved_generation() {
+    let harness = Harness::new(FakeOutcome::QueryAdvanced(Ok(advanced_plan_response(
+        generation(),
+        true,
+    ))));
+
+    let first = advanced_plan_fingerprint(&harness, None).await;
+    let second = advanced_plan_fingerprint(&harness, None).await;
+
+    assert_eq!(first, second);
+}
+
+#[tokio::test]
+async fn query_advanced_plan_binds_the_resolved_active_generation() {
+    let first = Harness::new(FakeOutcome::QueryAdvanced(Ok(advanced_plan_response(
+        generation(),
+        true,
+    ))));
+    let second = Harness::new(FakeOutcome::QueryAdvanced(Ok(advanced_plan_response(
+        alternate_generation(),
+        true,
+    ))));
+
+    let first_fingerprint = advanced_plan_fingerprint(&first, None).await;
+    let second_fingerprint = advanced_plan_fingerprint(&second, None).await;
+
+    assert_ne!(first_fingerprint, second_fingerprint);
+}
+
+#[tokio::test]
+async fn query_advanced_explicit_generation_uses_the_canonical_resolved_identity() {
+    let harness = Harness::new(FakeOutcome::QueryAdvanced(Ok(advanced_plan_response(
+        generation(),
+        false,
+    ))));
+
+    let fingerprint = advanced_plan_fingerprint(&harness, Some(generation())).await;
+    let expected = rootlight_agent::explain::finalize_plan(
+        PlanExplanation::new(
+            222,
+            vec!["Scan".to_owned(), "Filter".to_owned(), "Limit".to_owned()],
+            vec![
+                "max_results: 20".to_owned(),
+                "max_traversal: 100000".to_owned(),
+            ],
+        ),
+        &generation().to_string(),
+    );
+
+    assert_eq!(fingerprint, expected.fingerprint);
+    let ObservedCall::QueryAdvanced(request) = harness.only_call() else {
+        panic!("expected query advanced call");
+    };
+    assert_eq!(
+        request.generation(),
+        client::GenerationSelector::Generation(generation())
+    );
+}
+
+#[tokio::test]
+async fn query_advanced_generation_mismatch_fails_closed_before_plan_mapping() {
+    let harness = Harness::new(FakeOutcome::QueryAdvanced(Ok(advanced_plan_response(
+        alternate_generation(),
+        false,
+    ))));
+
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryAdvanced,
+        json!({
+            "repository": {"repository_id": repository()},
+            "generation": generation(),
+            "query": {"op": "scan", "entity": "function"},
+            "explain": true
+        }),
+    )
+    .await
+    .expect_err("a mismatched daemon generation is rejected");
+
+    assert_eq!(error.failure(), Some(ToolExecutionFailure::InvalidResponse));
+    assert!(error.public_error().is_none());
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

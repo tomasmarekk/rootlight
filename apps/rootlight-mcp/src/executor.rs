@@ -2546,6 +2546,9 @@ where
     if !is_compact_profile(input.response_profile) {
         return Err(unsupported_field("response_profile"));
     }
+    if matches!(input.generation, Some(GenerationSelector::Explicit(_))) {
+        return Err(unsupported_field("generation"));
+    }
     let request = RepositoryStatusPortRequest::new(repository, client_generation(input.generation));
     let future = port.repository_status(request, cancellation.clone());
     let status = await_port(future, cancellation).await?;
@@ -4663,10 +4666,7 @@ fn map_query_advanced(
         return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
     let rows = response.result.rows;
-    let generation_label = match &request.generation {
-        client::GenerationSelector::Generation(id) => id.to_string(),
-        client::GenerationSelector::Active => "active".to_owned(),
-    };
+    let resolved_generation = response.result.context.generation.to_string();
     let plan = match response.result.plan {
         Some(plan) => {
             if plan.estimated_cost > 10_000_000
@@ -4677,7 +4677,7 @@ fn map_query_advanced(
             }
             let explanation = rootlight_agent::explain::finalize_plan(
                 PlanExplanation::new(plan.estimated_cost, plan.operators, plan.applied_limits),
-                &generation_label,
+                &resolved_generation,
             );
             RequiredNullable(Some(explanation))
         }
