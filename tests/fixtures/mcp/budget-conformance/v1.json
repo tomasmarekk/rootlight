@@ -1,0 +1,607 @@
+{
+  "schema": "rootlight.mcp-budget-conformance/1",
+  "source_revision": "bc14db05b0a0ebcedd7500a72236318d362e6d01",
+  "tools": [
+    {
+      "tool": "repo.index",
+      "budget_semantics": "none",
+      "default_token_budget": 250,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "files",
+        "source_bytes",
+        "memory_bytes",
+        "wall_time",
+        "cancellation"
+      ],
+      "runtime_trigger_coverage": "not_applicable",
+      "omitted_client_budget_disposition": "operation_has_server_owned_fixed_bounds"
+    },
+    {
+      "tool": "repo.status",
+      "budget_semantics": "unsupported",
+      "default_token_budget": 500,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "response_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "unsupported",
+      "omitted_client_budget_disposition": "budget_field_rejected_before_work"
+    },
+    {
+      "tool": "repo.list",
+      "budget_semantics": "none",
+      "default_token_budget": 400,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "page_size",
+        "response_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_applicable",
+      "omitted_client_budget_disposition": "operation_has_server_owned_fixed_bounds"
+    },
+    {
+      "tool": "operation.status",
+      "budget_semantics": "none",
+      "default_token_budget": 350,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "single_operation",
+        "response_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_applicable",
+      "omitted_client_budget_disposition": "operation_has_server_owned_fixed_bounds"
+    },
+    {
+      "tool": "code.locate",
+      "budget_semantics": "per_request",
+      "default_token_budget": 1200,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "symbol.explain",
+      "budget_semantics": "per_request",
+      "default_token_budget": 1800,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "symbol.relationships",
+      "budget_semantics": "per_request",
+      "default_token_budget": 1800,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "flow.trace",
+      "budget_semantics": "per_request",
+      "default_token_budget": 2400,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "change.impact",
+      "budget_semantics": "per_request",
+      "default_token_budget": 2600,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "tests.select",
+      "budget_semantics": "per_request",
+      "default_token_budget": 1800,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "architecture.overview",
+      "budget_semantics": "per_request",
+      "default_token_budget": 2600,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "architecture.cycles",
+      "budget_semantics": "per_request",
+      "default_token_budget": 1900,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "code.dead",
+      "budget_semantics": "per_request",
+      "default_token_budget": 1800,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "history.compare",
+      "budget_semantics": "per_request",
+      "default_token_budget": 2400,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "plan.change",
+      "budget_semantics": "per_request",
+      "default_token_budget": 3200,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "context.pack",
+      "budget_semantics": "token_budget",
+      "default_token_budget": 4500,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "estimated_tokens",
+        "response_bytes",
+        "source_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "source.read",
+      "budget_semantics": "per_request",
+      "default_token_budget": 3200,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "query.advanced",
+      "budget_semantics": "per_request",
+      "default_token_budget": 2600,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "plan_cost",
+        "traversal_facts",
+        "depth",
+        "response_bytes",
+        "estimated_tokens",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "query.batch",
+      "budget_semantics": "per_request",
+      "default_token_budget": 3000,
+      "batch_shared_budget": true,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "covered_source_bound",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
+    }
+  ],
+  "ledger_boundaries": [
+    {
+      "resource": "rows",
+      "below_accepted": true,
+      "exact_accepted": true,
+      "one_above_rejected": true,
+      "zero_limit_rejects_work": true,
+      "stable_error": "budget_exceeded"
+    },
+    {
+      "resource": "results",
+      "below_accepted": true,
+      "exact_accepted": true,
+      "one_above_rejected": true,
+      "zero_limit_rejects_work": true,
+      "stable_error": "budget_exceeded"
+    },
+    {
+      "resource": "estimated_tokens",
+      "below_accepted": true,
+      "exact_accepted": true,
+      "one_above_rejected": true,
+      "zero_limit_rejects_work": true,
+      "stable_error": "budget_exceeded"
+    },
+    {
+      "resource": "actual_tokens",
+      "below_accepted": true,
+      "exact_accepted": true,
+      "one_above_rejected": true,
+      "zero_limit_rejects_work": true,
+      "stable_error": "budget_exceeded"
+    },
+    {
+      "resource": "source_bytes",
+      "below_accepted": true,
+      "exact_accepted": true,
+      "one_above_rejected": true,
+      "zero_limit_rejects_work": true,
+      "stable_error": "budget_exceeded"
+    },
+    {
+      "resource": "traversal_facts",
+      "below_accepted": true,
+      "exact_accepted": true,
+      "one_above_rejected": true,
+      "zero_limit_rejects_work": true,
+      "stable_error": "budget_exceeded"
+    },
+    {
+      "resource": "depth",
+      "below_accepted": true,
+      "exact_accepted": true,
+      "one_above_rejected": true,
+      "zero_limit_rejects_work": true,
+      "stable_error": "budget_exceeded"
+    },
+    {
+      "resource": "paths",
+      "below_accepted": true,
+      "exact_accepted": true,
+      "one_above_rejected": true,
+      "zero_limit_rejects_work": true,
+      "stable_error": "budget_exceeded"
+    },
+    {
+      "resource": "response_bytes",
+      "below_accepted": true,
+      "exact_accepted": true,
+      "one_above_rejected": true,
+      "zero_limit_rejects_work": true,
+      "stable_error": "budget_exceeded"
+    },
+    {
+      "resource": "memory_bytes",
+      "below_accepted": true,
+      "exact_accepted": true,
+      "one_above_rejected": true,
+      "zero_limit_rejects_work": true,
+      "stable_error": "budget_exceeded"
+    },
+    {
+      "resource": "wall_time",
+      "below_accepted": true,
+      "exact_accepted": true,
+      "one_above_rejected": true,
+      "zero_limit_rejects_work": true,
+      "stable_error": "budget_exceeded"
+    }
+  ],
+  "effective_limits": {
+    "omitted_budget_uses_complete_server_ceiling": true,
+    "client_reduces_all_accepted_dimensions": true,
+    "client_cannot_raise_server_ceiling": true,
+    "child_never_exceeds_parent_or_tool": true,
+    "reservation_is_checked_before_work": true,
+    "measured_commit_cannot_exceed_reservation": true
+  },
+  "completeness": [
+    {
+      "resource": "rows",
+      "disposition": "truthful_truncation_when_partial_results_are_safe",
+      "limiting_resource": "rows",
+      "observed_not_below_limit": true
+    },
+    {
+      "resource": "results",
+      "disposition": "truthful_truncation_when_partial_results_are_safe",
+      "limiting_resource": "results",
+      "observed_not_below_limit": true
+    },
+    {
+      "resource": "estimated_tokens",
+      "disposition": "truthful_truncation_when_partial_results_are_safe",
+      "limiting_resource": "estimated_tokens",
+      "observed_not_below_limit": true
+    },
+    {
+      "resource": "actual_tokens",
+      "disposition": "pre_execution_error_only",
+      "observed_not_below_limit": true
+    },
+    {
+      "resource": "source_bytes",
+      "disposition": "truthful_truncation_when_partial_results_are_safe",
+      "limiting_resource": "source_bytes",
+      "observed_not_below_limit": true
+    },
+    {
+      "resource": "traversal_facts",
+      "disposition": "truthful_truncation_when_partial_results_are_safe",
+      "limiting_resource": "edges",
+      "observed_not_below_limit": true
+    },
+    {
+      "resource": "depth",
+      "disposition": "truthful_truncation_when_partial_results_are_safe",
+      "limiting_resource": "depth",
+      "observed_not_below_limit": true
+    },
+    {
+      "resource": "paths",
+      "disposition": "truthful_truncation_when_partial_results_are_safe",
+      "limiting_resource": "paths",
+      "observed_not_below_limit": true
+    },
+    {
+      "resource": "response_bytes",
+      "disposition": "truthful_truncation_when_partial_results_are_safe",
+      "limiting_resource": "response_bytes",
+      "observed_not_below_limit": true
+    },
+    {
+      "resource": "memory_bytes",
+      "disposition": "truthful_truncation_when_partial_results_are_safe",
+      "limiting_resource": "memory_bytes",
+      "observed_not_below_limit": true
+    },
+    {
+      "resource": "wall_time",
+      "disposition": "truthful_truncation_when_partial_results_are_safe",
+      "limiting_resource": "deadline",
+      "observed_not_below_limit": true
+    }
+  ],
+  "source_proofs": [
+    {
+      "file": "crates/rootlight-agent/src/policy.rs",
+      "sha256": "2a6345c4da0106215d5006b7db0c0e71328ddc078cae8ee1e30b072345625e09",
+      "symbols": [
+        "every_dimension_accepts_below_and_exact_but_rejects_one_above",
+        "child_limits_never_exceed_parent_tool_or_local_caps"
+      ]
+    },
+    {
+      "file": "crates/rootlight-query/tests/query_slice.rs",
+      "sha256": "a4d26a90a527202ef24278517449b5931f7421e8001351493dfab48c84fa852b",
+      "symbols": [
+        "execution_enforces_cancellation_and_exact_output_bounds",
+        "plans_and_execution_enforce_all_query_resource_families"
+      ]
+    },
+    {
+      "file": "apps/rootlight-mcp/src/executor/tests.rs",
+      "sha256": "4c45400b1c186ee5bf7dcbc2e4f1479914a40cfa1fbb649d99a894f717551b7c",
+      "symbols": [
+        "analytical_budget_lowers_every_public_resource_dimension",
+        "omitted_analytical_budget_transports_the_complete_server_ceiling",
+        "final_serialization_enforces_exact_byte_and_conservative_token_boundaries",
+        "any_lower_layer_truncation_survives_final_serialization",
+        "cancellation_drops_a_pending_client_port_future",
+        "query_batch_enforces_aggregate_budget_across_the_app_boundary"
+      ]
+    },
+    {
+      "file": "apps/rootlight-daemon/src/first_slice.rs",
+      "sha256": "d4480683606ca55117ea59f3b6a93767b7b138a3009711851c0df904fcbadffe",
+      "symbols": [
+        "peer_cancellation_leaves_work_lane_reusable_before_publication",
+        "commit_boundary_failure_reports_failed_and_publishes_nothing"
+      ]
+    }
+  ],
+  "runtime_evidence": [
+    {
+      "evidence_class": "source_bound_regression",
+      "behavior": "pending client-port work is dropped after cooperative cancellation",
+      "proof_file": "apps/rootlight-mcp/src/executor/tests.rs",
+      "proof_symbol": "cancellation_drops_a_pending_client_port_future",
+      "work_after_cancel": "no new client-port result is published"
+    },
+    {
+      "evidence_class": "source_bound_process_regression",
+      "behavior": "daemon cancellation leaves the work lane reusable before publication",
+      "proof_file": "apps/rootlight-daemon/src/first_slice.rs",
+      "proof_symbol": "peer_cancellation_leaves_work_lane_reusable_before_publication",
+      "work_after_cancel": "cancelled pre-publication work publishes no parent generation"
+    }
+  ],
+  "token_accounting": {
+    "tokenizer": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "tokenizer": "o200k_base",
+      "implementation": "tiktoken-rs",
+      "implementation_version": "0.12.0",
+      "implementation_sha256": "027853bbf8c7763b77c5c595f1c271c7d536ced7d6f83452911b944621e57fc2",
+      "asset_sha256": "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
+    },
+    "input_schema": "rootlight.mcp-budget-conformance-input/1",
+    "input_sha256": "f6ac43757214df590a2cc7f3448f3fbc4cdd0a8001ffebb013662dad69e1843e",
+    "serialized_bytes": 13081,
+    "deterministic_estimated_tokens": 3271,
+    "actual_tokens": 2977,
+    "normalization": "none_exact_utf8",
+    "framing": "canonical_compact_json_without_accounting_measurement"
+  },
+  "residual_approximations": [
+    "runtime hard token admission uses a deterministic provider-neutral estimate",
+    "actual o200k tokens are offline evidence and are not a universal runtime ceiling",
+    "cancellation proofs assert prompt stop and no publication but do not claim a retained latency sample"
+  ]
+}
