@@ -20,6 +20,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 rootlight-vfs = { path = "../rootlight-vfs" }
+proptest.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 
 [lints]

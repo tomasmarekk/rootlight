@@ -2183,6 +2183,7 @@ dependencies = [
 name = "rootlight-query"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "rootlight-cancel",
  "rootlight-ids",
  "rootlight-ir",
@@ -2192,6 +2193,7 @@ dependencies = [
  "rootlight-vfs",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
 ]

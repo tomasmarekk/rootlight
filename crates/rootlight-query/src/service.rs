@@ -6924,6 +6924,8 @@ mod tests {
 
     use std::time::{Duration, Instant};
 
+    use proptest::prelude::*;
+    use proptest::test_runner::{RngAlgorithm, RngSeed};
     use rootlight_cancel::{Cancellation, CancellationReason};
     use rootlight_ids::SymbolId;
     use rootlight_ir::RelationPredicate;
@@ -9427,6 +9429,67 @@ mod tests {
             observed.len(),
             "pages contain no duplicates"
         );
+    }
+
+    fn advanced_service_campaign_cases() -> u32 {
+        std::env::var("ROOTLIGHT_ADVANCED_GATE_CASES")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|cases| (1..=4_096).contains(cases))
+            .unwrap_or(48)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: advanced_service_campaign_cases(),
+            max_shrink_iters: 256,
+            failure_persistence: None,
+            rng_algorithm: RngAlgorithm::ChaCha,
+            rng_seed: RngSeed::Fixed(202_607_220_041),
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn advanced_scan_order_and_page_concatenation_ignore_insertion_order(
+            entity_ids in prop::collection::btree_set(20_u8..=60, 0..=12),
+            page_size in 1_usize..=8,
+        ) {
+            let mut ascending = advanced_document();
+            for id in &entity_ids {
+                add_entity(&mut ascending, *id, 1, EntityKind::Function);
+            }
+            let mut descending = advanced_document();
+            for id in entity_ids.iter().rev() {
+                add_entity(&mut descending, *id, 1, EntityKind::Function);
+            }
+
+            let baseline = run_advanced(
+                &ascending,
+                &advanced_plan(scan_functions(), false, ADVANCED_MAX_RESULTS),
+            );
+            let reordered = run_advanced(
+                &descending,
+                &advanced_plan(scan_functions(), false, ADVANCED_MAX_RESULTS),
+            );
+            prop_assert_eq!(&reordered.rows, &baseline.rows);
+
+            let mut observed = Vec::new();
+            let mut offset = 0_usize;
+            loop {
+                let mut plan = advanced_plan(scan_functions(), false, page_size);
+                plan.page_offset = offset;
+                let page = run_advanced(&ascending, &plan);
+                observed.extend(page.rows);
+                match page.next_page_offset {
+                    Some(next) => {
+                        offset = usize::try_from(next).expect("test offset fits");
+                    }
+                    None => break,
+                }
+            }
+
+            prop_assert_eq!(observed, baseline.rows);
+        }
     }
 
     #[test]

@@ -1,0 +1,85 @@
+{
+  "schema_version": "1.0",
+  "campaign": {
+    "algorithm": "chacha",
+    "seed": 202607220040,
+    "ci_cases": 96,
+    "gate_cases_environment": "ROOTLIGHT_ADVANCED_GATE_CASES",
+    "gate_cases_maximum": 4096,
+    "maximum_payload_bytes": 4096
+  },
+  "cases": [
+    {
+      "id": "raw-sql",
+      "boundary": "ast_deserialize",
+      "payload": "\"SELECT * FROM symbols\"",
+      "sha256": "1e9a531f523476c62310b9a83659d79b1e51662252718a9fde6444439b78f1ba"
+    },
+    {
+      "id": "unknown-operator",
+      "boundary": "ast_deserialize",
+      "payload": "{\"op\":\"sql\",\"query\":\"SELECT * FROM symbols\"}",
+      "sha256": "1e39ff908381b51cb26ef74ea2e6e871f28b3c702b12ce5f30354c179609530c"
+    },
+    {
+      "id": "raw-cypher",
+      "boundary": "ast_deserialize",
+      "payload": "{\"op\":\"cypher\",\"query\":\"MATCH (n) RETURN n\"}",
+      "sha256": "70a764338bb2ebecc44470cb4586d4999a2ab2f14e84740f3bc9ebd95d938fec"
+    },
+    {
+      "id": "shell-command",
+      "boundary": "ast_deserialize",
+      "payload": "{\"op\":\"shell\",\"command\":\"rm -rf /\"}",
+      "sha256": "93302409f7a521f086044d44cbf1e29a7bffee9ceb7fe1b79a384784c3e8ac81"
+    },
+    {
+      "id": "unrestricted-regex",
+      "boundary": "ast_deserialize",
+      "payload": "{\"op\":\"scan\",\"entity\":\"function\",\"filter\":{\"pred\":\"regex\",\"field\":\"name\",\"pattern\":\".*.*\"}}",
+      "sha256": "def09c67ec908b3b8d2de75e4dd5406fbe79b884d715540b690e0f99153e1ccf"
+    },
+    {
+      "id": "unknown-function",
+      "boundary": "ast_deserialize",
+      "payload": "{\"op\":\"aggregate\",\"input\":{\"op\":\"scan\",\"entity\":\"function\"},\"group_by\":[],\"aggregations\":[{\"fn\":\"execute\",\"field\":\"name\"}]}",
+      "sha256": "c0ba5972c8acce67bd6fcd60e812f2452520c26925776e07d8a266c6dd3fe8e4"
+    },
+    {
+      "id": "field-object-injection",
+      "boundary": "ast_deserialize",
+      "payload": "{\"op\":\"scan\",\"entity\":\"function\",\"filter\":{\"pred\":\"equals\",\"field\":{\"parameter\":\"field\"},\"value\":{\"text\":\"x\"}}}",
+      "sha256": "f3a2e5df6a352ca102f19308adbd20cf2bb078543826b6054a1182feea5622f0"
+    },
+    {
+      "id": "operator-parameter-injection",
+      "boundary": "ast_deserialize",
+      "payload": "{\"op\":{\"parameter\":\"operator\"},\"entity\":\"function\"}",
+      "sha256": "b467d5a9f893cd11c5895adf80accf4a911c521d5b432e3219b937f57f07f1bf"
+    },
+    {
+      "id": "malformed-json",
+      "boundary": "ast_deserialize",
+      "payload": "{\"op\":\"scan\",\"entity\":",
+      "sha256": "732f4fce4ca8f1b64ed3c6e4433d6572ccb85587f5c0bb42bceda336b569de9d"
+    },
+    {
+      "id": "excessive-traversal-depth",
+      "boundary": "ast_plan",
+      "payload": "{\"op\":\"traverse\",\"seed\":\"sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey\",\"relation\":\"calls\",\"direction\":\"outbound\",\"max_depth\":6}",
+      "sha256": "9ee608dd61312a324f42187291c795cddcb48969a9cb955b7ba907328b3d4c8a"
+    },
+    {
+      "id": "cursor-malformed",
+      "boundary": "cursor_decode",
+      "payload": "%%%not-base64url%%%",
+      "sha256": "c939d3882e953b8a9f84aa1dfddb5501e8c1ee4e7eab1b95f737a3ea4e730c93"
+    },
+    {
+      "id": "cursor-truncated",
+      "boundary": "cursor_decode",
+      "payload": "AA",
+      "sha256": "58bb119c35513a451d24dc20ef0e9031ec85b35bfc919d263e7e5d9868909cb5"
+    }
+  ]
+}

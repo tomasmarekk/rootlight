@@ -13,6 +13,7 @@ use std::{
 };
 
 use proptest::prelude::*;
+use proptest::test_runner::{RngAlgorithm, RngSeed};
 use rootlight_client::{
     AdvancedColumn as ClientAdvancedColumn, AdvancedPlan as ClientAdvancedPlan,
     AdvancedQuery as ClientAdvancedQuery, AnalysisTier as ClientTier,
@@ -6631,6 +6632,136 @@ async fn query_advanced_rejects_a_malformed_paging_cursor() {
 }
 
 #[tokio::test]
+async fn query_advanced_corpus_is_rejected_before_daemon_publication() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/adversarial/query-advanced/v1/corpus.json"
+    ))
+    .expect("advanced adversarial corpus is valid");
+    for case in corpus["cases"]
+        .as_array()
+        .expect("advanced adversarial cases are an array")
+    {
+        let id = case["id"].as_str().expect("corpus case has an id");
+        let boundary = case["boundary"]
+            .as_str()
+            .expect("corpus case has a boundary");
+        let payload = case["payload"].as_str().expect("corpus case has a payload");
+        let arguments = match boundary {
+            "ast_deserialize" => {
+                let Ok(query) = serde_json::from_str::<Value>(payload) else {
+                    assert_eq!(id, "malformed-json");
+                    continue;
+                };
+                json!({
+                    "repository": {"repository_id": repository()},
+                    "query": query
+                })
+            }
+            "ast_plan" => json!({
+                "repository": {"repository_id": repository()},
+                "query": serde_json::from_str::<Value>(payload)
+                    .expect("planner corpus case is valid JSON")
+            }),
+            "cursor_decode" => json!({
+                "repository": {"repository_id": repository()},
+                "query": {"op": "scan", "entity": "function"},
+                "cursor": payload
+            }),
+            other => panic!("unexpected advanced corpus boundary {other}"),
+        };
+        let harness = Harness::new(FakeOutcome::QueryAdvanced(Err(ClientPortError::Executor)));
+        let error = match execute(&harness.executor, VerticalTool::QueryAdvanced, arguments).await {
+            Ok(_) => panic!("{id} must fail before the daemon"),
+            Err(error) => error,
+        };
+        let public = error
+            .public_error()
+            .unwrap_or_else(|| panic!("{id} must produce a checked public error"));
+        if boundary == "cursor_decode" {
+            assert_eq!(public.code(), ErrorCode::InvalidCursor, "{id}");
+        } else {
+            assert_ne!(public.code(), ErrorCode::Internal, "{id}");
+        }
+        assert_eq!(
+            harness.call_count.load(Ordering::Relaxed),
+            0,
+            "{id} reached the daemon"
+        );
+    }
+}
+
+#[tokio::test]
+async fn query_advanced_cursor_binds_parameters_and_effective_limits() {
+    const KEY_MATERIAL: [u8; 32] = [0x4A; 32];
+    let base = json!({
+        "repository": {"repository_id": repository()},
+        "query": {
+            "op": "scan",
+            "entity": "function",
+            "filter": {
+                "pred": "equals",
+                "field": "name",
+                "value": {"parameter": {"name": "needle"}}
+            }
+        },
+        "parameters": {"needle": {"text": "alpha"}},
+        "max_results": 2,
+        "max_depth": 3,
+        "cost_limit": 10_000
+    });
+    let cursor = issue_pagination_cursor(
+        VerticalTool::QueryAdvanced,
+        base.clone(),
+        ExposureProfile::Developer,
+        CursorSigningKey::deterministic(KEY_MATERIAL).expect("test signing key is valid"),
+        now_unix_ms(),
+        false,
+    );
+    let cases = [
+        (
+            "typed parameter",
+            with_argument(
+                base.clone(),
+                "parameters",
+                json!({"needle": {"text": "beta"}}),
+            ),
+        ),
+        (
+            "maximum depth",
+            with_argument(base.clone(), "max_depth", json!(4)),
+        ),
+        (
+            "cost limit",
+            with_argument(base, "cost_limit", json!(10_001)),
+        ),
+    ];
+
+    for (dimension, arguments) in cases {
+        let harness = Harness::with_cursor_key(
+            FakeOutcome::QueryAdvanced(Err(ClientPortError::Executor)),
+            KEY_MATERIAL,
+        );
+        let error = execute(
+            &harness.executor,
+            VerticalTool::QueryAdvanced,
+            with_argument(arguments, "cursor", json!(cursor.clone())),
+        )
+        .await
+        .expect_err("changed advanced cursor context is rejected");
+        assert_eq!(
+            error.public_error().map(PublicError::code),
+            Some(ErrorCode::InvalidCursor),
+            "{dimension} was not cursor-bound"
+        );
+        assert_eq!(
+            harness.call_count.load(Ordering::Relaxed),
+            0,
+            "{dimension} reached the daemon"
+        );
+    }
+}
+
+#[tokio::test]
 async fn query_advanced_distinguishes_cost_limit_from_capability_and_budget() {
     let harness = Harness::new(FakeOutcome::QueryAdvanced(Err(ClientPortError::Executor)));
     let error = execute(
@@ -10070,6 +10201,173 @@ fn advanced_query_parameters_are_bound_before_the_daemon_boundary() {
         !request.query_ast().contains("parameter"),
         "parameter references must not cross the daemon boundary"
     );
+}
+
+#[test]
+fn advanced_literal_and_parameter_forms_share_canonical_plan_identity() {
+    let literal: QueryAdvancedInput = decode_arguments(json!({
+        "repository": {"repository_id": repository()},
+        "query": {
+            "op": "scan",
+            "entity": "function",
+            "filter": {
+                "pred": "equals",
+                "field": "name",
+                "value": {"text": "handle_request"}
+            }
+        },
+        "max_results": 25,
+        "max_depth": 3,
+        "cost_limit": 50_000
+    }));
+    let parameterized: QueryAdvancedInput = decode_arguments(json!({
+        "repository": {"repository_id": repository()},
+        "query": {
+            "op": "scan",
+            "entity": "function",
+            "filter": {
+                "pred": "equals",
+                "field": "name",
+                "value": {"parameter": {"name": "needle"}}
+            }
+        },
+        "parameters": {"needle": {"text": "handle_request"}},
+        "max_results": 25,
+        "max_depth": 3,
+        "cost_limit": 50_000
+    }));
+    let literal = normalize_query_advanced(literal, &normalization_error())
+        .expect("literal advanced query normalizes");
+    let parameterized = normalize_query_advanced(parameterized, &normalization_error())
+        .expect("parameterized advanced query normalizes");
+
+    assert_eq!(parameterized.query_ast(), literal.query_ast());
+    let literal_context =
+        query_advanced_cursor_context(&literal, generation(), ExposureProfile::Developer, 7);
+    let parameterized_context =
+        query_advanced_cursor_context(&parameterized, generation(), ExposureProfile::Developer, 7);
+    assert_eq!(
+        parameterized_context.query_fingerprint,
+        literal_context.query_fingerprint
+    );
+    assert_eq!(
+        parameterized_context.plan_fingerprint,
+        literal_context.plan_fingerprint
+    );
+}
+
+fn adversarial_parameter_value() -> impl Strategy<Value = (Value, Value)> {
+    let suspicious_text = prop_oneof![
+        prop::sample::select(vec![
+            "SELECT * FROM symbols".to_owned(),
+            "MATCH (n) RETURN n".to_owned(),
+            "rm -rf /".to_owned(),
+            ".*.*".to_owned(),
+            "{\"op\":\"shell\"}".to_owned(),
+            "{\"field\":{\"parameter\":\"field\"}}".to_owned(),
+        ]),
+        "[ -~]{1,128}",
+    ];
+    suspicious_text.prop_map(|text| {
+        let value = json!({"text": text});
+        (value.clone(), value)
+    })
+}
+
+fn mismatched_parameter_value() -> impl Strategy<Value = Value> {
+    prop_oneof![
+        any::<i64>().prop_map(|integer| json!({"integer": integer})),
+        any::<bool>().prop_map(|boolean| json!({"boolean": boolean})),
+        Just(json!({"symbol": symbol()})),
+        Just(json!({"file": file()})),
+    ]
+}
+
+fn advanced_campaign_cases() -> u32 {
+    std::env::var("ROOTLIGHT_ADVANCED_GATE_CASES")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|cases| (1..=4_096).contains(cases))
+        .unwrap_or(96)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: advanced_campaign_cases(),
+        max_shrink_iters: 256,
+        failure_persistence: None,
+        rng_algorithm: RngAlgorithm::ChaCha,
+        rng_seed: RngSeed::Fixed(202_607_220_042),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn advanced_typed_parameters_cannot_replace_fields_operators_or_functions(
+        (wire_value, expected_value) in adversarial_parameter_value(),
+    ) {
+        let input: QueryAdvancedInput = decode_arguments(json!({
+            "repository": {"repository_id": repository()},
+            "query": {
+                "op": "scan",
+                "entity": "function",
+                "filter": {
+                    "pred": "equals",
+                    "field": "name",
+                    "value": {"parameter": {"name": "needle"}}
+                }
+            },
+            "parameters": {"needle": wire_value}
+        }));
+        let request = normalize_query_advanced(input, &normalization_error())
+            .expect("generated typed parameter normalizes");
+        let observed: Value =
+            serde_json::from_str(request.query_ast()).expect("bound AST remains JSON");
+
+        prop_assert_eq!(&observed["op"], "scan");
+        prop_assert_eq!(&observed["entity"], "function");
+        prop_assert_eq!(&observed["filter"]["pred"], "equals");
+        prop_assert_eq!(&observed["filter"]["field"], "name");
+        prop_assert_eq!(&observed["filter"]["value"], &expected_value);
+    }
+
+    #[test]
+    fn advanced_mismatched_typed_parameters_fail_before_serialization(
+        wire_value in mismatched_parameter_value(),
+    ) {
+        let input: QueryAdvancedInput = decode_arguments(json!({
+            "repository": {"repository_id": repository()},
+            "query": {
+                "op": "scan",
+                "entity": "function",
+                "filter": {
+                    "pred": "equals",
+                    "field": "name",
+                    "value": {"parameter": {"name": "needle"}}
+                }
+            },
+            "parameters": {"needle": wire_value}
+        }));
+        let error = normalize_query_advanced(input, &normalization_error())
+            .expect_err("a non-text name predicate is rejected");
+
+        prop_assert_eq!(
+            error.public_error().map(PublicError::code),
+            Some(ErrorCode::TypeMismatch),
+        );
+    }
+
+    #[test]
+    fn advanced_cursor_decoder_replays_bounded_wire_inputs_deterministically(
+        wire in "[A-Za-z0-9_%-]{0,512}",
+    ) {
+        let first = AuthenticatedCursor::from_wire(&wire);
+        let replay = AuthenticatedCursor::from_wire(&wire);
+
+        prop_assert_eq!(replay.is_ok(), first.is_ok());
+        if let Ok(cursor) = first {
+            prop_assert_eq!(cursor.to_wire(), wire);
+        }
+    }
 }
 
 #[test]
