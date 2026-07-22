@@ -19,7 +19,7 @@ use rootlight_error::{ErrorCode, NextAction, PublicValue};
 use rootlight_ids::OperationId;
 use rootlight_ipc::{IpcError, connect};
 use rootlight_observability::{
-    CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION, ControlMethod,
+    CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION, CancellationAuditOutcome, ControlMethod,
     DaemonLifecycle as TelemetryDaemonLifecycle, LogEvent, MAX_STRUCTURED_LOG_LINE_BYTES, SpanKind,
     StructuredLogRecord, TELEMETRY_SCHEMA_VERSION, TelemetryOutcome,
 };
@@ -63,7 +63,8 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     }
     let control_latency = exercise_saturated_control_responsiveness(&paths)?;
 
-    let operation = OperationId::from_bytes([42; 16]).to_string();
+    let completed_operation_id = OperationId::from_bytes([42; 16]);
+    let operation = completed_operation_id.to_string();
     let submitted = run_json(
         &rootlight,
         &["operation-submit", &operation],
@@ -79,7 +80,39 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     )?;
     assert_success_type(&retried, "operation_submit")?;
     assert_same_operation(&submitted, &retried)?;
-    wait_for_terminal(&rootlight, &operation, &environment)?;
+    let completed_terminal = wait_for_terminal(&rootlight, &operation, &environment)?;
+    assert_operation_state(&completed_terminal, "succeeded")?;
+    let completed_cancel = run_json_allow_failure(
+        &rootlight,
+        &["operation-cancel", &operation],
+        &environment,
+        COMMAND_TIMEOUT,
+    )?;
+    assert_error_code(&completed_cancel, "CONFLICT")?;
+    let completed_after_cancel = run_json(
+        &rootlight,
+        &["operation-status", &operation],
+        &environment,
+        COMMAND_TIMEOUT,
+    )?;
+    assert_operation_snapshot_stable(&completed_terminal, &completed_after_cancel)?;
+
+    let unknown_operation_id = OperationId::from_bytes([46; 16]);
+    let unknown_operation = unknown_operation_id.to_string();
+    let unknown_status = run_json_allow_failure(
+        &rootlight,
+        &["operation-status", &unknown_operation],
+        &environment,
+        COMMAND_TIMEOUT,
+    )?;
+    assert_error_code(&unknown_status, "NOT_FOUND")?;
+    let unknown_cancel = run_json_allow_failure(
+        &rootlight,
+        &["operation-cancel", &unknown_operation],
+        &environment,
+        COMMAND_TIMEOUT,
+    )?;
+    assert_error_code(&unknown_cancel, "NOT_FOUND")?;
 
     let cancelled_operation_id = OperationId::from_bytes([44; 16]);
     let cancelled_operation = cancelled_operation_id.to_string();
@@ -123,6 +156,15 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     assert_cancel_accepted(&cancelled)?;
     let cancelled_terminal = wait_for_terminal(&rootlight, &cancelled_operation, &environment)?;
     assert_operation_state(&cancelled_terminal, "cancelled")?;
+    let repeated_cancel = run_json(
+        &rootlight,
+        &["operation-cancel", &cancelled_operation],
+        &environment,
+        COMMAND_TIMEOUT,
+    )?;
+    assert_success_type(&repeated_cancel, "operation_cancel")?;
+    assert_cancel_replayed(&repeated_cancel)?;
+    assert_operation_snapshot_stable(&cancelled_terminal, &repeated_cancel)?;
 
     let deadline_operation = OperationId::from_bytes([45; 16]).to_string();
     let deadline_submit = run_json(
@@ -240,14 +282,21 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
         .support_bundle()
         .map_err(|source| client_stage("second support bundle request", source))?;
     assert_support_telemetry(&telemetry_health, &first_support, &support)?;
-    assert_privacy_sentinels_absent(
-        "support archive",
-        &support.archive,
-        &environment.private_values(),
-    )?;
+    let audit_operations = [
+        completed_operation_id,
+        cancelled_operation_id,
+        unknown_operation_id,
+    ];
+    let mut audit_private_values = environment.private_values();
+    audit_private_values.extend(
+        audit_operations
+            .iter()
+            .map(|operation| operation.to_string().into_bytes()),
+    );
+    assert_privacy_sentinels_absent("support archive", &support.archive, &audit_private_values)?;
 
     let daemon_stderr = exercise_stalled_peer_shutdown(&paths, &mut process)?;
-    validate_daemon_stderr(&daemon_stderr, &environment.private_values())?;
+    validate_daemon_stderr(&daemon_stderr, &audit_private_values, &audit_operations)?;
     wait_until_absent(&paths)?;
 
     exercise_crash_restart(&paths, &daemon, &rootlight, &environment)?;
@@ -290,7 +339,7 @@ pub(crate) fn check(bin_dir: &Path) -> Result<(), LifecycleError> {
     wait_until_absent(&daemon_paths)?;
 
     println!(
-        "daemon lifecycle check passed: startup, 100 deterministic concurrent clients, per-client operation quota isolation, saturated-worker control responsiveness, health, retry-safe submission, cancellation, stable deadlines, explicit lease-renewal rejection and attached lease expiry, schema-v3 support telemetry, bounded structured JSONL, privacy sentinels, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
+        "daemon lifecycle check passed: startup, 100 deterministic concurrent clients, per-client operation quota isolation, saturated-worker control responsiveness, health, retry-safe submission, cancellation dispositions, source-free cancellation audit evidence, stable deadlines, explicit lease-renewal rejection and attached lease expiry, schema-v3 support telemetry, bounded structured JSONL, privacy sentinels, crash recovery, daemon/standalone submit parity, writer exclusion, stalled-peer shutdown, graceful cleanup, and durable standalone status"
     );
     control_latency.report();
     Ok(())
@@ -1664,7 +1713,11 @@ fn assert_support_telemetry(
     Ok(())
 }
 
-fn validate_daemon_stderr(bytes: &[u8], private_values: &[Vec<u8>]) -> Result<(), LifecycleError> {
+fn validate_daemon_stderr(
+    bytes: &[u8],
+    private_values: &[Vec<u8>],
+    audited_operations: &[OperationId],
+) -> Result<(), LifecycleError> {
     if bytes.is_empty() {
         return Err(LifecycleError::EmptyDaemonStderr);
     }
@@ -1679,6 +1732,7 @@ fn validate_daemon_stderr(bytes: &[u8], private_values: &[Vec<u8>]) -> Result<()
     let mut saw_support_completion = false;
     let mut saw_draining = false;
     let mut saw_stopped = false;
+    let mut cancellation_audit = CancellationAuditEvidence::default();
     for line in bytes.split_inclusive(|byte| *byte == b'\n') {
         if line.len() > MAX_STRUCTURED_LOG_LINE_BYTES {
             return Err(LifecycleError::OversizedDaemonLogLine(line.len()));
@@ -1710,16 +1764,58 @@ fn validate_daemon_stderr(bytes: &[u8], private_values: &[Vec<u8>]) -> Result<()
             LogEvent::LifecycleChanged {
                 lifecycle: TelemetryDaemonLifecycle::Stopped,
             } => saw_stopped = true,
+            LogEvent::CancellationAttempt {
+                operation_digest,
+                outcome,
+                ..
+            } => {
+                if audited_operations
+                    .iter()
+                    .any(|operation| operation_digest == *operation.as_bytes())
+                {
+                    return Err(LifecycleError::RawCancellationIdentifierInAudit);
+                }
+                cancellation_audit.observe(outcome);
+            }
             _ => {}
         }
     }
     if !sequences_are_strictly_increasing(&sequences) {
         return Err(LifecycleError::InvalidDaemonLogSequence);
     }
+    if !cancellation_audit.is_complete() {
+        return Err(LifecycleError::MissingCancellationAuditEvidence);
+    }
     if saw_starting && saw_ready && saw_support_completion && saw_draining && saw_stopped {
         Ok(())
     } else {
         Err(LifecycleError::MissingDaemonTelemetryEvidence)
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CancellationAuditEvidence {
+    accepted: bool,
+    replayed: bool,
+    denied: bool,
+    too_late: bool,
+    not_found: bool,
+}
+
+impl CancellationAuditEvidence {
+    fn observe(&mut self, outcome: CancellationAuditOutcome) {
+        match outcome {
+            CancellationAuditOutcome::Accepted => self.accepted = true,
+            CancellationAuditOutcome::Replayed => self.replayed = true,
+            CancellationAuditOutcome::Denied => self.denied = true,
+            CancellationAuditOutcome::TooLate => self.too_late = true,
+            CancellationAuditOutcome::NotFound => self.not_found = true,
+            CancellationAuditOutcome::Failed => {}
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.accepted && self.replayed && self.denied && self.too_late && self.not_found
     }
 }
 
@@ -1827,12 +1923,32 @@ fn assert_cancel_accepted(value: &Value) -> Result<(), LifecycleError> {
     }
 }
 
+fn assert_cancel_replayed(value: &Value) -> Result<(), LifecycleError> {
+    let data = &value["result"]["data"];
+    if data["accepted"] == false
+        && data["operation"]["cancellation_requested"] == true
+        && data["operation"]["state"] == "cancelled"
+    {
+        Ok(())
+    } else {
+        Err(LifecycleError::UnexpectedEnvelope)
+    }
+}
+
 fn operation_data(value: &Value) -> &Value {
     let data = &value["result"]["data"];
     if data.get("operation").is_some() && data.get("state").is_none() {
         &data["operation"]
     } else {
         data
+    }
+}
+
+fn assert_operation_snapshot_stable(before: &Value, after: &Value) -> Result<(), LifecycleError> {
+    if operation_data(before) == operation_data(after) {
+        Ok(())
+    } else {
+        Err(LifecycleError::OperationSnapshotChanged)
     }
 }
 
@@ -1983,6 +2099,10 @@ pub(crate) enum LifecycleError {
     InvalidDaemonLogSequence,
     #[error("supervised daemon telemetry evidence was incomplete")]
     MissingDaemonTelemetryEvidence,
+    #[error("supervised daemon cancellation audit evidence was incomplete")]
+    MissingCancellationAuditEvidence,
+    #[error("supervised daemon cancellation audit exposed a raw operation identifier")]
+    RawCancellationIdentifierInAudit,
     #[error("schema-v3 support telemetry evidence was invalid")]
     InvalidSupportTelemetry,
     #[error("privacy sentinel appeared in {0}")]
@@ -2101,6 +2221,8 @@ pub(crate) enum LifecycleError {
     UnexpectedEnvelope,
     #[error("daemon operation-submit retry or standalone parity check failed")]
     OperationSubmitMismatch,
+    #[error("daemon cancellation changed an already stable operation snapshot")]
+    OperationSnapshotChanged,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2128,10 +2250,12 @@ mod tests {
     use rootlight_error::{ErrorCode, NextAction, PublicError};
     use rootlight_ids::OperationId;
     use rootlight_ipc::IpcError;
+    use rootlight_observability::CancellationAuditOutcome;
 
     use super::{
-        QuotaDaemonStderr, is_retryable_cancellation_failure, is_retryable_control_failure,
-        privacy_checked_quota_stderr, sequences_are_strictly_increasing,
+        CancellationAuditEvidence, QuotaDaemonStderr, is_retryable_cancellation_failure,
+        is_retryable_control_failure, privacy_checked_quota_stderr,
+        sequences_are_strictly_increasing,
     };
 
     #[test]
@@ -2141,6 +2265,24 @@ mod tests {
         assert!(sequences_are_strictly_increasing(&[1, 2, 3]));
         assert!(!sequences_are_strictly_increasing(&[2, 1]));
         assert!(!sequences_are_strictly_increasing(&[1, 1]));
+    }
+
+    #[test]
+    fn cancellation_audit_requires_every_public_disposition() {
+        let mut evidence = CancellationAuditEvidence::default();
+        for outcome in [
+            CancellationAuditOutcome::Accepted,
+            CancellationAuditOutcome::Replayed,
+            CancellationAuditOutcome::Denied,
+            CancellationAuditOutcome::TooLate,
+        ] {
+            evidence.observe(outcome);
+        }
+        assert!(!evidence.is_complete());
+        evidence.observe(CancellationAuditOutcome::NotFound);
+        assert!(evidence.is_complete());
+        evidence.observe(CancellationAuditOutcome::Failed);
+        assert!(evidence.is_complete());
     }
 
     #[test]
