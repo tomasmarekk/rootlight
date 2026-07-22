@@ -9,6 +9,11 @@
 pub use rootlight_agent::advanced;
 pub use rootlight_agent::batch;
 mod client_port;
+#[expect(
+    dead_code,
+    reason = "the mapping authority is consumed by the staged admission and executor migrations"
+)]
+mod error_mapping;
 pub use rootlight_agent::context_pack;
 mod executor;
 mod json;

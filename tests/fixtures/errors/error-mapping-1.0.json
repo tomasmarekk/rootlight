@@ -1,0 +1,126 @@
+{
+  "schema_version": "1.0",
+  "mappings": [
+    {
+      "failure": "invalid_argument",
+      "code": "INVALID_ARGUMENT",
+      "wire_number": 1,
+      "message": "tool arguments are invalid",
+      "retryable": false,
+      "remediation": "CorrectInput",
+      "field_policy": "required",
+      "fixed_field": null,
+      "next_action": "correct_field"
+    },
+    {
+      "failure": "type_mismatch",
+      "code": "TYPE_MISMATCH",
+      "wire_number": 18,
+      "message": "tool argument type does not match",
+      "retryable": false,
+      "remediation": "CorrectInput",
+      "field_policy": "required",
+      "fixed_field": null,
+      "next_action": "correct_field"
+    },
+    {
+      "failure": "invalid_cursor",
+      "code": "INVALID_CURSOR",
+      "wire_number": 17,
+      "message": "pagination cursor is invalid or expired",
+      "retryable": false,
+      "remediation": "RestartEnumeration",
+      "field_policy": "none",
+      "fixed_field": null,
+      "next_action": "restart_enumeration"
+    },
+    {
+      "failure": "unsupported_capability",
+      "code": "UNSUPPORTED_CAPABILITY",
+      "wire_number": 5,
+      "message": "requested capability is unavailable",
+      "retryable": false,
+      "remediation": "ReduceScope",
+      "field_policy": "required",
+      "fixed_field": null,
+      "next_action": "correct_field"
+    },
+    {
+      "failure": "incomplete_coverage",
+      "code": "INCOMPLETE_COVERAGE",
+      "wire_number": 6,
+      "message": "requested data is unavailable",
+      "retryable": false,
+      "remediation": "ReduceScope",
+      "field_policy": "fixed",
+      "fixed_field": "scope",
+      "next_action": "correct_field"
+    },
+    {
+      "failure": "budget_exceeded",
+      "code": "BUDGET_EXCEEDED",
+      "wire_number": 7,
+      "message": "request budget is exhausted",
+      "retryable": false,
+      "remediation": "ReduceScope",
+      "field_policy": "fixed",
+      "fixed_field": "budget",
+      "next_action": "correct_field"
+    },
+    {
+      "failure": "resource_exhausted",
+      "code": "RESOURCE_EXHAUSTED",
+      "wire_number": 8,
+      "message": "bounded resource is exhausted",
+      "retryable": true,
+      "remediation": "Retry",
+      "field_policy": "none",
+      "fixed_field": null,
+      "next_action": "retry"
+    },
+    {
+      "failure": "cost_limit",
+      "code": "COST_LIMIT",
+      "wire_number": 19,
+      "message": "query cost limit was exceeded",
+      "retryable": false,
+      "remediation": "ReduceScope",
+      "field_policy": "required",
+      "fixed_field": null,
+      "next_action": "correct_field"
+    },
+    {
+      "failure": "operator_forbidden",
+      "code": "OPERATOR_FORBIDDEN",
+      "wire_number": 20,
+      "message": "query operator is forbidden",
+      "retryable": false,
+      "remediation": "CorrectInput",
+      "field_policy": "required",
+      "fixed_field": null,
+      "next_action": "correct_field"
+    },
+    {
+      "failure": "binding_invalid",
+      "code": "BINDING_INVALID",
+      "wire_number": 21,
+      "message": "batch binding is invalid",
+      "retryable": false,
+      "remediation": "CorrectInput",
+      "field_policy": "fixed",
+      "fixed_field": "arguments",
+      "next_action": "correct_field"
+    },
+    {
+      "failure": "binding_type_mismatch",
+      "code": "BINDING_TYPE_MISMATCH",
+      "wire_number": 22,
+      "message": "batch binding type does not match",
+      "retryable": false,
+      "remediation": "CorrectInput",
+      "field_policy": "fixed",
+      "fixed_field": "arguments",
+      "next_action": "correct_field"
+    }
+  ]
+}
