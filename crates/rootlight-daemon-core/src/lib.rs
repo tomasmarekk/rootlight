@@ -5874,6 +5874,11 @@ async fn dispatch_first_slice(
     if let Err(error) = validate_first_slice_request(&request) {
         return daemon::response_envelope::Response::Error(public_error_to_wire(error.as_ref()));
     }
+    if context.effective_budget.is_some() && !first_slice_request_supports_budget(&request) {
+        return daemon::response_envelope::Response::Error(public_error_to_wire(
+            &invalid_argument("effective budgets are unsupported for this first-slice request"),
+        ));
+    }
     if !context.cancellation.has_deadline()
         && context
             .cancellation
@@ -5901,6 +5906,25 @@ async fn dispatch_first_slice(
             daemon::response_envelope::Response::Error(public_error_to_wire(&request_timed_out()))
         }
     }
+}
+
+fn first_slice_request_supports_budget(request: &FirstSliceIpcRequest) -> bool {
+    matches!(
+        request,
+        FirstSliceIpcRequest::CodeLocate(_)
+            | FirstSliceIpcRequest::SymbolExplain(_)
+            | FirstSliceIpcRequest::SourceRead(_)
+            | FirstSliceIpcRequest::SymbolRelationships(_)
+            | FirstSliceIpcRequest::FlowTrace(_)
+            | FirstSliceIpcRequest::ArchitectureCycles(_)
+            | FirstSliceIpcRequest::CodeDead(_)
+            | FirstSliceIpcRequest::ArchitectureOverview(_)
+            | FirstSliceIpcRequest::TestsSelect(_)
+            | FirstSliceIpcRequest::ChangeImpact(_)
+            | FirstSliceIpcRequest::PlanChange(_)
+            | FirstSliceIpcRequest::HistoryCompare(_)
+            | FirstSliceIpcRequest::QueryAdvanced(_)
+    )
 }
 
 fn correlated_first_slice_response(
@@ -9676,6 +9700,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn effective_budget_support_is_closed_over_analytical_requests() {
+        let supported = [
+            FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest::default()),
+            FirstSliceIpcRequest::SymbolExplain(daemon::SymbolExplainRequest::default()),
+            FirstSliceIpcRequest::SourceRead(daemon::SourceReadRequest::default()),
+            FirstSliceIpcRequest::SymbolRelationships(daemon::SymbolRelationshipsRequest::default()),
+            FirstSliceIpcRequest::FlowTrace(daemon::FlowTraceRequest::default()),
+            FirstSliceIpcRequest::ArchitectureCycles(daemon::ArchitectureCyclesRequest::default()),
+            FirstSliceIpcRequest::CodeDead(daemon::CodeDeadRequest::default()),
+            FirstSliceIpcRequest::ArchitectureOverview(
+                daemon::ArchitectureOverviewRequest::default(),
+            ),
+            FirstSliceIpcRequest::TestsSelect(daemon::TestsSelectRequest::default()),
+            FirstSliceIpcRequest::ChangeImpact(daemon::ChangeImpactRequest::default()),
+            FirstSliceIpcRequest::PlanChange(daemon::PlanChangeRequest::default()),
+            FirstSliceIpcRequest::HistoryCompare(daemon::HistoryCompareRequest::default()),
+            FirstSliceIpcRequest::QueryAdvanced(daemon::AdvancedQueryRequest::default()),
+        ];
+        assert!(supported.iter().all(first_slice_request_supports_budget));
+
+        let unsupported = [
+            FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest::default()),
+            FirstSliceIpcRequest::RepositoryOperationStatus(
+                daemon::RepositoryOperationStatusRequest::default(),
+            ),
+            FirstSliceIpcRequest::RepositoryList(daemon::RepositoryListRequest::default()),
+            FirstSliceIpcRequest::RepositoryCatalogPage(
+                daemon::RepositoryCatalogPageRequest::default(),
+            ),
+            FirstSliceIpcRequest::RepositoryStatus(daemon::RepositoryStatusRequest::default()),
+        ];
+        assert!(
+            unsupported
+                .iter()
+                .all(|request| !first_slice_request_supports_budget(request))
+        );
+    }
+
     #[derive(Debug, Default)]
     struct DeadlineCapturingFirstSlice {
         observed: Mutex<Option<Instant>>,
@@ -10538,17 +10601,19 @@ mod tests {
         )
         .expect("budget validates")
         .expect("budget is present");
-        let request = FirstSliceIpcRequest::RepositoryOperationStatus(
-            daemon::RepositoryOperationStatusRequest {
-                schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
-                operation: Some(common::OperationId {
-                    value: vec![92; 16],
-                }),
-                action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
-                wait_ms: None,
-                after_revision: None,
-            },
-        );
+        let request = FirstSliceIpcRequest::CodeLocate(daemon::CodeLocateRequest {
+            schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+            repository: Some(common::RepositoryId {
+                value: vec![92; 16],
+            }),
+            generation: Some(daemon::GenerationSelector {
+                selector: Some(daemon::generation_selector::Selector::Active(true)),
+            }),
+            query: "answer".to_owned(),
+            mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
+            maximum_results: 1,
+            page_offset: 0,
+        });
 
         let response = dispatch_first_slice(
             &handler,
@@ -10581,6 +10646,59 @@ mod tests {
                 .lock()
                 .expect("budget capture lock is healthy"),
             Some(effective_budget)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsupported_first_slice_budget_is_rejected_before_handler_work() {
+        let handler = DisconnectRecordingFirstSlice::default();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let effective_budget = first_slice_effective_budget_from_wire(
+            Some(&wire_effective_budget()),
+            PROTOCOL_MINOR,
+            Some(Duration::from_secs(1)),
+        )
+        .expect("budget validates")
+        .expect("budget is present");
+        let request = FirstSliceIpcRequest::RepositoryOperationStatus(
+            daemon::RepositoryOperationStatusRequest {
+                schema_version: Some(common::ContractVersion { major: 1, minor: 0 }),
+                operation: Some(common::OperationId {
+                    value: vec![92; 16],
+                }),
+                action: daemon::RepositoryOperationAction::RepositoryOperationGet as i32,
+                wait_ms: None,
+                after_revision: None,
+            },
+        );
+
+        let response = dispatch_first_slice(
+            &handler,
+            request,
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::from_bytes([92; 16]),
+                selected_protocol_minor: PROTOCOL_MINOR,
+                cancellation: Cancellation::new(),
+                deadline,
+                effective_budget: Some(effective_budget),
+                index_admission: None,
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            response,
+            daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            }) if code == common::ErrorCode::InvalidArgument as i32
+        ));
+        assert!(
+            handler
+                .requests
+                .lock()
+                .expect("request capture lock is healthy")
+                .is_empty()
         );
     }
 

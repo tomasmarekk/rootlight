@@ -23,9 +23,9 @@ use std::{
 };
 
 use rootlight_daemon_core::{
-    ControlRequest, ControlResponse, FirstSliceIpcContext, FirstSliceIpcFuture,
-    FirstSliceIpcHandler, FirstSliceIpcRequest, FirstSliceIpcResponse, JournalActorHandle,
-    ServiceError, operation_record_to_wire,
+    ControlRequest, ControlResponse, FirstSliceEffectiveBudget, FirstSliceIpcContext,
+    FirstSliceIpcFuture, FirstSliceIpcHandler, FirstSliceIpcRequest, FirstSliceIpcResponse,
+    JournalActorHandle, ServiceError, operation_record_to_wire,
 };
 use rootlight_error::{ErrorCode, NextAction, PublicError};
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
@@ -44,8 +44,8 @@ use rootlight_query::{
 };
 use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
-    AdvancedAstNode, FirstSliceError, FirstSliceGenerationContext, FirstSliceIndexReceipt,
-    FirstSliceService, HistoryChangeKind, PlanChangeObjective,
+    AdvancedAstNode, FirstSliceBudget, FirstSliceError, FirstSliceGenerationContext,
+    FirstSliceIndexReceipt, FirstSliceService, HistoryChangeKind, PlanChangeObjective,
     catalog::{
         CATALOG_SORT_VERSION, CatalogError, CatalogInstant, CatalogListFilter, CatalogPageRequest,
         CatalogPageSize, CatalogRepositoryRecord, CatalogRepositoryState, CatalogSnapshotId,
@@ -650,6 +650,148 @@ fn execute_service_request(
     }
 }
 
+#[derive(Clone, Copy)]
+struct ServiceBudgetReduction {
+    rows: u64,
+    edges: u64,
+    results: u64,
+    source_bytes: u64,
+    json_bytes: u64,
+    estimated_tokens: u64,
+    memory_bytes: u64,
+    duration: Duration,
+}
+
+impl From<FirstSliceEffectiveBudget> for ServiceBudgetReduction {
+    fn from(budget: FirstSliceEffectiveBudget) -> Self {
+        Self {
+            rows: budget.rows(),
+            edges: budget.edges(),
+            results: budget.results(),
+            source_bytes: budget.source_bytes(),
+            json_bytes: budget.json_bytes(),
+            estimated_tokens: budget.estimated_tokens(),
+            memory_bytes: budget.memory_bytes(),
+            duration: budget.duration(),
+        }
+    }
+}
+
+fn service_budget(context: &FirstSliceIpcContext) -> FirstSliceBudget {
+    reduced_service_budget(context.effective_budget.map(ServiceBudgetReduction::from))
+}
+
+fn reduced_service_budget(reduction: Option<ServiceBudgetReduction>) -> FirstSliceBudget {
+    reduction.map_or_else(FirstSliceBudget::new, |reduction| {
+        FirstSliceBudget::new()
+            .reduce_max_rows(reduction.rows)
+            .reduce_max_edges(reduction.edges)
+            .reduce_max_results(reduction.results)
+            .reduce_max_source_bytes(reduction.source_bytes)
+            .reduce_max_json_bytes(reduction.json_bytes)
+            .reduce_max_tokens(reduction.estimated_tokens)
+            .reduce_max_memory_bytes(reduction.memory_bytes)
+            .reduce_max_duration(reduction.duration)
+    })
+}
+
+enum BudgetExhaustion {
+    Resource(QueryResource),
+    Duration,
+}
+
+fn remaining_service_budget(
+    context: &FirstSliceIpcContext,
+    usage: &UsageAccumulator,
+) -> Result<FirstSliceBudget, BudgetExhaustion> {
+    let Some(budget) = context.effective_budget else {
+        return Ok(FirstSliceBudget::new());
+    };
+    let remaining = |maximum: u64, used: u64, resource| {
+        maximum
+            .checked_sub(used)
+            .filter(|remaining| *remaining > 0)
+            .ok_or(resource)
+    };
+    let rows = match remaining(budget.rows(), usage.rows, QueryResource::Rows) {
+        Ok(remaining) => remaining,
+        Err(resource) => return Err(BudgetExhaustion::Resource(resource)),
+    };
+    let edges = match remaining(budget.edges(), usage.edges, QueryResource::Edges) {
+        Ok(remaining) => remaining,
+        Err(resource) => return Err(BudgetExhaustion::Resource(resource)),
+    };
+    let results = match remaining(budget.results(), usage.results, QueryResource::Results) {
+        Ok(remaining) => remaining,
+        Err(resource) => return Err(BudgetExhaustion::Resource(resource)),
+    };
+    let source_bytes = match remaining(
+        budget.source_bytes(),
+        usage.source_bytes,
+        QueryResource::SourceBytes,
+    ) {
+        Ok(remaining) => remaining,
+        Err(resource) => return Err(BudgetExhaustion::Resource(resource)),
+    };
+    let json_bytes = match remaining(
+        budget.json_bytes(),
+        usage.json_bytes,
+        QueryResource::JsonBytes,
+    ) {
+        Ok(remaining) => remaining,
+        Err(resource) => return Err(BudgetExhaustion::Resource(resource)),
+    };
+    let estimated_tokens = match remaining(
+        budget.estimated_tokens(),
+        usage.estimated_tokens,
+        QueryResource::Tokens,
+    ) {
+        Ok(remaining) => remaining,
+        Err(resource) => return Err(BudgetExhaustion::Resource(resource)),
+    };
+    let memory_bytes = match remaining(
+        budget.memory_bytes(),
+        usage.memory_bytes,
+        QueryResource::MemoryBytes,
+    ) {
+        Ok(remaining) => remaining,
+        Err(resource) => return Err(BudgetExhaustion::Resource(resource)),
+    };
+    let Some(duration) = budget
+        .duration()
+        .checked_sub(Duration::from_micros(usage.elapsed_micros))
+        .filter(|duration| !duration.is_zero())
+    else {
+        return Err(BudgetExhaustion::Duration);
+    };
+    Ok(reduced_service_budget(Some(ServiceBudgetReduction {
+        rows,
+        edges,
+        results,
+        source_bytes,
+        json_bytes,
+        estimated_tokens,
+        memory_bytes,
+        duration,
+    })))
+}
+
+fn reduce_optional_u8(current: u8, maximum: Option<u64>) -> Result<u8, PublicError> {
+    maximum.map_or(Ok(current), |maximum| {
+        u8::try_from(maximum)
+            .map(|maximum| current.min(maximum))
+            .map_err(|_| internal_error())
+    })
+}
+
+fn reduce_optional_usize(current: usize, maximum: Option<u64>) -> Result<usize, PublicError> {
+    maximum.map_or(Ok(current), |maximum| {
+        usize::try_from(maximum)
+            .map(|maximum| current.min(maximum))
+            .map_err(|_| internal_error())
+    })
+}
+
 fn repository_index(
     service: &mut FirstSliceService,
     journal: &JournalActorHandle,
@@ -1147,12 +1289,13 @@ fn code_locate(
         daemon::FirstSliceLocateMode::Unspecified => return Err(invalid_argument()),
     };
     let response = service
-        .code_locate(
+        .code_locate_with_budget(
             generation.generation,
             request.query,
             mode,
             usize::try_from(request.maximum_results).map_err(|_| invalid_argument())?,
             usize::try_from(request.page_offset).map_err(|_| invalid_argument())?,
+            service_budget(context),
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -1214,9 +1357,25 @@ fn symbol_explain(
     let mut limiting_resources = Vec::new();
     let mut execution_state = ExecutionCompletenessState::Complete;
     for symbol in request.symbols {
+        let budget = match remaining_service_budget(context, &usage) {
+            Ok(budget) => budget,
+            Err(BudgetExhaustion::Resource(resource)) => {
+                if !limiting_resources.contains(&resource) {
+                    limiting_resources.push(resource);
+                }
+                execution_state = execution_state.max(ExecutionCompletenessState::Truncated);
+                break;
+            }
+            Err(BudgetExhaustion::Duration) => return Err(budget_exceeded()),
+        };
         let symbol = parse_symbol(Some(&symbol))?;
         let response = service
-            .symbol_explain(generation.generation, symbol, &context.cancellation)
+            .symbol_explain_with_budget(
+                generation.generation,
+                symbol,
+                budget,
+                &context.cancellation,
+            )
             .map_err(service_error)?;
         for resource in &response.data.limiting_resources {
             if !limiting_resources.contains(resource) {
@@ -1311,7 +1470,7 @@ fn symbol_relationships(
     let max_results = usize::try_from(request.max_results.unwrap_or(DEFAULT_RELATIONSHIP_RESULTS))
         .map_err(|_| invalid_argument())?;
     let response = service
-        .symbol_relationships(
+        .symbol_relationships_with_budget(
             generation.generation,
             seeds,
             families,
@@ -1319,6 +1478,7 @@ fn symbol_relationships(
             min_confidence,
             max_results,
             usize::try_from(request.page_offset).map_err(|_| invalid_argument())?,
+            service_budget(context),
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -1394,12 +1554,18 @@ fn flow_trace(
     };
     let min_confidence =
         u16::try_from(request.min_confidence.unwrap_or(0)).map_err(|_| invalid_argument())?;
-    let max_depth = u8::try_from(request.max_depth.unwrap_or(DEFAULT_FLOW_DEPTH))
-        .map_err(|_| invalid_argument())?;
-    let max_paths = usize::try_from(request.max_paths.unwrap_or(DEFAULT_FLOW_PATHS))
-        .map_err(|_| invalid_argument())?;
+    let max_depth = reduce_optional_u8(
+        u8::try_from(request.max_depth.unwrap_or(DEFAULT_FLOW_DEPTH))
+            .map_err(|_| invalid_argument())?,
+        context.effective_budget.and_then(|budget| budget.depth()),
+    )?;
+    let max_paths = reduce_optional_usize(
+        usize::try_from(request.max_paths.unwrap_or(DEFAULT_FLOW_PATHS))
+            .map_err(|_| invalid_argument())?,
+        context.effective_budget.and_then(|budget| budget.paths()),
+    )?;
     let response = service
-        .flow_trace(
+        .flow_trace_with_budget(
             generation.generation,
             from,
             to,
@@ -1408,6 +1574,7 @@ fn flow_trace(
             min_confidence,
             max_depth,
             max_paths,
+            service_budget(context),
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -1490,12 +1657,13 @@ fn architecture_cycles(
         .map_err(|_| invalid_argument())?;
     let include_self_cycles = request.include_self_cycles.unwrap_or(false);
     let response = service
-        .architecture_cycles(
+        .architecture_cycles_with_budget(
             generation.generation,
             families,
             min_size,
             max_cycles,
             include_self_cycles,
+            service_budget(context),
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -1593,13 +1761,14 @@ fn code_dead(
     )
     .map_err(|_| invalid_argument())?;
     let response = service
-        .code_dead(
+        .code_dead_with_budget(
             generation.generation,
             entry_point_policy,
             include_exported,
             include_tests,
             min_confidence,
             max_candidates,
+            service_budget(context),
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -1691,12 +1860,13 @@ fn architecture_overview(
     )
     .map_err(|_| invalid_argument())?;
     let response = service
-        .architecture_overview(
+        .architecture_overview_with_budget(
             generation.generation,
             views,
             min_confidence,
             max_components,
             include_edges,
+            service_budget(context),
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -1796,12 +1966,13 @@ fn tests_select(
         .map_err(|_| invalid_argument())?;
     let include_commands = request.include_commands.unwrap_or(false);
     let response = service
-        .tests_select(
+        .tests_select_with_budget(
             generation.generation,
             seeds,
             test_kinds,
             max_tests,
             include_commands,
+            service_budget(context),
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -1872,8 +2043,11 @@ fn change_impact(
     for path in &request.changed_paths {
         changed_paths.push(path.clone());
     }
-    let max_depth = u8::try_from(request.max_depth.unwrap_or(DEFAULT_CHANGE_IMPACT_MAX_DEPTH))
-        .map_err(|_| invalid_argument())?;
+    let max_depth = reduce_optional_u8(
+        u8::try_from(request.max_depth.unwrap_or(DEFAULT_CHANGE_IMPACT_MAX_DEPTH))
+            .map_err(|_| invalid_argument())?,
+        context.effective_budget.and_then(|budget| budget.depth()),
+    )?;
     let min_confidence =
         u16::try_from(request.min_confidence.unwrap_or(0)).map_err(|_| invalid_argument())?;
     let include_tests = request.include_tests.unwrap_or(false);
@@ -1884,7 +2058,7 @@ fn change_impact(
     )
     .map_err(|_| invalid_argument())?;
     let response = service
-        .change_impact(
+        .change_impact_with_budget(
             generation.generation,
             changed_symbols,
             changed_paths,
@@ -1892,6 +2066,7 @@ fn change_impact(
             min_confidence,
             include_tests,
             max_dependents,
+            service_budget(context),
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -1991,12 +2166,13 @@ fn plan_change(
     let max_steps = usize::try_from(request.max_steps.unwrap_or(DEFAULT_PLAN_CHANGE_MAX_STEPS))
         .map_err(|_| invalid_argument())?;
     let response = service
-        .plan_change(
+        .plan_change_with_budget(
             generation.generation,
             objective,
             target_symbols,
             target_files,
             max_steps,
+            service_budget(context),
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -2094,7 +2270,14 @@ fn history_compare(
     )
     .map_err(|_| invalid_argument())?;
     let response = service
-        .history_compare(base, head, change_kinds, max_results, &context.cancellation)
+        .history_compare_with_budget(
+            base,
+            head,
+            change_kinds,
+            max_results,
+            service_budget(context),
+            &context.cancellation,
+        )
         .map_err(service_error)?;
     let completeness = execution_completeness(
         response.data.execution.state(),
@@ -2186,16 +2369,25 @@ fn advanced_query(
         Some(depth) => usize::try_from(depth).map_err(|_| invalid_argument())?,
         None => ADVANCED_DEFAULT_MAX_DEPTH,
     };
+    let max_depth = reduce_optional_usize(
+        max_depth,
+        context.effective_budget.and_then(|budget| budget.depth()),
+    )?;
+    let max_traversal = reduce_optional_usize(
+        ADVANCED_MAX_TRAVERSAL,
+        context.effective_budget.and_then(|budget| budget.paths()),
+    )?;
     let response = service
-        .advanced_query(
+        .advanced_query_with_budget(
             generation.generation,
             ast,
             explain,
             max_results,
             usize::try_from(request.page_offset).map_err(|_| invalid_argument())?,
             max_depth,
-            ADVANCED_MAX_TRAVERSAL,
+            max_traversal,
             request.cost_limit,
+            service_budget(context),
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -2280,13 +2472,20 @@ fn source_read(
         references.push(reference);
     }
     let response = service
-        .source_read(generation.generation, references, &context.cancellation)
+        .source_read_with_budget(
+            generation.generation,
+            references,
+            service_budget(context),
+            &context.cancellation,
+        )
         .map_err(service_error)?;
+    let data = response.data;
+    let execution = data.execution;
     let mut chunks = Vec::new();
     chunks
-        .try_reserve_exact(response.data.chunks.len())
+        .try_reserve_exact(data.chunks.len())
         .map_err(|_| resource_exhausted())?;
-    for chunk in response.data.chunks {
+    for chunk in data.chunks {
         chunks.push(daemon::FirstSliceSourceChunk {
             source: Some(source_ref_to_wire(&chunk.reference)),
             path: chunk.path,
@@ -2305,10 +2504,10 @@ fn source_read(
         context: Some(query_context(generation, &response.usage, &[])),
         chunks,
         total_source_bytes: response.usage.source_bytes,
-        truncated: false,
+        truncated: execution.is_truncated(),
         completeness: Some(execution_completeness(
-            ExecutionCompletenessState::Complete,
-            &[],
+            execution.state(),
+            execution.limiting_resources(),
             false,
             daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest,
         )),
@@ -3309,6 +3508,15 @@ fn resource_exhausted() -> PublicError {
     .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
 }
 
+fn budget_exceeded() -> PublicError {
+    PublicError::builder(
+        ErrorCode::BudgetExceeded,
+        "first-slice execution budget is exhausted",
+    )
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed public error is statically bounded"))
+}
+
 fn invalid_cursor() -> PublicError {
     PublicError::builder(
         ErrorCode::InvalidCursor,
@@ -3420,6 +3628,82 @@ mod tests {
         for (resource, expected) in cases {
             assert_eq!(limiting_resource_to_wire(resource), expected);
         }
+    }
+
+    #[test]
+    fn reduced_budget_changes_locate_plan_and_truncates_results() {
+        let fixture = TempDir::new().expect("fixture exists");
+        fs::create_dir(fixture.path().join("src")).expect("source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn budget_alpha() {}\npub fn budget_beta() {}\n",
+        )
+        .expect("source writes");
+        let mut service =
+            FirstSliceService::new(DEFAULT_GENERATION_RETENTION).expect("service initializes");
+        let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(30));
+        let indexed = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("fixture indexes");
+
+        let unrestricted = service
+            .code_locate_with_budget(
+                indexed.generation,
+                "budget".to_owned(),
+                LocateMode::Prefix,
+                8,
+                0,
+                FirstSliceBudget::new(),
+                &cancellation,
+            )
+            .expect("unrestricted locate succeeds");
+        let reduced = service
+            .code_locate_with_budget(
+                indexed.generation,
+                "budget".to_owned(),
+                LocateMode::Prefix,
+                8,
+                0,
+                reduced_service_budget(Some(ServiceBudgetReduction {
+                    rows: u64::MAX,
+                    edges: u64::MAX,
+                    results: 1,
+                    source_bytes: u64::MAX,
+                    json_bytes: u64::MAX,
+                    estimated_tokens: u64::MAX,
+                    memory_bytes: u64::MAX,
+                    duration: Duration::MAX,
+                })),
+                &cancellation,
+            )
+            .expect("reduced locate succeeds");
+
+        assert_eq!(unrestricted.data.hits.len(), 2);
+        assert_eq!(reduced.plan.estimate.results, 1);
+        assert_eq!(reduced.data.hits.len(), 1);
+        assert!(reduced.data.truncated);
+    }
+
+    #[test]
+    fn optional_traversal_limits_only_reduce_request_dimensions() {
+        let default_depth = u8::try_from(DEFAULT_FLOW_DEPTH).expect("default depth converts");
+        let default_paths = usize::try_from(DEFAULT_FLOW_PATHS).expect("default paths convert");
+        assert_eq!(
+            reduce_optional_u8(default_depth, Some(1)).expect("validated depth converts"),
+            1
+        );
+        assert_eq!(
+            reduce_optional_u8(default_depth, Some(4)).expect("validated depth converts"),
+            default_depth
+        );
+        assert_eq!(
+            reduce_optional_usize(default_paths, Some(2)).expect("validated path limit converts"),
+            2
+        );
+        assert_eq!(
+            reduce_optional_usize(default_paths, Some(20)).expect("validated path limit converts"),
+            default_paths
+        );
     }
 
     fn catalog_request(
