@@ -149,6 +149,9 @@ pub struct ContextPackInput {
     /// Progressive detail handle from a prior pack response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ContinuationCursor>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// Role of one evidence item within the assembled context pack.
@@ -303,6 +306,9 @@ pub struct ContextPackData {
     pub followups: Vec<ToolSuggestion>,
     /// Estimated token usage by section and total.
     pub token_accounting: TokenAccounting,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 /// Checked success-or-error output for `context.pack`.

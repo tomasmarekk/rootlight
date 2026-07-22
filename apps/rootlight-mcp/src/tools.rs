@@ -2189,6 +2189,7 @@ mod tests {
             diversity: None,
             min_confidence: None,
             continuation: None,
+            explain: None,
         }
     }
 

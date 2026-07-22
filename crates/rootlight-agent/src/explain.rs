@@ -49,6 +49,9 @@ const PLAN_COST_PER_TARGET: u64 = 15;
 /// Fixed estimated cost units for the metadata-only `repo.status` plan.
 const STATUS_READ_COST: u64 = 4;
 
+/// Estimated cost units per planned seed for `context.pack`.
+const CONTEXT_COST_PER_SEED: u64 = 30;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -254,6 +257,26 @@ pub fn repo_status_plan() -> PlanExplanation {
     }
 }
 
+/// Builds the source-free `context.pack` plan for explain mode.
+///
+/// `seed_count` and `token_budget` bound the planned evidence assembly and
+/// drive the cost estimate.
+#[must_use]
+pub fn context_pack_plan(seed_count: usize, token_budget: u16) -> PlanExplanation {
+    let seeds = u64::try_from(seed_count).unwrap_or(u64::MAX);
+    let cost = seeds
+        .saturating_mul(CONTEXT_COST_PER_SEED)
+        .saturating_add(u64::from(token_budget));
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["context_assembly".to_owned()],
+        applied_limits: vec![
+            format!("seeds: {seeds}"),
+            format!("token_budget: {token_budget}"),
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::code_locate_plan;
@@ -404,5 +427,17 @@ mod tests {
         let plan = repo_status_plan();
         assert_eq!(plan.operators, vec!["status_read".to_owned()]);
         assert!(plan.applied_limits.is_empty());
+    }
+
+    #[test]
+    fn context_pack_plan_is_deterministic_and_bounded() {
+        use super::context_pack_plan;
+        assert_eq!(context_pack_plan(3, 1000), context_pack_plan(3, 1000));
+        let plan = context_pack_plan(3, 1000);
+        assert_eq!(plan.operators, vec!["context_assembly".to_owned()]);
+        assert_eq!(
+            plan.applied_limits,
+            vec!["seeds: 3".to_owned(), "token_budget: 1000".to_owned()]
+        );
     }
 }

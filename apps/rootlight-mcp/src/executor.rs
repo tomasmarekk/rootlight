@@ -1921,6 +1921,46 @@ fn aggregate_batch_usage(envelopes: &[Option<ReadEnvelope<Value>>]) -> UsageSumm
 /// objective-derived required roles under the requested token budget. Source
 /// snippets are not included in this slice. Repository-derived content is
 /// labeled untrusted and the guidance stays source-free.
+/// Builds the source-free `context.pack` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the generation); no evidence
+/// assembly runs. The plan is deterministic for the normalized request.
+async fn explain_context_pack<P>(
+    port: Arc<P>,
+    repository: RepositoryId,
+    generation: client::GenerationSelector,
+    input: &ContextPackInput,
+    seed_count: usize,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<ContextPackData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request = RepositoryStatusPortRequest::new(repository, generation);
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let explanation = rootlight_agent::explain::context_pack_plan(seed_count, input.token_budget);
+    let data = ContextPackData {
+        pack_id: pack_id(input, status.active_generation),
+        items: Vec::new(),
+        structure: ContextStructure {
+            reading_order: Vec::new(),
+            dependencies: Vec::new(),
+        },
+        omitted: Vec::new(),
+        followups: Vec::new(),
+        token_accounting: TokenAccounting {
+            estimated_total: 0,
+            by_section: BTreeMap::new(),
+        },
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_context_pack<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -1931,8 +1971,9 @@ where
     P: FirstSliceClientPort,
 {
     let input: ContextPackInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     // Alias selectors cannot be resolved behind this bridge.
-    repository_id(input.repository.clone(), unsupported)?;
+    let repository = repository_id(input.repository.clone(), unsupported)?;
 
     // This slice assembles packs from symbol/test seeds only. The other seed
     // kinds and selection controls are not served; each is rejected by name so
@@ -1981,6 +2022,19 @@ where
     // symbol.explain bounds a single request to sixteen symbols.
     let seed_symbols: BTreeSet<SymbolId> = seed_symbols.into_iter().take(16).collect();
 
+    if explain_only {
+        let generation = client_generation(input.generation.clone());
+        let output = explain_context_pack(
+            port,
+            repository,
+            generation,
+            &input,
+            seed_symbols.len(),
+            cancellation,
+        )
+        .await?;
+        return serialize_success(output);
+    }
     let mut explain_arguments = Map::new();
     explain_arguments.insert("repository".to_owned(), serialize_json(&input.repository)?);
     if let Some(generation) = &input.generation {
@@ -2141,7 +2195,7 @@ fn context_pack_data(
     }
 
     ContextPackData {
-        pack_id: pack_id(input, explain_envelope),
+        pack_id: pack_id(input, explain_envelope.generation.generation_id),
         items,
         structure,
         omitted,
@@ -2150,14 +2204,15 @@ fn context_pack_data(
             estimated_total: pack.total_tokens,
             by_section: BTreeMap::new(),
         },
+        explanation: None,
     }
 }
 
 /// Derives a deterministic pack identity from the pinned generation, task, and
 /// seeds so an identical request yields the same pack identifier.
-fn pack_id(input: &ContextPackInput, envelope: &ReadEnvelope<SymbolExplainData>) -> ContextPackId {
+fn pack_id(input: &ContextPackInput, generation: GenerationId) -> ContextPackId {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(envelope.generation.generation_id.to_string().as_bytes());
+    hasher.update(generation.to_string().as_bytes());
     hasher.update(b"\x00");
     hasher.update(input.task.as_bytes());
     hasher.update(b"\x00");

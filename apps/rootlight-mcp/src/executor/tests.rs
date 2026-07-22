@@ -2880,6 +2880,42 @@ async fn unsupported_fields_are_rejected_with_field_specific_actions() {
 }
 
 #[tokio::test]
+async fn context_pack_explain_returns_a_plan_without_retrieval() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
+        repository_id: repository(),
+        active_generation: generation(),
+        parent_generation: None,
+        structural_freshness: "current".to_owned(),
+        semantic_freshness: "current".to_owned(),
+        state: "ready".to_owned(),
+        coverage: vec![],
+    })));
+    let output = execute(
+        &harness.executor,
+        VerticalTool::ContextPack,
+        json!({"repository": {"repository_id": repository()}, "task": "fix the duplicate payment bug", "seeds": {"symbols": [symbol()]}, "token_budget": 4500, "explain": true}),
+    )
+    .await
+    .expect("explain executes");
+    let output: ContextPackOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected explain success");
+    };
+    assert!(
+        output.data.items.is_empty(),
+        "explain performs no retrieval"
+    );
+    assert!(output.data.pack_id.as_str().starts_with("pack1_"));
+    let explanation = output.data.explanation.expect("explain returns a plan");
+    assert_eq!(explanation.operators, vec!["context_assembly".to_owned()]);
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        1,
+        "only the metadata status call runs, no evidence assembly"
+    );
+}
+
+#[tokio::test]
 async fn repo_status_explain_attaches_a_plan_to_the_metadata_read() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
