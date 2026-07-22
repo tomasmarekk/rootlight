@@ -3011,16 +3011,16 @@ mod tests {
             observed,
             [
                 (
-                    222_150,
-                    "aaf995b257a560f3bb7b3d1a5c71525a775fd8d3e821ce5045b37828793ddabf".to_owned(),
+                    222_292,
+                    "a8d290eaacbb69686e8a2381a5562d1cbd4d9b9857276de3fdf91457bfad94a6".to_owned(),
                 ),
                 (
-                    485_006,
-                    "b8b73b7e79586686a4c4ae5f8ffecdc7abfa774b1ca762434413e415b1f620a3".to_owned(),
+                    485_148,
+                    "706af90cb4a7a3f403c982aba37403dea5fa7527cf4560dad2049e3845ea8def".to_owned(),
                 ),
                 (
-                    654_994,
-                    "e0a94d2459b14061145a8533ac38a7de94b8357eeafb0d72cac07f7249a4c0f6".to_owned(),
+                    655_136,
+                    "7bb817bf35ef84ecfe1457b590ed2c138bcd96f9899fa30e69a5dbc2947ea1d3".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
