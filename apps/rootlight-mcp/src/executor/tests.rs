@@ -9413,7 +9413,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "7c322af6dcb2a13c997605d14cf1b96a48cab838ffce397277e50b61b53f2e5a",
+        "ff504b65b06de77ca46154ef97ef5333f1418deb2cee0c55bed545d4f55577fd",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -9478,8 +9478,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[10],
         counts[11],
     );
-    assert_eq!(counts, [129, 97, 3, 69, 28, 16, 5, 16, 10, 1, 1, 4]);
-    assert_eq!(categorized.len(), 379);
+    assert_eq!(counts, [130, 97, 3, 69, 28, 16, 5, 16, 10, 1, 1, 4]);
+    assert_eq!(categorized.len(), 380);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -9789,7 +9789,7 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
         ),
         ("generation", json!(alternate_generation()), true),
         ("seeds", json!({"symbols": [missing_symbol()]}), false),
-        ("test_kinds", json!(["integration"]), true),
+        ("test_kinds", json!(["unit"]), true),
         ("max_tests", bounded.clone(), true),
         ("include_commands", json!(true), true),
     ] {

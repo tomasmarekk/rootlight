@@ -2649,7 +2649,7 @@ mod tests {
             ],
             "review any new generated-rule exclusion"
         );
-        assert_eq!((declared, covered, exclusions.len()), (144, 142, 2));
+        assert_eq!((declared, covered, exclusions.len()), (155, 153, 2));
     }
 
     #[tokio::test]
@@ -3026,16 +3026,16 @@ mod tests {
             observed,
             [
                 (
-                    226_498,
-                    "6de13ea1303cf268180aef0d2fad892124e6819f6c15f00faa03a80fa5be0385".to_owned(),
+                    229_799,
+                    "02013c23beba0c65c6541d3740f9ebd1e16b4f6ab8bab2bdfec0ea8e2e983415".to_owned(),
                 ),
                 (
-                    495_620,
-                    "20b05450c3677288e7a3e6d96caf8ef32a39f3db9c55439f3a8d38e88faffbe7".to_owned(),
+                    501_223,
+                    "62768536534dce4e194afaa40b461a4d57a39c9bcb2a785fc021e20a7628826c".to_owned(),
                 ),
                 (
-                    665_608,
-                    "ba49eea15393148793bdf0f2b67575fb4eb7a7813a38e90407c697711a08d6ba".to_owned(),
+                    672_345,
+                    "8c37e93af821ce7138ea139c995d9ea18345c36a19132dea23f0222207395f8c".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -3097,7 +3097,7 @@ mod tests {
             (
                 "find an exact identifier",
                 "code.locate",
-                "exact-identifier and lexical matching",
+                "exact-identifier or indexed lexical-text matching",
                 "search_modes[]",
             ),
             (
