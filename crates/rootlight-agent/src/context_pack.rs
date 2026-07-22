@@ -1207,14 +1207,12 @@ pub enum ContextPackServiceError {
     Cancelled,
     /// The bounded orchestration deadline elapsed.
     DeadlineExceeded,
-    /// A shared planning or evidence budget was exhausted.
+    /// A shared planning, evidence, or minimum publication budget was exhausted.
     BudgetExceeded,
     /// A child response violated the pinned identity or typed contract.
     InvalidResponse,
     /// A continuation is malformed, expired, or bound to another request.
     InvalidContinuation,
-    /// The minimum truthful final representation exceeds the requested budget.
-    BudgetExceeded,
     /// The adapter or planner failed internally.
     Unavailable,
 }
