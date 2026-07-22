@@ -44,6 +44,10 @@ use rootlight_service::{
 use serde::Serialize;
 
 const CLI_CONTRACT_VERSION: &str = "1.0";
+// Local IPC authenticates the OS account. Short-lived operation commands then
+// declare one stable CLI identity so a later invocation can cancel work from an
+// earlier invocation. MCP and library clients keep their independent identities.
+const CLI_CLIENT_INSTANCE_ID: [u8; 16] = *b"rootlight-cli-v1";
 const FIRST_SLICE_DEMO_CONTRACT_VERSION: &str = "1.0";
 const HARD_MAX_CLI_JSON_BYTES: usize = 4 * 1024 * 1024;
 const FIRST_SLICE_SOURCE_BEFORE: &str = "pub fn answer() -> u32 {\n    42\n}\n";
@@ -145,8 +149,16 @@ fn run() -> Result<CommandResult, CliError> {
         if standalone {
             execute_standalone(&paths, command.to_string_lossy().as_ref(), &trailing)
         } else {
-            let mut client_instance_id = [0_u8; 16];
-            getrandom::fill(&mut client_instance_id).map_err(|_| CliError::RandomUnavailable)?;
+            let client_instance_id = if command == "operation-submit"
+                || command == "operation-status"
+                || command == "operation-cancel"
+            {
+                CLI_CLIENT_INSTANCE_ID
+            } else {
+                let mut identity = [0_u8; 16];
+                getrandom::fill(&mut identity).map_err(|_| CliError::RandomUnavailable)?;
+                identity
+            };
             let client = Client::connect_or_start(
                 &paths,
                 client_instance_id,
