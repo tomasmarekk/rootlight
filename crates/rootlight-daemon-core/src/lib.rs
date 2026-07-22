@@ -28,17 +28,18 @@ use rootlight_ipc::{
     write_server_hello_async,
 };
 use rootlight_observability::{
-    Architecture as ObservabilityArchitecture, ControlMethod,
-    DaemonLifecycle as ObservabilityDaemonLifecycle, DiagnosticsQuickSnapshot,
-    ErrorCode as ObservabilityErrorCode, HealthSnapshot, OperatingSystem, OperationsSummary,
-    ProtocolVersion as ObservabilityProtocolVersion, SpanKind, SupportBundleInput,
-    SupportBundleSchema, Telemetry, TelemetryOutcome, TelemetryOutput,
+    Architecture as ObservabilityArchitecture, CancellationAuditAuthority,
+    CancellationAuditOutcome, ControlMethod, DaemonLifecycle as ObservabilityDaemonLifecycle,
+    DiagnosticsQuickSnapshot, ErrorCode as ObservabilityErrorCode, HealthSnapshot, OperatingSystem,
+    OperationsSummary, ProtocolVersion as ObservabilityProtocolVersion, SpanKind,
+    SupportBundleInput, SupportBundleSchema, Telemetry, TelemetryOutcome, TelemetryOutput,
     build_support_bundle_for_schema,
 };
 use rootlight_operations::{
-    Cancellation, CancellationReason, ClientInstanceId, DeadlineRetry, OperationError,
-    OperationJournal, OperationKind, OperationRecord, OperationStage, OperationState,
-    OperationSubmission, PlanHash, Progress, RecoveryClass, SubmissionOutcome,
+    Cancellation, CancellationAuthority, CancellationDisposition, CancellationOutcome,
+    CancellationReason, ClientInstanceId, DeadlineRetry, InternalCancellationAuthority,
+    OperationError, OperationJournal, OperationKind, OperationRecord, OperationStage,
+    OperationState, OperationSubmission, PlanHash, Progress, RecoveryClass, SubmissionOutcome,
 };
 use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR, PROTOCOL_VERSION,
@@ -1695,6 +1696,26 @@ impl JournalActor {
         control_capacity: usize,
         normal_capacity: usize,
     ) -> Result<Self, ServiceError> {
+        Self::start_with_telemetry(
+            journal,
+            control_capacity,
+            normal_capacity,
+            Arc::new(Telemetry::new(TelemetryOutput::RetainedOnly)),
+        )
+    }
+
+    /// Starts one journal thread with a shared bounded telemetry recorder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::InvalidLimits`] for invalid queue capacities or
+    /// [`ServiceError::ThreadSpawn`] when the journal thread cannot start.
+    pub fn start_with_telemetry(
+        journal: Arc<OperationJournal>,
+        control_capacity: usize,
+        normal_capacity: usize,
+        telemetry: Arc<Telemetry>,
+    ) -> Result<Self, ServiceError> {
         if control_capacity == 0
             || control_capacity > MAX_CONTROL_QUEUE_LIMIT
             || normal_capacity == 0
@@ -1706,7 +1727,7 @@ impl JournalActor {
         let (normal_tx, normal_rx) = mpsc::sync_channel(normal_capacity);
         let thread = thread::Builder::new()
             .name("rootlight-journal".to_owned())
-            .spawn(move || journal_actor_loop(journal, control_rx, normal_rx))
+            .spawn(move || journal_actor_loop(journal, control_rx, normal_rx, telemetry))
             .map_err(ServiceError::ThreadSpawn)?;
         Ok(Self {
             handle: JournalActorHandle {
@@ -1780,6 +1801,7 @@ fn journal_actor_loop(
     journal: Arc<OperationJournal>,
     control: Receiver<JournalCommand>,
     normal: Receiver<JournalCommand>,
+    telemetry: Arc<Telemetry>,
 ) {
     const CONTROL_BURST: usize = 16;
     let mut control_open = true;
@@ -1793,7 +1815,7 @@ fn journal_actor_loop(
             match control.try_recv() {
                 Ok(command) => {
                     handled = true;
-                    if execute_journal_command(&journal, command).is_err() {
+                    if execute_journal_command(&journal, &telemetry, command).is_err() {
                         return;
                     }
                 }
@@ -1808,7 +1830,7 @@ fn journal_actor_loop(
             match normal.try_recv() {
                 Ok(command) => {
                     handled = true;
-                    if execute_journal_command(&journal, command).is_err() {
+                    if execute_journal_command(&journal, &telemetry, command).is_err() {
                         return;
                     }
                 }
@@ -1825,7 +1847,7 @@ fn journal_actor_loop(
         if control_open {
             match control.recv_timeout(Duration::from_millis(10)) {
                 Ok(command) => {
-                    if execute_journal_command(&journal, command).is_err() {
+                    if execute_journal_command(&journal, &telemetry, command).is_err() {
                         return;
                     }
                 }
@@ -1835,7 +1857,7 @@ fn journal_actor_loop(
         } else if normal_open {
             match normal.recv_timeout(Duration::from_millis(10)) {
                 Ok(command) => {
-                    if execute_journal_command(&journal, command).is_err() {
+                    if execute_journal_command(&journal, &telemetry, command).is_err() {
                         return;
                     }
                 }
@@ -1891,6 +1913,7 @@ fn start_operation_before(
 
 fn execute_journal_command(
     journal: &OperationJournal,
+    telemetry: &Telemetry,
     command: JournalCommand,
 ) -> Result<(), OperationError> {
     match command {
@@ -1923,7 +1946,7 @@ fn execute_journal_command(
             reply,
         } => {
             let _ = reply.send(execute_claimed(claim.as_ref(), || {
-                execute_journal_request(journal, request)
+                execute_journal_request(journal, telemetry, request)
             }));
         }
         JournalCommand::Submit {
@@ -1981,9 +2004,13 @@ fn execute_journal_command(
                     match admission.claim_publication() {
                         PublicationAdmission::Claimed => {}
                         PublicationAdmission::Cancelled => {
-                            journal.request_cancellation(
+                            cancel_operation_with_audit(
+                                journal,
+                                telemetry,
                                 operation,
-                                CancellationReason::ClientRequest,
+                                CancellationAuthority::Internal(
+                                    InternalCancellationAuthority::ClientDisconnect,
+                                ),
                             )?;
                         }
                         PublicationAdmission::NotInserted => {
@@ -2017,15 +2044,17 @@ fn execute_journal_command(
                     }
                     if let Some(reason) = cancellation_reason {
                         match record.state {
-                            OperationState::Running => journal
-                                .request_cancellation(operation, reason)
-                                .map(|outcome| outcome.operation)
-                                .and_then(|_| {
-                                    journal.update_stage(operation, OperationStage::Cleanup)
-                                })
-                                .and_then(|_| {
-                                    journal.transition(operation, OperationState::Cancelled, None)
-                                }),
+                            OperationState::Running => cancel_operation_with_audit(
+                                journal,
+                                telemetry,
+                                operation,
+                                internal_cancellation_authority(reason)?,
+                            )
+                            .map(|outcome| outcome.operation)
+                            .and_then(|_| journal.update_stage(operation, OperationStage::Cleanup))
+                            .and_then(|_| {
+                                journal.transition(operation, OperationState::Cancelled, None)
+                            }),
                             OperationState::Cancelling => journal
                                 .update_stage(operation, OperationStage::Cleanup)
                                 .or_else(|error| {
@@ -2280,6 +2309,7 @@ fn deliver_worker_start(
 
 fn execute_journal_request(
     journal: &OperationJournal,
+    telemetry: &Telemetry,
     request: ControlRequest,
 ) -> Result<ControlResponse, OperationError> {
     match request {
@@ -2297,15 +2327,94 @@ fn execute_journal_request(
         ControlRequest::OperationLeaseRenew { operation, .. } => {
             Ok(ControlResponse::Error(lease_renewal_unsupported(operation)))
         }
-        ControlRequest::OperationCancel(operation) => {
-            journal.cancel(operation).map(|(accepted, operation)| {
-                ControlResponse::OperationCancel {
-                    accepted,
-                    operation,
-                }
-            })
+        ControlRequest::OperationCancel {
+            operation,
+            authority,
+        } => cancel_operation_with_audit(journal, telemetry, operation, authority).map(|outcome| {
+            ControlResponse::OperationCancel {
+                accepted: outcome.accepted(),
+                operation: outcome.operation,
+            }
+        }),
+    }
+}
+
+fn cancel_operation_with_audit(
+    journal: &OperationJournal,
+    telemetry: &Telemetry,
+    operation: OperationId,
+    authority: CancellationAuthority,
+) -> Result<CancellationOutcome, OperationError> {
+    let result = journal.request_cancellation(operation, authority);
+    let (outcome, error_code) = match &result {
+        Ok(outcome) => (
+            match outcome.disposition {
+                CancellationDisposition::Accepted => CancellationAuditOutcome::Accepted,
+                CancellationDisposition::Replayed => CancellationAuditOutcome::Replayed,
+            },
+            None,
+        ),
+        Err(OperationError::CancellationDenied) => (
+            CancellationAuditOutcome::Denied,
+            Some(ObservabilityErrorCode::PermissionDenied),
+        ),
+        Err(OperationError::CancellationTooLate) => (
+            CancellationAuditOutcome::TooLate,
+            Some(ObservabilityErrorCode::Conflict),
+        ),
+        Err(OperationError::NotFound) => (
+            CancellationAuditOutcome::NotFound,
+            Some(ObservabilityErrorCode::NotFound),
+        ),
+        Err(_) => (
+            CancellationAuditOutcome::Failed,
+            Some(ObservabilityErrorCode::Internal),
+        ),
+    };
+    telemetry.record_cancellation_attempt(
+        *operation.as_bytes(),
+        cancellation_audit_authority(authority),
+        outcome,
+        error_code,
+    );
+    result
+}
+
+const fn cancellation_audit_authority(
+    authority: CancellationAuthority,
+) -> CancellationAuditAuthority {
+    match authority {
+        CancellationAuthority::Client(_) => CancellationAuditAuthority::Client,
+        CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect) => {
+            CancellationAuditAuthority::InternalClientDisconnect
+        }
+        CancellationAuthority::Internal(InternalCancellationAuthority::Deadline) => {
+            CancellationAuditAuthority::InternalDeadline
+        }
+        CancellationAuthority::Internal(InternalCancellationAuthority::Shutdown) => {
+            CancellationAuditAuthority::InternalShutdown
+        }
+        CancellationAuthority::Internal(InternalCancellationAuthority::Parent) => {
+            CancellationAuditAuthority::InternalParent
+        }
+        CancellationAuthority::Internal(InternalCancellationAuthority::ResourceLimit) => {
+            CancellationAuditAuthority::InternalResourceLimit
         }
     }
+}
+
+fn internal_cancellation_authority(
+    reason: CancellationReason,
+) -> Result<CancellationAuthority, OperationError> {
+    let authority = match reason {
+        CancellationReason::ClientRequest => InternalCancellationAuthority::ClientDisconnect,
+        CancellationReason::DeadlineExceeded => InternalCancellationAuthority::Deadline,
+        CancellationReason::ParentCancelled => InternalCancellationAuthority::Parent,
+        CancellationReason::Shutdown => InternalCancellationAuthority::Shutdown,
+        CancellationReason::ResourceLimit => InternalCancellationAuthority::ResourceLimit,
+        _ => return Err(OperationError::UnsupportedCancellationReason),
+    };
+    Ok(CancellationAuthority::Internal(authority))
 }
 
 /// Source-free health state returned through every control boundary.
@@ -2428,8 +2537,13 @@ pub enum ControlRequest {
         /// Requested expiry retained for legacy payload compatibility.
         expiry_unix_ms: u64,
     },
-    /// Request cooperative cancellation.
-    OperationCancel(OperationId),
+    /// Request cooperative cancellation under an explicit actor authority.
+    OperationCancel {
+        /// Stable operation identifier.
+        operation: OperationId,
+        /// Authenticated client or named daemon lifecycle authority.
+        authority: CancellationAuthority,
+    },
 }
 
 /// Typed control response shared by daemon and standalone composition.
@@ -3825,7 +3939,12 @@ impl DaemonOrchestrator {
         if cancelled_at_handoff {
             let ControlResponse::OperationCancel { operation, .. } = self
                 .journal
-                .control(ControlRequest::OperationCancel(outcome.operation.operation))
+                .control(ControlRequest::OperationCancel {
+                    operation: outcome.operation.operation,
+                    authority: CancellationAuthority::Internal(
+                        InternalCancellationAuthority::ClientDisconnect,
+                    ),
+                })
                 .await?
             else {
                 return Err(ServiceError::UnexpectedResponse);
@@ -4891,10 +5010,18 @@ impl ControlService {
             ControlRequest::OperationLeaseRenew { operation, .. } => {
                 ControlResponse::Error(lease_renewal_unsupported(operation))
             }
-            ControlRequest::OperationCancel(operation) => match self.journal.cancel(operation) {
-                Ok((accepted, operation)) => ControlResponse::OperationCancel {
-                    accepted,
-                    operation,
+            ControlRequest::OperationCancel {
+                operation,
+                authority,
+            } => match cancel_operation_with_audit(
+                &self.journal,
+                &self.state.telemetry,
+                operation,
+                authority,
+            ) {
+                Ok(outcome) => ControlResponse::OperationCancel {
+                    accepted: outcome.accepted(),
+                    operation: outcome.operation,
                 },
                 Err(error) => {
                     ControlResponse::Error(operation_error_to_public(&error, Some(operation)))
@@ -5366,11 +5493,17 @@ async fn dispatch_async(
                         )
                         .await
                     }
-                    Ok(DecodedRequest::Control(ControlRequest::OperationCancel(operation))) => {
+                    Ok(DecodedRequest::Control(ControlRequest::OperationCancel {
+                        operation,
+                        authority,
+                    })) => {
                         let response = async {
                             match journal
                                 .control_until(
-                                    ControlRequest::OperationCancel(operation),
+                                    ControlRequest::OperationCancel {
+                                        operation,
+                                        authority,
+                                    },
                                     request_deadline,
                                 )
                                 .await
@@ -5385,7 +5518,10 @@ async fn dispatch_async(
                                     let pending = service.cancel_pending_admission(operation)?;
                                     match journal
                                         .control_until(
-                                            ControlRequest::OperationCancel(operation),
+                                            ControlRequest::OperationCancel {
+                                                operation,
+                                                authority,
+                                            },
                                             request_deadline,
                                         )
                                         .await
@@ -7873,9 +8009,12 @@ fn request_from_wire(
                 .map(DecodedRequest::Control)
         }
         Some(daemon::request_envelope::Request::OperationCancel(request)) => {
-            parse_operation(request.operation)
-                .map(ControlRequest::OperationCancel)
-                .map(DecodedRequest::Control)
+            parse_operation(request.operation).map(|operation| {
+                DecodedRequest::Control(ControlRequest::OperationCancel {
+                    operation,
+                    authority: CancellationAuthority::Client(client_instance_id),
+                })
+            })
         }
         Some(daemon::request_envelope::Request::OperationLeaseRenew(request)) => {
             if selected_protocol_minor < 2 {
@@ -8248,10 +8387,16 @@ fn operation_error_to_public(
 ) -> PublicError {
     let (code, message, retryable) = match error {
         OperationError::NotFound => (ErrorCode::NotFound, "operation was not found", false),
+        OperationError::CancellationDenied => (
+            ErrorCode::PermissionDenied,
+            "operation cancellation is not authorized",
+            false,
+        ),
         OperationError::AlreadyExists
         | OperationError::SubmissionConflict
         | OperationError::IllegalTransition { .. }
         | OperationError::CancellationWon
+        | OperationError::CancellationTooLate
         | OperationError::InvalidTerminalError
         | OperationError::InvalidProgress
         | OperationError::InvalidStage
@@ -8341,6 +8486,8 @@ impl ServiceError {
                 | OperationError::InvalidSubmission
                 | OperationError::IllegalTransition { .. }
                 | OperationError::CancellationWon
+                | OperationError::CancellationDenied
+                | OperationError::CancellationTooLate
                 | OperationError::InvalidTerminalError
                 | OperationError::InvalidProgress
                 | OperationError::InvalidStage
@@ -10134,7 +10281,8 @@ mod tests {
         let command = normal_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("start command remains admitted");
-        execute_journal_command(&journal, command).expect("journal command executes");
+        execute_journal_command(&journal, &Telemetry::default(), command)
+            .expect("journal command executes");
 
         assert_eq!(
             journal.status(operation).expect("status loads").state,
@@ -10155,6 +10303,7 @@ mod tests {
 
         execute_journal_command(
             &journal,
+            &Telemetry::default(),
             JournalCommand::StartOperation {
                 operation,
                 deadline,
@@ -11277,6 +11426,7 @@ mod tests {
         let journal = OperationJournal::open_in_memory().expect("journal opens");
         let actor_response = execute_journal_request(
             &journal,
+            &Telemetry::default(),
             ControlRequest::OperationLeaseRenew {
                 operation,
                 owner,
@@ -11560,7 +11710,10 @@ mod tests {
         assert!(matches!(
             control_rx.try_recv(),
             Ok(JournalCommand::Execute {
-                request: ControlRequest::OperationCancel(observed),
+                request: ControlRequest::OperationCancel {
+                    operation: observed,
+                    ..
+                },
                 ..
             }) if observed == operation
         ));
@@ -11773,7 +11926,8 @@ mod tests {
                 ..
             } if *observed == operation
         ));
-        execute_journal_command(&journal, command).expect("journal command executes");
+        execute_journal_command(&journal, &Telemetry::default(), command)
+            .expect("journal command executes");
         assert_eq!(
             journal.status(operation).expect("operation persists").state,
             OperationState::Interrupted
@@ -11829,7 +11983,12 @@ mod tests {
             .try_send(
                 JournalLane::Control,
                 JournalCommand::Execute {
-                    request: ControlRequest::OperationCancel(control_operation),
+                    request: ControlRequest::OperationCancel {
+                        operation: control_operation,
+                        authority: CancellationAuthority::Internal(
+                            InternalCancellationAuthority::Shutdown,
+                        ),
+                    },
                     claim: None,
                     reply: cancel_reply,
                 },
@@ -11850,13 +12009,14 @@ mod tests {
                 | (
                     "cancel",
                     JournalCommand::Execute {
-                        request: ControlRequest::OperationCancel(_),
+                        request: ControlRequest::OperationCancel { .. },
                         ..
                     },
                 ) => {}
                 _ => panic!("unexpected control-lane ordering"),
             }
-            execute_journal_command(&journal, command).expect("journal command executes");
+            execute_journal_command(&journal, &Telemetry::default(), command)
+                .expect("journal command executes");
         }
         assert!(matches!(
             status_receiver
@@ -12470,7 +12630,15 @@ mod tests {
         ));
         assert!(matches!(
             handle
-                .control_until(ControlRequest::OperationCancel(cancellation), timeout(),)
+                .control_until(
+                    ControlRequest::OperationCancel {
+                        operation: cancellation,
+                        authority: CancellationAuthority::Internal(
+                            InternalCancellationAuthority::Shutdown,
+                        ),
+                    },
+                    timeout(),
+                )
                 .await,
             Err(ServiceError::RequestTimedOut)
         ));
@@ -12537,7 +12705,15 @@ mod tests {
         ));
         assert!(matches!(
             handle
-                .control_until(ControlRequest::OperationCancel(cancelled), client_deadline,)
+                .control_until(
+                    ControlRequest::OperationCancel {
+                        operation: cancelled,
+                        authority: CancellationAuthority::Internal(
+                            InternalCancellationAuthority::Shutdown,
+                        ),
+                    },
+                    client_deadline,
+                )
                 .await,
             Err(ServiceError::RequestTimedOut)
         ));
@@ -12680,7 +12856,7 @@ mod tests {
         let terminal = journal
             .request_cancellation(
                 cancelled,
-                rootlight_operations::CancellationReason::ClientRequest,
+                CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
             )
             .expect("queued cancellation commits")
             .operation;
@@ -12728,18 +12904,15 @@ mod tests {
         assert_eq!(publication.stage, OperationStage::Cleanup);
         assert_eq!(publication.state, OperationState::Succeeded);
         let cancellation = handle
-            .control(ControlRequest::OperationCancel(authorized))
+            .control(ControlRequest::OperationCancel {
+                operation: authorized,
+                authority: CancellationAuthority::Client(owner),
+            })
             .await
-            .expect("late cancellation responds");
+            .expect_err("late cancellation conflicts");
         assert!(matches!(
             cancellation,
-            ControlResponse::OperationCancel {
-                accepted: false,
-                operation: OperationRecord {
-                    state: OperationState::Succeeded,
-                    ..
-                },
-            }
+            ServiceError::Operations(OperationError::CancellationTooLate)
         ));
 
         let cancelled = OperationId::from_bytes([33; 16]);
@@ -12763,7 +12936,10 @@ mod tests {
             .await
             .expect("operation activates");
         let cancellation = handle
-            .control(ControlRequest::OperationCancel(cancelled))
+            .control(ControlRequest::OperationCancel {
+                operation: cancelled,
+                authority: CancellationAuthority::Client(owner),
+            })
             .await
             .expect("early cancellation responds");
         assert!(matches!(
@@ -13297,7 +13473,10 @@ mod tests {
             .expect("progress advances");
 
         assert!(matches!(
-            service.execute(ControlRequest::OperationCancel(operation)),
+            service.execute(ControlRequest::OperationCancel {
+                operation,
+                authority: CancellationAuthority::Client(ClientInstanceId::SYSTEM),
+            }),
             ControlResponse::OperationCancel { accepted: true, .. }
         ));
         let cancelled = service
@@ -13305,6 +13484,130 @@ mod tests {
             .transition(operation, OperationState::Cancelled, None)
             .expect("cleanup completes");
         assert_eq!(cancelled.state, OperationState::Cancelled);
+    }
+
+    #[test]
+    fn authenticated_cancellation_denies_foreign_clients_and_audits_every_decision() {
+        let service = service();
+        let owner = ClientInstanceId::new([61; 16]).expect("owner is valid");
+        let foreign = ClientInstanceId::new([62; 16]).expect("foreign client is valid");
+        let operation = OperationId::from_bytes([63; 16]);
+        service
+            .journal
+            .submit(
+                OperationSubmission::new(
+                    operation,
+                    OperationKind::ControlProbe,
+                    PlanHash::from_bytes([64; 32]),
+                    owner,
+                    true,
+                    None,
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .expect("operation submits");
+        service
+            .journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let token = service
+            .journal
+            .cancellation_token(operation)
+            .expect("active cancellation token exists");
+        let before_denial = service.journal.status(operation).expect("status loads");
+        let request = || daemon::RequestEnvelope {
+            request_id: 1,
+            instance_nonce: vec![7; 16],
+            timeout_ms: Some(1_000),
+            request: Some(daemon::request_envelope::Request::OperationCancel(
+                daemon::OperationCancelRequest {
+                    operation: Some(common::OperationId {
+                        value: operation.as_bytes().to_vec(),
+                    }),
+                },
+            )),
+        };
+
+        let denied = service.dispatch_for_client(request(), foreign, PROTOCOL_MINOR);
+        assert!(matches!(
+            denied.response,
+            Some(daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            })) if code == common::ErrorCode::PermissionDenied as i32
+        ));
+        assert_eq!(
+            service
+                .journal
+                .status(operation)
+                .expect("denied status loads"),
+            before_denial
+        );
+        assert_eq!(token.reason(), None);
+
+        let accepted = service.dispatch_for_client(request(), owner, PROTOCOL_MINOR);
+        let Some(daemon::response_envelope::Response::OperationCancel(accepted)) =
+            accepted.response
+        else {
+            panic!("owner cancellation succeeds");
+        };
+        assert!(accepted.accepted);
+        let accepted_revision = accepted
+            .operation
+            .as_ref()
+            .expect("accepted operation is present")
+            .revision;
+        let replayed = service.dispatch_for_client(request(), owner, PROTOCOL_MINOR);
+        let Some(daemon::response_envelope::Response::OperationCancel(replayed)) =
+            replayed.response
+        else {
+            panic!("owner cancellation replay succeeds");
+        };
+        assert!(!replayed.accepted);
+        assert_eq!(
+            replayed
+                .operation
+                .as_ref()
+                .expect("replayed operation is present")
+                .revision,
+            accepted_revision
+        );
+
+        let snapshot = service.state.telemetry.snapshot();
+        let cancellations = snapshot
+            .logs
+            .iter()
+            .filter_map(|record| match record.event {
+                rootlight_observability::LogEvent::CancellationAttempt {
+                    operation_digest,
+                    authority,
+                    outcome,
+                    error_code,
+                } => Some((operation_digest, authority, outcome, error_code)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cancellations.len(), 3);
+        assert_eq!(
+            cancellations
+                .iter()
+                .map(|(_, _, outcome, _)| *outcome)
+                .collect::<Vec<_>>(),
+            vec![
+                CancellationAuditOutcome::Denied,
+                CancellationAuditOutcome::Accepted,
+                CancellationAuditOutcome::Replayed,
+            ]
+        );
+        assert!(cancellations.iter().all(|(digest, authority, _, _)| {
+            digest != operation.as_bytes() && *authority == CancellationAuditAuthority::Client
+        }));
+        let serialized =
+            serde_json::to_string(&snapshot.logs).expect("bounded audit records serialize");
+        for forbidden in ["owner", "plan_hash", "path", "source", "journal"] {
+            assert!(!serialized.contains(forbidden));
+        }
     }
 
     #[test]

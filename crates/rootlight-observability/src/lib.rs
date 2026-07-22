@@ -516,6 +516,42 @@ impl TelemetryOutcome {
     }
 }
 
+/// Closed authority category retained for cancellation audit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationAuditAuthority {
+    /// An authenticated owner submitted the public cancellation request.
+    Client,
+    /// The owning client connection disappeared or abandoned its request.
+    InternalClientDisconnect,
+    /// The operation deadline elapsed.
+    InternalDeadline,
+    /// Daemon shutdown or compensation stopped the operation.
+    InternalShutdown,
+    /// A parent operation cancelled dependent work.
+    InternalParent,
+    /// A bounded resource policy stopped the operation.
+    InternalResourceLimit,
+}
+
+/// Closed result category retained for every cancellation decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationAuditOutcome {
+    /// Cancellation first became durable.
+    Accepted,
+    /// An authorized request replayed durable cancellation.
+    Replayed,
+    /// A foreign client was denied without lifecycle mutation.
+    Denied,
+    /// Completion or publication cleanup had already closed cancellation.
+    TooLate,
+    /// No durable operation existed.
+    NotFound,
+    /// Cancellation failed for an infrastructure reason.
+    Failed,
+}
+
 /// Closed source-free structured event payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -563,6 +599,18 @@ pub enum LogEvent {
     DaemonFailed {
         /// Stable source-free failure code.
         error_code: ErrorCode,
+    },
+    /// One cancellation authorization and lifecycle decision completed.
+    CancellationAttempt {
+        /// Domain-separated truncated SHA-256 of the operation identifier.
+        operation_digest: [u8; 16],
+        /// Closed authenticated or daemon authority category.
+        authority: CancellationAuditAuthority,
+        /// Closed authorization and lifecycle result.
+        outcome: CancellationAuditOutcome,
+        /// Stable public failure code, when the attempt did not succeed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_code: Option<ErrorCode>,
     },
 }
 
@@ -1023,6 +1071,28 @@ impl Telemetry {
         });
     }
 
+    /// Records one bounded source-free cancellation audit decision.
+    pub fn record_cancellation_attempt(
+        &self,
+        operation: [u8; 16],
+        authority: CancellationAuditAuthority,
+        outcome: CancellationAuditOutcome,
+        error_code: Option<ErrorCode>,
+    ) {
+        let mut hasher = Sha256::new();
+        hasher.update(b"rootlight/cancellation-audit/operation/v1\0");
+        hasher.update(operation);
+        let digest = hasher.finalize();
+        let mut operation_digest = [0_u8; 16];
+        operation_digest.copy_from_slice(&digest[..16]);
+        self.record_log(LogEvent::CancellationAttempt {
+            operation_digest,
+            authority,
+            outcome,
+            error_code,
+        });
+    }
+
     /// Returns a bounded source-free process-local snapshot.
     #[must_use]
     pub fn snapshot(&self) -> TelemetrySnapshot {
@@ -1179,6 +1249,11 @@ fn classify_log_event(event: LogEvent) -> (LogSeverity, TelemetryTarget) {
         }
         | LogEvent::ConnectionTaskFailed { .. } => (LogSeverity::Error, TelemetryTarget::Ipc),
         LogEvent::DaemonFailed { .. } => (LogSeverity::Error, TelemetryTarget::Daemon),
+        LogEvent::CancellationAttempt {
+            outcome: CancellationAuditOutcome::Accepted | CancellationAuditOutcome::Replayed,
+            ..
+        } => (LogSeverity::Info, TelemetryTarget::Operation),
+        LogEvent::CancellationAttempt { .. } => (LogSeverity::Warn, TelemetryTarget::Operation),
         LogEvent::ConnectionRejected { .. } | LogEvent::RequestCompleted { .. } => {
             (LogSeverity::Warn, TelemetryTarget::Ipc)
         }
@@ -1377,6 +1452,7 @@ const fn log_event_supported_by_v2(event: LogEvent) -> bool {
         | LogEvent::ConnectionRejected { .. }
         | LogEvent::ConnectionTaskFailed { .. }
         | LogEvent::DaemonFailed { .. } => true,
+        LogEvent::CancellationAttempt { .. } => false,
     }
 }
 
@@ -1927,6 +2003,43 @@ mod tests {
             "client-capability-value",
         ] {
             assert!(!String::from_utf8_lossy(&bytes).contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn cancellation_audit_digests_ids_and_retains_closed_outcomes() {
+        let telemetry = Telemetry::default();
+        let operation = [0x5a; 16];
+        telemetry.record_cancellation_attempt(
+            operation,
+            CancellationAuditAuthority::Client,
+            CancellationAuditOutcome::Denied,
+            Some(ErrorCode::PermissionDenied),
+        );
+
+        let snapshot = telemetry.snapshot();
+        let record = snapshot.logs.first().expect("cancellation audit retained");
+        assert_eq!(record.severity, LogSeverity::Warn);
+        assert_eq!(record.target, TelemetryTarget::Operation);
+        let LogEvent::CancellationAttempt {
+            operation_digest,
+            authority,
+            outcome,
+            error_code,
+        } = record.event
+        else {
+            panic!("cancellation audit event is retained");
+        };
+        assert_ne!(operation_digest, operation);
+        assert_eq!(authority, CancellationAuditAuthority::Client);
+        assert_eq!(outcome, CancellationAuditOutcome::Denied);
+        assert_eq!(error_code, Some(ErrorCode::PermissionDenied));
+
+        let bytes = serde_json::to_vec(record).expect("audit record serializes");
+        assert!(bytes.len() < MAX_STRUCTURED_LOG_LINE_BYTES);
+        let json = String::from_utf8(bytes).expect("audit record is utf-8 JSON");
+        for forbidden in ["owner", "plan_hash", "path", "source", "journal"] {
+            assert!(!json.contains(forbidden));
         }
     }
 

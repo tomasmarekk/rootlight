@@ -34,8 +34,8 @@ use rootlight_ir::{
     RelationPredicate, SourceRef, SourceSpan,
 };
 use rootlight_operations::{
-    Cancellation, OperationError, OperationKind, OperationRecord, OperationState,
-    OperationSubmission, PlanHash,
+    Cancellation, CancellationAuthority, InternalCancellationAuthority, OperationError,
+    OperationKind, OperationRecord, OperationState, OperationSubmission, PlanHash,
 };
 use rootlight_protocol::generated::{common::v1 as common, daemon::v1 as daemon};
 use rootlight_query::{
@@ -793,7 +793,12 @@ fn propagate_peer_cancellation(
     let response = journal_lifecycle_call(
         runtime,
         journal.control_until(
-            ControlRequest::OperationCancel(operation),
+            ControlRequest::OperationCancel {
+                operation,
+                authority: CancellationAuthority::Internal(
+                    InternalCancellationAuthority::ClientDisconnect,
+                ),
+            },
             lifecycle_deadline,
         ),
     )?;
@@ -922,7 +927,10 @@ fn repository_operation_status(
     let action = daemon::RepositoryOperationAction::try_from(request.action)
         .map_err(|_| invalid_argument())?;
     let control = if action == daemon::RepositoryOperationAction::RepositoryOperationCancel {
-        ControlRequest::OperationCancel(operation)
+        ControlRequest::OperationCancel {
+            operation,
+            authority: CancellationAuthority::Client(context.client_instance_id),
+        }
     } else {
         ControlRequest::OperationStatus(operation)
     };
@@ -2602,11 +2610,17 @@ fn operation_error(error: &OperationError, operation: Option<OperationId>) -> Pu
         OperationError::AlreadyExists
         | OperationError::SubmissionConflict
         | OperationError::IllegalTransition { .. }
+        | OperationError::CancellationTooLate
         | OperationError::InvalidTerminalError
         | OperationError::LeaseOwnerMismatch
         | OperationError::InvalidLease => (
             ErrorCode::Conflict,
             "operation state conflicts with request",
+            false,
+        ),
+        OperationError::CancellationDenied => (
+            ErrorCode::PermissionDenied,
+            "operation cancellation is not authorized",
             false,
         ),
         OperationError::CancellationWon => (ErrorCode::Cancelled, "operation was cancelled", false),
@@ -3300,7 +3314,7 @@ mod tests {
         let cancelled_record = journal
             .request_cancellation(
                 cancelled,
-                rootlight_operations::CancellationReason::ClientRequest,
+                CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
             )
             .expect("cancellation persists")
             .operation;

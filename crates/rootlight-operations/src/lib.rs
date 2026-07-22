@@ -100,6 +100,59 @@ impl ClientInstanceId {
     }
 }
 
+/// Named daemon authority for cancellation that does not originate from a
+/// public cancel request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InternalCancellationAuthority {
+    /// The owning client connection disappeared or abandoned its request.
+    ClientDisconnect,
+    /// The operation's authoritative deadline elapsed.
+    Deadline,
+    /// The daemon is shutting down or compensating abandoned work.
+    Shutdown,
+    /// A parent operation cancelled its dependent work.
+    Parent,
+    /// A bounded resource policy stopped the operation.
+    ResourceLimit,
+}
+
+impl InternalCancellationAuthority {
+    const fn reason(self) -> CancellationReason {
+        match self {
+            Self::ClientDisconnect => CancellationReason::ClientRequest,
+            Self::Deadline => CancellationReason::DeadlineExceeded,
+            Self::Shutdown => CancellationReason::Shutdown,
+            Self::Parent => CancellationReason::ParentCancelled,
+            Self::ResourceLimit => CancellationReason::ResourceLimit,
+        }
+    }
+}
+
+/// Authority presented to the atomic cancellation decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancellationAuthority {
+    /// An authenticated client may cancel only operations it submitted.
+    Client(ClientInstanceId),
+    /// A named daemon lifecycle authority may cancel independent of ownership.
+    Internal(InternalCancellationAuthority),
+}
+
+impl CancellationAuthority {
+    const fn reason(self) -> CancellationReason {
+        match self {
+            Self::Client(_) => CancellationReason::ClientRequest,
+            Self::Internal(authority) => authority.reason(),
+        }
+    }
+
+    fn authorizes(self, owner: ClientInstanceId) -> bool {
+        match self {
+            Self::Client(actor) => actor == owner,
+            Self::Internal(_) => true,
+        }
+    }
+}
+
 /// Canonical digest of immutable operation-plan inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PlanHash([u8; 32]);
@@ -420,13 +473,30 @@ pub struct SubmissionOutcome {
     pub operation: OperationRecord,
 }
 
+/// Durable result class for one authorized cancellation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancellationDisposition {
+    /// This request first established durable cancellation.
+    Accepted,
+    /// The same authority replayed an already durable cancellation.
+    Replayed,
+}
+
 /// Result of a durable cancellation request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancellationOutcome {
-    /// Whether this call first established durable cancellation.
-    pub accepted: bool,
+    /// Whether this request established or replayed durable cancellation.
+    pub disposition: CancellationDisposition,
     /// Durable record after the request.
     pub operation: OperationRecord,
+}
+
+impl CancellationOutcome {
+    /// Reports whether this request first established durable cancellation.
+    #[must_use]
+    pub const fn accepted(&self) -> bool {
+        matches!(self.disposition, CancellationDisposition::Accepted)
+    }
 }
 
 /// Bounded operation counts for source-free health reporting.
@@ -976,39 +1046,44 @@ impl OperationJournal {
         self.status(operation)
     }
 
-    /// Durably requests cancellation before signalling in-memory workers.
+    /// Durably authorizes and requests cancellation before signalling workers.
     ///
     /// Queued work becomes terminal immediately; running work first enters
     /// `Cancelling` and reaches cleanup only during cooperative finalization.
-    /// Repeated and terminal requests are idempotent. Repository-index work
-    /// additionally closes cancellation admission once publication commits.
+    /// A same-owner replay of an established cancellation is idempotent.
+    /// Completed work and repository-index cleanup reject cancellation without
+    /// mutation. Repository-index work additionally closes cancellation
+    /// admission once publication commits.
     ///
     /// # Errors
     ///
-    /// Returns a typed error for unknown work, unsupported reasons, or storage failure.
+    /// Returns [`OperationError::CancellationDenied`] for a foreign client,
+    /// [`OperationError::CancellationTooLate`] after completion or publication
+    /// cleanup, [`OperationError::NotFound`] for unknown work, or a typed
+    /// storage failure.
     pub fn request_cancellation(
         &self,
         operation: OperationId,
-        reason: CancellationReason,
+        authority: CancellationAuthority,
     ) -> Result<CancellationOutcome, OperationError> {
-        self.request_cancellation_with(operation, reason, || {})
+        self.request_cancellation_with(operation, authority, || {})
     }
 
     fn request_cancellation_with(
         &self,
         operation: OperationId,
-        reason: CancellationReason,
+        authority: CancellationAuthority,
         mut after_commit: impl FnMut(),
     ) -> Result<CancellationOutcome, OperationError> {
+        let reason = authority.reason();
         let reason_text = cancellation_reason_as_str(reason)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(map_sqlite_error)?;
         let current = load_record(&transaction, operation)?.ok_or(OperationError::NotFound)?;
-        if current.state.is_terminal()
-            || current.cancellation_requested
-            || current.kind == OperationKind::RepositoryIndex
-                && current.stage == OperationStage::Cleanup
-        {
+        if !authority.authorizes(current.owner) {
+            return Err(OperationError::CancellationDenied);
+        }
+        if current.cancellation_requested {
             transaction.commit().map_err(map_sqlite_error)?;
             drop(connection);
             if let Some(durable_reason) = current.cancellation_reason {
@@ -1019,9 +1094,15 @@ impl OperationJournal {
                 }
             }
             return Ok(CancellationOutcome {
-                accepted: false,
+                disposition: CancellationDisposition::Replayed,
                 operation: current,
             });
+        }
+        if current.state.is_terminal()
+            || current.kind == OperationKind::RepositoryIndex
+                && current.stage == OperationStage::Cleanup
+        {
+            return Err(OperationError::CancellationTooLate);
         }
         let next_state = match current.state {
             OperationState::Queued => OperationState::Cancelled,
@@ -1030,7 +1111,7 @@ impl OperationJournal {
             OperationState::Succeeded
             | OperationState::Failed
             | OperationState::Cancelled
-            | OperationState::Interrupted => return Err(OperationError::CorruptState),
+            | OperationState::Interrupted => return Err(OperationError::CancellationTooLate),
         };
         let revision = next_revision(current.revision)?;
         let updated = transaction
@@ -1075,7 +1156,7 @@ impl OperationJournal {
             self.prune_to(MAX_OPERATION_HISTORY)?;
         }
         Ok(CancellationOutcome {
-            accepted: true,
+            disposition: CancellationDisposition::Accepted,
             operation: self.status(operation)?,
         })
     }
@@ -1242,17 +1323,17 @@ impl OperationJournal {
         self.status(operation)
     }
 
-    /// Requests client cancellation and returns acknowledgement plus state.
+    /// Requests authenticated client cancellation and returns state.
     ///
     /// # Errors
     ///
-    /// Returns a typed journal error.
+    /// Returns a typed authorization, lifecycle, or journal error.
     pub fn cancel(
         &self,
         operation: OperationId,
-    ) -> Result<(bool, OperationRecord), OperationError> {
-        let outcome = self.request_cancellation(operation, CancellationReason::ClientRequest)?;
-        Ok((outcome.accepted, outcome.operation))
+        actor: ClientInstanceId,
+    ) -> Result<CancellationOutcome, OperationError> {
+        self.request_cancellation(operation, CancellationAuthority::Client(actor))
     }
 
     /// Returns the in-memory cancellation notification for active work.
@@ -3489,6 +3570,12 @@ pub enum OperationError {
     /// Durable cancellation prevented successful completion.
     #[error("operation cancellation won the completion race")]
     CancellationWon,
+    /// An authenticated client attempted to cancel another client's operation.
+    #[error("operation cancellation is not authorized")]
+    CancellationDenied,
+    /// Cancellation arrived after terminal completion or publication cleanup.
+    #[error("operation cancellation is too late")]
+    CancellationTooLate,
     /// Failed-state error metadata was missing or attached to another state.
     #[error("operation terminal error does not match requested state")]
     InvalidTerminalError,
@@ -3781,7 +3868,10 @@ mod tests {
         let operation = operation(72);
         journal.enqueue(operation).expect("operation enqueues");
         journal
-            .request_cancellation(operation, CancellationReason::ClientRequest)
+            .request_cancellation(
+                operation,
+                CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
+            )
             .expect("cancellation wins");
 
         assert!(matches!(
@@ -3878,7 +3968,10 @@ mod tests {
 
         committed.wait();
         journal
-            .request_cancellation(operation, CancellationReason::ClientRequest)
+            .request_cancellation(
+                operation,
+                CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
+            )
             .expect("cancellation commits in the post-commit gap");
         cancellation_complete.wait();
 
@@ -3912,7 +4005,7 @@ mod tests {
         let cancellation = thread::spawn(move || {
             cancellation_journal.request_cancellation_with(
                 operation,
-                CancellationReason::ClientRequest,
+                CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
                 || {
                     cancellation_entered.wait();
                     cancellation_release.wait();
@@ -3945,7 +4038,7 @@ mod tests {
             .join()
             .expect("compensation thread joins")
             .expect("committed start compensation completes");
-        assert!(outcome.accepted);
+        assert!(outcome.accepted());
         assert_eq!(
             worker_token.reason(),
             Some(CancellationReason::ClientRequest)
@@ -4029,7 +4122,12 @@ mod tests {
                 }
                 OperationState::Cancelled => {
                     journal
-                        .request_cancellation(operation(seed), CancellationReason::ClientRequest)
+                        .request_cancellation(
+                            operation(seed),
+                            CancellationAuthority::Internal(
+                                InternalCancellationAuthority::ClientDisconnect,
+                            ),
+                        )
                         .expect("queued cancellation wins")
                         .operation
                 }
@@ -4041,11 +4139,23 @@ mod tests {
                 }
             };
 
-            let repeated_cancel = journal
-                .request_cancellation(operation(seed), CancellationReason::Shutdown)
-                .expect("terminal cancellation is idempotent");
-            assert!(!repeated_cancel.accepted);
-            assert_eq!(repeated_cancel.operation, before);
+            let repeated_cancel = journal.request_cancellation(
+                operation(seed),
+                CancellationAuthority::Internal(InternalCancellationAuthority::Shutdown),
+            );
+            if terminal == OperationState::Cancelled {
+                let repeated_cancel = repeated_cancel.expect("cancel replay is idempotent");
+                assert_eq!(
+                    repeated_cancel.disposition,
+                    CancellationDisposition::Replayed
+                );
+                assert_eq!(repeated_cancel.operation, before);
+            } else {
+                assert!(matches!(
+                    repeated_cancel,
+                    Err(OperationError::CancellationTooLate)
+                ));
+            }
             assert_eq!(
                 journal
                     .status(operation(seed))
@@ -4088,15 +4198,15 @@ mod tests {
             .expect("operation starts");
         let barrier = Arc::new(Barrier::new(3));
         let mut workers = Vec::new();
-        for reason in [
-            CancellationReason::ClientRequest,
-            CancellationReason::Shutdown,
+        for authority in [
+            CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
+            CancellationAuthority::Internal(InternalCancellationAuthority::Shutdown),
         ] {
             let journal = Arc::clone(&journal);
             let barrier = Arc::clone(&barrier);
             workers.push(thread::spawn(move || {
                 barrier.wait();
-                journal.request_cancellation(operation(44), reason)
+                journal.request_cancellation(operation(44), authority)
             }));
         }
         barrier.wait();
@@ -4107,7 +4217,7 @@ mod tests {
 
         let accepted = outcomes
             .iter()
-            .filter(|outcome| matches!(outcome, Ok(value) if value.accepted))
+            .filter(|outcome| matches!(outcome, Ok(value) if value.accepted()))
             .count();
         assert_eq!(accepted, 1);
         assert!(outcomes.iter().all(|outcome| matches!(
@@ -4157,7 +4267,10 @@ mod tests {
             .expect("cancellation hook installs");
         let cancellation_journal = Arc::clone(&journal);
         let cancellation = thread::spawn(move || {
-            cancellation_journal.request_cancellation(operation, CancellationReason::ClientRequest)
+            cancellation_journal.request_cancellation(
+                operation,
+                CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
+            )
         });
         committed_rx
             .recv_timeout(Duration::from_secs(1))
@@ -4225,14 +4338,19 @@ mod tests {
             .update_stage(operation, OperationStage::Cleanup)
             .expect("publication is authorized");
 
+        assert!(matches!(
+            journal.request_cancellation(
+                operation,
+                CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
+            ),
+            Err(OperationError::CancellationTooLate)
+        ));
         let outcome = journal
-            .request_cancellation(operation, CancellationReason::ClientRequest)
-            .expect("late cancellation is idempotent");
-
-        assert!(!outcome.accepted);
-        assert_eq!(outcome.operation.state, OperationState::Running);
-        assert_eq!(outcome.operation.stage, OperationStage::Cleanup);
-        assert!(!outcome.operation.cancellation_requested);
+            .status(operation)
+            .expect("late state remains readable");
+        assert_eq!(outcome.state, OperationState::Running);
+        assert_eq!(outcome.stage, OperationStage::Cleanup);
+        assert!(!outcome.cancellation_requested);
         assert!(
             journal
                 .transition(operation, OperationState::Succeeded, None)
@@ -4253,10 +4371,13 @@ mod tests {
             .expect("operation enters cleanup");
 
         let outcome = journal
-            .request_cancellation(operation, CancellationReason::Shutdown)
+            .request_cancellation(
+                operation,
+                CancellationAuthority::Internal(InternalCancellationAuthority::Shutdown),
+            )
             .expect("control work cancellation succeeds");
 
-        assert!(outcome.accepted);
+        assert!(outcome.accepted());
         assert_eq!(outcome.operation.state, OperationState::Cancelling);
         assert!(outcome.operation.cancellation_requested);
     }
@@ -4330,11 +4451,13 @@ mod tests {
                 .expect("late deadline delivery is idempotent"),
             publication
         );
-        let cancellation = journal
-            .request_cancellation(authorized, CancellationReason::ClientRequest)
-            .expect("late cancellation responds");
-        assert!(!cancellation.accepted);
-        assert_eq!(cancellation.operation.state, OperationState::Succeeded);
+        assert!(matches!(
+            journal.request_cancellation(
+                authorized,
+                CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
+            ),
+            Err(OperationError::CancellationTooLate)
+        ));
     }
 
     #[test]
@@ -4840,30 +4963,37 @@ mod tests {
     #[test]
     fn cancellation_is_durable_idempotent_and_blocks_success() {
         let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let owner = ClientInstanceId::SYSTEM;
         let queued_token = journal.enqueue(operation(3)).expect("operation enqueues");
         let queued = journal
-            .cancel(operation(3))
+            .cancel(operation(3), owner)
             .expect("queued cancellation succeeds");
-        assert!(queued.0);
-        assert_eq!(queued.1.state, OperationState::Cancelled);
+        assert!(queued.accepted());
+        assert_eq!(queued.operation.state, OperationState::Cancelled);
         assert_eq!(
-            queued.1.cancellation_reason,
+            queued.operation.cancellation_reason,
             Some(CancellationReason::ClientRequest)
         );
         assert_eq!(
             queued_token.reason(),
             Some(CancellationReason::ClientRequest)
         );
-        assert!(!journal.cancel(operation(3)).expect("repeat is stable").0);
+        assert_eq!(
+            journal
+                .cancel(operation(3), owner)
+                .expect("repeat is stable")
+                .disposition,
+            CancellationDisposition::Replayed
+        );
 
         let running_token = journal.enqueue(operation(4)).expect("operation enqueues");
         journal
             .transition(operation(4), OperationState::Running, None)
             .expect("operation starts");
         let running = journal
-            .cancel(operation(4))
+            .cancel(operation(4), owner)
             .expect("running cancellation succeeds");
-        assert_eq!(running.1.state, OperationState::Cancelling);
+        assert_eq!(running.operation.state, OperationState::Cancelling);
         assert!(matches!(
             journal.transition(operation(4), OperationState::Succeeded, None),
             Err(OperationError::CancellationWon)
@@ -4876,11 +5006,157 @@ mod tests {
             running_token.reason(),
             Some(CancellationReason::ClientRequest)
         );
-        assert!(
-            !journal
-                .cancel(operation(4))
+        assert_eq!(
+            journal
+                .cancel(operation(4), owner)
                 .expect("terminal cancel is stable")
-                .0
+                .disposition,
+            CancellationDisposition::Replayed
+        );
+    }
+
+    #[test]
+    fn client_cancellation_authorization_is_atomic_and_revision_stable() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let owner = ClientInstanceId::new([41; 16]).expect("owner is valid");
+        let foreign = ClientInstanceId::new([42; 16]).expect("foreign client is valid");
+        let operation = operation(41);
+        journal
+            .submit(
+                OperationSubmission::new(
+                    operation,
+                    OperationKind::ControlProbe,
+                    PlanHash::from_bytes([41; 32]),
+                    owner,
+                    true,
+                    None,
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .expect("operation submits");
+        journal
+            .start_execution(operation)
+            .expect("operation starts");
+        let token = journal
+            .cancellation_token(operation)
+            .expect("active token exists");
+        let before_denial = journal.status(operation).expect("status loads");
+
+        assert!(matches!(
+            journal.request_cancellation(operation, CancellationAuthority::Client(foreign)),
+            Err(OperationError::CancellationDenied)
+        ));
+        assert_eq!(
+            journal.status(operation).expect("denied status loads"),
+            before_denial
+        );
+        assert_eq!(token.reason(), None);
+
+        let accepted = journal
+            .request_cancellation(operation, CancellationAuthority::Client(owner))
+            .expect("owner cancellation succeeds");
+        assert_eq!(accepted.disposition, CancellationDisposition::Accepted);
+        assert_eq!(accepted.operation.revision, before_denial.revision + 1);
+        assert_eq!(token.reason(), Some(CancellationReason::ClientRequest));
+
+        let replayed = journal
+            .request_cancellation(operation, CancellationAuthority::Client(owner))
+            .expect("same-owner replay succeeds");
+        assert_eq!(replayed.disposition, CancellationDisposition::Replayed);
+        assert_eq!(replayed.operation, accepted.operation);
+        assert!(matches!(
+            journal.request_cancellation(operation, CancellationAuthority::Client(foreign)),
+            Err(OperationError::CancellationDenied)
+        ));
+        assert_eq!(
+            journal.status(operation).expect("foreign replay loads"),
+            accepted.operation
+        );
+        assert!(matches!(
+            journal.request_cancellation(
+                OperationId::from_bytes([99; 16]),
+                CancellationAuthority::Client(owner),
+            ),
+            Err(OperationError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn completed_and_publication_cleanup_cancellation_is_too_late() {
+        let journal = OperationJournal::open_in_memory().expect("journal opens");
+        let owner = ClientInstanceId::new([43; 16]).expect("owner is valid");
+        for (seed, terminal) in [
+            (43, OperationState::Succeeded),
+            (44, OperationState::Failed),
+        ] {
+            let operation = operation(seed);
+            journal
+                .submit(
+                    OperationSubmission::new(
+                        operation,
+                        OperationKind::ControlProbe,
+                        PlanHash::from_bytes([seed; 32]),
+                        owner,
+                        true,
+                        None,
+                        None,
+                    )
+                    .expect("submission is valid"),
+                )
+                .expect("operation submits");
+            journal
+                .start_execution(operation)
+                .expect("operation starts");
+            let failure = PublicError::builder(ErrorCode::Internal, "operation failed")
+                .operation(operation)
+                .build()
+                .expect("public failure builds");
+            let completed = journal
+                .transition(
+                    operation,
+                    terminal,
+                    (terminal == OperationState::Failed).then_some(&failure),
+                )
+                .expect("operation completes");
+            assert!(matches!(
+                journal.request_cancellation(operation, CancellationAuthority::Client(owner)),
+                Err(OperationError::CancellationTooLate)
+            ));
+            assert_eq!(
+                journal.status(operation).expect("completed status loads"),
+                completed
+            );
+        }
+
+        let operation = operation(45);
+        journal
+            .submit(
+                OperationSubmission::new(
+                    operation,
+                    OperationKind::RepositoryIndex,
+                    PlanHash::from_bytes([45; 32]),
+                    owner,
+                    true,
+                    None,
+                    None,
+                )
+                .expect("submission is valid"),
+            )
+            .expect("repository operation submits");
+        journal
+            .start_execution(operation)
+            .expect("repository operation starts");
+        let cleanup = journal
+            .update_stage(operation, OperationStage::Cleanup)
+            .expect("publication cleanup starts");
+        assert!(matches!(
+            journal.request_cancellation(operation, CancellationAuthority::Client(owner)),
+            Err(OperationError::CancellationTooLate)
+        ));
+        assert_eq!(
+            journal.status(operation).expect("cleanup status loads"),
+            cleanup
         );
     }
 
@@ -4999,7 +5275,7 @@ mod tests {
             .start_execution(operation(35))
             .expect("operation starts");
         let cancelling = journal
-            .request_cancellation(operation(35), CancellationReason::ClientRequest)
+            .request_cancellation(operation(35), CancellationAuthority::Client(owner))
             .expect("cancellation wins")
             .operation;
         let renewed_expiry = initial_expiry
@@ -5073,7 +5349,12 @@ mod tests {
                 .start_execution(operation)
                 .expect("operation starts");
             let cancelling = journal
-                .request_cancellation(operation, CancellationReason::ClientRequest)
+                .request_cancellation(
+                    operation,
+                    CancellationAuthority::Internal(
+                        InternalCancellationAuthority::ClientDisconnect,
+                    ),
+                )
                 .expect("cancellation is requested")
                 .operation;
             assert_eq!(cancelling.state, OperationState::Cancelling);
@@ -5912,7 +6193,10 @@ mod tests {
             .start_execution(cancelling)
             .expect("cancelling operation starts");
         journal
-            .request_cancellation(cancelling, CancellationReason::ClientRequest)
+            .request_cancellation(
+                cancelling,
+                CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
+            )
             .expect("cancellation commits");
 
         let counts = OperationJournal::counts_path_with_timeout(&path, Duration::from_secs(1))
@@ -5999,7 +6283,10 @@ mod tests {
             .expect("cancellation hook installs");
         let cancellation_journal = Arc::clone(&journal);
         let cancellation = thread::spawn(move || {
-            cancellation_journal.request_cancellation(operation, CancellationReason::ClientRequest)
+            cancellation_journal.request_cancellation(
+                operation,
+                CancellationAuthority::Internal(InternalCancellationAuthority::ClientDisconnect),
+            )
         });
         committed_rx
             .recv_timeout(Duration::from_secs(1))
@@ -6030,7 +6317,7 @@ mod tests {
             .join()
             .expect("writer thread joins")
             .expect("writer completes after the read");
-        assert!(outcome.accepted);
+        assert!(outcome.accepted());
         assert_eq!(outcome.operation.state, OperationState::Cancelling);
     }
 
