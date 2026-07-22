@@ -45,7 +45,7 @@ pub enum VerticalTool {
     ArchitectureOverview,
     /// Finds dependency cycles in a relation projection.
     ArchitectureCycles,
-    /// Finds dead or unreachable code candidates.
+    /// Reports bounded static reachability observations for human review.
     CodeDead,
     /// Compares two revisions or generations structurally.
     HistoryCompare,

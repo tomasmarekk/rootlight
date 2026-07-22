@@ -1547,12 +1547,13 @@ pub struct ArchitectureCycles {
     pub execution_completeness: ResultCompleteness,
 }
 
-/// One dead-code candidate with classification and source-free evidence.
+/// One static reachability observation with source-free evidence and caveats.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CodeDeadCandidate {
     /// Stable symbol identity of the candidate.
     pub symbol_id: SymbolId,
-    /// Reachability classification label, such as `proven_dead`.
+    /// Static reachability observation label, such as
+    /// `no_observed_incoming_references`.
     pub classification: String,
     /// Classification confidence from 0 through 1000.
     pub confidence: u16,
@@ -1593,12 +1594,12 @@ pub struct CodeDeadSuppressionRule {
     pub suppressed_count: u32,
 }
 
-/// Bounded dead-code candidates among stable symbols for one generation.
+/// Bounded static reachability observations for one generation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CodeDead {
     /// Checked query correlation.
     pub context: QueryContext,
-    /// Ranked dead-code candidates in deterministic order.
+    /// Ranked static reachability observations in deterministic order.
     pub candidates: Vec<CodeDeadCandidate>,
     /// Entry-point model summary.
     pub entry_points: CodeDeadEntryPointSummary,
@@ -3837,7 +3838,7 @@ impl Client {
         }
     }
 
-    /// Detects bounded dead-code candidates over one generation.
+    /// Reports bounded static reachability observations over one generation.
     ///
     /// # Errors
     ///
@@ -3870,7 +3871,7 @@ impl Client {
         )
     }
 
-    /// Detects dead-code candidates with explicit transport options.
+    /// Reports static reachability observations with explicit transport options.
     ///
     /// # Errors
     ///
@@ -3910,7 +3911,7 @@ impl Client {
         }
     }
 
-    /// Asynchronously detects bounded dead-code candidates over one generation.
+    /// Asynchronously reports bounded static reachability observations.
     ///
     /// Dropping the returned future closes its one-request stream, allowing the
     /// daemon to cancel the attached detection.
@@ -3952,7 +3953,7 @@ impl Client {
         .await
     }
 
-    /// Asynchronously detects dead-code candidates with explicit transport
+    /// Asynchronously reports static reachability observations with explicit transport
     /// options.
     ///
     /// Dropping the returned future closes its one-request stream.

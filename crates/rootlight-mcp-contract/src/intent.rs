@@ -22,7 +22,9 @@ use crate::vertical::{
 // Shared relation and direction types
 // ---------------------------------------------------------------------------
 
-/// Typed relation families accepted by intent tools.
+/// Typed relation families recognized across intent tools.
+///
+/// Each tool advertises and enforces its own supported subset.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
@@ -93,6 +95,9 @@ pub struct SymbolRelationshipsInput {
     #[schemars(length(min = 1, max = 64))]
     pub symbol_ids: BTreeSet<SymbolId>,
     /// Requested relation families.
+    ///
+    /// The served set is `calls`, `called_by`, `references`, `types`,
+    /// `implements`, and `imports`.
     #[schemars(length(min = 1, max = 16))]
     pub relations: BTreeSet<RelationKind>,
     /// Traversal direction.
@@ -265,6 +270,9 @@ pub struct FlowTraceInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direction: Option<Direction>,
     /// Explicit relation allow-list.
+    ///
+    /// The served set is `calls`, `references`, `types`, `implements`, and
+    /// `imports`.
     #[schemars(length(min = 1, max = 16))]
     pub relations: BTreeSet<RelationKind>,
     /// Maximum traversal depth.
@@ -583,6 +591,9 @@ pub enum CycleRankBy {
 #[serde(deny_unknown_fields)]
 pub struct CycleProjection {
     /// Relation families included in the projection.
+    ///
+    /// The served set is `calls`, `references`, `types`, `implements`, and
+    /// `imports`.
     #[schemars(length(min = 1, max = 8))]
     pub relations: BTreeSet<RelationKind>,
     /// Aggregation level for the projection.
@@ -702,17 +713,17 @@ pub type ArchitectureCyclesOutput = ToolResponse<ReadEnvelope<ArchitectureCycles
 // code.dead
 // ---------------------------------------------------------------------------
 
-/// Entry-point model policy for dead code analysis.
+/// Entry-point model policy for bounded static reachability observations.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum EntryPointPolicy {
-    /// Standard mixed entry-point model.
+    /// Partial mixed entry-point model currently served by `code.dead`.
     Standard,
-    /// Library export surface as entry points.
+    /// Reserved library entry-point model; currently rejected as unsupported.
     Library,
-    /// Application main and registered handlers.
+    /// Reserved application entry-point model; currently rejected as unsupported.
     Application,
 }
 
@@ -728,7 +739,7 @@ pub struct CodeDeadInput {
     /// Optional structural scope constraint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<ScopeSelector>,
-    /// Entry-point model policy.
+    /// Entry-point model policy. Only `standard` is currently served.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry_point_policy: Option<EntryPointPolicy>,
     /// Whether to include exported symbols as candidates.
@@ -756,27 +767,27 @@ pub struct CodeDeadInput {
     pub explain: Option<bool>,
 }
 
-/// Classification confidence for a dead-code candidate.
+/// Classification of one bounded static reachability observation.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DeadClassification {
-    /// Proven unreachable under the entry-point model.
-    ProvenDead,
-    /// Probable dead code with high confidence.
-    ProbableDead,
-    /// Suspected dead code with moderate confidence.
-    SuspectedDead,
+    /// No incoming reference was observed in the served static relation graph.
+    NoObservedIncomingReferences,
+    /// The partial entry-point scan did not reach a strongly referenced symbol.
+    NotObservedFromEntryPointsStrongReferences,
+    /// The partial entry-point scan did not reach a weakly referenced symbol.
+    NotObservedFromEntryPointsWeakReferences,
 }
 
-/// One dead-code candidate with evidence and caveats.
+/// One bounded static reachability observation with evidence and caveats.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeadCandidate {
     /// Stable symbol identity.
     pub symbol_id: SymbolId,
-    /// Reachability classification.
+    /// Static reachability observation; never a runtime-liveness proof.
     pub classification: DeadClassification,
     /// Confidence from 0 through 1000.
     #[schemars(range(min = 0, max = 1000))]
@@ -794,7 +805,7 @@ pub struct DeadCandidate {
     pub trust: TrustClassification,
 }
 
-/// Summary of the entry-point model used for reachability.
+/// Summary of the partial entry-point model used for static reachability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EntryPointSummary {
@@ -802,7 +813,7 @@ pub struct EntryPointSummary {
     pub policy: EntryPointPolicy,
     /// Number of resolved entry points.
     pub entry_point_count: u32,
-    /// Whether the model is complete for the scope.
+    /// Whether the model covers every possible runtime entry point.
     pub complete: bool,
 }
 
@@ -828,11 +839,11 @@ pub struct RuleSummary {
     pub suppressed_count: u32,
 }
 
-/// `code.dead` result data.
+/// `code.dead` static reachability result data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CodeDeadData {
-    /// Ranked dead-code candidates.
+    /// Ranked static reachability observations that require human review.
     #[schemars(length(max = 500))]
     pub candidates: Vec<DeadCandidate>,
     /// Entry-point model summary.

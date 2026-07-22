@@ -1364,7 +1364,7 @@ mod tests {
         let mut data = CodeDeadData {
             candidates: vec![DeadCandidate {
                 symbol_id: SymbolId::from_bytes([9; 20]),
-                classification: DeadClassification::ProbableDead,
+                classification: DeadClassification::NotObservedFromEntryPointsStrongReferences,
                 confidence: 900,
                 why: vec!["unreachable".to_owned(), "unreferenced".to_owned()],
                 suppressions_checked: suppressions_checked.clone(),
