@@ -352,6 +352,7 @@ const REPO_INDEX_RULES: &[CapabilityRule] = &[
         "repository_id",
         "updating a registered repository is not served",
     ),
+    unsupported("scope", "request-scoped index selection is not served"),
     unsupported(
         "requested_tiers",
         "explicit analysis-tier selection is not served",
@@ -787,6 +788,22 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
     unsupported(
         "repository.alias",
         "only stable repository identifiers are served",
+    ),
+    unsupported(
+        "context_lines_before",
+        "source context expansion is not served",
+    ),
+    unsupported(
+        "context_lines_after",
+        "source context expansion is not served",
+    ),
+    unsupported(
+        "references[].symbol_id",
+        "symbol selectors are not served by source reads",
+    ),
+    unsupported(
+        "references[].file_id",
+        "file range selectors are not served by source reads",
     ),
     unsupported_value("merge_overlaps", "true", "overlap merging is not served"),
     unsupported(
@@ -1237,6 +1254,17 @@ mod tests {
 
     #[test]
     fn known_silent_fields_have_explicit_dispositions() {
+        let repo_index = CAPABILITIES[McpTool::RepoIndex as usize];
+        let scoped_index = repo_index.disposition("scope.repository", None);
+        assert_eq!(
+            scoped_index.status,
+            CapabilityStatus::UnsupportedStableError
+        );
+        assert_eq!(
+            scoped_index.error_code,
+            Some(ErrorCode::UnsupportedCapability)
+        );
+
         let repo_status = CAPABILITIES[McpTool::RepoStatus as usize];
         let explicit_generation =
             repo_status.disposition("generation", Some("gen1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
@@ -1309,6 +1337,26 @@ mod tests {
             unsupported_level.error_code,
             Some(ErrorCode::UnsupportedCapability)
         );
+
+        let source_read = CAPABILITIES[McpTool::SourceRead as usize];
+        for path in [
+            "context_lines_before",
+            "context_lines_after",
+            "references[].symbol_id",
+            "references[].file_id",
+        ] {
+            let disposition = source_read.disposition(path, None);
+            assert_eq!(
+                disposition.status,
+                CapabilityStatus::UnsupportedStableError,
+                "{path} must fail closed"
+            );
+            assert_eq!(
+                disposition.error_code,
+                Some(ErrorCode::UnsupportedCapability),
+                "{path} must preserve the stable public code"
+            );
+        }
     }
 
     #[test]
