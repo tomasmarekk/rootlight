@@ -35,6 +35,9 @@ pub const MCP_SPECIFICATION_DATE: &str = "2025-11-25";
 /// The initial Rootlight MCP schema version.
 pub const MCP_SCHEMA_VERSION: &str = "1.0";
 
+/// The repository catalog response schema version.
+pub const REPO_LIST_SCHEMA_VERSION: &str = "2.0";
+
 /// Trust classification attached to every future source-bearing value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

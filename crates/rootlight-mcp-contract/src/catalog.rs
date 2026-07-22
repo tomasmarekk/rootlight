@@ -11,7 +11,7 @@ pub enum McpTool {
     RepoIndex,
     /// Inspects repository, generation, coverage, freshness, and operations.
     RepoStatus,
-    /// Lists registered repositories and workspaces.
+    /// Lists registered repositories.
     RepoList,
     /// Reads or cancels a long-running operation.
     OperationStatus,
@@ -97,6 +97,15 @@ impl McpTool {
         }
     }
 
+    /// Public contract version advertised for this tool.
+    #[must_use]
+    pub const fn contract_version(self) -> &'static str {
+        match self {
+            Self::RepoList => crate::REPO_LIST_SCHEMA_VERSION,
+            _ => crate::MCP_SCHEMA_VERSION,
+        }
+    }
+
     /// Static source-free title intended for clients.
     #[must_use]
     pub const fn title(self) -> &'static str {
@@ -134,7 +143,7 @@ impl McpTool {
                 "Use bounded process-local status with the active generation and compact coverage; operation projection and freshness gates are unsupported."
             }
             Self::RepoList => {
-                "Use bounded catalog listing with authenticated continuation; query text is cursor-bound but does not filter opaque repository identities."
+                "Use an immutable catalog snapshot with bounded display-name or alias and lifecycle-state filters, deterministic ordering, and authenticated continuation; workspace grouping and expanded profiles are unsupported."
             }
             Self::OperationStatus => {
                 "Read or request cancellation of one known long-running Rootlight operation."
@@ -372,6 +381,19 @@ mod tests {
     }
 
     #[test]
+    fn repository_list_has_a_dedicated_two_zero_contract() {
+        assert_eq!(
+            McpTool::RepoList.contract_version(),
+            crate::REPO_LIST_SCHEMA_VERSION
+        );
+        for tool in McpTool::ALL {
+            if tool != McpTool::RepoList {
+                assert_eq!(tool.contract_version(), crate::MCP_SCHEMA_VERSION);
+            }
+        }
+    }
+
+    #[test]
     fn tool_names_use_documented_dotted_convention() {
         for tool in McpTool::ALL {
             let name = tool.name();
@@ -502,6 +524,11 @@ mod tests {
                 );
             }
         }
+        let repository_list = McpTool::RepoList.description();
+        assert!(repository_list.contains("display-name or alias"));
+        assert!(repository_list.contains("lifecycle-state"));
+        assert!(repository_list.contains("workspace grouping"));
+        assert!(!repository_list.contains("does not filter"));
     }
 
     #[test]
