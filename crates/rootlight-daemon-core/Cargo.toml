@@ -16,6 +16,8 @@ rootlight-operations = { path = "../rootlight-operations" }
 rootlight-protocol = { path = "../rootlight-protocol" }
 thiserror.workspace = true
 tokio.workspace = true
+unicode-casefold.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 rootlight-client = { path = "../rootlight-client" }

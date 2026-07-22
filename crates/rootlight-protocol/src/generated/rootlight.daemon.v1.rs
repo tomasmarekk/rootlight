@@ -49,7 +49,7 @@ pub struct RequestEnvelope {
     pub timeout_ms: ::core::option::Option<u32>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -131,6 +131,9 @@ pub mod request_envelope {
         #[prost(message, tag = "46")]
         #[allow(missing_docs)]
         AdvancedQuery(super::AdvancedQueryRequest),
+        #[prost(message, tag = "47")]
+        #[allow(missing_docs)]
+        RepositoryCatalogPage(super::RepositoryCatalogPageRequest),
     }
 }
 /// Bounded response envelope paired with one request identifier.
@@ -141,7 +144,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -223,6 +226,9 @@ pub mod response_envelope {
         #[prost(message, tag = "46")]
         #[allow(missing_docs)]
         AdvancedQuery(super::AdvancedQueryResponse),
+        #[prost(message, tag = "47")]
+        #[allow(missing_docs)]
+        RepositoryCatalogPage(super::RepositoryCatalogPageResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -971,6 +977,103 @@ pub struct RepositoryListResponse {
     #[prost(message, repeated, tag = "1")]
     #[allow(missing_docs)]
     pub repositories: ::prost::alloc::vec::Vec<RepositoryListEntry>,
+}
+/// Opaque identity of one daemon-owned immutable repository catalog snapshot.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryCatalogSnapshotId {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+}
+/// Opaque versioned continuation key for the repository catalog total order.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryCatalogSortKey {
+    #[prost(bytes = "vec", tag = "1")]
+    #[allow(missing_docs)]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+}
+/// Requests one bounded page from an immutable repository catalog snapshot.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryCatalogPageRequest {
+    #[prost(uint32, tag = "1")]
+    #[allow(missing_docs)]
+    pub page_size: u32,
+    #[prost(string, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub normalized_query: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "3")]
+    #[allow(missing_docs)]
+    pub states: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub snapshot: ::core::option::Option<RepositoryCatalogSnapshotId>,
+    #[prost(message, optional, tag = "5")]
+    #[allow(missing_docs)]
+    pub after: ::core::option::Option<RepositoryCatalogSortKey>,
+    #[prost(uint32, tag = "6")]
+    #[allow(missing_docs)]
+    pub sort_version: u32,
+    #[prost(bool, tag = "7")]
+    #[allow(missing_docs)]
+    pub states_present: bool,
+}
+/// One authoritative repository summary in a catalog snapshot.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryCatalogEntry {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub active_generation: ::core::option::Option<
+        super::super::common::v1::GenerationId,
+    >,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub display_name: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub alias: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub generation_count: u64,
+    #[prost(string, tag = "6")]
+    #[allow(missing_docs)]
+    pub state: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "7")]
+    #[allow(missing_docs)]
+    pub languages: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "8")]
+    #[allow(missing_docs)]
+    pub structural_freshness: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    #[allow(missing_docs)]
+    pub semantic_freshness: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "10")]
+    #[allow(missing_docs)]
+    pub coverage: ::prost::alloc::vec::Vec<RepositoryCoverageEntry>,
+}
+/// Returns one correlated bounded page from an immutable repository catalog.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryCatalogPageResponse {
+    #[prost(message, repeated, tag = "1")]
+    #[allow(missing_docs)]
+    pub repositories: ::prost::alloc::vec::Vec<RepositoryCatalogEntry>,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub snapshot: ::core::option::Option<RepositoryCatalogSnapshotId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub next_after: ::core::option::Option<RepositoryCatalogSortKey>,
+    #[prost(uint64, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub total_count: ::core::option::Option<u64>,
+    #[prost(bool, tag = "5")]
+    #[allow(missing_docs)]
+    pub truncated: bool,
+    #[prost(uint32, tag = "6")]
+    #[allow(missing_docs)]
+    pub sort_version: u32,
 }
 /// Requests the status of one repository known to this daemon process.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

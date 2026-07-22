@@ -81,11 +81,12 @@ const COMPATIBILITY_BASELINES: [&str; 9] = [
     STORAGE_COMPATIBILITY_BASELINES[1],
     STORAGE_COMPATIBILITY_BASELINES[2],
 ];
-const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 4] = [
+const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 5] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
     ("1.2", "protobuf/1.2/rootlight.desc"),
     ("1.3", "protobuf/1.3/rootlight.desc"),
     ("1.4", "protobuf/1.4/rootlight.desc"),
+    ("1.5", "protobuf/1.5/rootlight.desc"),
 ];
 const SCHEMA_PROVENANCE_INPUTS: [&str; 19] = [
     "Cargo.lock",
@@ -268,7 +269,7 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
     validate_storage_compatibility(&workspace_root)?;
     println!("compatibility: frozen configuration 1.0 and current 1.1 fixtures verified");
     println!("compatibility: frozen protobuf descriptor is a compatible subset");
-    println!("compatibility: daemon protocol 1.1 through 1.4 descriptors verified");
+    println!("compatibility: daemon protocol 1.1 through 1.5 descriptors verified");
     println!("compatibility: frozen protobuf wire semantics verified");
     println!("compatibility: frozen IR 1.0 and normalized IR 1.1 documents verified");
     println!("compatibility: frozen rootlight.lexical extension version 1 verified");
