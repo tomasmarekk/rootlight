@@ -2,20 +2,20 @@
   "schema": "rootlight.mcp-schema-goldens/1",
   "tools": {
     "architecture.cycles": {
-      "inputSha256": "ebe508ae4e5d19be3303d74035578cb3a0483945a32502e11ea838857b4893e1",
-      "outputSha256": "958d046f47f2bd0bb9752ba97db07e36d518ff5266da1e800d745c500c70a4c6"
+      "inputSha256": "2be1760b95e1498f6cc996bb43bfdfae49f921cbd2a406c63d65033ae8a1305d",
+      "outputSha256": "fde4344083bda4feea65620f67a091bb061f5bd4ffbdc4f8f7f866d51032ef8c"
     },
     "architecture.overview": {
       "inputSha256": "1c3427879f0d2d92db588d115127c34a37a54371e896e52dcc935ad34b1d30b6",
-      "outputSha256": "d5c11c1727145eeb16d4fabb6fe24caea265b5af5f9c53e5b92d48b944940f5a"
+      "outputSha256": "f2d967108665895402407d1010c9442822005288010f5e05b526ee67325d2803"
     },
     "change.impact": {
       "inputSha256": "ff0657f5f168b9d8e4697e0f2266369859d80dc558cd23ba8084ea825e1c03d9",
       "outputSha256": "8c5a9d7732bbba434fc2c927e905ac42d27208693d44f230b9cdb81475a59df0"
     },
     "code.dead": {
-      "inputSha256": "89d5387117dcd114f45dc6f7d34d6c84d53acec6eba8e8240fce11b08a85cd64",
-      "outputSha256": "0e8268c7e06a8d53c31a2f8ef34c102f34bce3d10309269ef2fb8f18a5f2d472"
+      "inputSha256": "d343d734b49d5af07bba861f7792a39cdb917e977f48cc13a9669ecb76fb3c03",
+      "outputSha256": "bbe760079941ac5a536d9e14bed0ea9dfc07d2a9f33fe694c6a5c657fe5b5afa"
     },
     "code.locate": {
       "inputSha256": "45be57435c343b512a6287d2da333e350841ede1035ecada0e7d783b6dec1419",
@@ -26,8 +26,8 @@
       "outputSha256": "a34932a6436b16e89cad2d9816faf7af5fea2e8596ed6e757da1413580131e96"
     },
     "flow.trace": {
-      "inputSha256": "674fe4f51b368be31db29ccb9611f0567b9c649e890b0d769e4c91e6ffde428f",
-      "outputSha256": "c2a0372769b3715f36ae40de2edbf74ff1184fee6399c7a679dcf5b8249a2bf0"
+      "inputSha256": "9f1ae3caefa1e07fda061f8b27833b25bfde82cb771de0112103fefb6c3ea2df",
+      "outputSha256": "b4825bdd5edca1ff2cb0f8fbbffedc6bba98b2d265c1fff528c9aeeee3ced3b3"
     },
     "history.compare": {
       "inputSha256": "0faab3c18fc9d3818e598663bf647cc33f9884bad6cd4d8072a07d8bb6532e67",
@@ -67,11 +67,11 @@
     },
     "symbol.explain": {
       "inputSha256": "9136d44992dbe4190c60072b5dc59eefb4d68b409e38c6188b84aff136f6cc0e",
-      "outputSha256": "3f19c641e81de6e76c78e7bebe066933907b051fdb08e456560000e26a5414a9"
+      "outputSha256": "4465c1da52937a6376be60c15f9acdf21e4e065c07c2f607261e3cf31d94c9a2"
     },
     "symbol.relationships": {
-      "inputSha256": "88617f68a3e5b20790296c469e114ea413124bb6a95fd422b147c49c73f6de46",
-      "outputSha256": "3f7bc6397981d4200f7d59478b3de0b30ce3c92a66d30b3152d06e011212f0df"
+      "inputSha256": "270f572b3e243e9118beeecc467ea097722502bc30965f367c795c67e524c60f",
+      "outputSha256": "ee500d9d63189568dfd54df125a33dbc68241ed8633c6f94b6b4c08f1cfa4d41"
     },
     "tests.select": {
       "inputSha256": "357385e04a13f10e36334827b26dada1299b829aac148fb662bc0d49e85121c5",

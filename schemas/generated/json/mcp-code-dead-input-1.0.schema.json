@@ -14,7 +14,7 @@
       ]
     },
     "entry_point_policy": {
-      "description": "Entry-point model policy.",
+      "description": "Entry-point model policy. Only `standard` is currently served.",
       "anyOf": [
         {
           "$ref": "#/$defs/EntryPointPolicy"
@@ -114,20 +114,20 @@
       ]
     },
     "EntryPointPolicy": {
-      "description": "Entry-point model policy for dead code analysis.",
+      "description": "Entry-point model policy for bounded static reachability observations.",
       "oneOf": [
         {
-          "description": "Standard mixed entry-point model.",
+          "description": "Partial mixed entry-point model currently served by `code.dead`.",
           "type": "string",
           "const": "standard"
         },
         {
-          "description": "Library export surface as entry points.",
+          "description": "Reserved library entry-point model; currently rejected as unsupported.",
           "type": "string",
           "const": "library"
         },
         {
-          "description": "Application main and registered handlers.",
+          "description": "Reserved application entry-point model; currently rejected as unsupported.",
           "type": "string",
           "const": "application"
         }

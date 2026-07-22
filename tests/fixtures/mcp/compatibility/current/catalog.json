@@ -5105,7 +5105,7 @@
             "budget": "per_request",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded exact-identifier and lexical matching",
+            "fallbackSummary": "bounded exact-identifier or indexed lexical-text matching",
             "generation": "selects_generation",
             "inputShapeHash": "bdd2589fdad0697156bc225ccf4ebdb9257ccc8f95234c35dd9ae3c52d06fdad",
             "limitations": [
@@ -5205,7 +5205,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded exact-identifier and lexical matching in one selected generation with authenticated continuation; path, structural, semantic, and documentation modes are unsupported.",
+        "description": "Use bounded exact-identifier or indexed lexical-text matching over normalized symbols in one selected generation with authenticated continuation; path, structural, semantic, and documentation modes are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -7357,7 +7357,7 @@
             "budget": "per_request",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded profiled semantic evidence for explicit stable symbol identifiers",
+            "fallbackSummary": "bounded definitions, exact relation counts, and optional compact producer provenance",
             "generation": "selects_generation",
             "inputShapeHash": "698666081b80d3b8a031dcc103b74f5281dd0caa073d42ff3ee1679c21cf41a7",
             "limitations": [
@@ -7399,7 +7399,7 @@
                 "value": "full"
               }
             ],
-            "pagination": "progressive_handle",
+            "pagination": "explicit_truncation",
             "profiles": [
               "scout",
               "analysis",
@@ -7424,7 +7424,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Return bounded profiled semantic evidence for explicit stable symbol identifiers; custom sections and full provenance are unsupported.",
+        "description": "Return bounded definitions, exact relation counts, and optional compact producer provenance for explicit stable symbol identifiers; absent identifiers are reported as unresolved, while custom sections, source previews, relation samples, full provenance, and continuation are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -7965,7 +7965,7 @@
             },
             "DetailHandle": {
               "additionalProperties": false,
-              "description": "Progressive detail handle.",
+              "description": "Reserved detail handle for a future pageable contract.",
               "properties": {
                 "handle": {
                   "description": "Opaque generation-bound handle.",
@@ -9109,7 +9109,7 @@
               "description": "`symbol.explain` result data.",
               "properties": {
                 "detail_handles": {
-                  "description": "Bounded progressive-disclosure handles.",
+                  "description": "Reserved handles; empty while this tool uses explicit truncation.",
                   "items": {
                     "$ref": "#/$defs/DetailHandle"
                   },
@@ -9337,7 +9337,7 @@
             "budget": "per_request",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded typed relationships around explicit stable symbol identifiers",
+            "fallbackSummary": "bounded static call, caller, reference, type, implementation, and import relationships",
             "generation": "selects_generation",
             "inputShapeHash": "8023c0c362d18ed970b5a0d5ff8af700c986fd9ab186663fbd1e29ba07cd201a",
             "limitations": [
@@ -9359,6 +9359,76 @@
                 "status": "unsupported_stable_error",
                 "summary": "ambiguous candidate projection is not served",
                 "value": "true"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "test relations are not served",
+                "value": "tests"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "ownership relations are not served",
+                "value": "ownership"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "service-call relations are not served",
+                "value": "service_call"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "route-call relations are not served",
+                "value": "calls_route"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "messaging relations are not served",
+                "value": "messaging"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "database-read relations are not served",
+                "value": "reads_table"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "database-write relations are not served",
+                "value": "writes_table"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "build-dependency relations are not served",
+                "value": "build_dependency"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "data-flow relations are not served",
+                "value": "data_flow"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "history relations are not served",
+                "value": "history"
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -9391,7 +9461,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Return bounded typed relationships around explicit stable symbol identifiers with authenticated continuation; custom scope and candidate projection are unsupported.",
+        "description": "Return bounded static call, caller, reference, type, implementation, and import relationships around explicit stable symbol identifiers with authenticated continuation; other relation families, custom scope, and candidate projection are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -9537,7 +9607,7 @@
               ]
             },
             "RelationKind": {
-              "description": "Typed relation families accepted by intent tools.",
+              "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
               "oneOf": [
                 {
                   "const": "calls",
@@ -9858,7 +9928,7 @@
               "type": "integer"
             },
             "relations": {
-              "description": "Requested relation families.",
+              "description": "Requested relation families.\n\nThe served set is `calls`, `called_by`, `references`, `types`,\n`implements`, and `imports`.",
               "items": {
                 "$ref": "#/$defs/RelationKind"
               },
@@ -10970,7 +11040,7 @@
               "type": "object"
             },
             "RelationKind": {
-              "description": "Typed relation families accepted by intent tools.",
+              "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
               "oneOf": [
                 {
                   "const": "calls",
@@ -11537,7 +11607,7 @@
             "budget": "per_request",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded symbol relation path tracing",
+            "fallbackSummary": "bounded paths over static call, reference, type, implementation, and import edges",
             "generation": "selects_generation",
             "inputShapeHash": "b228a48614c0069f4347b6c9ce4040a8532db4c7a17a83b6d52108d50fcb1360",
             "limitations": [
@@ -11601,6 +11671,83 @@
                 "field": "to.database_object_id",
                 "status": "unsupported_stable_error",
                 "summary": "database endpoints are not served"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "use calls with inbound direction instead",
+                "value": "called_by"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "test relations are not served",
+                "value": "tests"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "ownership relations are not served",
+                "value": "ownership"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "service-call relations are not served",
+                "value": "service_call"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "route-call relations are not served",
+                "value": "calls_route"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "messaging relations are not served",
+                "value": "messaging"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "database-read relations are not served",
+                "value": "reads_table"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "database-write relations are not served",
+                "value": "writes_table"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "build-dependency relations are not served",
+                "value": "build_dependency"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "data-flow relations are not served",
+                "value": "data_flow"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "history relations are not served",
+                "value": "history"
               }
             ],
             "pagination": "explicit_truncation",
@@ -11627,7 +11774,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded symbol relation path tracing; route, service, database, and cross-repository endpoints are unsupported.",
+        "description": "Trace bounded paths over static call, reference, type, implementation, and import edges; other relation families plus route, service, database, and cross-repository endpoints are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -11754,7 +11901,7 @@
               ]
             },
             "RelationKind": {
-              "description": "Typed relation families accepted by intent tools.",
+              "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
               "oneOf": [
                 {
                   "const": "calls",
@@ -12045,7 +12192,7 @@
               "description": "Path selection strategy."
             },
             "relations": {
-              "description": "Explicit relation allow-list.",
+              "description": "Explicit relation allow-list.\n\nThe served set is `calls`, `references`, `types`, `implements`, and\n`imports`.",
               "items": {
                 "$ref": "#/$defs/RelationKind"
               },
@@ -13170,7 +13317,7 @@
               "type": "object"
             },
             "RelationKind": {
-              "description": "Typed relation families accepted by intent tools.",
+              "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
               "oneOf": [
                 {
                   "const": "calls",
@@ -19716,7 +19863,7 @@
               "type": "object"
             },
             "RelationKind": {
-              "description": "Typed relation families accepted by intent tools.",
+              "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
               "oneOf": [
                 {
                   "const": "calls",
@@ -20030,7 +20177,7 @@
             "budget": "per_request",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded cycle detection in a selected relation projection",
+            "fallbackSummary": "bounded symbol-level cycles over static call, reference, type, implementation, and import edges",
             "generation": "selects_generation",
             "inputShapeHash": "081ec741b4821a67453a0161a900577670faf06eb2ee7c1ff8d681c743875879",
             "limitations": [
@@ -20057,6 +20204,83 @@
                 "field": "rank_by",
                 "status": "unsupported_stable_error",
                 "summary": "cycle ranking strategy is not served"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "projection.relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "cycle projection requires canonical directed edges",
+                "value": "called_by"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "projection.relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "test relations are not served",
+                "value": "tests"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "projection.relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "ownership relations are not served",
+                "value": "ownership"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "projection.relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "service-call relations are not served",
+                "value": "service_call"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "projection.relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "route-call relations are not served",
+                "value": "calls_route"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "projection.relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "messaging relations are not served",
+                "value": "messaging"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "projection.relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "database-read relations are not served",
+                "value": "reads_table"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "projection.relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "database-write relations are not served",
+                "value": "writes_table"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "projection.relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "build-dependency relations are not served",
+                "value": "build_dependency"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "projection.relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "data-flow relations are not served",
+                "value": "data_flow"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "projection.relations[]",
+                "status": "unsupported_stable_error",
+                "summary": "history relations are not served",
+                "value": "history"
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -20089,7 +20313,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded cycle detection in a selected relation projection with caller-reduced resource ceilings; custom scope and ranking are unsupported.",
+        "description": "Detect bounded symbol-level cycles over static call, reference, type, implementation, and import edges; other relation families, custom scope, and ranking are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -20138,7 +20362,7 @@
                   "type": "string"
                 },
                 "relations": {
-                  "description": "Relation families included in the projection.",
+                  "description": "Relation families included in the projection.\n\nThe served set is `calls`, `references`, `types`, `implements`, and\n`imports`.",
                   "items": {
                     "$ref": "#/$defs/RelationKind"
                   },
@@ -20261,7 +20485,7 @@
               ]
             },
             "RelationKind": {
-              "description": "Typed relation families accepted by intent tools.",
+              "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
               "oneOf": [
                 {
                   "const": "calls",
@@ -21746,7 +21970,7 @@
               "type": "object"
             },
             "RelationKind": {
-              "description": "Typed relation families accepted by intent tools.",
+              "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
               "oneOf": [
                 {
                   "const": "calls",
@@ -22155,7 +22379,7 @@
             "budget": "per_request",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded dead-code candidates with entry-point and blind-spot caveats",
+            "fallbackSummary": "bounded static reachability observations from the partial standard entry-point model",
             "generation": "selects_generation",
             "inputShapeHash": "5a0fb3d5c1812d6ab023e4764e786dac63ec294e01d06466ae5f7e4e992c9f0b",
             "limitations": [
@@ -22170,6 +22394,20 @@
                 "field": "scope",
                 "status": "unsupported_stable_error",
                 "summary": "structural scope filtering is not served"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "entry_point_policy",
+                "status": "unsupported_stable_error",
+                "summary": "library-specific entry-point resolution is not served",
+                "value": "library"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "entry_point_policy",
+                "status": "unsupported_stable_error",
+                "summary": "application-specific entry-point resolution is not served",
+                "value": "application"
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
@@ -22202,7 +22440,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Return bounded dead-code candidates with entry-point and blind-spot caveats under caller-reduced resource ceilings; custom scope is unsupported.",
+        "description": "Return bounded static reachability observations from the partial standard entry-point model with dynamic-dispatch and coverage caveats; observations do not prove runtime liveness, and custom scope or alternate entry-point policies are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -22241,21 +22479,21 @@
               "type": "object"
             },
             "EntryPointPolicy": {
-              "description": "Entry-point model policy for dead code analysis.",
+              "description": "Entry-point model policy for bounded static reachability observations.",
               "oneOf": [
                 {
                   "const": "standard",
-                  "description": "Standard mixed entry-point model.",
+                  "description": "Partial mixed entry-point model currently served by `code.dead`.",
                   "type": "string"
                 },
                 {
                   "const": "library",
-                  "description": "Library export surface as entry points.",
+                  "description": "Reserved library entry-point model; currently rejected as unsupported.",
                   "type": "string"
                 },
                 {
                   "const": "application",
-                  "description": "Application main and registered handlers.",
+                  "description": "Reserved application entry-point model; currently rejected as unsupported.",
                   "type": "string"
                 }
               ]
@@ -22537,7 +22775,7 @@
                   "$ref": "#/$defs/EntryPointPolicy"
                 }
               ],
-              "description": "Entry-point model policy."
+              "description": "Entry-point model policy. Only `standard` is currently served."
             },
             "explain": {
               "description": "Return the bounded plan without executing retrieval.",
@@ -22673,7 +22911,7 @@
             },
             "CodeDeadData": {
               "additionalProperties": false,
-              "description": "`code.dead` result data.",
+              "description": "`code.dead` static reachability result data.",
               "properties": {
                 "blind_spots": {
                   "description": "Known analysis blind spots.",
@@ -22684,7 +22922,7 @@
                   "type": "array"
                 },
                 "candidates": {
-                  "description": "Ranked dead-code candidates.",
+                  "description": "Ranked static reachability observations that require human review.",
                   "items": {
                     "$ref": "#/$defs/DeadCandidate"
                   },
@@ -22886,11 +23124,11 @@
             },
             "DeadCandidate": {
               "additionalProperties": false,
-              "description": "One dead-code candidate with evidence and caveats.",
+              "description": "One bounded static reachability observation with evidence and caveats.",
               "properties": {
                 "classification": {
                   "$ref": "#/$defs/DeadClassification",
-                  "description": "Reachability classification."
+                  "description": "Static reachability observation; never a runtime-liveness proof."
                 },
                 "confidence": {
                   "description": "Confidence from 0 through 1000.",
@@ -22945,21 +23183,21 @@
               "type": "object"
             },
             "DeadClassification": {
-              "description": "Classification confidence for a dead-code candidate.",
+              "description": "Classification of one bounded static reachability observation.",
               "oneOf": [
                 {
-                  "const": "proven_dead",
-                  "description": "Proven unreachable under the entry-point model.",
+                  "const": "no_observed_incoming_references",
+                  "description": "No incoming reference was observed in the served static relation graph.",
                   "type": "string"
                 },
                 {
-                  "const": "probable_dead",
-                  "description": "Probable dead code with high confidence.",
+                  "const": "not_observed_from_entry_points_strong_references",
+                  "description": "The partial entry-point scan did not reach a strongly referenced symbol.",
                   "type": "string"
                 },
                 {
-                  "const": "suspected_dead",
-                  "description": "Suspected dead code with moderate confidence.",
+                  "const": "not_observed_from_entry_points_weak_references",
+                  "description": "The partial entry-point scan did not reach a weakly referenced symbol.",
                   "type": "string"
                 }
               ]
@@ -22972,31 +23210,31 @@
               "type": "string"
             },
             "EntryPointPolicy": {
-              "description": "Entry-point model policy for dead code analysis.",
+              "description": "Entry-point model policy for bounded static reachability observations.",
               "oneOf": [
                 {
                   "const": "standard",
-                  "description": "Standard mixed entry-point model.",
+                  "description": "Partial mixed entry-point model currently served by `code.dead`.",
                   "type": "string"
                 },
                 {
                   "const": "library",
-                  "description": "Library export surface as entry points.",
+                  "description": "Reserved library entry-point model; currently rejected as unsupported.",
                   "type": "string"
                 },
                 {
                   "const": "application",
-                  "description": "Application main and registered handlers.",
+                  "description": "Reserved application entry-point model; currently rejected as unsupported.",
                   "type": "string"
                 }
               ]
             },
             "EntryPointSummary": {
               "additionalProperties": false,
-              "description": "Summary of the entry-point model used for reachability.",
+              "description": "Summary of the partial entry-point model used for static reachability.",
               "properties": {
                 "complete": {
-                  "description": "Whether the model is complete for the scope.",
+                  "description": "Whether the model covers every possible runtime entry point.",
                   "type": "boolean"
                 },
                 "entry_point_count": {
@@ -24122,7 +24360,7 @@
           "type": "object",
           "unevaluatedProperties": false
         },
-        "title": "Dead code"
+        "title": "Static reachability"
       },
       {
         "_meta": {

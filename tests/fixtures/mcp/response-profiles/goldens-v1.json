@@ -2679,7 +2679,7 @@
           ],
           "candidates": [
             {
-              "classification": "probable_dead",
+              "classification": "not_observed_from_entry_points_strong_references",
               "confidence": 900,
               "source_refs": [
                 {
@@ -2708,7 +2708,7 @@
           "entry_points": {
             "complete": false,
             "entry_point_count": 7,
-            "policy": "application"
+            "policy": "standard"
           },
           "false_positive_controls": [
             {
@@ -2734,8 +2734,8 @@
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 374,
-          "json_bytes": 1494,
+          "estimated_tokens": 382,
+          "json_bytes": 1526,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-code-dead-1",
@@ -2768,7 +2768,7 @@
           ],
           "candidates": [
             {
-              "classification": "probable_dead",
+              "classification": "not_observed_from_entry_points_strong_references",
               "confidence": 900,
               "source_refs": [
                 {
@@ -2830,7 +2830,7 @@
           "entry_points": {
             "complete": false,
             "entry_point_count": 7,
-            "policy": "application"
+            "policy": "standard"
           },
           "false_positive_controls": [
             {
@@ -2856,8 +2856,8 @@
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 598,
-          "json_bytes": 2391,
+          "estimated_tokens": 606,
+          "json_bytes": 2423,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-code-dead-1",
@@ -2890,7 +2890,7 @@
           ],
           "candidates": [
             {
-              "classification": "probable_dead",
+              "classification": "not_observed_from_entry_points_strong_references",
               "confidence": 900,
               "source_refs": [
                 {
@@ -2998,7 +2998,7 @@
           "entry_points": {
             "complete": false,
             "entry_point_count": 7,
-            "policy": "application"
+            "policy": "standard"
           },
           "false_positive_controls": [
             {
@@ -3024,8 +3024,8 @@
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 811,
-          "json_bytes": 3241,
+          "estimated_tokens": 819,
+          "json_bytes": 3273,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-code-dead-1",

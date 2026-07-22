@@ -71,7 +71,7 @@
       ]
     },
     "relations": {
-      "description": "Explicit relation allow-list.",
+      "description": "Explicit relation allow-list.\n\nThe served set is `calls`, `references`, `types`, `implements`, and\n`imports`.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/RelationKind"
@@ -229,7 +229,7 @@
       ]
     },
     "RelationKind": {
-      "description": "Typed relation families accepted by intent tools.",
+      "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
       "oneOf": [
         {
           "description": "Direct outbound call.",

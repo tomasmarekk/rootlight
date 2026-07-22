@@ -1077,7 +1077,7 @@
       ]
     },
     "RelationKind": {
-      "description": "Typed relation families accepted by intent tools.",
+      "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
       "oneOf": [
         {
           "description": "Direct outbound call.",

@@ -60,7 +60,7 @@
       "minimum": 0
     },
     "relations": {
-      "description": "Requested relation families.",
+      "description": "Requested relation families.\n\nThe served set is `calls`, `called_by`, `references`, `types`,\n`implements`, and `imports`.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/RelationKind"
@@ -247,7 +247,7 @@
       ]
     },
     "RelationKind": {
-      "description": "Typed relation families accepted by intent tools.",
+      "description": "Typed relation families recognized across intent tools.\n\nEach tool advertises and enforces its own supported subset.",
       "oneOf": [
         {
           "description": "Direct outbound call.",

@@ -85,7 +85,7 @@
       ]
     },
     "CodeDeadData": {
-      "description": "`code.dead` result data.",
+      "description": "`code.dead` static reachability result data.",
       "type": "object",
       "properties": {
         "blind_spots": {
@@ -97,7 +97,7 @@
           "maxItems": 32
         },
         "candidates": {
-          "description": "Ranked dead-code candidates.",
+          "description": "Ranked static reachability observations that require human review.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/DeadCandidate"
@@ -298,11 +298,11 @@
       ]
     },
     "DeadCandidate": {
-      "description": "One dead-code candidate with evidence and caveats.",
+      "description": "One bounded static reachability observation with evidence and caveats.",
       "type": "object",
       "properties": {
         "classification": {
-          "description": "Reachability classification.",
+          "description": "Static reachability observation; never a runtime-liveness proof.",
           "$ref": "#/$defs/DeadClassification"
         },
         "confidence": {
@@ -358,22 +358,22 @@
       ]
     },
     "DeadClassification": {
-      "description": "Classification confidence for a dead-code candidate.",
+      "description": "Classification of one bounded static reachability observation.",
       "oneOf": [
         {
-          "description": "Proven unreachable under the entry-point model.",
+          "description": "No incoming reference was observed in the served static relation graph.",
           "type": "string",
-          "const": "proven_dead"
+          "const": "no_observed_incoming_references"
         },
         {
-          "description": "Probable dead code with high confidence.",
+          "description": "The partial entry-point scan did not reach a strongly referenced symbol.",
           "type": "string",
-          "const": "probable_dead"
+          "const": "not_observed_from_entry_points_strong_references"
         },
         {
-          "description": "Suspected dead code with moderate confidence.",
+          "description": "The partial entry-point scan did not reach a weakly referenced symbol.",
           "type": "string",
-          "const": "suspected_dead"
+          "const": "not_observed_from_entry_points_weak_references"
         }
       ]
     },
@@ -385,31 +385,31 @@
       "pattern": "^[a-z0-9_]+$"
     },
     "EntryPointPolicy": {
-      "description": "Entry-point model policy for dead code analysis.",
+      "description": "Entry-point model policy for bounded static reachability observations.",
       "oneOf": [
         {
-          "description": "Standard mixed entry-point model.",
+          "description": "Partial mixed entry-point model currently served by `code.dead`.",
           "type": "string",
           "const": "standard"
         },
         {
-          "description": "Library export surface as entry points.",
+          "description": "Reserved library entry-point model; currently rejected as unsupported.",
           "type": "string",
           "const": "library"
         },
         {
-          "description": "Application main and registered handlers.",
+          "description": "Reserved application entry-point model; currently rejected as unsupported.",
           "type": "string",
           "const": "application"
         }
       ]
     },
     "EntryPointSummary": {
-      "description": "Summary of the entry-point model used for reachability.",
+      "description": "Summary of the partial entry-point model used for static reachability.",
       "type": "object",
       "properties": {
         "complete": {
-          "description": "Whether the model is complete for the scope.",
+          "description": "Whether the model covers every possible runtime entry point.",
           "type": "boolean"
         },
         "entry_point_count": {

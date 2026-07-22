@@ -223,7 +223,7 @@
       ]
     },
     "DetailHandle": {
-      "description": "Progressive detail handle.",
+      "description": "Reserved detail handle for a future pageable contract.",
       "type": "object",
       "properties": {
         "handle": {
@@ -1368,7 +1368,7 @@
       "type": "object",
       "properties": {
         "detail_handles": {
-          "description": "Bounded progressive-disclosure handles.",
+          "description": "Reserved handles; empty while this tool uses explicit truncation.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/DetailHandle"
