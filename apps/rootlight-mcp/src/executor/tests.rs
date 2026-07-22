@@ -2653,6 +2653,59 @@ async fn query_batch_composes_locate_subtools_under_one_pinned_generation() {
 }
 
 #[tokio::test]
+async fn query_batch_public_profiles_preserve_child_semantics() {
+    let mut semantics = Vec::new();
+
+    for profile in ["compact", "standard", "evidence"] {
+        let harness = batch_harness();
+        let call_count = Arc::clone(&harness.call_count);
+        let router = ToolRouter::new(
+            harness.executor,
+            rootlight_mcp_contract::ExposureProfile::Developer,
+        )
+        .expect("router compiles");
+        let response = router
+            .handle(
+                operating_request(json!({
+                    "name": "query.batch",
+                    "arguments": {
+                        "repository": {"repository_id": repository()},
+                        "response_profile": profile,
+                        "operations": [{
+                            "id": "find",
+                            "tool": "code.locate",
+                            "arguments": {"query": "publish", "max_results": 5}
+                        }]
+                    }
+                })),
+                cancellation(),
+            )
+            .await;
+        let HandlerResponse::Success(result) = response else {
+            panic!("{profile} query.batch returns an MCP tool result");
+        };
+
+        assert_eq!(result["isError"], false, "{profile} profile is public");
+        let content = &result["structuredContent"];
+        assert_eq!(content["data"]["batch_status"], "ok");
+        assert_eq!(content["data"]["generation_id"], json!(generation()));
+        assert_eq!(content["data"]["operation_results"][0]["status"], "ok");
+        assert_eq!(call_count.load(Ordering::Relaxed), 2);
+        semantics.push((
+            content["data"]["operation_results"][0]["id"].clone(),
+            content["data"]["operation_results"][0]["tool"].clone(),
+            content["data"]["operation_results"][0]["status"].clone(),
+            content["data"]["operation_results"][0]["data"]["matches"][0]["symbol_id"].clone(),
+        ));
+    }
+
+    assert!(
+        semantics.windows(2).all(|pair| pair[0] == pair[1]),
+        "representation profiles must not change child identity or status"
+    );
+}
+
+#[tokio::test]
 async fn query_batch_identity_survives_active_generation_race() {
     let active_generation = Arc::new(Mutex::new(generation()));
     let locate_calls = Arc::new(AtomicUsize::new(0));
@@ -6901,10 +6954,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::ContextPack,
             json!({"repository": {"repository_id": repository()}, "task": "fix a bug", "seeds": {"symbols": [symbol()]}, "token_budget": 1000, "continuation": "opaque"}),
-        ),
-        (
-            VerticalTool::QueryBatch,
-            json!({"repository": {"repository_id": repository()}, "operations": [{"id": "a", "tool": "code.locate", "arguments": {"query": "x"}}], "response_profile": "standard"}),
         ),
         (
             VerticalTool::RepoIndex,

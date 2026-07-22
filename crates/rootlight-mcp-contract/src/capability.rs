@@ -1046,7 +1046,10 @@ const QUERY_BATCH_RULES: &[CapabilityRule] = &[
     accepted_fallback("repository"),
     accepted_fallback("operations"),
     accepted_fallback("failure_policy"),
-    accepted_fallback("response_profile"),
+    implemented(
+        "response_profile",
+        "propagates compact, standard, or evidence representation to compatible child tools",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -1072,16 +1075,6 @@ const QUERY_BATCH_RULES: &[CapabilityRule] = &[
     implemented(
         "operations[].local_budget.timeout_ms",
         "bounds every child call by the lower local deadline",
-    ),
-    unsupported_value(
-        "response_profile",
-        "evidence",
-        "only compact response projection is served",
-    ),
-    unsupported_value(
-        "response_profile",
-        "standard",
-        "only compact response projection is served",
     ),
 ];
 
@@ -1260,13 +1253,18 @@ const fn response_profile_support(tool: McpTool) -> ResponseProfileSupport {
         | McpTool::QueryAdvanced => ResponseProfileSupport::Fixed {
             representation: ResponseProfile::Compact,
         },
-        McpTool::RepoStatus | McpTool::RepoList | McpTool::SourceRead | McpTool::QueryBatch => {
+        McpTool::RepoStatus | McpTool::RepoList | McpTool::SourceRead => {
             ResponseProfileSupport::Selectable {
                 wire_field: ResponseProfileField::ResponseProfile,
                 supported: COMPACT_RESPONSE_PROFILES,
                 default: ResponseProfile::Compact,
             }
         }
+        McpTool::QueryBatch => ResponseProfileSupport::Selectable {
+            wire_field: ResponseProfileField::ResponseProfile,
+            supported: ANALYTICAL_RESPONSE_PROFILES,
+            default: ResponseProfile::Compact,
+        },
         McpTool::HistoryCompare => ResponseProfileSupport::Selectable {
             wire_field: ResponseProfileField::Profile,
             supported: COMPACT_RESPONSE_PROFILES,
@@ -1637,7 +1635,7 @@ mod tests {
                 McpTool::QueryBatch,
                 Selectable {
                     wire_field: CanonicalResponseProfileField,
-                    supported: COMPACT_RESPONSE_PROFILES,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
                     default: Compact,
                 },
             ),
