@@ -584,6 +584,7 @@ fn json_pointer_child(parent: &str, segment: &str) -> String {
 
 impl ToolContract {
     fn compile(tool: VerticalTool) -> Result<Self, ToolRegistryError> {
+        let catalog_tool = catalog_tool(tool);
         let input_schema =
             parse_object_schema(tool, "input", tool.input_schema_json()).map_err(|source| {
                 ToolRegistryError::ParseSchema {
@@ -613,21 +614,21 @@ impl ToolContract {
         Ok(Self {
             tool,
             definition: ToolDefinition {
-                name: tool.name(),
-                title: tool.title(),
-                description: tool.description(),
+                name: catalog_tool.name(),
+                title: catalog_tool.title(),
+                description: catalog_tool.description(),
                 input_schema,
                 output_schema,
                 annotations: ToolAnnotations {
-                    read_only_hint: tool.read_only(),
-                    destructive_hint: tool.destructive(),
-                    idempotent_hint: tool.idempotent(),
+                    read_only_hint: catalog_tool.read_only(),
+                    destructive_hint: catalog_tool.destructive(),
+                    idempotent_hint: catalog_tool.idempotent(),
                     open_world_hint: false,
                 },
                 execution: ToolExecution {
                     task_support: "forbidden",
                 },
-                metadata: tool_metadata(tool),
+                metadata: tool_metadata(catalog_tool),
             },
             input_validator,
             output_validator,
@@ -664,16 +665,19 @@ struct ToolExecution {
     task_support: &'static str,
 }
 
-fn tool_metadata(tool: VerticalTool) -> Map<String, Value> {
-    let catalog_tool = McpTool::ALL
+fn catalog_tool(tool: VerticalTool) -> McpTool {
+    McpTool::ALL
         .iter()
         .copied()
         .find(|candidate| candidate.name() == tool.name())
-        .expect("every vertical tool has a catalog capability");
+        .expect("every vertical tool has a catalog entry")
+}
+
+fn tool_metadata(tool: McpTool) -> Map<String, Value> {
     let mut metadata = Map::new();
     metadata.insert(
         DISCOVERY_METADATA_KEY.to_owned(),
-        serde_json::to_value(discovery_metadata(catalog_tool))
+        serde_json::to_value(discovery_metadata(tool))
             .expect("built-in capability metadata serializes"),
     );
     metadata

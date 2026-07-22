@@ -111,90 +111,6 @@ impl VerticalTool {
         }
     }
 
-    /// Static source-free title intended for clients.
-    #[must_use]
-    pub const fn title(self) -> &'static str {
-        match self {
-            Self::RepoIndex => "Index repository",
-            Self::RepoStatus => "Inspect repository",
-            Self::RepoList => "List repositories",
-            Self::OperationStatus => "Inspect operation",
-            Self::CodeLocate => "Locate code",
-            Self::SymbolExplain => "Explain symbol",
-            Self::SymbolRelationships => "Symbol relationships",
-            Self::FlowTrace => "Trace flow",
-            Self::ChangeImpact => "Change impact",
-            Self::TestsSelect => "Select tests",
-            Self::ArchitectureOverview => "Architecture overview",
-            Self::ArchitectureCycles => "Architecture cycles",
-            Self::CodeDead => "Dead code",
-            Self::HistoryCompare => "Compare history",
-            Self::PlanChange => "Plan change",
-            Self::ContextPack => "Context pack",
-            Self::SourceRead => "Read source",
-            Self::QueryAdvanced => "Advanced query",
-            Self::QueryBatch => "Batch query",
-        }
-    }
-
-    /// Static source-free description intended for models and clients.
-    #[must_use]
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::RepoIndex => {
-                "Create or update one local repository generation and return its operation handle."
-            }
-            Self::RepoStatus => {
-                "Inspect repository state, generation freshness, coverage, and active operations."
-            }
-            Self::RepoList => "List registered repositories and workspaces.",
-            Self::OperationStatus => "Read or cancel one known long-running Rootlight operation.",
-            Self::CodeLocate => {
-                "Find bounded, generation-pinned code and file matches by exact identifier or lexical text."
-            }
-            Self::SymbolExplain => {
-                "Return bounded semantic evidence for stable symbol identifiers."
-            }
-            Self::SymbolRelationships => {
-                "Get bounded typed callers, callees, references, types, implementations, dependencies, tests, or ownership around symbols."
-            }
-            Self::FlowTrace => {
-                "Trace bounded paths through calls, data flow, services, messaging, build, or dependency relations."
-            }
-            Self::ChangeImpact => {
-                "Map a provided change set to affected symbols, dependents, services, risks, and tests."
-            }
-            Self::TestsSelect => {
-                "Rank tests relevant to symbols or changes with rationale and uncertainty."
-            }
-            Self::ArchitectureOverview => {
-                "Produce a file-granularity architecture map of modules and packages, with hotspots."
-            }
-            Self::ArchitectureCycles => {
-                "Find and explain dependency cycles in a selected relation projection."
-            }
-            Self::CodeDead => {
-                "Find dead or unreachable candidates with entry-point and coverage caveats."
-            }
-            Self::HistoryCompare => "Compare two pinned generations structurally.",
-            Self::PlanChange => {
-                "Produce an ordered change plan with affected symbols, files, tests, risks, and verification steps."
-            }
-            Self::ContextPack => {
-                "Assemble minimal task-specific symbol evidence under a token budget."
-            }
-            Self::SourceRead => {
-                "Read exact bounded ranges from a pinned source snapshot as untrusted repository data."
-            }
-            Self::QueryAdvanced => {
-                "Execute a bounded expert query over the documented safe query AST."
-            }
-            Self::QueryBatch => {
-                "Execute up to sixteen independent or dependency-linked read operations under one pinned generation."
-            }
-        }
-    }
-
     /// Checked JSON Schema 2020-12 input artifact for this tool.
     #[must_use]
     pub const fn input_schema_json(self) -> &'static str {
@@ -321,28 +237,6 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-query-batch-output-1.0.schema.json"
             ),
         }
-    }
-
-    /// Whether the tool only reads already published state.
-    ///
-    /// `operation.status` can execute a cancel action, so it is conservatively
-    /// reported as not read-only even though a pure status read has no side
-    /// effect; clients must never treat a cancellation-capable call as read-only.
-    #[must_use]
-    pub const fn read_only(self) -> bool {
-        !matches!(self, Self::RepoIndex | Self::OperationStatus)
-    }
-
-    /// Whether repeating the same admitted request has the same intended effect.
-    #[must_use]
-    pub const fn idempotent(self) -> bool {
-        true
-    }
-
-    /// Whether the tool performs a destructive update.
-    #[must_use]
-    pub const fn destructive(self) -> bool {
-        false
     }
 }
 

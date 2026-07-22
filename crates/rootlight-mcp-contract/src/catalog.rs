@@ -128,55 +128,61 @@ impl McpTool {
     pub const fn description(self) -> &'static str {
         match self {
             Self::RepoIndex => {
-                "Create or update one local repository generation and return its operation handle."
+                "Use bounded process-local generation creation and return its operation handle; durable publication is inactive."
             }
             Self::RepoStatus => {
-                "Inspect repository state, generation freshness, coverage, and active operations."
+                "Use bounded process-local status with the active generation and compact coverage; operation projection and freshness gates are unsupported."
             }
-            Self::RepoList => "List registered repositories and workspaces.",
-            Self::OperationStatus => "Read or cancel one known long-running Rootlight operation.",
+            Self::RepoList => {
+                "Use bounded catalog listing with authenticated continuation; query text is cursor-bound but does not filter opaque repository identities."
+            }
+            Self::OperationStatus => {
+                "Read or request cancellation of one known long-running Rootlight operation."
+            }
             Self::CodeLocate => {
-                "Find bounded, generation-pinned code and file matches by exact identifier or lexical text."
+                "Use bounded exact-identifier and lexical matching in one selected generation; path, structural, semantic, documentation, and continuation modes are unsupported."
             }
             Self::SymbolExplain => {
-                "Return bounded semantic evidence for stable symbol identifiers."
+                "Return bounded compact semantic evidence for explicit stable symbol identifiers; custom sections and full provenance are unsupported."
             }
             Self::SymbolRelationships => {
-                "Get bounded typed callers, callees, references, types, implementations, dependencies, tests, or ownership around symbols."
+                "Return bounded typed relationships around explicit stable symbol identifiers; custom scope, candidate projection, and continuation are unsupported."
             }
             Self::FlowTrace => {
-                "Trace bounded paths through calls, data flow, services, messaging, build, or dependency relations."
+                "Use bounded symbol relation path tracing; route, service, database, and cross-repository endpoints are unsupported."
             }
             Self::ChangeImpact => {
-                "Map a provided change set to affected symbols, dependents, services, risks, and tests."
+                "Use bounded explicit symbol-or-path change mapping to dependents, risks, and optional tests; working-tree and revision-range resolution are unsupported."
             }
             Self::TestsSelect => {
-                "Rank tests relevant to symbols or changes with rationale and uncertainty."
+                "Use bounded test ranking from explicit symbol seeds with rationale; path, change, build-target, framework, and execution-budget inputs are unsupported."
             }
             Self::ArchitectureOverview => {
-                "Produce a file-granularity architecture map of modules and packages, with hotspots."
+                "Use a bounded file-granularity architecture map with optional hotspots; module, package, service, data, ownership, community, and build views are unsupported."
             }
             Self::ArchitectureCycles => {
-                "Find and explain dependency cycles in a selected relation projection."
+                "Use bounded cycle detection in a selected relation projection; custom scope, ranking, budgets, and expanded profiles are unsupported."
             }
             Self::CodeDead => {
-                "Find dead or unreachable candidates with entry-point and coverage caveats."
+                "Return bounded dead-code candidates with entry-point and blind-spot caveats; custom scope, budgets, and expanded profiles are unsupported."
             }
-            Self::HistoryCompare => "Compare two pinned generations structurally.",
+            Self::HistoryCompare => {
+                "Use bounded structural comparison of two explicit retained generation identifiers; Git revision selectors are unsupported."
+            }
             Self::PlanChange => {
-                "Produce an ordered change plan with affected symbols, files, tests, risks, and verification steps."
+                "Use bounded change planning from an explicit objective and targets; change-context resolution, user constraints, budgets, and expanded profiles are unsupported."
             }
             Self::ContextPack => {
-                "Assemble minimal task-specific symbol evidence under a token budget."
+                "Use bounded evidence assembly from explicit symbol or file identifiers under a token budget; path, route, change, located-result, and plan seeds are unsupported."
             }
             Self::SourceRead => {
-                "Read exact bounded ranges from a pinned source snapshot as untrusted repository data."
+                "Read bounded source ranges from pinned source references as untrusted data; direct file selectors, custom byte bounds, merging, and base64 output are unsupported."
             }
             Self::QueryAdvanced => {
-                "Execute a bounded expert query over the documented safe query AST."
+                "Use a bounded safe-AST query with enforced cost, row, and depth limits; bound parameters and continuation are unsupported."
             }
             Self::QueryBatch => {
-                "Execute up to sixteen dependency-linked reads under one active generation pinned once; explicit historical selection and complete accounting are fallback-limited."
+                "Use bounded active-generation batch dispatch for up to sixteen eligible reads with shared child accounting; explicit historical selection and complete overhead accounting are fallback-limited."
             }
         }
     }
@@ -194,7 +200,7 @@ impl McpTool {
     /// Whether repeating the same admitted request has the same intended effect.
     #[must_use]
     pub const fn idempotent(self) -> bool {
-        true
+        !matches!(self, Self::RepoIndex)
     }
 
     /// Whether the tool performs a destructive update.
@@ -447,6 +453,17 @@ mod tests {
     }
 
     #[test]
+    fn indexing_is_not_advertised_as_idempotent() {
+        assert!(!McpTool::RepoIndex.idempotent());
+        assert!(McpTool::OperationStatus.idempotent());
+        for tool in McpTool::ALL {
+            if !matches!(tool, McpTool::RepoIndex) {
+                assert!(tool.idempotent(), "{} should be idempotent", tool.name());
+            }
+        }
+    }
+
+    #[test]
     fn no_tool_is_destructive() {
         for tool in McpTool::ALL {
             assert!(
@@ -458,14 +475,17 @@ mod tests {
     }
 
     #[test]
-    fn descriptions_do_not_overclaim_unavailable_capabilities() {
-        // Bounded first-slice tools must not advertise capabilities the active
-        // runtime rejects as unsupported; overbroad discovery drives unsupported
-        // claims. Keep these phrases in sync with the executor slices.
+    fn descriptions_do_not_retain_the_known_overclaims() {
         let overclaims: &[(McpTool, &[&str])] = &[
             (McpTool::CodeLocate, &["path, or structure", "text, path"]),
-            (McpTool::ChangeImpact, &["working-tree", "Git change set"]),
-            (McpTool::ArchitectureOverview, &["data stores", "routes"]),
+            (
+                McpTool::ChangeImpact,
+                &["Map a provided change set", "Git change set"],
+            ),
+            (
+                McpTool::ArchitectureOverview,
+                &["modules and packages", "data stores", "routes"],
+            ),
             (
                 McpTool::HistoryCompare,
                 &["revisions or generations", "semantically"],

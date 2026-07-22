@@ -1119,26 +1119,42 @@ const fn input_shape_hash(tool: McpTool) -> &'static str {
 
 const fn tool_fallback_summary(tool: McpTool) -> &'static str {
     match tool {
-        McpTool::RepoIndex => "bounded generation creation; durable publication inactive",
-        McpTool::RepoStatus => "bounded process-local status; active generation returned",
+        McpTool::RepoIndex => "bounded process-local generation creation",
+        McpTool::RepoStatus => {
+            "bounded process-local status with the active generation and compact coverage"
+        }
         McpTool::RepoList => "bounded catalog listing with authenticated continuation",
         McpTool::OperationStatus => "bounded operation read and cancel",
-        McpTool::CodeLocate => "bounded structural and lexical matching",
-        McpTool::SymbolExplain => "bounded semantic evidence",
-        McpTool::SymbolRelationships => "bounded typed relationships",
-        McpTool::FlowTrace => "bounded path tracing",
-        McpTool::ChangeImpact => "bounded change mapping",
-        McpTool::TestsSelect => "bounded test ranking",
-        McpTool::ArchitectureOverview => "bounded architecture map",
-        McpTool::ArchitectureCycles => "bounded cycle detection",
-        McpTool::CodeDead => "bounded dead-code candidates",
-        McpTool::HistoryCompare => "bounded structural comparison",
-        McpTool::PlanChange => "bounded change planning",
-        McpTool::ContextPack => "bounded evidence assembly under a token budget",
-        McpTool::SourceRead => "bounded source ranges as untrusted data",
-        McpTool::QueryAdvanced => "bounded safe-AST query",
+        McpTool::CodeLocate => "bounded exact-identifier and lexical matching",
+        McpTool::SymbolExplain => {
+            "bounded compact semantic evidence for explicit stable symbol identifiers"
+        }
+        McpTool::SymbolRelationships => {
+            "bounded typed relationships around explicit stable symbol identifiers"
+        }
+        McpTool::FlowTrace => "bounded symbol relation path tracing",
+        McpTool::ChangeImpact => "bounded explicit symbol-or-path change mapping",
+        McpTool::TestsSelect => "bounded test ranking from explicit symbol seeds",
+        McpTool::ArchitectureOverview => {
+            "bounded file-granularity architecture map with optional hotspots"
+        }
+        McpTool::ArchitectureCycles => "bounded cycle detection in a selected relation projection",
+        McpTool::CodeDead => "bounded dead-code candidates with entry-point and blind-spot caveats",
+        McpTool::HistoryCompare => {
+            "bounded structural comparison of two explicit retained generation identifiers"
+        }
+        McpTool::PlanChange => "bounded change planning from an explicit objective and targets",
+        McpTool::ContextPack => {
+            "bounded evidence assembly from explicit symbol or file identifiers under a token budget"
+        }
+        McpTool::SourceRead => {
+            "bounded source ranges from pinned source references as untrusted data"
+        }
+        McpTool::QueryAdvanced => {
+            "bounded safe-ast query with enforced cost, row, and depth limits"
+        }
         McpTool::QueryBatch => {
-            "bounded active-generation dispatch with shared child accounting; historical selection and complete accounting remain fallback-limited"
+            "bounded active-generation batch dispatch for up to sixteen eligible reads with shared child accounting"
         }
     }
 }
