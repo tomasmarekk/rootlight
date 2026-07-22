@@ -105,6 +105,10 @@ enum FakeOutcome {
     PlanChange(Result<PlanChangePortResponse, ClientPortError>),
     HistoryCompare(Result<HistoryComparePortResponse, ClientPortError>),
     QueryAdvanced(Result<QueryAdvancedPortResponse, ClientPortError>),
+    Batch {
+        status: Result<RepositoryStatus, ClientPortError>,
+        locate: Result<CodeLocatePortResponse, ClientPortError>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +206,7 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::CodeLocate(request));
         let outcome = match &self.outcome {
             FakeOutcome::CodeLocate(outcome) => outcome.clone(),
+            FakeOutcome::Batch { locate, .. } => locate.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -254,6 +259,7 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::RepositoryStatus(request));
         let outcome = match &self.outcome {
             FakeOutcome::RepositoryStatus(outcome) => outcome.clone(),
+            FakeOutcome::Batch { status, .. } => status.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -704,6 +710,31 @@ fn locate_response() -> CodeLocatePortResponse {
     )
 }
 
+fn repository_status_response() -> RepositoryStatus {
+    RepositoryStatus {
+        repository_id: repository(),
+        active_generation: generation(),
+        parent_generation: Some(parent_generation()),
+        structural_freshness: "current".to_owned(),
+        semantic_freshness: "current".to_owned(),
+        state: "ready".to_owned(),
+        coverage: vec![RepositoryCoverageEntry {
+            language: "rust".to_owned(),
+            tier: "tier_c".to_owned(),
+            status: "complete".to_owned(),
+            discovered_files: 1,
+            indexed_files: 1,
+        }],
+    }
+}
+
+fn batch_harness() -> Harness {
+    Harness::new(FakeOutcome::Batch {
+        status: Ok(repository_status_response()),
+        locate: Ok(locate_response()),
+    })
+}
+
 fn explain_response(definition: client::SourceReference) -> SymbolExplainPortResponse {
     SymbolExplainPortResponse::new(
         client::SymbolExplain {
@@ -1075,7 +1106,7 @@ async fn maps_code_locate_with_trust_generation_and_deterministic_output() {
 
 #[tokio::test]
 async fn query_batch_composes_locate_subtools_under_one_pinned_generation() {
-    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+    let harness = batch_harness();
     let arguments = json!({
         "repository": {"repository_id": repository()},
         "generation": "active",
@@ -1102,12 +1133,12 @@ async fn query_batch_composes_locate_subtools_under_one_pinned_generation() {
             .iter()
             .all(|result| result.status == BatchOperationStatus::Ok)
     );
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 2);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 3);
 }
 
 #[tokio::test]
 async fn query_batch_enforces_aggregate_budget_across_the_app_boundary() {
-    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+    let harness = batch_harness();
     let error = execute(
         &harness.executor,
         VerticalTool::QueryBatch,
@@ -1128,7 +1159,11 @@ async fn query_batch_enforces_aggregate_budget_across_the_app_boundary() {
         error.public_error().map(PublicError::code),
         Some(ErrorCode::BudgetExceeded)
     );
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        3,
+        "status pinning and both observed children cross the client port"
+    );
 }
 
 #[tokio::test]
@@ -1168,7 +1203,7 @@ async fn batch_adapter_propagates_cancellation_before_client_dispatch() {
 
 #[tokio::test]
 async fn query_batch_resolves_typed_bindings_between_operations() {
-    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+    let harness = batch_harness();
     let arguments = json!({
         "repository": {"repository_id": repository()},
         "generation": "active",
@@ -1200,7 +1235,7 @@ async fn query_batch_resolves_typed_bindings_between_operations() {
 
 #[tokio::test]
 async fn query_batch_skips_dependents_of_an_unavailable_subtool() {
-    let harness = Harness::new(FakeOutcome::CodeLocate(Ok(locate_response())));
+    let harness = batch_harness();
     let arguments = json!({
         "repository": {"repository_id": repository()},
         "generation": "active",
@@ -1233,7 +1268,117 @@ async fn query_batch_skips_dependents_of_an_unavailable_subtool() {
         Some(BatchOperationStatus::SkippedDependency)
     );
     // Only the code.locate operation reaches the port.
-    assert_eq!(harness.call_count.load(Ordering::Relaxed), 1);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn query_batch_keeps_invalid_binding_inside_the_operation_result() {
+    let harness = batch_harness();
+    let output = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
+                {"id": "refine", "tool": "code.locate", "depends_on": ["find"], "arguments": {
+                    "query": {"$from": "find", "pointer": "/data/matches/99/symbol_id"}
+                }}
+            ]
+        }),
+    )
+    .await
+    .expect("a runtime binding failure stays inside the batch envelope");
+    let output: QueryBatchOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch success envelope");
+    };
+    assert_eq!(output.data.batch_status, BatchStatus::Partial);
+    assert_eq!(
+        output.data.operation_results[1]
+            .error
+            .as_ref()
+            .map(PublicError::code),
+        Some(ErrorCode::BindingInvalid)
+    );
+}
+
+#[tokio::test]
+async fn query_batch_classifies_bound_value_type_before_subtool_execution() {
+    let harness = batch_harness();
+    let output = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "find", "tool": "code.locate", "arguments": {"query": "publish"}},
+                {"id": "refine", "tool": "code.locate", "depends_on": ["find"], "arguments": {
+                    "query": {"$from": "find", "pointer": "/data/matches"}
+                }}
+            ]
+        }),
+    )
+    .await
+    .expect("a bound type failure stays inside the batch envelope");
+    let output: QueryBatchOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch success envelope");
+    };
+    assert_eq!(output.data.batch_status, BatchStatus::Partial);
+    assert_eq!(
+        output.data.operation_results[1]
+            .error
+            .as_ref()
+            .map(PublicError::code),
+        Some(ErrorCode::BindingTypeMismatch)
+    );
+    assert_eq!(
+        harness
+            .calls
+            .lock()
+            .expect("fake call recorder is not poisoned")
+            .iter()
+            .filter(|call| matches!(call, ObservedCall::CodeLocate(_)))
+            .count(),
+        1,
+        "the type-invalid dependent operation must not cross the client port"
+    );
+}
+
+#[tokio::test]
+async fn query_batch_keeps_all_subtool_errors_inside_a_pinned_envelope() {
+    let harness = batch_harness();
+    let output = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "operations": [
+                {"id": "rels", "tool": "symbol.relationships", "arguments": {}}
+            ]
+        }),
+    )
+    .await
+    .expect("all subtool failures still produce a batch envelope");
+    let output: QueryBatchOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch success envelope");
+    };
+    assert_eq!(output.data.batch_status, BatchStatus::Error);
+    assert_eq!(output.data.generation_id, generation());
+    assert_eq!(
+        output.data.operation_results[0]
+            .error
+            .as_ref()
+            .map(PublicError::code),
+        Some(ErrorCode::UnsupportedCapability)
+    );
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        1,
+        "only generation pinning reaches the client port"
+    );
 }
 
 #[tokio::test]
@@ -1922,7 +2067,7 @@ async fn repo_list_rejects_a_malformed_cursor() {
 }
 
 #[tokio::test]
-async fn executor_maps_malformed_arguments_to_invalid_argument_not_internal() {
+async fn executor_maps_malformed_argument_types_to_type_mismatch() {
     let harness = Harness::new(FakeOutcome::RepositoryList(Ok(RepositoryList {
         repositories: vec![],
     })));
@@ -1938,7 +2083,7 @@ async fn executor_maps_malformed_arguments_to_invalid_argument_not_internal() {
         .expect("malformed arguments are a checked public error");
     assert_eq!(
         public.code(),
-        ErrorCode::InvalidArgument,
+        ErrorCode::TypeMismatch,
         "argument decoding failures are client-correctable, not internal"
     );
 }
@@ -2952,6 +3097,86 @@ async fn query_advanced_rejects_a_paging_cursor() {
     assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
     assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn query_advanced_distinguishes_cost_limit_from_capability_and_budget() {
+    let harness = Harness::new(FakeOutcome::QueryAdvanced(Err(ClientPortError::Executor)));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryAdvanced,
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": {"op": "scan", "entity": "function"},
+            "cost_limit": 1
+        }),
+    )
+    .await
+    .expect_err("a tight cost ceiling is rejected before the port");
+    let public = error
+        .public_error()
+        .expect("cost rejection is a checked public error");
+    assert_eq!(public.code(), ErrorCode::CostLimit);
+    assert_ne!(public.code(), ErrorCode::BudgetExceeded);
+    assert_ne!(public.code(), ErrorCode::UnsupportedCapability);
+    assert!(
+        public
+            .details()
+            .contains_key(&DetailKey::parse("estimated_cost").expect("static key is valid"))
+    );
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn exhausted_budget_preserves_its_domain_code_across_the_client_port() {
+    let budget = PublicError::builder(
+        ErrorCode::BudgetExceeded,
+        error_definition(ErrorCode::BudgetExceeded).message,
+    )
+    .detail(
+        DetailKey::parse("budget_limit").expect("static key is valid"),
+        PublicValue::Unsigned(100),
+    )
+    .next_action(NextAction::CorrectField {
+        field: DetailKey::parse("budget").expect("static key is valid"),
+    })
+    .build()
+    .expect("budget error fixture is checked");
+    let harness = Harness::new(FakeOutcome::QueryAdvanced(Err(ClientPortError::Public(
+        Box::new(budget),
+    ))));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryAdvanced,
+        json!({
+            "repository": {"repository_id": repository()},
+            "query": {"op": "scan", "entity": "function"}
+        }),
+    )
+    .await
+    .expect_err("the daemon budget rejection crosses the MCP adapter");
+    assert_eq!(
+        error.public_error().map(PublicError::code),
+        Some(ErrorCode::BudgetExceeded)
+    );
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn capability_option_data_scope_and_budget_failures_remain_distinct() {
+    for code in [
+        ErrorCode::UnsupportedCapability,
+        ErrorCode::InvalidArgument,
+        ErrorCode::IncompleteCoverage,
+        ErrorCode::CostLimit,
+        ErrorCode::BudgetExceeded,
+    ] {
+        let public = PublicError::builder(code, error_definition(code).message)
+            .build()
+            .expect("registry fixture builds");
+        let mapped = map_port_error(ClientPortError::Public(Box::new(public)));
+        assert_eq!(mapped.public_error().map(PublicError::code), Some(code));
+    }
 }
 
 #[tokio::test]

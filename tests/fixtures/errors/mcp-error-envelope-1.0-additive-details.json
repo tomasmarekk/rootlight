@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "error": {
+    "code": "INVALID_CURSOR",
+    "message": "pagination cursor is invalid or expired",
+    "retryable": false,
+    "retry_after_ms": null,
+    "repository": null,
+    "operation": null,
+    "generation": null,
+    "details": {
+      "cursor_reason": {"type":"label","value":"expired"},
+      "key_id": {"type":"unsigned","value":7}
+    },
+    "next_actions": [{"action":"restart_enumeration"}]
+  }
+}

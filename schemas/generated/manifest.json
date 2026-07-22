@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "90b3808bc431005cdb138c22cb024195cbdb6b8f8f2312275b87848032fb3758"
+      "blake3": "021f75aaf7eecdd4597643401aa204825acf30cd78aca65fb76dc75188b7165b"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
@@ -22,7 +22,7 @@
     },
     {
       "path": "crates/rootlight-error/src/lib.rs",
-      "blake3": "45a7de4cdc3c56027763a7c4b2b0b285f44e9bd6d71a857253ba36e48d1a79d7"
+      "blake3": "4ecd93cdb27cc0fd31f2db743669b3a8d2877e1c7ef55624989134cb011a1783"
     },
     {
       "path": "crates/rootlight-ids/src/lib.rs",
@@ -58,7 +58,7 @@
     },
     {
       "path": "crates/rootlight-mcp-contract/src/lib.rs",
-      "blake3": "b1b30998975d8bdd475c5c49e86749f0c91cdd56492a55a4eec2a5f48142c5e3"
+      "blake3": "fe7c649f9d3df963bb12f2fa085eb4681560bc77e56efb4882747cf1bcf4e2ad"
     },
     {
       "path": "crates/rootlight-mcp-contract/src/repository.rs",

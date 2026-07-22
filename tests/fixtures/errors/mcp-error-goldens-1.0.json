@@ -1,0 +1,103 @@
+{
+  "schema_version": "1.0",
+  "envelopes": [
+    {
+      "schema_version": "1.0",
+      "error": {
+        "code": "INVALID_CURSOR",
+        "message": "pagination cursor is invalid or expired",
+        "retryable": false,
+        "retry_after_ms": null,
+        "repository": null,
+        "operation": null,
+        "generation": null,
+        "details": {"cursor_reason":{"type":"label","value":"expired"}},
+        "next_actions": [{"action":"restart_enumeration"}]
+      }
+    },
+    {
+      "schema_version": "1.0",
+      "error": {
+        "code": "TYPE_MISMATCH",
+        "message": "tool argument type does not match",
+        "retryable": false,
+        "retry_after_ms": null,
+        "repository": null,
+        "operation": null,
+        "generation": null,
+        "details": {"expected_type":{"type":"label","value":"string"},"actual_type":{"type":"label","value":"array"}},
+        "next_actions": [{"action":"correct_field","field":"arguments"}]
+      }
+    },
+    {
+      "schema_version": "1.0",
+      "error": {
+        "code": "BUDGET_EXCEEDED",
+        "message": "request budget is exhausted",
+        "retryable": false,
+        "retry_after_ms": null,
+        "repository": null,
+        "operation": null,
+        "generation": null,
+        "details": {"budget_limit":{"type":"unsigned","value":100}},
+        "next_actions": [{"action":"correct_field","field":"budget"}]
+      }
+    },
+    {
+      "schema_version": "1.0",
+      "error": {
+        "code": "COST_LIMIT",
+        "message": "query cost limit was exceeded",
+        "retryable": false,
+        "retry_after_ms": null,
+        "repository": null,
+        "operation": null,
+        "generation": null,
+        "details": {"estimated_cost":{"type":"unsigned","value":101},"cost_limit":{"type":"unsigned","value":1}},
+        "next_actions": [{"action":"correct_field","field":"cost_limit"}]
+      }
+    },
+    {
+      "schema_version": "1.0",
+      "error": {
+        "code": "OPERATOR_FORBIDDEN",
+        "message": "query operator is forbidden",
+        "retryable": false,
+        "retry_after_ms": null,
+        "repository": null,
+        "operation": null,
+        "generation": null,
+        "details": {"operator":{"type":"label","value":"execute"}},
+        "next_actions": [{"action":"correct_field","field":"query"}]
+      }
+    },
+    {
+      "schema_version": "1.0",
+      "error": {
+        "code": "BINDING_INVALID",
+        "message": "batch binding is invalid",
+        "retryable": false,
+        "retry_after_ms": null,
+        "repository": null,
+        "operation": null,
+        "generation": null,
+        "details": {"binding_reason":{"type":"label","value":"missing_pointer"}},
+        "next_actions": [{"action":"correct_field","field":"arguments"}]
+      }
+    },
+    {
+      "schema_version": "1.0",
+      "error": {
+        "code": "BINDING_TYPE_MISMATCH",
+        "message": "batch binding type does not match",
+        "retryable": false,
+        "retry_after_ms": null,
+        "repository": null,
+        "operation": null,
+        "generation": null,
+        "details": {"expected_type":{"type":"label","value":"string"},"actual_type":{"type":"label","value":"array"}},
+        "next_actions": [{"action":"correct_field","field":"arguments"}]
+      }
+    }
+  ]
+}

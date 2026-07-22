@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 
 pub use catalog::{ExposureProfile, McpTool};
 pub use rootlight_error::{
-    DetailKey, ErrorCode, NextAction, PublicError, PublicErrorBuildError, SafeLabel,
+    DetailKey, ErrorCode, NextAction, PublicError, PublicErrorBuildError, PublicValue, SafeLabel,
+    error_definition,
 };
 pub use vertical::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, GenerationSelector,

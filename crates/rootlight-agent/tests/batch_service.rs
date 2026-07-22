@@ -170,7 +170,10 @@ fn input(operations: Vec<BatchOperation>, budget: ResponseBudget) -> QueryBatchI
 
 fn errors() -> BatchPublicErrors {
     BatchPublicErrors::new(
-        PublicError::builder(ErrorCode::InvalidArgument, "invalid batch")
+        PublicError::builder(ErrorCode::BindingInvalid, "invalid binding")
+            .build()
+            .expect("static error is valid"),
+        PublicError::builder(ErrorCode::BindingTypeMismatch, "binding type mismatch")
             .build()
             .expect("static error is valid"),
         PublicError::builder(ErrorCode::Internal, "child failed")
@@ -338,5 +341,90 @@ async fn mismatched_child_generation_fails_closed() {
             .execute(port, input, repository(), TestCancellation(false), errors(),)
             .await,
         Err(BatchOrchestrationError::InvalidResponse)
+    );
+}
+
+#[tokio::test]
+async fn all_child_errors_preserve_complete_per_operation_outcome() {
+    let input = input(
+        vec![operation(
+            "unsupported",
+            BatchTool::SymbolRelationships,
+            Map::new(),
+            None,
+            None,
+        )],
+        budget(500),
+    );
+    let unsupported = PublicError::builder(
+        ErrorCode::UnsupportedCapability,
+        "capability is unavailable",
+    )
+    .build()
+    .expect("static error is valid");
+    let port = Arc::new(FakePort::with_responses([Err(AgentPortError::Public(
+        Box::new(unsupported),
+    ))]));
+
+    let error = BatchService
+        .execute(port, input, repository(), TestCancellation(false), errors())
+        .await
+        .expect_err("no successful child returns metadata-free operation outcomes");
+    let BatchOrchestrationError::NoSuccessfulOperation(output) = error else {
+        panic!("expected unsuccessful operation payload");
+    };
+    assert_eq!(output.operation_results.len(), 1);
+    assert_eq!(
+        output.operation_results[0]
+            .error
+            .as_ref()
+            .map(PublicError::code),
+        Some(ErrorCode::UnsupportedCapability)
+    );
+}
+
+#[tokio::test]
+async fn bound_child_type_error_uses_binding_specific_code() {
+    let mut arguments = Map::new();
+    arguments.insert(
+        "query".to_owned(),
+        json!({"$from": "find", "pointer": "/data/matches"}),
+    );
+    let input = input(
+        vec![
+            operation("find", BatchTool::CodeLocate, Map::new(), None, None),
+            operation(
+                "refine",
+                BatchTool::CodeLocate,
+                arguments,
+                Some(vec!["find"]),
+                None,
+            ),
+        ],
+        budget(500),
+    );
+    let type_mismatch = PublicError::builder(ErrorCode::TypeMismatch, "value has the wrong type")
+        .build()
+        .expect("static error is valid");
+    let port = Arc::new(FakePort::with_responses([
+        Ok(response(
+            generation(2),
+            100,
+            json!({"matches": [{"symbol_id": "symbol"}]}),
+        )),
+        Err(AgentPortError::Public(Box::new(type_mismatch))),
+    ]));
+
+    let output = BatchService
+        .execute(port, input, repository(), TestCancellation(false), errors())
+        .await
+        .expect("the independent successful child preserves the batch envelope");
+    assert_eq!(output.data.batch_status, BatchStatus::Partial);
+    assert_eq!(
+        output.data.operation_results[1]
+            .error
+            .as_ref()
+            .map(PublicError::code),
+        Some(ErrorCode::BindingTypeMismatch)
     );
 }
