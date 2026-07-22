@@ -2281,7 +2281,12 @@ mod tests {
         validate_capability_input(
             VerticalTool::SourceRead,
             &json!({
-                "source_ref": {"$from": "find", "pointer": "/data/matches/0/source_ref"}
+                "references": [{
+                    "source_ref": {
+                        "$from": "find",
+                        "pointer": "/data/matches/0/source_ref"
+                    }
+                }]
             }),
             CapabilityBindingPolicy::RejectUnprovenRestrictedBindings,
         )
@@ -2330,15 +2335,20 @@ mod tests {
         let error = validate_capability_input(
             VerticalTool::SourceRead,
             &json!({
-                "source_ref": {"$from": "find", "pointer": "/data/matches/0/source_ref"}
+                "references": [{
+                    "source_ref": {
+                        "$from": "find",
+                        "pointer": "/data/matches/0/source_ref"
+                    }
+                }]
             }),
             CapabilityBindingPolicy::Materialized,
         )
         .expect_err("materialized validation cannot accept a binding placeholder");
 
         assert_eq!(error.code(), ErrorCode::BindingInvalid);
-        assert_eq!(error.registry_path(), "source_ref");
-        assert_eq!(error.instance_path(), "source_ref");
+        assert_eq!(error.registry_path(), "references[].source_ref");
+        assert_eq!(error.instance_path(), "references.0.source_ref");
         assert_eq!(error.reason(), CapabilityRejectionReason::UnresolvedBinding);
     }
 
@@ -3664,14 +3674,7 @@ mod tests {
                     "tools/call",
                     json!({
                         "name": "source.read",
-                        "arguments": {
-                            "repository": {
-                                "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
-                            },
-                            "references": [{
-                                "symbol_id": "sym1_cecigxytq5fdpxizkjlxeqzrbmtnd2odobb4eey"
-                            }]
-                        }
+                        "arguments": retained_input("source.read")
                     }),
                 ),
                 cancellation(),
@@ -3701,16 +3704,7 @@ mod tests {
                     "tools/call",
                     json!({
                         "name": "source.read",
-                        "arguments": {
-                            "repository": {
-                                "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
-                            },
-                            "references": [{
-                                "file_id": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
-                                "start_byte": 0,
-                                "end_byte": 10
-                            }]
-                        }
+                        "arguments": retained_input("source.read")
                     }),
                 ),
                 cancellation(),
@@ -3746,22 +3740,15 @@ mod tests {
             ExposureProfile::Developer,
         )
         .expect("registry compiles");
+        let mut input = retained_input("source.read");
+        input["references"][0]["source_ref"]["span"]["end_byte"] = json!(source_bytes);
         let response = router
             .handle(
                 request(
                     "tools/call",
                     json!({
                         "name": "source.read",
-                        "arguments": {
-                            "repository": {
-                                "repository_id": "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
-                            },
-                            "references": [{
-                                "file_id": "file1_cukrkfivcukrkfivcukrkfivcukrkfivpyrmidq",
-                                "start_byte": 0,
-                                "end_byte": 200000
-                            }]
-                        }
+                        "arguments": input
                     }),
                 ),
                 cancellation(),

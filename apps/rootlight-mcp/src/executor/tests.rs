@@ -3961,7 +3961,7 @@ async fn source_read_rejects_non_reference_selectors_before_the_port() {
         (json!({"symbol_id": symbol()}), "references.0.symbol_id"),
         (
             json!({"file_id": file(), "start_byte": 0, "end_byte": 1}),
-            "references.0.file_id",
+            "references.0.end_byte",
         ),
     ] {
         let response = router
@@ -5715,8 +5715,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[1],
         counts[2]
     );
-    assert_eq!(counts, [11, 25, 226]);
-    assert_eq!(categorized.len(), 262);
+    assert_eq!(counts, [11, 25, 224]);
+    assert_eq!(categorized.len(), 260);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
