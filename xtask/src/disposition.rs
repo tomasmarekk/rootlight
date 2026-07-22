@@ -385,7 +385,7 @@ fn validate_records(
                 format!("unsupported schema version {}", record.schema_version),
             ));
         }
-        validate_identifier(&loaded.path, "id", id, id, problems);
+        validate_record_id(&loaded.path, id, problems);
         if record.title.trim().is_empty() {
             problems.push(Problem::new(&loaded.path, "title", id, "title is empty"));
         }
@@ -1917,6 +1917,22 @@ fn validate_identifier(
     }
 }
 
+fn validate_record_id(path: &str, value: &str, problems: &mut Vec<Problem>) {
+    let valid = value.len() == 3
+        && value.starts_with('M')
+        && value.as_bytes()[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit());
+    if !valid {
+        problems.push(Problem::new(
+            path,
+            "id",
+            value,
+            "record identifier must use canonical M00 through M99 form",
+        ));
+    }
+}
+
 fn is_full_revision(value: &str) -> bool {
     (value.len() == 40 || value.len() == 64)
         && value
@@ -2268,6 +2284,7 @@ mod tests {
 
         fn write_valid(&self, id: &str, acceptance: &str, checked: bool) {
             let box_state = if checked { "[X]" } else { "[ ]" };
+            let claim_id = id.to_ascii_lowercase();
             let detail = format!(
                 "# Synthetic stage\n\nStatus: {box_state} Synthetic state\n\n- {box_state} Observable criterion\n"
             );
@@ -2328,7 +2345,7 @@ mod tests {
             fs::write(
                 self.root().join(format!("{RECORDS_DIR}/{id}.toml")),
                 format!(
-                    "schema_version = \"2.0\"\nid = \"{id}\"\ntitle = \"Synthetic stage\"\nimplementation_status = \"present\"\nacceptance = \"{acceptance}\"\ngate_outcome = \"{gate}\"\nsource_revision = \"{revision}\"\n{fallback}dependencies = []\ndependents = []\nresidual_risks = []\n\n[detail]\npath = \"details/{id}.md\"\nsource_revision = \"{revision}\"\nsha256 = \"{detail_hash}\"\nbytes = {detail_bytes}\n\n[completion_report]\npath = \"reports/{id}.md\"\nsource_revision = \"{revision}\"\nsha256 = \"{report_hash}\"\nbytes = {report_bytes}\n\n[[evidence]]\nid = \"{id}-evidence\"\nclassification = \"{evidence_class}\"\nsource_revision = \"{revision}\"\nsha256 = \"{evidence_hash}\"\nbytes = {evidence_bytes}\nsource = {{ kind = \"local\", path = \"evidence/{id}.json\" }}\n\n[[capabilities]]\nid = \"{id}.capability\"\ndisposition = \"{capability}\"\nevidence = [\"{id}-evidence\"]\n{capability_boundary}depends_on = []\nunlocks = []\n\n[[checklist]]\nline = {checklist_line}\nitem_sha256 = \"{checklist_digest}\"\ndisposition = \"{checklist_disposition}\"\nevidence = [\"{id}-evidence\"]\n",
+                    "schema_version = \"2.0\"\nid = \"{id}\"\ntitle = \"Synthetic stage\"\nimplementation_status = \"present\"\nacceptance = \"{acceptance}\"\ngate_outcome = \"{gate}\"\nsource_revision = \"{revision}\"\n{fallback}dependencies = []\ndependents = []\nresidual_risks = []\n\n[detail]\npath = \"details/{id}.md\"\nsource_revision = \"{revision}\"\nsha256 = \"{detail_hash}\"\nbytes = {detail_bytes}\n\n[completion_report]\npath = \"reports/{id}.md\"\nsource_revision = \"{revision}\"\nsha256 = \"{report_hash}\"\nbytes = {report_bytes}\n\n[[evidence]]\nid = \"{claim_id}-evidence\"\nclassification = \"{evidence_class}\"\nsource_revision = \"{revision}\"\nsha256 = \"{evidence_hash}\"\nbytes = {evidence_bytes}\nsource = {{ kind = \"local\", path = \"evidence/{id}.json\" }}\n\n[[capabilities]]\nid = \"{claim_id}.capability\"\ndisposition = \"{capability}\"\nevidence = [\"{claim_id}-evidence\"]\n{capability_boundary}depends_on = []\nunlocks = []\n\n[[checklist]]\nline = {checklist_line}\nitem_sha256 = \"{checklist_digest}\"\ndisposition = \"{checklist_disposition}\"\nevidence = [\"{claim_id}-evidence\"]\n",
                     revision = self.revision,
                     detail_hash = sha256_hex(detail.as_bytes()),
                     detail_bytes = detail.len(),
@@ -2450,8 +2467,8 @@ mod tests {
         );
 
         let record_repository = TestRepository::new();
-        record_repository.write_valid("alpha", "pass", true);
-        File::create(record_repository.record_path("alpha"))
+        record_repository.write_valid("M00", "pass", true);
+        File::create(record_repository.record_path("M00"))
             .expect("open record")
             .set_len(MAX_RECORD_BYTES + 1)
             .expect("size record");
@@ -2463,8 +2480,8 @@ mod tests {
         );
 
         let document_repository = TestRepository::new();
-        document_repository.write_valid("alpha", "pass", true);
-        File::create(document_repository.root().join("details/alpha.md"))
+        document_repository.write_valid("M00", "pass", true);
+        File::create(document_repository.root().join("details/M00.md"))
             .expect("open detail")
             .set_len(MAX_DOCUMENT_BYTES + 1)
             .expect("size detail");
@@ -2476,8 +2493,8 @@ mod tests {
         );
 
         let evidence_repository = TestRepository::new();
-        evidence_repository.write_valid("alpha", "pass", true);
-        File::create(evidence_repository.root().join("evidence/alpha.json"))
+        evidence_repository.write_valid("M00", "pass", true);
+        File::create(evidence_repository.root().join("evidence/M00.json"))
             .expect("open evidence")
             .set_len(MAX_LOCAL_EVIDENCE_BYTES + 1)
             .expect("size evidence");
@@ -2492,10 +2509,10 @@ mod tests {
     #[test]
     fn malformed_summary_checkbox_is_rejected() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
+        repository.write_valid("M00", "pass", true);
         fs::write(
             repository.root().join(SUMMARY_FILE),
-            "- [?] alpha, Synthetic stage\n",
+            "- [?] M00, Synthetic stage\n",
         )
         .expect("write malformed summary");
         let message = error_message(&repository);
@@ -2505,18 +2522,35 @@ mod tests {
     #[test]
     fn summary_accepts_uppercase_and_lowercase_gfm_checkboxes() {
         let (entries, problems) =
-            parse_summary("- [x] alpha, First\n* [X] bravo, Second\n+ [ ] charlie, Third\n");
+            parse_summary("- [x] M00, First\n* [X] M01, Second\n+ [ ] M02, Third\n");
         assert!(problems.is_empty(), "{problems:?}");
-        assert!(entries.get("alpha").is_some_and(|entry| entry.checked));
-        assert!(entries.get("bravo").is_some_and(|entry| entry.checked));
-        assert!(entries.get("charlie").is_some_and(|entry| !entry.checked));
+        assert!(entries.get("M00").is_some_and(|entry| entry.checked));
+        assert!(entries.get("M01").is_some_and(|entry| entry.checked));
+        assert!(entries.get("M02").is_some_and(|entry| !entry.checked));
         assert_eq!(parse_detail_status("Status: [x] accepted\n"), Some(true));
+    }
+
+    #[test]
+    fn record_identifiers_require_canonical_uppercase_form() {
+        let mut problems = Vec::new();
+        validate_record_id("records/M00.toml", "M00", &mut problems);
+        assert!(problems.is_empty());
+
+        for invalid in ["m00", "alpha", "M0", "M000", "M0a"] {
+            validate_record_id("record.toml", invalid, &mut problems);
+        }
+        assert_eq!(problems.len(), 5);
+        assert!(
+            problems
+                .iter()
+                .all(|problem| problem.detail.contains("canonical M00 through M99"))
+        );
     }
 
     #[test]
     fn valid_content_bound_disposition_passes() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
+        repository.write_valid("M00", "pass", true);
         assert!(check(repository.root()).is_ok());
     }
 
@@ -2542,7 +2576,7 @@ mod tests {
     fn deferred_and_unavailable_evidence_states_are_valid_when_unaccepted() {
         for acceptance in ["pending", "blocked"] {
             let repository = TestRepository::new();
-            repository.write_valid("alpha", acceptance, false);
+            repository.write_valid("M00", acceptance, false);
             assert!(
                 check(repository.root()).is_ok(),
                 "{acceptance} fixture must be valid"
@@ -2553,7 +2587,7 @@ mod tests {
     #[test]
     fn reachable_but_stale_local_evidence_revision_is_rejected() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
+        repository.write_valid("M00", "pass", true);
         fs::write(repository.root().join("second.txt"), "second\n").expect("write second file");
         run_git(repository.root(), &["add", "second.txt"]);
         run_git(
@@ -2570,7 +2604,7 @@ mod tests {
             .expect("revision is UTF-8")
             .trim()
             .to_owned();
-        let path = repository.record_path("alpha");
+        let path = repository.record_path("M00");
         let text = fs::read_to_string(&path).expect("read record");
         let old_revision = format!("source_revision = \"{}\"", repository.revision);
         fs::write(
@@ -2589,8 +2623,8 @@ mod tests {
     #[test]
     fn wrong_local_digest_and_byte_count_are_rejected() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
-        let path = repository.root().join("evidence/alpha.json");
+        repository.write_valid("M00", "pass", true);
+        let path = repository.root().join("evidence/M00.json");
         let content = fs::read_to_string(&path)
             .expect("read evidence")
             .replace("}\n", ",\"extra\":true}\n");
@@ -2603,9 +2637,9 @@ mod tests {
     #[test]
     fn arbitrary_remote_url_is_rejected() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
+        repository.write_valid("M00", "pass", true);
         let evidence =
-            fs::read(repository.root().join("evidence/alpha.json")).expect("read evidence");
+            fs::read(repository.root().join("evidence/M00.json")).expect("read evidence");
         let attestation = github_attestation(
             &repository.revision,
             &sha256_hex(&evidence),
@@ -2615,10 +2649,10 @@ mod tests {
             "https://api.github.com/repos/owner/project/actions/artifacts/3",
             "https://example.invalid/proof",
         );
-        let source = repository.write_attestation("alpha", &attestation, true);
+        let source = repository.write_attestation("M00", &attestation, true);
         repository.replace_record(
-            "alpha",
-            "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
+            "M00",
+            "source = { kind = \"local\", path = \"evidence/M00.json\" }",
             &source,
         );
         assert!(error_message(&repository).contains("not the canonical API endpoint"));
@@ -2627,18 +2661,18 @@ mod tests {
     #[test]
     fn canonical_tracked_github_attestation_is_accepted() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
+        repository.write_valid("M00", "pass", true);
         let evidence =
-            fs::read(repository.root().join("evidence/alpha.json")).expect("read evidence");
+            fs::read(repository.root().join("evidence/M00.json")).expect("read evidence");
         let attestation = github_attestation(
             &repository.revision,
             &sha256_hex(&evidence),
             u64::try_from(evidence.len()).expect("evidence length fits u64"),
         );
-        let source = repository.write_attestation("alpha", &attestation, true);
+        let source = repository.write_attestation("M00", &attestation, true);
         repository.replace_record(
-            "alpha",
-            "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
+            "M00",
+            "source = { kind = \"local\", path = \"evidence/M00.json\" }",
             &source,
         );
         assert!(check(repository.root()).is_ok());
@@ -2647,18 +2681,18 @@ mod tests {
     #[test]
     fn untracked_github_attestation_is_rejected() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
+        repository.write_valid("M00", "pass", true);
         let evidence =
-            fs::read(repository.root().join("evidence/alpha.json")).expect("read evidence");
+            fs::read(repository.root().join("evidence/M00.json")).expect("read evidence");
         let attestation = github_attestation(
             &repository.revision,
             &sha256_hex(&evidence),
             u64::try_from(evidence.len()).expect("evidence length fits u64"),
         );
-        let source = repository.write_attestation("alpha", &attestation, false);
+        let source = repository.write_attestation("M00", &attestation, false);
         repository.replace_record(
-            "alpha",
-            "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
+            "M00",
+            "source = { kind = \"local\", path = \"evidence/M00.json\" }",
             &source,
         );
         assert!(
@@ -2670,24 +2704,24 @@ mod tests {
     #[test]
     fn modified_github_attestation_must_match_the_tracked_blob() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
+        repository.write_valid("M00", "pass", true);
         let evidence =
-            fs::read(repository.root().join("evidence/alpha.json")).expect("read evidence");
+            fs::read(repository.root().join("evidence/M00.json")).expect("read evidence");
         let attestation = github_attestation(
             &repository.revision,
             &sha256_hex(&evidence),
             u64::try_from(evidence.len()).expect("evidence length fits u64"),
         );
-        let tracked_source = repository.write_attestation("alpha", &attestation, true);
+        let tracked_source = repository.write_attestation("M00", &attestation, true);
         repository.replace_record(
-            "alpha",
-            "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
+            "M00",
+            "source = { kind = \"local\", path = \"evidence/M00.json\" }",
             &tracked_source,
         );
 
         let modified = format!("{attestation}\n");
-        let modified_source = repository.write_attestation("alpha", &modified, false);
-        repository.replace_record("alpha", &tracked_source, &modified_source);
+        let modified_source = repository.write_attestation("M00", &modified, false);
+        repository.replace_record("M00", &tracked_source, &modified_source);
         assert!(
             error_message(&repository).contains("repository-tracked HEAD blob"),
             "worktree-only attestation bytes must fail closed"
@@ -2697,24 +2731,24 @@ mod tests {
     #[test]
     fn github_attestation_raw_digest_and_size_are_enforced() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
+        repository.write_valid("M00", "pass", true);
         let evidence =
-            fs::read(repository.root().join("evidence/alpha.json")).expect("read evidence");
+            fs::read(repository.root().join("evidence/M00.json")).expect("read evidence");
         let attestation = github_attestation(
             &repository.revision,
             &sha256_hex(&evidence),
             u64::try_from(evidence.len()).expect("evidence length fits u64"),
         );
         let source = repository
-            .write_attestation("alpha", &attestation, true)
+            .write_attestation("M00", &attestation, true)
             .replace(
                 &sha256_hex(attestation.as_bytes()),
                 "0000000000000000000000000000000000000000000000000000000000000000",
             )
             .replace(&format!("bytes = {}", attestation.len()), "bytes = 1");
         repository.replace_record(
-            "alpha",
-            "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
+            "M00",
+            "source = { kind = \"local\", path = \"evidence/M00.json\" }",
             &source,
         );
         let message = error_message(&repository);
@@ -2725,14 +2759,14 @@ mod tests {
     #[test]
     fn self_asserted_github_identity_in_record_is_rejected() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
+        repository.write_valid("M00", "pass", true);
         repository.replace_record(
-            "alpha",
-            "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
+            "M00",
+            "source = { kind = \"local\", path = \"evidence/M00.json\" }",
             "source = { kind = \"github_artifact\", repository = \"owner/project\", run_id = 1, run_attempt = 1, job_id = 2, artifact_id = 3, artifact_name = \"proof\" }",
         );
         assert!(
-            error_message(&repository).contains("failed to parse records/alpha.toml"),
+            error_message(&repository).contains("failed to parse records/M00.toml"),
             "record-only identity must not deserialize"
         );
     }
@@ -2740,9 +2774,9 @@ mod tests {
     #[test]
     fn github_attestation_digest_bytes_and_revision_must_match_binding() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
+        repository.write_valid("M00", "pass", true);
         let evidence =
-            fs::read(repository.root().join("evidence/alpha.json")).expect("read evidence");
+            fs::read(repository.root().join("evidence/M00.json")).expect("read evidence");
         let attestation = github_attestation(
             &repository.revision,
             &sha256_hex(&evidence),
@@ -2760,10 +2794,10 @@ mod tests {
             &format!("\"api_bytes\":{}", evidence.len()),
             "\"api_bytes\":1",
         );
-        let source = repository.write_attestation("alpha", &attestation, true);
+        let source = repository.write_attestation("M00", &attestation, true);
         repository.replace_record(
-            "alpha",
-            "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
+            "M00",
+            "source = { kind = \"local\", path = \"evidence/M00.json\" }",
             &source,
         );
         let message = error_message(&repository);
@@ -2775,22 +2809,22 @@ mod tests {
     #[test]
     fn fallback_capability_cannot_unlock_available_dependent() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "fallback", true);
-        repository.replace_record("alpha", "unlocks = []", "unlocks = [\"bravo.capability\"]");
-        let alpha_summary =
-            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read alpha summary");
-        repository.write_valid("bravo", "pass", true);
-        let bravo_summary =
-            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read bravo summary");
+        repository.write_valid("M00", "fallback", true);
+        repository.replace_record("M00", "unlocks = []", "unlocks = [\"m01.capability\"]");
+        let m00_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read M00 summary");
+        repository.write_valid("M01", "pass", true);
+        let m01_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read M01 summary");
         fs::write(
             repository.root().join(SUMMARY_FILE),
-            format!("{alpha_summary}{bravo_summary}"),
+            format!("{m00_summary}{m01_summary}"),
         )
         .expect("write combined summary");
         repository.replace_record(
-            "bravo",
+            "M01",
             "depends_on = []",
-            "depends_on = [\"alpha.capability\"]",
+            "depends_on = [\"m00.capability\"]",
         );
         let message = error_message(&repository);
         assert!(
@@ -2806,8 +2840,8 @@ mod tests {
     #[test]
     fn missing_duplicate_and_noncanonical_checklist_mappings_are_rejected() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
-        let path = repository.record_path("alpha");
+        repository.write_valid("M00", "pass", true);
+        let path = repository.record_path("M00");
         let original = fs::read_to_string(&path).expect("read record");
         let without_mapping = original
             .split("[[checklist]]")
@@ -2824,7 +2858,7 @@ mod tests {
         fs::write(&path, format!("{original}\n[[checklist]]{mapping}")).expect("duplicate mapping");
         assert!(error_message(&repository).contains("unique and ordered by line"));
 
-        let detail_path = repository.root().join("details/alpha.md");
+        let detail_path = repository.root().join("details/M00.md");
         let mut detail = fs::read_to_string(&detail_path).expect("read detail");
         detail.push_str("- [X] Second criterion\n");
         fs::write(&detail_path, &detail).expect("append checklist row");
@@ -2839,7 +2873,7 @@ mod tests {
             )
             .replace("bytes = 73", &format!("bytes = {}", detail.len()));
         let second_mapping = format!(
-            "\n[[checklist]]\nline = 6\nitem_sha256 = \"{}\"\ndisposition = \"observed_pass\"\nevidence = [\"alpha-evidence\"]\n",
+            "\n[[checklist]]\nline = 6\nitem_sha256 = \"{}\"\ndisposition = \"observed_pass\"\nevidence = [\"m00-evidence\"]\n",
             sha256_hex("- [X] Second criterion".as_bytes())
         );
         let first_marker = updated.find("[[checklist]]").expect("checklist marker");
@@ -2861,14 +2895,14 @@ mod tests {
     #[test]
     fn checklist_indentation_change_stales_the_mapping_digest() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
-        let detail_path = repository.root().join("details/alpha.md");
+        repository.write_valid("M00", "pass", true);
+        let detail_path = repository.root().join("details/M00.md");
         let original_detail = fs::read_to_string(&detail_path).expect("read detail");
         let indented_detail =
             original_detail.replace("- [X] Observable criterion", "  - [X] Observable criterion");
         fs::write(&detail_path, &indented_detail).expect("write indented detail");
 
-        let record_path = repository.record_path("alpha");
+        let record_path = repository.record_path("M00");
         let record = fs::read_to_string(&record_path).expect("read record");
         let record = record
             .replacen(
@@ -2891,13 +2925,13 @@ mod tests {
     #[test]
     fn accepted_header_with_unresolved_row_is_rejected() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
-        let detail_path = repository.root().join("details/alpha.md");
+        repository.write_valid("M00", "pass", true);
+        let detail_path = repository.root().join("details/M00.md");
         let detail = fs::read_to_string(&detail_path)
             .expect("read detail")
             .replace("- [X] Observable", "- [ ] Observable");
         fs::write(&detail_path, &detail).expect("write unresolved detail");
-        let path = repository.record_path("alpha");
+        let path = repository.record_path("M00");
         let text = fs::read_to_string(&path)
             .expect("read record")
             .replace(
@@ -2913,32 +2947,31 @@ mod tests {
     #[test]
     fn missing_record_and_blocked_record_dependency_are_rejected() {
         let repository = TestRepository::new();
-        fs::write(repository.root().join(SUMMARY_FILE), "[X] alpha, Stage\n")
-            .expect("write summary");
+        fs::write(repository.root().join(SUMMARY_FILE), "[X] M00, Stage\n").expect("write summary");
         assert!(error_message(&repository).contains("no authoritative record"));
 
-        repository.write_valid("alpha", "blocked", false);
-        let alpha_summary =
-            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read alpha summary");
-        repository.write_valid("bravo", "pass", true);
-        let bravo_summary =
-            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read bravo summary");
+        repository.write_valid("M00", "blocked", false);
+        let m00_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read M00 summary");
+        repository.write_valid("M01", "pass", true);
+        let m01_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read M01 summary");
         fs::write(
             repository.root().join(SUMMARY_FILE),
-            format!("{alpha_summary}{bravo_summary}"),
+            format!("{m00_summary}{m01_summary}"),
         )
         .expect("write combined summary");
-        repository.replace_record("alpha", "dependents = []", "dependents = [\"bravo\"]");
-        repository.replace_record("bravo", "dependencies = []", "dependencies = [\"alpha\"]");
-        assert!(error_message(&repository).contains("upstream alpha is unaccepted"));
+        repository.replace_record("M00", "dependents = []", "dependents = [\"M01\"]");
+        repository.replace_record("M01", "dependencies = []", "dependencies = [\"M00\"]");
+        assert!(error_message(&repository).contains("upstream M00 is unaccepted"));
     }
 
     #[test]
     fn record_self_dependency_is_rejected() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
-        repository.replace_record("alpha", "dependencies = []", "dependencies = [\"alpha\"]");
-        repository.replace_record("alpha", "dependents = []", "dependents = [\"alpha\"]");
+        repository.write_valid("M00", "pass", true);
+        repository.replace_record("M00", "dependencies = []", "dependencies = [\"M00\"]");
+        repository.replace_record("M00", "dependents = []", "dependents = [\"M00\"]");
         let message = error_message(&repository);
         assert!(
             message.contains("record cannot depend on itself"),
@@ -2953,21 +2986,21 @@ mod tests {
     #[test]
     fn record_dependency_cycle_is_rejected() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
-        let alpha_summary =
-            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read alpha summary");
-        repository.write_valid("bravo", "pass", true);
-        let bravo_summary =
-            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read bravo summary");
+        repository.write_valid("M00", "pass", true);
+        let m00_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read M00 summary");
+        repository.write_valid("M01", "pass", true);
+        let m01_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read M01 summary");
         fs::write(
             repository.root().join(SUMMARY_FILE),
-            format!("{alpha_summary}{bravo_summary}"),
+            format!("{m00_summary}{m01_summary}"),
         )
         .expect("write combined summary");
-        repository.replace_record("alpha", "dependencies = []", "dependencies = [\"bravo\"]");
-        repository.replace_record("alpha", "dependents = []", "dependents = [\"bravo\"]");
-        repository.replace_record("bravo", "dependencies = []", "dependencies = [\"alpha\"]");
-        repository.replace_record("bravo", "dependents = []", "dependents = [\"alpha\"]");
+        repository.replace_record("M00", "dependencies = []", "dependencies = [\"M01\"]");
+        repository.replace_record("M00", "dependents = []", "dependents = [\"M01\"]");
+        repository.replace_record("M01", "dependencies = []", "dependencies = [\"M00\"]");
+        repository.replace_record("M01", "dependents = []", "dependents = [\"M00\"]");
         assert!(
             error_message(&repository).contains("record dependency graph contains a cycle"),
             "mutual record dependencies must fail"
@@ -2977,44 +3010,41 @@ mod tests {
     #[test]
     fn pending_record_dependency_cannot_unlock_accepted_downstream() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pending", false);
-        let alpha_summary =
-            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read alpha summary");
-        repository.write_valid("bravo", "fallback", true);
-        let bravo_summary =
-            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read bravo summary");
+        repository.write_valid("M00", "pending", false);
+        let m00_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read M00 summary");
+        repository.write_valid("M01", "fallback", true);
+        let m01_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read M01 summary");
         fs::write(
             repository.root().join(SUMMARY_FILE),
-            format!("{alpha_summary}{bravo_summary}"),
+            format!("{m00_summary}{m01_summary}"),
         )
         .expect("write combined summary");
-        repository.replace_record("alpha", "dependents = []", "dependents = [\"bravo\"]");
-        repository.replace_record("bravo", "dependencies = []", "dependencies = [\"alpha\"]");
+        repository.replace_record("M00", "dependents = []", "dependents = [\"M01\"]");
+        repository.replace_record("M01", "dependencies = []", "dependencies = [\"M00\"]");
         let message = error_message(&repository);
-        assert!(
-            message.contains("upstream alpha is unaccepted"),
-            "{message}"
-        );
+        assert!(message.contains("upstream M00 is unaccepted"), "{message}");
     }
 
     #[test]
     fn fallback_capability_is_fail_closed_by_unavailable_dependency() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "blocked", false);
-        let alpha_summary =
-            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read alpha summary");
-        repository.write_valid("bravo", "fallback", true);
-        let bravo_summary =
-            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read bravo summary");
+        repository.write_valid("M00", "blocked", false);
+        let m00_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read M00 summary");
+        repository.write_valid("M01", "fallback", true);
+        let m01_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read M01 summary");
         fs::write(
             repository.root().join(SUMMARY_FILE),
-            format!("{alpha_summary}{bravo_summary}"),
+            format!("{m00_summary}{m01_summary}"),
         )
         .expect("write combined summary");
         repository.replace_record(
-            "bravo",
+            "M01",
             "depends_on = []",
-            "depends_on = [\"alpha.capability\"]",
+            "depends_on = [\"m00.capability\"]",
         );
         let message = error_message(&repository);
         assert!(
@@ -3026,13 +3056,13 @@ mod tests {
     #[test]
     fn capability_self_dependency_is_rejected() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
+        repository.write_valid("M00", "pass", true);
         repository.replace_record(
-            "alpha",
+            "M00",
             "depends_on = []",
-            "depends_on = [\"alpha.capability\"]",
+            "depends_on = [\"m00.capability\"]",
         );
-        repository.replace_record("alpha", "unlocks = []", "unlocks = [\"alpha.capability\"]");
+        repository.replace_record("M00", "unlocks = []", "unlocks = [\"m00.capability\"]");
         let message = error_message(&repository);
         assert!(
             message.contains("capability cannot depend on itself"),
@@ -3047,29 +3077,29 @@ mod tests {
     #[test]
     fn capability_dependency_cycle_is_rejected() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
-        let alpha_summary =
-            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read alpha summary");
-        repository.write_valid("bravo", "pass", true);
-        let bravo_summary =
-            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read bravo summary");
+        repository.write_valid("M00", "pass", true);
+        let m00_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read M00 summary");
+        repository.write_valid("M01", "pass", true);
+        let m01_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read M01 summary");
         fs::write(
             repository.root().join(SUMMARY_FILE),
-            format!("{alpha_summary}{bravo_summary}"),
+            format!("{m00_summary}{m01_summary}"),
         )
         .expect("write combined summary");
         repository.replace_record(
-            "alpha",
+            "M00",
             "depends_on = []",
-            "depends_on = [\"bravo.capability\"]",
+            "depends_on = [\"m01.capability\"]",
         );
-        repository.replace_record("alpha", "unlocks = []", "unlocks = [\"bravo.capability\"]");
+        repository.replace_record("M00", "unlocks = []", "unlocks = [\"m01.capability\"]");
         repository.replace_record(
-            "bravo",
+            "M01",
             "depends_on = []",
-            "depends_on = [\"alpha.capability\"]",
+            "depends_on = [\"m00.capability\"]",
         );
-        repository.replace_record("bravo", "unlocks = []", "unlocks = [\"alpha.capability\"]");
+        repository.replace_record("M01", "unlocks = []", "unlocks = [\"m00.capability\"]");
         assert!(
             error_message(&repository).contains("capability dependency graph contains a cycle"),
             "mutual capability dependencies must fail"
@@ -3079,10 +3109,10 @@ mod tests {
     #[test]
     fn escaping_reference_is_rejected_without_absolute_path_leak() {
         let repository = TestRepository::new();
-        repository.write_valid("alpha", "pass", true);
+        repository.write_valid("M00", "pass", true);
         repository.replace_record(
-            "alpha",
-            "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
+            "M00",
+            "source = { kind = \"local\", path = \"evidence/M00.json\" }",
             "source = { kind = \"local\", path = \"../private.json\" }",
         );
         let message = error_message(&repository);
@@ -3100,9 +3130,9 @@ mod tests {
         let resolved = resolve_local_reference(
             &base,
             "proof.json",
-            "records/alpha.toml",
-            "evidence.alpha",
-            "alpha",
+            "records/M00.toml",
+            "evidence.M00",
+            "M00",
             &mut problems,
         )
         .expect("resolve reference")
@@ -3119,13 +3149,13 @@ mod tests {
         let repository = TestRepository::new();
         fs::write(
             repository.root().join(SUMMARY_FILE),
-            "[X] zeta, Later\n[X] alpha, Earlier\n",
+            "[X] M09, Later\n[X] M00, Earlier\n",
         )
         .expect("write summary");
         let message = error_message(&repository);
-        let alpha = message.find("alpha:").expect("alpha problem");
-        let zeta = message.find("zeta:").expect("zeta problem");
-        assert!(alpha < zeta, "diagnostics must be ordered by identifier");
+        let m00 = message.find("M00:").expect("M00 problem");
+        let m09 = message.find("M09:").expect("M09 problem");
+        assert!(m00 < m09, "diagnostics must be ordered by identifier");
     }
 
     #[test]
