@@ -30,7 +30,7 @@ use rootlight_daemon_core::{
 use rootlight_error::{DetailKey, ErrorCode, PublicError, PublicValue, SafeLabel};
 use rootlight_ids::OperationId;
 use rootlight_operations::{
-    CatalogWriterLock, ClientInstanceId, OperationJournal, OperationRecord,
+    CancellationAuthority, CatalogWriterLock, ClientInstanceId, OperationJournal, OperationRecord,
     OperationStage as JournalStage, OperationState as JournalState,
     RecoveryClass as JournalRecoveryClass,
 };
@@ -494,7 +494,10 @@ async fn execute_standalone_command(
         ),
         ("operation-cancel", [operation]) => response_to_result(
             actor
-                .control(ControlRequest::OperationCancel(parse_operation(operation)?))
+                .control(ControlRequest::OperationCancel {
+                    operation: parse_operation(operation)?,
+                    authority: CancellationAuthority::Client(ClientInstanceId::SYSTEM),
+                })
                 .await?,
         ),
         _ => Err(CliError::Usage),
