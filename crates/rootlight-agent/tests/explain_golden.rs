@@ -10,7 +10,7 @@
 use rootlight_agent::explain::{
     architecture_cycles_plan, architecture_overview_plan, change_impact_plan, code_dead_plan,
     code_locate_plan, context_pack_plan, finalize_plan, flow_trace_plan, history_compare_plan,
-    plan_change_plan, repo_status_plan, source_read_plan, symbol_explain_plan,
+    plan_change_plan, query_batch_plan, repo_status_plan, source_read_plan, symbol_explain_plan,
     symbol_relationships_plan, tests_select_plan,
 };
 use rootlight_mcp_contract::context::PLANNER_VERSION;
@@ -138,6 +138,14 @@ fn golden_repo_status() {
 }
 
 #[test]
+fn golden_query_batch() {
+    let plan = query_batch_plan(3);
+    assert_eq!(plan.operators, vec!["batch_dispatch".to_owned()]);
+    assert_eq!(plan.applied_limits, vec!["operations: 3".to_owned()]);
+    assert_eq!(plan.estimated_cost, 300);
+}
+
+#[test]
 fn golden_context_pack() {
     let plan = context_pack_plan(3, 1000);
     assert_eq!(plan.operators, vec!["context_assembly".to_owned()]);
@@ -167,6 +175,7 @@ fn golden_fingerprints_are_stable_for_a_pinned_generation() {
         plan_change_plan(Some(5), 2),
         repo_status_plan(),
         context_pack_plan(3, 1000),
+        query_batch_plan(2),
     ];
     for plan in plans {
         let first = finalize_plan(plan.clone(), PINNED_GENERATION);

@@ -1542,6 +1542,45 @@ impl<P> fmt::Debug for FirstSliceToolExecutor<P> {
 /// dependents are skipped. The batch pins its generation from the first
 /// successful operation; when nothing succeeds the batch itself fails rather
 /// than fabricating an identity.
+/// Builds the source-free `query.batch` plan without executing retrieval.
+///
+/// Only repository metadata is read (to pin the shared generation); the batch
+/// plan is validated but no operation runs. Each operation is reported as
+/// not-run so the bounded result schema stays satisfied.
+async fn explain_query_batch<P>(
+    port: Arc<P>,
+    repository: RepositoryId,
+    input: &QueryBatchInput,
+    cancellation: RequestCancellation,
+) -> Result<ReadEnvelope<QueryBatchData>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let status_request =
+        RepositoryStatusPortRequest::new(repository, client_generation(input.generation.clone()));
+    let status = await_port(
+        port.repository_status(status_request, cancellation.clone()),
+        cancellation,
+    )
+    .await?;
+    let explanation = rootlight_agent::explain::finalize_plan(
+        rootlight_agent::explain::query_batch_plan(input.operations.len()),
+        &status.active_generation.to_string(),
+    );
+    let operation_results = input
+        .operations
+        .iter()
+        .map(|operation| terminal_result(operation, BatchOperationStatus::NotRun))
+        .collect();
+    let data = QueryBatchData {
+        batch_status: BatchStatus::Planned,
+        generation_id: status.active_generation,
+        operation_results,
+        explanation: Some(explanation),
+    };
+    explain_envelope_from_status(status, data)
+}
+
 async fn execute_query_batch<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -1553,6 +1592,7 @@ where
     P: FirstSliceClientPort,
 {
     let input: QueryBatchInput = decode_input(arguments)?;
+    let explain_only = input.explain == Some(true);
     let repository = repository_id(input.repository.clone(), unsupported)?;
     // Shared budgets and aggregate response profiles are not enforced by this
     // slice; each is rejected by name rather than silently ignored.
@@ -1576,6 +1616,11 @@ where
         .ok_or_else(|| ToolExecutionError::new(invalid_arguments.clone()))?;
     let plan = BatchPlan::validate(&tools, &dependencies)
         .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
+
+    if explain_only {
+        let output = explain_query_batch(port, repository, &input, cancellation).await?;
+        return serialize_success(output);
+    }
 
     let fail_fast = matches!(input.failure_policy, Some(FailurePolicy::FailFast));
     let count = input.operations.len();
@@ -1652,6 +1697,7 @@ where
         batch_status,
         generation_id: source.generation.generation_id,
         operation_results,
+        explanation: None,
     };
     let envelope = ReadEnvelope {
         schema_version: SchemaVersion::V1_0,

@@ -52,6 +52,9 @@ const STATUS_READ_COST: u64 = 4;
 /// Estimated cost units per planned seed for `context.pack`.
 const CONTEXT_COST_PER_SEED: u64 = 30;
 
+/// Estimated cost units per planned batched operation for `query.batch`.
+const BATCH_COST_PER_OPERATION: u64 = 100;
+
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
 /// `exact` selects an index lookup (exact identifier) versus a lexical scan;
@@ -305,6 +308,23 @@ pub fn context_pack_plan(seed_count: usize, token_budget: u16) -> PlanExplanatio
     }
 }
 
+/// Builds the source-free `query.batch` plan for explain mode.
+///
+/// `operation_count` bounds the planned batched dispatch and drives the cost
+/// estimate.
+#[must_use]
+pub fn query_batch_plan(operation_count: usize) -> PlanExplanation {
+    let operations = u64::try_from(operation_count).unwrap_or(u64::MAX);
+    let cost = operations.saturating_mul(BATCH_COST_PER_OPERATION);
+    PlanExplanation {
+        estimated_cost: cost,
+        operators: vec!["batch_dispatch".to_owned()],
+        applied_limits: vec![format!("operations: {operations}")],
+        planner_version: PLANNER_VERSION,
+        fingerprint: String::new(),
+    }
+}
+
 /// Binds a stable physical-plan fingerprint to a plan for a pinned generation.
 ///
 /// The fingerprint is a deterministic BLAKE3 digest over the planner version,
@@ -518,5 +538,15 @@ mod tests {
         let other_plan = finalize_plan(code_locate_plan(true, 20), "gen-1");
         assert_ne!(base.fingerprint, other_generation.fingerprint);
         assert_ne!(base.fingerprint, other_plan.fingerprint);
+    }
+
+    #[test]
+    fn query_batch_plan_is_deterministic_and_bounded() {
+        use super::query_batch_plan;
+        assert_eq!(query_batch_plan(3), query_batch_plan(3));
+        let plan = query_batch_plan(3);
+        assert_eq!(plan.operators, vec!["batch_dispatch".to_owned()]);
+        assert_eq!(plan.applied_limits, vec!["operations: 3".to_owned()]);
+        assert_eq!(plan.estimated_cost, 300);
     }
 }

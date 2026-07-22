@@ -452,6 +452,9 @@ pub struct QueryBatchInput {
     /// Individual operations cannot widen this profile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_profile: Option<ResponseProfile>,
+    /// Return the bounded plan without executing retrieval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
 }
 
 /// Aggregate batch outcome derived from individual operation results.
@@ -464,6 +467,8 @@ pub enum BatchStatus {
     Partial,
     /// No operation produced a successful result.
     Error,
+    /// The batch plan was validated in explain mode without executing operations.
+    Planned,
 }
 
 /// Terminal status of one operation inside a batch.
@@ -478,6 +483,8 @@ pub enum BatchOperationStatus {
     SkippedDependency,
     /// The operation was not scheduled because fail-fast stopped the batch.
     NotRunFailFast,
+    /// The operation was planned in explain mode and not executed.
+    NotRun,
 }
 
 /// Result of one operation inside a `query.batch` response.
@@ -520,6 +527,9 @@ pub struct QueryBatchData {
     /// One result per requested operation in original request order.
     #[schemars(length(min = 1, max = 16))]
     pub operation_results: Vec<BatchOperationResult>,
+    /// Bounded source-free plan present when explain was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::context::PlanExplanation>,
 }
 
 /// Checked success-or-error output for `query.batch`.

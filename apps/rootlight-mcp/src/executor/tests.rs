@@ -3453,6 +3453,55 @@ async fn explain_fingerprint_is_stable_for_identical_requests() {
 }
 
 #[tokio::test]
+async fn query_batch_explain_returns_a_plan_without_retrieval() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
+        repository_id: repository(),
+        active_generation: generation(),
+        parent_generation: None,
+        structural_freshness: "current".to_owned(),
+        semantic_freshness: "current".to_owned(),
+        state: "ready".to_owned(),
+        coverage: vec![],
+    })));
+    let output = execute(
+        &harness.executor,
+        VerticalTool::QueryBatch,
+        json!({
+            "repository": {"repository_id": repository()},
+            "generation": "active",
+            "operations": [
+                {"id": "find_a", "tool": "code.locate", "arguments": {"query": "publish", "max_results": 5}},
+                {"id": "find_b", "tool": "code.locate", "arguments": {"query": "stage", "max_results": 5}}
+            ],
+            "explain": true
+        }),
+    )
+    .await
+    .expect("explain executes");
+    let output: QueryBatchOutput = decode(output);
+    let ToolResponse::Success(output) = output else {
+        panic!("expected explain success");
+    };
+    assert_eq!(output.data.batch_status, BatchStatus::Planned);
+    assert_eq!(output.data.operation_results.len(), 2);
+    assert!(
+        output
+            .data
+            .operation_results
+            .iter()
+            .all(|result| result.status == BatchOperationStatus::NotRun),
+        "explain runs no batch operation"
+    );
+    let explanation = output.data.explanation.expect("explain returns a plan");
+    assert_eq!(explanation.operators, vec!["batch_dispatch".to_owned()]);
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        1,
+        "only the metadata status call runs, no batch dispatch"
+    );
+}
+
+#[tokio::test]
 async fn explain_plan_is_invariant_across_index_states() {
     // The source-free plan and fingerprint depend only on the normalized
     // request and pinned generation, never on repository index state, so one
