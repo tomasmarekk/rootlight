@@ -626,7 +626,7 @@ fn representative_output(
         McpTool::CodeDead => serde_json::json!({
             "candidates": [{
                 "symbol_id": symbol_id,
-                "classification": "probable_dead",
+                "classification": "not_observed_from_entry_points_strong_references",
                 "confidence": 900,
                 "why": reasons(),
                 "suppressions_checked": [
@@ -638,7 +638,7 @@ fn representative_output(
                 "trust": "untrusted_repository_data"
             }],
             "entry_points": {
-                "policy": "application",
+                "policy": "standard",
                 "entry_point_count": 7,
                 "complete": false
             },
@@ -764,7 +764,7 @@ fn representative_output(
             ResponseProfileEvidenceError::Projection {
                 tool: tool.name(),
                 profile: ResponseProfile::Evidence,
-                message: error.to_string(),
+                message: format!("{error:?}"),
             }
         })?;
     }
@@ -788,7 +788,7 @@ fn shape_output(
             ResponseProfileEvidenceError::Projection {
                 tool: tool.name(),
                 profile,
-                message: error.to_string(),
+                message: format!("{error:?}"),
             }
         })?;
     } else if matches!(tool, McpTool::QueryBatch) {
@@ -828,7 +828,7 @@ fn shape_batch_output(
             ResponseProfileEvidenceError::Projection {
                 tool: McpTool::QueryBatch.name(),
                 profile,
-                message: error.to_string(),
+                message: format!("{error:?}"),
             }
         })?;
     }

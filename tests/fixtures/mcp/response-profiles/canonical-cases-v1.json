@@ -1296,7 +1296,7 @@
           "entry_points": {
             "complete": false,
             "entry_point_count": 7,
-            "policy": "application"
+            "policy": "standard"
           },
           "false_positive_controls": [
             {

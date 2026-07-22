@@ -633,7 +633,6 @@ const SYMBOL_EXPLAIN_RULES: &[CapabilityRule] = &[
     accepted_fallback("repository"),
     accepted_fallback("generation"),
     accepted_fallback("symbol_ids"),
-    accepted_fallback("relations"),
     accepted_fallback("include_provenance"),
     implemented(
         "response_profile",
@@ -666,6 +665,10 @@ const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
     accepted_fallback("repository"),
     accepted_fallback("generation"),
     accepted_fallback("symbol_ids"),
+    implemented(
+        "relations",
+        "selects one or more explicitly supported static relation families",
+    ),
     accepted_fallback("direction"),
     accepted_fallback("min_confidence"),
     accepted_fallback("include_candidates"),

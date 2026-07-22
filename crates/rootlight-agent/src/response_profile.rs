@@ -1344,7 +1344,7 @@ mod tests {
     #[test]
     fn compact_code_dead_shape_preserves_recovery_and_false_positive_controls() {
         let entry_points = EntryPointSummary {
-            policy: EntryPointPolicy::Application,
+            policy: EntryPointPolicy::Standard,
             entry_point_count: 7,
             complete: false,
         };
