@@ -147,6 +147,20 @@ pub(crate) enum GitMetadataError {
 mod tests {
     use super::*;
 
+    fn run_git(root: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(arguments)
+            .output()
+            .expect("git command starts");
+        assert!(
+            output.status.success(),
+            "git command failed with status {}",
+            output.status
+        );
+    }
+
     #[test]
     fn clean_conventional_message_passes() {
         let message =
@@ -195,6 +209,40 @@ mod tests {
             error,
             GitMetadataError::CommitMessage { line: 3, .. }
         ));
+    }
+
+    #[test]
+    fn temporary_repository_range_rejects_forbidden_commit() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let root = directory.path();
+        run_git(root, &["init", "--quiet"]);
+        run_git(root, &["config", "user.name", "Fixture Author"]);
+        run_git(root, &["config", "user.email", "fixture@example.invalid"]);
+        run_git(
+            root,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "chore: initialize",
+            ],
+        );
+        let forbidden_message = ["fix: close M", "15"].concat();
+        run_git(
+            root,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                &forbidden_message,
+            ],
+        );
+
+        let error =
+            check_range(root, "HEAD~1..HEAD").expect_err("forbidden commit range must fail");
+        assert!(matches!(error, GitMetadataError::RangeCommit { .. }));
     }
 
     #[test]
