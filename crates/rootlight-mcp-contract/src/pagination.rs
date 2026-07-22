@@ -204,6 +204,12 @@ impl AuthenticatedCursor {
         &self.last_sort_key
     }
 
+    /// Returns the immutable repository or catalog snapshot identity.
+    #[must_use]
+    pub const fn snapshot_id(&self) -> [u8; 32] {
+        self.context.snapshot_id
+    }
+
     /// Returns the issue timestamp in Unix milliseconds.
     #[must_use]
     pub const fn issued_at_ms(&self) -> u64 {
@@ -604,7 +610,21 @@ mod tests {
         let decoded = AuthenticatedCursor::from_wire(&wire).expect("wire decodes");
         assert_eq!(decoded, cursor);
         assert_eq!(decoded.last_sort_key(), &[1, 2, 3]);
+        assert_eq!(decoded.snapshot_id(), [5; 32]);
         assert_eq!(decoded.issued_at_ms(), 1_000_000);
+    }
+
+    #[test]
+    fn snapshot_accessor_returns_the_authenticated_bound_identity() {
+        let key = [42; 32];
+        let mut context = test_context();
+        context.snapshot_id = [91; 32];
+        let cursor = create_cursor(context, vec![1], 1_000_000, &key);
+
+        assert_eq!(cursor.snapshot_id(), [91; 32]);
+        let decoded =
+            AuthenticatedCursor::from_wire(&cursor.to_wire()).expect("wire cursor decodes");
+        assert_eq!(decoded.snapshot_id(), [91; 32]);
     }
 
     #[test]

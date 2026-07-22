@@ -6,8 +6,8 @@
 //! reviewing its runtime behavior fails deterministically. Declarations remain
 //! an honest inventory, not a substitute for process-level acceptance tests.
 
+use crate::ErrorCode;
 use crate::catalog::{ExposureProfile, McpTool};
-use crate::{ErrorCode, MCP_SCHEMA_VERSION};
 use serde::Serialize;
 
 /// Namespaced MCP `_meta` key carrying Rootlight capability discovery.
@@ -435,11 +435,14 @@ const REPO_LIST_RULES: &[CapabilityRule] = &[
     accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     implemented("cursor", "uses an authenticated request-bound continuation"),
-    blocked(
+    implemented(
         "query",
-        "query is cursor-bound but does not filter opaque repository identities",
+        "filters canonical display names and aliases before pagination",
     ),
-    unsupported("states", "repository-state filtering is not served"),
+    implemented(
+        "states",
+        "filters canonical lifecycle states before pagination",
+    ),
     unsupported_value(
         "response_profile",
         "evidence",
@@ -1126,7 +1129,7 @@ const fn build_capabilities() -> [ToolCapability; 19] {
 const fn tool_capability(tool: McpTool) -> ToolCapability {
     ToolCapability {
         tool,
-        contract_version: MCP_SCHEMA_VERSION,
+        contract_version: tool.contract_version(),
         input_shape_hash: input_shape_hash(tool),
         profiles: tool_profiles(tool),
         batch_eligible: is_batch_eligible(tool),
@@ -1303,7 +1306,9 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
         McpTool::RepoStatus => {
             "bounded process-local status with the active generation and compact coverage"
         }
-        McpTool::RepoList => "bounded catalog listing with authenticated continuation",
+        McpTool::RepoList => {
+            "immutable catalog snapshot with bounded display-name or alias and lifecycle-state filters"
+        }
         McpTool::OperationStatus => "bounded operation read and cancel",
         McpTool::CodeLocate => "bounded exact-identifier and lexical matching",
         McpTool::SymbolExplain => {
@@ -1357,9 +1362,19 @@ mod tests {
         assert_eq!(CAPABILITIES.len(), McpTool::ALL.len());
         for (entry, tool) in CAPABILITIES.iter().zip(McpTool::ALL) {
             assert_eq!(entry.tool, tool, "registry order must match the catalog");
-            assert_eq!(entry.contract_version, crate::MCP_SCHEMA_VERSION);
+            assert_eq!(entry.contract_version, tool.contract_version());
             assert_ne!(entry.input_shape_hash, "");
         }
+        assert_eq!(
+            super::capability_for(McpTool::RepoList).contract_version,
+            crate::REPO_LIST_SCHEMA_VERSION
+        );
+        assert!(
+            CAPABILITIES
+                .iter()
+                .filter(|entry| entry.tool != McpTool::RepoList)
+                .all(|entry| entry.contract_version == crate::MCP_SCHEMA_VERSION)
+        );
     }
 
     #[test]
@@ -1441,7 +1456,11 @@ mod tests {
         let repo_list = CAPABILITIES[McpTool::RepoList as usize];
         assert_eq!(
             repo_list.disposition("query", None).status,
-            CapabilityStatus::Blocked
+            CapabilityStatus::Implemented
+        );
+        assert_eq!(
+            repo_list.disposition("states", None).status,
+            CapabilityStatus::Implemented
         );
         assert_eq!(
             repo_list.pagination,
