@@ -7390,6 +7390,13 @@
                 "field": "budget.evidence_level",
                 "status": "unsupported_stable_error",
                 "summary": "evidence projection is not served"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "include_provenance",
+                "status": "unsupported_stable_error",
+                "summary": "full provenance projection is not served",
+                "value": "full"
               }
             ],
             "pagination": "progressive_handle",
@@ -7417,7 +7424,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Return bounded profiled semantic evidence for explicit stable symbol identifiers with selectable provenance; custom sections are unsupported.",
+        "description": "Return bounded profiled semantic evidence for explicit stable symbol identifiers; custom sections and full provenance are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
