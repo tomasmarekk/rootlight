@@ -12,8 +12,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::bundle::{
     AGENT_TRAJECTORIES_FILE, BUILD_PROVENANCE_FILE, BundleError, COMMAND_FILE, COVERAGE_FILE,
-    DATASET_MANIFEST_FILE, ENVIRONMENT_FILE, FIXED_ARTIFACTS, QUALITY_FILE, RAW_SAMPLES_FILE,
-    SUMMARY_FILE, json_bytes, json_lines,
+    DATASET_MANIFEST_FILE, ENVIRONMENT_FILE, FIXED_ARTIFACTS, LEGACY_FIXED_ARTIFACTS, QUALITY_FILE,
+    RAW_SAMPLES_FILE, SUMMARY_FILE, TRAJECTORY_EVIDENCE_FILE, json_bytes, json_lines,
 };
 use crate::decode::{CollectionKind, preflight_artifact_collection};
 use crate::parser::{
@@ -21,9 +21,15 @@ use crate::parser::{
     semantic_quality_eligibility_from_values, summarize,
 };
 use crate::{
-    Availability, BundleLimits, DatasetManifest, EvidenceValue, MetricDistribution,
-    RESULT_BUNDLE_SCHEMA_VERSION, RawSample, ResultSummary, SEMANTIC_QUALITY_RUBRIC_ID,
-    SampleOutcome, decode_benchmark_command, decode_dataset_manifest,
+    AgentTrajectory, Availability, BenchmarkCommand, BundleLimits, DatasetManifest, EvidenceValue,
+    LEGACY_RESULT_BUNDLE_SCHEMA_VERSION, MAX_TRAJECTORY_COUNTER, MAX_TRAJECTORY_ELAPSED_NS,
+    MAX_TRAJECTORY_ENCODED_BYTES, MAX_TRAJECTORY_EVIDENCE_ARTIFACTS, MAX_TRAJECTORY_LABEL_BYTES,
+    MAX_TRAJECTORY_REFERENCES, MAX_TRAJECTORY_SOURCE_BYTES, MAX_TRAJECTORY_STEPS,
+    MAX_TRAJECTORY_TOKENS, MetricDistribution, RESULT_BUNDLE_SCHEMA_VERSION, RawSample,
+    ResultSummary, SEMANTIC_QUALITY_RUBRIC_ID, SampleOutcome, TrajectoryCompleteness,
+    TrajectoryEvidenceKind, TrajectoryEvidenceManifest, TrajectoryEvidenceReference,
+    TrajectoryOperationStatus, TrajectoryStep, TrajectoryUsage, decode_benchmark_command,
+    decode_dataset_manifest, is_supported_result_bundle_schema,
 };
 
 const WIRE_FIELD_REJECTED: &str = "fixed artifact field set is invalid";
@@ -1016,12 +1022,15 @@ impl<'de> Visitor<'de> for BudgetVisitor<'_> {
 struct FixedArtifacts<'a> {
     environment: WireEnvironment<'a>,
     dataset_manifest: DatasetManifest,
+    command: BenchmarkCommand,
     build_provenance: WireBuildProvenance<'a>,
     schedule: Vec<ScheduledSample>,
     raw_samples: Vec<RawSample>,
     summary: WireSummary<'a>,
     coverage: WireCoverage<'a>,
     quality: WireQuality<'a>,
+    agent_trajectories: Vec<AgentTrajectory>,
+    trajectory_evidence: Option<TrajectoryEvidenceManifest>,
 }
 
 pub(crate) fn is_fixed_artifact(relative: &str) -> bool {
@@ -1051,7 +1060,7 @@ where
     S: FixedArtifactSource + ?Sized,
 {
     let mut decode_budget = FixedDecodeBudget::new(limits);
-    for name in FIXED_ARTIFACTS {
+    for name in LEGACY_FIXED_ARTIFACTS {
         let bytes = fixed_bytes(artifacts, name)?;
         decode_budget.inspect_artifact(name, bytes)?;
     }
@@ -1060,6 +1069,26 @@ where
     let dataset_manifest =
         decode_dataset_manifest(manifest_bytes, limits).map_err(map_decode_error)?;
     validate_canonical_json(manifest_bytes, &dataset_manifest, limits)?;
+    let trajectory_evidence = if dataset_manifest.schema_version == RESULT_BUNDLE_SCHEMA_VERSION {
+        let bytes = fixed_bytes(artifacts, TRAJECTORY_EVIDENCE_FILE)?;
+        decode_budget.inspect_artifact(TRAJECTORY_EVIDENCE_FILE, bytes)?;
+        preflight_fixed_collection(
+            artifacts,
+            TRAJECTORY_EVIDENCE_FILE,
+            &["artifacts"],
+            CollectionKind::Array,
+            MAX_TRAJECTORY_EVIDENCE_ARTIFACTS,
+            "trajectory_evidence_count",
+            true,
+            limits,
+        )?;
+        Some(decode_json(bytes, limits)?)
+    } else {
+        if artifacts.artifact_bytes(TRAJECTORY_EVIDENCE_FILE).is_some() {
+            return Err(BundleError::ArtifactSetMismatch);
+        }
+        None
+    };
     let command_bytes = fixed_bytes(artifacts, COMMAND_FILE)?;
     validate_json_bytes(command_bytes, limits)?;
     let command = decode_benchmark_command(command_bytes, limits).map_err(map_decode_error)?;
@@ -1131,10 +1160,15 @@ where
         true,
         limits,
     )?;
-    decode_agent_trajectories(fixed_bytes(artifacts, AGENT_TRAJECTORIES_FILE)?, limits)?;
+    let agent_trajectories = decode_agent_trajectories(
+        fixed_bytes(artifacts, AGENT_TRAJECTORIES_FILE)?,
+        &dataset_manifest.schema_version,
+        limits,
+    )?;
     Ok(FixedArtifacts {
         environment: decode_json(fixed_bytes(artifacts, ENVIRONMENT_FILE)?, limits)?,
         dataset_manifest,
+        command,
         build_provenance: decode_json(fixed_bytes(artifacts, BUILD_PROVENANCE_FILE)?, limits)?,
         raw_samples: decode_raw_samples(
             fixed_bytes(artifacts, RAW_SAMPLES_FILE)?,
@@ -1146,6 +1180,8 @@ where
         summary: decode_json(fixed_bytes(artifacts, SUMMARY_FILE)?, limits)?,
         coverage: decode_json(fixed_bytes(artifacts, COVERAGE_FILE)?, limits)?,
         quality: decode_json(fixed_bytes(artifacts, QUALITY_FILE)?, limits)?,
+        agent_trajectories,
+        trajectory_evidence,
     })
 }
 
@@ -1237,9 +1273,13 @@ fn decode_raw_samples(
     Ok(values)
 }
 
-fn decode_agent_trajectories(bytes: &[u8], limits: BundleLimits) -> Result<(), BundleError> {
+fn decode_agent_trajectories(
+    bytes: &[u8],
+    bundle_schema: &str,
+    limits: BundleLimits,
+) -> Result<Vec<AgentTrajectory>, BundleError> {
     if bytes.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     validate_artifact_size(bytes, limits)?;
     if !bytes.ends_with(b"\n") {
@@ -1252,20 +1292,52 @@ fn decode_agent_trajectories(bytes: &[u8], limits: BundleLimits) -> Result<(), B
             resource: "agent_trajectory_count",
         });
     }
+    if bundle_schema == LEGACY_RESULT_BUNDLE_SCHEMA_VERSION {
+        return Err(BundleError::UnsupportedTrajectorySchema);
+    }
+    if bundle_schema != RESULT_BUNDLE_SCHEMA_VERSION {
+        return Err(BundleError::UnsupportedSchemaVersion);
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(line_count)
+        .map_err(|_| BundleError::AllocationFailed)?;
     for line in lines {
         if line.is_empty() || line.contains(&b'\r') {
             return Err(BundleError::InvalidArtifactEncoding);
         }
+        if line.len() > MAX_TRAJECTORY_ENCODED_BYTES {
+            return Err(BundleError::LimitExceeded {
+                resource: "trajectory_encoded_bytes",
+            });
+        }
         preflight_artifact_collection(
             line,
-            &["tool_calls"],
+            &["steps"],
             CollectionKind::Array,
-            limits.max_command_arguments,
-            "trajectory_tool_call_count",
+            MAX_TRAJECTORY_STEPS,
+            "trajectory_step_count",
             true,
         )?;
+        preflight_artifact_collection(
+            line,
+            &["evidence"],
+            CollectionKind::Array,
+            MAX_TRAJECTORY_REFERENCES,
+            "trajectory_reference_count",
+            true,
+        )?;
+        let value: AgentTrajectory = map_decode_result(|| serde_json::from_slice(line))?;
+        values.push(value);
     }
-    Err(BundleError::UnsupportedTrajectorySchema)
+    let canonical_limit =
+        usize::try_from(limits.max_artifact_bytes).map_err(|_| BundleError::LimitExceeded {
+            resource: "artifact_bytes",
+        })?;
+    if json_lines(&values, canonical_limit)? != bytes {
+        return Err(BundleError::InvalidArtifactEncoding);
+    }
+    Ok(values)
 }
 
 fn validate_canonical_json(
@@ -1329,6 +1401,7 @@ fn validate_fixed_bundle(
     fixed: &FixedArtifacts<'_>,
     limits: BundleLimits,
 ) -> Result<(), BundleError> {
+    validate_bundle_schema_coherence(fixed)?;
     validate_environment(&fixed.environment)?;
     validate_manifest_revision(&fixed.dataset_manifest)?;
     validate_build_provenance(&fixed.environment, &fixed.build_provenance, limits)?;
@@ -1345,7 +1418,251 @@ fn validate_fixed_bundle(
         &fixed.coverage,
         limits,
     )?;
-    validate_quality(&fixed.raw_samples, &fixed.summary, &fixed.quality, limits)
+    validate_quality(&fixed.raw_samples, &fixed.summary, &fixed.quality, limits)?;
+    validate_agent_trajectories(
+        &fixed.agent_trajectories,
+        fixed.trajectory_evidence.as_ref(),
+    )
+}
+
+fn validate_bundle_schema_coherence(fixed: &FixedArtifacts<'_>) -> Result<(), BundleError> {
+    let expected = fixed.dataset_manifest.schema_version.as_str();
+    validate_schema(expected)?;
+    let fixed_versions = [
+        fixed.environment.schema_version,
+        fixed.command.schema_version.as_str(),
+        fixed.build_provenance.schema_version,
+        fixed.summary.schema_version,
+        fixed.coverage.schema_version,
+        fixed.quality.schema_version,
+    ];
+    for schema in fixed_versions {
+        validate_schema(schema)?;
+    }
+    for sample in &fixed.raw_samples {
+        validate_schema(&sample.schema_version)?;
+    }
+    for trajectory in &fixed.agent_trajectories {
+        validate_schema(&trajectory.schema_version)?;
+    }
+    if let Some(inventory) = &fixed.trajectory_evidence {
+        validate_schema(&inventory.schema_version)?;
+    }
+    if fixed_versions.into_iter().any(|schema| schema != expected)
+        || fixed
+            .raw_samples
+            .iter()
+            .any(|sample| sample.schema_version != expected)
+        || fixed
+            .agent_trajectories
+            .iter()
+            .any(|trajectory| trajectory.schema_version != expected)
+        || fixed
+            .trajectory_evidence
+            .as_ref()
+            .is_some_and(|inventory| inventory.schema_version != expected)
+        || (expected == RESULT_BUNDLE_SCHEMA_VERSION) != fixed.trajectory_evidence.is_some()
+    {
+        return Err(BundleError::ArtifactInvariantViolation);
+    }
+    Ok(())
+}
+
+fn validate_agent_trajectories(
+    trajectories: &[AgentTrajectory],
+    inventory: Option<&TrajectoryEvidenceManifest>,
+) -> Result<(), BundleError> {
+    if let Some(inventory) = inventory {
+        validate_trajectory_evidence_inventory(&inventory.artifacts)?;
+    }
+    if trajectories.is_empty() {
+        return Ok(());
+    }
+    let inventory = inventory.ok_or(BundleError::ArtifactSetMismatch)?;
+    let mut prior_key: Option<(&str, &str, &str)> = None;
+    for trajectory in trajectories {
+        if trajectory.schema_version != RESULT_BUNDLE_SCHEMA_VERSION {
+            return Err(BundleError::UnsupportedTrajectorySchema);
+        }
+        validate_trajectory_label(&trajectory.workflow_id)?;
+        validate_trajectory_label(&trajectory.attempt_id)?;
+        validate_trajectory_label(&trajectory.baseline_variant)?;
+        match &trajectory.completeness {
+            TrajectoryCompleteness::Complete => {}
+            TrajectoryCompleteness::Excluded { reason_code } => {
+                validate_trajectory_label(reason_code)?;
+            }
+        }
+        if trajectory.steps.is_empty() {
+            return Err(BundleError::ArtifactInvariantViolation);
+        }
+        if trajectory.steps.len() > MAX_TRAJECTORY_STEPS {
+            return Err(BundleError::LimitExceeded {
+                resource: "trajectory_step_count",
+            });
+        }
+        if trajectory.evidence.is_empty() {
+            return Err(BundleError::ArtifactInvariantViolation);
+        }
+        if trajectory.evidence.len() > MAX_TRAJECTORY_REFERENCES {
+            return Err(BundleError::LimitExceeded {
+                resource: "trajectory_reference_count",
+            });
+        }
+        for (index, step) in trajectory.steps.iter().enumerate() {
+            let expected_index =
+                u32::try_from(index).map_err(|_| BundleError::ArtifactInvariantViolation)?;
+            if step.step_index != expected_index {
+                return Err(BundleError::ArtifactInvariantViolation);
+            }
+            validate_trajectory_step(step)?;
+        }
+        let mut prior_reference: Option<(TrajectoryEvidenceKind, &str)> = None;
+        for reference in &trajectory.evidence {
+            validate_trajectory_label(&reference.artifact_id)?;
+            validate_digest(&reference.sha256)?;
+            let key = (reference.kind, reference.artifact_id.as_str());
+            if prior_reference.is_some_and(|prior| key <= prior) {
+                return Err(BundleError::ArtifactInvariantViolation);
+            }
+            prior_reference = Some(key);
+            if inventory
+                .artifacts
+                .binary_search_by(|retained| evidence_key(retained).cmp(&key))
+                .ok()
+                .and_then(|index| inventory.artifacts.get(index))
+                .is_none_or(|retained| retained.sha256 != reference.sha256)
+            {
+                return Err(BundleError::ArtifactInvariantViolation);
+            }
+        }
+        let key = (
+            trajectory.workflow_id.as_str(),
+            trajectory.attempt_id.as_str(),
+            trajectory.baseline_variant.as_str(),
+        );
+        if prior_key.is_some_and(|prior| key <= prior) {
+            return Err(BundleError::ArtifactInvariantViolation);
+        }
+        prior_key = Some(key);
+    }
+    Ok(())
+}
+
+fn validate_trajectory_evidence_inventory(
+    inventory: &[TrajectoryEvidenceReference],
+) -> Result<(), BundleError> {
+    if inventory.len() > MAX_TRAJECTORY_EVIDENCE_ARTIFACTS {
+        return Err(BundleError::LimitExceeded {
+            resource: "trajectory_evidence_count",
+        });
+    }
+    let mut prior: Option<(TrajectoryEvidenceKind, &str)> = None;
+    for artifact in inventory {
+        validate_trajectory_label(&artifact.artifact_id)?;
+        validate_digest(&artifact.sha256)?;
+        let key = evidence_key(artifact);
+        if prior.is_some_and(|previous| key <= previous) {
+            return Err(BundleError::ArtifactInvariantViolation);
+        }
+        prior = Some(key);
+    }
+    Ok(())
+}
+
+fn evidence_key(reference: &TrajectoryEvidenceReference) -> (TrajectoryEvidenceKind, &str) {
+    (reference.kind, reference.artifact_id.as_str())
+}
+
+fn validate_trajectory_step(step: &TrajectoryStep) -> Result<(), BundleError> {
+    validate_trajectory_label(&step.tool.tool_id)?;
+    validate_trajectory_label(&step.tool.tool_version)?;
+    match &step.operation_status {
+        TrajectoryOperationStatus::Succeeded => {}
+        TrajectoryOperationStatus::Failed { error_code }
+        | TrajectoryOperationStatus::TimedOut { error_code }
+        | TrajectoryOperationStatus::Cancelled { error_code } => {
+            validate_trajectory_label(error_code)?;
+        }
+    }
+    validate_trajectory_counters(&step.budget.into(), true)?;
+    validate_trajectory_counters(&step.usage, false)?;
+    if step.usage.tool_calls > step.budget.tool_calls
+        || step.usage.elapsed_ns > step.budget.elapsed_ns
+        || step.usage.result_items > step.budget.result_items
+        || step.usage.source_bytes > step.budget.source_bytes
+        || step.usage.tokens > step.budget.tokens
+        || step.source_tokens > step.request_tokens
+    {
+        return Err(BundleError::ArtifactInvariantViolation);
+    }
+    if step.request_tokens > MAX_TRAJECTORY_TOKENS
+        || step.response_tokens > MAX_TRAJECTORY_TOKENS
+        || step.source_tokens > MAX_TRAJECTORY_TOKENS
+    {
+        return Err(BundleError::LimitExceeded {
+            resource: "trajectory_counter",
+        });
+    }
+    let measured_tokens = step
+        .request_tokens
+        .checked_add(step.response_tokens)
+        .ok_or(BundleError::ArtifactInvariantViolation)?;
+    if measured_tokens != step.usage.tokens {
+        return Err(BundleError::ArtifactInvariantViolation);
+    }
+    Ok(())
+}
+
+impl From<crate::TrajectoryBudget> for TrajectoryUsage {
+    fn from(value: crate::TrajectoryBudget) -> Self {
+        Self {
+            tool_calls: value.tool_calls,
+            elapsed_ns: value.elapsed_ns,
+            result_items: value.result_items,
+            source_bytes: value.source_bytes,
+            tokens: value.tokens,
+        }
+    }
+}
+
+fn validate_trajectory_counters(
+    counters: &TrajectoryUsage,
+    require_nonzero_budget: bool,
+) -> Result<(), BundleError> {
+    if counters.tool_calls > MAX_TRAJECTORY_COUNTER
+        || counters.result_items > MAX_TRAJECTORY_COUNTER
+        || counters.elapsed_ns > MAX_TRAJECTORY_ELAPSED_NS
+        || counters.source_bytes > MAX_TRAJECTORY_SOURCE_BYTES
+        || counters.tokens > MAX_TRAJECTORY_TOKENS
+    {
+        return Err(BundleError::LimitExceeded {
+            resource: "trajectory_counter",
+        });
+    }
+    if (require_nonzero_budget
+        && (counters.tool_calls == 0
+            || counters.elapsed_ns == 0
+            || counters.result_items == 0
+            || counters.source_bytes == 0
+            || counters.tokens == 0))
+        || (!require_nonzero_budget && counters.tool_calls == 0)
+    {
+        return Err(BundleError::ArtifactInvariantViolation);
+    }
+    Ok(())
+}
+
+fn validate_trajectory_label(value: &str) -> Result<(), BundleError> {
+    if value.is_empty()
+        || value.len() > MAX_TRAJECTORY_LABEL_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
+    {
+        return Err(BundleError::InvalidArtifactEncoding);
+    }
+    Ok(())
 }
 
 fn validate_environment(environment: &WireEnvironment<'_>) -> Result<(), BundleError> {
@@ -1553,8 +1870,9 @@ fn validate_summary(
             return Err(BundleError::ArtifactInvariantViolation);
         }
     }
-    let expected = summarize(samples, summary.semantic_eligibility.to_owned()?)
+    let mut expected = summarize(samples, summary.semantic_eligibility.to_owned()?)
         .map_err(map_parser_integrity_error)?;
+    expected.schema_version = summary.schema_version.to_owned();
     if !summary_matches(summary, &expected) {
         return Err(BundleError::ArtifactInvariantViolation);
     }
@@ -1875,7 +2193,7 @@ fn validate_wire_availability(
 }
 
 fn validate_schema(schema: &str) -> Result<(), BundleError> {
-    if schema != RESULT_BUNDLE_SCHEMA_VERSION {
+    if !is_supported_result_bundle_schema(schema) {
         return Err(BundleError::UnsupportedSchemaVersion);
     }
     Ok(())

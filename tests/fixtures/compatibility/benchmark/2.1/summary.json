@@ -1,0 +1,1 @@
+{"schema_version":"2.1","benchmark_id":"rootlight-parser-benchmark-v1","semantic_eligibility":{"status":"failed","reason_code":"no_measured_samples"},"families":{},"failed_samples":0,"timed_out_samples":0,"cancelled_samples":0,"confidence_intervals":{"status":"unavailable","reason_code":"bootstrap_confidence_interval_not_integrated"}}

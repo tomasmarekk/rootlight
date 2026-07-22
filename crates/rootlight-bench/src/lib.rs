@@ -30,9 +30,15 @@ pub use decode::{DecodeError, decode_benchmark_command, decode_dataset_manifest}
 pub use model::{
     AgentTrajectory, Availability, BenchmarkCommand, BuildProvenance, CoverageEvidence,
     DatasetEntry, DatasetManifest, EnvironmentEvidence, EvidenceValue,
-    MAX_SEMANTIC_CALIBRATION_ERROR_PPM, MIN_SEMANTIC_PRECISION_PPM, MIN_SEMANTIC_RECALL_PPM,
-    MetricDistribution, QualityEvidence, RawSample, ResultSummary, SEMANTIC_QUALITY_RUBRIC_ID,
-    SampleOutcome, SemanticQualityMeasurement,
+    MAX_SEMANTIC_CALIBRATION_ERROR_PPM, MAX_TRAJECTORIES_PER_BUNDLE, MAX_TRAJECTORY_COUNTER,
+    MAX_TRAJECTORY_ELAPSED_NS, MAX_TRAJECTORY_ENCODED_BYTES, MAX_TRAJECTORY_EVIDENCE_ARTIFACTS,
+    MAX_TRAJECTORY_LABEL_BYTES, MAX_TRAJECTORY_REFERENCES, MAX_TRAJECTORY_SOURCE_BYTES,
+    MAX_TRAJECTORY_STEPS, MAX_TRAJECTORY_TOKENS, MIN_SEMANTIC_PRECISION_PPM,
+    MIN_SEMANTIC_RECALL_PPM, MetricDistribution, QualityEvidence, RawSample, ResultSummary,
+    SEMANTIC_QUALITY_RUBRIC_ID, SampleOutcome, SemanticQualityMeasurement, TrajectoryBudget,
+    TrajectoryCompleteness, TrajectoryEvidenceKind, TrajectoryEvidenceManifest,
+    TrajectoryEvidenceReference, TrajectoryExposureProfile, TrajectoryOperationStatus,
+    TrajectoryStep, TrajectoryToolIdentity, TrajectoryUsage,
 };
 pub use parser::{
     ParserBenchmarkConfig, ParserBenchmarkEvidence, ParserDatasetInput, ParserRunError,
@@ -55,7 +61,15 @@ pub use token_accounting::{
 
 /// Result-bundle schema version written and verified by this crate.
 ///
-/// Version 2 makes corpus-backed semantic quality and strict cross-artifact
-/// verification normative. Version 1 bundles remain identifiable but are not
-/// accepted as evidence under the stronger contract.
-pub const RESULT_BUNDLE_SCHEMA_VERSION: &str = "2.0";
+/// Version 2.1 adds closed, bounded, source-free agent trajectories while
+/// retaining read compatibility with empty-trajectory version 2.0 bundles.
+pub const RESULT_BUNDLE_SCHEMA_VERSION: &str = "2.1";
+
+pub(crate) const LEGACY_RESULT_BUNDLE_SCHEMA_VERSION: &str = "2.0";
+
+pub(crate) fn is_supported_result_bundle_schema(schema: &str) -> bool {
+    matches!(
+        schema,
+        RESULT_BUNDLE_SCHEMA_VERSION | LEGACY_RESULT_BUNDLE_SCHEMA_VERSION
+    )
+}

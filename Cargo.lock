@@ -1885,6 +1885,7 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
+ "proptest",
  "rootlight-adapter-sdk",
  "rootlight-adapter-treesitter",
  "rootlight-adapters",

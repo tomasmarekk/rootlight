@@ -11,8 +11,8 @@ use serde::{
 };
 
 use crate::{
-    BenchmarkCommand, BundleLimits, DatasetEntry, DatasetManifest, RESULT_BUNDLE_SCHEMA_VERSION,
-    bundle::BundleError,
+    BenchmarkCommand, BundleLimits, DatasetEntry, DatasetManifest, bundle::BundleError,
+    is_supported_result_bundle_schema,
 };
 
 /// Decodes a strict dataset manifest under checked limits.
@@ -55,7 +55,7 @@ fn decode_dataset_manifest_with_control(
     let input = decoded.map_err(|()| budget.take_seed_failure())?;
     deserializer.end().map_err(|_| DecodeError::InvalidJson)?;
     validate_string(input.schema_version, limits, StringKind::Label)?;
-    if input.schema_version != RESULT_BUNDLE_SCHEMA_VERSION {
+    if !is_supported_result_bundle_schema(input.schema_version) {
         return Err(DecodeError::InvalidSchema);
     }
     validate_string(input.dataset_id, limits, StringKind::Label)?;
@@ -160,7 +160,7 @@ fn decode_benchmark_command_with_control(
     let input = decoded.map_err(|()| budget.take_seed_failure())?;
     deserializer.end().map_err(|_| DecodeError::InvalidJson)?;
     validate_string(input.schema_version, limits, StringKind::Label)?;
-    if input.schema_version != RESULT_BUNDLE_SCHEMA_VERSION {
+    if !is_supported_result_bundle_schema(input.schema_version) {
         return Err(DecodeError::InvalidSchema);
     }
     validate_string(input.subcommand, limits, StringKind::Label)?;
@@ -1110,7 +1110,7 @@ impl<'de> Visitor<'de> for EmptySequenceVisitor {
     type Value = ();
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("an empty schema 2.0 array")
+        formatter.write_str("an empty result-bundle command array")
     }
 
     fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
@@ -1118,7 +1118,7 @@ impl<'de> Visitor<'de> for EmptySequenceVisitor {
         A: SeqAccess<'de>,
     {
         if sequence.next_element::<IgnoredAny>()?.is_some() {
-            return Err(A::Error::custom("schema 2.0 array is not empty"));
+            return Err(A::Error::custom("result-bundle command array is not empty"));
         }
         Ok(())
     }
@@ -1178,10 +1178,10 @@ pub enum DecodeError {
     /// A normalized argument resembles a host path or URL.
     #[error("benchmark command contains a path-shaped value")]
     PathShapedValue,
-    /// Schema 2.0 does not permit a free-form command argument channel.
+    /// Result bundles do not permit a free-form command argument channel.
     #[error("benchmark command arguments are unsupported")]
     UnsupportedArguments,
-    /// Schema 2.0 supports only the closed parser-evidence command.
+    /// Result bundles support only the closed parser-evidence command.
     #[error("benchmark command subcommand is unsupported")]
     UnsupportedSubcommand,
     /// Warm-up, trial, or timeout policy is zero.
@@ -1341,7 +1341,7 @@ mod tests {
                     decode_benchmark_command(unsupported.as_bytes(), BundleLimits::default()),
                     Err(DecodeError::UnsupportedArguments)
                 ),
-                "{value:?} must not cross the schema 2.0 command channel"
+                "{value:?} must not cross the result-bundle command channel"
             );
         }
 

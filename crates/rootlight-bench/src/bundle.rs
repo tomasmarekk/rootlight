@@ -28,7 +28,8 @@ use rootlight_vfs::platform::PrivateDirectory;
 use crate::integrity::{FixedArtifactSource, is_fixed_artifact, validate_fixed_artifacts};
 use crate::{
     AgentTrajectory, BenchmarkCommand, BuildProvenance, CoverageEvidence, DatasetManifest,
-    EnvironmentEvidence, QualityEvidence, RawSample, ResultSummary,
+    EnvironmentEvidence, MAX_TRAJECTORIES_PER_BUNDLE, QualityEvidence, RawSample, ResultSummary,
+    TrajectoryEvidenceManifest,
 };
 
 pub(crate) const ENVIRONMENT_FILE: &str = "environment.json";
@@ -40,8 +41,9 @@ pub(crate) const SUMMARY_FILE: &str = "summary.json";
 pub(crate) const COVERAGE_FILE: &str = "coverage.json";
 pub(crate) const QUALITY_FILE: &str = "quality.json";
 pub(crate) const AGENT_TRAJECTORIES_FILE: &str = "agent-trajectories.jsonl";
+pub(crate) const TRAJECTORY_EVIDENCE_FILE: &str = "trajectory-evidence.json";
 const CHECKSUMS_FILE: &str = "checksums.txt";
-pub(crate) const FIXED_ARTIFACTS: [&str; 9] = [
+pub(crate) const LEGACY_FIXED_ARTIFACTS: [&str; 9] = [
     ENVIRONMENT_FILE,
     DATASET_MANIFEST_FILE,
     BUILD_PROVENANCE_FILE,
@@ -52,10 +54,22 @@ pub(crate) const FIXED_ARTIFACTS: [&str; 9] = [
     QUALITY_FILE,
     AGENT_TRAJECTORIES_FILE,
 ];
+pub(crate) const FIXED_ARTIFACTS: [&str; 10] = [
+    ENVIRONMENT_FILE,
+    DATASET_MANIFEST_FILE,
+    BUILD_PROVENANCE_FILE,
+    COMMAND_FILE,
+    RAW_SAMPLES_FILE,
+    SUMMARY_FILE,
+    COVERAGE_FILE,
+    QUALITY_FILE,
+    AGENT_TRAJECTORIES_FILE,
+    TRAJECTORY_EVIDENCE_FILE,
+];
 const FIXED_ARTIFACT_COUNT: usize = FIXED_ARTIFACTS.len();
 
 const HARD_MAX_RAW_SAMPLES: usize = 250_000;
-const HARD_MAX_AGENT_TRAJECTORIES: usize = 25_000;
+const HARD_MAX_AGENT_TRAJECTORIES: usize = MAX_TRAJECTORIES_PER_BUNDLE;
 const HARD_MAX_ARTIFACTS_PER_CLASS: usize = 512;
 const HARD_MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 const HARD_MAX_PROFILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -395,8 +409,10 @@ pub struct ResultBundle {
     pub coverage: CoverageEvidence,
     /// Quality evidence.
     pub quality: QualityEvidence,
-    /// Reserved agent trajectories; schema 2.0 requires this to be empty.
+    /// Closed, bounded, source-free agent trajectories.
     pub agent_trajectories: Vec<AgentTrajectory>,
+    /// Closed inventory that resolves every trajectory evidence digest.
+    pub trajectory_evidence: TrajectoryEvidenceManifest,
     /// Profile artifacts keyed by validated relative artifact name.
     pub profiles: BTreeMap<String, Vec<u8>>,
     /// Source-free log artifacts keyed by validated relative artifact name.
@@ -656,9 +672,6 @@ fn build_artifacts<'a>(
         limits.max_agent_trajectories,
         "agent_trajectory_count",
     )?;
-    if !bundle.agent_trajectories.is_empty() {
-        return Err(BundleError::UnsupportedTrajectorySchema);
-    }
     check_count(
         bundle.profiles.len(),
         limits.max_artifacts_per_class,
@@ -675,7 +688,13 @@ fn build_artifacts<'a>(
     if !bundle.logs.is_empty() {
         return Err(BundleError::UnsupportedLogSchema);
     }
-    let artifact_count = FIXED_ARTIFACT_COUNT;
+    let current_schema =
+        bundle.dataset_manifest.schema_version == crate::RESULT_BUNDLE_SCHEMA_VERSION;
+    let artifact_count = if current_schema {
+        FIXED_ARTIFACT_COUNT
+    } else {
+        LEGACY_FIXED_ARTIFACTS.len()
+    };
     check_count(
         artifact_count
             .checked_add(1)
@@ -700,7 +719,7 @@ fn build_artifacts<'a>(
         limits.max_directory_entries,
         "directory_entry_count",
     )?;
-    let checksum_bytes = checksum_manifest_size()?;
+    let checksum_bytes = checksum_manifest_size(current_schema)?;
     if checksum_bytes > limits.max_checksum_bytes {
         return Err(BundleError::LimitExceeded {
             resource: "checksum_bytes",
@@ -750,6 +769,13 @@ fn build_artifacts<'a>(
         json_lines,
         &bundle.agent_trajectories
     );
+    if current_schema {
+        push_owned!(
+            TRAJECTORY_EVIDENCE_FILE,
+            json_bytes,
+            &bundle.trajectory_evidence
+        );
+    }
 
     artifacts.sort()?;
     validate_fixed_artifacts(&artifacts, limits)?;
@@ -857,7 +883,7 @@ fn checksum_buffer_error(checksums: &BoundedBuffer) -> BundleError {
 }
 
 #[cfg(test)]
-fn checksum_manifest_size() -> Result<u64, BundleError> {
+fn checksum_manifest_size(include_trajectory_evidence: bool) -> Result<u64, BundleError> {
     let mut size = 0_u64;
     for relative in [
         ENVIRONMENT_FILE,
@@ -871,6 +897,9 @@ fn checksum_manifest_size() -> Result<u64, BundleError> {
         AGENT_TRAJECTORIES_FILE,
     ] {
         add_checksum_line_size(&mut size, relative.len())?;
+    }
+    if include_trajectory_evidence {
+        add_checksum_line_size(&mut size, TRAJECTORY_EVIDENCE_FILE.len())?;
     }
     Ok(size)
 }
@@ -1094,6 +1123,7 @@ fn valid_checksum_path(relative: &str) -> bool {
             | COVERAGE_FILE
             | QUALITY_FILE
             | AGENT_TRAJECTORIES_FILE
+            | TRAJECTORY_EVIDENCE_FILE
     ) {
         return true;
     }
@@ -1630,7 +1660,7 @@ pub enum BundleError {
     /// The quality rubric is incompatible with the current bundle schema.
     #[error("result bundle quality rubric is unsupported")]
     UnsupportedRubricVersion,
-    /// Agent trajectories are reserved for a later closed, source-free schema.
+    /// The selected bundle schema does not support nonempty trajectories.
     #[error("result bundle agent trajectory schema is unsupported")]
     UnsupportedTrajectorySchema,
     /// Profiles are reserved for a later closed, source-free schema.
@@ -1657,7 +1687,10 @@ mod tests {
     use super::*;
     use crate::{
         Availability, BenchmarkCommand, BuildProvenance, CoverageEvidence, DatasetManifest,
-        EnvironmentEvidence, EvidenceValue, QualityEvidence, ResultSummary,
+        EnvironmentEvidence, EvidenceValue, QualityEvidence, ResultSummary, TrajectoryBudget,
+        TrajectoryCompleteness, TrajectoryEvidenceKind, TrajectoryEvidenceReference,
+        TrajectoryExposureProfile, TrajectoryOperationStatus, TrajectoryStep,
+        TrajectoryToolIdentity, TrajectoryUsage,
     };
 
     fn fixture() -> ResultBundle {
@@ -1747,9 +1780,101 @@ mod tests {
                 unsupported_cases: BTreeMap::new(),
             },
             agent_trajectories: Vec::new(),
+            trajectory_evidence: TrajectoryEvidenceManifest {
+                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
+                artifacts: Vec::new(),
+            },
             profiles: BTreeMap::new(),
             logs: BTreeMap::new(),
         }
+    }
+
+    fn trajectory_fixture(workflow_id: &str, attempt_id: &str) -> AgentTrajectory {
+        AgentTrajectory {
+            schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            attempt_id: attempt_id.to_owned(),
+            baseline_variant: "rootlight".to_owned(),
+            completeness: TrajectoryCompleteness::Complete,
+            steps: vec![TrajectoryStep {
+                step_index: 0,
+                tool: TrajectoryToolIdentity {
+                    tool_id: "query.symbol".to_owned(),
+                    tool_version: "1.0".to_owned(),
+                },
+                exposure_profile: TrajectoryExposureProfile::Analysis,
+                operation_status: TrajectoryOperationStatus::Succeeded,
+                budget: TrajectoryBudget {
+                    tool_calls: 4,
+                    elapsed_ns: 1_000_000_000,
+                    result_items: 100,
+                    source_bytes: 1_048_576,
+                    tokens: 4_096,
+                },
+                usage: TrajectoryUsage {
+                    tool_calls: 1,
+                    elapsed_ns: 10_000,
+                    result_items: 2,
+                    source_bytes: 256,
+                    tokens: 96,
+                },
+                request_tokens: 64,
+                response_tokens: 32,
+                source_tokens: 16,
+            }],
+            evidence: vec![
+                TrajectoryEvidenceReference {
+                    kind: TrajectoryEvidenceKind::TokenizerReport,
+                    artifact_id: "tokenizer-fixture".to_owned(),
+                    sha256: "11".repeat(32),
+                },
+                TrajectoryEvidenceReference {
+                    kind: TrajectoryEvidenceKind::QualityGrade,
+                    artifact_id: "quality-fixture".to_owned(),
+                    sha256: "22".repeat(32),
+                },
+                TrajectoryEvidenceReference {
+                    kind: TrajectoryEvidenceKind::SecurityCase,
+                    artifact_id: "security-fixture".to_owned(),
+                    sha256: "33".repeat(32),
+                },
+                TrajectoryEvidenceReference {
+                    kind: TrajectoryEvidenceKind::EnvironmentManifest,
+                    artifact_id: "environment-fixture".to_owned(),
+                    sha256: "44".repeat(32),
+                },
+                TrajectoryEvidenceReference {
+                    kind: TrajectoryEvidenceKind::PerformanceSample,
+                    artifact_id: "performance-fixture".to_owned(),
+                    sha256: "55".repeat(32),
+                },
+            ],
+        }
+    }
+
+    fn set_bundle_schema(bundle: &mut ResultBundle, schema: &str) {
+        bundle.environment.schema_version = schema.to_owned();
+        bundle.dataset_manifest.schema_version = schema.to_owned();
+        bundle.build_provenance.schema_version = schema.to_owned();
+        bundle.command.schema_version = schema.to_owned();
+        for sample in &mut bundle.raw_samples {
+            sample.schema_version = schema.to_owned();
+        }
+        bundle.summary.schema_version = schema.to_owned();
+        bundle.coverage.schema_version = schema.to_owned();
+        bundle.quality.schema_version = schema.to_owned();
+        for trajectory in &mut bundle.agent_trajectories {
+            trajectory.schema_version = schema.to_owned();
+        }
+        bundle.trajectory_evidence.schema_version = schema.to_owned();
+    }
+
+    fn bundle_with_trajectory() -> ResultBundle {
+        let mut bundle = fixture();
+        let trajectory = trajectory_fixture("workflow-01", "attempt-01");
+        bundle.trajectory_evidence.artifacts = trajectory.evidence.clone();
+        bundle.agent_trajectories = vec![trajectory];
+        bundle
     }
 
     fn scheduled_fixture() -> ResultBundle {
@@ -2066,8 +2191,87 @@ mod tests {
         ];
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        materialize_bundle(&fixture(), &destination).expect("compatibility fixture materializes");
+        fs::create_dir(&destination).expect("compatibility directory is created");
+        for (artifact, bytes) in frozen_artifacts {
+            fs::write(destination.join(artifact), bytes)
+                .expect("compatibility artifact is materialized");
+        }
         verify_bundle(&destination).expect("compatibility bundle verifies");
+
+        for (artifact, expected) in frozen_artifacts {
+            assert_eq!(
+                fs::read(destination.join(artifact)).expect("materialized artifact is readable"),
+                expected,
+                "{artifact} changed without a schema-version bump"
+            );
+        }
+    }
+
+    #[test]
+    fn current_compatibility_fixture_matches_canonical_encoding() {
+        let frozen_artifacts: [(&str, &[u8]); 11] = [
+            (
+                AGENT_TRAJECTORIES_FILE,
+                include_bytes!(
+                    "../../../tests/fixtures/compatibility/benchmark/2.1/agent-trajectories.jsonl"
+                ),
+            ),
+            (
+                BUILD_PROVENANCE_FILE,
+                include_bytes!(
+                    "../../../tests/fixtures/compatibility/benchmark/2.1/build-provenance.json"
+                ),
+            ),
+            (
+                COMMAND_FILE,
+                include_bytes!("../../../tests/fixtures/compatibility/benchmark/2.1/command.json"),
+            ),
+            (
+                COVERAGE_FILE,
+                include_bytes!("../../../tests/fixtures/compatibility/benchmark/2.1/coverage.json"),
+            ),
+            (
+                DATASET_MANIFEST_FILE,
+                include_bytes!(
+                    "../../../tests/fixtures/compatibility/benchmark/2.1/dataset-manifest.json"
+                ),
+            ),
+            (
+                ENVIRONMENT_FILE,
+                include_bytes!(
+                    "../../../tests/fixtures/compatibility/benchmark/2.1/environment.json"
+                ),
+            ),
+            (
+                QUALITY_FILE,
+                include_bytes!("../../../tests/fixtures/compatibility/benchmark/2.1/quality.json"),
+            ),
+            (
+                RAW_SAMPLES_FILE,
+                include_bytes!(
+                    "../../../tests/fixtures/compatibility/benchmark/2.1/raw-samples.jsonl"
+                ),
+            ),
+            (
+                SUMMARY_FILE,
+                include_bytes!("../../../tests/fixtures/compatibility/benchmark/2.1/summary.json"),
+            ),
+            (
+                TRAJECTORY_EVIDENCE_FILE,
+                include_bytes!(
+                    "../../../tests/fixtures/compatibility/benchmark/2.1/trajectory-evidence.json"
+                ),
+            ),
+            (
+                CHECKSUMS_FILE,
+                include_bytes!("../../../tests/fixtures/compatibility/benchmark/2.1/checksums.txt"),
+            ),
+        ];
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let destination = temporary.path().join("result");
+        materialize_bundle(&bundle_with_trajectory(), &destination)
+            .expect("current compatibility fixture materializes");
+        verify_bundle(&destination).expect("current compatibility fixture verifies");
 
         for (artifact, expected) in frozen_artifacts {
             assert_eq!(
@@ -2493,53 +2697,317 @@ mod tests {
     }
 
     #[test]
-    fn schema_two_rejects_every_agent_trajectory_payload() {
+    fn current_schema_round_trips_nonempty_source_free_trajectory() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
-        let cases = [
-            ("empty", None),
-            ("source", Some("fn private_source() {}")),
-            ("path", Some("C:\\private\\source.rs")),
-            ("url", Some("https://example.invalid/private")),
-            ("secret", Some("authorization=bearer-secret-value")),
-        ];
+        let destination = temporary.path().join("result");
+        let bundle = bundle_with_trajectory();
 
-        for (name, payload) in cases {
-            let destination = temporary.path().join(name);
-            let mut bundle = fixture();
-            bundle.agent_trajectories.push(AgentTrajectory {
-                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
-                task_id: "task".to_owned(),
-                eligibility: Availability::Unavailable {
-                    reason_code: "not_measured".to_owned(),
-                },
-                tool_calls: payload.into_iter().map(str::to_owned).collect(),
-                total_tokens: EvidenceValue::unavailable("not_measured"),
-            });
-
-            let error = materialize_bundle(&bundle, &destination)
-                .expect_err("schema 2.0 rejects every non-empty trajectory artifact");
-
-            assert!(matches!(error, BundleError::UnsupportedTrajectorySchema));
-            assert!(!destination.exists());
-            if let Some(payload) = payload {
-                assert!(!error.to_string().contains(payload));
-            }
+        materialize_bundle(&bundle, &destination).expect("trajectory bundle materializes");
+        verify_bundle(&destination).expect("trajectory bundle verifies");
+        let encoded = fs::read_to_string(destination.join(AGENT_TRAJECTORIES_FILE))
+            .expect("trajectory artifact is readable");
+        for forbidden in [
+            "source_text",
+            "prompt",
+            "arguments",
+            "completion",
+            "local_path",
+            "secret",
+        ] {
+            assert!(!encoded.contains(forbidden));
         }
     }
 
     #[test]
-    fn verifier_rejects_checksum_valid_schema_two_trajectories_after_limits() {
+    fn trajectory_references_resolve_exact_kind_id_and_digest() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+
+        let mut missing = bundle_with_trajectory();
+        missing.trajectory_evidence.artifacts.remove(0);
+        assert!(matches!(
+            materialize_bundle(&missing, &temporary.path().join("missing")),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+
+        let mut wrong_digest = bundle_with_trajectory();
+        wrong_digest.trajectory_evidence.artifacts[0].sha256 = "aa".repeat(32);
+        assert!(matches!(
+            materialize_bundle(&wrong_digest, &temporary.path().join("wrong-digest")),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+
+        let mut wrong_kind = bundle_with_trajectory();
+        wrong_kind.trajectory_evidence.artifacts[0].kind = TrajectoryEvidenceKind::RawSample;
+        assert!(matches!(
+            materialize_bundle(&wrong_kind, &temporary.path().join("wrong-kind")),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+
+        let mut traversal = bundle_with_trajectory();
+        traversal.trajectory_evidence.artifacts[0].artifact_id = "../private".to_owned();
+        assert!(matches!(
+            materialize_bundle(&traversal, &temporary.path().join("traversal")),
+            Err(BundleError::InvalidArtifactEncoding)
+        ));
+    }
+
+    #[test]
+    fn trajectory_collection_boundaries_accept_maxima_and_reject_overflow() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let mut maximum_count = fixture();
+        let count_template = trajectory_fixture("workflow", "attempt-0000");
+        maximum_count.trajectory_evidence.artifacts = count_template.evidence.clone();
+        maximum_count.agent_trajectories = (0..crate::MAX_TRAJECTORIES_PER_BUNDLE)
+            .map(|index| trajectory_fixture("workflow", &format!("attempt-{index:04}")))
+            .collect();
+        let maximum_count_destination = temporary.path().join("maximum-count");
+        materialize_bundle(&maximum_count, &maximum_count_destination)
+            .expect("maximum trajectory count materializes");
+        verify_bundle(&maximum_count_destination).expect("maximum trajectory count verifies");
+        maximum_count.agent_trajectories.push(count_template);
+        assert!(matches!(
+            materialize_bundle(
+                &maximum_count,
+                &temporary.path().join("too-many-trajectories")
+            ),
+            Err(BundleError::LimitExceeded {
+                resource: "agent_trajectory_count"
+            })
+        ));
+
+        let mut maximum = bundle_with_trajectory();
+        let template = maximum.agent_trajectories[0].steps[0].clone();
+        maximum.agent_trajectories[0].steps = (0..crate::MAX_TRAJECTORY_STEPS)
+            .map(|index| {
+                let mut step = template.clone();
+                step.step_index = u32::try_from(index).expect("step limit fits u32");
+                step
+            })
+            .collect();
+        let references: Vec<_> = (0..crate::MAX_TRAJECTORY_REFERENCES)
+            .map(|index| TrajectoryEvidenceReference {
+                kind: TrajectoryEvidenceKind::TokenizerReport,
+                artifact_id: format!("artifact-{index:03}"),
+                sha256: format!("{index:064x}"),
+            })
+            .collect();
+        maximum.agent_trajectories[0].evidence = references.clone();
+        maximum.trajectory_evidence.artifacts = references;
+        let maximum_destination = temporary.path().join("maximum");
+        materialize_bundle(&maximum, &maximum_destination)
+            .expect("maximum trajectory collections materialize");
+        verify_bundle(&maximum_destination).expect("maximum trajectory collections verify");
+
+        let mut too_many_steps = bundle_with_trajectory();
+        too_many_steps.agent_trajectories[0].steps =
+            vec![template; crate::MAX_TRAJECTORY_STEPS + 1];
+        assert!(matches!(
+            materialize_bundle(&too_many_steps, &temporary.path().join("too-many-steps")),
+            Err(BundleError::LimitExceeded {
+                resource: "trajectory_step_count"
+            })
+        ));
+
+        let mut too_many_references = bundle_with_trajectory();
+        too_many_references.agent_trajectories[0].evidence = (0..=crate::MAX_TRAJECTORY_REFERENCES)
+            .map(|index| TrajectoryEvidenceReference {
+                kind: TrajectoryEvidenceKind::TokenizerReport,
+                artifact_id: format!("artifact-{index:03}"),
+                sha256: format!("{index:064x}"),
+            })
+            .collect();
+        assert!(matches!(
+            materialize_bundle(
+                &too_many_references,
+                &temporary.path().join("too-many-references")
+            ),
+            Err(BundleError::LimitExceeded {
+                resource: "trajectory_reference_count"
+            })
+        ));
+
+        let mut too_many_inventory = fixture();
+        too_many_inventory.trajectory_evidence.artifacts = (0
+            ..=crate::MAX_TRAJECTORY_EVIDENCE_ARTIFACTS)
+            .map(|index| TrajectoryEvidenceReference {
+                kind: TrajectoryEvidenceKind::TokenizerReport,
+                artifact_id: format!("artifact-{index:04}"),
+                sha256: format!("{index:064x}"),
+            })
+            .collect();
+        assert!(matches!(
+            materialize_bundle(
+                &too_many_inventory,
+                &temporary.path().join("too-many-inventory")
+            ),
+            Err(BundleError::LimitExceeded {
+                resource: "trajectory_evidence_count"
+            })
+        ));
+    }
+
+    #[test]
+    fn trajectory_field_and_counter_boundaries_fail_closed() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+        let mut exact = bundle_with_trajectory();
+        exact.agent_trajectories[0].workflow_id = "a".repeat(crate::MAX_TRAJECTORY_LABEL_BYTES);
+        let step = &mut exact.agent_trajectories[0].steps[0];
+        step.budget = TrajectoryBudget {
+            tool_calls: crate::MAX_TRAJECTORY_COUNTER,
+            elapsed_ns: crate::MAX_TRAJECTORY_ELAPSED_NS,
+            result_items: crate::MAX_TRAJECTORY_COUNTER,
+            source_bytes: crate::MAX_TRAJECTORY_SOURCE_BYTES,
+            tokens: crate::MAX_TRAJECTORY_TOKENS,
+        };
+        step.usage = TrajectoryUsage {
+            tool_calls: crate::MAX_TRAJECTORY_COUNTER,
+            elapsed_ns: crate::MAX_TRAJECTORY_ELAPSED_NS,
+            result_items: crate::MAX_TRAJECTORY_COUNTER,
+            source_bytes: crate::MAX_TRAJECTORY_SOURCE_BYTES,
+            tokens: crate::MAX_TRAJECTORY_TOKENS,
+        };
+        step.request_tokens = crate::MAX_TRAJECTORY_TOKENS;
+        step.response_tokens = 0;
+        step.source_tokens = crate::MAX_TRAJECTORY_TOKENS;
+        materialize_bundle(&exact, &temporary.path().join("exact"))
+            .expect("exact trajectory scalar maxima materialize");
+
+        let mut long_label = bundle_with_trajectory();
+        long_label.agent_trajectories[0].workflow_id =
+            "a".repeat(crate::MAX_TRAJECTORY_LABEL_BYTES + 1);
+        assert!(matches!(
+            materialize_bundle(&long_label, &temporary.path().join("long-label")),
+            Err(BundleError::InvalidArtifactEncoding)
+        ));
+
+        for (name, field) in [
+            ("calls", 0),
+            ("elapsed", 1),
+            ("items", 2),
+            ("source", 3),
+            ("tokens", 4),
+        ] {
+            let mut invalid = bundle_with_trajectory();
+            let usage = &mut invalid.agent_trajectories[0].steps[0].usage;
+            match field {
+                0 => usage.tool_calls = crate::MAX_TRAJECTORY_COUNTER + 1,
+                1 => usage.elapsed_ns = crate::MAX_TRAJECTORY_ELAPSED_NS + 1,
+                2 => usage.result_items = crate::MAX_TRAJECTORY_COUNTER + 1,
+                3 => usage.source_bytes = crate::MAX_TRAJECTORY_SOURCE_BYTES + 1,
+                4 => usage.tokens = crate::MAX_TRAJECTORY_TOKENS + 1,
+                _ => unreachable!("test field table is closed"),
+            }
+            assert!(matches!(
+                materialize_bundle(&invalid, &temporary.path().join(name)),
+                Err(BundleError::LimitExceeded {
+                    resource: "trajectory_counter"
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn trajectory_decoder_rejects_malformed_duplicate_and_oversized_records() {
+        let temporary = tempfile::tempdir().expect("temporary root is available");
+
+        let missing_destination = temporary.path().join("missing");
+        materialize_bundle(&bundle_with_trajectory(), &missing_destination)
+            .expect("valid trajectory bundle materializes");
+        let missing = fs::read_to_string(missing_destination.join(AGENT_TRAJECTORIES_FILE))
+            .expect("trajectory is readable")
+            .replace("\"baseline_variant\":\"rootlight\",", "");
+        rewrite_artifact_and_checksum(
+            &missing_destination,
+            AGENT_TRAJECTORIES_FILE,
+            missing.as_bytes(),
+        );
+        assert!(matches!(
+            verify_bundle(&missing_destination),
+            Err(BundleError::InvalidArtifactEncoding)
+        ));
+
+        let duplicate_destination = temporary.path().join("duplicate");
+        materialize_bundle(&bundle_with_trajectory(), &duplicate_destination)
+            .expect("valid trajectory bundle materializes");
+        let trajectory = trajectory_fixture("workflow-01", "attempt-01");
+        let duplicate = json_lines(&[trajectory.clone(), trajectory], 512 * 1024)
+            .expect("duplicate trajectory serializes");
+        rewrite_artifact_and_checksum(&duplicate_destination, AGENT_TRAJECTORIES_FILE, &duplicate);
+        assert!(matches!(
+            verify_bundle(&duplicate_destination),
+            Err(BundleError::ArtifactInvariantViolation)
+        ));
+
+        let truncated_destination = temporary.path().join("truncated");
+        materialize_bundle(&bundle_with_trajectory(), &truncated_destination)
+            .expect("valid trajectory bundle materializes");
+        let mut truncated = fs::read(truncated_destination.join(AGENT_TRAJECTORIES_FILE))
+            .expect("trajectory is readable");
+        assert_eq!(truncated.pop(), Some(b'\n'));
+        rewrite_artifact_and_checksum(&truncated_destination, AGENT_TRAJECTORIES_FILE, &truncated);
+        assert!(matches!(
+            verify_bundle(&truncated_destination),
+            Err(BundleError::InvalidArtifactEncoding)
+        ));
+
+        let oversized_destination = temporary.path().join("oversized");
+        materialize_bundle(&bundle_with_trajectory(), &oversized_destination)
+            .expect("valid trajectory bundle materializes");
+        let mut oversized = String::from("{\"padding\":[");
+        for index in 0..140_000 {
+            if index != 0 {
+                oversized.push(',');
+            }
+            oversized.push('0');
+        }
+        oversized.push_str("]}\n");
+        rewrite_artifact_and_checksum(
+            &oversized_destination,
+            AGENT_TRAJECTORIES_FILE,
+            oversized.as_bytes(),
+        );
+        let error = verify_bundle(&oversized_destination)
+            .expect_err("oversized trajectory record is rejected");
+        assert!(
+            matches!(
+                error,
+                BundleError::LimitExceeded {
+                    resource: "trajectory_encoded_bytes"
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn canonical_trajectory_serialization_is_deterministic(
+            attempt_id in "[a-z0-9]{1,32}",
+            elapsed_ns in 1_u64..1_000_000_u64,
+        ) {
+            let mut trajectory = trajectory_fixture("workflow", &attempt_id);
+            trajectory.steps[0].usage.elapsed_ns = elapsed_ns;
+            let first = json_lines(std::slice::from_ref(&trajectory), 512 * 1024)
+                .expect("generated trajectory serializes");
+            let second = json_lines(std::slice::from_ref(&trajectory), 512 * 1024)
+                .expect("generated trajectory serializes again");
+            proptest::prop_assert_eq!(&first, &second);
+            let decoded: AgentTrajectory =
+                serde_json::from_slice(&first[..first.len() - 1])
+                    .expect("canonical trajectory decodes");
+            proptest::prop_assert_eq!(decoded, trajectory);
+        }
+    }
+
+    #[test]
+    fn legacy_schema_rejects_nonempty_trajectory_after_count_preflight() {
         let temporary = tempfile::tempdir().expect("temporary root is available");
         let destination = temporary.path().join("result");
-        materialize_bundle(&fixture(), &destination)
-            .expect("empty trajectory fixture materializes");
-        let trajectory = AgentTrajectory {
-            schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
-            task_id: "task".to_owned(),
-            eligibility: Availability::Available,
-            tool_calls: vec!["closed-shape-placeholder".to_owned()],
-            total_tokens: EvidenceValue::unavailable("not_measured"),
-        };
+        let mut legacy = fixture();
+        set_bundle_schema(&mut legacy, crate::LEGACY_RESULT_BUNDLE_SCHEMA_VERSION);
+        materialize_bundle(&legacy, &destination).expect("legacy empty bundle materializes");
+        let mut trajectory = trajectory_fixture("workflow-01", "attempt-01");
+        trajectory.schema_version = crate::LEGACY_RESULT_BUNDLE_SCHEMA_VERSION.to_owned();
         let canonical = json_lines(std::slice::from_ref(&trajectory), 64 * 1024)
             .expect("trajectory serializes");
         rewrite_artifact_and_checksum(&destination, AGENT_TRAJECTORIES_FILE, &canonical);
@@ -2572,7 +3040,7 @@ mod tests {
             fs::read(destination.join(DATASET_MANIFEST_FILE)).expect("manifest is readable");
         let legacy = String::from_utf8(manifest)
             .expect("manifest is UTF-8")
-            .replace("\"schema_version\":\"2.0\"", "\"schema_version\":\"1.0\"");
+            .replace("\"schema_version\":\"2.1\"", "\"schema_version\":\"1.0\"");
         rewrite_artifact_and_checksum(&destination, DATASET_MANIFEST_FILE, legacy.as_bytes());
 
         let error = verify_bundle(&destination).expect_err("legacy bundle is rejected explicitly");
@@ -2903,30 +3371,18 @@ mod tests {
         let trajectory_destination = temporary.path().join("trajectory");
         materialize_bundle(&fixture(), &trajectory_destination)
             .expect("trajectory fixture materializes");
-        let trajectory = AgentTrajectory {
-            schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
-            task_id: "task".to_owned(),
-            eligibility: Availability::Available,
-            tool_calls: vec!["first".to_owned(), "second".to_owned()],
-            total_tokens: EvidenceValue::unavailable("not_measured"),
-        };
-        let trajectory =
-            String::from_utf8(json_lines(&[trajectory], 64 * 1024).expect("trajectory serializes"))
-                .expect("trajectory is UTF-8")
-                .replace("\"second\"", "7");
+        let mut trajectory = trajectory_fixture("workflow-01", "attempt-01");
+        trajectory.steps = vec![trajectory.steps[0].clone(); crate::MAX_TRAJECTORY_STEPS + 1];
+        let trajectory = json_lines(&[trajectory], 512 * 1024).expect("trajectory serializes");
         rewrite_artifact_and_checksum(
             &trajectory_destination,
             AGENT_TRAJECTORIES_FILE,
-            trajectory.as_bytes(),
+            &trajectory,
         );
-        let limits = BundleLimits {
-            max_command_arguments: 1,
-            ..constrained_limits()
-        };
         assert!(matches!(
-            verify_bundle_with_limits(&trajectory_destination, limits),
+            verify_bundle(&trajectory_destination),
             Err(BundleError::LimitExceeded {
-                resource: "trajectory_tool_call_count"
+                resource: "trajectory_step_count"
             })
         ));
     }
@@ -2982,15 +3438,7 @@ mod tests {
 
         let mut bundle = fixture();
         bundle.agent_trajectories = vec![
-            AgentTrajectory {
-                schema_version: crate::RESULT_BUNDLE_SCHEMA_VERSION.to_owned(),
-                task_id: "task".to_owned(),
-                eligibility: Availability::Unavailable {
-                    reason_code: "not_measured".to_owned(),
-                },
-                tool_calls: Vec::new(),
-                total_tokens: EvidenceValue::unavailable("not_measured"),
-            };
+            trajectory_fixture("workflow-01", "attempt-01");
             limits.max_agent_trajectories + 1
         ];
         let error =
@@ -3030,7 +3478,7 @@ mod tests {
         ));
         assert!(!temporary.path().join("total").exists());
 
-        let checksum_bytes = checksum_manifest_size().expect("checksum size is computable");
+        let checksum_bytes = checksum_manifest_size(true).expect("checksum size is computable");
         let mut limits = constrained_limits();
         limits.max_total_bytes = checksum_bytes + 32;
         let error = materialize_bundle_with_limits(
@@ -3061,7 +3509,7 @@ mod tests {
             }
         ));
 
-        let checksum_bytes = checksum_manifest_size().expect("checksum size is computable");
+        let checksum_bytes = checksum_manifest_size(true).expect("checksum size is computable");
         let mut artifact_limits = constrained_limits();
         artifact_limits.max_artifact_bytes = checksum_bytes - 1;
         let error = materialize_bundle_with_limits(
@@ -3095,8 +3543,8 @@ mod tests {
         materialize_bundle(&fixture(), &destination).expect("fixture materializes");
 
         let mut limits = constrained_limits();
-        limits.max_file_count = 10;
-        verify_bundle_with_limits(&destination, limits).expect("ten normative files fit");
+        limits.max_file_count = FIXED_ARTIFACT_COUNT + 1;
+        verify_bundle_with_limits(&destination, limits).expect("normative files fit exactly");
         fs::write(destination.join("extra"), b"x").expect("extra file is created");
         let error = verify_bundle_with_limits(&destination, limits)
             .expect_err("file-count bound is enforced");

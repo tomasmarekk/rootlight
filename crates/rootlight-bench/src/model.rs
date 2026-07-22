@@ -372,22 +372,205 @@ impl SemanticQualityMeasurement {
     }
 }
 
-/// Reserved agent-trajectory shape.
+/// Maximum source-free trajectories retained by one result bundle.
+pub const MAX_TRAJECTORIES_PER_BUNDLE: usize = 1_024;
+/// Maximum steps retained by one source-free trajectory.
+pub const MAX_TRAJECTORY_STEPS: usize = 256;
+/// Maximum typed evidence references retained by one source-free trajectory.
+pub const MAX_TRAJECTORY_REFERENCES: usize = 64;
+/// Maximum typed evidence identities retained by one result bundle.
+pub const MAX_TRAJECTORY_EVIDENCE_ARTIFACTS: usize = 4_096;
+/// Maximum UTF-8 bytes in a normalized trajectory identifier or reason code.
+pub const MAX_TRAJECTORY_LABEL_BYTES: usize = 128;
+/// Maximum canonical encoded bytes in one trajectory JSONL record.
+pub const MAX_TRAJECTORY_ENCODED_BYTES: usize = 256 * 1024;
+/// Maximum value accepted for a trajectory operation count or item counter.
+pub const MAX_TRAJECTORY_COUNTER: u64 = 1_000_000_000;
+/// Maximum elapsed nanoseconds accepted for one trajectory counter.
+pub const MAX_TRAJECTORY_ELAPSED_NS: u64 = 86_400_000_000_000;
+/// Maximum source bytes attributed to one trajectory counter.
+pub const MAX_TRAJECTORY_SOURCE_BYTES: u64 = 1 << 40;
+/// Maximum tokens attributed to one trajectory counter.
+pub const MAX_TRAJECTORY_TOKENS: u64 = 1_000_000_000;
+
+/// One bounded source-free agent workflow attempt.
 ///
-/// Result-bundle schema 2.0 requires the trajectory artifact to remain empty;
-/// a later schema must replace free-form tool-call text with a closed,
-/// source-free record before trajectories can be published.
+/// The wire contract intentionally contains no source text, prompts, tool
+/// arguments, model completions, paths, URLs, or secret-bearing free-form
+/// fields. Every string is a normalized identifier or reason code checked at
+/// the publication and verification boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentTrajectory {
-    /// Trajectory schema version.
+    /// Bundle schema version, used to reject legacy or mixed trajectory records.
     pub schema_version: String,
-    /// Stable task ID.
-    pub task_id: String,
-    /// Terminal eligibility.
-    pub eligibility: Availability,
-    /// Reserved tool-call payload; schema 2.0 rejects every non-empty trajectory.
-    pub tool_calls: Vec<String>,
-    /// Total model tokens, when measured.
-    pub total_tokens: EvidenceValue<u64>,
+    /// Stable normalized workflow identifier; it cannot carry workflow source.
+    pub workflow_id: String,
+    /// Stable normalized attempt identifier; it cannot contain a host path.
+    pub attempt_id: String,
+    /// Stable normalized comparison variant identifier.
+    pub baseline_variant: String,
+    /// Whether the attempt is complete or excluded under a stable reason code.
+    pub completeness: TrajectoryCompleteness,
+    /// Ordered closed operation records without raw request or response payloads.
+    pub steps: Vec<TrajectoryStep>,
+    /// Canonically ordered typed digests for separately retained evidence.
+    pub evidence: Vec<TrajectoryEvidenceReference>,
+}
+
+/// Completeness classification for one workflow attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TrajectoryCompleteness {
+    /// Every planned step reached a retained terminal status.
+    Complete,
+    /// The attempt is retained but excluded from aggregate claims.
+    Excluded {
+        /// Stable normalized exclusion reason without diagnostic prose.
+        reason_code: String,
+    },
+}
+
+/// One closed operation step in an agent trajectory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrajectoryStep {
+    /// Zero-based contiguous operation index.
+    pub step_index: u32,
+    /// Versioned tool identity without arguments or output.
+    pub tool: TrajectoryToolIdentity,
+    /// Exposure profile active for the operation.
+    pub exposure_profile: TrajectoryExposureProfile,
+    /// Closed terminal operation status with a stable code on failure.
+    pub operation_status: TrajectoryOperationStatus,
+    /// Ceilings in force before the operation started.
+    pub budget: TrajectoryBudget,
+    /// Measured counters consumed by the operation.
+    pub usage: TrajectoryUsage,
+    /// Tokenizer-measured request tokens, including any attributed source tokens.
+    pub request_tokens: u64,
+    /// Tokenizer-measured response tokens.
+    pub response_tokens: u64,
+    /// Request tokens attributed to source material, retained only as a count.
+    pub source_tokens: u64,
+}
+
+/// Stable tool identity retained without a raw invocation payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrajectoryToolIdentity {
+    /// Stable normalized tool identifier.
+    pub tool_id: String,
+    /// Stable normalized tool contract version.
+    pub tool_version: String,
+}
+
+/// Closed tool exposure profiles accepted by trajectory evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrajectoryExposureProfile {
+    /// Minimal exploration tool surface.
+    Scout,
+    /// Read-only analysis tool surface.
+    Analysis,
+    /// Full development tool surface.
+    Developer,
+}
+
+/// Closed terminal status for one retained tool operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TrajectoryOperationStatus {
+    /// The operation completed successfully.
+    Succeeded,
+    /// The operation failed under a stable source-free error code.
+    Failed {
+        /// Stable normalized error code.
+        error_code: String,
+    },
+    /// The operation exhausted its monotonic deadline.
+    TimedOut {
+        /// Stable normalized timeout code.
+        error_code: String,
+    },
+    /// The operation was cancelled before completion.
+    Cancelled {
+        /// Stable normalized cancellation code.
+        error_code: String,
+    },
+}
+
+/// Resource ceilings applied to one trajectory operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrajectoryBudget {
+    /// Maximum tool calls.
+    pub tool_calls: u64,
+    /// Maximum monotonic elapsed nanoseconds.
+    pub elapsed_ns: u64,
+    /// Maximum result items.
+    pub result_items: u64,
+    /// Maximum source bytes inspected.
+    pub source_bytes: u64,
+    /// Maximum tokenizer-measured request and response tokens.
+    pub tokens: u64,
+}
+
+/// Measured resource usage for one trajectory operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrajectoryUsage {
+    /// Tool calls actually made.
+    pub tool_calls: u64,
+    /// Monotonic elapsed nanoseconds actually consumed.
+    pub elapsed_ns: u64,
+    /// Result items actually returned.
+    pub result_items: u64,
+    /// Source bytes actually inspected.
+    pub source_bytes: u64,
+    /// Tokenizer-measured request and response tokens actually consumed.
+    pub tokens: u64,
+}
+
+/// Closed evidence classes that a trajectory may reference by digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrajectoryEvidenceKind {
+    /// Retained raw benchmark sample artifact.
+    RawSample,
+    /// Tokenizer identity and accounting report.
+    TokenizerReport,
+    /// Blinded or rubric-bound quality grade.
+    QualityGrade,
+    /// Prompt-injection or other security case result.
+    SecurityCase,
+    /// Source-free environment manifest.
+    EnvironmentManifest,
+    /// Timing or resource performance sample.
+    PerformanceSample,
+}
+
+/// Typed reference to separately hashed source-free evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrajectoryEvidenceReference {
+    /// Closed artifact class, preventing path-shaped type substitution.
+    pub kind: TrajectoryEvidenceKind,
+    /// Stable normalized artifact identifier, never a filesystem path.
+    pub artifact_id: String,
+    /// Lowercase SHA-256 of the separately retained artifact.
+    pub sha256: String,
+}
+
+/// Closed inventory used to resolve trajectory evidence references.
+///
+/// The inventory stores only typed normalized IDs and digests. Artifact
+/// locations and payloads remain outside the trajectory publication boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrajectoryEvidenceManifest {
+    /// Bundle schema version, preventing cross-version inventory reuse.
+    pub schema_version: String,
+    /// Canonically ordered retained evidence identities and digests.
+    pub artifacts: Vec<TrajectoryEvidenceReference>,
 }
