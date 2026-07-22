@@ -131,7 +131,7 @@ fn every_advertised_batch_subtool_reaches_its_production_adapter() {
             );
         } else {
             failures.push(format!(
-                "{}: operation {}",
+                "{}: operation {} ({result})",
                 descriptor.batch_tool.name(),
                 result["error"]["code"]
             ));
@@ -228,7 +228,7 @@ fn dispatch_arguments(tool: BatchTool, symbol: &Value, source_ref: &Value) -> Va
             json!({
                 "task": "fixture",
                 "seeds": {"symbols": [symbol.clone()]},
-                "token_budget": 500
+                "token_budget": 4_500
             })
         }
         BatchTool::SourceRead => {

@@ -12,9 +12,14 @@ use std::{
 };
 
 use rootlight_agent::{
+    context_continuation::{
+        ContextContinuationBinding, ContextContinuationCodec, ContextContinuationError,
+        ContextContinuationState,
+    },
     context_evidence::{
         ContextEvidenceCallContext, ContextEvidencePort, ContextEvidencePortError,
-        ContextEvidencePortErrorKind, EvidenceCandidateDraft, EvidenceProvenance, EvidenceProvider,
+        ContextEvidencePortErrorKind, ContextSourceMaterial, ContextSourceOutput,
+        ContextSourceRequest, EvidenceCandidateDraft, EvidenceProvenance, EvidenceProvider,
         EvidenceProviderInvocation, EvidenceProviderOutput,
     },
     context_pack::{CONTEXT_PACK_TIMEOUT_MS, ContextPackService, ContextPackServiceError},
@@ -69,6 +74,9 @@ struct FakePort {
     identity_calls: Mutex<Vec<IdentityCall>>,
     evidence_calls: Mutex<Vec<EvidenceCall>>,
     call_count: AtomicUsize,
+    definition_candidates: usize,
+    candidate_tokens: u64,
+    signature_bytes: Vec<usize>,
 }
 
 impl FakePort {
@@ -82,7 +90,23 @@ impl FakePort {
             identity_calls: Mutex::new(Vec::new()),
             evidence_calls: Mutex::new(Vec::new()),
             call_count: AtomicUsize::new(0),
+            definition_candidates: 1,
+            candidate_tokens: 32,
+            signature_bytes: vec![1],
         }
+    }
+
+    fn paged(
+        identity_response: Result<AgentResolvedIdentity, AgentPortError>,
+        definition_candidates: usize,
+        candidate_tokens: u64,
+        signature_bytes: Vec<usize>,
+    ) -> Self {
+        let mut port = Self::new(identity_response, None);
+        port.definition_candidates = definition_candidates;
+        port.candidate_tokens = candidate_tokens;
+        port.signature_bytes = signature_bytes;
+        port
     }
 }
 
@@ -130,40 +154,157 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
                 })
             });
         }
-        let definition = explanation(invocation.generation()).definition;
-        let candidate = EvidenceCandidateDraft {
-            repository: invocation.repository(),
-            generation: invocation.generation(),
-            invocation: invocation.id().clone(),
-            provider: invocation.provider(),
-            role: invocation.role(),
-            provenance: EvidenceProvenance::Graph,
-            symbol_id: Some(symbol()),
-            identity: symbol().to_string(),
-            relevance: 900,
-            confidence: 900,
-            cost: BudgetCharge {
-                results: 1,
-                tokens: 32,
-                ..BudgetCharge::default()
-            },
-            source_refs: vec![definition],
-            dependencies: Vec::new(),
-        };
+        let candidates = (0..self.definition_candidates)
+            .map(|index| {
+                let byte = u8::try_from(index).unwrap_or(u8::MAX).saturating_add(3);
+                let candidate_symbol = SymbolId::from_bytes([byte; 20]);
+                let definition = SourceRef::new(
+                    invocation.repository(),
+                    invocation.generation(),
+                    SourceSpan::new(FileId::from_bytes([byte.saturating_add(20); 20]), 0, 32)
+                        .expect("fixture source span is valid"),
+                    ContentHash::from_bytes([byte; 32]),
+                    Some(LineRange::new(1, 2).expect("fixture line range is valid")),
+                );
+                EvidenceCandidateDraft {
+                    repository: invocation.repository(),
+                    generation: invocation.generation(),
+                    invocation: invocation.id().clone(),
+                    provider: invocation.provider(),
+                    role: invocation.role(),
+                    provenance: EvidenceProvenance::Graph,
+                    symbol_id: Some(candidate_symbol),
+                    identity: candidate_symbol.to_string(),
+                    relevance: 900_u16.saturating_sub(u16::try_from(index).unwrap_or(u16::MAX)),
+                    confidence: 900,
+                    cost: BudgetCharge {
+                        results: 1,
+                        tokens: self.candidate_tokens,
+                        ..BudgetCharge::default()
+                    },
+                    source_refs: vec![definition],
+                    dependencies: Vec::new(),
+                }
+            })
+            .collect::<Vec<_>>();
         let output = EvidenceProviderOutput {
             repository: invocation.repository(),
             generation: invocation.generation(),
             invocation: invocation.id().clone(),
-            candidates: vec![candidate],
+            candidates,
             completeness: rootlight_mcp_contract::completeness::ResultCompleteness::complete(),
             usage: BudgetCharge {
-                results: 1,
-                tokens: 32,
+                results: u64::try_from(self.definition_candidates).unwrap_or(u64::MAX),
+                tokens: 32_u64
+                    .saturating_mul(u64::try_from(self.definition_candidates).unwrap_or(u64::MAX)),
                 ..BudgetCharge::default()
             },
         };
         Box::pin(async move { Ok(output) })
     }
+
+    fn materialize_source(
+        &self,
+        request: ContextSourceRequest,
+        _context: ContextEvidenceCallContext<TestCancellation>,
+    ) -> AgentPortFuture<Result<ContextSourceOutput, ContextEvidencePortError>> {
+        let signature_bytes = self.signature_bytes.clone();
+        let materials = request
+            .targets
+            .into_iter()
+            .enumerate()
+            .map(|(index, target)| {
+                let bytes = signature_bytes
+                    .get(index)
+                    .copied()
+                    .or_else(|| signature_bytes.last().copied())
+                    .unwrap_or(1);
+                ContextSourceMaterial {
+                    candidate_id: target.candidate_id,
+                    source_ref: target.source_ref,
+                    signature: Some("s".repeat(bytes)),
+                    snippet: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let source_bytes = materials
+            .iter()
+            .filter_map(|material| material.signature.as_ref())
+            .map(|signature| u64::try_from(signature.len()).unwrap_or(u64::MAX))
+            .sum();
+        let output = ContextSourceOutput {
+            repository: request.repository,
+            generation: request.generation,
+            materials,
+            completeness: rootlight_mcp_contract::completeness::ResultCompleteness::complete(),
+            usage: BudgetCharge {
+                results: u64::try_from(self.definition_candidates).unwrap_or(u64::MAX),
+                source_bytes,
+                ..BudgetCharge::default()
+            },
+        };
+        Box::pin(async move { Ok(output) })
+    }
+}
+
+impl ContextContinuationCodec for FakePort {
+    fn open_context_continuation(
+        &self,
+        cursor: &ContinuationCursor,
+        binding: ContextContinuationBinding,
+    ) -> Result<ContextContinuationState, ContextContinuationError> {
+        let payload = cursor
+            .as_str()
+            .strip_prefix("test:")
+            .ok_or(ContextContinuationError::Invalid)?;
+        let (encoded_binding, encoded) = payload
+            .split_once(':')
+            .ok_or(ContextContinuationError::Invalid)?;
+        if encoded_binding != binding_fingerprint(binding) {
+            return Err(ContextContinuationError::Invalid);
+        }
+        let bytes = encoded
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let text =
+                    std::str::from_utf8(pair).map_err(|_| ContextContinuationError::Invalid)?;
+                u8::from_str_radix(text, 16).map_err(|_| ContextContinuationError::Invalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        ContextContinuationState::decode(&bytes)
+    }
+
+    fn seal_context_continuation(
+        &self,
+        state: ContextContinuationState,
+        binding: ContextContinuationBinding,
+    ) -> Result<ContinuationCursor, ContextContinuationError> {
+        let encoded = state
+            .encode()
+            .into_iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        ContinuationCursor::parse(&format!("test:{}:{encoded}", binding_fingerprint(binding)))
+            .map_err(|_| ContextContinuationError::Unavailable)
+    }
+}
+
+fn binding_fingerprint(binding: ContextContinuationBinding) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key("rootlight.context-test-binding.v1");
+    hasher.update(binding.repository.as_bytes());
+    hasher.update(binding.generation.as_bytes());
+    hasher.update(&binding.request_digest);
+    hasher.update(&[binding.response_profile as u8]);
+    hasher.update(&binding.token_budget.to_le_bytes());
+    hasher.update(&binding.planner_version.to_le_bytes());
+    hasher.update(&binding.role_policy_version.to_le_bytes());
+    hasher
+        .finalize()
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 impl AgentToolPort<TestCancellation> for FakePort {
@@ -320,7 +461,7 @@ fn input(generation_id: GenerationId) -> ContextPackInput {
             change: None,
             plan: None,
         },
-        token_budget: 500,
+        token_budget: 4_000,
         source_policy: None,
         sections: None,
         diversity: None,
@@ -332,7 +473,7 @@ fn input(generation_id: GenerationId) -> ContextPackInput {
 }
 
 #[tokio::test]
-async fn admission_rejects_continuation_before_port_work() {
+async fn invalid_continuation_is_rejected_after_identity_resolution() {
     let mut request = input(generation(2));
     request.continuation =
         Some(ContinuationCursor::parse("next-page").expect("fixture cursor is valid"));
@@ -347,15 +488,13 @@ async fn admission_rejects_continuation_before_port_work() {
         )
         .await;
 
-    assert_eq!(
-        result,
-        Err(ContextPackServiceError::UnsupportedField("continuation"))
-    );
+    assert_eq!(result, Err(ContextPackServiceError::InvalidContinuation));
     assert!(
         port.identity_calls
             .lock()
             .expect("identity call lock is available")
-            .is_empty()
+            .len()
+            == 1
     );
     assert_eq!(port.call_count.load(Ordering::Relaxed), 0);
 }
@@ -398,6 +537,21 @@ async fn explain_resolves_explicit_identity_without_child_and_shapes_envelope() 
     assert_eq!(output.generation.generation_id, generation(2));
     assert!(output.data.explanation.is_some());
     assert!(output.data.items.is_empty());
+    assert_eq!(
+        output.usage.estimated_tokens,
+        u64::from(output.data.token_accounting.estimated_total)
+    );
+    assert_eq!(
+        output
+            .data
+            .token_accounting
+            .by_section
+            .values()
+            .copied()
+            .fold(0_u32, u32::saturating_add),
+        output.data.token_accounting.estimated_total
+    );
+    assert!(output.usage.estimated_tokens <= 4_000);
     let encoded = serde_json::to_value(output).expect("context-pack envelope serializes");
     serde_json::from_value::<ReadEnvelope<ContextPackData>>(encoded)
         .expect("context-pack envelope retains its public schema");
@@ -431,7 +585,7 @@ async fn execution_propagates_policy_and_shapes_child_response() {
         .evidence_calls
         .lock()
         .expect("evidence call lock is available");
-    assert_eq!(calls.len(), 1);
+    assert_eq!(calls.len(), 8);
     assert_eq!(calls[0].invocation.provider(), EvidenceProvider::Definition);
     assert_eq!(calls[0].invocation.repository(), repository());
     assert_eq!(calls[0].invocation.generation(), generation(2));
@@ -444,7 +598,22 @@ async fn execution_propagates_policy_and_shapes_child_response() {
     );
     assert!(!calls[0].cancelled);
     assert!(calls[0].deadline > Instant::now());
-    assert_eq!(output.usage.estimated_tokens, 64);
+    assert_eq!(
+        output.usage.estimated_tokens,
+        u64::from(output.data.token_accounting.estimated_total)
+    );
+    assert!(output.data.token_accounting.by_section.len() >= 10);
+    assert_eq!(
+        output
+            .data
+            .token_accounting
+            .by_section
+            .values()
+            .copied()
+            .fold(0_u32, u32::saturating_add),
+        output.data.token_accounting.estimated_total
+    );
+    assert!(output.usage.json_bytes > 0);
     assert!(!output.data.role_coverage.complete());
     assert_ne!(
         output.completeness.state,
@@ -455,6 +624,92 @@ async fn execution_propagates_policy_and_shapes_child_response() {
     let encoded = serde_json::to_value(output).expect("context-pack envelope serializes");
     serde_json::from_value::<ReadEnvelope<ContextPackData>>(encoded)
         .expect("context-pack envelope retains its public schema");
+}
+
+#[tokio::test]
+async fn authenticated_continuation_resumes_without_duplicates_and_preserves_partial_truth() {
+    let token_budget = 1_550;
+    let mut request = input(generation(2));
+    request.token_budget = token_budget;
+    let port = Arc::new(FakePort::paged(
+        Ok(identity(generation(2))),
+        2,
+        900,
+        vec![1],
+    ));
+    let first = ContextPackService
+        .execute(port, request, repository(), TestCancellation(false))
+        .await
+        .expect("bounded first page succeeds");
+    assert!(
+        first
+            .completeness
+            .guidance
+            .contains(&rootlight_mcp_contract::completeness::ContinuationGuidance::UseCursor)
+    );
+    let cursor = first
+        .next_cursor
+        .0
+        .clone()
+        .expect("first page exposes its authenticated cursor");
+    let first_symbols = first
+        .data
+        .items
+        .iter()
+        .filter_map(|item| item.symbol_id)
+        .collect::<Vec<_>>();
+
+    let mut resume = input(generation(2));
+    resume.token_budget = token_budget;
+    resume.continuation = Some(cursor.clone());
+    let resume_port = Arc::new(FakePort::paged(
+        Ok(identity(generation(2))),
+        2,
+        900,
+        vec![1],
+    ));
+    let second = ContextPackService
+        .execute(resume_port, resume, repository(), TestCancellation(false))
+        .await
+        .expect("authenticated second page resumes");
+    let second_symbols = second
+        .data
+        .items
+        .iter()
+        .filter_map(|item| item.symbol_id)
+        .collect::<Vec<_>>();
+    assert!(!second_symbols.is_empty());
+    assert!(
+        first_symbols
+            .iter()
+            .all(|symbol| !second_symbols.contains(symbol))
+    );
+    assert!(second.next_cursor.0.is_none());
+
+    let stale_definition = rootlight_mcp_contract::error_definition(ErrorCode::StaleGeneration);
+    let stale = PublicError::builder(ErrorCode::StaleGeneration, stale_definition.message)
+        .build()
+        .expect("stale-generation fixture is canonical");
+    let retired_port = Arc::new(FakePort::paged(
+        Err(AgentPortError::Public(Box::new(stale))),
+        2,
+        900,
+        vec![1],
+    ));
+    let mut retired_resume = input(generation(2));
+    retired_resume.token_budget = token_budget;
+    retired_resume.continuation = Some(cursor);
+    assert_eq!(
+        ContextPackService
+            .execute(
+                retired_port,
+                retired_resume,
+                repository(),
+                TestCancellation(false),
+            )
+            .await,
+        Err(ContextPackServiceError::InvalidContinuation)
+    );
 }
 
 #[tokio::test]
@@ -494,12 +749,15 @@ async fn pinned_identity_path_skips_resolution_and_preserves_child_behavior() {
         .evidence_calls
         .lock()
         .expect("evidence call lock is available");
-    assert_eq!(calls.len(), 1);
+    assert_eq!(calls.len(), 8);
     assert_eq!(calls[0].invocation.provider(), EvidenceProvider::Definition);
     assert_eq!(calls[0].invocation.generation(), generation(2));
     assert_eq!(calls[0].deadline, deadline);
     assert_eq!(output.generation.generation_id, generation(2));
-    assert_eq!(output.usage.estimated_tokens, 64);
+    assert_eq!(
+        output.usage.estimated_tokens,
+        u64::from(output.data.token_accounting.estimated_total)
+    );
 }
 
 #[tokio::test]

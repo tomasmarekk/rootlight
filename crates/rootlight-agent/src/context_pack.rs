@@ -6,26 +6,26 @@
 //! constrained by one shared token ledger.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use rootlight_ids::RepositoryId;
 use rootlight_mcp_contract::{
-    PublicError, RepositorySelector, SafeLabel, SchemaVersion, SourceFreeMessage,
-    TrustClassification,
+    ErrorCode, PublicError, RepositorySelector, SafeLabel, SchemaVersion, SourceFreeMessage,
+    ToolResponse, TrustClassification,
     completeness::{
         CompletenessState, ContinuationAvailability, ContinuationGuidance, LimitingResource,
         LimitingResourceKind, ResultCompleteness,
     },
     context::{
         ContextItem, ContextPackData, ContextPackId, ContextPackInput,
-        ContextPackObjective as ContractContextPackObjective, ContextStructure, Diversity,
-        EvidenceRole as ContractEvidenceRole, MissingRequiredRoleReason, OmissionSummary,
-        RepositorySnippet, RoleCoverageEntry, RoleCoverageError, RoleCoverageStatus,
-        RoleCoverageSummary, RoleRequirement, SnippetProvenance, SourcePolicy, TokenAccounting,
-        ToolSuggestion,
+        ContextPackObjective as ContractContextPackObjective, ContextSection, ContextStructure,
+        Diversity, EvidenceRole as ContractEvidenceRole, MissingRequiredRoleReason,
+        OmissionSummary, RepositorySnippet, RoleCoverageEntry, RoleCoverageError,
+        RoleCoverageStatus, RoleCoverageSummary, RoleRequirement, SnippetProvenance, SourcePolicy,
+        TokenAccounting, ToolSuggestion,
     },
     vertical::{
         GenerationSelector, ReadEnvelope, RequiredNullable, ResponseProfile, SymbolExplanation,
@@ -33,6 +33,10 @@ use rootlight_mcp_contract::{
 };
 
 use crate::{
+    context_continuation::{
+        ContextContinuationBinding, ContextContinuationCodec, ContextContinuationError,
+        ContextContinuationState, ContextContinuationStateParts, extend_identity_digest,
+    },
     context_evidence::{
         ContextEvidenceCollectionError, ContextEvidenceCollector, ContextEvidenceCorpus,
         ContextEvidencePort, ContextEvidencePortErrorKind, ContextEvidenceProviderRegistry,
@@ -203,8 +207,25 @@ pub struct OmissionEntry {
     pub count: usize,
     /// Estimated tokens that would be needed to include them.
     pub estimated_tokens: u32,
+    /// Stable provider domain affected by the omission.
+    pub provider_key: String,
+    /// Source-free optimizer reason.
+    pub reason: PackOmissionReason,
+    /// Whether a fresh page can retrieve the omitted candidate.
+    pub resumable: bool,
     /// Opaque continuation handle for follow-up requests.
     pub continuation_handle: String,
+}
+
+/// Optimizer-level reason an admitted candidate was not emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackOmissionReason {
+    /// The remaining page token capacity was insufficient.
+    Budget,
+    /// Per-page file, provider, or source-region diversity rejected the item.
+    Diversity,
+    /// The public item ceiling ended the page.
+    ItemLimit,
 }
 
 /// Result of context pack optimization.
@@ -252,6 +273,12 @@ pub enum ContextPackPlanningError {
     /// Objective-role coverage could not represent provider observations.
     #[error("context-pack planner produced invalid role coverage")]
     InvalidRoleCoverage,
+    /// A continuation did not reproduce its authenticated deterministic prefix.
+    #[error("context-pack continuation does not match the deterministic frontier")]
+    InvalidContinuation,
+    /// The minimum truthful final representation exceeds the requested budget.
+    #[error("context-pack final representation exceeds the requested token budget")]
+    FinalRepresentationExceeded,
 }
 
 /// Transport-neutral input for one complete context-pack planning pass.
@@ -274,6 +301,73 @@ pub struct PlannedContextPack {
     pub completeness: ResultCompleteness,
     /// Provider retrieval and output materialization charged to one ledger.
     pub usage: BudgetCharge,
+    /// Source-free next-page frontier awaiting authenticated transport sealing.
+    pub continuation: Option<ContextContinuationState>,
+    /// Ranked private identities for the current page's reconciliation pass.
+    page_identities: Vec<String>,
+    /// Unsealed current-page proof retained for late final-envelope eviction.
+    continuation_frontier: Option<ContextContinuationFrontier>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextContinuationFrontier {
+    next_page: u16,
+    output_budget: u32,
+    corpus_digest: [u8; 32],
+    page_start_digest: [u8; 32],
+    page_start_count: u16,
+    emitted_digest: [u8; 32],
+    emitted_count: u16,
+    remaining_candidates: u32,
+    page_item_counts: Vec<u8>,
+}
+
+impl ContextContinuationFrontier {
+    fn state(&self) -> Result<Option<ContextContinuationState>, ContextContinuationError> {
+        if self.remaining_candidates == 0 {
+            return Ok(None);
+        }
+        ContextContinuationState::new(ContextContinuationStateParts {
+            next_page: self.next_page,
+            output_budget: self.output_budget,
+            corpus_digest: self.corpus_digest,
+            page_start_digest: self.page_start_digest,
+            page_start_count: self.page_start_count,
+            emitted_digest: self.emitted_digest,
+            emitted_count: self.emitted_count,
+            remaining_candidates: self.remaining_candidates,
+            page_item_counts: self.page_item_counts.clone(),
+        })
+        .map(Some)
+    }
+
+    fn retain_current_page(
+        &mut self,
+        retained_identities: &[String],
+    ) -> Result<ContextContinuationState, ContextContinuationError> {
+        let current_count = self
+            .page_item_counts
+            .last_mut()
+            .ok_or(ContextContinuationError::Invalid)?;
+        if retained_identities.is_empty() || retained_identities.len() > usize::from(*current_count)
+        {
+            return Err(ContextContinuationError::Invalid);
+        }
+        let retained_count = u8::try_from(retained_identities.len())
+            .map_err(|_| ContextContinuationError::Invalid)?;
+        let removed = current_count.saturating_sub(retained_count);
+        self.emitted_count = self
+            .page_start_count
+            .checked_add(u16::from(retained_count))
+            .ok_or(ContextContinuationError::Invalid)?;
+        self.remaining_candidates = self
+            .remaining_candidates
+            .checked_add(u32::from(removed))
+            .ok_or(ContextContinuationError::Invalid)?;
+        self.emitted_digest = extend_identity_digest(self.page_start_digest, retained_identities);
+        *current_count = retained_count;
+        self.state()?.ok_or(ContextContinuationError::Invalid)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -418,6 +512,13 @@ where
             truncated: pack.truncated,
             completeness,
             usage: budget.consumed(),
+            continuation: None,
+            page_identities: pack
+                .items
+                .iter()
+                .map(|item| item.candidate.identity.clone())
+                .collect(),
+            continuation_frontier: None,
         })
     }
 }
@@ -441,6 +542,22 @@ impl DefaultContextPackPlanner {
         P: ContextEvidencePort<C>,
         C: CancellationSignal + Clone + Send + Sync + 'static,
     {
+        self.collect_and_plan_page(port, request, None, cancellation, deadline)
+            .await
+    }
+
+    async fn collect_and_plan_page<P, C>(
+        &self,
+        port: &P,
+        request: &CanonicalContextPackRequest,
+        continuation: Option<ContextContinuationState>,
+        cancellation: C,
+        deadline: Instant,
+    ) -> Result<PlannedContextPack, ContextEvidencePlanningError>
+    where
+        P: ContextEvidencePort<C>,
+        C: CancellationSignal + Clone + Send + Sync + 'static,
+    {
         let provider_plan = ContextEvidenceProviderRegistry.plan(request)?;
         let corpus = ContextEvidenceCollector
             .collect(
@@ -451,7 +568,7 @@ impl DefaultContextPackPlanner {
                 deadline,
             )
             .await?;
-        let mut planned = self.plan_corpus(request, &corpus, &cancellation)?;
+        let mut planned = self.plan_corpus_page(request, &corpus, continuation, &cancellation)?;
         if request.source_policy() == SourcePolicy::ReferencesOnly {
             return Ok(planned);
         }
@@ -603,6 +720,19 @@ impl DefaultContextPackPlanner {
     where
         C: CancellationSignal,
     {
+        self.plan_corpus_page(request, corpus, None, cancellation)
+    }
+
+    fn plan_corpus_page<C>(
+        &self,
+        request: &CanonicalContextPackRequest,
+        corpus: &ContextEvidenceCorpus,
+        continuation: Option<ContextContinuationState>,
+        cancellation: &C,
+    ) -> Result<PlannedContextPack, ContextPackPlanningError>
+    where
+        C: CancellationSignal,
+    {
         checkpoint(cancellation)?;
         let mut metadata = BTreeMap::new();
         let mut candidates = Vec::new();
@@ -644,12 +774,37 @@ impl DefaultContextPackPlanner {
 
         let mut budget = corpus.budget().clone();
         let available_tokens = u32::try_from(budget.remaining().tokens).unwrap_or(u32::MAX);
-        let pack = optimize_admitted_pack(
-            request.objective(),
-            &mut candidates,
-            available_tokens,
-            request.diversity(),
-        )?;
+        let (pack, next_continuation, continuation_frontier, cumulative_roles) =
+            if candidates.is_empty() {
+                if continuation.is_some() {
+                    return Err(ContextPackPlanningError::InvalidContinuation);
+                }
+                (
+                    PackResult {
+                        items: Vec::new(),
+                        omissions: Vec::new(),
+                        total_tokens: 0,
+                        truncated: false,
+                    },
+                    None,
+                    None,
+                    Vec::new(),
+                )
+            } else {
+                let ContextPageSelection {
+                    pack,
+                    continuation,
+                    frontier,
+                    cumulative_roles,
+                } = optimize_context_page(
+                    request.objective(),
+                    &mut candidates,
+                    available_tokens,
+                    request.diversity(),
+                    continuation,
+                )?;
+                (pack, continuation, Some(frontier), cumulative_roles)
+            };
         budget.charge(BudgetCharge {
             results: u64::try_from(pack.items.len()).unwrap_or(u64::MAX),
             tokens: u64::from(pack.total_tokens),
@@ -657,11 +812,6 @@ impl DefaultContextPackPlanner {
         })?;
         checkpoint(cancellation)?;
 
-        let selected_roles = pack
-            .items
-            .iter()
-            .map(|item| item.candidate.role)
-            .collect::<Vec<_>>();
         let observed_roles = corpus
             .candidates
             .iter()
@@ -669,7 +819,7 @@ impl DefaultContextPackPlanner {
             .collect::<Vec<_>>();
         let role_coverage = evaluate_role_coverage(
             request.objective(),
-            &selected_roles,
+            &cumulative_roles,
             &observed_roles,
             &corpus.omissions,
         )
@@ -690,6 +840,13 @@ impl DefaultContextPackPlanner {
             truncated,
             completeness,
             usage: budget.consumed(),
+            continuation: next_continuation,
+            page_identities: pack
+                .items
+                .iter()
+                .map(|item| item.candidate.identity.clone())
+                .collect(),
+            continuation_frontier,
         })
     }
 }
@@ -1023,8 +1180,12 @@ fn mark_source_omission(
 ) -> Result<(), ContextPackPlanningError> {
     if let Ok(reason) = SafeLabel::parse(label) {
         planned.data.omitted.push(OmissionSummary {
+            role: None,
             reason,
+            provider: SafeLabel::parse("source_read").ok(),
             count: u32::try_from(count).unwrap_or(u32::MAX),
+            limiting_resources: completeness.limiting_resources.clone(),
+            resumable: false,
             continuation: None,
         });
         planned.data.omitted.truncate(MAX_OMISSIONS);
@@ -1048,6 +1209,10 @@ pub enum ContextPackServiceError {
     DeadlineExceeded,
     /// A child response violated the pinned identity or typed contract.
     InvalidResponse,
+    /// A continuation is malformed, expired, or bound to another request.
+    InvalidContinuation,
+    /// The minimum truthful final representation exceeds the requested budget.
+    BudgetExceeded,
     /// The adapter or planner failed internally.
     Unavailable,
 }
@@ -1071,21 +1236,23 @@ impl ContextPackService {
         cancellation: C,
     ) -> Result<ReadEnvelope<ContextPackData>, ContextPackServiceError>
     where
-        P: AgentToolPort<C> + ContextEvidencePort<C>,
+        P: AgentToolPort<C> + ContextEvidencePort<C> + ContextContinuationCodec,
         C: CancellationSignal + Clone + Send + Sync + 'static,
     {
         validate_supported_fields(&input)?;
-        let deadline = Instant::now()
+        let started_at = Instant::now();
+        let deadline = started_at
             .checked_add(Duration::from_millis(u64::from(CONTEXT_PACK_TIMEOUT_MS)))
             .ok_or(ContextPackServiceError::Unavailable)?;
         context_service_checkpoint(&cancellation, deadline)?;
+        let continuation_request = input.continuation.is_some();
         let identity = port
             .resolve_identity(
                 AgentIdentityRequest::new(input.repository.clone(), input.generation.clone()),
                 AgentResolutionContext::new(cancellation.clone(), deadline),
             )
             .await
-            .map_err(map_port_error)?;
+            .map_err(|error| map_identity_port_error(error, continuation_request))?;
         context_service_checkpoint(&cancellation, deadline)?;
 
         Self::execute_admitted_with_identity(
@@ -1095,6 +1262,7 @@ impl ContextPackService {
             identity,
             cancellation,
             deadline,
+            started_at,
         )
         .await
     }
@@ -1117,10 +1285,11 @@ impl ContextPackService {
         deadline: Instant,
     ) -> Result<ReadEnvelope<ContextPackData>, ContextPackServiceError>
     where
-        P: AgentToolPort<C> + ContextEvidencePort<C>,
+        P: AgentToolPort<C> + ContextEvidencePort<C> + ContextContinuationCodec,
         C: CancellationSignal + Clone + Send + Sync + 'static,
     {
         validate_supported_fields(&input)?;
+        let started_at = Instant::now();
         context_service_checkpoint(&cancellation, deadline)?;
 
         Self::execute_admitted_with_identity(
@@ -1130,6 +1299,7 @@ impl ContextPackService {
             identity,
             cancellation,
             deadline,
+            started_at,
         )
         .await
     }
@@ -1141,9 +1311,10 @@ impl ContextPackService {
         identity: AgentResolvedIdentity,
         cancellation: C,
         deadline: Instant,
+        started_at: Instant,
     ) -> Result<ReadEnvelope<ContextPackData>, ContextPackServiceError>
     where
-        P: AgentToolPort<C> + ContextEvidencePort<C>,
+        P: AgentToolPort<C> + ContextEvidencePort<C> + ContextContinuationCodec,
         C: CancellationSignal + Clone + Send + Sync + 'static,
     {
         if identity.repository.repository_id != repository {
@@ -1169,6 +1340,23 @@ impl ContextPackService {
             identity.generation.generation_id,
         )
         .map_err(map_canonical_request_error)?;
+        let continuation_binding = ContextContinuationBinding {
+            repository: canonical.repository(),
+            generation: canonical.generation(),
+            request_digest: canonical.digest_bytes(),
+            response_profile: canonical.response_profile(),
+            token_budget: canonical.token_budget(),
+            planner_version: rootlight_mcp_contract::context::PLANNER_VERSION,
+            role_policy_version: rootlight_mcp_contract::context::OBJECTIVE_ROLE_POLICY_VERSION,
+        };
+        let continuation = input
+            .continuation
+            .as_ref()
+            .map(|cursor| {
+                port.open_context_continuation(cursor, continuation_binding)
+                    .map_err(map_continuation_error)
+            })
+            .transpose()?;
         if input.explain == Some(true) {
             let explanation = context_pack_plan(&canonical);
             let role_coverage = evaluate_role_coverage(canonical.objective(), &[], &[], &[])
@@ -1195,7 +1383,7 @@ impl ContextPackService {
                 },
                 explanation: Some(explanation),
             };
-            return Ok(ReadEnvelope {
+            let mut envelope = ReadEnvelope {
                 schema_version: SchemaVersion::V1_0,
                 repository: identity.repository,
                 generation: identity.generation,
@@ -1207,28 +1395,70 @@ impl ContextPackService {
                 usage: empty_usage("context-pack-explain"),
                 warnings: identity.warnings,
                 trust: TrustClassification::UntrustedRepositoryData,
-            });
+            };
+            envelope.usage.wall_time_ms = elapsed_millis(started_at);
+            reconcile_final_envelope(&canonical, &mut envelope)
+                .map_err(|_| ContextPackServiceError::BudgetExceeded)?;
+            return Ok(envelope);
         }
 
-        let planned = DefaultContextPackPlanner
-            .collect_and_plan(port.as_ref(), &canonical, cancellation.clone(), deadline)
+        let mut planned = DefaultContextPackPlanner
+            .collect_and_plan_page(
+                port.as_ref(),
+                &canonical,
+                continuation,
+                cancellation.clone(),
+                deadline,
+            )
             .await
             .map_err(map_evidence_planning_error)?;
         context_service_checkpoint(&cancellation, deadline)?;
-        let usage = usage_summary(planned.usage, "context-pack");
-        Ok(ReadEnvelope {
-            schema_version: SchemaVersion::V1_0,
-            repository: identity.repository,
-            generation: identity.generation,
-            coverage: identity.coverage,
-            data: planned.data,
-            truncated: planned.truncated,
-            completeness: planned.completeness,
-            next_cursor: RequiredNullable(None),
-            usage,
-            warnings: identity.warnings,
-            trust: TrustClassification::UntrustedRepositoryData,
-        })
+        loop {
+            let next_cursor = planned
+                .continuation
+                .as_ref()
+                .map(|state| {
+                    port.seal_context_continuation(state.clone(), continuation_binding)
+                        .map_err(map_continuation_error)
+                })
+                .transpose()?;
+            let mut data = planned.data.clone();
+            if let Some(cursor) = &next_cursor {
+                attach_context_cursor(&mut data, cursor);
+            }
+            let completeness = if next_cursor.is_some() {
+                resumable_completeness(&planned.completeness)
+                    .map_err(|_| ContextPackServiceError::InvalidResponse)?
+            } else {
+                planned.completeness.clone()
+            };
+            let mut envelope = ReadEnvelope {
+                schema_version: SchemaVersion::V1_0,
+                repository: identity.repository.clone(),
+                generation: identity.generation.clone(),
+                coverage: identity.coverage.clone(),
+                data,
+                truncated: planned.truncated || next_cursor.is_some(),
+                completeness,
+                next_cursor: RequiredNullable(next_cursor),
+                usage: usage_summary(planned.usage, "context-pack"),
+                warnings: identity.warnings.clone(),
+                trust: TrustClassification::UntrustedRepositoryData,
+            };
+            envelope.usage.wall_time_ms = elapsed_millis(started_at);
+            match reconcile_final_envelope(&canonical, &mut envelope) {
+                Ok(()) => return Ok(envelope),
+                Err(ContextPackPlanningError::FinalRepresentationExceeded)
+                    if evict_lowest_ranked_optional(&mut planned)? =>
+                {
+                    continue;
+                }
+                Err(ContextPackPlanningError::FinalRepresentationExceeded) => {
+                    return Err(ContextPackServiceError::BudgetExceeded);
+                }
+                Err(_) => return Err(ContextPackServiceError::Unavailable),
+            }
+        }
     }
 }
 
@@ -1398,10 +1628,43 @@ where
 }
 
 fn validate_supported_fields(input: &ContextPackInput) -> Result<(), ContextPackServiceError> {
-    if input.continuation.is_some() {
-        return Err(ContextPackServiceError::UnsupportedField("continuation"));
+    if input.continuation.is_some() && input.explain == Some(true) {
+        return Err(ContextPackServiceError::InvalidContinuation);
     }
     Ok(())
+}
+
+const fn map_continuation_error(error: ContextContinuationError) -> ContextPackServiceError {
+    match error {
+        ContextContinuationError::Invalid => ContextPackServiceError::InvalidContinuation,
+        ContextContinuationError::Unavailable => ContextPackServiceError::Unavailable,
+    }
+}
+
+fn resumable_completeness(
+    current: &ResultCompleteness,
+) -> Result<ResultCompleteness, ContextPackPlanningError> {
+    let mut resources = current.limiting_resources.clone();
+    resources.push(LimitingResource::kind(
+        LimitingResourceKind::EstimatedTokens,
+    ));
+    resources.sort_unstable();
+    resources.dedup_by_key(|resource| resource.kind);
+    let mut guidance = current.guidance.clone();
+    guidance.push(ContinuationGuidance::UseCursor);
+    guidance.sort_unstable();
+    guidance.dedup();
+    ResultCompleteness::new(
+        if current.state == CompletenessState::Complete {
+            CompletenessState::Truncated
+        } else {
+            current.state
+        },
+        resources,
+        ContinuationAvailability::Available,
+        guidance,
+    )
+    .map_err(|_| ContextPackPlanningError::InvalidCompleteness)
 }
 
 fn map_canonical_request_error(error: CanonicalContextPackRequestError) -> ContextPackServiceError {
@@ -1426,8 +1689,19 @@ fn map_canonical_request_error(error: CanonicalContextPackRequestError) -> Conte
     }
 }
 
-fn map_port_error(error: AgentPortError) -> ContextPackServiceError {
+fn map_identity_port_error(
+    error: AgentPortError,
+    continuation_request: bool,
+) -> ContextPackServiceError {
     let (error, _) = error.into_parts();
+    if continuation_request
+        && matches!(
+            &error,
+            AgentPortError::Public(public) if public.code() == ErrorCode::StaleGeneration
+        )
+    {
+        return ContextPackServiceError::InvalidContinuation;
+    }
     match error {
         AgentPortError::Public(error) => ContextPackServiceError::Public(error),
         AgentPortError::Cancelled => ContextPackServiceError::Cancelled,
@@ -1474,6 +1748,12 @@ fn map_evidence_planning_error(error: ContextEvidencePlanningError) -> ContextPa
             ContextPackPlanningError::InvalidRoleCoverage => {
                 ContextPackServiceError::InvalidResponse
             }
+            ContextPackPlanningError::InvalidContinuation => {
+                ContextPackServiceError::InvalidContinuation
+            }
+            ContextPackPlanningError::FinalRepresentationExceeded => {
+                ContextPackServiceError::BudgetExceeded
+            }
         },
     }
 }
@@ -1496,6 +1776,214 @@ fn usage_summary(
 
 fn empty_usage(trace_id: &str) -> rootlight_mcp_contract::vertical::UsageSummary {
     usage_summary(BudgetCharge::default(), trace_id)
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_micros())
+        .unwrap_or(u64::MAX)
+        .div_ceil(1_000)
+}
+
+#[derive(Debug)]
+struct ContextPageSelection {
+    pack: PackResult,
+    continuation: Option<ContextContinuationState>,
+    frontier: ContextContinuationFrontier,
+    cumulative_roles: Vec<EvidenceRole>,
+}
+
+fn optimize_context_page(
+    objective: PackObjective,
+    candidates: &mut [EvidenceCandidate],
+    token_budget: u32,
+    diversity: Diversity,
+    continuation: Option<ContextContinuationState>,
+) -> Result<ContextPageSelection, ContextPackPlanningError> {
+    if candidates.is_empty() {
+        return Err(PackError::NoTargets.into());
+    }
+    rank_candidates(objective, candidates, diversity);
+    let corpus_digest = candidate_corpus_digest(candidates);
+    let target_page = continuation
+        .as_ref()
+        .map_or(0, ContextContinuationState::next_page);
+    if continuation.as_ref().is_some_and(|state| {
+        state.output_budget() != token_budget || state.corpus_digest() != corpus_digest
+    }) {
+        return Err(ContextPackPlanningError::InvalidContinuation);
+    }
+    let mut page_item_counts = continuation
+        .as_ref()
+        .map_or_else(Vec::new, |state| state.page_item_counts().to_vec());
+
+    let mut emitted = BTreeSet::new();
+    let mut emitted_order = Vec::new();
+    let mut cumulative_roles = Vec::new();
+    for page_index in 0..target_page {
+        let mut prior =
+            select_remaining_page(objective, candidates, &emitted, token_budget, diversity)?;
+        let authenticated_count = page_item_counts
+            .get(usize::from(page_index))
+            .copied()
+            .ok_or(ContextPackPlanningError::InvalidContinuation)?;
+        if usize::from(authenticated_count) > prior.items.len() {
+            return Err(ContextPackPlanningError::InvalidContinuation);
+        }
+        prior.items.truncate(usize::from(authenticated_count));
+        prior.total_tokens = prior.items.iter().fold(0_u32, |total, item| {
+            total.saturating_add(item.candidate.estimated_tokens)
+        });
+        if prior.items.is_empty() {
+            return Err(ContextPackPlanningError::InvalidContinuation);
+        }
+        append_emitted(
+            &prior,
+            &mut emitted,
+            &mut emitted_order,
+            &mut cumulative_roles,
+        );
+        if page_index + 1 < target_page
+            && !has_resumable_candidate(candidates, &emitted, token_budget)
+        {
+            return Err(ContextPackPlanningError::InvalidContinuation);
+        }
+    }
+
+    if let Some(state) = continuation.as_ref() {
+        let emitted_count = u16::try_from(emitted_order.len())
+            .map_err(|_| ContextPackPlanningError::InvalidContinuation)?;
+        let remaining = u32::try_from(candidates.len().saturating_sub(emitted.len()))
+            .map_err(|_| ContextPackPlanningError::InvalidContinuation)?;
+        if state.emitted_count() != emitted_count
+            || state.emitted_digest() != emitted_identity_digest(&emitted_order)
+            || state.remaining_candidates() != remaining
+        {
+            return Err(ContextPackPlanningError::InvalidContinuation);
+        }
+    }
+
+    let page_start_digest = emitted_identity_digest(&emitted_order);
+    let page_start_count = u16::try_from(emitted_order.len())
+        .map_err(|_| ContextPackPlanningError::InvalidContinuation)?;
+    let mut pack = select_remaining_page(objective, candidates, &emitted, token_budget, diversity)?;
+    append_emitted(
+        &pack,
+        &mut emitted,
+        &mut emitted_order,
+        &mut cumulative_roles,
+    );
+    let has_next = has_resumable_candidate(candidates, &emitted, token_budget);
+    pack.truncated |= has_next;
+    let next_page = target_page
+        .checked_add(1)
+        .ok_or(ContextPackPlanningError::InvalidContinuation)?;
+    page_item_counts.push(
+        u8::try_from(pack.items.len())
+            .map_err(|_| ContextPackPlanningError::InvalidContinuation)?,
+    );
+    let frontier = ContextContinuationFrontier {
+        next_page,
+        output_budget: token_budget,
+        corpus_digest,
+        page_start_digest,
+        page_start_count,
+        emitted_digest: emitted_identity_digest(&emitted_order),
+        emitted_count: u16::try_from(emitted_order.len())
+            .map_err(|_| ContextPackPlanningError::InvalidContinuation)?,
+        remaining_candidates: u32::try_from(candidates.len().saturating_sub(emitted.len()))
+            .map_err(|_| ContextPackPlanningError::InvalidContinuation)?,
+        page_item_counts,
+    };
+    let next = if has_next && !pack.items.is_empty() {
+        frontier
+            .state()
+            .map_err(|_| ContextPackPlanningError::InvalidContinuation)?
+    } else {
+        None
+    };
+
+    Ok(ContextPageSelection {
+        pack,
+        continuation: next,
+        frontier,
+        cumulative_roles,
+    })
+}
+
+fn select_remaining_page(
+    objective: PackObjective,
+    candidates: &[EvidenceCandidate],
+    emitted: &BTreeSet<String>,
+    token_budget: u32,
+    diversity: Diversity,
+) -> Result<PackResult, PackError> {
+    let mut remaining = candidates
+        .iter()
+        .filter(|candidate| !emitted.contains(&candidate.identity))
+        .cloned()
+        .collect::<Vec<_>>();
+    if remaining.is_empty() {
+        return Ok(PackResult {
+            items: Vec::new(),
+            omissions: Vec::new(),
+            total_tokens: 0,
+            truncated: false,
+        });
+    }
+    optimize_admitted_pack(objective, &mut remaining, token_budget, diversity)
+}
+
+fn append_emitted(
+    page: &PackResult,
+    emitted: &mut BTreeSet<String>,
+    emitted_order: &mut Vec<String>,
+    roles: &mut Vec<EvidenceRole>,
+) {
+    for item in &page.items {
+        if emitted.insert(item.candidate.identity.clone()) {
+            emitted_order.push(item.candidate.identity.clone());
+            roles.push(item.candidate.role);
+        }
+    }
+}
+
+fn has_resumable_candidate(
+    candidates: &[EvidenceCandidate],
+    emitted: &BTreeSet<String>,
+    token_budget: u32,
+) -> bool {
+    candidates.iter().any(|candidate| {
+        !emitted.contains(&candidate.identity) && candidate.estimated_tokens <= token_budget
+    })
+}
+
+fn candidate_corpus_digest(candidates: &[EvidenceCandidate]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_derive_key("rootlight.context-pack.candidate-corpus.v1");
+    hasher.update(
+        &u64::try_from(candidates.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for candidate in candidates {
+        hash_context_bytes(&mut hasher, candidate.identity.as_bytes());
+        hasher.update(&[candidate.role.priority()]);
+        hasher.update(&candidate.relevance.to_le_bytes());
+        hasher.update(&candidate.confidence.to_le_bytes());
+        hasher.update(&candidate.estimated_tokens.to_le_bytes());
+        hash_context_bytes(&mut hasher, candidate.source_path.as_bytes());
+        hash_context_bytes(&mut hasher, candidate.provider_key.as_bytes());
+        hasher.update(&candidate.source_region.to_le_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn emitted_identity_digest(identities: &[String]) -> [u8; 32] {
+    extend_identity_digest([0; 32], identities)
+}
+
+fn hash_context_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
 }
 
 /// Optimizes a context pack from scored candidates under a token budget.
@@ -1552,27 +2040,8 @@ fn optimize_admitted_pack(
         return Err(PackError::NoTargets);
     }
 
-    // Sort candidates by deterministic ranking:
-    // 1. Role priority (required roles first)
-    // 2. Relevance descending
-    // 3. Confidence descending
-    // 4. Identity ascending (stable tie-break)
+    rank_candidates(objective, candidates, diversity);
     let required = objective.required_roles();
-    // Deterministic global ranking: required roles first, then role priority,
-    // relevance, confidence, and a stable identity tie-break. Within one role
-    // this orders candidates best-first, so the first unreserved candidate of
-    // a role is also its best representative.
-    candidates.sort_by(|a, b| {
-        let a_required = required.contains(&a.role);
-        let b_required = required.contains(&b.role);
-        b_required
-            .cmp(&a_required)
-            .then_with(|| diversity_rank(diversity, a.role).cmp(&diversity_rank(diversity, b.role)))
-            .then_with(|| a.role.priority().cmp(&b.role.priority()))
-            .then_with(|| b.relevance.cmp(&a.relevance))
-            .then_with(|| b.confidence.cmp(&a.confidence))
-            .then_with(|| a.identity.cmp(&b.identity))
-    });
 
     // Minimum representation: reserve one fitting candidate per required role
     // before the remaining budget is handed to greedy filling. Without this
@@ -1621,14 +2090,24 @@ fn optimize_admitted_pack(
         if !reserved[index] {
             // Deduplication: skip items from the same source path if we already
             // have two items from it (diversity constraint).
-            if path_count(&seen_paths, &candidate.source_path) >= 2
+            let diversity_limited = path_count(&seen_paths, &candidate.source_path) >= 2
                 || path_count(&seen_providers, &candidate.provider_key) >= 4
                 || seen_regions.iter().any(|(path, region)| {
                     *path == candidate.source_path && *region == candidate.source_region
-                })
-                || greedy_spent.saturating_add(candidate.estimated_tokens) > greedy_budget
-            {
-                record_omission(&mut omissions, candidate);
+                });
+            let budget_limited =
+                greedy_spent.saturating_add(candidate.estimated_tokens) > greedy_budget;
+            if diversity_limited || budget_limited {
+                record_omission(
+                    &mut omissions,
+                    candidate,
+                    if diversity_limited {
+                        PackOmissionReason::Diversity
+                    } else {
+                        PackOmissionReason::Budget
+                    },
+                    candidate.estimated_tokens <= token_budget,
+                );
                 truncated = true;
                 continue;
             }
@@ -1648,9 +2127,16 @@ fn optimize_admitted_pack(
 
     if candidates.len() > MAX_PACK_ITEMS {
         truncated = true;
+        for candidate in candidates.iter().skip(MAX_PACK_ITEMS) {
+            record_omission(
+                &mut omissions,
+                candidate,
+                PackOmissionReason::ItemLimit,
+                candidate.estimated_tokens <= token_budget,
+            );
+        }
     }
 
-    // Trim omissions to bounded count
     omissions.truncate(MAX_OMISSIONS);
 
     Ok(PackResult {
@@ -1659,6 +2145,25 @@ fn optimize_admitted_pack(
         total_tokens,
         truncated,
     })
+}
+
+fn rank_candidates(
+    objective: PackObjective,
+    candidates: &mut [EvidenceCandidate],
+    diversity: Diversity,
+) {
+    let required = objective.required_roles();
+    candidates.sort_by(|a, b| {
+        let a_required = required.contains(&a.role);
+        let b_required = required.contains(&b.role);
+        b_required
+            .cmp(&a_required)
+            .then_with(|| diversity_rank(diversity, a.role).cmp(&diversity_rank(diversity, b.role)))
+            .then_with(|| a.role.priority().cmp(&b.role.priority()))
+            .then_with(|| b.relevance.cmp(&a.relevance))
+            .then_with(|| b.confidence.cmp(&a.confidence))
+            .then_with(|| a.identity.cmp(&b.identity))
+    });
 }
 
 const fn diversity_rank(diversity: Diversity, role: EvidenceRole) -> u8 {
@@ -1697,8 +2202,18 @@ fn path_count(seen_paths: &[&str], path: &str) -> usize {
     seen_paths.iter().filter(|p| **p == path).count()
 }
 
-fn record_omission(omissions: &mut Vec<OmissionEntry>, candidate: &EvidenceCandidate) {
-    if let Some(existing) = omissions.iter_mut().find(|o| o.role == candidate.role) {
+fn record_omission(
+    omissions: &mut Vec<OmissionEntry>,
+    candidate: &EvidenceCandidate,
+    reason: PackOmissionReason,
+    resumable: bool,
+) {
+    if let Some(existing) = omissions.iter_mut().find(|omission| {
+        omission.role == candidate.role
+            && omission.provider_key == candidate.provider_key
+            && omission.reason == reason
+            && omission.resumable == resumable
+    }) {
         existing.count += 1;
         existing.estimated_tokens = existing
             .estimated_tokens
@@ -1708,6 +2223,9 @@ fn record_omission(omissions: &mut Vec<OmissionEntry>, candidate: &EvidenceCandi
             role: candidate.role,
             count: 1,
             estimated_tokens: candidate.estimated_tokens,
+            provider_key: candidate.provider_key.clone(),
+            reason,
+            resumable,
             continuation_handle: format!("pack-cont-{}", candidate.role.priority()),
         });
     }
@@ -1915,9 +2433,23 @@ fn context_pack_data(
         .omissions
         .iter()
         .filter_map(|omission| {
+            let reason = match omission.reason {
+                PackOmissionReason::Budget => "selection_budget",
+                PackOmissionReason::Diversity => "selection_diversity",
+                PackOmissionReason::ItemLimit => "selection_item_limit",
+            };
             Some(OmissionSummary {
-                reason: SafeLabel::parse(role_label(contract_role(omission.role))).ok()?,
+                role: Some(contract_role(omission.role)),
+                reason: SafeLabel::parse(reason).ok()?,
+                provider: SafeLabel::parse(&omission.provider_key).ok(),
                 count: u32::try_from(omission.count).unwrap_or(u32::MAX),
+                limiting_resources: vec![LimitingResource::kind(match omission.reason {
+                    PackOmissionReason::Budget => LimitingResourceKind::EstimatedTokens,
+                    PackOmissionReason::Diversity | PackOmissionReason::ItemLimit => {
+                        LimitingResourceKind::Results
+                    }
+                })],
+                resumable: omission.resumable,
                 continuation: None,
             })
         })
@@ -1964,6 +2496,282 @@ fn context_pack_data(
     }
 }
 
+fn attach_context_cursor(
+    data: &mut ContextPackData,
+    cursor: &rootlight_mcp_contract::vertical::ContinuationCursor,
+) {
+    for omission in &mut data.omitted {
+        if omission.resumable {
+            omission.continuation = Some(cursor.clone());
+        }
+    }
+    if let Ok(reason) =
+        SourceFreeMessage::parse("continue the authenticated context evidence frontier")
+    {
+        data.followups.push(ToolSuggestion {
+            tool: "context.pack".to_owned(),
+            reason,
+            continuation: Some(cursor.clone()),
+        });
+        data.followups.truncate(MAX_OMISSIONS);
+    }
+}
+
+fn reconcile_final_envelope(
+    request: &CanonicalContextPackRequest,
+    envelope: &mut ReadEnvelope<ContextPackData>,
+) -> Result<(), ContextPackPlanningError> {
+    reconcile_final_envelope_with_budget(request, envelope, request.token_budget())
+}
+
+fn reconcile_final_envelope_with_budget(
+    request: &CanonicalContextPackRequest,
+    envelope: &mut ReadEnvelope<ContextPackData>,
+    token_budget: u16,
+) -> Result<(), ContextPackPlanningError> {
+    let mut by_section = context_section_accounting(request, &envelope.data)?;
+    by_section.insert("envelope".to_owned(), 0);
+    for _ in 0..12 {
+        let accounted_without_envelope = by_section
+            .iter()
+            .filter(|(section, _)| section.as_str() != "envelope")
+            .map(|(_, tokens)| *tokens)
+            .fold(0_u32, u32::saturating_add);
+        let estimated_total = by_section
+            .values()
+            .copied()
+            .fold(0_u32, u32::saturating_add);
+        envelope.data.token_accounting = TokenAccounting {
+            estimated_total,
+            by_section: by_section.clone(),
+        };
+        let serialized = serde_json::to_vec(&ToolResponse::Success(&*envelope))
+            .map_err(|_| ContextPackPlanningError::FinalRepresentationExceeded)?;
+        let json_bytes = u64::try_from(serialized.len()).unwrap_or(u64::MAX);
+        let measured_tokens = rootlight_mcp_contract::accounting::estimate_tokens(serialized.len());
+        let measured_tokens_u32 = u32::try_from(measured_tokens).unwrap_or(u32::MAX);
+        let envelope_tokens = measured_tokens_u32.saturating_sub(accounted_without_envelope);
+        let stable = envelope.usage.json_bytes == json_bytes
+            && envelope.usage.estimated_tokens == measured_tokens
+            && by_section.get("envelope").copied() == Some(envelope_tokens)
+            && envelope.data.token_accounting.estimated_total == measured_tokens_u32;
+        envelope.usage.json_bytes = json_bytes;
+        envelope.usage.estimated_tokens = measured_tokens;
+        by_section.insert("envelope".to_owned(), envelope_tokens);
+        if stable {
+            if measured_tokens > u64::from(token_budget) {
+                return Err(ContextPackPlanningError::FinalRepresentationExceeded);
+            }
+            return Ok(());
+        }
+    }
+    Err(ContextPackPlanningError::FinalRepresentationExceeded)
+}
+
+fn evict_lowest_ranked_optional(
+    planned: &mut PlannedContextPack,
+) -> Result<bool, ContextPackServiceError> {
+    if planned.continuation.is_none() && planned.continuation_frontier.is_none() {
+        return Ok(false);
+    }
+    let Some(last) = planned.data.items.last() else {
+        return Ok(false);
+    };
+    let mut coverage_entries = planned.data.role_coverage.roles().to_vec();
+    let Some(coverage) = coverage_entries
+        .iter_mut()
+        .find(|entry| entry.role == last.role)
+    else {
+        return Err(ContextPackServiceError::InvalidResponse);
+    };
+    if coverage.requirement == RoleRequirement::Required && coverage.selected_items <= 1 {
+        return Ok(false);
+    }
+    if planned.data.items.len() <= 1 || planned.page_identities.len() <= 1 {
+        return Ok(false);
+    }
+    let role = last.role;
+    let removed_tokens = last.tokens;
+    planned.data.items.pop();
+    planned.page_identities.pop();
+    if let Some(state) = planned.continuation.as_mut() {
+        state
+            .retain_current_page(&planned.page_identities)
+            .map_err(map_continuation_error)?;
+    } else {
+        let state = planned
+            .continuation_frontier
+            .as_mut()
+            .ok_or(ContextPackServiceError::InvalidResponse)?
+            .retain_current_page(&planned.page_identities)
+            .map_err(map_continuation_error)?;
+        planned.continuation = Some(state);
+    }
+    coverage.selected_items = coverage.selected_items.saturating_sub(1);
+    if coverage.selected_items == 0 {
+        coverage.status = RoleCoverageStatus::OptionalAbsent;
+        coverage.missing_reason = None;
+    }
+    planned.data.role_coverage =
+        RoleCoverageSummary::new(planned.data.role_coverage.objective(), coverage_entries)
+            .map_err(|_| ContextPackServiceError::InvalidResponse)?;
+    planned
+        .data
+        .structure
+        .reading_order
+        .truncate(planned.data.items.len());
+    planned.usage.results = planned.usage.results.saturating_sub(1);
+    planned.usage.tokens = planned
+        .usage
+        .tokens
+        .saturating_sub(u64::from(removed_tokens));
+    let reason = SafeLabel::parse("final_representation_budget")
+        .map_err(|_| ContextPackServiceError::InvalidResponse)?;
+    if let Some(omission) = planned
+        .data
+        .omitted
+        .iter_mut()
+        .find(|omission| omission.reason == reason && omission.role == Some(role))
+    {
+        omission.count = omission.count.saturating_add(1);
+    } else {
+        planned.data.omitted.push(OmissionSummary {
+            role: Some(role),
+            reason,
+            provider: None,
+            count: 1,
+            limiting_resources: vec![LimitingResource::kind(
+                LimitingResourceKind::EstimatedTokens,
+            )],
+            resumable: true,
+            continuation: None,
+        });
+        planned.data.omitted.truncate(MAX_OMISSIONS);
+    }
+    planned.truncated = true;
+    planned.completeness = resumable_completeness(&planned.completeness)
+        .map_err(|_| ContextPackServiceError::InvalidResponse)?;
+    Ok(true)
+}
+
+fn context_section_accounting(
+    request: &CanonicalContextPackRequest,
+    data: &ContextPackData,
+) -> Result<BTreeMap<String, u32>, ContextPackPlanningError> {
+    let mut by_section_bytes = BTreeMap::new();
+    for section in request.sections() {
+        by_section_bytes.insert(section_label(*section).to_owned(), 0_usize);
+    }
+    for item in &data.items {
+        let item_bytes = serde_json::to_vec(item)
+            .map_err(|_| ContextPackPlanningError::FinalRepresentationExceeded)?
+            .len();
+        let sections = item_sections(request.sections(), item.role);
+        if sections.is_empty() {
+            add_section_bytes(&mut by_section_bytes, "unclassified_items", item_bytes);
+            continue;
+        }
+        let divisor = sections.len().max(1);
+        let share = item_bytes / divisor;
+        let remainder = item_bytes % divisor;
+        for (index, section) in sections.into_iter().enumerate() {
+            add_section_bytes(
+                &mut by_section_bytes,
+                section_label(section),
+                share.saturating_add(usize::from(index == 0).saturating_mul(remainder)),
+            );
+        }
+    }
+
+    add_serialized_section_bytes(
+        &mut by_section_bytes,
+        "role_coverage",
+        serde_json::to_vec(&data.role_coverage).map_or(usize::MAX, |encoded| encoded.len()),
+    );
+    add_serialized_section_bytes(
+        &mut by_section_bytes,
+        "structure",
+        serde_json::to_vec(&data.structure).map_or(usize::MAX, |encoded| encoded.len()),
+    );
+    add_serialized_section_bytes(
+        &mut by_section_bytes,
+        "omissions",
+        serde_json::to_vec(&data.omitted).map_or(usize::MAX, |encoded| encoded.len()),
+    );
+    add_serialized_section_bytes(
+        &mut by_section_bytes,
+        "followups",
+        serde_json::to_vec(&data.followups).map_or(usize::MAX, |encoded| encoded.len()),
+    );
+    if let Some(explanation) = &data.explanation {
+        add_serialized_section_bytes(
+            &mut by_section_bytes,
+            "explanation",
+            serde_json::to_vec(explanation).map_or(usize::MAX, |encoded| encoded.len()),
+        );
+    }
+    let mut prefix_bytes = 0_usize;
+    let mut prefix_tokens = 0_u64;
+    let mut by_section = BTreeMap::new();
+    for (section, bytes) in by_section_bytes {
+        prefix_bytes = prefix_bytes.saturating_add(bytes);
+        let next_tokens = rootlight_mcp_contract::accounting::estimate_tokens(prefix_bytes);
+        by_section.insert(
+            section,
+            u32::try_from(next_tokens.saturating_sub(prefix_tokens)).unwrap_or(u32::MAX),
+        );
+        prefix_tokens = next_tokens;
+    }
+    Ok(by_section)
+}
+
+fn add_serialized_section_bytes(
+    accounting: &mut BTreeMap<String, usize>,
+    section: &str,
+    bytes: usize,
+) {
+    add_section_bytes(accounting, section, bytes);
+}
+
+fn add_section_bytes(accounting: &mut BTreeMap<String, usize>, section: &str, bytes: usize) {
+    let entry = accounting.entry(section.to_owned()).or_default();
+    *entry = entry.saturating_add(bytes);
+}
+
+fn item_sections(requested: &[ContextSection], role: ContractEvidenceRole) -> Vec<ContextSection> {
+    requested
+        .iter()
+        .copied()
+        .filter(|section| match role {
+            ContractEvidenceRole::Definition => {
+                matches!(section, ContextSection::Definitions | ContextSection::Types)
+            }
+            ContractEvidenceRole::Implementation => *section == ContextSection::Source,
+            ContractEvidenceRole::Caller => {
+                matches!(section, ContextSection::Callers | ContextSection::Callees)
+            }
+            ContractEvidenceRole::Test => *section == ContextSection::Tests,
+            ContractEvidenceRole::Risk => *section == ContextSection::Risks,
+            ContractEvidenceRole::Architecture => *section == ContextSection::Architecture,
+            ContractEvidenceRole::Change => *section == ContextSection::History,
+        })
+        .collect()
+}
+
+const fn section_label(section: ContextSection) -> &'static str {
+    match section {
+        ContextSection::Architecture => "architecture",
+        ContextSection::Definitions => "definitions",
+        ContextSection::Callers => "callers",
+        ContextSection::Callees => "callees",
+        ContextSection::Types => "types",
+        ContextSection::Tests => "tests",
+        ContextSection::History => "history",
+        ContextSection::Source => "source",
+        ContextSection::Risks => "risks",
+    }
+}
+
 fn append_provider_omissions(omitted: &mut Vec<OmissionSummary>, corpus: &ContextEvidenceCorpus) {
     for provider_omission in &corpus.omissions {
         let label = match provider_omission.reason {
@@ -1977,12 +2785,24 @@ fn append_provider_omissions(omitted: &mut Vec<OmissionSummary>, corpus: &Contex
         let Ok(reason) = SafeLabel::parse(label) else {
             continue;
         };
-        if let Some(existing) = omitted.iter_mut().find(|value| value.reason == reason) {
+        let provider = SafeLabel::parse(provider_omission.provider.name()).ok();
+        let role = Some(contract_role(provider_omission.role));
+        if let Some(existing) = omitted.iter_mut().find(|value| {
+            value.reason == reason
+                && value.provider == provider
+                && value.role == role
+                && value.limiting_resources == provider_omission.limiting_resources
+                && !value.resumable
+        }) {
             existing.count = existing.count.saturating_add(provider_omission.count);
         } else if omitted.len() < MAX_OMISSIONS {
             omitted.push(OmissionSummary {
+                role,
                 reason,
+                provider,
                 count: provider_omission.count,
+                limiting_resources: provider_omission.limiting_resources.clone(),
+                resumable: false,
                 continuation: None,
             });
         }
@@ -2088,19 +2908,22 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ContextPackPlanRequest, ContextPackPlanner, DefaultContextPackPlanner, EvidenceCandidate,
-        EvidenceRole, MAX_PACK_TOKENS, MIN_PACK_TOKENS, PackError, PackObjective,
-        add_budget_charge, affordable_source_target_count, append_role_followups,
-        context_pack_completeness, context_pack_id, contract_role, evaluate_role_coverage,
-        objective_for_task, optimize_pack, optimize_pack_with_diversity,
+        ContextPackPlanRequest, ContextPackPlanner, ContextPackPlanningError,
+        DefaultContextPackPlanner, EvidenceCandidate, EvidenceRole, MAX_PACK_TOKENS,
+        MIN_PACK_TOKENS, PackError, PackObjective, add_budget_charge,
+        affordable_source_target_count, append_role_followups, context_pack_completeness,
+        context_pack_id, contract_role, evaluate_role_coverage, objective_for_task,
+        optimize_context_page, optimize_pack, optimize_pack_with_diversity,
+        reconcile_final_envelope, reconcile_final_envelope_with_budget, resumable_completeness,
         role_coverage_completeness, source_materialization_limits, source_provider_reservation,
-        source_shaping_reservation, validate_source_output,
+        source_shaping_reservation, usage_summary, validate_source_output,
     };
     use crate::{
         context_evidence::{
             ContextEvidenceCallContext, ContextEvidenceCollectionError, ContextEvidencePort,
-            ContextEvidencePortError, ContextEvidenceProviderRegistry, ContextSourceMaterial,
-            ContextSourceOutput, ContextSourceRequest, ContextSourceSnippet, ContextSourceTarget,
+            ContextEvidencePortError, ContextEvidencePortErrorKind,
+            ContextEvidenceProviderRegistry, ContextSourceMaterial, ContextSourceOutput,
+            ContextSourceRequest, ContextSourceSnippet, ContextSourceTarget,
             EvidenceCandidateDraft, EvidenceProvenance, EvidenceProvider,
             EvidenceProviderInvocation, EvidenceProviderOmission, EvidenceProviderOmissionReason,
             EvidenceProviderOutput, TypedEvidenceCandidate,
@@ -2111,16 +2934,18 @@ mod tests {
     };
     use proptest::prelude::*;
     use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
-    use rootlight_ir::{LineRange, SourceRef, SourceSpan};
+    use rootlight_ir::{CoverageStatus, LineRange, SourceRef, SourceSpan};
     use rootlight_mcp_contract::{
-        RepositorySelector, TrustClassification,
+        RepositorySelector, SchemaVersion, TrustClassification,
         completeness::{CompletenessState, LimitingResourceKind, ResultCompleteness},
         context::{
             ContextPackInput, ContextSection, ContextSeedSelector, Diversity,
             MissingRequiredRoleReason, RoleCoverageStatus, SourcePolicy,
         },
         vertical::{
-            EntityKind, RelationSummary, RepositoryIdSelector, ResponseProfile, SymbolExplanation,
+            CoverageSummary, EntityKind, Freshness, GenerationSummary, ReadEnvelope,
+            RelationSummary, RepositoryIdSelector, RequiredNullable, ResolvedRepository,
+            ResponseProfile, SymbolExplanation,
         },
     };
 
@@ -2231,6 +3056,27 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct UnsupportedEvidencePort;
+
+    impl<C> ContextEvidencePort<C> for UnsupportedEvidencePort
+    where
+        C: CancellationSignal + Clone + Send + Sync + 'static,
+    {
+        fn retrieve(
+            &self,
+            _invocation: EvidenceProviderInvocation,
+            _context: ContextEvidenceCallContext<C>,
+        ) -> AgentPortFuture<Result<EvidenceProviderOutput, ContextEvidencePortError>> {
+            Box::pin(async {
+                Err(ContextEvidencePortError {
+                    kind: ContextEvidencePortErrorKind::Unsupported,
+                    usage: BudgetCharge::default(),
+                })
+            })
+        }
+    }
+
     fn omission(
         role: EvidenceRole,
         reason: EvidenceProviderOmissionReason,
@@ -2329,6 +3175,33 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn unavailable_providers_produce_a_truthful_empty_pack() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([5; 20]);
+        let input = context_input(SymbolId::from_bytes([2; 20]));
+        let canonical = CanonicalContextPackRequest::new(&input, repository, generation)
+            .expect("fixture request canonicalizes");
+
+        let planned = DefaultContextPackPlanner
+            .collect_and_plan(
+                &UnsupportedEvidencePort,
+                &canonical,
+                NeverCancelled,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("provider absence remains a truthful result");
+
+        assert!(planned.data.items.is_empty());
+        assert!(!planned.data.omitted.is_empty());
+        assert!(planned.continuation.is_none());
+        assert_eq!(
+            planned.completeness.state,
+            CompletenessState::UnsupportedPartial
+        );
+    }
+
     #[test]
     fn required_roles_are_prioritized() {
         let mut candidates = vec![
@@ -2383,6 +3256,185 @@ mod tests {
         );
         assert!(roles.contains(&EvidenceRole::Test), "test represented");
         assert!(result.total_tokens <= 900, "budget respected");
+    }
+
+    #[test]
+    fn continuation_pages_are_deterministic_for_every_objective_without_duplicates() {
+        let make_candidates = || {
+            EvidenceRole::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(index, role)| {
+                    candidate(
+                        &format!("candidate-{index}"),
+                        role,
+                        900_u16.saturating_sub(u16::try_from(index).unwrap_or(u16::MAX)),
+                        400,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let page_sequence = |objective| {
+            let mut continuation = None;
+            let mut sequence = Vec::new();
+            for _ in 0..EvidenceRole::ALL.len() {
+                let mut candidates = make_candidates();
+                let page = optimize_context_page(
+                    objective,
+                    &mut candidates,
+                    500,
+                    Diversity::Balanced,
+                    continuation,
+                )
+                .expect("page is valid");
+                assert_eq!(page.pack.items.len(), 1);
+                let identity = page.pack.items[0].candidate.identity.clone();
+                assert!(!sequence.contains(&identity), "pages never repeat evidence");
+                sequence.push(identity);
+                continuation = page.continuation;
+                if continuation.is_none() {
+                    break;
+                }
+            }
+            sequence
+        };
+
+        for objective in objectives() {
+            let first = page_sequence(objective);
+            let replay = page_sequence(objective);
+            assert_eq!(first, replay, "{objective:?} has a stable page golden");
+            assert_eq!(first.len(), EvidenceRole::ALL.len());
+        }
+    }
+
+    #[test]
+    fn resumable_frontier_preserves_non_resumable_partial_truth() {
+        use rootlight_mcp_contract::completeness::{
+            ContinuationAvailability, ContinuationGuidance, LimitingResource,
+        };
+
+        for state in [
+            CompletenessState::UnsupportedPartial,
+            CompletenessState::Indeterminate,
+        ] {
+            let current = ResultCompleteness::new(
+                state,
+                vec![LimitingResource::kind(LimitingResourceKind::Capability)],
+                ContinuationAvailability::Unavailable,
+                vec![ContinuationGuidance::UnsupportedNoContinuation],
+            )
+            .expect("partial fixture is valid");
+            let resumed =
+                resumable_completeness(&current).expect("mixed continuation truth is valid");
+            assert_eq!(resumed.state, state);
+            assert_eq!(resumed.continuation, ContinuationAvailability::Available);
+            assert!(resumed.guidance.contains(&ContinuationGuidance::UseCursor));
+            assert!(
+                resumed
+                    .guidance
+                    .contains(&ContinuationGuidance::UnsupportedNoContinuation)
+            );
+        }
+    }
+
+    #[test]
+    fn late_final_eviction_creates_the_first_truthful_frontier() {
+        let mut candidates = vec![
+            candidate("required", EvidenceRole::Definition, 900, 100),
+            candidate("optional", EvidenceRole::Definition, 800, 100),
+        ];
+        let mut selection = optimize_context_page(
+            PackObjective::Explanation,
+            &mut candidates,
+            500,
+            Diversity::Balanced,
+            None,
+        )
+        .expect("all candidates initially fit");
+        assert!(selection.continuation.is_none());
+        let retained = vec![selection.pack.items[0].candidate.identity.clone()];
+        let state = selection
+            .frontier
+            .retain_current_page(&retained)
+            .expect("late eviction creates a continuation");
+        assert_eq!(state.remaining_candidates(), 1);
+        assert_eq!(state.emitted_count(), 1);
+        assert_eq!(state.page_item_counts(), &[1]);
+    }
+
+    #[test]
+    fn final_envelope_accounting_converges_at_the_exact_budget_boundary() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([5; 20]);
+        let symbol = SymbolId::from_bytes([2; 20]);
+        let mut input = context_input(symbol);
+        input.token_budget = 20_000;
+        let canonical = CanonicalContextPackRequest::new(&input, repository, generation)
+            .expect("fixture request canonicalizes");
+        let symbols = [explanation(symbol, generation)];
+        let planned = DefaultContextPackPlanner
+            .plan(
+                ContextPackPlanRequest {
+                    request: &canonical,
+                    symbols: &symbols,
+                },
+                &NeverCancelled,
+            )
+            .expect("fixture pack plans");
+        let mut envelope = ReadEnvelope {
+            schema_version: SchemaVersion::V1_0,
+            repository: ResolvedRepository {
+                repository_id: repository,
+                display_name: "fixture".to_owned(),
+            },
+            generation: GenerationSummary {
+                generation_id: generation,
+                parent_generation: RequiredNullable(None),
+                structural_freshness: Freshness::Current,
+                semantic_freshness: Freshness::Current,
+            },
+            coverage: CoverageSummary {
+                status: CoverageStatus::Bounded,
+                languages: Vec::new(),
+                skipped_inputs: 0,
+            },
+            data: planned.data,
+            truncated: planned.truncated,
+            completeness: planned.completeness,
+            next_cursor: RequiredNullable(None),
+            usage: usage_summary(planned.usage, "accounting-boundary"),
+            warnings: Vec::new(),
+            trust: TrustClassification::UntrustedRepositoryData,
+        };
+        reconcile_final_envelope(&canonical, &mut envelope).expect("generous envelope converges");
+        let exact_budget =
+            u16::try_from(envelope.usage.estimated_tokens).expect("fixture fits u16");
+        let section_total = envelope
+            .data
+            .token_accounting
+            .by_section
+            .values()
+            .copied()
+            .fold(0_u32, u32::saturating_add);
+        assert!(envelope.data.token_accounting.by_section.len() >= 10);
+        assert_eq!(
+            section_total,
+            envelope.data.token_accounting.estimated_total
+        );
+        assert_eq!(u64::from(section_total), envelope.usage.estimated_tokens);
+
+        let mut exact = envelope.clone();
+        reconcile_final_envelope_with_budget(&canonical, &mut exact, exact_budget)
+            .expect("exact measured boundary is accepted");
+        let mut below = envelope;
+        assert_eq!(
+            reconcile_final_envelope_with_budget(
+                &canonical,
+                &mut below,
+                exact_budget.saturating_sub(1),
+            ),
+            Err(ContextPackPlanningError::FinalRepresentationExceeded)
+        );
     }
 
     #[test]

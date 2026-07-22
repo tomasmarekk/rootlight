@@ -245,12 +245,6 @@ impl CanonicalContextPackRequest {
         ) {
             return Err(CanonicalContextPackRequestError::GenerationMismatch);
         }
-        if input.continuation.is_some() {
-            return Err(CanonicalContextPackRequestError::UnsupportedField(
-                "continuation",
-            ));
-        }
-
         let task = normalize_task(&input.task);
         if task.is_empty() {
             return Err(CanonicalContextPackRequestError::EmptyTask);
@@ -919,17 +913,15 @@ mod tests {
     }
 
     #[test]
-    fn continuation_remains_truthfully_unsupported() {
+    fn continuation_does_not_change_canonical_request_identity() {
         let mut continuation = input();
         continuation.continuation = Some(
             rootlight_mcp_contract::vertical::ContinuationCursor::parse("opaque")
                 .expect("fixture cursor is bounded"),
         );
         assert_eq!(
-            CanonicalContextPackRequest::new(&continuation, REPOSITORY, GENERATION),
-            Err(CanonicalContextPackRequestError::UnsupportedField(
-                "continuation"
-            ))
+            canonical(&continuation).digest_bytes(),
+            canonical(&input()).digest_bytes()
         );
     }
 

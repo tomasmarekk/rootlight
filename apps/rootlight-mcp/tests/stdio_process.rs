@@ -250,18 +250,18 @@ fn tools_list_payloads_match_all_profile_goldens_across_the_process_boundary() {
     let expected = [
         (
             ExposureProfile::Scout,
-            222_178,
-            "ae1ce2a14a324be9976b4d24ee2105d02d4af070c5461f785d75b1457fea5449",
+            226_498,
+            "6de13ea1303cf268180aef0d2fad892124e6819f6c15f00faa03a80fa5be0385",
         ),
         (
             ExposureProfile::Analysis,
-            485_034,
-            "49986fbdb8e8a909cbc32d936d7b04a4bd50610eb3cb727d3846211c57a02880",
+            489_354,
+            "2f6a701d704d05dc0fa2fdd0230d03eba1f8c78f2345b4bc754d7bd944839647",
         ),
         (
             ExposureProfile::Developer,
-            654_745,
-            "743648a7f6e4ebd9200adb3e60d937cfe65e3d53484f88cba0c547b04746f381",
+            659_342,
+            "920075f729f0a66aecf29ac2ee3404af3461fcf82f3211035e5b8bb582c3c768",
         ),
     ];
     for (profile, expected_bytes, expected_hash) in expected {
@@ -322,8 +322,13 @@ fn tools_list_payloads_match_all_profile_goldens_across_the_process_boundary() {
             profile.name()
         );
         let encoded = serde_json::to_vec(&payload).expect("tools/list payload serializes");
-        assert_eq!(encoded.len(), expected_bytes);
-        assert_eq!(blake3::hash(&encoded).to_hex().as_str(), expected_hash);
+        let actual_hash = blake3::hash(&encoded).to_hex();
+        assert_eq!(
+            (encoded.len(), actual_hash.as_str()),
+            (expected_bytes, expected_hash),
+            "{} process byte golden drifted",
+            profile.name()
+        );
         drop(input);
         drop(output);
         let output = child

@@ -22,12 +22,17 @@ use rootlight_agent::{
         PlanChangeError, PlanChangePort, PlanChangePortOutput, PlanChangeRequest, PlanChangeResult,
         PlanChangeService, PlanChangeServiceError, PlanImpactResult, normalize_plan_change,
     },
+    context_continuation::{
+        ContextContinuationBinding, ContextContinuationCodec, ContextContinuationError,
+        ContextContinuationState,
+    },
     context_evidence::{
         ContextEvidenceCallContext, ContextEvidencePort, ContextEvidencePortError,
         ContextEvidencePortErrorKind, EvidenceAnchor, EvidenceCandidateDraft, EvidenceProvenance,
         EvidenceProvider, EvidenceProviderInvocation, EvidenceProviderOutput,
     },
     context_pack::{ContextPackService, ContextPackServiceError},
+    context_pack_request::CanonicalContextPackRequest,
     policy::{BudgetCharge, BudgetLimits, is_compact_profile},
     port::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentPortFuture,
@@ -72,8 +77,8 @@ use rootlight_mcp_contract::{
     },
     context::{
         BatchOperationResult, BatchOperationStatus, BatchStatus, BatchTool, ColumnSchema,
-        ColumnType, ContextPackInput, PlanExplanation, QueryAdvancedData, QueryAdvancedInput,
-        QueryBatchData, QueryBatchInput, QueryCompleteness,
+        ColumnType, ContextPackData, ContextPackInput, PlanExplanation, QueryAdvancedData,
+        QueryAdvancedInput, QueryBatchData, QueryBatchInput, QueryCompleteness,
     },
     error_definition,
     pagination::{AuthenticatedCursor, CursorContext},
@@ -2171,6 +2176,51 @@ where
     }
 }
 
+impl<P> ContextContinuationCodec for McpAgentToolPort<P>
+where
+    P: FirstSliceClientPort,
+{
+    fn open_context_continuation(
+        &self,
+        cursor: &ContinuationCursor,
+        binding: ContextContinuationBinding,
+    ) -> Result<ContextContinuationState, ContextContinuationError> {
+        let authenticated = AuthenticatedCursor::from_wire(cursor.as_str())
+            .map_err(|_| ContextContinuationError::Invalid)?;
+        let context =
+            context_pack_cursor_context(binding, self.exposure_profile, self.cursor_key.key_id);
+        authenticated
+            .validate(&context, now_unix_ms(), &self.cursor_key.secret)
+            .map_err(|_| ContextContinuationError::Invalid)?;
+        let state = ContextContinuationState::decode(authenticated.last_sort_key())?;
+        if state.output_budget() > u32::from(binding.token_budget) {
+            return Err(ContextContinuationError::Invalid);
+        }
+        Ok(state)
+    }
+
+    fn seal_context_continuation(
+        &self,
+        state: ContextContinuationState,
+        binding: ContextContinuationBinding,
+    ) -> Result<ContinuationCursor, ContextContinuationError> {
+        if state.output_budget() > u32::from(binding.token_budget) {
+            return Err(ContextContinuationError::Invalid);
+        }
+        let context =
+            context_pack_cursor_context(binding, self.exposure_profile, self.cursor_key.key_id);
+        let cursor = AuthenticatedCursor::create(
+            context,
+            state.encode(),
+            now_unix_ms(),
+            &self.cursor_key.secret,
+        )
+        .map_err(|_| ContextContinuationError::Unavailable)?;
+        ContinuationCursor::parse(&cursor.to_wire())
+            .map_err(|_| ContextContinuationError::Unavailable)
+    }
+}
+
 impl<P> PlanChangePort<RequestCancellation> for McpAgentToolPort<P>
 where
     P: FirstSliceClientPort,
@@ -2651,8 +2701,7 @@ async fn execute_context_pack<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
-    let input: ContextPackInput = decode_input(arguments)?;
+    let mut input: ContextPackInput = decode_input(arguments)?;
     let limits = BudgetLimits::server_ceiling();
     let repository = repository_id(input.repository.clone(), unsupported)?;
     let adapter = Arc::new(McpAgentToolPort {
@@ -2664,11 +2713,37 @@ where
         exposure_profile,
         cursor_key,
     });
+    if let Some(cursor) = input.continuation.as_ref() {
+        let authenticated = AuthenticatedCursor::from_wire(cursor.as_str())
+            .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))?;
+        let cursor_generation = authenticated.generation();
+        if matches!(
+            input.generation.as_ref(),
+            Some(GenerationSelector::Explicit(explicit)) if *explicit != cursor_generation
+        ) {
+            return Err(ToolExecutionError::new(invalid_cursor.clone()));
+        }
+        let canonical = CanonicalContextPackRequest::new(&input, repository, cursor_generation)
+            .map_err(|_| ToolExecutionError::new(invalid_arguments.clone()))?;
+        let binding = ContextContinuationBinding {
+            repository: canonical.repository(),
+            generation: canonical.generation(),
+            request_digest: canonical.digest_bytes(),
+            response_profile: canonical.response_profile(),
+            token_budget: canonical.token_budget(),
+            planner_version: rootlight_mcp_contract::context::PLANNER_VERSION,
+            role_policy_version: rootlight_mcp_contract::context::OBJECTIVE_ROLE_POLICY_VERSION,
+        };
+        adapter
+            .open_context_continuation(cursor, binding)
+            .map_err(|_| ToolExecutionError::new(invalid_cursor.clone()))?;
+        input.generation = Some(GenerationSelector::Explicit(cursor_generation));
+    }
     let output = ContextPackService
         .execute(adapter, input, repository, cancellation)
         .await
-        .map_err(|error| map_context_pack_service_error(error, unsupported))?;
-    serialize_measured_read_success(output, started_at, limits)
+        .map_err(|error| map_context_pack_service_error(error, unsupported, invalid_cursor))?;
+    serialize_context_pack_success(output, limits)
 }
 
 #[expect(
@@ -2691,7 +2766,6 @@ async fn execute_context_pack_with_identity<P>(
 where
     P: FirstSliceClientPort,
 {
-    let started_at = Instant::now();
     let input: ContextPackInput = decode_input(arguments)?;
     let limits = BudgetLimits::server_ceiling();
     let repository = repository_id(input.repository.clone(), unsupported)?;
@@ -2707,19 +2781,26 @@ where
     let output = ContextPackService
         .execute_with_identity(adapter, input, repository, identity, cancellation, deadline)
         .await
-        .map_err(|error| map_context_pack_service_error(error, unsupported))?;
-    serialize_measured_read_success(output, started_at, limits)
+        .map_err(|error| map_context_pack_service_error(error, unsupported, invalid_cursor))?;
+    serialize_context_pack_success(output, limits)
 }
 
 fn map_context_pack_service_error(
     error: ContextPackServiceError,
     unsupported: &PublicError,
+    invalid_cursor: &PublicError,
 ) -> ToolExecutionError {
     match error {
         ContextPackServiceError::UnsupportedField(field) => unsupported_field(field),
         ContextPackServiceError::EmptySeeds => ToolExecutionError::new(unsupported.clone()),
+        ContextPackServiceError::InvalidContinuation => {
+            ToolExecutionError::new(invalid_cursor.clone())
+        }
         ContextPackServiceError::Public(error) => ToolExecutionError::new(*error),
         ContextPackServiceError::DeadlineExceeded => {
+            ToolExecutionError::new(authoritative_error(MappedDomainFailure::budget_exceeded()))
+        }
+        ContextPackServiceError::BudgetExceeded => {
             ToolExecutionError::new(authoritative_error(MappedDomainFailure::budget_exceeded()))
         }
         ContextPackServiceError::InvalidResponse => internal(ToolExecutionFailure::InvalidResponse),
@@ -3145,6 +3226,35 @@ fn repository_snapshot_id(repository: RepositoryId, generation: GenerationId) ->
     hasher.update(repository.as_bytes());
     hasher.update(generation.as_bytes());
     *hasher.finalize().as_bytes()
+}
+
+fn context_pack_cursor_context(
+    binding: ContextContinuationBinding,
+    exposure_profile: ExposureProfile,
+    key_id: u64,
+) -> CursorContext {
+    let mut request_hasher =
+        blake3::Hasher::new_derive_key("rootlight.context-pack.cursor-request.v1");
+    request_hasher.update(&binding.request_digest);
+    hash_budget_limits(&mut request_hasher, BudgetLimits::server_ceiling());
+    let query_fingerprint = *request_hasher.finalize().as_bytes();
+
+    let mut plan_hasher = blake3::Hasher::new_derive_key("rootlight.context-pack.cursor-plan.v1");
+    plan_hasher.update(&binding.planner_version.to_le_bytes());
+    plan_hasher.update(&binding.role_policy_version.to_le_bytes());
+    let plan_fingerprint = *plan_hasher.finalize().as_bytes();
+
+    repository_cursor_context(
+        McpTool::ContextPack,
+        binding.repository,
+        binding.generation,
+        exposure_profile,
+        binding.response_profile,
+        binding.token_budget,
+        query_fingerprint,
+        plan_fingerprint,
+        key_id,
+    )
 }
 
 #[expect(
@@ -7249,6 +7359,49 @@ fn serialize_catalog_success(
         BudgetLimits::server_ceiling(),
         |output| &mut output.usage,
     )
+}
+
+fn serialize_context_pack_success(
+    output: ReadEnvelope<ContextPackData>,
+    limits: BudgetLimits,
+) -> Result<Map<String, Value>, ToolExecutionError> {
+    let value = serde_json::to_value(ToolResponse::Success(&output))
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    let serialized =
+        serde_json::to_vec(&value).map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    let json_bytes =
+        u64::try_from(serialized.len()).map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    let estimated_tokens = rootlight_mcp_contract::accounting::estimate_tokens(serialized.len());
+    let section_total = output
+        .data
+        .token_accounting
+        .by_section
+        .values()
+        .copied()
+        .fold(0_u32, u32::saturating_add);
+    if output.usage.json_bytes != json_bytes
+        || output.usage.estimated_tokens != estimated_tokens
+        || u64::from(output.data.token_accounting.estimated_total) != estimated_tokens
+        || section_total != output.data.token_accounting.estimated_total
+    {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    let maximums = limits.maximums();
+    if output.usage.rows > maximums.rows
+        || output.usage.edges > maximums.traversal_facts
+        || output.usage.source_bytes > maximums.source_bytes
+        || output.usage.json_bytes > maximums.json_bytes
+        || output.usage.estimated_tokens > maximums.tokens
+        || output.usage.wall_time_ms > maximums.time_ms
+    {
+        return Err(ToolExecutionError::new(authoritative_error(
+            MappedDomainFailure::budget_exceeded(),
+        )));
+    }
+    let Value::Object(output) = value else {
+        return Err(internal(ToolExecutionFailure::Executor));
+    };
+    Ok(output)
 }
 
 fn serialize_measured_read_success<T>(

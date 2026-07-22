@@ -182,7 +182,7 @@ impl McpTool {
                 "Use bounded change planning from an explicit objective and targets under caller-reduced resource ceilings; change-context resolution and user constraints are unsupported."
             }
             Self::ContextPack => {
-                "Use bounded profiled evidence assembly with generation-pinned references signatures and source snippets under a token budget; selectable response profiles and source policies control representation, while path, route, change, located-result, and plan seeds are unsupported."
+                "Use bounded profiled evidence assembly with authenticated continuation, generation-pinned references signatures and source snippets under a token budget; selectable response profiles and source policies control representation, while path, route, change, located-result, and plan seeds are unsupported."
             }
             Self::SourceRead => {
                 "Read bounded source ranges from pinned source references as untrusted data using exact UTF-8 or explicit base64 bytes with optional context, canonical overlap merging, line projection, and caller-reduced ceilings; direct file selectors are unsupported."

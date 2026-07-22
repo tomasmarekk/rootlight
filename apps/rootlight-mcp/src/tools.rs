@@ -2238,11 +2238,11 @@ mod tests {
         .expect("implemented values and descendants override limited ancestors");
 
         let error = validate_capability_input(
-            VerticalTool::QueryBatch,
+            VerticalTool::SourceRead,
             &json!({"response_profile": "standard"}),
             CapabilityBindingPolicy::Materialized,
         )
-        .expect_err("the restricted response representation is rejected");
+        .expect_err("the restricted source representation is rejected");
         assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
         assert_eq!(error.registry_path(), "response_profile");
         assert_eq!(error.instance_path(), "response_profile");
@@ -2381,7 +2381,7 @@ mod tests {
     #[test]
     fn capability_rejection_builds_bounded_field_details() {
         let error = validate_capability_input(
-            VerticalTool::QueryBatch,
+            VerticalTool::SourceRead,
             &json!({"response_profile": "standard"}),
             CapabilityBindingPolicy::Materialized,
         )
@@ -2634,7 +2634,7 @@ mod tests {
             ],
             "review any new generated-rule exclusion"
         );
-        assert_eq!((declared, covered, exclusions.len()), (123, 121, 2));
+        assert_eq!((declared, covered, exclusions.len()), (110, 108, 2));
     }
 
     #[tokio::test]
@@ -2887,7 +2887,7 @@ mod tests {
             ("architecture.overview", "explicit_truncation"),
             ("architecture.cycles", "explicit_truncation"),
             ("code.dead", "explicit_truncation"),
-            ("context.pack", "progressive_handle"),
+            ("context.pack", "authenticated_cursor"),
             ("query.advanced", "authenticated_cursor"),
             ("query.batch", "child_continuations"),
             ("history.compare", "explicit_truncation"),
@@ -3011,16 +3011,16 @@ mod tests {
             observed,
             [
                 (
-                    222_292,
-                    "a8d290eaacbb69686e8a2381a5562d1cbd4d9b9857276de3fdf91457bfad94a6".to_owned(),
+                    226_498,
+                    "6de13ea1303cf268180aef0d2fad892124e6819f6c15f00faa03a80fa5be0385".to_owned(),
                 ),
                 (
-                    485_148,
-                    "706af90cb4a7a3f403c982aba37403dea5fa7527cf4560dad2049e3845ea8def".to_owned(),
+                    489_354,
+                    "2f6a701d704d05dc0fa2fdd0230d03eba1f8c78f2345b4bc754d7bd944839647".to_owned(),
                 ),
                 (
-                    655_136,
-                    "7bb817bf35ef84ecfe1457b590ed2c138bcd96f9899fa30e69a5dbc2947ea1d3".to_owned(),
+                    659_342,
+                    "920075f729f0a66aecf29ac2ee3404af3461fcf82f3211035e5b8bb582c3c768".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -3106,7 +3106,7 @@ mod tests {
             (
                 "assemble focused evidence",
                 "context.pack",
-                "evidence assembly from explicit symbol or file identifiers",
+                "profiled evidence assembly",
                 "seeds.paths",
             ),
             (

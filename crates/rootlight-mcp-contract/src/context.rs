@@ -14,12 +14,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::TrustClassification;
 use crate::vertical::{
     ContinuationCursor, EntityKind, GenerationSelector, ReadEnvelope, RepositorySelector,
     RequiredNullable, ResponseBudget, ResponseProfile, ResponseWarning, SourceFreeMessage,
     ToolResponse, UsageSummary,
 };
+use crate::{TrustClassification, completeness::LimitingResource};
 
 // ---------------------------------------------------------------------------
 // context.pack
@@ -585,11 +585,24 @@ pub struct ContextStructure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OmissionSummary {
+    /// Evidence role affected by the omission, when role-specific.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<EvidenceRole>,
     /// Source-free reason code for the omission.
     pub reason: SafeLabel,
+    /// Provider domain that observed the omission, when provider-specific.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<SafeLabel>,
     /// Number of evidence items excluded for this reason.
     #[schemars(range(max = 100_000))]
     pub count: u32,
+    /// Exact resources that prevented inclusion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 16))]
+    pub limiting_resources: Vec<LimitingResource>,
+    /// Whether another page of this exact request can retrieve the omission.
+    #[serde(default)]
+    pub resumable: bool,
     /// Continuation handle to retrieve omitted items, when pageable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ContinuationCursor>,

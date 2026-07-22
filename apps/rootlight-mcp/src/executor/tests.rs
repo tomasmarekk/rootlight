@@ -14,6 +14,7 @@ use std::{
 
 use proptest::prelude::*;
 use proptest::test_runner::{RngAlgorithm, RngSeed};
+use rootlight_agent::context_continuation::ContextContinuationStateParts;
 use rootlight_client::{
     AdvancedColumn as ClientAdvancedColumn, AdvancedPlan as ClientAdvancedPlan,
     AdvancedQuery as ClientAdvancedQuery, AnalysisTier as ClientTier,
@@ -143,6 +144,10 @@ enum FakeOutcome {
     BatchContextPack {
         status: Box<Result<RepositoryStatus, ClientPortError>>,
         explain: Result<SymbolExplainPortResponse, ClientPortError>,
+    },
+    BatchSourceRead {
+        status: Box<Result<RepositoryStatus, ClientPortError>>,
+        source: Result<SourceReadPortResponse, ClientPortError>,
     },
     BatchPendingLocate {
         status: Box<Result<RepositoryStatus, ClientPortError>>,
@@ -511,6 +516,7 @@ impl FirstSliceClientPort for FakePort {
         )));
         let outcome = match &self.outcome {
             FakeOutcome::SourceRead(outcome) => outcome.clone(),
+            FakeOutcome::BatchSourceRead { source, .. } => source.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -550,6 +556,7 @@ impl FirstSliceClientPort for FakePort {
             | FakeOutcome::BatchLocateSequence { status, .. } => status.as_ref().clone(),
             FakeOutcome::BatchPlanChange { status, .. } => status.as_ref().clone(),
             FakeOutcome::BatchContextPack { status, .. } => status.as_ref().clone(),
+            FakeOutcome::BatchSourceRead { status, .. } => status.as_ref().clone(),
             FakeOutcome::BatchPendingLocate { status } => status.as_ref().clone(),
             FakeOutcome::SymbolExplain(Ok(_)) => Ok(repository_status_response()),
             FakeOutcome::PlanChange(Ok(_)) => Ok(repository_status_response()),
@@ -1674,6 +1681,59 @@ fn issue_pagination_cursor(
     .to_wire()
 }
 
+fn context_pack_arguments() -> Value {
+    json!({
+        "repository": {"repository_id": repository()},
+        "task": "explain the parser",
+        "seeds": {"symbols": [symbol()]},
+        "token_budget": 1000
+    })
+}
+
+fn issue_context_pack_cursor(
+    arguments: Value,
+    exposure_profile: ExposureProfile,
+    signing_key: CursorSigningKey,
+    issued_at_ms: u64,
+    planner_version: u32,
+) -> String {
+    let Value::Object(arguments) = arguments else {
+        panic!("context-pack arguments are objects");
+    };
+    let input: ContextPackInput = decode_input(arguments).expect("context-pack fixture decodes");
+    let canonical = CanonicalContextPackRequest::new(&input, repository(), generation())
+        .expect("context-pack fixture canonicalizes");
+    let binding = ContextContinuationBinding {
+        repository: canonical.repository(),
+        generation: canonical.generation(),
+        request_digest: canonical.digest_bytes(),
+        response_profile: canonical.response_profile(),
+        token_budget: canonical.token_budget(),
+        planner_version,
+        role_policy_version: rootlight_mcp_contract::context::OBJECTIVE_ROLE_POLICY_VERSION,
+    };
+    let state = ContextContinuationState::new(ContextContinuationStateParts {
+        next_page: 1,
+        output_budget: 1_000,
+        corpus_digest: [3; 32],
+        page_start_digest: [0; 32],
+        page_start_count: 0,
+        emitted_digest: [4; 32],
+        emitted_count: 1,
+        remaining_candidates: 1,
+        page_item_counts: vec![1],
+    })
+    .expect("context frontier fixture is valid");
+    AuthenticatedCursor::create(
+        context_pack_cursor_context(binding, exposure_profile, signing_key.key_id),
+        state.encode(),
+        issued_at_ms,
+        &signing_key.secret,
+    )
+    .expect("context cursor fixture is valid")
+    .to_wire()
+}
+
 fn with_argument(mut arguments: Value, field: &str, value: Value) -> Value {
     arguments
         .as_object_mut()
@@ -1713,6 +1773,7 @@ async fn repository_read_cursors_bind_every_cross_tool_execution_dimension() {
         registered,
         std::collections::BTreeSet::from([
             ("code.locate", "cursor"),
+            ("context.pack", "continuation"),
             ("query.advanced", "cursor"),
             ("symbol.relationships", "cursor"),
         ])
@@ -1845,6 +1906,126 @@ async fn repository_read_cursors_bind_every_cross_tool_execution_dimension() {
                 "{tool:?} performed daemon work for {dimension}"
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn context_pack_cursor_failures_are_rejected_before_daemon_work() {
+    const KEY_MATERIAL: [u8; 32] = [0x6D; 32];
+    let signing_key =
+        CursorSigningKey::deterministic(KEY_MATERIAL).expect("test signing key is valid");
+    let base = context_pack_arguments();
+    let valid = issue_context_pack_cursor(
+        base.clone(),
+        ExposureProfile::Developer,
+        signing_key,
+        now_unix_ms(),
+        rootlight_mcp_contract::context::PLANNER_VERSION,
+    );
+    let expired = issue_context_pack_cursor(
+        base.clone(),
+        ExposureProfile::Developer,
+        signing_key,
+        now_unix_ms().saturating_sub(400_000),
+        rootlight_mcp_contract::context::PLANNER_VERSION,
+    );
+    let retired_planner = issue_context_pack_cursor(
+        base.clone(),
+        ExposureProfile::Developer,
+        signing_key,
+        now_unix_ms(),
+        rootlight_mcp_contract::context::PLANNER_VERSION.saturating_add(1),
+    );
+    let mut tampered = valid.clone().into_bytes();
+    let last = tampered.last_mut().expect("cursor has an encoded payload");
+    *last = if *last == b'A' { b'B' } else { b'A' };
+    let tampered = String::from_utf8(tampered).expect("base64url remains UTF-8");
+
+    let cases = [
+        (
+            "request",
+            with_argument(
+                with_argument(base.clone(), "task", json!("different task")),
+                "continuation",
+                json!(valid.clone()),
+            ),
+            ExposureProfile::Developer,
+        ),
+        (
+            "generation",
+            with_argument(
+                with_argument(base.clone(), "generation", json!(alternate_generation())),
+                "continuation",
+                json!(valid.clone()),
+            ),
+            ExposureProfile::Developer,
+        ),
+        (
+            "response profile",
+            with_argument(
+                with_argument(base.clone(), "response_profile", json!("standard")),
+                "continuation",
+                json!(valid.clone()),
+            ),
+            ExposureProfile::Developer,
+        ),
+        (
+            "budget increase",
+            with_argument(
+                with_argument(base.clone(), "token_budget", json!(1001)),
+                "continuation",
+                json!(valid.clone()),
+            ),
+            ExposureProfile::Developer,
+        ),
+        (
+            "exposure profile",
+            with_argument(base.clone(), "continuation", json!(valid.clone())),
+            ExposureProfile::Analysis,
+        ),
+        (
+            "expiry",
+            with_argument(base.clone(), "continuation", json!(expired)),
+            ExposureProfile::Developer,
+        ),
+        (
+            "tamper",
+            with_argument(base.clone(), "continuation", json!(tampered)),
+            ExposureProfile::Developer,
+        ),
+        (
+            "planner retirement",
+            with_argument(base, "continuation", json!(retired_planner)),
+            ExposureProfile::Developer,
+        ),
+    ];
+
+    for (dimension, arguments, exposure_profile) in cases {
+        let harness = Harness::with_cursor_key(
+            FakeOutcome::SymbolExplain(Err(ClientPortError::Executor)),
+            KEY_MATERIAL,
+        );
+        let error = execute_as(
+            &harness.executor,
+            VerticalTool::ContextPack,
+            arguments,
+            exposure_profile,
+        )
+        .await
+        .expect_err(dimension);
+        assert_eq!(
+            error
+                .public_error()
+                .expect("binding failure is public")
+                .code(),
+            ErrorCode::InvalidCursor,
+            "{dimension}"
+        );
+        assert_eq!(
+            harness.call_count.load(Ordering::Relaxed),
+            0,
+            "{dimension} fails before daemon work"
+        );
     }
 }
 
@@ -3077,7 +3258,7 @@ async fn query_batch_context_pack_reuses_the_pinned_identity() {
                     "arguments": {
                         "task": "fix the duplicate payment bug",
                         "seeds": {"symbols": [symbol()]},
-                        "token_budget": 1_000
+                        "token_budget": 4_500
                     }
                 }]
             }),
@@ -3094,17 +3275,35 @@ async fn query_batch_context_pack_reuses_the_pinned_identity() {
         output.data.operation_results[0].status,
         BatchOperationStatus::Ok
     );
-    assert_eq!(
-        harness.call_count.load(Ordering::Relaxed),
-        2,
-        "one status preflight and one symbol read prove there is no second identity lookup"
-    );
     let calls = harness
         .calls
         .lock()
         .expect("fake call recorder is not poisoned");
-    assert!(matches!(calls[0], ObservedCall::RepositoryStatus(_)));
-    assert!(matches!(calls[1], ObservedCall::SymbolExplain(_)));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, ObservedCall::RepositoryStatus(_)))
+            .count(),
+        1,
+        "the batch identity is resolved exactly once"
+    );
+    assert!(matches!(
+        calls.first(),
+        Some(ObservedCall::RepositoryStatus(_))
+    ));
+    assert!(
+        calls
+            .iter()
+            .skip(1)
+            .all(|call| !matches!(call, ObservedCall::RepositoryStatus(_))),
+        "context evidence collection must not resolve identity again"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| matches!(call, ObservedCall::SymbolExplain(_))),
+        "context assembly retrieves symbol evidence"
+    );
 }
 
 #[tokio::test]
@@ -3470,7 +3669,18 @@ async fn batch_adapter_preserves_local_and_parent_deadline_provenance() {
         )
         .with_pinned_identity(agent_identity_from_status(repository_status_response()))
         .with_local_deadline(local);
-        assert_eq!(adapter.execute(request, context).await, Err(expected));
+        let error = adapter
+            .execute(request, context)
+            .await
+            .expect_err("the pending child reaches its effective deadline");
+        let (error, usage) = error.into_parts();
+        assert_eq!(error, expected);
+        assert!(
+            usage
+                .expect("deadline failures retain measured work")
+                .wall_time_ms
+                > 0
+        );
     }
 }
 
@@ -3901,10 +4111,14 @@ async fn query_batch_rejects_static_child_capabilities_before_identity_resolutio
 }
 
 #[tokio::test]
-async fn query_batch_rejects_source_context_fields_before_identity_resolution() {
-    for field in ["context_lines_before", "context_lines_after"] {
-        let harness = batch_harness();
-        let error = execute(
+async fn query_batch_forwards_source_context_fields() {
+    let requested = source_reference(4, 12, 2, 2);
+    let harness = Harness::new(FakeOutcome::BatchSourceRead {
+        status: Box::new(Ok(repository_status_response())),
+        source: Ok(source_read_response(requested.clone())),
+    });
+    let output: QueryBatchOutput = decode(
+        execute(
             &harness.executor,
             VerticalTool::QueryBatch,
             json!({
@@ -3912,24 +4126,40 @@ async fn query_batch_rejects_source_context_fields_before_identity_resolution() 
                 "operations": [{
                     "id": "read",
                     "tool": "source.read",
-                    "arguments": {(field): 2}
+                    "arguments": {
+                        "references": [{
+                            "source_ref": wire_source_reference(4, 12, 2, 2)
+                        }],
+                        "context_lines_before": 2,
+                        "context_lines_after": 3
+                    }
                 }]
             }),
         )
         .await
-        .expect_err("explicit source context is rejected before identity resolution");
-        assert_capability_rejection(
-            &error,
-            ErrorCode::UnsupportedCapability,
-            &format!("operations.0.arguments.{field}"),
-            "unsupported_field",
-        );
-        assert_eq!(
-            harness.call_count.load(Ordering::Relaxed),
-            0,
-            "static capability rejection must not cross the client port"
-        );
-    }
+        .expect("source context fields are accepted inside a batch"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch success");
+    };
+    assert_eq!(output.data.batch_status, BatchStatus::Ok);
+    assert_eq!(
+        output.data.operation_results[0].status,
+        BatchOperationStatus::Ok
+    );
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    let [
+        ObservedCall::RepositoryStatus(_),
+        ObservedCall::SourceRead(request),
+    ] = calls.as_slice()
+    else {
+        panic!("batch pins identity once before the source read");
+    };
+    assert_eq!(request.context_lines_before(), 2);
+    assert_eq!(request.context_lines_after(), 3);
 }
 
 #[tokio::test]
@@ -6867,7 +7097,7 @@ async fn explain_source_reference_without_line_hint_composes_with_source_read() 
             VerticalTool::SymbolExplain,
             json!({
                 "repository": {"repository_id": repository()},
-                "symbol_ids": [symbol()]
+                "symbol_ids": [symbol(), missing_symbol()]
             }),
         )
         .await
@@ -6952,6 +7182,8 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
         panic!("expected source read request");
     };
     assert_eq!(request.references, [requested]);
+    assert_eq!(request.context_lines_before(), 1);
+    assert_eq!(request.context_lines_after(), 1);
     assert!(!request.merge_overlaps());
     assert!(request.include_line_numbers());
     assert_eq!(
@@ -7121,58 +7353,6 @@ async fn retrieval_mappers_reject_untrusted_identity_and_path_drift() {
 }
 
 #[tokio::test]
-async fn source_read_rejects_explicit_context_fields_before_the_port() {
-    let harness = Harness::new(FakeOutcome::SourceRead(Err(ClientPortError::Executor)));
-    let call_count = Arc::clone(&harness.call_count);
-    let router = ToolRouter::new(
-        harness.executor,
-        rootlight_mcp_contract::ExposureProfile::Developer,
-    )
-    .expect("router compiles");
-
-    for field in ["context_lines_before", "context_lines_after"] {
-        let mut arguments = json!({
-            "repository": {"repository_id": repository()},
-            "references": [{"source_ref": wire_source_reference(5, 10, 2, 2)}]
-        });
-        arguments
-            .as_object_mut()
-            .expect("fixture arguments are an object")
-            .insert(field.to_owned(), json!(2));
-        let response = router
-            .handle(
-                operating_request(json!({
-                    "name": "source.read",
-                    "arguments": arguments
-                })),
-                cancellation(),
-            )
-            .await;
-        let HandlerResponse::Success(result) = response else {
-            panic!("capability rejection is an MCP tool result");
-        };
-        assert_eq!(result["isError"], true);
-        assert_eq!(
-            result["structuredContent"]["error"]["code"],
-            "UNSUPPORTED_CAPABILITY"
-        );
-        assert_eq!(
-            result["structuredContent"]["error"]["details"]["field_path"]["value"],
-            field
-        );
-        assert_eq!(
-            result["structuredContent"]["error"]["details"]["capability_reason"]["value"],
-            "unsupported_field"
-        );
-    }
-    assert_eq!(
-        call_count.load(Ordering::Relaxed),
-        0,
-        "capability rejection must happen before source retrieval"
-    );
-}
-
-#[tokio::test]
 async fn source_read_rejects_line_context_for_raw_bytes_before_the_port() {
     let harness = Harness::new(FakeOutcome::SourceRead(Err(ClientPortError::Executor)));
     let error = execute(
@@ -7306,22 +7486,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::RepoList,
             json!({"response_profile": "standard"}),
-        ),
-        (
-            VerticalTool::ContextPack,
-            json!({"repository": {"repository_id": repository()}, "task": "fix a bug", "seeds": {"symbols": [symbol()]}, "token_budget": 1000, "min_confidence": 800}),
-        ),
-        (
-            VerticalTool::ContextPack,
-            json!({"repository": {"repository_id": repository()}, "task": "fix a bug", "seeds": {"symbols": [symbol()]}, "token_budget": 1000, "source_policy": "signatures"}),
-        ),
-        (
-            VerticalTool::ContextPack,
-            json!({"repository": {"repository_id": repository()}, "task": "fix a bug", "seeds": {"symbols": [symbol()], "paths": ["src/lib.rs"]}, "token_budget": 1000}),
-        ),
-        (
-            VerticalTool::ContextPack,
-            json!({"repository": {"repository_id": repository()}, "task": "fix a bug", "seeds": {"symbols": [symbol()]}, "token_budget": 1000, "continuation": "opaque"}),
         ),
         (
             VerticalTool::RepoIndex,
@@ -7469,11 +7633,6 @@ async fn unsupported_fields_are_rejected_with_field_specific_actions() {
             VerticalTool::RepoList,
             json!({"response_profile": "standard"}),
             "response_profile",
-        ),
-        (
-            VerticalTool::ContextPack,
-            json!({"repository": {"repository_id": repository()}, "task": "fix a bug", "seeds": {"symbols": [symbol()]}, "token_budget": 1000, "min_confidence": 800}),
-            "min_confidence",
         ),
     ];
     for (tool, arguments, field) in cases {
@@ -8922,13 +9081,31 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     group!(
         ContextPack,
         ContextRuntime,
-        ["generation", "repository", "seeds", "task", "token_budget"]
+        [
+            "diversity",
+            "generation",
+            "min_confidence",
+            "repository",
+            "response_profile",
+            "sections",
+            "seeds",
+            "source_policy",
+            "task",
+            "token_budget"
+        ]
     );
+    group!(ContextPack, CursorContinuation, ["continuation"]);
     group!(ContextPack, ExplainPlan, ["explain"]);
     group!(
         SourceRead,
         NormalizedDelta,
-        ["generation", "references", "repository"]
+        [
+            "context_lines_after",
+            "context_lines_before",
+            "generation",
+            "references",
+            "repository"
+        ]
     );
     group!(SourceRead, BudgetRuntime, ["budget", "max_source_bytes"]);
     group!(SourceRead, ExplainPlan, ["explain"]);
@@ -8954,7 +9131,7 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
             "repository"
         ]
     );
-    group!(QueryAdvanced, StructuredQueryAst, ["query"]);
+    group!(QueryAdvanced, StructuredQueryAst, ["query", "parameters"]);
     group!(QueryAdvanced, CursorContinuation, ["cursor"]);
     group!(QueryBatch, BatchRuntime, ["failure_policy", "repository"]);
     group_excluding!(
@@ -9030,7 +9207,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "21270067f87c965556672f0fbe9b93e48f5fb4833ca4b5dcdedcfd272c392f0e",
+        "ff504b65b06de77ca46154ef97ef5333f1418deb2cee0c55bed545d4f55577fd",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -9095,8 +9272,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[10],
         counts[11],
     );
-    assert_eq!(counts, [129, 97, 3, 61, 27, 16, 5, 10, 10, 1, 1, 3]);
-    assert_eq!(categorized.len(), 363);
+    assert_eq!(counts, [131, 97, 3, 69, 27, 16, 5, 16, 10, 1, 1, 4]);
+    assert_eq!(categorized.len(), 380);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -9496,6 +9673,9 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
         json!([{"source_ref": wire_source_reference(12, 20, 3, 3)}]),
         false,
     );
+    for field in ["context_lines_before", "context_lines_after"] {
+        add(VerticalTool::SourceRead, field, json!(2), true);
+    }
     for (field, value, optional) in [
         (
             "repository",
@@ -9775,6 +9955,8 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
                 "repository" => json!(request.repository()),
                 "generation" => json!(format!("{:?}", request.generation())),
                 "references" => json!(format!("{:?}", request.references())),
+                "context_lines_before" => json!(request.context_lines_before()),
+                "context_lines_after" => json!(request.context_lines_after()),
                 _ => panic!("unknown source.read observation field"),
             }
         }
@@ -10161,7 +10343,10 @@ fn advanced_query_ast_branches_are_losslessly_normalized() {
         .collect();
     assert_eq!(
         registered,
-        std::collections::BTreeSet::from([("query.advanced", "query")])
+        std::collections::BTreeSet::from([
+            ("query.advanced", "parameters"),
+            ("query.advanced", "query"),
+        ])
     );
 
     let unsupported = normalization_error();
@@ -11008,6 +11193,26 @@ async fn every_explain_oracle_returns_a_plan_without_a_subtool_call() {
             "{} explain invoked a subtool",
             tool.name()
         );
+        if tool == VerticalTool::ContextPack {
+            let serialized =
+                serde_json::to_vec(&output).expect("context explain response serializes");
+            let measured = rootlight_mcp_contract::accounting::estimate_tokens(serialized.len());
+            assert_eq!(output["usage"]["json_bytes"], json!(serialized.len()));
+            assert_eq!(output["usage"]["estimated_tokens"], json!(measured));
+            assert_eq!(
+                output["data"]["token_accounting"]["estimated_total"],
+                json!(measured)
+            );
+            let by_section = output["data"]["token_accounting"]["by_section"]
+                .as_object()
+                .expect("context accounting exposes sections");
+            let section_total = by_section
+                .values()
+                .map(|value| value.as_u64().expect("section tokens are integers"))
+                .sum::<u64>();
+            assert_eq!(section_total, measured);
+            assert!(measured <= 1_000);
+        }
     }
 }
 
@@ -11131,7 +11336,7 @@ async fn accepted_effect_code_locate_controls_change_the_normalized_request() {
 }
 
 #[tokio::test]
-async fn accepted_effect_context_pack_token_budget_changes_selection() {
+async fn accepted_effect_context_pack_token_budget_enforces_final_representation() {
     let registered: std::collections::BTreeSet<_> = accepted_field_evidence()
         .into_iter()
         .filter(|evidence| evidence.oracle == AcceptedFieldOracle::ContextRuntime)
@@ -11146,9 +11351,14 @@ async fn accepted_effect_context_pack_token_budget_changes_selection() {
     assert_eq!(
         registered,
         std::collections::BTreeSet::from([
+            ("context.pack", "diversity"),
             ("context.pack", "generation"),
+            ("context.pack", "min_confidence"),
             ("context.pack", "repository"),
+            ("context.pack", "response_profile"),
+            ("context.pack", "sections"),
             ("context.pack", "seeds"),
+            ("context.pack", "source_policy"),
             ("context.pack", "task"),
             ("context.pack", "token_budget"),
         ])
@@ -11169,26 +11379,82 @@ async fn accepted_effect_context_pack_token_budget_changes_selection() {
             }),
         )
     };
-    let smaller: ContextPackOutput = decode(
-        execute_with_budget(500)
-            .await
-            .expect("smaller accepted token budget executes"),
+    let smaller = execute_with_budget(500)
+        .await
+        .expect_err("smaller budget cannot fit the truthful final envelope");
+    assert_eq!(
+        smaller
+            .public_error()
+            .expect("budget exhaustion is checked")
+            .code(),
+        ErrorCode::BudgetExceeded
     );
     let larger: ContextPackOutput = decode(
         execute_with_budget(4_500)
             .await
             .expect("larger accepted token budget executes"),
     );
-    let ToolResponse::Success(smaller) = smaller else {
-        panic!("expected smaller context pack success");
-    };
     let ToolResponse::Success(larger) = larger else {
         panic!("expected larger context pack success");
     };
-    assert!(smaller.data.items.is_empty());
     assert_eq!(larger.data.items.len(), 1);
-    assert!(smaller.truncated);
     assert!(!larger.truncated);
+}
+
+#[tokio::test]
+async fn context_pack_public_cursor_resumes_once_without_duplicate_evidence() {
+    let second_symbol = SymbolId::from_bytes([9; 20]);
+    let mut response = explain_response(source_reference(4, 12, 2, 2));
+    response.result.symbols[0].signature = Some("a".repeat(900));
+    let mut second = response.result.symbols[0].clone();
+    second.symbol = second_symbol;
+    second.display_name = "publish_secondary".to_owned();
+    second.signature = Some("b".repeat(900));
+    second.definition = source_reference(20, 32, 4, 5);
+    response.result.symbols.push(second);
+    response.result.unresolved_symbols.clear();
+
+    let harness = Harness::new(FakeOutcome::SymbolExplain(Ok(response)));
+    let base = json!({
+        "repository": {"repository_id": repository()},
+        "task": "explain the publishing path",
+        "seeds": {"symbols": [symbol(), second_symbol]},
+        "token_budget": 1550
+    });
+    let first: ContextPackOutput = decode(
+        execute(&harness.executor, VerticalTool::ContextPack, base.clone())
+            .await
+            .expect("first public context page succeeds"),
+    );
+    let ToolResponse::Success(first) = first else {
+        panic!("expected first public context success");
+    };
+    let cursor = first
+        .next_cursor
+        .0
+        .clone()
+        .expect("first public page emits an authenticated cursor");
+    assert_eq!(first.data.items.len(), 1);
+
+    let mut resume = base;
+    resume
+        .as_object_mut()
+        .expect("context arguments are an object")
+        .insert("continuation".to_owned(), json!(cursor.as_str()));
+    let second: ContextPackOutput = decode(
+        execute(&harness.executor, VerticalTool::ContextPack, resume)
+            .await
+            .expect("public context continuation resumes"),
+    );
+    let ToolResponse::Success(second) = second else {
+        panic!("expected second public context success");
+    };
+    assert_eq!(second.data.items.len(), 1);
+    assert_ne!(
+        first.data.items[0].symbol_id,
+        second.data.items[0].symbol_id
+    );
+    assert!(second.next_cursor.0.is_none());
 }
 
 #[tokio::test]
@@ -11199,7 +11465,7 @@ async fn context_pack_identity_task_and_seed_branches_have_runtime_effects() {
                 "repository": {"repository_id": repository_id},
                 "task": task,
                 "seeds": seeds,
-                "token_budget": 1_000
+                "token_budget": 4_500
             });
             if let Some(generation_selector) = generation_selector {
                 arguments
@@ -11224,7 +11490,7 @@ async fn context_pack_identity_task_and_seed_branches_have_runtime_effects() {
         ),
     )
     .await
-    .expect_err("the identity fixture intentionally has no retrieval response");
+    .expect("provider absence produces a truthful empty context pack");
     let base_identity_call = {
         let calls = base_identity
             .calls
@@ -11251,7 +11517,7 @@ async fn context_pack_identity_task_and_seed_branches_have_runtime_effects() {
         ),
     )
     .await
-    .expect_err("the identity fixture intentionally has no retrieval response");
+    .expect("provider absence produces a truthful empty context pack");
     let alternate_repository_call = {
         let calls = alternate_repository_harness
             .calls
@@ -11287,7 +11553,7 @@ async fn context_pack_identity_task_and_seed_branches_have_runtime_effects() {
         ),
     )
     .await
-    .expect_err("the identity fixture intentionally has no retrieval response");
+    .expect("provider absence produces a truthful empty context pack");
     let (alternate_generation_call, alternate_child_generation) = {
         let calls = alternate_generation_harness
             .calls

@@ -969,7 +969,10 @@ const CONTEXT_PACK_RULES: &[CapabilityRule] = &[
         "response_profile",
         "selects compact, standard, or evidence source representation",
     ),
-    unsupported("continuation", "continuation assembly is not served"),
+    implemented(
+        "continuation",
+        "resumes authenticated request-bound evidence frontiers",
+    ),
     implemented("token_budget", "bounds assembled context tokens"),
 ];
 
@@ -1336,9 +1339,10 @@ const fn pagination_semantics(tool: McpTool) -> PaginationSemantics {
         McpTool::RepoList
         | McpTool::CodeLocate
         | McpTool::SymbolRelationships
+        | McpTool::ContextPack
         | McpTool::QueryAdvanced => PaginationSemantics::AuthenticatedCursor,
         McpTool::RepoStatus | McpTool::OperationStatus => PaginationSemantics::BoundedComplete,
-        McpTool::SymbolExplain | McpTool::ContextPack => PaginationSemantics::ProgressiveHandle,
+        McpTool::SymbolExplain => PaginationSemantics::ProgressiveHandle,
         McpTool::QueryBatch => PaginationSemantics::ChildContinuations,
         McpTool::FlowTrace
         | McpTool::ChangeImpact
@@ -1453,7 +1457,7 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
         }
         McpTool::PlanChange => "bounded change planning from an explicit objective and targets",
         McpTool::ContextPack => {
-            "bounded profiled evidence assembly with generation-pinned references signatures and source snippets under a token budget"
+            "bounded profiled evidence assembly with authenticated continuation, generation-pinned references signatures and source snippets under a token budget"
         }
         McpTool::SourceRead => {
             "bounded source ranges from pinned source references as untrusted data"
@@ -2057,7 +2061,10 @@ mod tests {
                 PaginationSemantics::ExplicitTruncation,
             ),
             (McpTool::CodeDead, PaginationSemantics::ExplicitTruncation),
-            (McpTool::ContextPack, PaginationSemantics::ProgressiveHandle),
+            (
+                McpTool::ContextPack,
+                PaginationSemantics::AuthenticatedCursor,
+            ),
             (
                 McpTool::QueryAdvanced,
                 PaginationSemantics::AuthenticatedCursor,
