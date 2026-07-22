@@ -6,12 +6,12 @@
 //! constrained by one shared token ledger.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use rootlight_ids::{RepositoryId, SymbolId};
+use rootlight_ids::RepositoryId;
 use rootlight_mcp_contract::{
     PublicError, RepositorySelector, SafeLabel, SchemaVersion, SourceFreeMessage,
     TrustClassification,
@@ -31,7 +31,10 @@ use rootlight_mcp_contract::{
 use serde_json::Map;
 
 use crate::{
-    explain::{context_pack_plan, finalize_plan},
+    context_pack_request::{
+        CanonicalContextPackRequest, CanonicalContextPackRequestError, normalize_task,
+    },
+    explain::context_pack_plan,
     policy::{BudgetCharge, BudgetLedger, CancellationSignal, ExecutionPolicyError},
     port::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentResolutionContext,
@@ -112,19 +115,7 @@ impl EvidenceRole {
 }
 
 /// Task objective for context pack assembly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PackObjective {
-    /// Fix a bug in target symbols.
-    BugFix,
-    /// Refactor target symbols.
-    Refactor,
-    /// Explain target symbols.
-    Explanation,
-    /// Migrate target symbols to a new API or framework.
-    Migration,
-    /// Review changes to target symbols.
-    Review,
-}
+pub use crate::context_pack_request::ContextPackObjective as PackObjective;
 
 impl PackObjective {
     /// Minimum required roles for this objective.
@@ -242,10 +233,8 @@ pub enum ContextPackPlanningError {
 /// Transport-neutral input for one complete context-pack planning pass.
 #[derive(Debug)]
 pub struct ContextPackPlanRequest<'a> {
-    /// Validated public request.
-    pub input: &'a ContextPackInput,
-    /// Immutable generation that supplied all evidence.
-    pub generation: rootlight_ids::GenerationId,
+    /// Canonical request pinned to one exact repository and generation.
+    pub request: &'a CanonicalContextPackRequest,
     /// Generation-pinned symbol evidence returned by the injected provider.
     pub symbols: &'a [SymbolExplanation],
 }
@@ -319,13 +308,13 @@ where
         }
 
         let pack = optimize_pack(
-            objective_for_task(&request.input.task),
+            request.request.objective(),
             &mut candidates,
-            u32::from(request.input.token_budget),
+            u32::from(request.request.token_budget()),
         )?;
         checkpoint(cancellation)?;
 
-        let mut budget = BudgetLedger::with_token_limit(u64::from(request.input.token_budget));
+        let mut budget = BudgetLedger::with_token_limit(u64::from(request.request.token_budget()));
         budget.charge(BudgetCharge {
             results: u64::try_from(pack.items.len()).unwrap_or(u64::MAX),
             tokens: u64::from(pack.total_tokens),
@@ -333,7 +322,7 @@ where
         })?;
 
         Ok(PlannedContextPack {
-            data: context_pack_data(request.input, request.generation, &pack, &definitions),
+            data: context_pack_data(request.request, &pack, &definitions),
             truncated: pack.truncated,
         })
     }
@@ -382,7 +371,6 @@ impl ContextPackService {
         C: CancellationSignal + Clone + Send + Sync + 'static,
     {
         validate_supported_fields(&input)?;
-        let seeds = supported_seed_symbols(&input)?;
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(u64::from(CONTEXT_PACK_TIMEOUT_MS)))
             .ok_or(ContextPackServiceError::Unavailable)?;
@@ -399,7 +387,6 @@ impl ContextPackService {
         Self::execute_admitted_with_identity(
             port,
             input,
-            seeds,
             repository,
             identity,
             cancellation,
@@ -430,13 +417,11 @@ impl ContextPackService {
         C: CancellationSignal + Clone + Send + Sync + 'static,
     {
         validate_supported_fields(&input)?;
-        let seeds = supported_seed_symbols(&input)?;
         context_service_checkpoint(&cancellation, deadline)?;
 
         Self::execute_admitted_with_identity(
             port,
             input,
-            seeds,
             repository,
             identity,
             cancellation,
@@ -448,7 +433,6 @@ impl ContextPackService {
     async fn execute_admitted_with_identity<P, C>(
         port: Arc<P>,
         input: ContextPackInput,
-        seeds: BTreeSet<SymbolId>,
         repository: RepositoryId,
         identity: AgentResolvedIdentity,
         cancellation: C,
@@ -475,14 +459,20 @@ impl ContextPackService {
         ) {
             return Err(ContextPackServiceError::InvalidResponse);
         }
+        let canonical = CanonicalContextPackRequest::new(
+            &input,
+            identity.repository.repository_id,
+            identity.generation.generation_id,
+        )
+        .map_err(map_canonical_request_error)?;
+        let seeds = canonical.seeds().retrieval_symbols();
 
         if input.explain == Some(true) {
-            let explanation = finalize_plan(
-                context_pack_plan(seeds.len(), input.token_budget),
-                &identity.generation.generation_id.to_string(),
-            );
+            let explanation = context_pack_plan(&canonical);
             let data = ContextPackData {
-                pack_id: context_pack_id(&input, identity.generation.generation_id),
+                pack_id: context_pack_id(&canonical),
+                request_digest: canonical.request_digest(),
+                planner_version: rootlight_mcp_contract::context::PLANNER_VERSION,
                 items: Vec::new(),
                 structure: ContextStructure {
                     reading_order: Vec::new(),
@@ -572,8 +562,7 @@ impl ContextPackService {
         let planned = DefaultContextPackPlanner
             .plan(
                 ContextPackPlanRequest {
-                    input: &input,
-                    generation: identity.generation.generation_id,
+                    request: &canonical,
                     symbols: &symbols.symbols,
                 },
                 &cancellation,
@@ -664,23 +653,25 @@ fn validate_supported_fields(input: &ContextPackInput) -> Result<(), ContextPack
     Ok(())
 }
 
-fn supported_seed_symbols(
-    input: &ContextPackInput,
-) -> Result<BTreeSet<SymbolId>, ContextPackServiceError> {
-    let mut symbols = BTreeSet::new();
-    if let Some(seeds) = &input.seeds.symbols {
-        symbols.extend(seeds.iter().copied());
-    }
-    if let Some(tests) = &input.seeds.tests {
-        symbols.extend(tests.iter().copied());
-    }
-    while symbols.len() > 16 {
-        symbols.pop_last();
-    }
-    if symbols.is_empty() {
-        Err(ContextPackServiceError::EmptySeeds)
-    } else {
-        Ok(symbols)
+fn map_canonical_request_error(error: CanonicalContextPackRequestError) -> ContextPackServiceError {
+    match error {
+        CanonicalContextPackRequestError::EmptySeeds => ContextPackServiceError::EmptySeeds,
+        CanonicalContextPackRequestError::UnsupportedField(field) => {
+            ContextPackServiceError::UnsupportedField(field)
+        }
+        CanonicalContextPackRequestError::InvalidField(field) => {
+            ContextPackServiceError::UnsupportedField(field)
+        }
+        CanonicalContextPackRequestError::TooManySeeds => {
+            ContextPackServiceError::UnsupportedField("seeds")
+        }
+        CanonicalContextPackRequestError::EmptyTask => {
+            ContextPackServiceError::UnsupportedField("task")
+        }
+        CanonicalContextPackRequestError::RepositoryMismatch
+        | CanonicalContextPackRequestError::GenerationMismatch => {
+            ContextPackServiceError::InvalidResponse
+        }
     }
 }
 
@@ -859,59 +850,17 @@ fn record_omission(omissions: &mut Vec<OmissionEntry>, candidate: &EvidenceCandi
 /// Classifies source-free task guidance into the planner's objective set.
 #[must_use]
 pub fn objective_for_task(task: &str) -> PackObjective {
-    let task = task.to_lowercase();
-    if task.contains("fix")
-        || task.contains("bug")
-        || task.contains("error")
-        || task.contains("crash")
-        || task.contains("broken")
-    {
-        PackObjective::BugFix
-    } else if task.contains("refactor")
-        || task.contains("restructure")
-        || task.contains("simplify")
-        || task.contains("clean")
-    {
-        PackObjective::Refactor
-    } else if task.contains("migrat")
-        || task.contains("upgrade")
-        || task.contains("port to")
-        || task.contains("move to")
-    {
-        PackObjective::Migration
-    } else if task.contains("review") || task.contains("audit") || task.contains("security") {
-        PackObjective::Review
-    } else {
-        PackObjective::Explanation
-    }
+    PackObjective::from_normalized_task(&normalize_task(task))
 }
 
 /// Derives a deterministic identity for one generation-pinned context pack.
 #[must_use]
-pub fn context_pack_id(
-    input: &ContextPackInput,
-    generation: rootlight_ids::GenerationId,
-) -> ContextPackId {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(generation.to_string().as_bytes());
-    hasher.update(b"\x00");
-    hasher.update(input.task.as_bytes());
-    hasher.update(b"\x00");
-    if let Some(symbols) = &input.seeds.symbols {
-        for symbol in symbols {
-            hasher.update(symbol.to_string().as_bytes());
-            hasher.update(b",");
-        }
-    }
-    hasher.update(b"\x00planner-v1");
-    let hex = hasher.finalize().to_hex();
-    let short: String = hex.chars().take(32).collect();
-    ContextPackId::new(format!("pack1_{short}"))
+pub fn context_pack_id(request: &CanonicalContextPackRequest) -> ContextPackId {
+    request.pack_id()
 }
 
 fn context_pack_data(
-    input: &ContextPackInput,
-    generation: rootlight_ids::GenerationId,
+    request: &CanonicalContextPackRequest,
     pack: &PackResult,
     definitions: &BTreeMap<String, rootlight_ir::SourceRef>,
 ) -> ContextPackData {
@@ -974,7 +923,9 @@ fn context_pack_data(
     }
 
     ContextPackData {
-        pack_id: context_pack_id(input, generation),
+        pack_id: context_pack_id(request),
+        request_digest: request.request_digest(),
+        planner_version: rootlight_mcp_contract::context::PLANNER_VERSION,
         items,
         structure: ContextStructure {
             reading_order,
@@ -1032,7 +983,7 @@ mod tests {
         EvidenceRole, MAX_PACK_TOKENS, MIN_PACK_TOKENS, PackError, PackObjective,
         context_pack_completeness, context_pack_id, objective_for_task, optimize_pack,
     };
-    use crate::policy::NeverCancelled;
+    use crate::{context_pack_request::CanonicalContextPackRequest, policy::NeverCancelled};
     use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId, SymbolId};
     use rootlight_ir::{LineRange, SourceRef, SourceSpan};
     use rootlight_mcp_contract::{
@@ -1318,20 +1269,27 @@ mod tests {
         let symbol = SymbolId::from_bytes([2; 20]);
         let generation = GenerationId::from_bytes([5; 20]);
         let input = context_input(symbol);
+        let request =
+            CanonicalContextPackRequest::new(&input, RepositoryId::from_bytes([1; 16]), generation)
+                .expect("fixture request canonicalizes");
         let symbols = [explanation(symbol, generation)];
 
         let planned = DefaultContextPackPlanner
             .plan(
                 ContextPackPlanRequest {
-                    input: &input,
-                    generation,
+                    request: &request,
                     symbols: &symbols,
                 },
                 &NeverCancelled,
             )
             .expect("context pack is planned");
 
-        assert_eq!(planned.data.pack_id, context_pack_id(&input, generation));
+        assert_eq!(planned.data.pack_id, context_pack_id(&request));
+        assert_eq!(planned.data.request_digest, request.request_digest());
+        assert_eq!(
+            planned.data.planner_version,
+            rootlight_mcp_contract::context::PLANNER_VERSION
+        );
         assert_eq!(planned.data.items.len(), 1);
         assert_eq!(planned.data.items[0].symbol_id, Some(symbol));
         let expected_token_ceiling = symbols[0]

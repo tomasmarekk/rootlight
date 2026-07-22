@@ -12,7 +12,10 @@ use rootlight_mcp_contract::{
     vertical::ResponseProfile,
 };
 
-use crate::{advanced::AdvancedQueryPlan, batch::StaticBatchPlan};
+use crate::{
+    advanced::AdvancedQueryPlan, batch::StaticBatchPlan,
+    context_pack_request::CanonicalContextPackRequest,
+};
 
 /// Estimated cost units per planned match for `code.locate`.
 const LOCATE_COST_PER_RESULT: u64 = 8;
@@ -390,23 +393,24 @@ pub fn repo_status_plan() -> PlanExplanation {
 
 /// Builds the source-free `context.pack` plan for explain mode.
 ///
-/// `seed_count` and `token_budget` bound the planned evidence assembly and
-/// drive the cost estimate.
+/// The canonical request supplies both bounded cost inputs and the exact
+/// request identity exposed by the plan fingerprint.
 #[must_use]
-pub fn context_pack_plan(seed_count: usize, token_budget: u16) -> PlanExplanation {
-    let seeds = u64::try_from(seed_count).unwrap_or(u64::MAX);
+pub fn context_pack_plan(request: &CanonicalContextPackRequest) -> PlanExplanation {
+    let seeds = u64::try_from(request.seeds().len()).unwrap_or(u64::MAX);
     let cost = seeds
         .saturating_mul(CONTEXT_COST_PER_SEED)
-        .saturating_add(u64::from(token_budget));
+        .saturating_add(u64::from(request.token_budget()));
     PlanExplanation {
         estimated_cost: cost,
         operators: vec!["context_assembly".to_owned()],
         applied_limits: vec![
             format!("seeds: {seeds}"),
-            format!("token_budget: {token_budget}"),
+            format!("token_budget: {}", request.token_budget()),
+            format!("request_digest: {}", request.request_digest()),
         ],
         planner_version: PLANNER_VERSION,
-        fingerprint: String::new(),
+        fingerprint: request.plan_fingerprint(),
     }
 }
 
@@ -610,9 +614,15 @@ fn hash_length_prefixed(hasher: &mut blake3::Hasher, value: &[u8]) {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
+    use rootlight_ids::{GenerationId, RepositoryId, SymbolId};
     use rootlight_mcp_contract::{
-        context::PLANNER_VERSION, repository::RepositoryState, vertical::ResponseProfile,
+        RepositorySelector,
+        context::{ContextPackInput, ContextSeedSelector, PLANNER_VERSION},
+        repository::RepositoryState,
+        vertical::{RepositoryIdSelector, ResponseProfile},
     };
+
+    use crate::context_pack_request::CanonicalContextPackRequest;
 
     use super::{
         PlanExplanation, RepoListPlanContext, RepoListPlanError, code_locate_plan, finalize_plan,
@@ -634,6 +644,40 @@ mod tests {
                     fingerprint: String::new(),
                 },
             )
+    }
+
+    fn canonical_context_request() -> CanonicalContextPackRequest {
+        let repository = RepositoryId::from_bytes([3; 16]);
+        let generation = GenerationId::from_bytes([4; 20]);
+        let input = ContextPackInput {
+            repository: RepositorySelector::ById(RepositoryIdSelector {
+                repository_id: repository,
+            }),
+            generation: None,
+            task: "fix parser crash".to_owned(),
+            seeds: ContextSeedSelector {
+                symbols: Some(vec![
+                    SymbolId::from_bytes([1; 20]),
+                    SymbolId::from_bytes([2; 20]),
+                    SymbolId::from_bytes([3; 20]),
+                ]),
+                paths: None,
+                routes: None,
+                tests: None,
+                located: None,
+                change: None,
+                plan: None,
+            },
+            token_budget: 1_000,
+            source_policy: None,
+            sections: None,
+            diversity: None,
+            min_confidence: None,
+            continuation: None,
+            explain: None,
+        };
+        CanonicalContextPackRequest::new(&input, repository, generation)
+            .expect("explain fixture canonicalizes")
     }
 
     #[test]
@@ -787,13 +831,19 @@ mod tests {
     #[test]
     fn context_pack_plan_is_deterministic_and_bounded() {
         use super::context_pack_plan;
-        assert_eq!(context_pack_plan(3, 1000), context_pack_plan(3, 1000));
-        let plan = context_pack_plan(3, 1000);
+        let request = canonical_context_request();
+        assert_eq!(context_pack_plan(&request), context_pack_plan(&request));
+        let plan = context_pack_plan(&request);
         assert_eq!(plan.operators, vec!["context_assembly".to_owned()]);
         assert_eq!(
             plan.applied_limits,
-            vec!["seeds: 3".to_owned(), "token_budget: 1000".to_owned()]
+            vec![
+                "seeds: 3".to_owned(),
+                "token_budget: 1000".to_owned(),
+                format!("request_digest: {}", request.request_digest()),
+            ]
         );
+        assert_eq!(plan.fingerprint, request.plan_fingerprint());
     }
 
     #[test]

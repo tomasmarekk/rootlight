@@ -293,6 +293,12 @@ pub struct TokenAccounting {
 pub struct ContextPackData {
     /// Stable pack identifier for the exact generation, request, and planner.
     pub pack_id: ContextPackId,
+    /// Full domain-separated digest of the canonical source-free request.
+    #[schemars(length(min = 72, max = 72))]
+    pub request_digest: String,
+    /// Planner version bound into the request digest and pack identity.
+    #[schemars(range(max = 1000))]
+    pub planner_version: u32,
     /// Ordered, deduplicated evidence items in deterministic rank order.
     #[schemars(length(max = 200))]
     pub items: Vec<ContextItem>,

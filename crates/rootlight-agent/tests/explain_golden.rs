@@ -8,6 +8,7 @@
 //! small, large, and unsupported capability states.
 
 use rootlight_agent::advanced::{AdvancedQueryPlan, QueryOperator};
+use rootlight_agent::context_pack_request::CanonicalContextPackRequest;
 use rootlight_agent::explain::{
     RepoListPlanContext, architecture_cycles_plan, architecture_overview_plan, change_impact_plan,
     code_dead_plan, code_locate_plan, context_pack_plan, finalize_plan, flow_trace_plan,
@@ -15,8 +16,12 @@ use rootlight_agent::explain::{
     repo_status_plan, source_read_plan, symbol_explain_plan, symbol_relationships_plan,
     tests_select_plan,
 };
+use rootlight_ids::{GenerationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
-    context::PLANNER_VERSION, repository::RepositoryState, vertical::ResponseProfile,
+    RepositorySelector,
+    context::{ContextPackInput, ContextSeedSelector, PLANNER_VERSION},
+    repository::RepositoryState,
+    vertical::{RepositoryIdSelector, ResponseProfile},
 };
 
 /// A pinned generation used to make golden fingerprints reproducible.
@@ -44,6 +49,40 @@ fn advanced_plan() -> AdvancedQueryPlan {
         3,
     )
     .expect("golden advanced query is bounded")
+}
+
+fn context_request() -> CanonicalContextPackRequest {
+    let repository = RepositoryId::from_bytes([7; 16]);
+    let generation = GenerationId::from_bytes([8; 20]);
+    let input = ContextPackInput {
+        repository: RepositorySelector::ById(RepositoryIdSelector {
+            repository_id: repository,
+        }),
+        generation: None,
+        task: "fix parser crash".to_owned(),
+        seeds: ContextSeedSelector {
+            symbols: Some(vec![
+                SymbolId::from_bytes([1; 20]),
+                SymbolId::from_bytes([2; 20]),
+                SymbolId::from_bytes([3; 20]),
+            ]),
+            paths: None,
+            routes: None,
+            tests: None,
+            located: None,
+            change: None,
+            plan: None,
+        },
+        token_budget: 1_000,
+        source_policy: None,
+        sections: None,
+        diversity: None,
+        min_confidence: None,
+        continuation: None,
+        explain: None,
+    };
+    CanonicalContextPackRequest::new(&input, repository, generation)
+        .expect("golden context request canonicalizes")
 }
 
 #[test]
@@ -201,13 +240,19 @@ fn golden_repo_list() {
 
 #[test]
 fn golden_context_pack() {
-    let plan = context_pack_plan(3, 1000);
+    let request = context_request();
+    let plan = context_pack_plan(&request);
     assert_eq!(plan.operators, vec!["context_assembly".to_owned()]);
     assert_eq!(
         plan.applied_limits,
-        vec!["seeds: 3".to_owned(), "token_budget: 1000".to_owned()]
+        vec![
+            "seeds: 3".to_owned(),
+            "token_budget: 1000".to_owned(),
+            format!("request_digest: {}", request.request_digest()),
+        ]
     );
     assert_eq!(plan.estimated_cost, 1090);
+    assert_eq!(plan.fingerprint, request.plan_fingerprint());
 }
 
 #[test]
@@ -247,7 +292,6 @@ fn golden_fingerprints_are_stable_for_a_pinned_generation() {
         history_compare_plan(Some(30)),
         plan_change_plan(Some(5), 2),
         repo_status_plan(),
-        context_pack_plan(3, 1000),
         query_batch_plan(2),
         repo_list_plan(&catalog_context()),
         query_advanced_plan(&advanced_plan()),
