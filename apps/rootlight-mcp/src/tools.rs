@@ -2884,7 +2884,7 @@ mod tests {
             ("repo.list", "authenticated_cursor"),
             ("repo.status", "bounded_complete"),
             ("code.locate", "authenticated_cursor"),
-            ("symbol.explain", "progressive_handle"),
+            ("symbol.explain", "explicit_truncation"),
             ("symbol.relationships", "authenticated_cursor"),
             ("flow.trace", "explicit_truncation"),
             ("change.impact", "explicit_truncation"),
