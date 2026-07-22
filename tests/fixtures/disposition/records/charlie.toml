@@ -1,13 +1,43 @@
-schema_version = "1.0"
+schema_version = "2.0"
 id = "charlie"
 title = "Pending dependent stage"
 implementation_status = "not_started"
 acceptance = "pending"
 gate_outcome = "not_applicable"
 source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
-detail = "details/charlie.md"
-completion_report = "tests/fixtures/disposition/reports/charlie.md"
-evidence = []
 dependencies = ["bravo"]
 dependents = []
 residual_risks = []
+
+[detail]
+path = "details/charlie.md"
+source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
+sha256 = "2ed178313ddf2c456ba805e2a43ca8607b390376f0aece71b89d906a09248e90"
+bytes = 110
+
+[completion_report]
+path = "tests/fixtures/disposition/reports/charlie.md"
+source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
+sha256 = "5e107f889949d503552944f2f4d01f4fa06187e53ad378f81196130a685cef32"
+bytes = 44
+
+[[evidence]]
+id = "charlie-na"
+classification = "not_applicable"
+source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
+sha256 = "5310c6445958ce0c68ea22aad3a32a2ebe7509d2e645fc11e22ea45dfc309e2d"
+bytes = 89
+source = { kind = "local", path = "tests/fixtures/disposition/evidence/charlie.json" }
+
+[[capabilities]]
+id = "charlie.capability"
+disposition = "not_applicable"
+evidence = ["charlie-na"]
+depends_on = []
+unlocks = []
+
+[[checklist]]
+line = 5
+item_sha256 = "2cb4fc27f50da6d1271e813dd7e2764258eee43383bd8a4af187a41f5890bd12"
+disposition = "not_applicable"
+evidence = ["charlie-na"]

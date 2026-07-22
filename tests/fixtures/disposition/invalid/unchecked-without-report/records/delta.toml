@@ -1,13 +1,37 @@
-schema_version = "1.0"
+schema_version = "2.0"
 id = "delta"
 title = "Incorrectly accepted stage"
 implementation_status = "present"
 acceptance = "pass"
 gate_outcome = "not_applicable"
 source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
-detail = "details/delta.md"
-completion_report = "tests/fixtures/disposition/invalid/unchecked-without-report/reports/delta.md"
-evidence = ["tests/fixtures/disposition/invalid/unchecked-without-report/evidence/delta.json"]
 dependencies = []
 dependents = []
 residual_risks = []
+
+[detail]
+path = "details/delta.md"
+source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
+sha256 = "b16178d166b426c308f3c5829aa16a47e93fab9e243d87586140911f19a29ce3"
+bytes = 61
+
+[completion_report]
+path = "tests/fixtures/disposition/invalid/unchecked-without-report/reports/delta.md"
+source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
+sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+bytes = 1
+
+[[evidence]]
+id = "delta-observation"
+classification = "observed_pass"
+source_revision = "a9487e06a9d8820500383e55bff93f72a68003ec"
+sha256 = "96af57812e0d1a7ad3cdf80531a94edce34ead57ac980a32d4027fdbe2e9b5c8"
+bytes = 88
+source = { kind = "local", path = "tests/fixtures/disposition/invalid/unchecked-without-report/evidence/delta.json" }
+
+[[capabilities]]
+id = "delta.capability"
+disposition = "available"
+evidence = ["delta-observation"]
+depends_on = []
+unlocks = []
