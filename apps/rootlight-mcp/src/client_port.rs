@@ -10,8 +10,8 @@ use rootlight_client::{
     ChangeImpact, Client, ClientError, CodeDead, CodeLocate, CoverageStatus, FlowTrace,
     GenerationSelector, HistoryCompare, LocateMode, PlanChange, RepositoryCatalogPage,
     RepositoryCatalogPageRequest, RepositoryIndex, RepositoryOperationAction,
-    RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceRead, SourceReference,
-    SymbolExplain, SymbolRelationships, TestsSelect,
+    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestTimeout,
+    SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
 };
 use rootlight_ids::{FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::CoverageStatus as IrCoverageStatus;
@@ -94,8 +94,7 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
 
     fn repository_status(
         &self,
-        repository: RepositoryId,
-        generation: GenerationSelector,
+        request: RepositoryStatusRequest,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<RepositoryStatus>;
 
@@ -365,14 +364,13 @@ impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
 
     fn repository_status(
         &self,
-        repository: RepositoryId,
-        generation: GenerationSelector,
+        request: RepositoryStatusRequest,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<RepositoryStatus> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
             client
-                .repository_status_async(repository, generation, timeout)
+                .repository_status_with_options_async(request, timeout)
                 .await
         })
     }
@@ -834,12 +832,15 @@ impl FirstSliceClientPort for NativeFirstSliceClientPort {
     ) -> ClientPortFuture<RepositoryStatus> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
+            let status_request = rootlight_client::RepositoryStatusRequest::new(
+                request.repository(),
+                request.generation(),
+            )
+            .with_coverage_detail(request.coverage_detail())
+            .with_operations(request.include_operations())
+            .with_freshness_requirement(request.freshness_requirement());
             client
-                .repository_status(
-                    request.repository(),
-                    request.generation(),
-                    request_timeout()?,
-                )
+                .repository_status(status_request, request_timeout()?)
                 .await
                 .map_err(map_client_error)
         })

@@ -1084,6 +1084,17 @@ pub struct RepositoryStatusRequest {
     #[prost(message, optional, tag = "2")]
     #[allow(missing_docs)]
     pub generation: ::core::option::Option<GenerationSelector>,
+    /// "summary" or "language"; finer projections are rejected before IPC.
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub coverage_detail: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    #[allow(missing_docs)]
+    pub include_operations: bool,
+    /// "none", "structural", or "semantic".
+    #[prost(string, tag = "5")]
+    #[allow(missing_docs)]
+    pub require_freshness: ::prost::alloc::string::String,
 }
 /// One language-scoped coverage entry for one repository generation.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1103,6 +1114,31 @@ pub struct RepositoryCoverageEntry {
     #[prost(uint64, tag = "5")]
     #[allow(missing_docs)]
     pub indexed_files: u64,
+}
+/// One bounded source-free repository-index operation summary.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryStatusOperation {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub operation: ::core::option::Option<super::super::common::v1::OperationId>,
+    #[prost(enumeration = "OperationKind", tag = "2")]
+    #[allow(missing_docs)]
+    pub kind: i32,
+    #[prost(enumeration = "OperationState", tag = "3")]
+    #[allow(missing_docs)]
+    pub state: i32,
+    #[prost(uint32, tag = "4")]
+    #[allow(missing_docs)]
+    pub completed_units: u32,
+    #[prost(uint32, tag = "5")]
+    #[allow(missing_docs)]
+    pub total_units: u32,
+    #[prost(bool, tag = "6")]
+    #[allow(missing_docs)]
+    pub owned_by_client: bool,
+    #[prost(uint64, tag = "7")]
+    #[allow(missing_docs)]
+    pub started_unix_ms: u64,
 }
 /// Reports one repository's resolved and active generation status.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1143,6 +1179,27 @@ pub struct RepositoryStatusResponse {
     pub active_parent_generation: ::core::option::Option<
         super::super::common::v1::GenerationId,
     >,
+    #[prost(string, tag = "10")]
+    #[allow(missing_docs)]
+    pub display_name: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "11")]
+    #[allow(missing_docs)]
+    pub alias: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, tag = "12")]
+    #[allow(missing_docs)]
+    pub publication_state: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "13")]
+    #[allow(missing_docs)]
+    pub operations: ::prost::alloc::vec::Vec<RepositoryStatusOperation>,
+    #[prost(string, tag = "14")]
+    #[allow(missing_docs)]
+    pub coverage_detail: ::prost::alloc::string::String,
+    #[prost(string, tag = "15")]
+    #[allow(missing_docs)]
+    pub active_structural_freshness: ::prost::alloc::string::String,
+    #[prost(string, tag = "16")]
+    #[allow(missing_docs)]
+    pub active_semantic_freshness: ::prost::alloc::string::String,
 }
 /// Requests bounded typed relation neighborhoods for stable symbols.
 #[derive(Clone, PartialEq, ::prost::Message)]

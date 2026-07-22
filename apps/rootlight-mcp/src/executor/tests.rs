@@ -46,10 +46,10 @@ use rootlight_client::{
     RepositoryCatalogFreshness, RepositoryCatalogPage, RepositoryCatalogPageRequest,
     RepositoryCatalogSnapshotId, RepositoryCatalogSortKey, RepositoryCatalogState,
     RepositoryCoverageEntry, RepositoryList, RepositoryListEntry, RepositoryStatus,
-    SourceChunk as ClientSourceChunk, SymbolExplanation as ClientExplanation,
-    SymbolRelationships as ClientRelationships, TestsSelect as ClientTestsSelect,
-    TestsSelectCoverageStrategy as ClientCoverageStrategy, TestsSelectGap as ClientTestGap,
-    TestsSelectRankedTest as ClientRankedTest,
+    RepositoryStatusOperation, SourceChunk as ClientSourceChunk,
+    SymbolExplanation as ClientExplanation, SymbolRelationships as ClientRelationships,
+    TestsSelect as ClientTestsSelect, TestsSelectCoverageStrategy as ClientCoverageStrategy,
+    TestsSelectGap as ClientTestGap, TestsSelectRankedTest as ClientRankedTest,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_ir::{
@@ -115,11 +115,11 @@ enum FakeOutcome {
     HistoryCompare(Result<HistoryComparePortResponse, ClientPortError>),
     QueryAdvanced(Result<QueryAdvancedPortResponse, ClientPortError>),
     Batch {
-        status: Result<RepositoryStatus, ClientPortError>,
+        status: Box<Result<RepositoryStatus, ClientPortError>>,
         locate: Result<CodeLocatePortResponse, ClientPortError>,
     },
     BatchPendingLocate {
-        status: Result<RepositoryStatus, ClientPortError>,
+        status: Box<Result<RepositoryStatus, ClientPortError>>,
     },
 }
 
@@ -465,8 +465,8 @@ impl FirstSliceClientPort for FakePort {
         self.record(ObservedCall::RepositoryStatus(request));
         let outcome = match &self.outcome {
             FakeOutcome::RepositoryStatus(outcome) => outcome.clone(),
-            FakeOutcome::Batch { status, .. } => status.clone(),
-            FakeOutcome::BatchPendingLocate { status } => status.clone(),
+            FakeOutcome::Batch { status, .. } => status.as_ref().clone(),
+            FakeOutcome::BatchPendingLocate { status } => status.as_ref().clone(),
             FakeOutcome::SymbolExplain(Ok(_)) => Ok(repository_status_response()),
             _ => Err(ClientPortError::Executor),
         };
@@ -921,13 +921,18 @@ fn locate_response() -> CodeLocatePortResponse {
 fn repository_status_response() -> RepositoryStatus {
     RepositoryStatus {
         repository_id: repository(),
+        display_name: "fixture".to_owned(),
+        alias: None,
         resolved_generation: generation(),
         active_generation: generation(),
         parent_generation: Some(parent_generation()),
         active_parent_generation: Some(parent_generation()),
+        active_structural_freshness: "current".to_owned(),
+        active_semantic_freshness: "current".to_owned(),
         structural_freshness: "current".to_owned(),
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
+        publication_state: "published".to_owned(),
         coverage: vec![RepositoryCoverageEntry {
             language: "rust".to_owned(),
             tier: "tier_c".to_owned(),
@@ -935,12 +940,13 @@ fn repository_status_response() -> RepositoryStatus {
             discovered_files: 1,
             indexed_files: 1,
         }],
+        operations: Vec::new(),
     }
 }
 
 fn batch_harness() -> Harness {
     Harness::new(FakeOutcome::Batch {
-        status: Ok(repository_status_response()),
+        status: Box::new(Ok(repository_status_response())),
         locate: Ok(locate_response()),
     })
 }
@@ -1387,6 +1393,12 @@ async fn maps_code_locate_with_trust_generation_and_deterministic_output() {
     };
     assert_eq!(request.mode, LocateMode::Exact);
     assert_eq!(request.maximum_results, 5);
+    assert!(
+        calls
+            .iter()
+            .all(|call| matches!(call, ObservedCall::CodeLocate(_))),
+        "ordinary target retrieval must not add a repository-status preflight"
+    );
     let request_debug = format!("{request:?}");
     assert!(!request_debug.contains("publish"));
     assert!(request_debug.contains("query_bytes: 7"));
@@ -2175,7 +2187,7 @@ async fn query_batch_keeps_runtime_child_errors_inside_a_pinned_envelope() {
 #[tokio::test]
 async fn query_batch_keeps_local_deadline_budget_error_inside_the_operation_result() {
     let harness = Harness::new(FakeOutcome::BatchPendingLocate {
-        status: Ok(repository_status_response()),
+        status: Box::new(Ok(repository_status_response())),
     });
     let output = execute(
         &harness.executor,
@@ -3353,11 +3365,15 @@ async fn repo_status_maps_active_generation_and_coverage() {
             discovered_files: 3,
             indexed_files: 3,
         }],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
         VerticalTool::RepoStatus,
-        json!({"repository": {"repository_id": repository()}}),
+        json!({
+            "repository": {"repository_id": repository()},
+            "coverage_detail": "language"
+        }),
     )
     .await
     .expect("repo status maps");
@@ -3392,6 +3408,71 @@ async fn repo_status_maps_active_generation_and_coverage() {
     );
     assert_eq!(output.data.coverage.indexed_files, 3);
     assert_eq!(output.data.coverage.languages[0].tier, "A");
+    assert_eq!(output.repository.display_name, "fixture");
+    assert_eq!(output.data.resolved_generation, generation());
+    assert_eq!(output.data.requested_generation.0, None);
+    assert_eq!(
+        output.data.publication_state,
+        GenerationPublicationState::Published
+    );
+    assert_eq!(output.usage.rows, 2);
+    let ObservedCall::RepositoryStatus(request) = harness.only_call() else {
+        panic!("expected repository status call");
+    };
+    assert_eq!(
+        request.coverage_detail(),
+        client::RepositoryStatusCoverageDetail::Language
+    );
+}
+
+#[tokio::test]
+async fn repo_status_projects_bounded_operations_and_freshness_controls() {
+    let mut status = repository_status_response();
+    status.operations.push(RepositoryStatusOperation {
+        operation: operation(),
+        kind: client::OperationKind::RepositoryIndex,
+        state: client::OperationState::Running,
+        completed_units: 2,
+        total_units: 4,
+        owned_by_client: true,
+        started_unix_ms: 1,
+    });
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(status)));
+    let output: RepoStatusOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoStatus,
+            json!({
+                "repository": {"repository_id": repository()},
+                "include_operations": true,
+                "require_freshness": "structural"
+            }),
+        )
+        .await
+        .expect("repo status maps requested operations"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected repository status success");
+    };
+
+    assert_eq!(output.data.operations.len(), 1);
+    assert_eq!(output.data.operations[0].operation_id, operation());
+    assert_eq!(output.data.operations[0].state, OperationState::Running);
+    assert_eq!(output.data.operations[0].progress_permille, 500);
+    assert!(output.data.operations[0].owned_by_session);
+    assert_eq!(output.usage.rows, 3);
+    assert_eq!(
+        output.data.recommended_actions[0].as_str(),
+        "inspect operation"
+    );
+    let ObservedCall::RepositoryStatus(request) = harness.only_call() else {
+        panic!("expected repository status call");
+    };
+    assert!(request.include_operations());
+    assert_eq!(
+        request.freshness_requirement(),
+        client::RepositoryStatusFreshnessRequirement::Structural
+    );
 }
 
 #[tokio::test]
@@ -3401,6 +3482,8 @@ async fn repo_status_preserves_exact_generation_when_active_changes() {
     status.parent_generation = None;
     status.structural_freshness = "superseded".to_owned();
     status.semantic_freshness = "superseded".to_owned();
+    status.publication_state = "retained".to_owned();
+    status.active_semantic_freshness = "stale".to_owned();
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(status)));
     let output: RepoStatusOutput = decode(
         execute(
@@ -3429,8 +3512,16 @@ async fn repo_status_preserves_exact_generation_when_active_changes() {
             .active_generation
             .0
             .expect("active generation remains visible")
-            .generation_id,
-        generation()
+            .semantic_freshness,
+        Freshness::Stale
+    );
+    assert_eq!(
+        output.data.publication_state,
+        GenerationPublicationState::Retained
+    );
+    assert_eq!(
+        output.data.requested_generation.0,
+        Some(alternate_generation())
     );
     let ObservedCall::RepositoryStatus(request) = harness.only_call() else {
         panic!("expected repository status call");
@@ -5207,6 +5298,7 @@ async fn context_pack_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5245,6 +5337,7 @@ async fn repo_status_explain_attaches_a_plan_to_the_metadata_read() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5278,6 +5371,7 @@ async fn plan_change_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5320,6 +5414,7 @@ async fn history_compare_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5364,6 +5459,7 @@ async fn code_dead_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5405,6 +5501,7 @@ async fn architecture_cycles_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5446,6 +5543,7 @@ async fn architecture_overview_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5490,6 +5588,7 @@ async fn tests_select_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5528,6 +5627,7 @@ async fn change_impact_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5565,6 +5665,7 @@ async fn flow_trace_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5602,6 +5703,7 @@ async fn symbol_relationships_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5642,6 +5744,7 @@ async fn source_read_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let source = wire_source_reference(5, 10, 2, 2);
     let output = execute(
@@ -5680,6 +5783,7 @@ async fn symbol_explain_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5717,6 +5821,7 @@ async fn code_locate_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5758,6 +5863,7 @@ async fn explain_fingerprint_is_stable_for_identical_requests() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let arguments =
         json!({"repository": {"repository_id": repository()}, "query": "publish", "explain": true});
@@ -5905,6 +6011,7 @@ async fn query_batch_explain_returns_a_plan_without_retrieval() {
         semantic_freshness: "current".to_owned(),
         state: "ready".to_owned(),
         coverage: vec![],
+        ..repository_status_response()
     })));
     let output = execute(
         &harness.executor,
@@ -5985,6 +6092,7 @@ async fn explain_plan_is_invariant_across_index_states() {
             semantic_freshness: semantic.to_owned(),
             state: state.to_owned(),
             coverage,
+            ..repository_status_response()
         })));
         let output: CodeLocateOutput = decode(
             execute(
@@ -6257,7 +6365,12 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
     group!(
         RepoStatus,
         DefaultEquivalent,
-        ["include_operations", "response_profile"]
+        [
+            "coverage_detail",
+            "include_operations",
+            "require_freshness",
+            "response_profile"
+        ]
     );
     group!(
         RepoList,
@@ -6561,7 +6674,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "56166684097f9abcd3f776cdaa0ea66ecbe486deab5136481b8b16e24be0358d",
+        "b40621af5e35564e20d7de7000b8c5271f85ad21e059606576cc9a85bbef96a0",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -6622,8 +6735,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[8],
         counts[9],
     );
-    assert_eq!(counts, [131, 3, 61, 25, 16, 5, 10, 10, 1, 1]);
-    assert_eq!(categorized.len(), 263);
+    assert_eq!(counts, [131, 3, 61, 27, 16, 5, 10, 10, 1, 1]);
+    assert_eq!(categorized.len(), 265);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -7949,7 +8062,9 @@ fn default_equivalent_cases() -> Vec<DefaultEquivalentCase> {
             VerticalTool::RepoStatus,
             json!({"repository": repository_selector(), "explain": true}),
             &[
+                ("coverage_detail", json!("summary")),
                 ("include_operations", json!(false)),
+                ("require_freshness", json!("none")),
                 ("response_profile", json!("compact")),
             ][..],
         ),
@@ -8147,7 +8262,7 @@ async fn accepted_effect_defaults_match_omitted_values() {
             )
         });
         let mut omitted = omitted;
-        if case.tool == VerticalTool::RepoList {
+        if matches!(case.tool, VerticalTool::RepoList | VerticalTool::RepoStatus) {
             explicit.remove("usage");
             omitted.remove("usage");
         }
@@ -8494,7 +8609,11 @@ async fn context_pack_identity_task_and_seed_branches_have_runtime_effects() {
     );
 
     let mut alternate_generation_status = repository_status_response();
-    alternate_generation_status.active_generation = alternate_generation();
+    alternate_generation_status.resolved_generation = alternate_generation();
+    alternate_generation_status.parent_generation = None;
+    alternate_generation_status.structural_freshness = "superseded".to_owned();
+    alternate_generation_status.semantic_freshness = "superseded".to_owned();
+    alternate_generation_status.publication_state = "retained".to_owned();
     let alternate_generation_harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(
         alternate_generation_status,
     )));
@@ -8510,7 +8629,7 @@ async fn context_pack_identity_task_and_seed_branches_have_runtime_effects() {
     )
     .await
     .expect_err("the identity fixture intentionally has no retrieval response");
-    let alternate_generation_call = {
+    let (alternate_generation_call, alternate_child_generation) = {
         let calls = alternate_generation_harness
             .calls
             .lock()
@@ -8518,11 +8637,19 @@ async fn context_pack_identity_task_and_seed_branches_have_runtime_effects() {
         let ObservedCall::RepositoryStatus(request) = &calls[0] else {
             panic!("context identity starts with repository status");
         };
-        request.clone()
+        let ObservedCall::SymbolExplain(child) = &calls[1] else {
+            panic!("resolved retained identity is passed to the retrieval child");
+        };
+        (request.clone(), child.generation())
     };
     assert_ne!(
         base_identity_call.generation(),
         alternate_generation_call.generation()
+    );
+    assert_eq!(
+        alternate_child_generation,
+        ClientGenerationSelector::Generation(alternate_generation()),
+        "agent identity must pin the exact resolved retained generation"
     );
 
     let execute_explain = |task: &'static str, seeds: Value| async move {
@@ -8768,7 +8895,7 @@ async fn accepted_effect_query_batch_failure_policy_changes_scheduling() {
     let mut alternate_status = repository_status_response();
     alternate_status.repository_id = alternate_repository();
     let alternate_harness = Harness::new(FakeOutcome::Batch {
-        status: Ok(alternate_status),
+        status: Box::new(Ok(alternate_status)),
         locate: executor_failure(),
     });
     execute(

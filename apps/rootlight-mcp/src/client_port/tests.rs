@@ -15,8 +15,9 @@ use rootlight_client::{
     QueryUsage, RecoveryClass, RepositoryCatalogEntry, RepositoryCatalogFreshness,
     RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId,
     RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex, RepositoryOperationAction,
-    RepositoryOperationStatus, RepositoryStatus, RequestTimeout, SourceChunk, SourceRead,
-    SourceReference, SymbolExplain, SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
+    RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestTimeout,
+    SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
+    TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -392,25 +393,29 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
 
     fn repository_status(
         &self,
-        repository: RepositoryId,
-        generation_selector: GenerationSelector,
+        request: RepositoryStatusRequest,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<RepositoryStatus> {
         self.record(Call::RepositoryStatus {
-            repository,
-            generation: generation_selector,
+            repository: request.repository(),
+            generation: request.generation(),
             timeout,
         });
         Box::pin(async move {
             Ok(RepositoryStatus {
-                repository_id: repository,
+                repository_id: request.repository(),
+                display_name: "fixture".to_owned(),
+                alias: None,
                 resolved_generation: generation(),
                 active_generation: generation(),
                 parent_generation: Some(parent_generation()),
                 active_parent_generation: Some(parent_generation()),
+                active_structural_freshness: "current".to_owned(),
+                active_semantic_freshness: "current".to_owned(),
                 structural_freshness: "current".to_owned(),
                 semantic_freshness: "current".to_owned(),
                 state: "ready".to_owned(),
+                publication_state: "published".to_owned(),
                 coverage: vec![RepositoryCoverageEntry {
                     language: "rust".to_owned(),
                     tier: "tier_a".to_owned(),
@@ -418,6 +423,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     discovered_files: 1,
                     indexed_files: 1,
                 }],
+                operations: Vec::new(),
             })
         })
     }

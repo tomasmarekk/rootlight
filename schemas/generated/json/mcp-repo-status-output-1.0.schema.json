@@ -335,6 +335,21 @@
       "type": "string",
       "pattern": "^gen1_[a-z2-7]{39}$"
     },
+    "GenerationPublicationState": {
+      "description": "Publication relationship of the selected generation.",
+      "oneOf": [
+        {
+          "description": "The selected generation is the active published generation.",
+          "type": "string",
+          "const": "published"
+        },
+        {
+          "description": "The selected generation is retained but no longer active.",
+          "type": "string",
+          "const": "retained"
+        }
+      ]
+    },
     "GenerationSummary": {
       "description": "Generation metadata carried by each read response.",
       "type": "object",
@@ -908,7 +923,7 @@
         },
         "next_cursor": {
           "description": "Safe continuation cursor, when the result is pageable.",
-          "$ref": "#/$defs/RequiredNullable3"
+          "$ref": "#/$defs/RequiredNullable4"
         },
         "repository": {
           "description": "Resolved repository.",
@@ -961,6 +976,10 @@
           "description": "Active generation summary, null when no generation is published.",
           "$ref": "#/$defs/RequiredNullable2"
         },
+        "alias": {
+          "description": "Registered repository alias, when configured.",
+          "$ref": "#/$defs/RequiredNullable3"
+        },
         "coverage": {
           "description": "Coverage at the requested granularity.",
           "$ref": "#/$defs/CoverageReport"
@@ -984,6 +1003,10 @@
           },
           "maxItems": 100
         },
+        "publication_state": {
+          "description": "Publication relationship of the selected generation.",
+          "$ref": "#/$defs/GenerationPublicationState"
+        },
         "recommended_actions": {
           "description": "Recommended next actions for the agent.",
           "type": "array",
@@ -995,12 +1018,24 @@
         "repository_state": {
           "description": "Overall repository health.",
           "$ref": "#/$defs/RepositoryState"
+        },
+        "requested_generation": {
+          "description": "Explicit generation requested by the caller, null for the active selector.",
+          "$ref": "#/$defs/RequiredNullable"
+        },
+        "resolved_generation": {
+          "description": "Exact immutable generation resolved for this response.",
+          "$ref": "#/$defs/GenerationId"
         }
       },
       "additionalProperties": false,
       "required": [
         "repository_state",
+        "requested_generation",
+        "resolved_generation",
         "active_generation",
+        "publication_state",
+        "alias",
         "coverage",
         "operations",
         "recommended_actions"
@@ -1068,6 +1103,13 @@
       ]
     },
     "RequiredNullable3": {
+      "description": "A property that must be present and may contain JSON `null`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "RequiredNullable4": {
       "description": "A property that must be present and may contain JSON `null`.",
       "anyOf": [
         {
