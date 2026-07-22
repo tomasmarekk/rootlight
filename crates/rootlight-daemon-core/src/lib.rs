@@ -45,6 +45,8 @@ use rootlight_protocol::{
     CURRENT_PROTOCOL_MINOR, MINIMUM_PROTOCOL_MINOR, PROTOCOL_VERSION,
     generated::{common::v1 as common, daemon::v1 as daemon},
 };
+use unicode_casefold::UnicodeCaseFold as _;
+use unicode_normalization::UnicodeNormalization as _;
 
 /// Protocol major supported by the first local daemon contract.
 pub const PROTOCOL_MAJOR: u32 = 1;
@@ -129,6 +131,15 @@ const RESOURCE_UNKNOWN: u8 = 5;
 const MAX_WIRE_PUBLIC_ERROR_MESSAGE_BYTES: usize = 1_024;
 const MAX_WIRE_PUBLIC_ERROR_DETAILS: usize = 32;
 const MAX_WIRE_PUBLIC_ERROR_ACTIONS: usize = 8;
+const REPOSITORY_CATALOG_SORT_VERSION: u32 = 1;
+const MAX_REPOSITORY_CATALOG_PAGE_SIZE: u32 = 200;
+const MAX_REPOSITORY_CATALOG_QUERY_BYTES: usize = 1_024;
+const MAX_REPOSITORY_CATALOG_STATES: usize = 8;
+const MAX_REPOSITORY_CATALOG_LABEL_BYTES: usize = 256;
+const MAX_REPOSITORY_CATALOG_LANGUAGES: usize = 64;
+const MAX_REPOSITORY_CATALOG_LANGUAGE_BYTES: usize = 64;
+const MIN_REPOSITORY_CATALOG_SORT_KEY_BYTES: usize = 18;
+const MAX_REPOSITORY_CATALOG_SORT_KEY_BYTES: usize = 1_042;
 
 /// Boxed future returned by the daemon-owned first-slice IPC implementation.
 pub type FirstSliceIpcFuture =
@@ -149,6 +160,8 @@ pub enum FirstSliceIpcRequest {
     SourceRead(daemon::SourceReadRequest),
     /// List repositories known to this daemon process.
     RepositoryList(daemon::RepositoryListRequest),
+    /// Read one page from a daemon-owned immutable repository catalog snapshot.
+    RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest),
     /// Read one repository's active generation status.
     RepositoryStatus(daemon::RepositoryStatusRequest),
     /// Expand typed relation neighborhoods for stable symbols.
@@ -188,6 +201,8 @@ pub enum FirstSliceIpcResponse {
     SourceRead(daemon::SourceReadResponse),
     /// Bounded repository list.
     RepositoryList(daemon::RepositoryListResponse),
+    /// One bounded immutable repository catalog page.
+    RepositoryCatalogPage(daemon::RepositoryCatalogPageResponse),
     /// One repository status.
     RepositoryStatus(daemon::RepositoryStatusResponse),
     /// Bounded typed relation neighborhoods.
@@ -228,6 +243,9 @@ impl FirstSliceIpcResponse {
             Self::SourceRead(response) => daemon::response_envelope::Response::SourceRead(response),
             Self::RepositoryList(response) => {
                 daemon::response_envelope::Response::RepositoryList(response)
+            }
+            Self::RepositoryCatalogPage(response) => {
+                daemon::response_envelope::Response::RepositoryCatalogPage(response)
             }
             Self::RepositoryStatus(response) => {
                 daemon::response_envelope::Response::RepositoryStatus(response)
@@ -5598,6 +5616,9 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::RepositoryList(request)) => {
             Ok(Some(FirstSliceIpcRequest::RepositoryList(request)))
         }
+        Some(daemon::request_envelope::Request::RepositoryCatalogPage(request)) => {
+            Ok(Some(FirstSliceIpcRequest::RepositoryCatalogPage(request)))
+        }
         Some(daemon::request_envelope::Request::RepositoryStatus(request)) => {
             Ok(Some(FirstSliceIpcRequest::RepositoryStatus(request)))
         }
@@ -5645,9 +5666,20 @@ async fn dispatch_first_slice(
     cancellation: Cancellation,
     index_admission: Option<FirstSliceAdmission>,
 ) -> daemon::response_envelope::Response {
-    if selected_protocol_minor < 5 {
+    let required_protocol_minor =
+        if matches!(&request, FirstSliceIpcRequest::RepositoryCatalogPage(_)) {
+            6
+        } else {
+            5
+        };
+    if selected_protocol_minor < required_protocol_minor {
+        let message = if required_protocol_minor == 6 {
+            "repository catalog pages need protocol minor six"
+        } else {
+            "first-slice requests need protocol minor five"
+        };
         return daemon::response_envelope::Response::Error(public_error_to_wire(
-            &protocol_mismatch("first-slice requests need protocol minor five"),
+            &protocol_mismatch(message),
         ));
     }
     if let Err(error) = validate_first_slice_request(&request) {
@@ -5930,6 +5962,10 @@ fn first_slice_response_correlates(
                         && !entry.state.is_empty()
                 })
         }
+        (
+            FirstSliceIpcRequest::RepositoryCatalogPage(request),
+            FirstSliceIpcResponse::RepositoryCatalogPage(response),
+        ) => repository_catalog_page_correlates(request, response),
         (
             FirstSliceIpcRequest::RepositoryStatus(request),
             FirstSliceIpcResponse::RepositoryStatus(response),
@@ -6598,6 +6634,261 @@ fn first_slice_response_correlates(
     }
 }
 
+fn repository_catalog_page_correlates(
+    request: &daemon::RepositoryCatalogPageRequest,
+    response: &daemon::RepositoryCatalogPageResponse,
+) -> bool {
+    let Some(snapshot) = response.snapshot.as_ref() else {
+        return false;
+    };
+    if response.sort_version != request.sort_version
+        || response.sort_version != REPOSITORY_CATALOG_SORT_VERSION
+        || snapshot.value.len() != 32
+        || request
+            .snapshot
+            .as_ref()
+            .is_some_and(|expected| expected.value != snapshot.value)
+        || response.repositories.len() > usize::try_from(request.page_size).unwrap_or(usize::MAX)
+        || response.truncated != response.next_after.is_some()
+        || (response.truncated
+            && response.repositories.len()
+                != usize::try_from(request.page_size).unwrap_or(usize::MAX))
+    {
+        return false;
+    }
+    let mut repository_ids = BTreeSet::new();
+    if response.repositories.iter().any(|entry| {
+        !valid_repository_catalog_entry(entry)
+            || !repository_catalog_entry_matches_request(entry, request)
+            || !repository_ids.insert(
+                entry
+                    .repository
+                    .as_ref()
+                    .map_or(&[][..], |repository| repository.value.as_slice()),
+            )
+    }) {
+        return false;
+    }
+    if !response.repositories.windows(2).all(|pair| {
+        repository_catalog_entry_order(&pair[0])
+            .zip(repository_catalog_entry_order(&pair[1]))
+            .is_some_and(|(left, right)| left < right)
+    }) {
+        return false;
+    }
+    if let Some(after) = request.after.as_ref()
+        && let Some(first) = response.repositories.first()
+    {
+        let Some(first_key) = repository_catalog_sort_key_for_wire_entry(first) else {
+            return false;
+        };
+        let Some(ordering) = compare_repository_catalog_sort_key_bytes(&first_key, &after.value)
+        else {
+            return false;
+        };
+        if ordering != std::cmp::Ordering::Greater {
+            return false;
+        }
+    }
+    if let Some(next) = response.next_after.as_ref() {
+        let Some(last) = response.repositories.last() else {
+            return false;
+        };
+        if repository_catalog_sort_key_for_wire_entry(last)
+            .is_none_or(|expected| expected != next.value)
+        {
+            return false;
+        }
+    }
+    if let Some(total_count) = response.total_count {
+        let Ok(page_rows) = u64::try_from(response.repositories.len()) else {
+            return false;
+        };
+        if total_count < page_rows
+            || (request.after.is_none()
+                && ((!response.truncated && total_count != page_rows)
+                    || (response.truncated && total_count <= page_rows)))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn repository_catalog_entry_matches_request(
+    entry: &daemon::RepositoryCatalogEntry,
+    request: &daemon::RepositoryCatalogPageRequest,
+) -> bool {
+    if request.states_present && !request.states.contains(&entry.state) {
+        return false;
+    }
+    let Some(query) = request.normalized_query.as_deref() else {
+        return true;
+    };
+    let display_matches = entry
+        .display_name
+        .nfd()
+        .case_fold()
+        .nfc()
+        .collect::<String>()
+        .contains(query);
+    let alias_matches = entry.alias.as_deref().is_some_and(|alias| {
+        alias
+            .nfd()
+            .case_fold()
+            .nfc()
+            .collect::<String>()
+            .contains(query)
+    });
+    let repository_matches = entry
+        .repository
+        .as_ref()
+        .and_then(|repository| <[u8; 16]>::try_from(repository.value.as_slice()).ok())
+        .map(RepositoryId::from_bytes)
+        .is_some_and(|repository| repository.to_string().contains(query));
+    display_matches || alias_matches || repository_matches
+}
+
+fn valid_repository_catalog_entry(entry: &daemon::RepositoryCatalogEntry) -> bool {
+    wire_id_has_len(entry.repository.as_ref().map(|id| &id.value), 16)
+        && optional_wire_id_has_len(entry.active_generation.as_ref().map(|id| &id.value), 20)
+        && repository_catalog_label_is_safe(&entry.display_name)
+        && entry
+            .alias
+            .as_deref()
+            .is_none_or(repository_catalog_label_is_safe)
+        && (entry.active_generation.is_none() || entry.generation_count > 0)
+        && valid_repository_catalog_state(&entry.state)
+        && valid_repository_catalog_freshness(&entry.structural_freshness)
+        && valid_repository_catalog_freshness(&entry.semantic_freshness)
+        && entry.languages.len() <= MAX_REPOSITORY_CATALOG_LANGUAGES
+        && entry.coverage.len() <= MAX_REPOSITORY_CATALOG_LANGUAGES
+        && entry.languages.windows(2).all(|pair| pair[0] < pair[1])
+        && entry.languages.iter().all(|language| {
+            !language.is_empty()
+                && language.len() <= MAX_REPOSITORY_CATALOG_LANGUAGE_BYTES
+                && !language.chars().any(char::is_control)
+        })
+        && entry
+            .coverage
+            .windows(2)
+            .all(|pair| pair[0].language < pair[1].language)
+        && entry.coverage.iter().all(|coverage| {
+            !coverage.language.is_empty()
+                && coverage.language.len() <= MAX_REPOSITORY_CATALOG_LANGUAGE_BYTES
+                && !coverage.language.chars().any(char::is_control)
+                && matches!(
+                    coverage.tier.as_str(),
+                    "tier_a" | "tier_b" | "tier_c" | "tier_d"
+                )
+                && matches!(
+                    coverage.status.as_str(),
+                    "complete" | "bounded" | "sampled" | "unknown"
+                )
+                && coverage.indexed_files <= coverage.discovered_files
+        })
+        && entry.languages.len() == entry.coverage.len()
+        && entry
+            .languages
+            .iter()
+            .zip(&entry.coverage)
+            .all(|(language, coverage)| language == &coverage.language)
+}
+
+fn repository_catalog_entry_order(
+    entry: &daemon::RepositoryCatalogEntry,
+) -> Option<(String, &[u8])> {
+    let repository = entry.repository.as_ref()?.value.as_slice();
+    let normalized = entry
+        .display_name
+        .nfd()
+        .case_fold()
+        .nfc()
+        .collect::<String>();
+    (normalized.len() <= MAX_REPOSITORY_CATALOG_QUERY_BYTES).then_some((normalized, repository))
+}
+
+fn repository_catalog_sort_key_for_wire_entry(
+    entry: &daemon::RepositoryCatalogEntry,
+) -> Option<Vec<u8>> {
+    let repository = entry.repository.as_ref()?.value.as_slice();
+    let normalized = entry
+        .display_name
+        .nfd()
+        .case_fold()
+        .nfc()
+        .collect::<String>();
+    let name_len = u16::try_from(normalized.len()).ok()?;
+    let mut bytes = Vec::with_capacity(2 + normalized.len() + repository.len());
+    bytes.extend_from_slice(&name_len.to_le_bytes());
+    bytes.extend_from_slice(normalized.as_bytes());
+    bytes.extend_from_slice(repository);
+    valid_repository_catalog_sort_key(&bytes).then_some(bytes)
+}
+
+fn compare_repository_catalog_sort_key_bytes(
+    left: &[u8],
+    right: &[u8],
+) -> Option<std::cmp::Ordering> {
+    Some(repository_catalog_sort_key_parts(left)?.cmp(&repository_catalog_sort_key_parts(right)?))
+}
+
+fn repository_catalog_sort_key_parts(bytes: &[u8]) -> Option<(&str, &[u8])> {
+    if !valid_repository_catalog_sort_key(bytes) {
+        return None;
+    }
+    let length = usize::from(u16::from_le_bytes(bytes.get(..2)?.try_into().ok()?));
+    let name = std::str::from_utf8(bytes.get(2..2 + length)?).ok()?;
+    Some((name, bytes.get(2 + length..)?))
+}
+
+fn valid_repository_catalog_sort_key(bytes: &[u8]) -> bool {
+    if !(MIN_REPOSITORY_CATALOG_SORT_KEY_BYTES..=MAX_REPOSITORY_CATALOG_SORT_KEY_BYTES)
+        .contains(&bytes.len())
+    {
+        return false;
+    }
+    let Some(length_bytes) = bytes.get(..2) else {
+        return false;
+    };
+    let Ok(length_bytes) = <[u8; 2]>::try_from(length_bytes) else {
+        return false;
+    };
+    let name_len = usize::from(u16::from_le_bytes(length_bytes));
+    if name_len > MAX_REPOSITORY_CATALOG_QUERY_BYTES || bytes.len() != 2 + name_len + 16 {
+        return false;
+    }
+    let Some(name_bytes) = bytes.get(2..2 + name_len) else {
+        return false;
+    };
+    let Ok(name) = std::str::from_utf8(name_bytes) else {
+        return false;
+    };
+    !name
+        .chars()
+        .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+        && name.nfd().case_fold().nfc().collect::<String>() == name
+}
+
+fn repository_catalog_label_is_safe(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_REPOSITORY_CATALOG_LABEL_BYTES
+        && !value
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+}
+
+fn valid_repository_catalog_state(value: &str) -> bool {
+    matches!(
+        value,
+        "ready" | "indexing" | "degraded" | "corrupt" | "migration_required" | "rebuild_required"
+    )
+}
+
+fn valid_repository_catalog_freshness(value: &str) -> bool {
+    matches!(value, "current" | "superseded" | "stale")
+}
+
 fn first_slice_schema_matches(version: Option<&common::ContractVersion>) -> bool {
     version.is_some_and(|version| version.major == 1 && version.minor == 0)
 }
@@ -7012,6 +7303,37 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
             {
                 return Err(Box::new(invalid_argument(
                     "repository list request is invalid",
+                )));
+            }
+        }
+        FirstSliceIpcRequest::RepositoryCatalogPage(request) => {
+            if !(1..=MAX_REPOSITORY_CATALOG_PAGE_SIZE).contains(&request.page_size)
+                || request.sort_version != REPOSITORY_CATALOG_SORT_VERSION
+                || request.states.len() > MAX_REPOSITORY_CATALOG_STATES
+                || (!request.states_present && !request.states.is_empty())
+                || request.normalized_query.as_ref().is_some_and(|query| {
+                    query.is_empty()
+                        || query.len() > MAX_REPOSITORY_CATALOG_QUERY_BYTES
+                        || query.as_bytes().contains(&0)
+                        || query.nfd().case_fold().nfc().collect::<String>() != *query
+                })
+                || request
+                    .states
+                    .iter()
+                    .any(|state| !valid_repository_catalog_state(state))
+                || request.states.iter().collect::<BTreeSet<_>>().len() != request.states.len()
+                || request
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.value.len() != 32)
+                || request
+                    .after
+                    .as_ref()
+                    .is_some_and(|after| !valid_repository_catalog_sort_key(&after.value))
+                || (request.after.is_some() && request.snapshot.is_none())
+            {
+                return Err(Box::new(invalid_argument(
+                    "repository catalog page request is invalid",
                 )));
             }
         }
@@ -7562,6 +7884,9 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         Some(daemon::request_envelope::Request::SymbolExplain(_)) => ControlMethod::SymbolExplain,
         Some(daemon::request_envelope::Request::SourceRead(_)) => ControlMethod::SourceRead,
         Some(daemon::request_envelope::Request::RepositoryList(_)) => ControlMethod::RepositoryList,
+        Some(daemon::request_envelope::Request::RepositoryCatalogPage(_)) => {
+            ControlMethod::RepositoryList
+        }
         Some(daemon::request_envelope::Request::RepositoryStatus(_)) => {
             ControlMethod::RepositoryStatus
         }
@@ -8039,6 +8364,7 @@ fn request_from_wire(
         ) => Err(Box::new(first_slice_unavailable())),
         Some(
             daemon::request_envelope::Request::RepositoryList(_)
+            | daemon::request_envelope::Request::RepositoryCatalogPage(_)
             | daemon::request_envelope::Request::RepositoryStatus(_)
             | daemon::request_envelope::Request::SymbolRelationships(_)
             | daemon::request_envelope::Request::FlowTrace(_)
@@ -13695,6 +14021,245 @@ mod tests {
                 .iter()
                 .any(|capability| capability == "repository.index.v1")
         );
+    }
+
+    fn catalog_sort_key(display_name: &str, repository: &[u8; 16]) -> Vec<u8> {
+        let normalized = display_name.nfd().case_fold().nfc().collect::<String>();
+        let length = u16::try_from(normalized.len()).expect("test catalog name length fits");
+        let mut bytes = Vec::with_capacity(2 + normalized.len() + repository.len());
+        bytes.extend_from_slice(&length.to_le_bytes());
+        bytes.extend_from_slice(normalized.as_bytes());
+        bytes.extend_from_slice(repository);
+        bytes
+    }
+
+    fn catalog_page_request(
+        snapshot: Option<[u8; 32]>,
+        after: Option<Vec<u8>>,
+    ) -> FirstSliceIpcRequest {
+        FirstSliceIpcRequest::RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest {
+            page_size: 1,
+            normalized_query: None,
+            states: vec!["ready".to_owned()],
+            snapshot: snapshot.map(|value| daemon::RepositoryCatalogSnapshotId {
+                value: value.to_vec(),
+            }),
+            after: after.map(|value| daemon::RepositoryCatalogSortKey { value }),
+            sort_version: REPOSITORY_CATALOG_SORT_VERSION,
+            states_present: true,
+        })
+    }
+
+    fn catalog_page_response(snapshot: [u8; 32], repository: [u8; 16]) -> FirstSliceIpcResponse {
+        let display_name = "sample";
+        FirstSliceIpcResponse::RepositoryCatalogPage(daemon::RepositoryCatalogPageResponse {
+            repositories: vec![daemon::RepositoryCatalogEntry {
+                repository: Some(common::RepositoryId {
+                    value: repository.to_vec(),
+                }),
+                active_generation: None,
+                display_name: display_name.to_owned(),
+                alias: None,
+                generation_count: 0,
+                state: "ready".to_owned(),
+                languages: vec!["rust".to_owned()],
+                structural_freshness: "current".to_owned(),
+                semantic_freshness: "current".to_owned(),
+                coverage: vec![daemon::RepositoryCoverageEntry {
+                    language: "rust".to_owned(),
+                    tier: "tier_a".to_owned(),
+                    status: "complete".to_owned(),
+                    discovered_files: 1,
+                    indexed_files: 1,
+                }],
+            }],
+            snapshot: Some(daemon::RepositoryCatalogSnapshotId {
+                value: snapshot.to_vec(),
+            }),
+            next_after: Some(daemon::RepositoryCatalogSortKey {
+                value: catalog_sort_key(display_name, &repository),
+            }),
+            total_count: Some(2),
+            truncated: true,
+            sort_version: REPOSITORY_CATALOG_SORT_VERSION,
+        })
+    }
+
+    #[test]
+    fn repository_catalog_page_request_validation_is_closed_and_bounded() {
+        let snapshot = [3; 32];
+        let after = catalog_sort_key("sample", &[4; 16]);
+        let valid = catalog_page_request(Some(snapshot), Some(after));
+        assert!(validate_first_slice_request(&valid).is_ok());
+        let empty_state_filter =
+            FirstSliceIpcRequest::RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest {
+                page_size: 1,
+                sort_version: REPOSITORY_CATALOG_SORT_VERSION,
+                states_present: true,
+                ..Default::default()
+            });
+        assert!(validate_first_slice_request(&empty_state_filter).is_ok());
+
+        let invalid = [
+            FirstSliceIpcRequest::RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest {
+                page_size: 0,
+                ..Default::default()
+            }),
+            FirstSliceIpcRequest::RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest {
+                page_size: 1,
+                sort_version: 2,
+                ..Default::default()
+            }),
+            FirstSliceIpcRequest::RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest {
+                page_size: 1,
+                normalized_query: Some("Straße".to_owned()),
+                sort_version: REPOSITORY_CATALOG_SORT_VERSION,
+                ..Default::default()
+            }),
+            FirstSliceIpcRequest::RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest {
+                page_size: 1,
+                states: vec!["ready".to_owned(), "ready".to_owned()],
+                states_present: true,
+                sort_version: REPOSITORY_CATALOG_SORT_VERSION,
+                ..Default::default()
+            }),
+            FirstSliceIpcRequest::RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest {
+                page_size: 1,
+                states: vec!["ready".to_owned()],
+                sort_version: REPOSITORY_CATALOG_SORT_VERSION,
+                ..Default::default()
+            }),
+            FirstSliceIpcRequest::RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest {
+                page_size: 1,
+                snapshot: Some(daemon::RepositoryCatalogSnapshotId { value: vec![0; 31] }),
+                sort_version: REPOSITORY_CATALOG_SORT_VERSION,
+                ..Default::default()
+            }),
+            FirstSliceIpcRequest::RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest {
+                page_size: 1,
+                after: Some(daemon::RepositoryCatalogSortKey {
+                    value: vec![0; MIN_REPOSITORY_CATALOG_SORT_KEY_BYTES],
+                }),
+                sort_version: REPOSITORY_CATALOG_SORT_VERSION,
+                ..Default::default()
+            }),
+        ];
+        for request in invalid {
+            assert!(validate_first_slice_request(&request).is_err());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn repository_catalog_page_requires_negotiated_minor_six() {
+        let request = catalog_page_request(None, None);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let legacy = dispatch_first_slice(
+            &UnavailableFirstSliceIpcHandler,
+            request.clone(),
+            ClientInstanceId::SYSTEM,
+            5,
+            deadline,
+            Cancellation::new(),
+            None,
+        )
+        .await;
+        let current = dispatch_first_slice(
+            &UnavailableFirstSliceIpcHandler,
+            request,
+            ClientInstanceId::SYSTEM,
+            6,
+            deadline,
+            Cancellation::new(),
+            None,
+        )
+        .await;
+        assert!(matches!(
+            legacy,
+            daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            }) if code == common::ErrorCode::ProtocolMismatch as i32
+        ));
+        assert!(matches!(
+            current,
+            daemon::response_envelope::Response::Error(common::PublicError {
+                code,
+                ..
+            }) if code == common::ErrorCode::UnsupportedCapability as i32
+        ));
+    }
+
+    #[test]
+    fn repository_catalog_page_response_correlation_rejects_drift() {
+        let snapshot = [5; 32];
+        let repository = [6; 16];
+        let request = catalog_page_request(Some(snapshot), None);
+        let response = catalog_page_response(snapshot, repository);
+        assert!(first_slice_response_correlates(&request, &response));
+        let empty_state_filter =
+            FirstSliceIpcRequest::RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest {
+                page_size: 1,
+                snapshot: Some(daemon::RepositoryCatalogSnapshotId {
+                    value: snapshot.to_vec(),
+                }),
+                sort_version: REPOSITORY_CATALOG_SORT_VERSION,
+                states_present: true,
+                ..Default::default()
+            });
+        assert!(!first_slice_response_correlates(
+            &empty_state_filter,
+            &response
+        ));
+        let unmatched_query =
+            FirstSliceIpcRequest::RepositoryCatalogPage(daemon::RepositoryCatalogPageRequest {
+                page_size: 1,
+                normalized_query: Some("absent".to_owned()),
+                snapshot: Some(daemon::RepositoryCatalogSnapshotId {
+                    value: snapshot.to_vec(),
+                }),
+                sort_version: REPOSITORY_CATALOG_SORT_VERSION,
+                ..Default::default()
+            });
+        assert!(!first_slice_response_correlates(
+            &unmatched_query,
+            &response
+        ));
+
+        let FirstSliceIpcResponse::RepositoryCatalogPage(valid) = response else {
+            panic!("catalog response fixture has the expected variant");
+        };
+        let mut wrong_snapshot = valid.clone();
+        wrong_snapshot
+            .snapshot
+            .as_mut()
+            .expect("snapshot is present")
+            .value = vec![7; 32];
+        let mut wrong_key = valid.clone();
+        wrong_key.next_after = Some(daemon::RepositoryCatalogSortKey {
+            value: catalog_sort_key("other", &repository),
+        });
+        let mut unknown_state = valid.clone();
+        unknown_state.repositories[0].state = "unknown".to_owned();
+        let mut unsafe_alias = valid.clone();
+        unsafe_alias.repositories[0].alias = Some(r"C:\private".to_owned());
+        let mut missing_key = valid.clone();
+        missing_key.next_after = None;
+        let mut false_total = valid;
+        false_total.total_count = Some(1);
+
+        for response in [
+            wrong_snapshot,
+            wrong_key,
+            unknown_state,
+            unsafe_alias,
+            missing_key,
+            false_total,
+        ] {
+            assert!(!first_slice_response_correlates(
+                &request,
+                &FirstSliceIpcResponse::RepositoryCatalogPage(response)
+            ));
+        }
     }
 
     #[test]

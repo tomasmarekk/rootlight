@@ -1929,6 +1929,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "unicode-casefold",
+ "unicode-normalization",
  "zip",
 ]
 
@@ -1984,6 +1986,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "unicode-casefold",
+ "unicode-normalization",
 ]
 
 [[package]]

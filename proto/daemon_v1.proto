@@ -50,6 +50,7 @@ message RequestEnvelope {
     PlanChangeRequest plan_change = 44;
     HistoryCompareRequest history_compare = 45;
     AdvancedQueryRequest advanced_query = 46;
+    RepositoryCatalogPageRequest repository_catalog_page = 47;
   }
 }
 
@@ -81,6 +82,7 @@ message ResponseEnvelope {
     PlanChangeResponse plan_change = 44;
     HistoryCompareResponse history_compare = 45;
     AdvancedQueryResponse advanced_query = 46;
+    RepositoryCatalogPageResponse repository_catalog_page = 47;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -529,6 +531,51 @@ message RepositoryListEntry {
 // Returns the bounded list of repositories with their active generation.
 message RepositoryListResponse {
   repeated RepositoryListEntry repositories = 1;
+}
+
+// Opaque identity of one daemon-owned immutable repository catalog snapshot.
+message RepositoryCatalogSnapshotId {
+  bytes value = 1;
+}
+
+// Opaque versioned continuation key for the repository catalog total order.
+message RepositoryCatalogSortKey {
+  bytes value = 1;
+}
+
+// Requests one bounded page from an immutable repository catalog snapshot.
+message RepositoryCatalogPageRequest {
+  uint32 page_size = 1;
+  optional string normalized_query = 2;
+  repeated string states = 3;
+  RepositoryCatalogSnapshotId snapshot = 4;
+  RepositoryCatalogSortKey after = 5;
+  uint32 sort_version = 6;
+  bool states_present = 7;
+}
+
+// One authoritative repository summary in a catalog snapshot.
+message RepositoryCatalogEntry {
+  rootlight.common.v1.RepositoryId repository = 1;
+  optional rootlight.common.v1.GenerationId active_generation = 2;
+  string display_name = 3;
+  optional string alias = 4;
+  uint64 generation_count = 5;
+  string state = 6;
+  repeated string languages = 7;
+  string structural_freshness = 8;
+  string semantic_freshness = 9;
+  repeated RepositoryCoverageEntry coverage = 10;
+}
+
+// Returns one correlated bounded page from an immutable repository catalog.
+message RepositoryCatalogPageResponse {
+  repeated RepositoryCatalogEntry repositories = 1;
+  RepositoryCatalogSnapshotId snapshot = 2;
+  RepositoryCatalogSortKey next_after = 3;
+  optional uint64 total_count = 4;
+  bool truncated = 5;
+  uint32 sort_version = 6;
 }
 
 // Requests the status of one repository known to this daemon process.

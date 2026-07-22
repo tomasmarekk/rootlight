@@ -10,7 +10,7 @@
   "inputs": [
     {
       "path": "Cargo.lock",
-      "blake3": "43d6ec9978e1253002a55dc6c45473c8b62c441e60fa235abf3f83debb76af6f"
+      "blake3": "c3136f085882be217ddc411bafcd9effb60a2994443fb4cc124b96ade329c595"
     },
     {
       "path": "crates/rootlight-catalog/src/schema.rs",
@@ -82,7 +82,7 @@
     },
     {
       "path": "proto/daemon_v1.proto",
-      "blake3": "a16b0b75f1d165270c62d8d865ffe65081def62d36dcf8cfdcfd5ad57baba74f"
+      "blake3": "07088029d43508dd5cdd754e03f1d84b1b397de68c64ef44bda6ffec7ca16a69"
     },
     {
       "path": "tests/fixtures/compatibility/contract-0.1.json",
@@ -141,6 +141,10 @@
       "blake3": "d611cb9904e1087d06b18b9c62441e912609274ae8f9bac5f647c2cab4b454d0"
     },
     {
+      "path": "tests/fixtures/compatibility/protobuf/1.5/rootlight.desc",
+      "blake3": "3e11d3bce7603728505a1bc82caf84fb57dba4492b5f9d52acf48dbccd1399a5"
+    },
+    {
       "path": "tests/fixtures/compatibility/storage/1.0/schema-fingerprints.json",
       "blake3": "37aae71b93acea8d49bece736d17d8b8c39646328394edd75c68f4e86c1d2ef1"
     },
@@ -170,7 +174,7 @@
     },
     {
       "path": "xtask/src/schemas.rs",
-      "blake3": "5d2627c9a4241acef15340edf1025ac164082a8aa4683e73e480ca4670fe02f4"
+      "blake3": "b07559212001e52faf21cce70087708ac474259cbc0f65f900e31ec7c74f7f54"
     }
   ],
   "artifacts": [
@@ -188,7 +192,7 @@
     },
     {
       "path": "crates/rootlight-protocol/src/generated/rootlight.daemon.v1.rs",
-      "blake3": "af7a0e70a629f89ee926357bcbfb0660938f19a2a86be66de4a1647824632c59"
+      "blake3": "4f5ea902aacd1f68d453b363db47bc0d8bf94d49eac4b3cacefe15e28bd39761"
     },
     {
       "path": "schemas/generated/json/config-1.0.schema.json",
@@ -372,7 +376,7 @@
     },
     {
       "path": "schemas/generated/protobuf/rootlight.desc",
-      "blake3": "3e11d3bce7603728505a1bc82caf84fb57dba4492b5f9d52acf48dbccd1399a5"
+      "blake3": "4830326db78409eec3841d8de18f9a424f2d22407b2d5215617a489e8daa5327"
     }
   ]
 }
