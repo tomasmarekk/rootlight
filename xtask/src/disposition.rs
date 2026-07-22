@@ -3,10 +3,13 @@
 //! Records separate implementation, acceptance, gate, and product-capability
 //! state. Every accepted claim is tied to content metadata and one exact,
 //! reachable source revision without printing evidence content or local paths.
+//! Remote artifact identity comes only from exact repository-tracked snapshots,
+//! keeping validation offline without trusting record-authored identity fields.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, File},
+    io::Read as _,
     path::{Component, Path, PathBuf},
     process::Command,
 };
@@ -17,9 +20,13 @@ use sha2::{Digest, Sha256};
 const SCHEMA_VERSION: &str = "2.0";
 const SUMMARY_FILE: &str = "summary.md";
 const RECORDS_DIR: &str = "records";
+const MAX_SUMMARY_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_RECORD_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_ATTESTATION_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LOCAL_EVIDENCE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_REMOTE_EVIDENCE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_RECORDS: usize = 256;
 const MAX_EVIDENCE_PER_RECORD: usize = 32;
 const MAX_EVIDENCE_PER_CLAIM: usize = 8;
 const MAX_IDENTIFIER_BYTES: usize = 96;
@@ -31,9 +38,25 @@ pub(crate) fn check(root: &Path) -> Result<(), DispositionError> {
     }
 
     let repository_root = find_repository_root(root)?;
-    let summary_text = read_text(&root.join(SUMMARY_FILE), SUMMARY_FILE)?;
+    let summary_text = read_text(&root.join(SUMMARY_FILE), SUMMARY_FILE, MAX_SUMMARY_BYTES)?;
     let (summary, mut problems) = parse_summary(&summary_text);
     let records = load_records(root)?;
+    if summary.is_empty() {
+        problems.push(Problem::new(
+            SUMMARY_FILE,
+            "entries",
+            "",
+            "summary must contain at least one recognized checkbox entry",
+        ));
+    }
+    if records.is_empty() {
+        problems.push(Problem::new(
+            RECORDS_DIR,
+            "records",
+            "",
+            "at least one authoritative record is required",
+        ));
+    }
     let record_index = index_records(&records, &mut problems);
 
     validate_records(root, &repository_root, &records, &mut problems)?;
@@ -98,11 +121,63 @@ fn find_repository_root(root: &Path) -> Result<PathBuf, DispositionError> {
     Ok(PathBuf::from(path))
 }
 
-fn read_text(path: &Path, logical_path: &str) -> Result<String, DispositionError> {
-    fs::read_to_string(path).map_err(|source| DispositionError::Read {
+fn read_text(
+    path: &Path,
+    logical_path: &str,
+    maximum_bytes: u64,
+) -> Result<String, DispositionError> {
+    let bytes = read_bounded(path, logical_path, maximum_bytes)?;
+    String::from_utf8(bytes).map_err(|_| DispositionError::InvalidUtf8 {
+        path: logical_path.to_owned(),
+    })
+}
+
+fn read_bounded(
+    path: &Path,
+    logical_path: &str,
+    maximum_bytes: u64,
+) -> Result<Vec<u8>, DispositionError> {
+    let file = File::open(path).map_err(|source| DispositionError::Read {
         path: logical_path.to_owned(),
         source,
-    })
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|source| DispositionError::Read {
+            path: logical_path.to_owned(),
+            source,
+        })?
+        .len();
+    if length > maximum_bytes {
+        return Err(DispositionError::TooLarge {
+            path: logical_path.to_owned(),
+            maximum_bytes,
+        });
+    }
+    let capacity = usize::try_from(length).map_err(|_| DispositionError::TooLarge {
+        path: logical_path.to_owned(),
+        maximum_bytes,
+    })?;
+    let read_limit = maximum_bytes
+        .checked_add(1)
+        .ok_or_else(|| DispositionError::TooLarge {
+            path: logical_path.to_owned(),
+            maximum_bytes,
+        })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|source| DispositionError::Read {
+            path: logical_path.to_owned(),
+            source,
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum_bytes {
+        return Err(DispositionError::TooLarge {
+            path: logical_path.to_owned(),
+            maximum_bytes,
+        });
+    }
+    Ok(bytes)
 }
 
 #[derive(Debug)]
@@ -115,12 +190,19 @@ fn parse_summary(text: &str) -> (BTreeMap<String, SummaryEntry>, Vec<Problem>) {
     let mut entries = BTreeMap::new();
     let mut problems = Vec::new();
     for (line_index, line) in text.lines().enumerate() {
-        let trimmed = line.trim_start();
-        let rest = match trimmed.strip_prefix("[X] ") {
-            Some(rest) => Some((rest, true)),
-            None => trimmed.strip_prefix("[ ] ").map(|rest| (rest, false)),
+        let parsed = match parse_summary_line(line) {
+            Ok(parsed) => parsed,
+            Err(()) => {
+                problems.push(Problem::new(
+                    SUMMARY_FILE,
+                    &format!("line {}", line_index + 1),
+                    "",
+                    "malformed summary checkbox entry",
+                ));
+                continue;
+            }
         };
-        let Some((rest, checked)) = rest else {
+        let Some((rest, checked)) = parsed else {
             continue;
         };
         let id = rest
@@ -153,6 +235,33 @@ fn parse_summary(text: &str) -> (BTreeMap<String, SummaryEntry>, Vec<Problem>) {
     (entries, problems)
 }
 
+fn parse_summary_line(line: &str) -> Result<Option<(&str, bool)>, ()> {
+    let trimmed = line.trim_start();
+    let candidate = ["- ", "* ", "+ "]
+        .iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix))
+        .unwrap_or(trimmed);
+    let Some(after_open) = candidate.strip_prefix('[') else {
+        return Ok(None);
+    };
+    let Some((marker, remainder)) = after_open.split_once(']') else {
+        return Ok(None);
+    };
+    if marker.len() != 1 {
+        return Ok(None);
+    }
+    let checked = match marker {
+        "X" | "x" => true,
+        " " => false,
+        _ => return Err(()),
+    };
+    let rest = remainder.strip_prefix(' ').ok_or(())?;
+    if rest.trim().is_empty() {
+        return Err(());
+    }
+    Ok(Some((rest, checked)))
+}
+
 #[derive(Debug)]
 struct LoadedRecord {
     path: String,
@@ -169,13 +278,27 @@ fn load_records(root: &Path) -> Result<Vec<LoadedRecord>, DispositionError> {
             path: RECORDS_DIR.to_owned(),
             source,
         })?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|source| DispositionError::ReadDir {
+                    path: RECORDS_DIR.to_owned(),
+                    source,
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|path| {
             path.extension()
                 .is_some_and(|extension| extension == "toml")
         })
         .collect();
     paths.sort();
+    if paths.len() > MAX_RECORDS {
+        return Err(DispositionError::TooManyRecords {
+            maximum: MAX_RECORDS,
+        });
+    }
 
     paths
         .into_iter()
@@ -185,7 +308,7 @@ fn load_records(root: &Path) -> Result<Vec<LoadedRecord>, DispositionError> {
                 .and_then(|name| name.to_str())
                 .ok_or(DispositionError::InvalidRecordFileName)?;
             let logical_path = format!("{RECORDS_DIR}/{file_name}");
-            let text = read_text(&path, &logical_path)?;
+            let text = read_text(&path, &logical_path, MAX_RECORD_BYTES)?;
             let table =
                 toml::from_str::<toml::Table>(&text).map_err(|_| DispositionError::Parse {
                     path: logical_path.clone(),
@@ -326,15 +449,22 @@ fn validate_revision(
 }
 
 fn revision_is_reachable(repository_root: &Path, revision: &str) -> Result<bool, DispositionError> {
-    let object = format!("{revision}^{{commit}}");
     let output = Command::new("git")
         .arg("-C")
         .arg(repository_root)
-        .args(["cat-file", "-e"])
-        .arg(object)
+        .args([
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            "--contains",
+            revision,
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ])
         .output()
         .map_err(|source| DispositionError::Git { source })?;
-    Ok(output.status.success())
+    Ok(output.status.success() && !output.stdout.is_empty())
 }
 
 fn validate_state_combination(loaded: &LoadedRecord, problems: &mut Vec<Problem>) {
@@ -508,10 +638,7 @@ fn validate_bound_document(
     else {
         return Ok(None);
     };
-    let bytes = fs::read(path).map_err(|source| DispositionError::Read {
-        path: binding.path.clone(),
-        source,
-    })?;
+    let bytes = read_bounded(&path, &binding.path, maximum_bytes)?;
     validate_content_metadata(
         &loaded.path,
         field,
@@ -693,26 +820,9 @@ fn validate_evidence(
             EvidenceSource::Local { path } => {
                 validate_local_evidence(repository_root, loaded, evidence, path, problems)?;
             }
-            EvidenceSource::GithubArtifact(artifact) => validate_github_evidence(
-                loaded,
-                evidence,
-                GithubArtifactIdentity {
-                    repository: &artifact.repository,
-                    run_id: artifact.run_id,
-                    run_attempt: artifact.run_attempt,
-                    job_id: artifact.job_id,
-                    artifact_id: artifact.artifact_id,
-                    artifact_name: &artifact.artifact_name,
-                    head_sha: &artifact.head_sha,
-                    run_url: &artifact.run_url,
-                    job_url: &artifact.job_url,
-                    api_url: &artifact.api_url,
-                    archive_url: &artifact.archive_url,
-                    api_digest: &artifact.api_digest,
-                    api_bytes: artifact.api_bytes,
-                },
-                problems,
-            ),
+            EvidenceSource::GithubArtifact(attestation) => {
+                validate_github_evidence(repository_root, loaded, evidence, attestation, problems)?;
+            }
         }
     }
     Ok(())
@@ -737,10 +847,7 @@ fn validate_local_evidence(
     else {
         return Ok(());
     };
-    let bytes = fs::read(path_buf).map_err(|source| DispositionError::Read {
-        path: path.to_owned(),
-        source,
-    })?;
+    let bytes = read_bounded(&path_buf, path, MAX_LOCAL_EVIDENCE_BYTES)?;
     validate_content_metadata(
         &loaded.path,
         &field,
@@ -770,30 +877,108 @@ fn validate_local_evidence(
     Ok(())
 }
 
-struct GithubArtifactIdentity<'a> {
-    repository: &'a str,
+fn validate_github_evidence(
+    repository_root: &Path,
+    loaded: &LoadedRecord,
+    evidence: &Evidence,
+    attestation: &DocumentBinding,
+    problems: &mut Vec<Problem>,
+) -> Result<(), DispositionError> {
+    let field = format!("evidence.{}.attestation", evidence.id);
+    validate_binding_metadata(
+        &loaded.path,
+        &field,
+        &loaded.record.id,
+        BindingMetadata {
+            record_revision: &loaded.record.source_revision,
+            binding_revision: &attestation.source_revision,
+            digest: &attestation.sha256,
+            bytes: attestation.bytes,
+            maximum_bytes: MAX_ATTESTATION_BYTES,
+        },
+        problems,
+    );
+    let Some(path) = resolve_local_reference(
+        repository_root,
+        &attestation.path,
+        &loaded.path,
+        &field,
+        &loaded.record.id,
+        problems,
+    )?
+    else {
+        return Ok(());
+    };
+    let bytes = read_bounded(&path, &attestation.path, MAX_ATTESTATION_BYTES)?;
+    validate_content_metadata(
+        &loaded.path,
+        &field,
+        &loaded.record.id,
+        &bytes,
+        attestation.bytes,
+        &attestation.sha256,
+        problems,
+    );
+    if !head_contains_exact_file(repository_root, &path, &bytes)? {
+        problems.push(Problem::new(
+            &loaded.path,
+            &field,
+            &loaded.record.id,
+            "GitHub attestation must exactly match a repository-tracked HEAD blob",
+        ));
+        return Ok(());
+    }
+    let identity = match serde_json::from_slice::<GithubArtifactAttestation>(&bytes) {
+        Ok(identity) => identity,
+        Err(_) => {
+            problems.push(Problem::new(
+                &loaded.path,
+                &field,
+                &loaded.record.id,
+                "GitHub attestation is not a recognized JSON document",
+            ));
+            return Ok(());
+        }
+    };
+    validate_github_identity(loaded, evidence, &identity, problems);
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GithubArtifactAttestation {
+    schema_version: String,
+    repository: String,
     run_id: u64,
     run_attempt: u32,
     job_id: u64,
     artifact_id: u64,
-    artifact_name: &'a str,
-    head_sha: &'a str,
-    run_url: &'a str,
-    job_url: &'a str,
-    api_url: &'a str,
-    archive_url: &'a str,
-    api_digest: &'a str,
+    artifact_name: String,
+    head_sha: String,
+    run_url: String,
+    job_url: String,
+    api_url: String,
+    archive_url: String,
+    api_digest: String,
     api_bytes: u64,
 }
 
-fn validate_github_evidence(
+fn validate_github_identity(
     loaded: &LoadedRecord,
     evidence: &Evidence,
-    identity: GithubArtifactIdentity<'_>,
+    identity: &GithubArtifactAttestation,
     problems: &mut Vec<Problem>,
 ) {
     let field = format!("evidence.{}", evidence.id);
-    if !is_github_repository(identity.repository) {
+    if identity.schema_version != "1.0" {
+        problems.push(Problem::new(
+            &loaded.path,
+            &field,
+            &loaded.record.id,
+            "GitHub attestation schema version is unsupported",
+        ));
+    }
+    if !is_github_repository(&identity.repository) {
         problems.push(Problem::new(
             &loaded.path,
             &field,
@@ -894,6 +1079,85 @@ fn validate_github_evidence(
             "GitHub API byte count differs from the bound byte count",
         ));
     }
+}
+
+fn head_contains_exact_file(
+    repository_root: &Path,
+    path: &Path,
+    expected: &[u8],
+) -> Result<bool, DispositionError> {
+    let canonical_root =
+        fs::canonicalize(repository_root).map_err(|source| DispositionError::Read {
+            path: ".".to_owned(),
+            source,
+        })?;
+    let relative = path
+        .strip_prefix(&canonical_root)
+        .map_err(|_| DispositionError::InvalidGitOutput)?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(value) = component else {
+            return Ok(false);
+        };
+        let Some(value) = value.to_str() else {
+            return Ok(false);
+        };
+        components.push(value);
+    }
+    if components.is_empty() {
+        return Ok(false);
+    }
+    let object_spec = format!("HEAD:{}", components.join("/"));
+    let object = Command::new("git")
+        .arg("-C")
+        .arg(repository_root)
+        .args(["rev-parse", "--verify", "--end-of-options"])
+        .arg(object_spec)
+        .output()
+        .map_err(|source| DispositionError::Git { source })?;
+    if !object.status.success() || object.stdout.len() > 129 {
+        return Ok(false);
+    }
+    let object_id = String::from_utf8(object.stdout)
+        .map_err(|_| DispositionError::InvalidGitOutput)?
+        .trim()
+        .to_owned();
+    if !is_full_revision(&object_id) {
+        return Ok(false);
+    }
+
+    let kind = Command::new("git")
+        .arg("-C")
+        .arg(repository_root)
+        .args(["cat-file", "-t", &object_id])
+        .output()
+        .map_err(|source| DispositionError::Git { source })?;
+    if !kind.status.success() || kind.stdout.as_slice() != b"blob\n" {
+        return Ok(false);
+    }
+    let size = Command::new("git")
+        .arg("-C")
+        .arg(repository_root)
+        .args(["cat-file", "-s", &object_id])
+        .output()
+        .map_err(|source| DispositionError::Git { source })?;
+    if !size.status.success() || size.stdout.len() > 32 {
+        return Ok(false);
+    }
+    let size = std::str::from_utf8(&size.stdout)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let expected_len = u64::try_from(expected.len()).unwrap_or(u64::MAX);
+    if size != Some(expected_len) || expected_len > MAX_ATTESTATION_BYTES {
+        return Ok(false);
+    }
+    let content = Command::new("git")
+        .arg("-C")
+        .arg(repository_root)
+        .args(["cat-file", "blob", &object_id])
+        .output()
+        .map_err(|source| DispositionError::Git { source })?;
+    Ok(content.status.success() && content.stdout == expected)
 }
 
 fn validate_capabilities(loaded: &LoadedRecord, problems: &mut Vec<Problem>) {
@@ -1038,6 +1302,14 @@ fn validate_capability_graph(records: &[LoadedRecord], problems: &mut Vec<Proble
 
     for (id, (loaded, capability)) in &capabilities {
         for dependency in &capability.depends_on {
+            if dependency == id {
+                problems.push(Problem::new(
+                    &loaded.path,
+                    "capabilities.depends_on",
+                    &loaded.record.id,
+                    "capability cannot depend on itself",
+                ));
+            }
             let Some((upstream_record, upstream)) = capabilities.get(dependency.as_str()) else {
                 problems.push(Problem::new(
                     &loaded.path,
@@ -1083,6 +1355,14 @@ fn validate_capability_graph(records: &[LoadedRecord], problems: &mut Vec<Proble
             }
         }
         for unlocked in &capability.unlocks {
+            if unlocked == id {
+                problems.push(Problem::new(
+                    &loaded.path,
+                    "capabilities.unlocks",
+                    &loaded.record.id,
+                    "capability cannot unlock itself",
+                ));
+            }
             let Some((downstream_record, downstream)) = capabilities.get(unlocked.as_str()) else {
                 problems.push(Problem::new(
                     &loaded.path,
@@ -1114,6 +1394,32 @@ fn validate_capability_graph(records: &[LoadedRecord], problems: &mut Vec<Proble
                 ));
             }
         }
+    }
+
+    let graph = capabilities
+        .iter()
+        .map(|(id, (_, capability))| {
+            (
+                *id,
+                capability
+                    .depends_on
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|dependency| capabilities.contains_key(dependency))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for id in cyclic_nodes(&graph) {
+        let Some((loaded, _)) = capabilities.get(id) else {
+            continue;
+        };
+        problems.push(Problem::new(
+            &loaded.path,
+            "capabilities.depends_on",
+            &loaded.record.id,
+            "capability dependency graph contains a cycle",
+        ));
     }
 }
 
@@ -1331,7 +1637,7 @@ fn resolve_local_reference(
         ));
         return Ok(None);
     }
-    Ok(Some(path))
+    Ok(Some(canonical_path))
 }
 
 fn validate_summary(
@@ -1377,6 +1683,14 @@ fn validate_record_dependencies(
 ) {
     for (id, loaded) in records {
         for dependency in &loaded.record.dependencies {
+            if dependency == id {
+                problems.push(Problem::new(
+                    &loaded.path,
+                    "dependencies",
+                    id,
+                    "record cannot depend on itself",
+                ));
+            }
             let Some(upstream) = records.get(dependency) else {
                 problems.push(Problem::new(
                     &loaded.path,
@@ -1407,6 +1721,14 @@ fn validate_record_dependencies(
             }
         }
         for dependent in &loaded.record.dependents {
+            if dependent == id {
+                problems.push(Problem::new(
+                    &loaded.path,
+                    "dependents",
+                    id,
+                    "record cannot declare itself as a dependent",
+                ));
+            }
             let Some(downstream) = records.get(dependent) else {
                 problems.push(Problem::new(
                     &loaded.path,
@@ -1431,12 +1753,60 @@ fn validate_record_dependencies(
             }
         }
     }
+
+    let graph = records
+        .iter()
+        .map(|(id, loaded)| {
+            (
+                id.as_str(),
+                loaded
+                    .record
+                    .dependencies
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|dependency| records.contains_key(*dependency))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for id in cyclic_nodes(&graph) {
+        let Some(loaded) = records.get(id) else {
+            continue;
+        };
+        problems.push(Problem::new(
+            &loaded.path,
+            "dependencies",
+            id,
+            "record dependency graph contains a cycle",
+        ));
+    }
+}
+
+fn cyclic_nodes<'a>(graph: &BTreeMap<&'a str, Vec<&'a str>>) -> BTreeSet<&'a str> {
+    let mut cyclic = BTreeSet::new();
+    for start in graph.keys().copied() {
+        let mut visited = BTreeSet::new();
+        let mut pending = graph.get(start).cloned().unwrap_or_default();
+        while let Some(node) = pending.pop() {
+            if node == start {
+                cyclic.insert(start);
+                break;
+            }
+            if !visited.insert(node) {
+                continue;
+            }
+            if let Some(dependencies) = graph.get(node) {
+                pending.extend(dependencies.iter().copied());
+            }
+        }
+    }
+    cyclic
 }
 
 fn parse_detail_status(text: &str) -> Option<bool> {
     text.lines().find_map(|line| {
         let status = line.trim().strip_prefix("Status:")?.trim();
-        if status.starts_with("[X]") {
+        if status.starts_with("[X]") || status.starts_with("[x]") {
             Some(true)
         } else if status.starts_with("[ ]") {
             Some(false)
@@ -1467,14 +1837,16 @@ struct ChecklistRow {
 }
 
 fn parse_checklist_rows(text: &str) -> Vec<ChecklistRow> {
-    text.lines()
+    text.split_terminator('\n')
         .enumerate()
         .filter_map(|(index, line)| {
             let trimmed = line.trim();
             if trimmed.starts_with("Status:") {
                 return None;
             }
-            let (position, checked) = match (trimmed.find("[X] "), trimmed.find("[ ] ")) {
+            let checked_position = trimmed.find("[X] ").or_else(|| trimmed.find("[x] "));
+            let unchecked_position = trimmed.find("[ ] ");
+            let (position, checked) = match (checked_position, unchecked_position) {
                 (Some(position), None) => (position, true),
                 (None, Some(position)) => (position, false),
                 _ => return None,
@@ -1489,7 +1861,7 @@ fn parse_checklist_rows(text: &str) -> Vec<ChecklistRow> {
             Some(ChecklistRow {
                 line: index + 1,
                 checked,
-                sha256: sha256_hex(trimmed.as_bytes()),
+                sha256: sha256_hex(line.as_bytes()),
             })
         })
         .collect()
@@ -1652,25 +2024,7 @@ struct Evidence {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum EvidenceSource {
     Local { path: String },
-    GithubArtifact(Box<GithubArtifactSource>),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GithubArtifactSource {
-    repository: String,
-    run_id: u64,
-    run_attempt: u32,
-    job_id: u64,
-    artifact_id: u64,
-    artifact_name: String,
-    head_sha: String,
-    run_url: String,
-    job_url: String,
-    api_url: String,
-    archive_url: String,
-    api_digest: String,
-    api_bytes: u64,
+    GithubArtifact(Box<DocumentBinding>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -1836,6 +2190,12 @@ pub(crate) enum DispositionError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{path} exceeds the {maximum_bytes}-byte input limit")]
+    TooLarge { path: String, maximum_bytes: u64 },
+    #[error("{path} is not valid UTF-8")]
+    InvalidUtf8 { path: String },
+    #[error("records exceed the {maximum}-record limit")]
+    TooManyRecords { maximum: usize },
     #[error("failed to parse {path}")]
     Parse { path: String },
     #[error(
@@ -1992,6 +2352,26 @@ mod tests {
                 .replace(from, to);
             fs::write(path, text).expect("replace record content");
         }
+
+        fn write_attestation(&self, id: &str, content: &str, commit: bool) -> String {
+            let relative_path = format!("attestations/{id}.json");
+            fs::create_dir_all(self.root().join("attestations"))
+                .expect("create attestations directory");
+            fs::write(self.root().join(&relative_path), content).expect("write attestation");
+            if commit {
+                run_git(self.root(), &["add", &relative_path]);
+                run_git(
+                    self.root(),
+                    &["commit", "--quiet", "-m", "add fixture attestation"],
+                );
+            }
+            format!(
+                "source = {{ kind = \"github_artifact\", path = \"{relative_path}\", source_revision = \"{}\", sha256 = \"{}\", bytes = {} }}",
+                self.revision,
+                sha256_hex(content.as_bytes()),
+                content.len()
+            )
+        }
     }
 
     fn run_git(root: &Path, args: &[&str]) {
@@ -2008,6 +2388,24 @@ mod tests {
         );
     }
 
+    fn git_stdout(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("run Git");
+        assert!(
+            output.status.success(),
+            "Git command failed: {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("Git output is UTF-8")
+            .trim()
+            .to_owned()
+    }
+
     fn error_message(repository: &TestRepository) -> String {
         check(repository.root())
             .expect_err("fixture must fail")
@@ -2021,10 +2419,123 @@ mod tests {
     }
 
     #[test]
+    fn present_root_requires_summary_entries_and_records() {
+        let repository = TestRepository::new();
+        fs::write(repository.root().join(SUMMARY_FILE), "# Empty fixture\n")
+            .expect("write empty summary");
+        fs::create_dir(repository.root().join(RECORDS_DIR)).expect("create empty records");
+        let message = error_message(&repository);
+        assert!(
+            message.contains("at least one recognized checkbox entry"),
+            "{message}"
+        );
+        assert!(
+            message.contains("at least one authoritative record"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn oversized_summary_record_document_and_evidence_are_rejected_before_reading() {
+        let summary_repository = TestRepository::new();
+        File::create(summary_repository.root().join(SUMMARY_FILE))
+            .expect("create summary")
+            .set_len(MAX_SUMMARY_BYTES + 1)
+            .expect("size summary");
+        assert!(
+            check(summary_repository.root())
+                .expect_err("oversized summary must fail")
+                .to_string()
+                .contains("input limit")
+        );
+
+        let record_repository = TestRepository::new();
+        record_repository.write_valid("alpha", "pass", true);
+        File::create(record_repository.record_path("alpha"))
+            .expect("open record")
+            .set_len(MAX_RECORD_BYTES + 1)
+            .expect("size record");
+        assert!(
+            check(record_repository.root())
+                .expect_err("oversized record must fail")
+                .to_string()
+                .contains("input limit")
+        );
+
+        let document_repository = TestRepository::new();
+        document_repository.write_valid("alpha", "pass", true);
+        File::create(document_repository.root().join("details/alpha.md"))
+            .expect("open detail")
+            .set_len(MAX_DOCUMENT_BYTES + 1)
+            .expect("size detail");
+        assert!(
+            check(document_repository.root())
+                .expect_err("oversized detail must fail")
+                .to_string()
+                .contains("input limit")
+        );
+
+        let evidence_repository = TestRepository::new();
+        evidence_repository.write_valid("alpha", "pass", true);
+        File::create(evidence_repository.root().join("evidence/alpha.json"))
+            .expect("open evidence")
+            .set_len(MAX_LOCAL_EVIDENCE_BYTES + 1)
+            .expect("size evidence");
+        assert!(
+            check(evidence_repository.root())
+                .expect_err("oversized evidence must fail")
+                .to_string()
+                .contains("input limit")
+        );
+    }
+
+    #[test]
+    fn malformed_summary_checkbox_is_rejected() {
+        let repository = TestRepository::new();
+        repository.write_valid("alpha", "pass", true);
+        fs::write(
+            repository.root().join(SUMMARY_FILE),
+            "- [?] alpha, Synthetic stage\n",
+        )
+        .expect("write malformed summary");
+        let message = error_message(&repository);
+        assert!(message.contains("malformed summary checkbox"), "{message}");
+    }
+
+    #[test]
+    fn summary_accepts_uppercase_and_lowercase_gfm_checkboxes() {
+        let (entries, problems) =
+            parse_summary("- [x] alpha, First\n* [X] bravo, Second\n+ [ ] charlie, Third\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(entries.get("alpha").is_some_and(|entry| entry.checked));
+        assert!(entries.get("bravo").is_some_and(|entry| entry.checked));
+        assert!(entries.get("charlie").is_some_and(|entry| !entry.checked));
+        assert_eq!(parse_detail_status("Status: [x] accepted\n"), Some(true));
+    }
+
+    #[test]
     fn valid_content_bound_disposition_passes() {
         let repository = TestRepository::new();
         repository.write_valid("alpha", "pass", true);
         assert!(check(repository.root()).is_ok());
+    }
+
+    #[test]
+    fn dangling_commit_object_is_not_reachable_from_repository_refs() {
+        let repository = TestRepository::new();
+        let tree = git_stdout(repository.root(), &["rev-parse", "HEAD^{tree}"]);
+        let dangling = git_stdout(
+            repository.root(),
+            &["commit-tree", &tree, "-m", "dangling fixture"],
+        );
+        assert!(
+            revision_is_reachable(repository.root(), &repository.revision)
+                .expect("inspect referenced revision")
+        );
+        assert!(
+            !revision_is_reachable(repository.root(), &dangling)
+                .expect("inspect dangling revision")
+        );
     }
 
     #[test]
@@ -2093,10 +2604,9 @@ mod tests {
     fn arbitrary_remote_url_is_rejected() {
         let repository = TestRepository::new();
         repository.write_valid("alpha", "pass", true);
-        let path = repository.record_path("alpha");
         let evidence =
             fs::read(repository.root().join("evidence/alpha.json")).expect("read evidence");
-        let source = github_source(
+        let attestation = github_attestation(
             &repository.revision,
             &sha256_hex(&evidence),
             u64::try_from(evidence.len()).expect("evidence length fits u64"),
@@ -2105,55 +2615,152 @@ mod tests {
             "https://api.github.com/repos/owner/project/actions/artifacts/3",
             "https://example.invalid/proof",
         );
-        let text = fs::read_to_string(&path).expect("read record").replace(
+        let source = repository.write_attestation("alpha", &attestation, true);
+        repository.replace_record(
+            "alpha",
             "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
             &source,
         );
-        fs::write(path, text).expect("write remote evidence");
         assert!(error_message(&repository).contains("not the canonical API endpoint"));
     }
 
     #[test]
-    fn canonical_github_artifact_identity_is_accepted() {
+    fn canonical_tracked_github_attestation_is_accepted() {
         let repository = TestRepository::new();
         repository.write_valid("alpha", "pass", true);
         let evidence =
             fs::read(repository.root().join("evidence/alpha.json")).expect("read evidence");
+        let attestation = github_attestation(
+            &repository.revision,
+            &sha256_hex(&evidence),
+            u64::try_from(evidence.len()).expect("evidence length fits u64"),
+        );
+        let source = repository.write_attestation("alpha", &attestation, true);
         repository.replace_record(
             "alpha",
             "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
-            &github_source(
-                &repository.revision,
-                &sha256_hex(&evidence),
-                u64::try_from(evidence.len()).expect("evidence length fits u64"),
-            ),
+            &source,
         );
         assert!(check(repository.root()).is_ok());
     }
 
     #[test]
-    fn github_artifact_digest_bytes_and_revision_must_match_binding() {
+    fn untracked_github_attestation_is_rejected() {
         let repository = TestRepository::new();
         repository.write_valid("alpha", "pass", true);
         let evidence =
             fs::read(repository.root().join("evidence/alpha.json")).expect("read evidence");
-        let source = github_source(
+        let attestation = github_attestation(
+            &repository.revision,
+            &sha256_hex(&evidence),
+            u64::try_from(evidence.len()).expect("evidence length fits u64"),
+        );
+        let source = repository.write_attestation("alpha", &attestation, false);
+        repository.replace_record(
+            "alpha",
+            "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
+            &source,
+        );
+        assert!(
+            error_message(&repository).contains("repository-tracked HEAD blob"),
+            "untracked attestation must fail closed"
+        );
+    }
+
+    #[test]
+    fn modified_github_attestation_must_match_the_tracked_blob() {
+        let repository = TestRepository::new();
+        repository.write_valid("alpha", "pass", true);
+        let evidence =
+            fs::read(repository.root().join("evidence/alpha.json")).expect("read evidence");
+        let attestation = github_attestation(
+            &repository.revision,
+            &sha256_hex(&evidence),
+            u64::try_from(evidence.len()).expect("evidence length fits u64"),
+        );
+        let tracked_source = repository.write_attestation("alpha", &attestation, true);
+        repository.replace_record(
+            "alpha",
+            "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
+            &tracked_source,
+        );
+
+        let modified = format!("{attestation}\n");
+        let modified_source = repository.write_attestation("alpha", &modified, false);
+        repository.replace_record("alpha", &tracked_source, &modified_source);
+        assert!(
+            error_message(&repository).contains("repository-tracked HEAD blob"),
+            "worktree-only attestation bytes must fail closed"
+        );
+    }
+
+    #[test]
+    fn github_attestation_raw_digest_and_size_are_enforced() {
+        let repository = TestRepository::new();
+        repository.write_valid("alpha", "pass", true);
+        let evidence =
+            fs::read(repository.root().join("evidence/alpha.json")).expect("read evidence");
+        let attestation = github_attestation(
+            &repository.revision,
+            &sha256_hex(&evidence),
+            u64::try_from(evidence.len()).expect("evidence length fits u64"),
+        );
+        let source = repository
+            .write_attestation("alpha", &attestation, true)
+            .replace(
+                &sha256_hex(attestation.as_bytes()),
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .replace(&format!("bytes = {}", attestation.len()), "bytes = 1");
+        repository.replace_record(
+            "alpha",
+            "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
+            &source,
+        );
+        let message = error_message(&repository);
+        assert!(message.contains("bound SHA-256 differs"), "{message}");
+        assert!(message.contains("bound byte count differs"), "{message}");
+    }
+
+    #[test]
+    fn self_asserted_github_identity_in_record_is_rejected() {
+        let repository = TestRepository::new();
+        repository.write_valid("alpha", "pass", true);
+        repository.replace_record(
+            "alpha",
+            "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
+            "source = { kind = \"github_artifact\", repository = \"owner/project\", run_id = 1, run_attempt = 1, job_id = 2, artifact_id = 3, artifact_name = \"proof\" }",
+        );
+        assert!(
+            error_message(&repository).contains("failed to parse records/alpha.toml"),
+            "record-only identity must not deserialize"
+        );
+    }
+
+    #[test]
+    fn github_attestation_digest_bytes_and_revision_must_match_binding() {
+        let repository = TestRepository::new();
+        repository.write_valid("alpha", "pass", true);
+        let evidence =
+            fs::read(repository.root().join("evidence/alpha.json")).expect("read evidence");
+        let attestation = github_attestation(
             &repository.revision,
             &sha256_hex(&evidence),
             u64::try_from(evidence.len()).expect("evidence length fits u64"),
         )
         .replace(
-            &format!("head_sha = \"{}\"", repository.revision),
-            "head_sha = \"0000000000000000000000000000000000000000\"",
+            &format!("\"head_sha\":\"{}\"", repository.revision),
+            "\"head_sha\":\"0000000000000000000000000000000000000000\"",
         )
         .replace(
-            &format!("api_digest = \"sha256:{}\"", sha256_hex(&evidence)),
-            "api_digest = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"",
+            &format!("\"api_digest\":\"sha256:{}\"", sha256_hex(&evidence)),
+            "\"api_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\"",
         )
         .replace(
-            &format!("api_bytes = {}", evidence.len()),
-            "api_bytes = 1",
+            &format!("\"api_bytes\":{}", evidence.len()),
+            "\"api_bytes\":1",
         );
+        let source = repository.write_attestation("alpha", &attestation, true);
         repository.replace_record(
             "alpha",
             "source = { kind = \"local\", path = \"evidence/alpha.json\" }",
@@ -2243,6 +2850,45 @@ mod tests {
     }
 
     #[test]
+    fn lowercase_checklist_rows_hash_exact_raw_indentation() {
+        let line = "    - [x] Observable criterion";
+        let rows = parse_checklist_rows(&format!("{line}\n"));
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].checked);
+        assert_eq!(rows[0].sha256, sha256_hex(line.as_bytes()));
+    }
+
+    #[test]
+    fn checklist_indentation_change_stales_the_mapping_digest() {
+        let repository = TestRepository::new();
+        repository.write_valid("alpha", "pass", true);
+        let detail_path = repository.root().join("details/alpha.md");
+        let original_detail = fs::read_to_string(&detail_path).expect("read detail");
+        let indented_detail =
+            original_detail.replace("- [X] Observable criterion", "  - [X] Observable criterion");
+        fs::write(&detail_path, &indented_detail).expect("write indented detail");
+
+        let record_path = repository.record_path("alpha");
+        let record = fs::read_to_string(&record_path).expect("read record");
+        let record = record
+            .replacen(
+                &sha256_hex(original_detail.as_bytes()),
+                &sha256_hex(indented_detail.as_bytes()),
+                1,
+            )
+            .replacen(
+                &format!("bytes = {}", original_detail.len()),
+                &format!("bytes = {}", indented_detail.len()),
+                1,
+            );
+        fs::write(record_path, record).expect("rebind detail document");
+        assert!(
+            error_message(&repository).contains("stale digest"),
+            "indentation must be part of the checklist digest"
+        );
+    }
+
+    #[test]
     fn accepted_header_with_unresolved_row_is_rejected() {
         let repository = TestRepository::new();
         repository.write_valid("alpha", "pass", true);
@@ -2285,6 +2931,47 @@ mod tests {
         repository.replace_record("alpha", "dependents = []", "dependents = [\"bravo\"]");
         repository.replace_record("bravo", "dependencies = []", "dependencies = [\"alpha\"]");
         assert!(error_message(&repository).contains("upstream alpha is unaccepted"));
+    }
+
+    #[test]
+    fn record_self_dependency_is_rejected() {
+        let repository = TestRepository::new();
+        repository.write_valid("alpha", "pass", true);
+        repository.replace_record("alpha", "dependencies = []", "dependencies = [\"alpha\"]");
+        repository.replace_record("alpha", "dependents = []", "dependents = [\"alpha\"]");
+        let message = error_message(&repository);
+        assert!(
+            message.contains("record cannot depend on itself"),
+            "{message}"
+        );
+        assert!(
+            message.contains("record dependency graph contains a cycle"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn record_dependency_cycle_is_rejected() {
+        let repository = TestRepository::new();
+        repository.write_valid("alpha", "pass", true);
+        let alpha_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read alpha summary");
+        repository.write_valid("bravo", "pass", true);
+        let bravo_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read bravo summary");
+        fs::write(
+            repository.root().join(SUMMARY_FILE),
+            format!("{alpha_summary}{bravo_summary}"),
+        )
+        .expect("write combined summary");
+        repository.replace_record("alpha", "dependencies = []", "dependencies = [\"bravo\"]");
+        repository.replace_record("alpha", "dependents = []", "dependents = [\"bravo\"]");
+        repository.replace_record("bravo", "dependencies = []", "dependencies = [\"alpha\"]");
+        repository.replace_record("bravo", "dependents = []", "dependents = [\"alpha\"]");
+        assert!(
+            error_message(&repository).contains("record dependency graph contains a cycle"),
+            "mutual record dependencies must fail"
+        );
     }
 
     #[test]
@@ -2337,6 +3024,59 @@ mod tests {
     }
 
     #[test]
+    fn capability_self_dependency_is_rejected() {
+        let repository = TestRepository::new();
+        repository.write_valid("alpha", "pass", true);
+        repository.replace_record(
+            "alpha",
+            "depends_on = []",
+            "depends_on = [\"alpha.capability\"]",
+        );
+        repository.replace_record("alpha", "unlocks = []", "unlocks = [\"alpha.capability\"]");
+        let message = error_message(&repository);
+        assert!(
+            message.contains("capability cannot depend on itself"),
+            "{message}"
+        );
+        assert!(
+            message.contains("capability dependency graph contains a cycle"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn capability_dependency_cycle_is_rejected() {
+        let repository = TestRepository::new();
+        repository.write_valid("alpha", "pass", true);
+        let alpha_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read alpha summary");
+        repository.write_valid("bravo", "pass", true);
+        let bravo_summary =
+            fs::read_to_string(repository.root().join(SUMMARY_FILE)).expect("read bravo summary");
+        fs::write(
+            repository.root().join(SUMMARY_FILE),
+            format!("{alpha_summary}{bravo_summary}"),
+        )
+        .expect("write combined summary");
+        repository.replace_record(
+            "alpha",
+            "depends_on = []",
+            "depends_on = [\"bravo.capability\"]",
+        );
+        repository.replace_record("alpha", "unlocks = []", "unlocks = [\"bravo.capability\"]");
+        repository.replace_record(
+            "bravo",
+            "depends_on = []",
+            "depends_on = [\"alpha.capability\"]",
+        );
+        repository.replace_record("bravo", "unlocks = []", "unlocks = [\"alpha.capability\"]");
+        assert!(
+            error_message(&repository).contains("capability dependency graph contains a cycle"),
+            "mutual capability dependencies must fail"
+        );
+    }
+
+    #[test]
     fn escaping_reference_is_rejected_without_absolute_path_leak() {
         let repository = TestRepository::new();
         repository.write_valid("alpha", "pass", true);
@@ -2348,6 +3088,30 @@ mod tests {
         let message = error_message(&repository);
         assert!(message.contains("contained relative file"), "{message}");
         assert!(!message.contains(&repository.root().display().to_string()));
+    }
+
+    #[test]
+    fn contained_reference_returns_the_validated_canonical_path() {
+        let repository = TestRepository::new();
+        fs::create_dir(repository.root().join("nested")).expect("create nested directory");
+        fs::write(repository.root().join("proof.json"), "{}\n").expect("write proof");
+        let base = repository.root().join("nested").join("..");
+        let mut problems = Vec::new();
+        let resolved = resolve_local_reference(
+            &base,
+            "proof.json",
+            "records/alpha.toml",
+            "evidence.alpha",
+            "alpha",
+            &mut problems,
+        )
+        .expect("resolve reference")
+        .expect("reference exists");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            resolved,
+            fs::canonicalize(repository.root().join("proof.json")).expect("canonical proof")
+        );
     }
 
     #[test]
@@ -2404,9 +3168,9 @@ mod tests {
         }
     }
 
-    fn github_source(revision: &str, digest: &str, bytes: u64) -> String {
+    fn github_attestation(revision: &str, digest: &str, bytes: u64) -> String {
         format!(
-            "source = {{ kind = \"github_artifact\", repository = \"owner/project\", run_id = 1, run_attempt = 1, job_id = 2, artifact_id = 3, artifact_name = \"proof\", head_sha = \"{revision}\", run_url = \"https://api.github.com/repos/owner/project/actions/runs/1/attempts/1\", job_url = \"https://api.github.com/repos/owner/project/actions/jobs/2\", api_url = \"https://api.github.com/repos/owner/project/actions/artifacts/3\", archive_url = \"https://api.github.com/repos/owner/project/actions/artifacts/3/zip\", api_digest = \"sha256:{digest}\", api_bytes = {bytes} }}"
+            "{{\"schema_version\":\"1.0\",\"repository\":\"owner/project\",\"run_id\":1,\"run_attempt\":1,\"job_id\":2,\"artifact_id\":3,\"artifact_name\":\"proof\",\"head_sha\":\"{revision}\",\"run_url\":\"https://api.github.com/repos/owner/project/actions/runs/1/attempts/1\",\"job_url\":\"https://api.github.com/repos/owner/project/actions/jobs/2\",\"api_url\":\"https://api.github.com/repos/owner/project/actions/artifacts/3\",\"archive_url\":\"https://api.github.com/repos/owner/project/actions/artifacts/3/zip\",\"api_digest\":\"sha256:{digest}\",\"api_bytes\":{bytes}}}\n"
         )
     }
 }
