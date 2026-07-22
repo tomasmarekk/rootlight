@@ -4,6 +4,7 @@
 //! response bytes, and source content bytes separately for every exposure
 //! profile. Unexplained increases in definition cost block review.
 
+use crate::capability::{DISCOVERY_METADATA_KEY, discovery_metadata};
 use crate::catalog::{ExposureProfile, McpTool};
 use crate::vertical::VerticalTool;
 use serde_json::{Map, Value};
@@ -148,6 +149,13 @@ fn tool_definition_value(tool: McpTool) -> Value {
     definition.insert("outputSchema".to_owned(), output_schema);
     definition.insert("annotations".to_owned(), Value::Object(annotations));
     definition.insert("execution".to_owned(), Value::Object(execution));
+    let mut metadata = Map::new();
+    metadata.insert(
+        DISCOVERY_METADATA_KEY.to_owned(),
+        serde_json::to_value(discovery_metadata(tool))
+            .expect("built-in capability metadata serializes"),
+    );
+    definition.insert("_meta".to_owned(), Value::Object(metadata));
 
     Value::Object(definition)
 }
@@ -169,6 +177,7 @@ mod tests {
         measure_tool_list,
     };
     use crate::McpTool;
+    use crate::capability::{DISCOVERY_METADATA_KEY, discovery_metadata};
     use crate::vertical::VerticalTool;
     use serde_json::{Map, Value};
 
@@ -292,6 +301,13 @@ mod tests {
         definition.insert("outputSchema".to_owned(), output_schema);
         definition.insert("annotations".to_owned(), Value::Object(annotations));
         definition.insert("execution".to_owned(), Value::Object(execution));
+        let mut metadata = Map::new();
+        metadata.insert(
+            DISCOVERY_METADATA_KEY.to_owned(),
+            serde_json::to_value(discovery_metadata(tool))
+                .expect("built-in capability metadata serializes"),
+        );
+        definition.insert("_meta".to_owned(), Value::Object(metadata));
 
         Value::Object(definition)
     }

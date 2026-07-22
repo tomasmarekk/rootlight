@@ -8,6 +8,10 @@
 
 use crate::catalog::{ExposureProfile, McpTool};
 use crate::{ErrorCode, MCP_SCHEMA_VERSION};
+use serde::Serialize;
+
+/// Namespaced MCP `_meta` key carrying Rootlight capability discovery.
+pub const DISCOVERY_METADATA_KEY: &str = "rootlight/capabilities";
 
 /// How a public capability is currently satisfied at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +24,17 @@ pub enum CapabilityStatus {
     FallbackLimited,
     /// Accepted by the schema but not safely or observably implemented.
     Blocked,
+}
+
+impl CapabilityStatus {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Implemented => "implemented",
+            Self::UnsupportedStableError => "unsupported_stable_error",
+            Self::FallbackLimited => "fallback_limited",
+            Self::Blocked => "blocked",
+        }
+    }
 }
 
 /// An exception to a tool's default field disposition.
@@ -52,6 +67,16 @@ pub enum PaginationSemantics {
     UnsupportedCursor,
 }
 
+impl PaginationSemantics {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::AuthenticatedCursor => "authenticated_cursor",
+            Self::UnsupportedCursor => "unsupported_cursor",
+        }
+    }
+}
+
 /// Generation behavior advertised for one tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenerationSemantics {
@@ -69,6 +94,19 @@ pub enum GenerationSemantics {
     BatchInherited,
 }
 
+impl GenerationSemantics {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::CreatesGeneration => "creates_generation",
+            Self::SelectsGeneration => "selects_generation",
+            Self::ActiveGenerationFallback => "active_generation_fallback",
+            Self::ComparesGenerations => "compares_generations",
+            Self::BatchInherited => "batch_inherited",
+        }
+    }
+}
+
 /// Budget behavior advertised for one tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetSemantics {
@@ -80,6 +118,65 @@ pub enum BudgetSemantics {
     TokenBudget,
     /// A schema-level budget exists but is rejected by the current executor.
     Unsupported,
+}
+
+impl BudgetSemantics {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::PerRequest => "per_request",
+            Self::TokenBudget => "token_budget",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// Safe machine-readable capability metadata exposed through MCP discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryCapabilityMetadata {
+    /// Public tool contract version.
+    pub contract_version: &'static str,
+    /// Fingerprint of the reviewed generated input shape.
+    pub input_shape_hash: &'static str,
+    /// Aggregate runtime disposition.
+    pub status: &'static str,
+    /// Profiles in which the tool may be discovered.
+    pub profiles: Vec<&'static str>,
+    /// Whether the tool may be nested in a public batch.
+    pub batch_eligible: bool,
+    /// Whether bounded explain mode is served.
+    pub explain_supported: bool,
+    /// Pagination behavior.
+    pub pagination: &'static str,
+    /// Immutable-generation behavior.
+    pub generation: &'static str,
+    /// Request-budget behavior.
+    pub budget: &'static str,
+    /// Whether nested batch operations share one enforced aggregate budget.
+    pub batch_shared_budget: bool,
+    /// Concise source-free aggregate limitation.
+    pub fallback_summary: &'static str,
+    /// Reviewed field or value limitations.
+    pub limitations: Vec<DiscoveryCapabilityLimit>,
+}
+
+/// One safe field/value limitation exposed through discovery metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryCapabilityLimit {
+    /// Generated-schema field path.
+    pub field: &'static str,
+    /// Closed value when the rule applies to one value only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<&'static str>,
+    /// Runtime disposition.
+    pub status: &'static str,
+    /// Stable pre-execution error when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<ErrorCode>,
+    /// Concise source-free explanation.
+    pub summary: &'static str,
 }
 
 /// One tool's canonical capability entry.
@@ -733,6 +830,48 @@ pub const fn is_batch_eligible(tool: McpTool) -> bool {
 /// The canonical capability registry, one entry per tool in catalog order.
 pub const CAPABILITIES: [ToolCapability; 19] = build_capabilities();
 
+/// Returns the canonical capability entry for one catalog tool.
+#[must_use]
+pub const fn capability_for(tool: McpTool) -> &'static ToolCapability {
+    &CAPABILITIES[tool_as_u8(tool) as usize]
+}
+
+/// Builds the source-free capability metadata served through `tools/list`.
+#[must_use]
+pub fn discovery_metadata(tool: McpTool) -> DiscoveryCapabilityMetadata {
+    let capability = capability_for(tool);
+    let limitations = capability
+        .rules
+        .iter()
+        .filter(|rule| rule.status != CapabilityStatus::Implemented)
+        .map(|rule| DiscoveryCapabilityLimit {
+            field: rule.path,
+            value: rule.value,
+            status: rule.status.name(),
+            error_code: rule.error_code,
+            summary: rule.summary,
+        })
+        .collect();
+    DiscoveryCapabilityMetadata {
+        contract_version: capability.contract_version,
+        input_shape_hash: capability.input_shape_hash,
+        status: capability.status.name(),
+        profiles: capability
+            .profiles
+            .iter()
+            .map(|profile| profile.name())
+            .collect(),
+        batch_eligible: capability.batch_eligible,
+        explain_supported: capability.explain_supported,
+        pagination: capability.pagination.name(),
+        generation: capability.generation.name(),
+        budget: capability.budget.name(),
+        batch_shared_budget: capability.batch_shared_budget,
+        fallback_summary: capability.fallback_summary,
+        limitations,
+    }
+}
+
 const fn build_capabilities() -> [ToolCapability; 19] {
     let mut entries = [tool_capability(McpTool::RepoIndex); 19];
     let mut index = 0;
@@ -981,6 +1120,40 @@ mod tests {
                 .status,
             CapabilityStatus::Blocked
         );
+    }
+
+    #[test]
+    fn discovery_metadata_is_source_free_and_matches_the_registry() {
+        use super::{CapabilityStatus, discovery_metadata};
+
+        for entry in &CAPABILITIES {
+            let metadata = discovery_metadata(entry.tool);
+            assert_eq!(metadata.contract_version, entry.contract_version);
+            assert_eq!(metadata.input_shape_hash, entry.input_shape_hash);
+            assert_eq!(
+                metadata.profiles,
+                entry
+                    .profiles
+                    .iter()
+                    .map(|profile| profile.name())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(metadata.batch_eligible, entry.batch_eligible);
+            assert_eq!(metadata.explain_supported, entry.explain_supported);
+            assert_eq!(metadata.batch_shared_budget, entry.batch_shared_budget);
+            assert_eq!(
+                metadata.limitations.len(),
+                entry
+                    .rules
+                    .iter()
+                    .filter(|rule| rule.status != CapabilityStatus::Implemented)
+                    .count()
+            );
+            let encoded = serde_json::to_string(&metadata).expect("capability metadata serializes");
+            assert!(!encoded.contains('\\'));
+            assert!(!encoded.contains("TASK-"));
+            assert!(!encoded.contains("GATE-"));
+        }
     }
 
     #[test]

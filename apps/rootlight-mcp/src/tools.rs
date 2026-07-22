@@ -12,6 +12,7 @@ use rootlight_mcp_contract::{
     PublicError, RepoIndexInput, RepoIndexOutput, RepositorySelector, SchemaVersion,
     SourceReadInput, SourceReadOutput, SymbolExplainInput, SymbolExplainOutput, ToolResponse,
     TrustClassification, VerticalTool,
+    capability::{DISCOVERY_METADATA_KEY, discovery_metadata},
     context::{
         BatchOperation, BatchTool, ContextPackInput, QueryAdvancedInput, QueryAstNode,
         QueryBatchInput,
@@ -514,6 +515,7 @@ impl ToolContract {
                 execution: ToolExecution {
                     task_support: "forbidden",
                 },
+                metadata: tool_metadata(tool),
             },
             input_validator,
             output_validator,
@@ -531,6 +533,8 @@ struct ToolDefinition {
     output_schema: Map<String, Value>,
     annotations: ToolAnnotations,
     execution: ToolExecution,
+    #[serde(rename = "_meta")]
+    metadata: Map<String, Value>,
 }
 
 #[derive(Serialize)]
@@ -546,6 +550,21 @@ struct ToolAnnotations {
 #[serde(rename_all = "camelCase")]
 struct ToolExecution {
     task_support: &'static str,
+}
+
+fn tool_metadata(tool: VerticalTool) -> Map<String, Value> {
+    let catalog_tool = McpTool::ALL
+        .iter()
+        .copied()
+        .find(|candidate| candidate.name() == tool.name())
+        .expect("every vertical tool has a catalog capability");
+    let mut metadata = Map::new();
+    metadata.insert(
+        DISCOVERY_METADATA_KEY.to_owned(),
+        serde_json::to_value(discovery_metadata(catalog_tool))
+            .expect("built-in capability metadata serializes"),
+    );
+    metadata
 }
 
 fn parse_object_schema(
@@ -1320,6 +1339,15 @@ mod tests {
             assert_eq!(tool["annotations"]["openWorldHint"], false);
             assert_eq!(tool["annotations"]["destructiveHint"], false);
             assert_eq!(tool["execution"]["taskSupport"], "forbidden");
+            let metadata = &tool["_meta"][DISCOVERY_METADATA_KEY];
+            assert_eq!(metadata["contractVersion"], "1.0");
+            assert_eq!(metadata["status"], "fallback_limited");
+            assert!(
+                metadata["profiles"]
+                    .as_array()
+                    .is_some_and(|profiles| !profiles.is_empty())
+            );
+            assert!(metadata["inputShapeHash"].as_str().is_some());
         }
         assert_eq!(tools[0]["annotations"]["readOnlyHint"], false);
         assert_eq!(tools[2]["annotations"]["readOnlyHint"], true);
@@ -1330,6 +1358,51 @@ mod tests {
         assert_eq!(
             operation_status["annotations"]["readOnlyHint"], false,
             "operation.status can cancel and must not be advertised as read-only"
+        );
+        let repo_list = tools
+            .iter()
+            .find(|tool| tool["name"] == "repo.list")
+            .expect("repo.list is listed");
+        assert_eq!(
+            repo_list["_meta"][DISCOVERY_METADATA_KEY]["pagination"],
+            "authenticated_cursor"
+        );
+        let batch = tools
+            .iter()
+            .find(|tool| tool["name"] == "query.batch")
+            .expect("query.batch is listed");
+        assert_eq!(
+            batch["_meta"][DISCOVERY_METADATA_KEY]["batchSharedBudget"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_list_payloads_match_profile_goldens() {
+        let profiles = [
+            ExposureProfile::Scout,
+            ExposureProfile::Analysis,
+            ExposureProfile::Developer,
+        ];
+        let mut observed = Vec::with_capacity(profiles.len());
+        for profile in profiles {
+            let router =
+                ToolRouter::new(FixtureExecutor::default(), profile).expect("registry compiles");
+            let response = router
+                .handle(request("tools/list", json!({})), cancellation())
+                .await;
+            let result = success(response);
+            let encoded = serde_json::to_vec(&result).expect("tools/list serializes");
+            observed.push(blake3::hash(&encoded).to_hex().to_string());
+        }
+        assert_eq!(
+            observed,
+            [
+                "4bb13c8436822bb2da214e617e8d9e56c767d6ba889cc9746e62e9f2045d26f3",
+                "91288fcc8e75d5a260b0b1e94a4265f3911a47c0f32d12833f4d85ee4ec6f2f1",
+                "c987dea397af689603923eba359a4c6fd084f198d08fb28fa6037278da9f0a11",
+            ],
+            "update the reviewed Scout, Analysis, and Developer tools/list goldens"
         );
     }
 
