@@ -700,6 +700,35 @@ pub struct FirstSliceQueryContext {
     #[allow(missing_docs)]
     pub usage: ::core::option::Option<FirstSliceQueryUsage>,
 }
+/// One source-free limiting-resource observation.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FirstSliceLimitingResource {
+    #[prost(enumeration = "FirstSliceLimitingResourceKind", tag = "1")]
+    #[allow(missing_docs)]
+    pub kind: i32,
+    #[prost(uint64, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub limit: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub observed: ::core::option::Option<u64>,
+}
+/// Completeness, limits, and continuation semantics preserved across IPC.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FirstSliceCompleteness {
+    #[prost(enumeration = "FirstSliceCompletenessState", tag = "1")]
+    #[allow(missing_docs)]
+    pub state: i32,
+    #[prost(message, repeated, tag = "2")]
+    #[allow(missing_docs)]
+    pub limiting_resources: ::prost::alloc::vec::Vec<FirstSliceLimitingResource>,
+    #[prost(enumeration = "FirstSliceContinuationAvailability", tag = "3")]
+    #[allow(missing_docs)]
+    pub continuation: i32,
+    #[prost(enumeration = "FirstSliceContinuationGuidance", repeated, tag = "4")]
+    #[allow(missing_docs)]
+    pub guidance: ::prost::alloc::vec::Vec<i32>,
+}
 /// Requests one bounded generation-pinned lexical lookup.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CodeLocateRequest {
@@ -787,6 +816,9 @@ pub struct CodeLocateResponse {
     #[prost(uint64, optional, tag = "6")]
     #[allow(missing_docs)]
     pub next_page_offset: ::core::option::Option<u64>,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests bounded explanations for stable symbols.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -869,6 +901,9 @@ pub struct SymbolExplainResponse {
     #[prost(bool, tag = "5")]
     #[allow(missing_docs)]
     pub truncated: bool,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests exact generation-bound source references.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -942,6 +977,9 @@ pub struct SourceReadResponse {
     #[prost(bool, tag = "5")]
     #[allow(missing_docs)]
     pub truncated: bool,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests the bounded list of repositories known to this daemon process.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1301,6 +1339,9 @@ pub struct SymbolRelationshipsResponse {
     #[prost(uint64, optional, tag = "8")]
     #[allow(missing_docs)]
     pub next_page_offset: ::core::option::Option<u64>,
+    #[prost(message, optional, tag = "9")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests bounded directed paths between stable symbols.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1413,6 +1454,9 @@ pub struct FlowTraceResponse {
     #[prost(message, optional, tag = "5")]
     #[allow(missing_docs)]
     pub projection: ::core::option::Option<FirstSliceTraceProjection>,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests bounded architecture cycle detection over a relation projection.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1519,6 +1563,9 @@ pub struct ArchitectureCyclesResponse {
     #[prost(message, optional, tag = "6")]
     #[allow(missing_docs)]
     pub projection: ::core::option::Option<FirstSliceCycleProjection>,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests bounded dead-code reachability analysis over one generation.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1628,6 +1675,9 @@ pub struct CodeDeadResponse {
     #[prost(message, repeated, tag = "6")]
     #[allow(missing_docs)]
     pub false_positive_controls: ::prost::alloc::vec::Vec<FirstSliceSuppressionRule>,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests a bounded file-granularity architecture overview over one generation.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1754,6 +1804,9 @@ pub struct ArchitectureOverviewResponse {
     #[prost(message, repeated, tag = "6")]
     #[allow(missing_docs)]
     pub views: ::prost::alloc::vec::Vec<FirstSliceDerivedView>,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests a bounded test selection for one generation and seed set.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1853,6 +1906,9 @@ pub struct TestsSelectResponse {
     #[prost(message, repeated, tag = "5")]
     #[allow(missing_docs)]
     pub gaps: ::prost::alloc::vec::Vec<FirstSliceTestGap>,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests a bounded change-impact analysis for one generation and change set.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1996,6 +2052,9 @@ pub struct ChangeImpactResponse {
     #[prost(message, optional, tag = "6")]
     #[allow(missing_docs)]
     pub risk_summary: ::core::option::Option<FirstSliceImpactRiskSummary>,
+    #[prost(message, optional, tag = "7")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests a bounded ordered change plan for one generation and target set.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2112,6 +2171,9 @@ pub struct PlanChangeResponse {
     #[prost(message, optional, tag = "7")]
     #[allow(missing_docs)]
     pub context_pack_request: ::core::option::Option<FirstSliceContextPackRequest>,
+    #[prost(message, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Selects a revision by Git ref expression or immutable generation identity.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2264,6 +2326,9 @@ pub struct HistoryCompareResponse {
     #[prost(message, repeated, tag = "7")]
     #[allow(missing_docs)]
     pub lineage: ::prost::alloc::vec::Vec<FirstSliceLineageMatch>,
+    #[prost(message, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Requests a bounded advanced query over a safe typed AST.
 ///
@@ -2353,6 +2418,9 @@ pub struct AdvancedQueryResponse {
     #[prost(uint64, optional, tag = "7")]
     #[allow(missing_docs)]
     pub next_page_offset: ::core::option::Option<u64>,
+    #[prost(message, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub result_completeness: ::core::option::Option<FirstSliceCompleteness>,
 }
 /// Source-free daemon lifecycle state.
 #[allow(missing_docs)]
@@ -2892,6 +2960,292 @@ impl FirstSliceCoverageStatus {
             "FIRST_SLICE_COVERAGE_BOUNDED" => Some(Self::FirstSliceCoverageBounded),
             "FIRST_SLICE_COVERAGE_SAMPLED" => Some(Self::FirstSliceCoverageSampled),
             "FIRST_SLICE_COVERAGE_UNKNOWN" => Some(Self::FirstSliceCoverageUnknown),
+            _ => None,
+        }
+    }
+}
+/// Authoritative execution-completeness state for one bounded result.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FirstSliceCompletenessState {
+    #[allow(missing_docs)]
+    FirstSliceCompletenessUnspecified = 0,
+    #[allow(missing_docs)]
+    FirstSliceCompletenessComplete = 1,
+    #[allow(missing_docs)]
+    FirstSliceCompletenessTruncated = 2,
+    #[allow(missing_docs)]
+    FirstSliceCompletenessUnsupportedPartial = 3,
+    #[allow(missing_docs)]
+    FirstSliceCompletenessIndeterminate = 4,
+}
+impl FirstSliceCompletenessState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::FirstSliceCompletenessUnspecified => {
+                "FIRST_SLICE_COMPLETENESS_UNSPECIFIED"
+            }
+            Self::FirstSliceCompletenessComplete => "FIRST_SLICE_COMPLETENESS_COMPLETE",
+            Self::FirstSliceCompletenessTruncated => "FIRST_SLICE_COMPLETENESS_TRUNCATED",
+            Self::FirstSliceCompletenessUnsupportedPartial => {
+                "FIRST_SLICE_COMPLETENESS_UNSUPPORTED_PARTIAL"
+            }
+            Self::FirstSliceCompletenessIndeterminate => {
+                "FIRST_SLICE_COMPLETENESS_INDETERMINATE"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FIRST_SLICE_COMPLETENESS_UNSPECIFIED" => {
+                Some(Self::FirstSliceCompletenessUnspecified)
+            }
+            "FIRST_SLICE_COMPLETENESS_COMPLETE" => {
+                Some(Self::FirstSliceCompletenessComplete)
+            }
+            "FIRST_SLICE_COMPLETENESS_TRUNCATED" => {
+                Some(Self::FirstSliceCompletenessTruncated)
+            }
+            "FIRST_SLICE_COMPLETENESS_UNSUPPORTED_PARTIAL" => {
+                Some(Self::FirstSliceCompletenessUnsupportedPartial)
+            }
+            "FIRST_SLICE_COMPLETENESS_INDETERMINATE" => {
+                Some(Self::FirstSliceCompletenessIndeterminate)
+            }
+            _ => None,
+        }
+    }
+}
+/// Stable resource family that limited a bounded result.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FirstSliceLimitingResourceKind {
+    #[allow(missing_docs)]
+    FirstSliceLimitUnspecified = 0,
+    #[allow(missing_docs)]
+    FirstSliceLimitRows = 1,
+    #[allow(missing_docs)]
+    FirstSliceLimitEdges = 2,
+    #[allow(missing_docs)]
+    FirstSliceLimitResults = 3,
+    #[allow(missing_docs)]
+    FirstSliceLimitDepth = 4,
+    #[allow(missing_docs)]
+    FirstSliceLimitPaths = 5,
+    #[allow(missing_docs)]
+    FirstSliceLimitSourceBytes = 6,
+    #[allow(missing_docs)]
+    FirstSliceLimitResponseBytes = 7,
+    #[allow(missing_docs)]
+    FirstSliceLimitMemoryBytes = 8,
+    #[allow(missing_docs)]
+    FirstSliceLimitDeadline = 9,
+    #[allow(missing_docs)]
+    FirstSliceLimitEstimatedTokens = 10,
+    #[allow(missing_docs)]
+    FirstSliceLimitCancellation = 11,
+    #[allow(missing_docs)]
+    FirstSliceLimitCapability = 12,
+    #[allow(missing_docs)]
+    FirstSliceLimitCoverage = 13,
+    #[allow(missing_docs)]
+    FirstSliceLimitPageSize = 14,
+}
+impl FirstSliceLimitingResourceKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::FirstSliceLimitUnspecified => "FIRST_SLICE_LIMIT_UNSPECIFIED",
+            Self::FirstSliceLimitRows => "FIRST_SLICE_LIMIT_ROWS",
+            Self::FirstSliceLimitEdges => "FIRST_SLICE_LIMIT_EDGES",
+            Self::FirstSliceLimitResults => "FIRST_SLICE_LIMIT_RESULTS",
+            Self::FirstSliceLimitDepth => "FIRST_SLICE_LIMIT_DEPTH",
+            Self::FirstSliceLimitPaths => "FIRST_SLICE_LIMIT_PATHS",
+            Self::FirstSliceLimitSourceBytes => "FIRST_SLICE_LIMIT_SOURCE_BYTES",
+            Self::FirstSliceLimitResponseBytes => "FIRST_SLICE_LIMIT_RESPONSE_BYTES",
+            Self::FirstSliceLimitMemoryBytes => "FIRST_SLICE_LIMIT_MEMORY_BYTES",
+            Self::FirstSliceLimitDeadline => "FIRST_SLICE_LIMIT_DEADLINE",
+            Self::FirstSliceLimitEstimatedTokens => "FIRST_SLICE_LIMIT_ESTIMATED_TOKENS",
+            Self::FirstSliceLimitCancellation => "FIRST_SLICE_LIMIT_CANCELLATION",
+            Self::FirstSliceLimitCapability => "FIRST_SLICE_LIMIT_CAPABILITY",
+            Self::FirstSliceLimitCoverage => "FIRST_SLICE_LIMIT_COVERAGE",
+            Self::FirstSliceLimitPageSize => "FIRST_SLICE_LIMIT_PAGE_SIZE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FIRST_SLICE_LIMIT_UNSPECIFIED" => Some(Self::FirstSliceLimitUnspecified),
+            "FIRST_SLICE_LIMIT_ROWS" => Some(Self::FirstSliceLimitRows),
+            "FIRST_SLICE_LIMIT_EDGES" => Some(Self::FirstSliceLimitEdges),
+            "FIRST_SLICE_LIMIT_RESULTS" => Some(Self::FirstSliceLimitResults),
+            "FIRST_SLICE_LIMIT_DEPTH" => Some(Self::FirstSliceLimitDepth),
+            "FIRST_SLICE_LIMIT_PATHS" => Some(Self::FirstSliceLimitPaths),
+            "FIRST_SLICE_LIMIT_SOURCE_BYTES" => Some(Self::FirstSliceLimitSourceBytes),
+            "FIRST_SLICE_LIMIT_RESPONSE_BYTES" => {
+                Some(Self::FirstSliceLimitResponseBytes)
+            }
+            "FIRST_SLICE_LIMIT_MEMORY_BYTES" => Some(Self::FirstSliceLimitMemoryBytes),
+            "FIRST_SLICE_LIMIT_DEADLINE" => Some(Self::FirstSliceLimitDeadline),
+            "FIRST_SLICE_LIMIT_ESTIMATED_TOKENS" => {
+                Some(Self::FirstSliceLimitEstimatedTokens)
+            }
+            "FIRST_SLICE_LIMIT_CANCELLATION" => Some(Self::FirstSliceLimitCancellation),
+            "FIRST_SLICE_LIMIT_CAPABILITY" => Some(Self::FirstSliceLimitCapability),
+            "FIRST_SLICE_LIMIT_COVERAGE" => Some(Self::FirstSliceLimitCoverage),
+            "FIRST_SLICE_LIMIT_PAGE_SIZE" => Some(Self::FirstSliceLimitPageSize),
+            _ => None,
+        }
+    }
+}
+/// Whether an incomplete result has a safe continuation.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FirstSliceContinuationAvailability {
+    #[allow(missing_docs)]
+    FirstSliceContinuationUnspecified = 0,
+    #[allow(missing_docs)]
+    FirstSliceContinuationNotApplicable = 1,
+    #[allow(missing_docs)]
+    FirstSliceContinuationAvailable = 2,
+    #[allow(missing_docs)]
+    FirstSliceContinuationUnavailable = 3,
+}
+impl FirstSliceContinuationAvailability {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::FirstSliceContinuationUnspecified => {
+                "FIRST_SLICE_CONTINUATION_UNSPECIFIED"
+            }
+            Self::FirstSliceContinuationNotApplicable => {
+                "FIRST_SLICE_CONTINUATION_NOT_APPLICABLE"
+            }
+            Self::FirstSliceContinuationAvailable => "FIRST_SLICE_CONTINUATION_AVAILABLE",
+            Self::FirstSliceContinuationUnavailable => {
+                "FIRST_SLICE_CONTINUATION_UNAVAILABLE"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FIRST_SLICE_CONTINUATION_UNSPECIFIED" => {
+                Some(Self::FirstSliceContinuationUnspecified)
+            }
+            "FIRST_SLICE_CONTINUATION_NOT_APPLICABLE" => {
+                Some(Self::FirstSliceContinuationNotApplicable)
+            }
+            "FIRST_SLICE_CONTINUATION_AVAILABLE" => {
+                Some(Self::FirstSliceContinuationAvailable)
+            }
+            "FIRST_SLICE_CONTINUATION_UNAVAILABLE" => {
+                Some(Self::FirstSliceContinuationUnavailable)
+            }
+            _ => None,
+        }
+    }
+}
+/// Typed source-free follow-up guidance for an incomplete result.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FirstSliceContinuationGuidance {
+    #[allow(missing_docs)]
+    FirstSliceGuidanceUnspecified = 0,
+    #[allow(missing_docs)]
+    FirstSliceGuidanceUseCursor = 1,
+    #[allow(missing_docs)]
+    FirstSliceGuidanceNarrowScope = 2,
+    #[allow(missing_docs)]
+    FirstSliceGuidanceSplitRequest = 3,
+    #[allow(missing_docs)]
+    FirstSliceGuidanceReduceDepth = 4,
+    #[allow(missing_docs)]
+    FirstSliceGuidanceReduceRelations = 5,
+    #[allow(missing_docs)]
+    FirstSliceGuidanceRequestSource = 6,
+    #[allow(missing_docs)]
+    FirstSliceGuidanceIncreaseBudgetWithinLimit = 7,
+    #[allow(missing_docs)]
+    FirstSliceGuidanceRefreshCoverage = 8,
+    #[allow(missing_docs)]
+    FirstSliceGuidanceUnsupportedNoContinuation = 9,
+}
+impl FirstSliceContinuationGuidance {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::FirstSliceGuidanceUnspecified => "FIRST_SLICE_GUIDANCE_UNSPECIFIED",
+            Self::FirstSliceGuidanceUseCursor => "FIRST_SLICE_GUIDANCE_USE_CURSOR",
+            Self::FirstSliceGuidanceNarrowScope => "FIRST_SLICE_GUIDANCE_NARROW_SCOPE",
+            Self::FirstSliceGuidanceSplitRequest => "FIRST_SLICE_GUIDANCE_SPLIT_REQUEST",
+            Self::FirstSliceGuidanceReduceDepth => "FIRST_SLICE_GUIDANCE_REDUCE_DEPTH",
+            Self::FirstSliceGuidanceReduceRelations => {
+                "FIRST_SLICE_GUIDANCE_REDUCE_RELATIONS"
+            }
+            Self::FirstSliceGuidanceRequestSource => {
+                "FIRST_SLICE_GUIDANCE_REQUEST_SOURCE"
+            }
+            Self::FirstSliceGuidanceIncreaseBudgetWithinLimit => {
+                "FIRST_SLICE_GUIDANCE_INCREASE_BUDGET_WITHIN_LIMIT"
+            }
+            Self::FirstSliceGuidanceRefreshCoverage => {
+                "FIRST_SLICE_GUIDANCE_REFRESH_COVERAGE"
+            }
+            Self::FirstSliceGuidanceUnsupportedNoContinuation => {
+                "FIRST_SLICE_GUIDANCE_UNSUPPORTED_NO_CONTINUATION"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FIRST_SLICE_GUIDANCE_UNSPECIFIED" => {
+                Some(Self::FirstSliceGuidanceUnspecified)
+            }
+            "FIRST_SLICE_GUIDANCE_USE_CURSOR" => Some(Self::FirstSliceGuidanceUseCursor),
+            "FIRST_SLICE_GUIDANCE_NARROW_SCOPE" => {
+                Some(Self::FirstSliceGuidanceNarrowScope)
+            }
+            "FIRST_SLICE_GUIDANCE_SPLIT_REQUEST" => {
+                Some(Self::FirstSliceGuidanceSplitRequest)
+            }
+            "FIRST_SLICE_GUIDANCE_REDUCE_DEPTH" => {
+                Some(Self::FirstSliceGuidanceReduceDepth)
+            }
+            "FIRST_SLICE_GUIDANCE_REDUCE_RELATIONS" => {
+                Some(Self::FirstSliceGuidanceReduceRelations)
+            }
+            "FIRST_SLICE_GUIDANCE_REQUEST_SOURCE" => {
+                Some(Self::FirstSliceGuidanceRequestSource)
+            }
+            "FIRST_SLICE_GUIDANCE_INCREASE_BUDGET_WITHIN_LIMIT" => {
+                Some(Self::FirstSliceGuidanceIncreaseBudgetWithinLimit)
+            }
+            "FIRST_SLICE_GUIDANCE_REFRESH_COVERAGE" => {
+                Some(Self::FirstSliceGuidanceRefreshCoverage)
+            }
+            "FIRST_SLICE_GUIDANCE_UNSUPPORTED_NO_CONTINUATION" => {
+                Some(Self::FirstSliceGuidanceUnsupportedNoContinuation)
+            }
             _ => None,
         }
     }

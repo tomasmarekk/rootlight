@@ -39,8 +39,8 @@ use rootlight_operations::{
 };
 use rootlight_protocol::generated::{common::v1 as common, daemon::v1 as daemon};
 use rootlight_query::{
-    ArchitectureOverviewView, CodeDeadEntryPointPolicy, LocateMode, QueryUsage, RelationDirection,
-    RelationFamily, TestsSelectKind,
+    ArchitectureOverviewView, CodeDeadEntryPointPolicy, ExecutionCompletenessState, LocateMode,
+    QueryResource, QueryUsage, RelationDirection, RelationFamily, TestsSelectKind,
 };
 use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
@@ -1156,6 +1156,12 @@ fn code_locate(
             &context.cancellation,
         )
         .map_err(service_error)?;
+    let completeness = execution_completeness(
+        response.data.execution.state(),
+        &response.data.limiting_resources,
+        response.data.next_page_offset.is_some(),
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceNarrowScope,
+    );
     let mut hits = Vec::new();
     hits.try_reserve_exact(response.data.hits.len())
         .map_err(|_| resource_exhausted())?;
@@ -1185,6 +1191,7 @@ fn code_locate(
         matched_candidates: response.data.matched_candidates,
         truncated: response.data.truncated,
         next_page_offset: response.data.next_page_offset,
+        completeness: Some(completeness),
     })
 }
 
@@ -1204,11 +1211,19 @@ fn symbol_explain(
         .map_err(|_| resource_exhausted())?;
     let mut usage = UsageAccumulator::default();
     let mut coverage = Vec::new();
+    let mut limiting_resources = Vec::new();
+    let mut execution_state = ExecutionCompletenessState::Complete;
     for symbol in request.symbols {
         let symbol = parse_symbol(Some(&symbol))?;
         let response = service
             .symbol_explain(generation.generation, symbol, &context.cancellation)
             .map_err(service_error)?;
+        for resource in &response.data.limiting_resources {
+            if !limiting_resources.contains(resource) {
+                limiting_resources.push(*resource);
+            }
+        }
+        execution_state = execution_state.max(response.data.execution.state());
         usage.add(&response.usage)?;
         coverage.extend(response.data.coverage.iter().cloned());
         let entity = response.data.entity;
@@ -1253,7 +1268,13 @@ fn symbol_explain(
         context: Some(query_context(generation, &usage.finish(), &coverage)),
         symbols,
         unresolved_symbols: Vec::new(),
-        truncated: false,
+        truncated: !limiting_resources.is_empty(),
+        completeness: Some(execution_completeness(
+            execution_state,
+            &limiting_resources,
+            false,
+            daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest,
+        )),
     })
 }
 
@@ -1301,6 +1322,12 @@ fn symbol_relationships(
             &context.cancellation,
         )
         .map_err(service_error)?;
+    let completeness = execution_completeness(
+        response.data.execution.state(),
+        &response.data.limiting_resources,
+        response.data.next_page_offset.is_some(),
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceReduceRelations,
+    );
     let mut groups = Vec::new();
     groups
         .try_reserve_exact(response.data.groups.len())
@@ -1332,6 +1359,7 @@ fn symbol_relationships(
         exact: response.data.exact,
         truncated: response.data.truncated,
         next_page_offset: response.data.next_page_offset,
+        completeness: Some(completeness),
     })
 }
 
@@ -1383,6 +1411,12 @@ fn flow_trace(
             &context.cancellation,
         )
         .map_err(service_error)?;
+    let completeness = execution_completeness(
+        response.data.execution.state(),
+        &response.data.limiting_resources,
+        false,
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceReduceDepth,
+    );
     let mut paths = Vec::new();
     paths
         .try_reserve_exact(response.data.paths.len())
@@ -1426,6 +1460,7 @@ fn flow_trace(
                 .collect(),
             min_confidence: u32::from(projection.min_confidence),
         }),
+        completeness: Some(completeness),
     })
 }
 
@@ -1464,6 +1499,12 @@ fn architecture_cycles(
             &context.cancellation,
         )
         .map_err(service_error)?;
+    let completeness = execution_completeness(
+        response.data.execution.state(),
+        &response.data.limiting_resources,
+        false,
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceReduceRelations,
+    );
     let mut components = Vec::new();
     components
         .try_reserve_exact(response.data.components.len())
@@ -1523,6 +1564,7 @@ fn architecture_cycles(
                 .collect(),
             min_confidence: u32::from(projection.min_confidence),
         }),
+        completeness: Some(completeness),
     })
 }
 
@@ -1561,6 +1603,12 @@ fn code_dead(
             &context.cancellation,
         )
         .map_err(service_error)?;
+    let completeness = execution_completeness(
+        response.data.execution.state(),
+        &response.data.limiting_resources,
+        false,
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceRefreshCoverage,
+    );
     let mut candidates = Vec::new();
     candidates
         .try_reserve_exact(response.data.candidates.len())
@@ -1611,6 +1659,7 @@ fn code_dead(
         }),
         blind_spots,
         false_positive_controls,
+        completeness: Some(completeness),
     })
 }
 
@@ -1651,6 +1700,12 @@ fn architecture_overview(
             &context.cancellation,
         )
         .map_err(service_error)?;
+    let completeness = execution_completeness(
+        response.data.execution.state(),
+        &response.data.limiting_resources,
+        false,
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceNarrowScope,
+    );
     let mut components = Vec::new();
     components
         .try_reserve_exact(response.data.components.len())
@@ -1709,6 +1764,7 @@ fn architecture_overview(
         connections,
         hotspots,
         views: wire_views,
+        completeness: Some(completeness),
     })
 }
 
@@ -1749,6 +1805,12 @@ fn tests_select(
             &context.cancellation,
         )
         .map_err(service_error)?;
+    let completeness = execution_completeness(
+        response.data.execution.state(),
+        &response.data.limiting_resources,
+        false,
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest,
+    );
     let strategy = response.data.coverage_strategy;
     let mut tests = Vec::new();
     tests
@@ -1785,6 +1847,7 @@ fn tests_select(
             build_target_signals: strategy.build_target_signals,
         }),
         gaps,
+        completeness: Some(completeness),
     })
 }
 
@@ -1832,6 +1895,12 @@ fn change_impact(
             &context.cancellation,
         )
         .map_err(service_error)?;
+    let completeness = execution_completeness(
+        response.data.execution.state(),
+        &response.data.limiting_resources,
+        false,
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceReduceDepth,
+    );
     let risk = response.data.risk_summary;
     let mut resolved_changes = Vec::new();
     resolved_changes
@@ -1895,6 +1964,7 @@ fn change_impact(
             fanout: risk.fanout,
             dynamic_blind_spots: risk.dynamic_blind_spots,
         }),
+        completeness: Some(completeness),
     })
 }
 
@@ -1930,6 +2000,12 @@ fn plan_change(
             &context.cancellation,
         )
         .map_err(service_error)?;
+    let completeness = execution_completeness(
+        response.data.execution.state(),
+        &response.data.limiting_resources,
+        false,
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceNarrowScope,
+    );
     let affected_scope = response.data.affected_scope;
     let context_pack = response.data.context_pack_request;
     let mut plan = Vec::new();
@@ -1987,6 +2063,7 @@ fn plan_change(
                 .collect(),
             files: context_pack.files.into_iter().map(file_to_wire).collect(),
         }),
+        completeness: Some(completeness),
     })
 }
 
@@ -2019,6 +2096,12 @@ fn history_compare(
     let response = service
         .history_compare(base, head, change_kinds, max_results, &context.cancellation)
         .map_err(service_error)?;
+    let completeness = execution_completeness(
+        response.data.execution.state(),
+        &response.data.limiting_resources,
+        false,
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceNarrowScope,
+    );
     let data = response.data;
     let architecture_delta = data.architecture_delta;
     let mut changes = Vec::new();
@@ -2075,6 +2158,7 @@ fn history_compare(
         }),
         breaking_candidates,
         lineage,
+        completeness: Some(completeness),
     })
 }
 
@@ -2116,6 +2200,12 @@ fn advanced_query(
         )
         .map_err(service_error)?;
     let data = response.data;
+    let result_completeness = execution_completeness(
+        data.execution.state(),
+        &data.limiting_resources,
+        data.next_page_offset.is_some(),
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceNarrowScope,
+    );
     let mut columns = Vec::new();
     columns
         .try_reserve_exact(data.columns.len())
@@ -2146,6 +2236,7 @@ fn advanced_query(
         plan,
         completeness,
         next_page_offset: data.next_page_offset,
+        result_completeness: Some(result_completeness),
     })
 }
 
@@ -2215,6 +2306,12 @@ fn source_read(
         chunks,
         total_source_bytes: response.usage.source_bytes,
         truncated: false,
+        completeness: Some(execution_completeness(
+            ExecutionCompletenessState::Complete,
+            &[],
+            false,
+            daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest,
+        )),
     })
 }
 
@@ -2587,6 +2684,91 @@ fn query_context(
             estimated_tokens: usage.estimated_tokens,
             elapsed_micros: usage.elapsed_micros,
         }),
+    }
+}
+
+fn execution_completeness(
+    state: ExecutionCompletenessState,
+    resources: &[QueryResource],
+    continuation_available: bool,
+    guidance: daemon::FirstSliceContinuationGuidance,
+) -> daemon::FirstSliceCompleteness {
+    if state == ExecutionCompletenessState::Complete {
+        return daemon::FirstSliceCompleteness {
+            state: daemon::FirstSliceCompletenessState::FirstSliceCompletenessComplete as i32,
+            limiting_resources: Vec::new(),
+            continuation:
+                daemon::FirstSliceContinuationAvailability::FirstSliceContinuationNotApplicable
+                    as i32,
+            guidance: Vec::new(),
+        };
+    }
+    let limiting_resources = resources
+        .iter()
+        .copied()
+        .map(|resource| daemon::FirstSliceLimitingResource {
+            kind: limiting_resource_to_wire(resource) as i32,
+            limit: None,
+            observed: None,
+        })
+        .collect();
+    daemon::FirstSliceCompleteness {
+        state: match state {
+            ExecutionCompletenessState::Complete => {
+                daemon::FirstSliceCompletenessState::FirstSliceCompletenessComplete
+            }
+            ExecutionCompletenessState::Truncated => {
+                daemon::FirstSliceCompletenessState::FirstSliceCompletenessTruncated
+            }
+            ExecutionCompletenessState::UnsupportedPartial => {
+                daemon::FirstSliceCompletenessState::FirstSliceCompletenessUnsupportedPartial
+            }
+            _ => daemon::FirstSliceCompletenessState::FirstSliceCompletenessIndeterminate,
+        } as i32,
+        limiting_resources,
+        continuation: if continuation_available && state == ExecutionCompletenessState::Truncated {
+            daemon::FirstSliceContinuationAvailability::FirstSliceContinuationAvailable as i32
+        } else {
+            daemon::FirstSliceContinuationAvailability::FirstSliceContinuationUnavailable as i32
+        },
+        guidance: vec![
+            if continuation_available && state == ExecutionCompletenessState::Truncated {
+                daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceUseCursor as i32
+            } else if state == ExecutionCompletenessState::UnsupportedPartial {
+                daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceUnsupportedNoContinuation
+                    as i32
+            } else {
+                guidance as i32
+            },
+        ],
+    }
+}
+
+const fn limiting_resource_to_wire(
+    resource: QueryResource,
+) -> daemon::FirstSliceLimitingResourceKind {
+    match resource {
+        QueryResource::Rows => daemon::FirstSliceLimitingResourceKind::FirstSliceLimitRows,
+        QueryResource::Edges => daemon::FirstSliceLimitingResourceKind::FirstSliceLimitEdges,
+        QueryResource::Results => daemon::FirstSliceLimitingResourceKind::FirstSliceLimitResults,
+        QueryResource::SourceBytes => {
+            daemon::FirstSliceLimitingResourceKind::FirstSliceLimitSourceBytes
+        }
+        QueryResource::JsonBytes => {
+            daemon::FirstSliceLimitingResourceKind::FirstSliceLimitResponseBytes
+        }
+        QueryResource::Tokens => {
+            daemon::FirstSliceLimitingResourceKind::FirstSliceLimitEstimatedTokens
+        }
+        QueryResource::MemoryBytes => {
+            daemon::FirstSliceLimitingResourceKind::FirstSliceLimitMemoryBytes
+        }
+        QueryResource::Depth => daemon::FirstSliceLimitingResourceKind::FirstSliceLimitDepth,
+        QueryResource::Paths => daemon::FirstSliceLimitingResourceKind::FirstSliceLimitPaths,
+        QueryResource::Capability => {
+            daemon::FirstSliceLimitingResourceKind::FirstSliceLimitCapability
+        }
+        _ => daemon::FirstSliceLimitingResourceKind::FirstSliceLimitUnspecified,
     }
 }
 
@@ -3185,6 +3367,55 @@ mod tests {
     use rootlight_operations::{ClientInstanceId, OperationJournal, OperationStage, RecoveryClass};
     use std::{fs, time::Duration};
     use tempfile::TempDir;
+
+    #[test]
+    fn every_query_limiting_resource_has_a_stable_wire_mapping() {
+        let cases = [
+            (
+                QueryResource::Rows,
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitRows,
+            ),
+            (
+                QueryResource::Edges,
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitEdges,
+            ),
+            (
+                QueryResource::Results,
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitResults,
+            ),
+            (
+                QueryResource::SourceBytes,
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitSourceBytes,
+            ),
+            (
+                QueryResource::JsonBytes,
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitResponseBytes,
+            ),
+            (
+                QueryResource::Tokens,
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitEstimatedTokens,
+            ),
+            (
+                QueryResource::MemoryBytes,
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitMemoryBytes,
+            ),
+            (
+                QueryResource::Depth,
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitDepth,
+            ),
+            (
+                QueryResource::Paths,
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitPaths,
+            ),
+            (
+                QueryResource::Capability,
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitCapability,
+            ),
+        ];
+        for (resource, expected) in cases {
+            assert_eq!(limiting_resource_to_wire(resource), expected);
+        }
+    }
 
     fn catalog_request(
         page_size: u32,

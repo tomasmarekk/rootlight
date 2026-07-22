@@ -144,6 +144,7 @@ fn response(generation: GenerationId, tokens: u64, data: Value) -> ReadEnvelope<
         },
         data,
         truncated: false,
+        completeness: rootlight_mcp_contract::completeness::ResultCompleteness::complete(),
         next_cursor: RequiredNullable(None),
         usage: UsageSummary {
             rows: 1,

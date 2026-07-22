@@ -193,6 +193,7 @@ fn child_response(generation_id: GenerationId, data: Value) -> ReadEnvelope<Valu
         coverage: coverage(),
         data,
         truncated: false,
+        completeness: rootlight_mcp_contract::completeness::ResultCompleteness::complete(),
         next_cursor: RequiredNullable(None),
         usage: usage(),
         warnings: Vec::new(),

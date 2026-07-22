@@ -85,6 +85,12 @@
           "recommended_actions": []
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -230,6 +236,12 @@
           "suggested_next": []
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -280,6 +292,12 @@
           "detail_handles": []
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -378,6 +396,12 @@
           "total_source_bytes": 10
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -433,6 +457,12 @@
           }
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -494,6 +524,12 @@
           }
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -540,6 +576,12 @@
           "views": []
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -591,6 +633,12 @@
           "break_candidates": []
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -641,6 +689,12 @@
           "false_positive_controls": []
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -706,6 +760,12 @@
           }
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -761,6 +821,12 @@
           "gaps": []
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -819,6 +885,12 @@
           "lineage": []
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -889,6 +961,12 @@
           }
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -952,6 +1030,12 @@
          }
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -1007,6 +1091,12 @@
           "completeness": "complete"
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,
@@ -1070,6 +1160,12 @@
           ]
         },
         "truncated": false,
+        "completeness": {
+          "state": "complete",
+          "limiting_resources": [],
+          "continuation": "not_applicable",
+          "guidance": []
+        },
         "next_cursor": null,
         "usage": {
           "rows": 1,

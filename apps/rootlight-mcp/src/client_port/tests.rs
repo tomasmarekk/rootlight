@@ -8,16 +8,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 use rootlight_client::{
     AdvancedColumn, AdvancedQuery, AnalysisTier as ClientAnalysisTier, ArchitectureCycles,
     ArchitectureOverview, ChangeImpact, ChangeImpactRiskSummary, ClientError, CodeDead,
-    CodeDeadEntryPointSummary, CodeLocate, CoverageStatus, CycleProjection, FlowTrace,
-    FlowTraceFrontier, FlowTraceProjection, GenerationSelector, HistoryArchitectureDelta,
-    HistoryCompare, HistoryMatchedStates, LocateMode, OperationKind, OperationStage,
-    OperationState, PlanChange, PlanChangeContextPack, PlanChangeImpactSummary, QueryContext,
-    QueryUsage, RecoveryClass, RepositoryCatalogEntry, RepositoryCatalogFreshness,
+    CodeDeadEntryPointSummary, CodeLocate, ContinuationAvailability, CoverageStatus,
+    CycleProjection, FlowTrace, FlowTraceFrontier, FlowTraceProjection, GenerationSelector,
+    HistoryArchitectureDelta, HistoryCompare, HistoryMatchedStates, LocateMode, OperationKind,
+    OperationStage, OperationState, PlanChange, PlanChangeContextPack, PlanChangeImpactSummary,
+    QueryContext, QueryUsage, RecoveryClass, RepositoryCatalogEntry, RepositoryCatalogFreshness,
     RepositoryCatalogPage, RepositoryCatalogPageRequest, RepositoryCatalogSnapshotId,
     RepositoryCatalogState, RepositoryCoverageEntry, RepositoryIndex, RepositoryOperationAction,
     RepositoryOperationStatus, RepositoryStatus, RepositoryStatusRequest, RequestTimeout,
-    SourceChunk, SourceRead, SourceReference, SymbolExplain, SymbolRelationships, TestsSelect,
-    TestsSelectCoverageStrategy,
+    ResultCompleteness, ResultCompletenessState, SourceChunk, SourceRead, SourceReference,
+    SymbolExplain, SymbolRelationships, TestsSelect, TestsSelectCoverageStrategy,
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
@@ -192,6 +192,15 @@ struct FakeAsyncClient {
     calls: Arc<Mutex<Vec<Call>>>,
 }
 
+fn complete_execution() -> ResultCompleteness {
+    ResultCompleteness {
+        state: ResultCompletenessState::Complete,
+        limiting_resources: Vec::new(),
+        continuation: ContinuationAvailability::NotApplicable,
+        guidance: Vec::new(),
+    }
+}
+
 impl FakeAsyncClient {
     fn record(&self, call: Call) {
         self.calls
@@ -300,6 +309,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 matched_candidates: 0,
                 truncated: false,
                 next_page_offset: None,
+                execution_completeness: complete_execution(),
             })
         })
     }
@@ -323,6 +333,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 symbols: Vec::new(),
                 unresolved_symbols: symbols,
                 truncated: false,
+                execution_completeness: complete_execution(),
             })
         })
     }
@@ -361,6 +372,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 chunks,
                 total_source_bytes: 0,
                 truncated: false,
+                execution_completeness: complete_execution(),
             })
         })
     }
@@ -466,6 +478,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 exact: true,
                 truncated: false,
                 next_page_offset: None,
+                execution_completeness: complete_execution(),
             })
         })
     }
@@ -509,6 +522,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     relations,
                     min_confidence: min_confidence.unwrap_or(0),
                 },
+                execution_completeness: complete_execution(),
             })
         })
     }
@@ -542,6 +556,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     relations,
                     min_confidence: 0,
                 },
+                execution_completeness: complete_execution(),
             })
         })
     }
@@ -578,6 +593,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 },
                 blind_spots: Vec::new(),
                 false_positive_controls: Vec::new(),
+                execution_completeness: complete_execution(),
             })
         })
     }
@@ -608,6 +624,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 connections: Vec::new(),
                 hotspots: Vec::new(),
                 views: Vec::new(),
+                execution_completeness: complete_execution(),
             })
         })
     }
@@ -642,6 +659,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     build_target_signals: false,
                 },
                 gaps: Vec::new(),
+                execution_completeness: complete_execution(),
             })
         })
     }
@@ -683,6 +701,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     fanout: 0,
                     dynamic_blind_spots: true,
                 },
+                execution_completeness: complete_execution(),
             })
         })
     }
@@ -724,6 +743,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     symbols: Vec::new(),
                     files: Vec::new(),
                 },
+                execution_completeness: complete_execution(),
             })
         })
     }
@@ -762,6 +782,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 },
                 breaking_candidates: Vec::new(),
                 lineage: Vec::new(),
+                execution_completeness: complete_execution(),
             })
         })
     }
@@ -800,6 +821,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 plan: None,
                 completeness: "complete".to_owned(),
                 next_page_offset: None,
+                execution_completeness: complete_execution(),
             })
         })
     }

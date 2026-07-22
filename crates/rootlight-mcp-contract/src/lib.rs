@@ -6,6 +6,7 @@ pub mod accounting;
 pub mod capability;
 pub mod catalog;
 pub mod change;
+pub mod completeness;
 pub mod context;
 pub mod intent;
 pub mod pagination;

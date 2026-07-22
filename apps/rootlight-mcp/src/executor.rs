@@ -58,6 +58,11 @@ use rootlight_mcp_contract::{
     PublicErrorBuildError, PublicValue, RepoIndexInput, RepositorySelector, SafeLabel,
     SchemaVersion, SourceFreeMessage, SourceReadInput, SymbolExplainInput, ToolResponse,
     TrustClassification, VerticalTool,
+    completeness::{
+        CompletenessState, ContinuationAvailability, ContinuationGuidance,
+        LimitingResource as ContractLimitingResource,
+        LimitingResourceKind as ContractLimitingResourceKind, ResultCompleteness,
+    },
     context::{
         BatchOperationStatus, BatchStatus, BatchTool, ColumnSchema, ColumnType, ContextPackInput,
         PlanExplanation, QueryAdvancedData, QueryAdvancedInput, QueryBatchData, QueryBatchInput,
@@ -3098,6 +3103,7 @@ where
         },
         data,
         truncated: false,
+        completeness: ResultCompleteness::complete(),
         next_cursor: RequiredNullable(None),
         usage: UsageSummary {
             rows: 1_u64
@@ -3404,7 +3410,7 @@ fn explain_envelope_from_status<T>(
         "explain".to_owned(),
         Vec::new(),
     );
-    map_read_envelope(context, metadata, data, false, None)
+    map_read_envelope(context, metadata, data, complete_client_result(), None)
 }
 
 fn agent_identity_from_status(status: client::RepositoryStatus) -> AgentResolvedIdentity {
@@ -3745,7 +3751,7 @@ fn map_symbol_relationships(
         response.result.context,
         response.metadata,
         data,
-        response.result.truncated,
+        response.result.execution_completeness,
         next_cursor,
     )
 }
@@ -3966,7 +3972,7 @@ fn map_flow_trace(
         response.result.context,
         response.metadata,
         data,
-        frontier.truncated,
+        response.result.execution_completeness,
         None,
     )
 }
@@ -4142,7 +4148,7 @@ fn map_architecture_cycles(
         response.result.context,
         response.metadata,
         data,
-        false,
+        response.result.execution_completeness,
         None,
     )
 }
@@ -4305,7 +4311,7 @@ fn map_code_dead(
         response.result.context,
         response.metadata,
         data,
-        false,
+        response.result.execution_completeness,
         None,
     )
 }
@@ -4494,7 +4500,7 @@ fn map_architecture_overview(
         response.result.context,
         response.metadata,
         data,
-        false,
+        response.result.execution_completeness,
         None,
     )
 }
@@ -4666,7 +4672,7 @@ fn map_tests_select(
         response.result.context,
         response.metadata,
         data,
-        false,
+        response.result.execution_completeness,
         None,
     )
 }
@@ -4882,7 +4888,7 @@ fn map_change_impact(
         response.result.context,
         response.metadata,
         data,
-        false,
+        response.result.execution_completeness,
         None,
     )
 }
@@ -5028,7 +5034,13 @@ fn adapt_plan_change_response(
             files: pack.files,
         },
     };
-    let metadata = map_read_envelope(response.result.context, response.metadata, (), false, None)?;
+    let metadata = map_read_envelope(
+        response.result.context,
+        response.metadata,
+        (),
+        response.result.execution_completeness,
+        None,
+    )?;
     Ok(PlanChangePortOutput {
         identity: AgentResolvedIdentity {
             repository: metadata.repository,
@@ -5039,6 +5051,7 @@ fn adapt_plan_change_response(
         result,
         usage: metadata.usage,
         truncated: metadata.truncated,
+        completeness: metadata.completeness,
         warnings: metadata.warnings,
     })
 }
@@ -5232,7 +5245,7 @@ fn map_history_compare(
         response.result.context,
         response.metadata,
         data,
-        false,
+        response.result.execution_completeness,
         None,
     )
 }
@@ -5381,10 +5394,6 @@ fn map_query_advanced(
     {
         return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
-    let truncated = matches!(
-        completeness,
-        QueryCompleteness::Paged | QueryCompleteness::Truncated
-    );
     let data = QueryAdvancedData {
         columns,
         rows,
@@ -5395,7 +5404,7 @@ fn map_query_advanced(
         response.result.context,
         response.metadata,
         data,
-        truncated,
+        response.result.execution_completeness,
         next_cursor,
     )
 }
@@ -5931,7 +5940,7 @@ fn map_code_locate(
         response.result.context,
         response.metadata,
         data,
-        response.result.truncated,
+        response.result.execution_completeness,
         next_cursor,
     )
 }
@@ -6001,7 +6010,7 @@ fn map_symbol_explain(
         response.result.context,
         response.metadata,
         data,
-        response.result.truncated,
+        response.result.execution_completeness,
         None,
     )
 }
@@ -6097,7 +6106,7 @@ fn map_source_read(
         response.result.context,
         response.metadata,
         data,
-        response.result.truncated,
+        response.result.execution_completeness,
         None,
     )
 }
@@ -6106,7 +6115,7 @@ fn map_read_envelope<T>(
     context: client::QueryContext,
     mut metadata: ReadResponseMetadata,
     data: T,
-    truncated: bool,
+    completeness: client::ResultCompleteness,
     next_cursor: Option<ContinuationCursor>,
 ) -> Result<ReadEnvelope<T>, ToolExecutionError> {
     if !safe_display_name(&metadata.display_name) || !safe_label(&metadata.trace_id, 128) {
@@ -6126,13 +6135,28 @@ fn map_read_envelope<T>(
     {
         return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
-    if truncated && next_cursor.is_none() {
-        metadata.warnings.push(ResponseWarning {
-            code: SafeLabel::parse("non_pageable_truncation")
-                .expect("built-in warning code satisfies the safe-label contract"),
-            message: SourceFreeMessage::parse("narrow the request scope and retry")
-                .expect("built-in warning text satisfies the source-free contract"),
-        });
+    let completeness = contract_completeness(completeness)?;
+    if (completeness.continuation == ContinuationAvailability::Available) != next_cursor.is_some() {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
+    append_completeness_warnings(&mut metadata.warnings, &completeness)?;
+    let coverage_status = coverage_status(context.coverage_status);
+    let claim_assessment = rootlight_agent::claim_safety::assess_public_claim(
+        rootlight_agent::claim_safety::ClaimKind::NegativeExistence,
+        Some(&completeness),
+        Some(coverage_status),
+    );
+    if claim_assessment.disposition()
+        == rootlight_agent::claim_safety::ClaimDisposition::Inconclusive
+    {
+        push_completeness_warning(
+            &mut metadata.warnings,
+            "negative_claims_inconclusive",
+            "negative and exhaustive claims are inconclusive",
+        )?;
+    }
+    if metadata.warnings.len() > 100 {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
     }
     metadata.warnings.sort_by(|left, right| {
         left.code
@@ -6141,6 +6165,13 @@ fn map_read_envelope<T>(
             .then_with(|| left.message.as_str().cmp(right.message.as_str()))
     });
     let wall_time_ms = context.usage.elapsed_micros.div_ceil(1_000);
+    let truncated = completeness.state == CompletenessState::Truncated
+        || completeness.limiting_resources.iter().any(|resource| {
+            !matches!(
+                resource.kind,
+                ContractLimitingResourceKind::Capability | ContractLimitingResourceKind::Coverage
+            )
+        });
     Ok(ReadEnvelope {
         schema_version: SchemaVersion::V1_0,
         repository: rootlight_mcp_contract::vertical::ResolvedRepository {
@@ -6154,12 +6185,13 @@ fn map_read_envelope<T>(
             semantic_freshness: metadata.semantic_freshness,
         },
         coverage: CoverageSummary {
-            status: coverage_status(context.coverage_status),
+            status: coverage_status,
             languages: metadata.languages,
             skipped_inputs: context.skipped_inputs,
         },
         data,
         truncated,
+        completeness,
         next_cursor: RequiredNullable(next_cursor),
         usage: UsageSummary {
             rows: context.usage.rows,
@@ -6174,6 +6206,198 @@ fn map_read_envelope<T>(
         warnings: metadata.warnings,
         trust: TrustClassification::UntrustedRepositoryData,
     })
+}
+
+fn complete_client_result() -> client::ResultCompleteness {
+    client::ResultCompleteness {
+        state: client::ResultCompletenessState::Complete,
+        limiting_resources: Vec::new(),
+        continuation: client::ContinuationAvailability::NotApplicable,
+        guidance: Vec::new(),
+    }
+}
+
+fn contract_completeness(
+    value: client::ResultCompleteness,
+) -> Result<ResultCompleteness, ToolExecutionError> {
+    let state = match value.state {
+        client::ResultCompletenessState::Complete => CompletenessState::Complete,
+        client::ResultCompletenessState::Truncated => CompletenessState::Truncated,
+        client::ResultCompletenessState::UnsupportedPartial => {
+            CompletenessState::UnsupportedPartial
+        }
+        client::ResultCompletenessState::Indeterminate => CompletenessState::Indeterminate,
+    };
+    let limiting_resources = value
+        .limiting_resources
+        .into_iter()
+        .map(|resource| ContractLimitingResource {
+            kind: match resource.kind {
+                client::LimitingResourceKind::Rows => ContractLimitingResourceKind::Rows,
+                client::LimitingResourceKind::Edges => ContractLimitingResourceKind::Edges,
+                client::LimitingResourceKind::Results => ContractLimitingResourceKind::Results,
+                client::LimitingResourceKind::Depth => ContractLimitingResourceKind::Depth,
+                client::LimitingResourceKind::Paths => ContractLimitingResourceKind::Paths,
+                client::LimitingResourceKind::SourceBytes => {
+                    ContractLimitingResourceKind::SourceBytes
+                }
+                client::LimitingResourceKind::ResponseBytes => {
+                    ContractLimitingResourceKind::ResponseBytes
+                }
+                client::LimitingResourceKind::MemoryBytes => {
+                    ContractLimitingResourceKind::MemoryBytes
+                }
+                client::LimitingResourceKind::Deadline => ContractLimitingResourceKind::Deadline,
+                client::LimitingResourceKind::EstimatedTokens => {
+                    ContractLimitingResourceKind::EstimatedTokens
+                }
+                client::LimitingResourceKind::Cancellation => {
+                    ContractLimitingResourceKind::Cancellation
+                }
+                client::LimitingResourceKind::Capability => {
+                    ContractLimitingResourceKind::Capability
+                }
+                client::LimitingResourceKind::Coverage => ContractLimitingResourceKind::Coverage,
+                client::LimitingResourceKind::PageSize => ContractLimitingResourceKind::PageSize,
+            },
+            limit: resource.limit,
+            observed: resource.observed,
+        })
+        .collect();
+    let continuation = match value.continuation {
+        client::ContinuationAvailability::NotApplicable => ContinuationAvailability::NotApplicable,
+        client::ContinuationAvailability::Available => ContinuationAvailability::Available,
+        client::ContinuationAvailability::Unavailable => ContinuationAvailability::Unavailable,
+    };
+    let guidance = value
+        .guidance
+        .into_iter()
+        .map(|guidance| match guidance {
+            client::ContinuationGuidance::UseCursor => ContinuationGuidance::UseCursor,
+            client::ContinuationGuidance::NarrowScope => ContinuationGuidance::NarrowScope,
+            client::ContinuationGuidance::SplitRequest => ContinuationGuidance::SplitRequest,
+            client::ContinuationGuidance::ReduceDepth => ContinuationGuidance::ReduceDepth,
+            client::ContinuationGuidance::ReduceRelations => ContinuationGuidance::ReduceRelations,
+            client::ContinuationGuidance::RequestSource => ContinuationGuidance::RequestSource,
+            client::ContinuationGuidance::IncreaseBudgetWithinLimit => {
+                ContinuationGuidance::IncreaseBudgetWithinLimit
+            }
+            client::ContinuationGuidance::RefreshCoverage => ContinuationGuidance::RefreshCoverage,
+            client::ContinuationGuidance::UnsupportedNoContinuation => {
+                ContinuationGuidance::UnsupportedNoContinuation
+            }
+        })
+        .collect();
+    ResultCompleteness::new(state, limiting_resources, continuation, guidance)
+        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
+}
+
+fn append_completeness_warnings(
+    warnings: &mut Vec<ResponseWarning>,
+    completeness: &ResultCompleteness,
+) -> Result<(), ToolExecutionError> {
+    let state_warning = match completeness.state {
+        CompletenessState::Complete => None,
+        CompletenessState::Truncated => {
+            Some(("result_truncated", "a bounded limit stopped execution"))
+        }
+        CompletenessState::UnsupportedPartial => Some((
+            "unsupported_partial",
+            "the result excludes an unsupported portion",
+        )),
+        CompletenessState::Indeterminate => Some((
+            "completeness_indeterminate",
+            "result completeness is indeterminate",
+        )),
+    };
+    if let Some((code, message)) = state_warning {
+        push_completeness_warning(warnings, code, message)?;
+    }
+    for resource in &completeness.limiting_resources {
+        let (code, message) = match resource.kind {
+            ContractLimitingResourceKind::Rows => ("limit_rows", "row limit stopped execution"),
+            ContractLimitingResourceKind::Edges => ("limit_edges", "edge limit stopped execution"),
+            ContractLimitingResourceKind::Results => {
+                ("limit_results", "result limit stopped execution")
+            }
+            ContractLimitingResourceKind::Depth => ("limit_depth", "depth limit stopped execution"),
+            ContractLimitingResourceKind::Paths => ("limit_paths", "path limit stopped execution"),
+            ContractLimitingResourceKind::SourceBytes => {
+                ("limit_source_bytes", "source byte limit stopped execution")
+            }
+            ContractLimitingResourceKind::ResponseBytes => (
+                "limit_response_bytes",
+                "response byte limit stopped execution",
+            ),
+            ContractLimitingResourceKind::MemoryBytes => {
+                ("limit_memory", "memory limit stopped execution")
+            }
+            ContractLimitingResourceKind::Deadline => {
+                ("limit_deadline", "deadline stopped execution")
+            }
+            ContractLimitingResourceKind::EstimatedTokens => {
+                ("limit_tokens", "token limit stopped execution")
+            }
+            ContractLimitingResourceKind::Cancellation => {
+                ("limit_cancellation", "cancellation stopped execution")
+            }
+            ContractLimitingResourceKind::Capability => (
+                "limit_capability",
+                "an unavailable capability bounded the result",
+            ),
+            ContractLimitingResourceKind::Coverage => {
+                ("limit_coverage", "coverage bounded the result")
+            }
+            ContractLimitingResourceKind::PageSize => {
+                ("limit_page_size", "page size bounded the result")
+            }
+        };
+        push_completeness_warning(warnings, code, message)?;
+    }
+    for guidance in &completeness.guidance {
+        let (code, message) = match guidance {
+            ContinuationGuidance::UseCursor => {
+                ("use_cursor", "continue with the authenticated cursor")
+            }
+            ContinuationGuidance::NarrowScope => ("narrow_scope", "narrow the request scope"),
+            ContinuationGuidance::SplitRequest => ("split_request", "split the request"),
+            ContinuationGuidance::ReduceDepth => ("reduce_depth", "reduce traversal depth"),
+            ContinuationGuidance::ReduceRelations => {
+                ("reduce_relations", "reduce the relation projection")
+            }
+            ContinuationGuidance::RequestSource => ("request_source", "request source separately"),
+            ContinuationGuidance::IncreaseBudgetWithinLimit => (
+                "increase_budget",
+                "increase the budget within the supported limit",
+            ),
+            ContinuationGuidance::RefreshCoverage => {
+                ("refresh_coverage", "refresh indexed coverage")
+            }
+            ContinuationGuidance::UnsupportedNoContinuation => (
+                "no_continuation",
+                "the unsupported portion has no continuation",
+            ),
+        };
+        push_completeness_warning(warnings, code, message)?;
+    }
+    Ok(())
+}
+
+fn push_completeness_warning(
+    warnings: &mut Vec<ResponseWarning>,
+    code: &str,
+    message: &str,
+) -> Result<(), ToolExecutionError> {
+    warnings
+        .try_reserve(1)
+        .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+    warnings.push(ResponseWarning {
+        code: SafeLabel::parse(code)
+            .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+        message: SourceFreeMessage::parse(message)
+            .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?,
+    });
+    Ok(())
 }
 
 fn validate_query_context(

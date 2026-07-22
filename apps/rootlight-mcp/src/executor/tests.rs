@@ -46,7 +46,8 @@ use rootlight_client::{
     RepositoryCatalogFreshness, RepositoryCatalogPage, RepositoryCatalogPageRequest,
     RepositoryCatalogSnapshotId, RepositoryCatalogSortKey, RepositoryCatalogState,
     RepositoryCoverageEntry, RepositoryList, RepositoryListEntry, RepositoryStatus,
-    RepositoryStatusOperation, SourceChunk as ClientSourceChunk,
+    RepositoryStatusOperation, ResultCompleteness as ClientResultCompleteness,
+    ResultCompletenessState as ClientResultCompletenessState, SourceChunk as ClientSourceChunk,
     SymbolExplanation as ClientExplanation, SymbolRelationships as ClientRelationships,
     TestsSelect as ClientTestsSelect, TestsSelectCoverageStrategy as ClientCoverageStrategy,
     TestsSelectGap as ClientTestGap, TestsSelectRankedTest as ClientRankedTest,
@@ -889,6 +890,74 @@ fn context(results: u64, source_bytes: u64) -> QueryContext {
     }
 }
 
+fn complete_execution() -> ClientResultCompleteness {
+    ClientResultCompleteness {
+        state: ClientResultCompletenessState::Complete,
+        limiting_resources: Vec::new(),
+        continuation: client::ContinuationAvailability::NotApplicable,
+        guidance: Vec::new(),
+    }
+}
+
+fn pageable_execution(resource: client::LimitingResourceKind) -> ClientResultCompleteness {
+    ClientResultCompleteness {
+        state: ClientResultCompletenessState::Truncated,
+        limiting_resources: vec![client::LimitingResource {
+            kind: resource,
+            limit: None,
+            observed: None,
+        }],
+        continuation: client::ContinuationAvailability::Available,
+        guidance: vec![client::ContinuationGuidance::UseCursor],
+    }
+}
+
+fn truncated_execution(
+    resource: client::LimitingResourceKind,
+    guidance: client::ContinuationGuidance,
+) -> ClientResultCompleteness {
+    ClientResultCompleteness {
+        state: ClientResultCompletenessState::Truncated,
+        limiting_resources: vec![client::LimitingResource {
+            kind: resource,
+            limit: None,
+            observed: None,
+        }],
+        continuation: client::ContinuationAvailability::Unavailable,
+        guidance: vec![guidance],
+    }
+}
+
+fn unsupported_execution(resource: client::LimitingResourceKind) -> ClientResultCompleteness {
+    ClientResultCompleteness {
+        state: ClientResultCompletenessState::UnsupportedPartial,
+        limiting_resources: vec![client::LimitingResource {
+            kind: resource,
+            limit: None,
+            observed: None,
+        }],
+        continuation: client::ContinuationAvailability::Unavailable,
+        guidance: vec![client::ContinuationGuidance::UnsupportedNoContinuation],
+    }
+}
+
+fn assert_public_truncation<T>(output: &ReadEnvelope<T>, resource: ContractLimitingResourceKind) {
+    assert!(output.truncated);
+    assert_eq!(output.completeness.state, CompletenessState::Truncated);
+    assert!(
+        output
+            .completeness
+            .limiting_resources
+            .iter()
+            .any(|observed| observed.kind == resource)
+    );
+    assert_eq!(
+        output.completeness.continuation,
+        ContinuationAvailability::Unavailable
+    );
+    assert!(output.next_cursor.0.is_none());
+}
+
 fn metadata(trace_id: &str) -> ReadResponseMetadata {
     ReadResponseMetadata::new(
         "fixture".to_owned(),
@@ -944,6 +1013,7 @@ fn locate_response() -> CodeLocatePortResponse {
             matched_candidates: 1,
             truncated: false,
             next_page_offset: None,
+            execution_completeness: complete_execution(),
         },
         metadata("trace-locate-1"),
         vec!["publish".to_owned()],
@@ -962,6 +1032,11 @@ fn locate_page(
     response.result.matched_candidates = 3;
     response.result.truncated = next_page_offset.is_some();
     response.result.next_page_offset = next_page_offset;
+    response.result.execution_completeness = if next_page_offset.is_some() {
+        pageable_execution(client::LimitingResourceKind::Results)
+    } else {
+        complete_execution()
+    };
     response
 }
 
@@ -988,6 +1063,11 @@ fn relationships_page(
             exact: true,
             truncated: next_page_offset.is_some(),
             next_page_offset,
+            execution_completeness: if next_page_offset.is_some() {
+                pageable_execution(client::LimitingResourceKind::Results)
+            } else {
+                complete_execution()
+            },
         },
         metadata("trace-rel-page"),
     )
@@ -1009,6 +1089,11 @@ fn advanced_page(row_id: &str, next_page_offset: Option<u64>) -> QueryAdvancedPo
                 "complete".to_owned()
             },
             next_page_offset,
+            execution_completeness: if next_page_offset.is_some() {
+                pageable_execution(client::LimitingResourceKind::Results)
+            } else {
+                complete_execution()
+            },
         },
         metadata("trace-advanced-page"),
     )
@@ -1512,6 +1597,10 @@ async fn hard_limits_never_masquerade_as_page_continuations() {
     let mut relationships = relationships_page(missing_symbol(), None);
     relationships.result.exact = false;
     relationships.result.truncated = true;
+    relationships.result.execution_completeness = truncated_execution(
+        client::LimitingResourceKind::Edges,
+        client::ContinuationGuidance::ReduceRelations,
+    );
     let relationship_harness = Harness::new(FakeOutcome::SymbolRelationships(Ok(relationships)));
     let relationship_output: SymbolRelationshipsOutput = decode(
         execute(
@@ -1527,13 +1616,22 @@ async fn hard_limits_never_masquerade_as_page_continuations() {
     };
     assert!(relationship_page.truncated);
     assert!(relationship_page.next_cursor.0.is_none());
-    assert!(relationship_page.warnings.iter().any(|warning| {
-        warning.code.as_str() == "non_pageable_truncation"
-            && warning.message.as_str() == "narrow the request scope and retry"
-    }));
+    let relationship_warning_codes = relationship_page
+        .warnings
+        .iter()
+        .map(|warning| warning.code.as_str())
+        .collect::<Vec<_>>();
+    assert!(relationship_warning_codes.contains(&"result_truncated"));
+    assert!(relationship_warning_codes.contains(&"limit_edges"));
+    assert!(relationship_warning_codes.contains(&"reduce_relations"));
+    assert!(!relationship_warning_codes.contains(&"use_cursor"));
 
     let mut advanced = advanced_page("partial", None);
     advanced.result.completeness = "truncated".to_owned();
+    advanced.result.execution_completeness = truncated_execution(
+        client::LimitingResourceKind::Results,
+        client::ContinuationGuidance::NarrowScope,
+    );
     let advanced_harness = Harness::new(FakeOutcome::QueryAdvanced(Ok(advanced)));
     let advanced_output: QueryAdvancedOutput = decode(
         execute(
@@ -1549,10 +1647,68 @@ async fn hard_limits_never_masquerade_as_page_continuations() {
     };
     assert!(advanced_page.truncated);
     assert!(advanced_page.next_cursor.0.is_none());
-    assert!(advanced_page.warnings.iter().any(|warning| {
-        warning.code.as_str() == "non_pageable_truncation"
-            && warning.message.as_str() == "narrow the request scope and retry"
-    }));
+    let advanced_warning_codes = advanced_page
+        .warnings
+        .iter()
+        .map(|warning| warning.code.as_str())
+        .collect::<Vec<_>>();
+    assert!(advanced_warning_codes.contains(&"result_truncated"));
+    assert!(advanced_warning_codes.contains(&"limit_results"));
+    assert!(advanced_warning_codes.contains(&"narrow_scope"));
+    assert!(!advanced_warning_codes.contains(&"use_cursor"));
+}
+
+#[tokio::test]
+async fn unsupported_partial_results_surface_public_warnings_without_a_cursor() {
+    let mut advanced = advanced_page("partial", None);
+    advanced.result.completeness = "unsupported".to_owned();
+    advanced.result.execution_completeness =
+        unsupported_execution(client::LimitingResourceKind::Capability);
+    let harness = Harness::new(FakeOutcome::QueryAdvanced(Ok(advanced)));
+
+    let output: QueryAdvancedOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::QueryAdvanced,
+            pagination_arguments(VerticalTool::QueryAdvanced),
+        )
+        .await
+        .expect("unsupported partial result maps"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected advanced success");
+    };
+    assert!(!output.truncated);
+    assert!(output.next_cursor.0.is_none());
+    assert_eq!(output.data.completeness, QueryCompleteness::Unsupported);
+    let warning_codes = output
+        .warnings
+        .iter()
+        .map(|warning| warning.code.as_str())
+        .collect::<Vec<_>>();
+    assert!(warning_codes.contains(&"unsupported_partial"));
+    assert!(warning_codes.contains(&"limit_capability"));
+    assert!(warning_codes.contains(&"no_continuation"));
+    assert!(!warning_codes.contains(&"use_cursor"));
+}
+
+#[tokio::test]
+async fn paging_cursor_requires_available_execution_continuation() {
+    let mut advanced = advanced_page("partial", Some(1));
+    advanced.result.execution_completeness = truncated_execution(
+        client::LimitingResourceKind::Results,
+        client::ContinuationGuidance::NarrowScope,
+    );
+    let harness = Harness::new(FakeOutcome::QueryAdvanced(Ok(advanced)));
+
+    let error = execute(
+        &harness.executor,
+        VerticalTool::QueryAdvanced,
+        pagination_arguments(VerticalTool::QueryAdvanced),
+    )
+    .await
+    .expect_err("cursor and execution completeness must agree");
+    assert_eq!(error.failure(), Some(ToolExecutionFailure::InvalidResponse));
 }
 
 fn assert_capability_rejection(
@@ -1640,6 +1796,7 @@ fn explain_response(definition: client::SourceReference) -> SymbolExplainPortRes
             }],
             unresolved_symbols: vec![missing_symbol()],
             truncated: false,
+            execution_completeness: complete_execution(),
         },
         metadata("trace-explain-1"),
     )
@@ -1664,6 +1821,7 @@ fn source_read_response(source: client::SourceReference) -> SourceReadPortRespon
             }],
             total_source_bytes: 8,
             truncated: false,
+            execution_completeness: complete_execution(),
         },
         metadata("trace-source-compose"),
         Vec::new(),
@@ -4251,6 +4409,7 @@ async fn symbol_relationships_maps_groups_and_totals() {
             exact: true,
             truncated: false,
             next_page_offset: None,
+            execution_completeness: complete_execution(),
         },
         metadata("trace-rel-1"),
     );
@@ -4318,6 +4477,7 @@ async fn flow_trace_maps_paths_frontier_and_projection() {
                 relations: vec!["calls".to_owned()],
                 min_confidence: 0,
             },
+            execution_completeness: complete_execution(),
         },
         metadata("trace-flow-1"),
     );
@@ -4395,6 +4555,10 @@ async fn architecture_cycles_maps_components_cycles_and_breaks() {
                 relations: vec!["calls".to_owned()],
                 min_confidence: 0,
             },
+            execution_completeness: truncated_execution(
+                client::LimitingResourceKind::Results,
+                client::ContinuationGuidance::ReduceRelations,
+            ),
         },
         metadata("architecture-cycles-1"),
     );
@@ -4414,6 +4578,7 @@ async fn architecture_cycles_maps_components_cycles_and_breaks() {
     let ToolResponse::Success(output) = output else {
         panic!("expected architecture cycles success");
     };
+    assert_public_truncation(&output, ContractLimitingResourceKind::Results);
     assert_eq!(output.data.components.len(), 1);
     let component = &output.data.components[0];
     assert_eq!(component.size, 2);
@@ -4504,6 +4669,10 @@ async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
                 rule: "exported".to_owned(),
                 suppressed_count: 2,
             }],
+            execution_completeness: truncated_execution(
+                client::LimitingResourceKind::Rows,
+                client::ContinuationGuidance::RefreshCoverage,
+            ),
         },
         metadata("code-dead-1"),
     );
@@ -4522,6 +4691,7 @@ async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
     let ToolResponse::Success(output) = output else {
         panic!("expected code dead success");
     };
+    assert_public_truncation(&output, ContractLimitingResourceKind::Rows);
     assert_eq!(output.data.candidates.len(), 1);
     let candidate = &output.data.candidates[0];
     assert_eq!(candidate.symbol_id, missing_symbol());
@@ -4610,6 +4780,10 @@ async fn architecture_overview_maps_components_connections_and_hotspots() {
                 view: "hotspots".to_owned(),
                 algorithm_version: "fan_in_out_v1".to_owned(),
             }],
+            execution_completeness: truncated_execution(
+                client::LimitingResourceKind::Results,
+                client::ContinuationGuidance::NarrowScope,
+            ),
         },
         metadata("architecture-overview-1"),
     );
@@ -4629,6 +4803,7 @@ async fn architecture_overview_maps_components_connections_and_hotspots() {
     let ToolResponse::Success(output) = output else {
         panic!("expected architecture overview success");
     };
+    assert_public_truncation(&output, ContractLimitingResourceKind::Results);
     assert_eq!(output.data.components.len(), 1);
     let component = &output.data.components[0];
     assert_eq!(component.id, "file-a");
@@ -4715,6 +4890,10 @@ async fn tests_select_maps_ranked_tests_strategy_and_gaps() {
                 scope: "scope-1".to_owned(),
                 reason: "no_related_test".to_owned(),
             }],
+            execution_completeness: truncated_execution(
+                client::LimitingResourceKind::Results,
+                client::ContinuationGuidance::SplitRequest,
+            ),
         },
         metadata("tests-select-1"),
     );
@@ -4734,6 +4913,7 @@ async fn tests_select_maps_ranked_tests_strategy_and_gaps() {
     let ToolResponse::Success(output) = output else {
         panic!("expected tests select success");
     };
+    assert_public_truncation(&output, ContractLimitingResourceKind::Results);
     assert_eq!(output.data.tests.len(), 1);
     let test = &output.data.tests[0];
     assert_eq!(test.test_id, "test-1");
@@ -4819,6 +4999,10 @@ async fn change_impact_maps_resolved_changes_impact_groups_and_risk() {
                 fanout: 1,
                 dynamic_blind_spots: true,
             },
+            execution_completeness: truncated_execution(
+                client::LimitingResourceKind::Depth,
+                client::ContinuationGuidance::ReduceDepth,
+            ),
         },
         metadata("change-impact-1"),
     );
@@ -4838,6 +5022,7 @@ async fn change_impact_maps_resolved_changes_impact_groups_and_risk() {
     let ToolResponse::Success(output) = output else {
         panic!("expected change impact success");
     };
+    assert_public_truncation(&output, ContractLimitingResourceKind::Depth);
     assert_eq!(output.data.resolved_changes.len(), 1);
     let change = &output.data.resolved_changes[0];
     assert_eq!(change.symbol_id, RequiredNullable(Some(symbol())));
@@ -4937,6 +5122,10 @@ async fn plan_change_maps_steps_impact_summary_decisions_and_context_pack() {
                 symbols: vec![symbol()],
                 files: vec![file()],
             },
+            execution_completeness: truncated_execution(
+                client::LimitingResourceKind::Results,
+                client::ContinuationGuidance::NarrowScope,
+            ),
         },
         metadata("plan-change-1"),
     );
@@ -4958,6 +5147,7 @@ async fn plan_change_maps_steps_impact_summary_decisions_and_context_pack() {
     let ToolResponse::Success(output) = output else {
         panic!("expected plan change success");
     };
+    assert_public_truncation(&output, ContractLimitingResourceKind::Results);
     assert_eq!(output.data.plan.len(), 2);
     assert_eq!(output.data.plan[0].step, 1);
     assert_eq!(output.data.plan[0].targets, vec![symbol()]);
@@ -5048,6 +5238,10 @@ async fn history_compare_maps_changes_breaking_candidates_and_lineage() {
                 confidence: 1_000,
                 is_rename: false,
             }],
+            execution_completeness: truncated_execution(
+                client::LimitingResourceKind::Results,
+                client::ContinuationGuidance::NarrowScope,
+            ),
         },
         metadata("history-compare-1"),
     );
@@ -5068,6 +5262,7 @@ async fn history_compare_maps_changes_breaking_candidates_and_lineage() {
     let ToolResponse::Success(output) = output else {
         panic!("expected history compare success");
     };
+    assert_public_truncation(&output, ContractLimitingResourceKind::Results);
     assert_eq!(
         output.data.matched_states.base_generation,
         parent_generation()
@@ -5143,6 +5338,7 @@ async fn query_advanced_maps_columns_rows_and_completeness() {
             plan: None,
             completeness: "complete".to_owned(),
             next_page_offset: None,
+            execution_completeness: complete_execution(),
         },
         metadata("query-advanced-1"),
     );
@@ -5203,6 +5399,7 @@ fn advanced_plan_response(
             }),
             completeness: "complete".to_owned(),
             next_page_offset: None,
+            execution_completeness: complete_execution(),
         },
         metadata("query-advanced-plan"),
     )
@@ -5480,6 +5677,7 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
             }],
             total_source_bytes: 15,
             truncated: false,
+            execution_completeness: complete_execution(),
         },
         metadata("trace-source-1"),
         Vec::new(),
@@ -8167,6 +8365,46 @@ proptest! {
             case.field
         );
     }
+
+    #[test]
+    fn any_lower_layer_truncation_survives_final_serialization(
+        resource in prop_oneof![
+            Just(client::LimitingResourceKind::Rows),
+            Just(client::LimitingResourceKind::Edges),
+            Just(client::LimitingResourceKind::Results),
+            Just(client::LimitingResourceKind::Depth),
+            Just(client::LimitingResourceKind::Paths),
+            Just(client::LimitingResourceKind::SourceBytes),
+            Just(client::LimitingResourceKind::ResponseBytes),
+            Just(client::LimitingResourceKind::MemoryBytes),
+            Just(client::LimitingResourceKind::Deadline),
+            Just(client::LimitingResourceKind::EstimatedTokens),
+            Just(client::LimitingResourceKind::Cancellation),
+            Just(client::LimitingResourceKind::Capability),
+            Just(client::LimitingResourceKind::Coverage),
+            Just(client::LimitingResourceKind::PageSize),
+        ],
+    ) {
+        let envelope = map_read_envelope(
+            context(0, 0),
+            metadata("completeness-property"),
+            (),
+            truncated_execution(resource, client::ContinuationGuidance::NarrowScope),
+            None,
+        )
+        .expect("valid lower-layer truncation maps");
+        let encoded = serde_json::to_value(envelope).expect("final envelope serializes");
+
+        prop_assert_eq!(&encoded["truncated"], &json!(true));
+        prop_assert_eq!(&encoded["completeness"]["state"], &json!("truncated"));
+        prop_assert_eq!(
+            encoded["completeness"]["limiting_resources"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        prop_assert!(encoded["next_cursor"].is_null());
+    }
 }
 
 struct AdvancedAstCase {
@@ -9418,6 +9656,7 @@ async fn accepted_effect_query_advanced_controls_change_the_normalized_request()
             plan: None,
             completeness: "complete".to_owned(),
             next_page_offset: None,
+            execution_completeness: complete_execution(),
         },
         metadata("query-advanced-controls"),
     );

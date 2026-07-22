@@ -15,6 +15,10 @@ use std::{
 use rootlight_ids::RepositoryId;
 use rootlight_mcp_contract::{
     McpTool, PublicError, SchemaVersion, TrustClassification,
+    completeness::{
+        CompletenessState, ContinuationAvailability, ContinuationGuidance, LimitingResource,
+        LimitingResourceKind, ResultCompleteness,
+    },
     context::{
         BatchOperation as ContractBatchOperation, BatchOperationResult, BatchOperationStatus,
         BatchStatus, BatchTool, FailurePolicy, QueryBatchData, QueryBatchInput,
@@ -505,6 +509,50 @@ pub fn aggregate_usage(envelopes: &[Option<ReadEnvelope<Value>>]) -> UsageSummar
     usage
 }
 
+fn aggregate_completeness(
+    envelopes: &[Option<ReadEnvelope<Value>>],
+    aggregate_truncated: bool,
+) -> Result<ResultCompleteness, BatchOrchestrationError> {
+    let mut state = CompletenessState::Complete;
+    let mut resources = Vec::new();
+    let mut guidance = Vec::new();
+    for envelope in envelopes.iter().flatten() {
+        state = state.max(envelope.completeness.state);
+        resources.extend(envelope.completeness.limiting_resources.iter().copied());
+        guidance.extend(
+            envelope
+                .completeness
+                .guidance
+                .iter()
+                .copied()
+                .filter(|value| *value != ContinuationGuidance::UseCursor),
+        );
+        if envelope.truncated && envelope.completeness.state == CompletenessState::Complete {
+            state = CompletenessState::Truncated;
+            resources.push(LimitingResource::kind(LimitingResourceKind::Results));
+        }
+    }
+    if aggregate_truncated && state == CompletenessState::Complete {
+        state = CompletenessState::Truncated;
+        resources.push(LimitingResource::kind(LimitingResourceKind::Results));
+    }
+    if state == CompletenessState::Complete {
+        return Ok(ResultCompleteness::complete());
+    }
+    guidance.push(ContinuationGuidance::SplitRequest);
+    resources.sort_unstable();
+    resources.dedup_by_key(|resource| resource.kind);
+    guidance.sort_unstable();
+    guidance.dedup();
+    ResultCompleteness::new(
+        state,
+        resources,
+        ContinuationAvailability::Unavailable,
+        guidance,
+    )
+    .map_err(|_| BatchOrchestrationError::InvalidResponse)
+}
+
 fn resolve_binding(
     value: &Value,
     envelopes: &[Option<ReadEnvelope<Value>>],
@@ -931,6 +979,7 @@ impl BatchService {
         check_deadline(Some(parent_deadline))?;
         let operation_results: Vec<BatchOperationResult> = results.into_iter().flatten().collect();
         let truncated = operation_results.iter().any(|result| result.truncated);
+        let completeness = aggregate_completeness(&observed_envelopes, truncated)?;
         let usage = aggregate_usage(&observed_envelopes);
         let data = QueryBatchData {
             batch_status: aggregate_status(&operation_results),
@@ -945,6 +994,7 @@ impl BatchService {
             coverage: identity.coverage,
             data,
             truncated,
+            completeness,
             next_cursor: RequiredNullable(None),
             usage,
             warnings: identity.warnings,
@@ -1264,6 +1314,24 @@ fn validate_child_identity(
         return Err(BatchOrchestrationError::InvalidResponse);
     }
     if envelope.generation.generation_id != identity.generation.generation_id {
+        return Err(BatchOrchestrationError::InvalidResponse);
+    }
+    let continuation_available =
+        envelope.completeness.continuation == ContinuationAvailability::Available;
+    let resource_truncated = envelope.completeness.state == CompletenessState::Truncated
+        || envelope
+            .completeness
+            .limiting_resources
+            .iter()
+            .any(|resource| {
+                !matches!(
+                    resource.kind,
+                    LimitingResourceKind::Capability | LimitingResourceKind::Coverage
+                )
+            });
+    if continuation_available != envelope.next_cursor.0.is_some()
+        || resource_truncated != envelope.truncated
+    {
         return Err(BatchOrchestrationError::InvalidResponse);
     }
     Ok(())

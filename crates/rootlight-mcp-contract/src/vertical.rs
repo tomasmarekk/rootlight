@@ -1031,6 +1031,8 @@ pub struct ReadEnvelope<T> {
     pub data: T,
     /// Whether any hard or requested limit stopped completion.
     pub truncated: bool,
+    /// Authoritative execution completeness and safe continuation semantics.
+    pub completeness: crate::completeness::ResultCompleteness,
     /// Safe continuation cursor, when the result is pageable.
     pub next_cursor: RequiredNullable<ContinuationCursor>,
     /// Runtime resource accounting.

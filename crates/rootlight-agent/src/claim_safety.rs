@@ -6,6 +6,9 @@
 //! analysis.
 
 use rootlight_ir::CoverageStatus;
+use rootlight_mcp_contract::completeness::{
+    CompletenessState as PublicCompletenessState, ResultCompleteness,
+};
 use rootlight_query::{ExecutionCompleteness, ExecutionCompletenessState};
 
 /// Semantic shape of a claim derived from an analytical result.
@@ -93,11 +96,47 @@ pub fn assess_claim(
     execution: Option<&ExecutionCompleteness>,
     coverage: Option<CoverageStatus>,
 ) -> ClaimAssessment {
+    assess(
+        kind,
+        execution_limitation(execution),
+        coverage_limitation(coverage),
+    )
+}
+
+/// Assesses a claim at the public response boundary.
+///
+/// This variant consumes the transport-neutral completeness contract after
+/// daemon and client validation, so final response shaping applies the same
+/// fail-closed policy as query-owned agent workflows.
+#[must_use]
+pub fn assess_public_claim(
+    kind: ClaimKind,
+    execution: Option<&ResultCompleteness>,
+    coverage: Option<CoverageStatus>,
+) -> ClaimAssessment {
+    let execution_limitation = match execution.map(|value| value.state) {
+        Some(PublicCompletenessState::Complete) => None,
+        Some(PublicCompletenessState::Truncated) => Some(ClaimLimitation::ExecutionTruncated),
+        Some(PublicCompletenessState::UnsupportedPartial) => {
+            Some(ClaimLimitation::ExecutionUnsupportedPartial)
+        }
+        Some(PublicCompletenessState::Indeterminate) | None => {
+            Some(ClaimLimitation::ExecutionIndeterminate)
+        }
+    };
+    assess(kind, execution_limitation, coverage_limitation(coverage))
+}
+
+fn assess(
+    kind: ClaimKind,
+    execution_limitation: Option<ClaimLimitation>,
+    coverage_limitation: Option<ClaimLimitation>,
+) -> ClaimAssessment {
     let mut limitations = Vec::with_capacity(2);
-    if let Some(limitation) = execution_limitation(execution) {
+    if let Some(limitation) = execution_limitation {
         limitations.push(limitation);
     }
-    if let Some(limitation) = coverage_limitation(coverage) {
+    if let Some(limitation) = coverage_limitation {
         limitations.push(limitation);
     }
 
@@ -145,6 +184,10 @@ fn coverage_limitation(coverage: Option<CoverageStatus>) -> Option<ClaimLimitati
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
+    use rootlight_mcp_contract::completeness::{
+        CompletenessState as PublicCompletenessState, ContinuationAvailability,
+        ContinuationGuidance, LimitingResource, LimitingResourceKind, ResultCompleteness,
+    };
     use rootlight_query::QueryResource;
 
     use super::*;
@@ -256,6 +299,29 @@ mod tests {
                 ClaimLimitation::ExecutionUnsupportedPartial,
                 ClaimLimitation::CoverageSampled,
             ]
+        );
+    }
+
+    #[test]
+    fn public_incomplete_execution_makes_negative_claims_inconclusive() {
+        let execution = ResultCompleteness::new(
+            PublicCompletenessState::Truncated,
+            vec![LimitingResource::kind(LimitingResourceKind::Results)],
+            ContinuationAvailability::Unavailable,
+            vec![ContinuationGuidance::NarrowScope],
+        )
+        .expect("public completeness is valid");
+
+        let assessment = assess_public_claim(
+            ClaimKind::NegativeExistence,
+            Some(&execution),
+            Some(CoverageStatus::Complete),
+        );
+
+        assert_eq!(assessment.disposition(), ClaimDisposition::Inconclusive);
+        assert_eq!(
+            assessment.limitations(),
+            &[ClaimLimitation::ExecutionTruncated]
         );
     }
 

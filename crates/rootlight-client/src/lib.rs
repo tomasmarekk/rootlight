@@ -506,6 +506,114 @@ pub struct QueryContext {
     pub usage: QueryUsage,
 }
 
+/// Authoritative execution state for one bounded analytical result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultCompletenessState {
+    /// The producer completed the supported execution domain.
+    Complete,
+    /// A known resource limit stopped execution.
+    Truncated,
+    /// A known semantic portion of the request is unsupported.
+    UnsupportedPartial,
+    /// The producer could not establish what portion was evaluated.
+    Indeterminate,
+}
+
+/// Stable resource family that limited a bounded result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitingResourceKind {
+    /// Logical row limit.
+    Rows,
+    /// Traversed edge limit.
+    Edges,
+    /// Returned result limit.
+    Results,
+    /// Traversal depth limit.
+    Depth,
+    /// Returned path limit.
+    Paths,
+    /// Returned source-byte limit.
+    SourceBytes,
+    /// Serialized response-byte limit.
+    ResponseBytes,
+    /// Owned response-memory limit.
+    MemoryBytes,
+    /// Monotonic deadline.
+    Deadline,
+    /// Estimated output-token limit.
+    EstimatedTokens,
+    /// Cooperative cancellation.
+    Cancellation,
+    /// Unavailable requested capability.
+    Capability,
+    /// Incomplete index or semantic coverage.
+    Coverage,
+    /// Requested or effective page-size limit.
+    PageSize,
+}
+
+/// One source-free limiting-resource observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+pub struct LimitingResource {
+    /// Stable limiting-resource family.
+    pub kind: LimitingResourceKind,
+    /// Effective ceiling, when measured.
+    pub limit: Option<u64>,
+    /// Observed value at the stop boundary, when measured.
+    pub observed: Option<u64>,
+}
+
+/// Whether an incomplete result exposes a safe continuation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationAvailability {
+    /// Continuation does not apply.
+    NotApplicable,
+    /// A checked continuation is available.
+    Available,
+    /// No direct continuation is available.
+    Unavailable,
+}
+
+/// Typed source-free follow-up guidance for an incomplete result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationGuidance {
+    /// Continue with the authenticated cursor.
+    UseCursor,
+    /// Narrow the request scope.
+    NarrowScope,
+    /// Split the request.
+    SplitRequest,
+    /// Reduce traversal depth.
+    ReduceDepth,
+    /// Reduce the relation projection.
+    ReduceRelations,
+    /// Request source separately.
+    RequestSource,
+    /// Increase a caller-controlled budget within server policy.
+    IncreaseBudgetWithinLimit,
+    /// Refresh or expand indexed coverage.
+    RefreshCoverage,
+    /// The unsupported or unknown portion has no continuation.
+    UnsupportedNoContinuation,
+}
+
+/// Checked completeness, limits, and continuation semantics from the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResultCompleteness {
+    /// Authoritative execution state.
+    pub state: ResultCompletenessState,
+    /// Deterministically ordered unique limiting resources.
+    pub limiting_resources: Vec<LimitingResource>,
+    /// Continuation availability at this boundary.
+    pub continuation: ContinuationAvailability,
+    /// Deterministically ordered unique source-free guidance.
+    pub guidance: Vec<ContinuationGuidance>,
+}
+
 /// Successful repository-index publication.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RepositoryIndex {
@@ -604,6 +712,8 @@ pub struct CodeLocate {
     pub truncated: bool,
     /// Offset of the next deterministic page when more matches remain.
     pub next_page_offset: Option<u64>,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 /// One compact generation-pinned symbol explanation.
@@ -664,6 +774,8 @@ pub struct SymbolExplain {
     pub unresolved_symbols: Vec<SymbolId>,
     /// Whether the response was cut by a bound.
     pub truncated: bool,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 /// One verified UTF-8 source chunk.
@@ -719,6 +831,8 @@ pub struct SourceRead {
     pub total_source_bytes: u64,
     /// Whether the response was cut by a bound.
     pub truncated: bool,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 impl std::fmt::Debug for SourceRead {
@@ -1241,6 +1355,8 @@ pub struct SymbolRelationships {
     pub truncated: bool,
     /// Offset of the next deterministic page when more edges remain.
     pub next_page_offset: Option<u64>,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 /// One evidence-bearing edge within a traced path.
@@ -1300,6 +1416,8 @@ pub struct FlowTrace {
     pub frontier: FlowTraceFrontier,
     /// Actual relation projection used.
     pub projection: FlowTraceProjection,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 /// One strongly connected component containing cycles.
@@ -1361,6 +1479,8 @@ pub struct ArchitectureCycles {
     pub break_candidates: Vec<CycleBreakCandidate>,
     /// Actual relation projection used.
     pub projection: CycleProjection,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 /// One dead-code candidate with classification and source-free evidence.
@@ -1422,6 +1542,8 @@ pub struct CodeDead {
     pub blind_spots: Vec<CodeDeadBlindSpot>,
     /// Applied false-positive suppression rules.
     pub false_positive_controls: Vec<CodeDeadSuppressionRule>,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 /// One aggregated architecture component keyed by its containing file.
@@ -1495,6 +1617,8 @@ pub struct ArchitectureOverview {
     pub hotspots: Vec<ArchitectureOverviewHotspot>,
     /// Derived-view algorithm metadata in deterministic order.
     pub views: Vec<ArchitectureOverviewDerivedView>,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 /// One ranked test selected for relevance to a seed set.
@@ -1549,6 +1673,8 @@ pub struct TestsSelect {
     pub coverage_strategy: TestsSelectCoverageStrategy,
     /// Honest coverage gaps in deterministic order.
     pub gaps: Vec<TestsSelectGap>,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 /// One resolved change from the input change set.
@@ -1633,6 +1759,8 @@ pub struct ChangeImpact {
     pub tests: Vec<ChangeImpactTest>,
     /// Aggregate risk summary.
     pub risk_summary: ChangeImpactRiskSummary,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 /// One ordered step in a change plan.
@@ -1698,6 +1826,8 @@ pub struct PlanChange {
     pub open_decisions: Vec<PlanChangeDecision>,
     /// Ready follow-up context-pack arguments.
     pub context_pack_request: PlanChangeContextPack,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 /// Resolved state pair for a history comparison.
@@ -1780,6 +1910,8 @@ pub struct HistoryCompare {
     pub breaking_candidates: Vec<HistoryBreakingCandidate>,
     /// Entity lineage matches in deterministic identity order.
     pub lineage: Vec<HistoryLineageMatch>,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 /// One typed column definition in an advanced query result schema.
@@ -1817,6 +1949,8 @@ pub struct AdvancedQuery {
     pub completeness: String,
     /// Offset of the next deterministic page when more rows remain.
     pub next_page_offset: Option<u64>,
+    /// Authoritative execution-completeness diagnostics.
+    pub execution_completeness: ResultCompleteness,
 }
 
 /// Validated total deadline budget for one asynchronous daemon request.
@@ -5751,6 +5885,11 @@ fn parse_symbol_relationships(
     page_offset: u64,
 ) -> Result<SymbolRelationships, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let execution_completeness = parse_result_completeness(
+        response.completeness,
+        Some(response.truncated),
+        response.next_page_offset.is_some(),
+    )?;
     let context = parse_query_context(response.context, repository, selector)?;
     let mut groups = Vec::new();
     groups
@@ -5833,6 +5972,7 @@ fn parse_symbol_relationships(
         exact: response.exact,
         truncated: response.truncated,
         next_page_offset: response.next_page_offset,
+        execution_completeness,
     })
 }
 
@@ -5901,6 +6041,12 @@ fn parse_flow_trace(
     to: Option<SymbolId>,
 ) -> Result<FlowTrace, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let legacy_truncated = response
+        .frontier
+        .as_ref()
+        .is_some_and(|frontier| frontier.truncated);
+    let execution_completeness =
+        parse_result_completeness(response.completeness, Some(legacy_truncated), false)?;
     let context = parse_query_context(response.context, repository, selector)?;
     let wire_frontier = response
         .frontier
@@ -5996,6 +6142,7 @@ fn parse_flow_trace(
             min_confidence: u16::try_from(wire_projection.min_confidence)
                 .map_err(|_| ClientError::InvalidResponseCorrelation)?,
         },
+        execution_completeness,
     })
 }
 
@@ -6045,6 +6192,7 @@ fn parse_architecture_cycles(
     relations: &[String],
 ) -> Result<ArchitectureCycles, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let execution_completeness = parse_result_completeness(response.completeness, None, false)?;
     let context = parse_query_context(response.context, repository, selector)?;
     let wire_projection = response
         .projection
@@ -6173,6 +6321,7 @@ fn parse_architecture_cycles(
             min_confidence: u16::try_from(wire_projection.min_confidence)
                 .map_err(|_| ClientError::InvalidResponseCorrelation)?,
         },
+        execution_completeness,
     })
 }
 
@@ -6216,6 +6365,7 @@ fn parse_code_dead(
     selector: GenerationSelector,
 ) -> Result<CodeDead, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let execution_completeness = parse_result_completeness(response.completeness, None, false)?;
     let context = parse_query_context(response.context, repository, selector)?;
     let wire_entry_points = response
         .entry_points
@@ -6297,6 +6447,7 @@ fn parse_code_dead(
         },
         blind_spots,
         false_positive_controls,
+        execution_completeness,
     })
 }
 
@@ -6340,6 +6491,7 @@ fn parse_architecture_overview(
     selector: GenerationSelector,
 ) -> Result<ArchitectureOverview, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let execution_completeness = parse_result_completeness(response.completeness, None, false)?;
     let context = parse_query_context(response.context, repository, selector)?;
     if response.components.len() > 250
         || response.connections.len() > 1_000
@@ -6442,6 +6594,7 @@ fn parse_architecture_overview(
         connections,
         hotspots,
         views,
+        execution_completeness,
     })
 }
 
@@ -6485,6 +6638,7 @@ fn parse_tests_select(
     selector: GenerationSelector,
 ) -> Result<TestsSelect, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let execution_completeness = parse_result_completeness(response.completeness, None, false)?;
     let context = parse_query_context(response.context, repository, selector)?;
     let Some(strategy) = response.coverage_strategy else {
         return Err(ClientError::InvalidResponseCorrelation);
@@ -6556,6 +6710,7 @@ fn parse_tests_select(
             build_target_signals: strategy.build_target_signals,
         },
         gaps,
+        execution_completeness,
     })
 }
 
@@ -6619,6 +6774,7 @@ fn parse_change_impact(
     selector: GenerationSelector,
 ) -> Result<ChangeImpact, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let execution_completeness = parse_result_completeness(response.completeness, None, false)?;
     let context = parse_query_context(response.context, repository, selector)?;
     let wire_risk = response
         .risk_summary
@@ -6753,6 +6909,7 @@ fn parse_change_impact(
             fanout: wire_risk.fanout,
             dynamic_blind_spots: wire_risk.dynamic_blind_spots,
         },
+        execution_completeness,
     })
 }
 
@@ -6800,6 +6957,7 @@ fn parse_plan_change(
     selector: GenerationSelector,
 ) -> Result<PlanChange, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let execution_completeness = parse_result_completeness(response.completeness, None, false)?;
     let context = parse_query_context(response.context, repository, selector)?;
     let wire_scope = response
         .affected_scope
@@ -6938,6 +7096,7 @@ fn parse_plan_change(
         test_plan,
         open_decisions,
         context_pack_request: PlanChangeContextPack { symbols, files },
+        execution_completeness,
     })
 }
 
@@ -6985,6 +7144,7 @@ fn parse_history_compare(
     head: GenerationId,
 ) -> Result<HistoryCompare, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let execution_completeness = parse_result_completeness(response.completeness, None, false)?;
     let context = parse_query_context(
         response.context,
         repository,
@@ -7094,6 +7254,7 @@ fn parse_history_compare(
         },
         breaking_candidates,
         lineage,
+        execution_completeness,
     })
 }
 
@@ -7143,6 +7304,12 @@ fn parse_advanced_query(
     page_offset: u64,
 ) -> Result<AdvancedQuery, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let legacy_truncated = matches!(response.completeness.as_str(), "paged" | "truncated");
+    let execution_completeness = parse_result_completeness(
+        response.result_completeness,
+        Some(legacy_truncated),
+        response.next_page_offset.is_some(),
+    )?;
     let context = parse_query_context(response.context, repository, selector)?;
     if response.columns.is_empty() || response.columns.len() > 64 {
         return Err(ClientError::InvalidResponseCorrelation);
@@ -7212,6 +7379,7 @@ fn parse_advanced_query(
         plan,
         completeness: response.completeness,
         next_page_offset: response.next_page_offset,
+        execution_completeness,
     })
 }
 
@@ -7223,6 +7391,11 @@ fn parse_code_locate(
     page_offset: u64,
 ) -> Result<CodeLocate, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let execution_completeness = parse_result_completeness(
+        response.completeness,
+        Some(response.truncated),
+        response.next_page_offset.is_some(),
+    )?;
     let context = parse_query_context(response.context, repository, selector)?;
     let returned_results =
         u64::try_from(response.hits.len()).map_err(|_| ClientError::InvalidResponseCorrelation)?;
@@ -7272,6 +7445,7 @@ fn parse_code_locate(
         matched_candidates: response.matched_candidates,
         truncated: response.truncated,
         next_page_offset: response.next_page_offset,
+        execution_completeness,
     })
 }
 
@@ -7282,6 +7456,8 @@ fn parse_symbol_explain(
     requested: &[SymbolId],
 ) -> Result<SymbolExplain, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let execution_completeness =
+        parse_result_completeness(response.completeness, Some(response.truncated), false)?;
     let context = parse_query_context(response.context, repository, selector)?;
     let total = response
         .symbols
@@ -7351,6 +7527,7 @@ fn parse_symbol_explain(
         symbols,
         unresolved_symbols,
         truncated: response.truncated,
+        execution_completeness,
     })
 }
 
@@ -7361,6 +7538,8 @@ fn parse_source_read(
     requested: &[SourceReference],
 ) -> Result<SourceRead, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
+    let execution_completeness =
+        parse_result_completeness(response.completeness, Some(response.truncated), false)?;
     let context = parse_query_context(response.context, repository, selector)?;
     if context.generation != requested[0].generation
         || response.chunks.len() > requested.len()
@@ -7429,7 +7608,255 @@ fn parse_source_read(
         chunks,
         total_source_bytes: response.total_source_bytes,
         truncated: response.truncated,
+        execution_completeness,
     })
+}
+
+fn parse_result_completeness(
+    wire: Option<daemon::FirstSliceCompleteness>,
+    legacy_truncated: Option<bool>,
+    has_continuation: bool,
+) -> Result<ResultCompleteness, ClientError> {
+    let Some(wire) = wire else {
+        if legacy_truncated == Some(true) {
+            return Ok(ResultCompleteness {
+                state: ResultCompletenessState::Truncated,
+                limiting_resources: vec![LimitingResource {
+                    kind: LimitingResourceKind::Capability,
+                    limit: None,
+                    observed: None,
+                }],
+                continuation: if has_continuation {
+                    ContinuationAvailability::Available
+                } else {
+                    ContinuationAvailability::Unavailable
+                },
+                guidance: vec![if has_continuation {
+                    ContinuationGuidance::UseCursor
+                } else {
+                    ContinuationGuidance::UnsupportedNoContinuation
+                }],
+            });
+        }
+        return Ok(indeterminate_completeness(has_continuation));
+    };
+
+    let state = match daemon::FirstSliceCompletenessState::try_from(wire.state) {
+        Ok(daemon::FirstSliceCompletenessState::FirstSliceCompletenessComplete) => {
+            ResultCompletenessState::Complete
+        }
+        Ok(daemon::FirstSliceCompletenessState::FirstSliceCompletenessTruncated) => {
+            ResultCompletenessState::Truncated
+        }
+        Ok(daemon::FirstSliceCompletenessState::FirstSliceCompletenessUnsupportedPartial) => {
+            ResultCompletenessState::UnsupportedPartial
+        }
+        Ok(daemon::FirstSliceCompletenessState::FirstSliceCompletenessIndeterminate)
+        | Ok(daemon::FirstSliceCompletenessState::FirstSliceCompletenessUnspecified)
+        | Err(_) => return Ok(indeterminate_completeness(has_continuation)),
+    };
+    let continuation = match daemon::FirstSliceContinuationAvailability::try_from(wire.continuation)
+    {
+        Ok(daemon::FirstSliceContinuationAvailability::FirstSliceContinuationNotApplicable) => {
+            ContinuationAvailability::NotApplicable
+        }
+        Ok(daemon::FirstSliceContinuationAvailability::FirstSliceContinuationAvailable) => {
+            ContinuationAvailability::Available
+        }
+        Ok(daemon::FirstSliceContinuationAvailability::FirstSliceContinuationUnavailable) => {
+            ContinuationAvailability::Unavailable
+        }
+        Ok(daemon::FirstSliceContinuationAvailability::FirstSliceContinuationUnspecified)
+        | Err(_) => return Ok(indeterminate_completeness(has_continuation)),
+    };
+    if wire.limiting_resources.len() > 14 || wire.guidance.len() > 9 {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut limiting_resources = Vec::new();
+    limiting_resources
+        .try_reserve_exact(wire.limiting_resources.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for resource in wire.limiting_resources {
+        let Some(kind) = parse_limiting_resource_kind(resource.kind) else {
+            return Ok(indeterminate_completeness(has_continuation));
+        };
+        if resource
+            .limit
+            .zip(resource.observed)
+            .is_some_and(|(limit, observed)| observed < limit)
+        {
+            return Err(ClientError::InvalidResponseCorrelation);
+        }
+        limiting_resources.push(LimitingResource {
+            kind,
+            limit: resource.limit,
+            observed: resource.observed,
+        });
+    }
+    limiting_resources.sort_unstable();
+    if limiting_resources
+        .windows(2)
+        .any(|pair| pair[0].kind == pair[1].kind)
+    {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    let mut guidance = Vec::new();
+    guidance
+        .try_reserve_exact(wire.guidance.len())
+        .map_err(|_| ClientError::ResponseAllocationFailed)?;
+    for guidance_value in wire.guidance {
+        let Some(value) = parse_continuation_guidance(guidance_value) else {
+            return Ok(indeterminate_completeness(has_continuation));
+        };
+        guidance.push(value);
+    }
+    guidance.sort_unstable();
+    if guidance.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+
+    let legacy_matches = match (state, legacy_truncated) {
+        (_, None) => true,
+        (ResultCompletenessState::Truncated, Some(value)) => value,
+        (_, Some(value)) => !value,
+    };
+    let valid = legacy_matches
+        && (continuation == ContinuationAvailability::Available) == has_continuation
+        && match state {
+            ResultCompletenessState::Complete => {
+                limiting_resources.is_empty()
+                    && continuation == ContinuationAvailability::NotApplicable
+                    && guidance.is_empty()
+            }
+            ResultCompletenessState::Truncated => {
+                !limiting_resources.is_empty()
+                    && continuation != ContinuationAvailability::NotApplicable
+                    && match continuation {
+                        ContinuationAvailability::Available => {
+                            guidance.contains(&ContinuationGuidance::UseCursor)
+                        }
+                        ContinuationAvailability::Unavailable => !guidance.is_empty(),
+                        ContinuationAvailability::NotApplicable => false,
+                    }
+            }
+            ResultCompletenessState::UnsupportedPartial => {
+                limiting_resources.iter().any(|resource| {
+                    matches!(
+                        resource.kind,
+                        LimitingResourceKind::Capability | LimitingResourceKind::Coverage
+                    )
+                }) && continuation == ContinuationAvailability::Unavailable
+                    && !guidance.is_empty()
+            }
+            ResultCompletenessState::Indeterminate => false,
+        };
+    if !valid {
+        return Err(ClientError::InvalidResponseCorrelation);
+    }
+    Ok(ResultCompleteness {
+        state,
+        limiting_resources,
+        continuation,
+        guidance,
+    })
+}
+
+fn indeterminate_completeness(has_continuation: bool) -> ResultCompleteness {
+    ResultCompleteness {
+        state: ResultCompletenessState::Indeterminate,
+        limiting_resources: Vec::new(),
+        continuation: if has_continuation {
+            ContinuationAvailability::Available
+        } else {
+            ContinuationAvailability::Unavailable
+        },
+        guidance: vec![if has_continuation {
+            ContinuationGuidance::UseCursor
+        } else {
+            ContinuationGuidance::UnsupportedNoContinuation
+        }],
+    }
+}
+
+fn parse_limiting_resource_kind(value: i32) -> Option<LimitingResourceKind> {
+    match daemon::FirstSliceLimitingResourceKind::try_from(value).ok()? {
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitRows => {
+            Some(LimitingResourceKind::Rows)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitEdges => {
+            Some(LimitingResourceKind::Edges)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitResults => {
+            Some(LimitingResourceKind::Results)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitDepth => {
+            Some(LimitingResourceKind::Depth)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitPaths => {
+            Some(LimitingResourceKind::Paths)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitSourceBytes => {
+            Some(LimitingResourceKind::SourceBytes)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitResponseBytes => {
+            Some(LimitingResourceKind::ResponseBytes)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitMemoryBytes => {
+            Some(LimitingResourceKind::MemoryBytes)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitDeadline => {
+            Some(LimitingResourceKind::Deadline)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitEstimatedTokens => {
+            Some(LimitingResourceKind::EstimatedTokens)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitCancellation => {
+            Some(LimitingResourceKind::Cancellation)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitCapability => {
+            Some(LimitingResourceKind::Capability)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitCoverage => {
+            Some(LimitingResourceKind::Coverage)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitPageSize => {
+            Some(LimitingResourceKind::PageSize)
+        }
+        daemon::FirstSliceLimitingResourceKind::FirstSliceLimitUnspecified => None,
+    }
+}
+
+fn parse_continuation_guidance(value: i32) -> Option<ContinuationGuidance> {
+    match daemon::FirstSliceContinuationGuidance::try_from(value).ok()? {
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceUseCursor => {
+            Some(ContinuationGuidance::UseCursor)
+        }
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceNarrowScope => {
+            Some(ContinuationGuidance::NarrowScope)
+        }
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest => {
+            Some(ContinuationGuidance::SplitRequest)
+        }
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceReduceDepth => {
+            Some(ContinuationGuidance::ReduceDepth)
+        }
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceReduceRelations => {
+            Some(ContinuationGuidance::ReduceRelations)
+        }
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceRequestSource => {
+            Some(ContinuationGuidance::RequestSource)
+        }
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceIncreaseBudgetWithinLimit => {
+            Some(ContinuationGuidance::IncreaseBudgetWithinLimit)
+        }
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceRefreshCoverage => {
+            Some(ContinuationGuidance::RefreshCoverage)
+        }
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceUnsupportedNoContinuation => {
+            Some(ContinuationGuidance::UnsupportedNoContinuation)
+        }
+        daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceUnspecified => None,
+    }
 }
 
 fn parse_query_context(
@@ -8322,6 +8749,7 @@ mod tests {
             matched_candidates: 1,
             truncated: false,
             next_page_offset: None,
+            completeness: None,
         }
     }
 
@@ -8349,6 +8777,7 @@ mod tests {
             }],
             unresolved_symbols: Vec::new(),
             truncated: false,
+            completeness: None,
         }
     }
 
@@ -8370,6 +8799,7 @@ mod tests {
             }],
             total_source_bytes: 3,
             truncated: false,
+            completeness: None,
         }
     }
 
@@ -9751,6 +10181,7 @@ mod tests {
             matched_candidates: 1,
             truncated: false,
             next_page_offset: None,
+            completeness: None,
         };
         assert!(
             parse_code_locate(
@@ -9868,6 +10299,7 @@ mod tests {
             }],
             unresolved_symbols: vec![symbol_to_wire(second_symbol)],
             truncated: false,
+            completeness: None,
         };
         assert!(
             parse_symbol_explain(
@@ -9912,6 +10344,7 @@ mod tests {
             chunks: vec![chunk(&first, 0, 3, "aaa"), chunk(&second, 3, 6, "bbb")],
             total_source_bytes: 6,
             truncated: false,
+            completeness: None,
         };
         assert!(
             parse_source_read(
@@ -10514,5 +10947,169 @@ mod tests {
             next_actions: Vec::new(),
         });
         assert!(matches!(unknown, Err(ClientError::InvalidPublicError)));
+    }
+
+    #[test]
+    fn completeness_from_older_or_unknown_peers_fails_closed() {
+        let absent = parse_result_completeness(None, Some(false), false)
+            .expect("an older response remains readable");
+        assert_eq!(absent.state, ResultCompletenessState::Indeterminate);
+        assert_eq!(absent.continuation, ContinuationAvailability::Unavailable);
+
+        let unknown = parse_result_completeness(
+            Some(daemon::FirstSliceCompleteness {
+                state: i32::MAX,
+                limiting_resources: Vec::new(),
+                continuation: i32::MAX,
+                guidance: Vec::new(),
+            }),
+            None,
+            true,
+        )
+        .expect("an additive peer state remains readable");
+        assert_eq!(unknown.state, ResultCompletenessState::Indeterminate);
+        assert_eq!(unknown.continuation, ContinuationAvailability::Available);
+        assert_eq!(unknown.guidance, vec![ContinuationGuidance::UseCursor]);
+    }
+
+    #[test]
+    fn completeness_rejects_optimistic_or_ambiguous_records() {
+        let truncated_without_resource = daemon::FirstSliceCompleteness {
+            state: daemon::FirstSliceCompletenessState::FirstSliceCompletenessTruncated as i32,
+            limiting_resources: Vec::new(),
+            continuation:
+                daemon::FirstSliceContinuationAvailability::FirstSliceContinuationUnavailable as i32,
+            guidance: vec![
+                daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceNarrowScope as i32,
+            ],
+        };
+        assert!(matches!(
+            parse_result_completeness(Some(truncated_without_resource), Some(true), false),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+
+        let duplicate_resources = daemon::FirstSliceCompleteness {
+            state: daemon::FirstSliceCompletenessState::FirstSliceCompletenessTruncated as i32,
+            limiting_resources: vec![
+                daemon::FirstSliceLimitingResource {
+                    kind: daemon::FirstSliceLimitingResourceKind::FirstSliceLimitRows as i32,
+                    limit: Some(10),
+                    observed: Some(10),
+                },
+                daemon::FirstSliceLimitingResource {
+                    kind: daemon::FirstSliceLimitingResourceKind::FirstSliceLimitRows as i32,
+                    limit: Some(20),
+                    observed: Some(20),
+                },
+            ],
+            continuation:
+                daemon::FirstSliceContinuationAvailability::FirstSliceContinuationUnavailable as i32,
+            guidance: vec![
+                daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceNarrowScope as i32,
+            ],
+        };
+        assert!(matches!(
+            parse_result_completeness(Some(duplicate_resources), Some(true), false),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+    }
+
+    #[test]
+    fn completeness_cursor_and_legacy_projection_must_agree() {
+        let page = daemon::FirstSliceCompleteness {
+            state: daemon::FirstSliceCompletenessState::FirstSliceCompletenessTruncated as i32,
+            limiting_resources: vec![daemon::FirstSliceLimitingResource {
+                kind: daemon::FirstSliceLimitingResourceKind::FirstSliceLimitPageSize as i32,
+                limit: Some(10),
+                observed: Some(10),
+            }],
+            continuation:
+                daemon::FirstSliceContinuationAvailability::FirstSliceContinuationAvailable as i32,
+            guidance: vec![
+                daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceUseCursor as i32,
+            ],
+        };
+        let parsed = parse_result_completeness(Some(page.clone()), Some(true), true)
+            .expect("consistent page completeness validates");
+        assert_eq!(parsed.state, ResultCompletenessState::Truncated);
+        assert!(matches!(
+            parse_result_completeness(Some(page.clone()), Some(false), true),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+        assert!(matches!(
+            parse_result_completeness(Some(page), Some(true), false),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+    }
+
+    #[test]
+    fn every_wire_limiting_resource_has_a_stable_client_mapping() {
+        let cases = [
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitRows,
+                LimitingResourceKind::Rows,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitEdges,
+                LimitingResourceKind::Edges,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitResults,
+                LimitingResourceKind::Results,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitDepth,
+                LimitingResourceKind::Depth,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitPaths,
+                LimitingResourceKind::Paths,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitSourceBytes,
+                LimitingResourceKind::SourceBytes,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitResponseBytes,
+                LimitingResourceKind::ResponseBytes,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitMemoryBytes,
+                LimitingResourceKind::MemoryBytes,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitDeadline,
+                LimitingResourceKind::Deadline,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitEstimatedTokens,
+                LimitingResourceKind::EstimatedTokens,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitCancellation,
+                LimitingResourceKind::Cancellation,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitCapability,
+                LimitingResourceKind::Capability,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitCoverage,
+                LimitingResourceKind::Coverage,
+            ),
+            (
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitPageSize,
+                LimitingResourceKind::PageSize,
+            ),
+        ];
+        for (wire, expected) in cases {
+            assert_eq!(parse_limiting_resource_kind(wire as i32), Some(expected));
+        }
+        assert_eq!(
+            parse_limiting_resource_kind(
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitUnspecified as i32
+            ),
+            None
+        );
     }
 }

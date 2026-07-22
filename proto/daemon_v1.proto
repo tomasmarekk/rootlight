@@ -413,6 +413,71 @@ message FirstSliceQueryContext {
   FirstSliceQueryUsage usage = 8;
 }
 
+// Authoritative execution-completeness state for one bounded result.
+enum FirstSliceCompletenessState {
+  FIRST_SLICE_COMPLETENESS_UNSPECIFIED = 0;
+  FIRST_SLICE_COMPLETENESS_COMPLETE = 1;
+  FIRST_SLICE_COMPLETENESS_TRUNCATED = 2;
+  FIRST_SLICE_COMPLETENESS_UNSUPPORTED_PARTIAL = 3;
+  FIRST_SLICE_COMPLETENESS_INDETERMINATE = 4;
+}
+
+// Stable resource family that limited a bounded result.
+enum FirstSliceLimitingResourceKind {
+  FIRST_SLICE_LIMIT_UNSPECIFIED = 0;
+  FIRST_SLICE_LIMIT_ROWS = 1;
+  FIRST_SLICE_LIMIT_EDGES = 2;
+  FIRST_SLICE_LIMIT_RESULTS = 3;
+  FIRST_SLICE_LIMIT_DEPTH = 4;
+  FIRST_SLICE_LIMIT_PATHS = 5;
+  FIRST_SLICE_LIMIT_SOURCE_BYTES = 6;
+  FIRST_SLICE_LIMIT_RESPONSE_BYTES = 7;
+  FIRST_SLICE_LIMIT_MEMORY_BYTES = 8;
+  FIRST_SLICE_LIMIT_DEADLINE = 9;
+  FIRST_SLICE_LIMIT_ESTIMATED_TOKENS = 10;
+  FIRST_SLICE_LIMIT_CANCELLATION = 11;
+  FIRST_SLICE_LIMIT_CAPABILITY = 12;
+  FIRST_SLICE_LIMIT_COVERAGE = 13;
+  FIRST_SLICE_LIMIT_PAGE_SIZE = 14;
+}
+
+// One source-free limiting-resource observation.
+message FirstSliceLimitingResource {
+  FirstSliceLimitingResourceKind kind = 1;
+  optional uint64 limit = 2;
+  optional uint64 observed = 3;
+}
+
+// Whether an incomplete result has a safe continuation.
+enum FirstSliceContinuationAvailability {
+  FIRST_SLICE_CONTINUATION_UNSPECIFIED = 0;
+  FIRST_SLICE_CONTINUATION_NOT_APPLICABLE = 1;
+  FIRST_SLICE_CONTINUATION_AVAILABLE = 2;
+  FIRST_SLICE_CONTINUATION_UNAVAILABLE = 3;
+}
+
+// Typed source-free follow-up guidance for an incomplete result.
+enum FirstSliceContinuationGuidance {
+  FIRST_SLICE_GUIDANCE_UNSPECIFIED = 0;
+  FIRST_SLICE_GUIDANCE_USE_CURSOR = 1;
+  FIRST_SLICE_GUIDANCE_NARROW_SCOPE = 2;
+  FIRST_SLICE_GUIDANCE_SPLIT_REQUEST = 3;
+  FIRST_SLICE_GUIDANCE_REDUCE_DEPTH = 4;
+  FIRST_SLICE_GUIDANCE_REDUCE_RELATIONS = 5;
+  FIRST_SLICE_GUIDANCE_REQUEST_SOURCE = 6;
+  FIRST_SLICE_GUIDANCE_INCREASE_BUDGET_WITHIN_LIMIT = 7;
+  FIRST_SLICE_GUIDANCE_REFRESH_COVERAGE = 8;
+  FIRST_SLICE_GUIDANCE_UNSUPPORTED_NO_CONTINUATION = 9;
+}
+
+// Completeness, limits, and continuation semantics preserved across IPC.
+message FirstSliceCompleteness {
+  FirstSliceCompletenessState state = 1;
+  repeated FirstSliceLimitingResource limiting_resources = 2;
+  FirstSliceContinuationAvailability continuation = 3;
+  repeated FirstSliceContinuationGuidance guidance = 4;
+}
+
 // Requests one bounded generation-pinned lexical lookup.
 message CodeLocateRequest {
   rootlight.common.v1.ContractVersion schema_version = 1;
@@ -447,6 +512,7 @@ message CodeLocateResponse {
   uint64 matched_candidates = 4;
   bool truncated = 5;
   optional uint64 next_page_offset = 6;
+  FirstSliceCompleteness completeness = 7;
 }
 
 // Requests bounded explanations for stable symbols.
@@ -481,6 +547,7 @@ message SymbolExplainResponse {
   repeated FirstSliceSymbolExplanation symbols = 3;
   repeated rootlight.common.v1.SymbolId unresolved_symbols = 4;
   bool truncated = 5;
+  FirstSliceCompleteness completeness = 6;
 }
 
 // Requests exact generation-bound source references.
@@ -512,6 +579,7 @@ message SourceReadResponse {
   repeated FirstSliceSourceChunk chunks = 3;
   uint64 total_source_bytes = 4;
   bool truncated = 5;
+  FirstSliceCompleteness completeness = 6;
 }
 
 // Requests the bounded list of repositories known to this daemon process.
@@ -671,6 +739,7 @@ message SymbolRelationshipsResponse {
   bool exact = 6;
   bool truncated = 7;
   optional uint64 next_page_offset = 8;
+  FirstSliceCompleteness completeness = 9;
 }
 
 // Requests bounded directed paths between stable symbols.
@@ -723,6 +792,7 @@ message FlowTraceResponse {
   repeated FirstSliceTracePath paths = 3;
   FirstSliceTraceFrontier frontier = 4;
   FirstSliceTraceProjection projection = 5;
+  FirstSliceCompleteness completeness = 6;
 }
 
 // Requests bounded architecture cycle detection over a relation projection.
@@ -773,6 +843,7 @@ message ArchitectureCyclesResponse {
   repeated FirstSliceCycle cycles = 4;
   repeated FirstSliceCycleBreak break_candidates = 5;
   FirstSliceCycleProjection projection = 6;
+  FirstSliceCompleteness completeness = 7;
 }
 
 // Requests bounded dead-code reachability analysis over one generation.
@@ -824,6 +895,7 @@ message CodeDeadResponse {
   FirstSliceEntryPointSummary entry_points = 4;
   repeated FirstSliceBlindSpot blind_spots = 5;
   repeated FirstSliceSuppressionRule false_positive_controls = 6;
+  FirstSliceCompleteness completeness = 7;
 }
 
 // Requests a bounded file-granularity architecture overview over one generation.
@@ -880,6 +952,7 @@ message ArchitectureOverviewResponse {
   repeated FirstSliceArchitectureConnection connections = 4;
   repeated FirstSliceHotspot hotspots = 5;
   repeated FirstSliceDerivedView views = 6;
+  FirstSliceCompleteness completeness = 7;
 }
 
 // Requests a bounded test selection for one generation and seed set.
@@ -925,6 +998,7 @@ message TestsSelectResponse {
   repeated FirstSliceRankedTest tests = 3;
   FirstSliceTestCoverageStrategy coverage_strategy = 4;
   repeated FirstSliceTestGap gaps = 5;
+  FirstSliceCompleteness completeness = 6;
 }
 
 // Requests a bounded change-impact analysis for one generation and change set.
@@ -990,6 +1064,7 @@ message ChangeImpactResponse {
   repeated FirstSliceImpactGroup impacted = 4;
   repeated FirstSliceChangeImpactTest tests = 5;
   FirstSliceImpactRiskSummary risk_summary = 6;
+  FirstSliceCompleteness completeness = 7;
 }
 
 // Requests a bounded ordered change plan for one generation and target set.
@@ -1044,6 +1119,7 @@ message PlanChangeResponse {
   repeated FirstSliceChangeImpactTest test_plan = 5;
   repeated FirstSlicePlanDecision open_decisions = 6;
   FirstSliceContextPackRequest context_pack_request = 7;
+  FirstSliceCompleteness completeness = 8;
 }
 
 // Selects a revision by Git ref expression or immutable generation identity.
@@ -1114,6 +1190,7 @@ message HistoryCompareResponse {
   FirstSliceArchitectureDelta architecture_delta = 5;
   repeated FirstSliceBreakingCandidate breaking_candidates = 6;
   repeated FirstSliceLineageMatch lineage = 7;
+  FirstSliceCompleteness completeness = 8;
 }
 
 // Requests a bounded advanced query over a safe typed AST.
@@ -1157,4 +1234,5 @@ message AdvancedQueryResponse {
   FirstSliceAdvancedPlan plan = 5;
   string completeness = 6;
   optional uint64 next_page_offset = 7;
+  FirstSliceCompleteness result_completeness = 8;
 }

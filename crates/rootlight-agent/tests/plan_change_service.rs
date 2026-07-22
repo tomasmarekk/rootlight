@@ -208,6 +208,17 @@ fn plan_output(generation_id: GenerationId) -> PlanChangePortOutput {
         result: plan_result(),
         usage: usage(),
         truncated: true,
+        completeness: rootlight_mcp_contract::completeness::ResultCompleteness::new(
+            rootlight_mcp_contract::completeness::CompletenessState::Truncated,
+            vec![
+                rootlight_mcp_contract::completeness::LimitingResource::kind(
+                    rootlight_mcp_contract::completeness::LimitingResourceKind::Results,
+                ),
+            ],
+            rootlight_mcp_contract::completeness::ContinuationAvailability::Unavailable,
+            vec![rootlight_mcp_contract::completeness::ContinuationGuidance::NarrowScope],
+        )
+        .expect("fixture completeness is valid"),
         warnings: Vec::new(),
     }
 }

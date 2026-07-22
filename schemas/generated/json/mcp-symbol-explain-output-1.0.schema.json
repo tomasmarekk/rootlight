@@ -61,15 +61,110 @@
         }
       ]
     },
+    "CompletenessState": {
+      "description": "Authoritative execution state for one bounded analytical result.",
+      "oneOf": [
+        {
+          "description": "The producer authoritatively completed the supported execution domain.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "A known resource limit stopped an otherwise supported execution.",
+          "type": "string",
+          "const": "truncated"
+        },
+        {
+          "description": "A known part of the requested semantic domain is unsupported.",
+          "type": "string",
+          "const": "unsupported_partial"
+        },
+        {
+          "description": "The producer cannot establish what portion of the domain was evaluated.",
+          "type": "string",
+          "const": "indeterminate"
+        }
+      ]
+    },
     "ContentHash": {
       "type": "string",
       "pattern": "^b3_[a-z2-7]{58}$"
+    },
+    "ContinuationAvailability": {
+      "description": "Whether an incomplete result exposes a safe continuation.",
+      "oneOf": [
+        {
+          "description": "Continuation does not apply to a complete or atomic result.",
+          "type": "string",
+          "const": "not_applicable"
+        },
+        {
+          "description": "A checked continuation is present at the public boundary.",
+          "type": "string",
+          "const": "available"
+        },
+        {
+          "description": "The result is incomplete and cannot be continued directly.",
+          "type": "string",
+          "const": "unavailable"
+        }
+      ]
     },
     "ContinuationCursor": {
       "description": "A bounded opaque continuation cursor.",
       "type": "string",
       "maxLength": 4096,
       "minLength": 1
+    },
+    "ContinuationGuidance": {
+      "description": "Typed source-free follow-up guidance for an incomplete result.",
+      "oneOf": [
+        {
+          "description": "Continue with the authenticated cursor.",
+          "type": "string",
+          "const": "use_cursor"
+        },
+        {
+          "description": "Narrow the requested scope.",
+          "type": "string",
+          "const": "narrow_scope"
+        },
+        {
+          "description": "Split the request into independently bounded requests.",
+          "type": "string",
+          "const": "split_request"
+        },
+        {
+          "description": "Reduce traversal depth.",
+          "type": "string",
+          "const": "reduce_depth"
+        },
+        {
+          "description": "Reduce the relation projection.",
+          "type": "string",
+          "const": "reduce_relations"
+        },
+        {
+          "description": "Request source separately from analytical evidence.",
+          "type": "string",
+          "const": "request_source"
+        },
+        {
+          "description": "Increase a caller-controlled budget without exceeding server policy.",
+          "type": "string",
+          "const": "increase_budget_within_limit"
+        },
+        {
+          "description": "Refresh or expand indexed coverage.",
+          "type": "string",
+          "const": "refresh_coverage"
+        },
+        {
+          "description": "The unsupported or unknown portion has no continuation.",
+          "type": "string",
+          "const": "unsupported_no_continuation"
+        }
+      ]
     },
     "CoverageStatus": {
       "description": "Completeness of a bounded fact or result set.",
@@ -422,6 +517,115 @@
         "language",
         "tier",
         "status"
+      ]
+    },
+    "LimitingResource": {
+      "description": "One source-free limiting-resource observation.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Stable limiting-resource family.",
+          "$ref": "#/$defs/LimitingResourceKind"
+        },
+        "limit": {
+          "description": "Effective ceiling, when the producer measured it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        },
+        "observed": {
+          "description": "Observed value at the stop boundary, when available.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ]
+    },
+    "LimitingResourceKind": {
+      "description": "Stable resource family that limited an analytical result.",
+      "oneOf": [
+        {
+          "description": "Logical row limit.",
+          "type": "string",
+          "const": "rows"
+        },
+        {
+          "description": "Traversed edge limit.",
+          "type": "string",
+          "const": "edges"
+        },
+        {
+          "description": "Returned result limit.",
+          "type": "string",
+          "const": "results"
+        },
+        {
+          "description": "Traversal depth limit.",
+          "type": "string",
+          "const": "depth"
+        },
+        {
+          "description": "Returned path limit.",
+          "type": "string",
+          "const": "paths"
+        },
+        {
+          "description": "Returned source-byte limit.",
+          "type": "string",
+          "const": "source_bytes"
+        },
+        {
+          "description": "Serialized response-byte limit.",
+          "type": "string",
+          "const": "response_bytes"
+        },
+        {
+          "description": "Owned response-memory limit.",
+          "type": "string",
+          "const": "memory_bytes"
+        },
+        {
+          "description": "Monotonic deadline.",
+          "type": "string",
+          "const": "deadline"
+        },
+        {
+          "description": "Estimated output-token limit.",
+          "type": "string",
+          "const": "estimated_tokens"
+        },
+        {
+          "description": "Cooperative cancellation.",
+          "type": "string",
+          "const": "cancellation"
+        },
+        {
+          "description": "Unavailable requested capability.",
+          "type": "string",
+          "const": "capability"
+        },
+        {
+          "description": "Incomplete index or semantic coverage.",
+          "type": "string",
+          "const": "coverage"
+        },
+        {
+          "description": "Requested or effective page-size limit.",
+          "type": "string",
+          "const": "page_size"
+        }
       ]
     },
     "LineRange": {
@@ -861,6 +1065,10 @@
       "description": "Common strict response envelope for generation-pinned reads.",
       "type": "object",
       "properties": {
+        "completeness": {
+          "description": "Authoritative execution completeness and safe continuation semantics.",
+          "$ref": "#/$defs/ResultCompleteness"
+        },
         "coverage": {
           "description": "Relevant coverage.",
           "$ref": "#/$defs/CoverageSummary"
@@ -914,6 +1122,7 @@
         "coverage",
         "data",
         "truncated",
+        "completeness",
         "next_cursor",
         "usage",
         "warnings",
@@ -1033,6 +1242,39 @@
       "required": [
         "code",
         "message"
+      ]
+    },
+    "ResultCompleteness": {
+      "description": "Checked completeness, limiting resources, and continuation semantics.",
+      "type": "object",
+      "properties": {
+        "continuation": {
+          "$ref": "#/$defs/ContinuationAvailability"
+        },
+        "guidance": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContinuationGuidance"
+          },
+          "maxItems": 9
+        },
+        "limiting_resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LimitingResource"
+          },
+          "maxItems": 14
+        },
+        "state": {
+          "$ref": "#/$defs/CompletenessState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "limiting_resources",
+        "continuation",
+        "guidance"
       ]
     },
     "SafeLabel": {

@@ -13,6 +13,9 @@ use rootlight_mcp_contract::{
         ChangePlanStep, ContextPackRequest, PlanChangeData, PlanChangeInput, PlanDecision,
         PlanImpactSummary, PlanObjective, PlanTargetSelector, RiskLevel, TestCandidate,
     },
+    completeness::{
+        CompletenessState, ContinuationAvailability, LimitingResourceKind, ResultCompleteness,
+    },
     context::PlanExplanation,
     vertical::{ReadEnvelope, RequiredNullable, ResponseWarning, UsageSummary},
 };
@@ -208,6 +211,8 @@ pub struct PlanChangePortOutput {
     pub usage: UsageSummary,
     /// Whether the daemon truncated its bounded result.
     pub truncated: bool,
+    /// Authoritative daemon execution completeness.
+    pub completeness: ResultCompleteness,
     /// Source-free response warnings.
     pub warnings: Vec<ResponseWarning>,
 }
@@ -308,6 +313,7 @@ impl PlanChangeService {
                 coverage: identity.coverage,
                 data,
                 truncated: false,
+                completeness: ResultCompleteness::complete(),
                 next_cursor: RequiredNullable(None),
                 usage: empty_plan_usage(),
                 warnings: identity.warnings,
@@ -342,6 +348,22 @@ impl PlanChangeService {
         {
             return Err(PlanChangeServiceError::InvalidResponse);
         }
+        let resource_truncated = output.completeness.state == CompletenessState::Truncated
+            || output
+                .completeness
+                .limiting_resources
+                .iter()
+                .any(|resource| {
+                    !matches!(
+                        resource.kind,
+                        LimitingResourceKind::Capability | LimitingResourceKind::Coverage
+                    )
+                });
+        if output.completeness.continuation == ContinuationAvailability::Available
+            || resource_truncated != output.truncated
+        {
+            return Err(PlanChangeServiceError::InvalidResponse);
+        }
         let data = shape_plan_change(output.result).map_err(PlanChangeServiceError::Admission)?;
         Ok(ReadEnvelope {
             schema_version: SchemaVersion::V1_0,
@@ -350,6 +372,7 @@ impl PlanChangeService {
             coverage: output.identity.coverage,
             data,
             truncated: output.truncated,
+            completeness: output.completeness,
             next_cursor: RequiredNullable(None),
             usage: output.usage,
             warnings: output.warnings,

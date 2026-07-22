@@ -14,6 +14,10 @@ use std::{
 use rootlight_ids::{RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
     PublicError, SafeLabel, SchemaVersion, SourceFreeMessage, TrustClassification,
+    completeness::{
+        CompletenessState, ContinuationAvailability, ContinuationGuidance, LimitingResource,
+        LimitingResourceKind, ResultCompleteness,
+    },
     context::{
         BatchTool, ContextItem, ContextPackData, ContextPackId, ContextPackInput, ContextStructure,
         EvidenceRole as ContractEvidenceRole, OmissionSummary, TokenAccounting, ToolSuggestion,
@@ -425,6 +429,7 @@ impl ContextPackService {
                 coverage: identity.coverage,
                 data,
                 truncated: false,
+                completeness: ResultCompleteness::complete(),
                 next_cursor: RequiredNullable(None),
                 usage: empty_usage("context-pack-explain"),
                 warnings: identity.warnings,
@@ -471,6 +476,23 @@ impl ContextPackService {
         {
             return Err(ContextPackServiceError::InvalidResponse);
         }
+        let resource_truncated = envelope.completeness.state == CompletenessState::Truncated
+            || envelope
+                .completeness
+                .limiting_resources
+                .iter()
+                .any(|resource| {
+                    !matches!(
+                        resource.kind,
+                        LimitingResourceKind::Capability | LimitingResourceKind::Coverage
+                    )
+                });
+        if (envelope.completeness.continuation == ContinuationAvailability::Available)
+            != envelope.next_cursor.0.is_some()
+            || resource_truncated != envelope.truncated
+        {
+            return Err(ContextPackServiceError::InvalidResponse);
+        }
         let symbols: SymbolExplainData = serde_json::from_value(envelope.data.clone())
             .map_err(|_| ContextPackServiceError::InvalidResponse)?;
         let planned = DefaultContextPackPlanner
@@ -483,19 +505,52 @@ impl ContextPackService {
                 &cancellation,
             )
             .map_err(|_| ContextPackServiceError::Unavailable)?;
+        let truncated = envelope.truncated || planned.truncated;
+        let completeness = context_pack_completeness(&envelope.completeness, planned.truncated)?;
         Ok(ReadEnvelope {
             schema_version: SchemaVersion::V1_0,
             repository: identity.repository,
             generation: identity.generation,
             coverage: identity.coverage,
             data: planned.data,
-            truncated: planned.truncated,
+            truncated,
+            completeness,
             next_cursor: RequiredNullable(None),
             usage: envelope.usage,
             warnings: envelope.warnings,
             trust: TrustClassification::UntrustedRepositoryData,
         })
     }
+}
+
+fn context_pack_completeness(
+    child: &ResultCompleteness,
+    planner_truncated: bool,
+) -> Result<ResultCompleteness, ContextPackServiceError> {
+    if !planner_truncated {
+        return Ok(child.clone());
+    }
+    let state = child.state.max(CompletenessState::Truncated);
+    let mut resources = child.limiting_resources.clone();
+    resources.push(LimitingResource::kind(LimitingResourceKind::Results));
+    let mut guidance = child
+        .guidance
+        .iter()
+        .copied()
+        .filter(|value| *value != ContinuationGuidance::UseCursor)
+        .collect::<Vec<_>>();
+    guidance.push(ContinuationGuidance::SplitRequest);
+    resources.sort_unstable();
+    resources.dedup_by_key(|resource| resource.kind);
+    guidance.sort_unstable();
+    guidance.dedup();
+    ResultCompleteness::new(
+        state,
+        resources,
+        ContinuationAvailability::Unavailable,
+        guidance,
+    )
+    .map_err(|_| ContextPackServiceError::InvalidResponse)
 }
 
 fn context_service_checkpoint<C>(
