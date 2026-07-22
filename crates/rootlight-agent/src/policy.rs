@@ -4,6 +4,7 @@
 //! provides transactional accounting for standalone and nested agent work.
 
 use rootlight_mcp_contract::vertical::{ResponseBudget, ResponseProfile};
+use rootlight_query::QueryBudget;
 
 /// Read-only cancellation signal supplied by an application adapter.
 ///
@@ -33,8 +34,10 @@ impl CancellationSignal for NeverCancelled {
 pub enum BudgetResource {
     /// Returned result objects.
     Results,
-    /// Estimated output tokens.
+    /// Deterministic conservative output-token estimate.
     Tokens,
+    /// Tokens counted by an actual tokenizer when one is available.
+    ActualTokens,
     /// Raw source bytes.
     SourceBytes,
     /// Relationship or traversal facts.
@@ -43,20 +46,28 @@ pub enum BudgetResource {
     Depth,
     /// Independently returned paths.
     Paths,
+    /// Exact serialized response bytes.
+    JsonBytes,
+    /// Variable-sized bytes owned by retained response data.
+    MemoryBytes,
     /// Maximum cooperative wall time observed in milliseconds.
     Time,
 }
 
 /// One resource charge made by an agent planner or shaper.
 ///
-/// Results, tokens, source bytes, traversal facts, and paths are additive.
-/// Depth and wall time are high-water marks.
+/// Results, both token counters, source bytes, traversal facts, paths, response
+/// bytes, and owned memory are additive. Depth and wall time are high-water
+/// marks. `tokens` remains the deterministic estimate used for admission;
+/// `actual_tokens` records tokenizer output only when that measurement exists.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BudgetCharge {
     /// Returned result objects.
     pub results: u64,
-    /// Estimated output tokens.
+    /// Deterministic conservative output-token estimate.
     pub tokens: u64,
+    /// Actual tokenizer tokens measured for this charge, or zero when unavailable.
+    pub actual_tokens: u64,
     /// Raw source bytes.
     pub source_bytes: u64,
     /// Relationship or traversal facts.
@@ -65,6 +76,10 @@ pub struct BudgetCharge {
     pub depth: u64,
     /// Independently returned paths.
     pub paths: u64,
+    /// Exact bytes in the serialized response representation.
+    pub json_bytes: u64,
+    /// Variable-sized bytes owned by retained response data.
+    pub memory_bytes: u64,
     /// Cooperative elapsed time in milliseconds.
     pub time_ms: u64,
 }
@@ -90,15 +105,22 @@ impl BudgetLimits {
     /// Tool entry points should further reduce this ceiling with
     /// [`BudgetLimits::constrained_by`] before beginning work.
     #[must_use]
-    pub const fn server_ceiling() -> Self {
+    pub fn server_ceiling() -> Self {
+        let query = QueryBudget::new();
+        let time_ms = u64::try_from(query.max_duration().as_millis()).unwrap_or(u64::MAX);
         Self::from_maximums(BudgetCharge {
-            results: 1_000,
-            tokens: 16_000,
-            source_bytes: 524_288,
-            traversal_facts: 100_000,
+            results: query.max_results(),
+            tokens: query.max_tokens(),
+            // A supported byte-level tokenizer cannot emit more tokens than
+            // the exact serialized UTF-8 bytes from which those tokens are measured.
+            actual_tokens: query.max_json_bytes(),
+            source_bytes: query.max_source_bytes(),
+            traversal_facts: query.max_edges(),
             depth: 16,
-            paths: 1_000,
-            time_ms: 30_000,
+            paths: query.max_results(),
+            json_bytes: query.max_json_bytes(),
+            memory_bytes: query.max_memory_bytes(),
+            time_ms,
         })
     }
 
@@ -114,18 +136,24 @@ impl BudgetLimits {
         match resource {
             BudgetResource::Results => self.maximums.results,
             BudgetResource::Tokens => self.maximums.tokens,
+            BudgetResource::ActualTokens => self.maximums.actual_tokens,
             BudgetResource::SourceBytes => self.maximums.source_bytes,
             BudgetResource::TraversalFacts => self.maximums.traversal_facts,
             BudgetResource::Depth => self.maximums.depth,
             BudgetResource::Paths => self.maximums.paths,
+            BudgetResource::JsonBytes => self.maximums.json_bytes,
+            BudgetResource::MemoryBytes => self.maximums.memory_bytes,
             BudgetResource::Time => self.maximums.time_ms,
         }
     }
 
-    /// Returns limits with the token ceiling replaced.
+    /// Returns limits with the deterministic estimated-token ceiling reduced.
+    ///
+    /// Actual tokenizer usage is an independent measured dimension bounded by
+    /// serialized bytes; an estimated-token request cannot constrain it safely.
     #[must_use]
     pub const fn with_tokens(mut self, maximum: u64) -> Self {
-        self.maximums.tokens = maximum;
+        self.maximums.tokens = min_u64(self.maximums.tokens, maximum);
         self
     }
 
@@ -264,19 +292,25 @@ impl BudgetLedger {
             consumed: BudgetCharge {
                 results: 0,
                 tokens: 0,
+                actual_tokens: 0,
                 source_bytes: 0,
                 traversal_facts: 0,
                 depth: 0,
                 paths: 0,
+                json_bytes: 0,
+                memory_bytes: 0,
                 time_ms: 0,
             },
             reserved: BudgetCharge {
                 results: 0,
                 tokens: 0,
+                actual_tokens: 0,
                 source_bytes: 0,
                 traversal_facts: 0,
                 depth: 0,
                 paths: 0,
+                json_bytes: 0,
+                memory_bytes: 0,
                 time_ms: 0,
             },
             limiting_resource: None,
@@ -289,7 +323,7 @@ impl BudgetLedger {
     /// `context.pack` have dedicated ceilings that differ from the shared
     /// [`ResponseBudget`] schema.
     #[must_use]
-    pub const fn with_token_limit(max_tokens: u64) -> Self {
+    pub fn with_token_limit(max_tokens: u64) -> Self {
         Self::from_limits(BudgetLimits::server_ceiling().with_tokens(max_tokens))
     }
 
@@ -312,7 +346,7 @@ impl BudgetLedger {
     ///
     /// # Panics
     ///
-    /// Panics only if internal ledger counters violate the admission invariant.
+    /// Panics only if internal ledger counters violate their admission invariant.
     #[must_use]
     pub fn remaining(&self) -> BudgetCharge {
         let admitted = combined_usage(self.consumed, self.reserved)
@@ -602,10 +636,13 @@ const fn minimum_charge(left: BudgetCharge, right: BudgetCharge) -> BudgetCharge
     BudgetCharge {
         results: min_u64(left.results, right.results),
         tokens: min_u64(left.tokens, right.tokens),
+        actual_tokens: min_u64(left.actual_tokens, right.actual_tokens),
         source_bytes: min_u64(left.source_bytes, right.source_bytes),
         traversal_facts: min_u64(left.traversal_facts, right.traversal_facts),
         depth: min_u64(left.depth, right.depth),
         paths: min_u64(left.paths, right.paths),
+        json_bytes: min_u64(left.json_bytes, right.json_bytes),
+        memory_bytes: min_u64(left.memory_bytes, right.memory_bytes),
         time_ms: min_u64(left.time_ms, right.time_ms),
     }
 }
@@ -624,6 +661,10 @@ fn combined_usage(left: BudgetCharge, right: BudgetCharge) -> Result<BudgetCharg
             .tokens
             .checked_add(right.tokens)
             .ok_or(BudgetResource::Tokens)?,
+        actual_tokens: left
+            .actual_tokens
+            .checked_add(right.actual_tokens)
+            .ok_or(BudgetResource::ActualTokens)?,
         source_bytes: left
             .source_bytes
             .checked_add(right.source_bytes)
@@ -637,6 +678,14 @@ fn combined_usage(left: BudgetCharge, right: BudgetCharge) -> Result<BudgetCharg
             .paths
             .checked_add(right.paths)
             .ok_or(BudgetResource::Paths)?,
+        json_bytes: left
+            .json_bytes
+            .checked_add(right.json_bytes)
+            .ok_or(BudgetResource::JsonBytes)?,
+        memory_bytes: left
+            .memory_bytes
+            .checked_add(right.memory_bytes)
+            .ok_or(BudgetResource::MemoryBytes)?,
         time_ms: left.time_ms.max(right.time_ms),
     })
 }
@@ -650,7 +699,11 @@ fn remaining_capacity(limits: BudgetCharge, used: BudgetCharge) -> BudgetCharge 
         tokens: limits
             .tokens
             .checked_sub(used.tokens)
-            .expect("admitted tokens never exceed their limit"),
+            .expect("admitted estimated tokens never exceed their limit"),
+        actual_tokens: limits
+            .actual_tokens
+            .checked_sub(used.actual_tokens)
+            .expect("admitted actual tokens never exceed their limit"),
         source_bytes: limits
             .source_bytes
             .checked_sub(used.source_bytes)
@@ -664,6 +717,14 @@ fn remaining_capacity(limits: BudgetCharge, used: BudgetCharge) -> BudgetCharge 
             .paths
             .checked_sub(used.paths)
             .expect("admitted paths never exceed their limit"),
+        json_bytes: limits
+            .json_bytes
+            .checked_sub(used.json_bytes)
+            .expect("admitted JSON bytes never exceed their limit"),
+        memory_bytes: limits
+            .memory_bytes
+            .checked_sub(used.memory_bytes)
+            .expect("admitted memory bytes never exceed their limit"),
         time_ms: limits.time_ms,
     }
 }
@@ -673,6 +734,8 @@ fn first_exceeded(used: BudgetCharge, limits: BudgetCharge) -> Option<BudgetReso
         Some(BudgetResource::Results)
     } else if used.tokens > limits.tokens {
         Some(BudgetResource::Tokens)
+    } else if used.actual_tokens > limits.actual_tokens {
+        Some(BudgetResource::ActualTokens)
     } else if used.source_bytes > limits.source_bytes {
         Some(BudgetResource::SourceBytes)
     } else if used.traversal_facts > limits.traversal_facts {
@@ -681,6 +744,10 @@ fn first_exceeded(used: BudgetCharge, limits: BudgetCharge) -> Option<BudgetReso
         Some(BudgetResource::Depth)
     } else if used.paths > limits.paths {
         Some(BudgetResource::Paths)
+    } else if used.json_bytes > limits.json_bytes {
+        Some(BudgetResource::JsonBytes)
+    } else if used.memory_bytes > limits.memory_bytes {
+        Some(BudgetResource::MemoryBytes)
     } else if used.time_ms > limits.time_ms {
         Some(BudgetResource::Time)
     } else {
@@ -720,10 +787,13 @@ mod tests {
         match resource {
             BudgetResource::Results => charge.results = value,
             BudgetResource::Tokens => charge.tokens = value,
+            BudgetResource::ActualTokens => charge.actual_tokens = value,
             BudgetResource::SourceBytes => charge.source_bytes = value,
             BudgetResource::TraversalFacts => charge.traversal_facts = value,
             BudgetResource::Depth => charge.depth = value,
             BudgetResource::Paths => charge.paths = value,
+            BudgetResource::JsonBytes => charge.json_bytes = value,
+            BudgetResource::MemoryBytes => charge.memory_bytes = value,
             BudgetResource::Time => charge.time_ms = value,
         }
         charge
@@ -741,14 +811,37 @@ mod tests {
     }
 
     #[test]
+    fn server_ceiling_tracks_authoritative_query_limits() {
+        let query = QueryBudget::new();
+        let maximums = BudgetLimits::server_ceiling().maximums();
+
+        assert_eq!(maximums.results, query.max_results());
+        assert_eq!(maximums.tokens, query.max_tokens());
+        assert_eq!(maximums.actual_tokens, query.max_json_bytes());
+        assert_eq!(maximums.source_bytes, query.max_source_bytes());
+        assert_eq!(maximums.traversal_facts, query.max_edges());
+        assert_eq!(maximums.paths, query.max_results());
+        assert_eq!(maximums.json_bytes, query.max_json_bytes());
+        assert_eq!(maximums.memory_bytes, query.max_memory_bytes());
+        assert_eq!(
+            maximums.time_ms,
+            u64::try_from(query.max_duration().as_millis())
+                .expect("query default duration is representable in milliseconds")
+        );
+    }
+
+    #[test]
     fn client_fields_only_reduce_server_limits() {
         let requested = response_budget(BudgetCharge {
             results: 2_000,
             tokens: 100,
+            actual_tokens: 100,
             source_bytes: 1_000_000,
             traversal_facts: 50,
             depth: 32,
             paths: 5,
+            json_bytes: u64::MAX,
+            memory_bytes: u64::MAX,
             time_ms: 60_000,
         });
         let limits = BudgetLedger::new(Some(requested)).limits().maximums();
@@ -758,13 +851,29 @@ mod tests {
             BudgetCharge {
                 results: 1_000,
                 tokens: 100,
-                source_bytes: 524_288,
+                actual_tokens: 1_048_576,
+                source_bytes: 65_536,
                 traversal_facts: 50,
                 depth: 16,
                 paths: 5,
-                time_ms: 30_000,
+                json_bytes: 1_048_576,
+                memory_bytes: 16_777_216,
+                time_ms: 2_000,
             }
         );
+    }
+
+    #[test]
+    fn token_limit_reduces_only_estimate_without_raising_server_policy() {
+        let reduced = BudgetLedger::with_token_limit(40).limits().maximums();
+        assert_eq!(reduced.tokens, 40);
+        assert_eq!(
+            reduced.actual_tokens,
+            BudgetLimits::server_ceiling().maximums().actual_tokens
+        );
+
+        let attempted_raise = BudgetLedger::with_token_limit(u64::MAX).limits().maximums();
+        assert_eq!(attempted_raise, BudgetLimits::server_ceiling().maximums());
     }
 
     #[test]
@@ -772,10 +881,13 @@ mod tests {
         let limits = BudgetLimits::from_maximums(BudgetCharge {
             results: 1,
             tokens: 1,
+            actual_tokens: 1,
             source_bytes: 1,
             traversal_facts: 1,
             depth: 1,
             paths: 1,
+            json_bytes: 1,
+            memory_bytes: 1,
             time_ms: 1,
         });
         let mut ledger = BudgetLedger::from_limits(limits);
@@ -823,10 +935,13 @@ mod tests {
         let resources = [
             BudgetResource::Results,
             BudgetResource::Tokens,
+            BudgetResource::ActualTokens,
             BudgetResource::SourceBytes,
             BudgetResource::TraversalFacts,
             BudgetResource::Depth,
             BudgetResource::Paths,
+            BudgetResource::JsonBytes,
+            BudgetResource::MemoryBytes,
             BudgetResource::Time,
         ];
 
@@ -847,13 +962,45 @@ mod tests {
     }
 
     #[test]
+    fn constrained_and_remaining_include_measured_output_dimensions() {
+        let broad = BudgetLimits::from_maximums(BudgetCharge {
+            actual_tokens: 100,
+            json_bytes: 200,
+            memory_bytes: 300,
+            ..BudgetCharge::default()
+        });
+        let narrow = BudgetLimits::from_maximums(BudgetCharge {
+            actual_tokens: 80,
+            json_bytes: 180,
+            memory_bytes: 250,
+            ..BudgetCharge::default()
+        });
+        let mut ledger = BudgetLedger::from_limits(broad.constrained_by(narrow));
+        ledger
+            .charge(BudgetCharge {
+                actual_tokens: 30,
+                json_bytes: 60,
+                memory_bytes: 70,
+                ..BudgetCharge::default()
+            })
+            .expect("measured output usage fits");
+
+        assert_eq!(ledger.remaining().actual_tokens, 50);
+        assert_eq!(ledger.remaining().json_bytes, 120);
+        assert_eq!(ledger.remaining().memory_bytes, 180);
+    }
+
+    #[test]
     fn checked_overflow_reports_each_additive_resource_without_mutation() {
         let resources = [
             BudgetResource::Results,
             BudgetResource::Tokens,
+            BudgetResource::ActualTokens,
             BudgetResource::SourceBytes,
             BudgetResource::TraversalFacts,
             BudgetResource::Paths,
+            BudgetResource::JsonBytes,
+            BudgetResource::MemoryBytes,
         ];
 
         for resource in resources {
@@ -879,10 +1026,13 @@ mod tests {
         let charge = BudgetCharge {
             results: 1,
             tokens: 1,
+            actual_tokens: 1,
             source_bytes: 1,
             traversal_facts: 1,
             depth: 1,
             paths: 1,
+            json_bytes: 1,
+            memory_bytes: 1,
             time_ms: 1,
         };
 
@@ -892,6 +1042,52 @@ mod tests {
                 Err(ExecutionPolicyError::BudgetExceeded {
                     resource: BudgetResource::Results,
                 })
+            );
+        }
+    }
+
+    #[test]
+    fn stable_precedence_orders_new_measured_resources() {
+        let limits = BudgetLimits::from_maximums(BudgetCharge::default());
+        for (charge, expected) in [
+            (
+                BudgetCharge {
+                    tokens: 1,
+                    actual_tokens: 1,
+                    ..BudgetCharge::default()
+                },
+                BudgetResource::Tokens,
+            ),
+            (
+                BudgetCharge {
+                    actual_tokens: 1,
+                    source_bytes: 1,
+                    ..BudgetCharge::default()
+                },
+                BudgetResource::ActualTokens,
+            ),
+            (
+                BudgetCharge {
+                    json_bytes: 1,
+                    memory_bytes: 1,
+                    time_ms: 1,
+                    ..BudgetCharge::default()
+                },
+                BudgetResource::JsonBytes,
+            ),
+            (
+                BudgetCharge {
+                    memory_bytes: 1,
+                    time_ms: 1,
+                    ..BudgetCharge::default()
+                },
+                BudgetResource::MemoryBytes,
+            ),
+        ] {
+            let mut ledger = BudgetLedger::from_limits(limits);
+            assert_eq!(
+                ledger.charge(charge),
+                Err(ExecutionPolicyError::BudgetExceeded { resource: expected })
             );
         }
     }
@@ -988,7 +1184,7 @@ mod tests {
         assert_eq!(ledger.consumed().depth, 4);
         assert_eq!(ledger.consumed().time_ms, 20);
         assert_eq!(ledger.remaining().depth, 16);
-        assert_eq!(ledger.remaining().time_ms, 30_000);
+        assert_eq!(ledger.remaining().time_ms, 2_000);
     }
 
     #[test]
@@ -996,34 +1192,46 @@ mod tests {
         let parent_limits = BudgetLimits::from_maximums(BudgetCharge {
             results: 20,
             tokens: 100,
+            actual_tokens: 100,
             source_bytes: 200,
             traversal_facts: 300,
             depth: 8,
             paths: 10,
+            json_bytes: 400,
+            memory_bytes: 500,
             time_ms: 1_000,
         });
         let tool_limits = BudgetLimits::from_maximums(BudgetCharge {
             results: 10,
             tokens: 90,
+            actual_tokens: 85,
             source_bytes: 150,
             traversal_facts: 250,
             depth: 6,
             paths: 8,
+            json_bytes: 350,
+            memory_bytes: 450,
             time_ms: 900,
         });
         let local = response_budget(BudgetCharge {
             results: 9,
             tokens: 80,
+            actual_tokens: 80,
             source_bytes: 140,
             traversal_facts: 240,
             depth: 5,
             paths: 7,
+            json_bytes: 300,
+            memory_bytes: 400,
             time_ms: 800,
         });
         let mut parent = BudgetLedger::from_limits(parent_limits);
         parent
             .charge(BudgetCharge {
                 tokens: 25,
+                actual_tokens: 20,
+                json_bytes: 10,
+                memory_bytes: 20,
                 ..BudgetCharge::default()
             })
             .expect("parent setup charge fits");
@@ -1036,10 +1244,13 @@ mod tests {
             BudgetCharge {
                 results: 9,
                 tokens: 75,
+                actual_tokens: 80,
                 source_bytes: 140,
                 traversal_facts: 240,
                 depth: 5,
                 paths: 7,
+                json_bytes: 350,
+                memory_bytes: 450,
                 time_ms: 800,
             }
         );
@@ -1048,7 +1259,10 @@ mod tests {
             .charge(BudgetCharge {
                 results: 2,
                 tokens: 30,
+                actual_tokens: 25,
                 depth: 3,
+                json_bytes: 100,
+                memory_bytes: 150,
                 time_ms: 100,
                 ..BudgetCharge::default()
             })
@@ -1057,7 +1271,10 @@ mod tests {
 
         assert_eq!(child_snapshot.consumed().tokens, 30);
         assert_eq!(parent.consumed().tokens, 55);
+        assert_eq!(parent.consumed().actual_tokens, 45);
         assert_eq!(parent.consumed().results, 2);
+        assert_eq!(parent.consumed().json_bytes, 110);
+        assert_eq!(parent.consumed().memory_bytes, 170);
         assert_eq!(parent.snapshot().reserved(), BudgetCharge::default());
     }
 
@@ -1124,28 +1341,37 @@ mod tests {
             let parent_charge = BudgetCharge {
                 results: u64::from(parent_results),
                 tokens: u64::from(parent_tokens),
+                actual_tokens: u64::from(parent_tokens),
                 source_bytes: u64::from(parent_source),
                 traversal_facts: u64::from(parent_facts),
                 depth: u64::from(parent_depth),
                 paths: u64::from(parent_paths),
+                json_bytes: u64::from(parent_source),
+                memory_bytes: u64::from(parent_source),
                 time_ms: u64::from(parent_time),
             };
             let tool_charge = BudgetCharge {
                 results: u64::from(tool_results),
                 tokens: u64::from(tool_tokens),
+                actual_tokens: u64::from(tool_tokens),
                 source_bytes: u64::from(tool_source),
                 traversal_facts: u64::from(tool_facts),
                 depth: u64::from(tool_depth),
                 paths: u64::from(tool_paths),
+                json_bytes: u64::from(tool_source),
+                memory_bytes: u64::from(tool_source),
                 time_ms: u64::from(tool_time),
             };
             let local_charge = BudgetCharge {
                 results: u64::from(local_results),
                 tokens: u64::from(local_tokens),
+                actual_tokens: u64::MAX,
                 source_bytes: u64::from(local_source),
                 traversal_facts: u64::from(local_facts),
                 depth: u64::from(local_depth),
                 paths: u64::from(local_paths),
+                json_bytes: u64::MAX,
+                memory_bytes: u64::MAX,
                 time_ms: u64::from(local_time),
             };
             let mut parent =
@@ -1154,10 +1380,13 @@ mod tests {
                 .charge(BudgetCharge {
                     results: parent_charge.results / 2,
                     tokens: parent_charge.tokens / 2,
+                    actual_tokens: parent_charge.actual_tokens / 2,
                     source_bytes: parent_charge.source_bytes / 2,
                     traversal_facts: parent_charge.traversal_facts / 2,
                     depth: parent_charge.depth / 2,
                     paths: parent_charge.paths / 2,
+                    json_bytes: parent_charge.json_bytes / 2,
+                    memory_bytes: parent_charge.memory_bytes / 2,
                     time_ms: parent_charge.time_ms / 2,
                 })
                 .expect("deterministic parent setup charge is within its limits");
@@ -1182,24 +1411,39 @@ mod tests {
             let maximum = u64::from(first) + u64::from(second);
             let limits = BudgetLimits::from_maximums(BudgetCharge {
                 tokens: maximum,
+                actual_tokens: maximum,
+                json_bytes: maximum,
+                memory_bytes: maximum,
                 ..BudgetCharge::default()
             });
             let mut ledger = BudgetLedger::from_limits(limits);
             ledger
                 .charge(BudgetCharge {
                     tokens: u64::from(first),
+                    actual_tokens: u64::from(first),
+                    json_bytes: u64::from(first),
+                    memory_bytes: u64::from(first),
                     ..BudgetCharge::default()
                 })
                 .expect("first charge is within constructed limit");
             ledger
                 .charge(BudgetCharge {
                     tokens: u64::from(second),
+                    actual_tokens: u64::from(second),
+                    json_bytes: u64::from(second),
+                    memory_bytes: u64::from(second),
                     ..BudgetCharge::default()
                 })
                 .expect("aggregate charge equals constructed limit");
 
             prop_assert_eq!(ledger.consumed().tokens, maximum);
+            prop_assert_eq!(ledger.consumed().actual_tokens, maximum);
+            prop_assert_eq!(ledger.consumed().json_bytes, maximum);
+            prop_assert_eq!(ledger.consumed().memory_bytes, maximum);
             prop_assert_eq!(ledger.remaining().tokens, 0);
+            prop_assert_eq!(ledger.remaining().actual_tokens, 0);
+            prop_assert_eq!(ledger.remaining().json_bytes, 0);
+            prop_assert_eq!(ledger.remaining().memory_bytes, 0);
         }
     }
 }

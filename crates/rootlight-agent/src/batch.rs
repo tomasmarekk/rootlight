@@ -1253,10 +1253,15 @@ fn charge_for(
     Ok(BudgetCharge {
         results: returned_result_count(tool, &envelope.data)?,
         tokens: usage.estimated_tokens,
+        // The public envelope currently exposes only its deterministic estimate.
+        actual_tokens: 0,
         source_bytes: usage.source_bytes,
         traversal_facts: usage.edges,
         depth: returned_depth(tool, &envelope.data),
         paths: returned_path_count(tool, &envelope.data),
+        json_bytes: usage.json_bytes,
+        // Owned lower-layer response memory is not present in UsageSummary.
+        memory_bytes: 0,
         time_ms: usage.wall_time_ms,
     })
 }
