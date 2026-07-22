@@ -963,6 +963,7 @@ impl BatchService {
                 Some(effective_deadline.at),
             )
             .with_local_budget(operation.local_budget.clone())
+            .with_pinned_identity(identity.clone())
             .with_local_deadline(effective_deadline.source == DeadlineSource::Local);
             let request = AgentToolRequest::new(operation.tool, resolved.arguments)
                 .with_materialized_binding_paths(resolved.materialized_binding_paths);

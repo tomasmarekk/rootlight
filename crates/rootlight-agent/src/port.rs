@@ -161,6 +161,7 @@ pub struct AgentCallContext<C> {
     cancellation: C,
     budget: ResponseBudget,
     local_budget: Option<ResponseBudget>,
+    pinned_identity: Option<AgentResolvedIdentity>,
     deadline: Option<Instant>,
     local_deadline: bool,
 }
@@ -176,6 +177,7 @@ where
             cancellation,
             budget,
             local_budget: None,
+            pinned_identity: None,
             deadline,
             local_deadline: false,
         }
@@ -186,6 +188,14 @@ where
     #[must_use]
     pub fn with_local_budget(mut self, local_budget: Option<ResponseBudget>) -> Self {
         self.local_budget = local_budget;
+        self
+    }
+
+    /// Attaches the immutable repository and generation selected before the
+    /// child was admitted.
+    #[must_use]
+    pub fn with_pinned_identity(mut self, identity: AgentResolvedIdentity) -> Self {
+        self.pinned_identity = Some(identity);
         self
     }
 
@@ -218,6 +228,12 @@ where
     #[must_use]
     pub const fn local_budget(&self) -> Option<&ResponseBudget> {
         self.local_budget.as_ref()
+    }
+
+    /// Returns the immutable repository and generation selected for the batch.
+    #[must_use]
+    pub const fn pinned_identity(&self) -> Option<&AgentResolvedIdentity> {
+        self.pinned_identity.as_ref()
     }
 
     /// Returns the earliest parent or child monotonic deadline.

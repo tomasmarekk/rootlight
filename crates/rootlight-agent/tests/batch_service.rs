@@ -42,6 +42,7 @@ impl CancellationSignal for TestCancellation {
 struct RecordedCall {
     request: AgentToolRequest,
     budget: ResponseBudget,
+    pinned_generation: Option<GenerationId>,
     has_deadline: bool,
 }
 
@@ -104,6 +105,9 @@ impl AgentToolPort<TestCancellation> for FakePort {
             .push(RecordedCall {
                 request,
                 budget: context.budget().clone(),
+                pinned_generation: context
+                    .pinned_identity()
+                    .map(|identity| identity.generation.generation_id),
                 has_deadline: context.deadline().is_some(),
             });
         let response = self
@@ -328,6 +332,11 @@ async fn service_materializes_bindings_and_propagates_policy() {
     );
     assert_eq!(calls[0].budget.max_tokens, Some(1_000));
     assert_eq!(calls[1].budget.max_tokens, Some(900));
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.pinned_generation == Some(generation(2)))
+    );
     assert!(calls.iter().all(|call| call.has_deadline));
     assert_eq!(port.identity_calls.load(Ordering::Relaxed), 1);
     assert_eq!(

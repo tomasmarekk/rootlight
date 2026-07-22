@@ -124,6 +124,14 @@ enum FakeOutcome {
         status: Box<Result<RepositoryStatus, ClientPortError>>,
         locate: Result<CodeLocatePortResponse, ClientPortError>,
     },
+    BatchPlanChange {
+        status: Box<Result<RepositoryStatus, ClientPortError>>,
+        plan_change: Result<PlanChangePortResponse, ClientPortError>,
+    },
+    BatchContextPack {
+        status: Box<Result<RepositoryStatus, ClientPortError>>,
+        explain: Result<SymbolExplainPortResponse, ClientPortError>,
+    },
     BatchPendingLocate {
         status: Box<Result<RepositoryStatus, ClientPortError>>,
     },
@@ -455,6 +463,7 @@ impl FirstSliceClientPort for FakePort {
         )));
         let outcome = match &self.outcome {
             FakeOutcome::SymbolExplain(outcome) => outcome.clone(),
+            FakeOutcome::BatchContextPack { explain, .. } => explain.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -506,8 +515,11 @@ impl FirstSliceClientPort for FakePort {
         let outcome = match &self.outcome {
             FakeOutcome::RepositoryStatus(outcome) => outcome.clone(),
             FakeOutcome::Batch { status, .. } => status.as_ref().clone(),
+            FakeOutcome::BatchPlanChange { status, .. } => status.as_ref().clone(),
+            FakeOutcome::BatchContextPack { status, .. } => status.as_ref().clone(),
             FakeOutcome::BatchPendingLocate { status } => status.as_ref().clone(),
             FakeOutcome::SymbolExplain(Ok(_)) => Ok(repository_status_response()),
+            FakeOutcome::PlanChange(Ok(_)) => Ok(repository_status_response()),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -641,6 +653,7 @@ impl FirstSliceClientPort for FakePort {
         )));
         let outcome = match &self.outcome {
             FakeOutcome::PlanChange(outcome) => outcome.clone(),
+            FakeOutcome::BatchPlanChange { plan_change, .. } => plan_change.clone(),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1375,6 +1388,36 @@ fn batch_harness() -> Harness {
         status: Box::new(Ok(repository_status_response())),
         locate: Ok(locate_response()),
     })
+}
+
+fn batch_plan_change_response() -> PlanChangePortResponse {
+    PlanChangePortResponse::new(
+        ClientPlanChange {
+            context: context(1, 0),
+            plan: vec![ClientPlanStep {
+                step: 1,
+                action: "Apply the bounded change.".to_owned(),
+                targets: vec![symbol()],
+                depends_on: Vec::new(),
+                risks: Vec::new(),
+                verification: Some("run the focused regression test".to_owned()),
+            }],
+            affected_scope: ClientPlanImpactSummary {
+                affected_symbols: 1,
+                affected_files: 1,
+                risk_level: "low".to_owned(),
+                touches_public_surface: false,
+            },
+            test_plan: Vec::new(),
+            open_decisions: Vec::new(),
+            context_pack_request: ClientPlanContextPack {
+                symbols: vec![symbol()],
+                files: vec![file()],
+            },
+            execution_completeness: complete_execution(),
+        },
+        metadata("batch-plan-change"),
+    )
 }
 
 fn assert_canonical_budget_error(error: &PublicError) {
@@ -2520,6 +2563,108 @@ async fn query_batch_composes_locate_subtools_under_one_pinned_generation() {
 }
 
 #[tokio::test]
+async fn query_batch_executes_plan_change_under_the_pinned_identity() {
+    let harness = Harness::new(FakeOutcome::BatchPlanChange {
+        status: Box::new(Ok(repository_status_response())),
+        plan_change: Ok(batch_plan_change_response()),
+    });
+    let output: QueryBatchOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::QueryBatch,
+            json!({
+                "repository": {"repository_id": repository()},
+                "generation": "active",
+                "operations": [{
+                    "id": "plan",
+                    "tool": "plan.change",
+                    "arguments": {
+                        "objective": "bug_fix",
+                        "objective_text": "fix the defect",
+                        "targets": [{"symbol_id": symbol()}]
+                    }
+                }]
+            }),
+        )
+        .await
+        .expect("batch change planning succeeds"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch success");
+    };
+
+    assert_eq!(output.data.batch_status, BatchStatus::Ok);
+    assert_eq!(output.data.operation_results.len(), 1);
+    assert_eq!(
+        output.data.operation_results[0].status,
+        BatchOperationStatus::Ok
+    );
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 2);
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    assert!(matches!(calls[0], ObservedCall::RepositoryStatus(_)));
+    let ObservedCall::PlanChange(request) = &calls[1] else {
+        panic!("expected plan change call");
+    };
+    assert_eq!(
+        request.generation(),
+        &GenerationSelector::Explicit(generation())
+    );
+    assert_eq!(request.max_steps(), Some(100));
+}
+
+#[tokio::test]
+async fn query_batch_context_pack_reuses_the_pinned_identity() {
+    let harness = Harness::new(FakeOutcome::BatchContextPack {
+        status: Box::new(Ok(repository_status_response())),
+        explain: Ok(explain_response(source_reference(4, 12, 2, 2))),
+    });
+    let output: QueryBatchOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::QueryBatch,
+            json!({
+                "repository": {"repository_id": repository()},
+                "generation": "active",
+                "operations": [{
+                    "id": "context",
+                    "tool": "context.pack",
+                    "arguments": {
+                        "task": "fix the duplicate payment bug",
+                        "seeds": {"symbols": [symbol()]},
+                        "token_budget": 1_000
+                    }
+                }]
+            }),
+        )
+        .await
+        .expect("batch context assembly succeeds"),
+    );
+    let ToolResponse::Success(output) = output else {
+        panic!("expected batch success");
+    };
+
+    assert_eq!(output.data.batch_status, BatchStatus::Ok);
+    assert_eq!(
+        output.data.operation_results[0].status,
+        BatchOperationStatus::Ok
+    );
+    assert_eq!(
+        harness.call_count.load(Ordering::Relaxed),
+        2,
+        "one status preflight and one symbol read prove there is no second identity lookup"
+    );
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    assert!(matches!(calls[0], ObservedCall::RepositoryStatus(_)));
+    assert!(matches!(calls[1], ObservedCall::SymbolExplain(_)));
+}
+
+#[tokio::test]
 async fn query_batch_preserves_child_page_continuations() {
     let harness = Harness::with_cursor_key(
         FakeOutcome::Batch {
@@ -2767,7 +2912,8 @@ async fn batch_adapter_rejects_unrepresentable_evidence_before_client_dispatch()
         local_budget.clone(),
         Some(std::time::Instant::now() + std::time::Duration::from_secs(1)),
     )
-    .with_local_budget(Some(local_budget));
+    .with_local_budget(Some(local_budget))
+    .with_pinned_identity(agent_identity_from_status(repository_status_response()));
 
     let error = adapter
         .execute(request, context)
@@ -2842,6 +2988,7 @@ async fn batch_adapter_preserves_local_and_parent_deadline_provenance() {
             },
             Some(std::time::Instant::now()),
         )
+        .with_pinned_identity(agent_identity_from_status(repository_status_response()))
         .with_local_deadline(local);
         assert_eq!(adapter.execute(request, context).await, Err(expected));
     }
@@ -2862,6 +3009,7 @@ fn production_batch_mapping_covers_every_canonical_eligible_tool() {
         ),
         (McpTool::ArchitectureCycles, BatchTool::ArchitectureCycles),
         (McpTool::CodeDead, BatchTool::CodeDead),
+        (McpTool::PlanChange, BatchTool::PlanChange),
         (McpTool::ContextPack, BatchTool::ContextPack),
         (McpTool::SourceRead, BatchTool::SourceRead),
     ];
@@ -2873,7 +3021,6 @@ fn production_batch_mapping_covers_every_canonical_eligible_tool() {
         let vertical = vertical_tool_for_batch(batch).expect("eligible tool has a dispatch target");
         assert_eq!(vertical.name(), catalog.name());
     }
-    assert_eq!(vertical_tool_for_batch(BatchTool::PlanChange), None);
 }
 
 #[tokio::test]
@@ -5542,7 +5689,12 @@ async fn plan_change_maps_steps_impact_summary_decisions_and_context_pack() {
     );
     assert_eq!(output.data.context_pack_request.symbols, vec![symbol()]);
     assert_eq!(output.data.context_pack_request.files, vec![file()]);
-    let ObservedCall::PlanChange(request) = harness.only_call() else {
+    let calls = harness
+        .calls
+        .lock()
+        .expect("fake call recorder is not poisoned");
+    assert!(matches!(calls[0], ObservedCall::RepositoryStatus(_)));
+    let ObservedCall::PlanChange(request) = &calls[1] else {
         panic!("expected plan change call");
     };
     assert_eq!(request.repository(), repository());
@@ -7197,7 +7349,7 @@ async fn repo_list_explain_empty_catalog_uses_one_bounded_catalog_call() {
 async fn query_batch_explain_returns_a_plan_without_retrieval() {
     let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(RepositoryStatus {
         repository_id: repository(),
-        resolved_generation: generation(),
+        resolved_generation: alternate_generation(),
         active_generation: generation(),
         parent_generation: None,
         active_parent_generation: None,
@@ -7212,7 +7364,7 @@ async fn query_batch_explain_returns_a_plan_without_retrieval() {
         VerticalTool::QueryBatch,
         json!({
             "repository": {"repository_id": repository()},
-            "generation": "active",
+            "generation": alternate_generation(),
             "operations": [
                 {"id": "find_a", "tool": "code.locate", "arguments": {"query": "publish", "max_results": 5}},
                 {"id": "find_b", "tool": "code.locate", "arguments": {"query": "stage", "max_results": 5}}
@@ -7227,6 +7379,8 @@ async fn query_batch_explain_returns_a_plan_without_retrieval() {
         panic!("expected explain success");
     };
     assert_eq!(output.data.batch_status, BatchStatus::Planned);
+    assert_eq!(output.data.generation_id, alternate_generation());
+    assert_eq!(output.generation.generation_id, alternate_generation());
     assert_eq!(output.data.operation_results.len(), 2);
     assert!(
         output

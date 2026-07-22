@@ -2221,7 +2221,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_traversal_prefers_values_and_descendants_over_ancestors() {
+    fn capability_traversal_prefers_specific_values_over_ancestors() {
         validate_capability_input(
             VerticalTool::QueryBatch,
             &json!({
@@ -2236,13 +2236,13 @@ mod tests {
 
         let error = validate_capability_input(
             VerticalTool::QueryBatch,
-            &json!({"operations": [{"tool": "plan.change"}]}),
+            &json!({"response_profile": "standard"}),
             CapabilityBindingPolicy::Materialized,
         )
-        .expect_err("the restricted batch tool value is rejected");
-        assert_eq!(error.code(), ErrorCode::OperatorForbidden);
-        assert_eq!(error.registry_path(), "operations[].tool");
-        assert_eq!(error.instance_path(), "operations.0.tool");
+        .expect_err("the restricted response representation is rejected");
+        assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+        assert_eq!(error.registry_path(), "response_profile");
+        assert_eq!(error.instance_path(), "response_profile");
         assert_eq!(error.reason(), CapabilityRejectionReason::UnsupportedValue);
     }
 
@@ -2379,20 +2379,20 @@ mod tests {
     fn capability_rejection_builds_bounded_field_details() {
         let error = validate_capability_input(
             VerticalTool::QueryBatch,
-            &json!({"operations": [{"tool": "plan.change"}]}),
+            &json!({"response_profile": "standard"}),
             CapabilityBindingPolicy::Materialized,
         )
         .expect_err("the restricted value is rejected")
         .to_public_error(Some("operations.3.arguments"))
         .expect("generated capability paths fit public diagnostic bounds");
 
-        assert_eq!(error.code(), ErrorCode::OperatorForbidden);
+        assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
         assert_eq!(
             error
                 .details()
                 .get(&DetailKey::parse("field_path").expect("static detail key is valid")),
             Some(&PublicValue::Label(
-                SafeLabel::parse("operations.3.arguments.operations.0.tool")
+                SafeLabel::parse("operations.3.arguments.response_profile")
                     .expect("fixture path is valid")
             ))
         );
@@ -2631,7 +2631,7 @@ mod tests {
             ],
             "review any new generated-rule exclusion"
         );
-        assert_eq!((declared, covered, exclusions.len()), (124, 122, 2));
+        assert_eq!((declared, covered, exclusions.len()), (123, 121, 2));
     }
 
     #[tokio::test]
@@ -3008,16 +3008,16 @@ mod tests {
             observed,
             [
                 (
-                    222_178,
-                    "ae1ce2a14a324be9976b4d24ee2105d02d4af070c5461f785d75b1457fea5449".to_owned(),
+                    221_986,
+                    "a4589dee5136a872016f3430b31df9523adde5d297b9ef85a9908fd4a24438e2".to_owned(),
                 ),
                 (
-                    485_034,
-                    "49986fbdb8e8a909cbc32d936d7b04a4bd50610eb3cb727d3846211c57a02880".to_owned(),
+                    484_842,
+                    "0cd3fde436ceb102c9d52c420381ae330ccfd01b69addc25351c7c644ccd0bb1".to_owned(),
                 ),
                 (
-                    654_745,
-                    "743648a7f6e4ebd9200adb3e60d937cfe65e3d53484f88cba0c547b04746f381".to_owned(),
+                    654_552,
+                    "eebc5ff5c752508dc3bd1ca9e8da07add89aa15f726cbd60dc09435557a3cbab".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -3356,8 +3356,8 @@ mod tests {
         assert_eq!(*materialized, direct.error);
     }
 
-    #[tokio::test]
-    async fn restricted_batch_tool_has_precise_direct_and_materialized_admission() {
+    #[test]
+    fn plan_change_batch_admission_respects_the_exposure_profile() {
         let arguments = json!({
             "repository": selector(),
             "operations": [{
@@ -3369,65 +3369,41 @@ mod tests {
         .as_object()
         .expect("batch arguments are an object")
         .clone();
-        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
-            .expect("registry compiles");
-        let response = router
-            .handle(
-                request(
-                    "tools/call",
-                    json!({"name": "query.batch", "arguments": arguments.clone()}),
-                ),
-                cancellation(),
-            )
-            .await;
-        let result = success(response);
-        let direct: ErrorResponse = serde_json::from_value(result["structuredContent"].clone())
-            .expect("batch capability rejection uses the checked error contract");
-
-        assert_eq!(direct.error.code(), ErrorCode::OperatorForbidden);
-        assert_eq!(
-            direct
-                .error
-                .details()
-                .get(&DetailKey::parse("field_path").expect("static detail key is valid")),
-            Some(&PublicValue::Label(
-                SafeLabel::parse("operations.0.tool").expect("fixture field path is valid")
-            ))
-        );
-        assert_eq!(
-            direct
-                .error
-                .details()
-                .get(&DetailKey::parse("capability_reason").expect("static detail key is valid")),
-            Some(&PublicValue::Label(
-                SafeLabel::parse("unsupported_value").expect("fixture reason is valid")
-            ))
-        );
-        assert_eq!(
-            direct.error.next_actions(),
-            &[NextAction::CorrectField {
-                field: DetailKey::parse("arguments").expect("static detail key is valid")
-            }]
-        );
-        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+        let input: QueryBatchInput =
+            serde_json::from_value(Value::Object(arguments.clone())).expect("batch input decodes");
+        assert!(batch_invariants_are_valid(
+            &input,
+            ExposureProfile::Developer
+        ));
+        let direct = batch_invariant_error(&input, ExposureProfile::Analysis)
+            .expect("analysis rejects the developer-only child");
+        assert_eq!(direct.code(), ErrorCode::UnsupportedCapability);
 
         let validator =
             MaterializedToolValidator::compile().expect("checked contracts compile once");
-        let MaterializedInputError::Public(materialized) = validator
+        validator
             .validate(
                 VerticalTool::QueryBatch,
                 &arguments,
                 ExposureProfile::Developer,
             )
-            .expect_err("materialized batch shares capability admission")
+            .expect("developer materialization accepts the developer-only child");
+
+        let MaterializedInputError::Public(materialized) = validator
+            .validate(
+                VerticalTool::QueryBatch,
+                &arguments,
+                ExposureProfile::Analysis,
+            )
+            .expect_err("analysis materialization rejects the developer-only child")
         else {
-            panic!("batch capability rejection must remain a checked public error");
+            panic!("profile rejection must remain a checked public error");
         };
-        assert_eq!(*materialized, direct.error);
+        assert_eq!(*materialized, direct);
     }
 
     #[tokio::test]
-    async fn malformed_batch_invariant_precedes_restricted_tool_admission() {
+    async fn malformed_batch_invariant_precedes_child_admission() {
         let arguments = json!({
             "repository": selector(),
             "operations": [

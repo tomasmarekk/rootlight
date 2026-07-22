@@ -58,6 +58,7 @@ use rootlight_mcp_contract::{
     PublicErrorBuildError, PublicValue, RepoIndexInput, RepositorySelector, SafeLabel,
     SchemaVersion, SourceFreeMessage, SourceReadInput, SymbolExplainInput, ToolResponse,
     TrustClassification, VerticalTool,
+    batch::batch_descriptor,
     completeness::{
         CompletenessState, ContinuationAvailability, ContinuationGuidance,
         LimitingResource as ContractLimitingResource,
@@ -1807,7 +1808,7 @@ where
     .await?;
     let explanation = rootlight_agent::explain::finalize_plan(
         rootlight_agent::explain::query_batch_plan(input.operations.len()),
-        &status.active_generation.to_string(),
+        &status.resolved_generation.to_string(),
     );
     let operation_results = input
         .operations
@@ -1816,7 +1817,7 @@ where
         .collect();
     let data = QueryBatchData {
         batch_status: BatchStatus::Planned,
-        generation_id: status.active_generation,
+        generation_id: status.resolved_generation,
         operation_results,
         explanation: Some(explanation),
     };
@@ -1982,6 +1983,7 @@ where
         let validator = Arc::clone(&self.validator);
         let budget = context.budget().clone();
         let local_budget = context.local_budget().cloned();
+        let pinned_identity = context.pinned_identity().cloned();
         let deadline = context.deadline();
         let local_deadline = context.has_local_deadline();
         let cancellation = context.into_cancellation();
@@ -2016,6 +2018,8 @@ where
                 &invalid_arguments,
                 &invalid_cursor,
                 cursor_key,
+                pinned_identity,
+                deadline,
             );
             let response = if let Some(deadline) = deadline {
                 let mut cancellation_wait = cancellation.clone();
@@ -2097,20 +2101,7 @@ where
 }
 
 fn vertical_tool_for_batch(tool: BatchTool) -> Option<VerticalTool> {
-    match tool {
-        BatchTool::CodeLocate => Some(VerticalTool::CodeLocate),
-        BatchTool::SymbolExplain => Some(VerticalTool::SymbolExplain),
-        BatchTool::SymbolRelationships => Some(VerticalTool::SymbolRelationships),
-        BatchTool::FlowTrace => Some(VerticalTool::FlowTrace),
-        BatchTool::ChangeImpact => Some(VerticalTool::ChangeImpact),
-        BatchTool::TestsSelect => Some(VerticalTool::TestsSelect),
-        BatchTool::ArchitectureOverview => Some(VerticalTool::ArchitectureOverview),
-        BatchTool::ArchitectureCycles => Some(VerticalTool::ArchitectureCycles),
-        BatchTool::CodeDead => Some(VerticalTool::CodeDead),
-        BatchTool::ContextPack => Some(VerticalTool::ContextPack),
-        BatchTool::SourceRead => Some(VerticalTool::SourceRead),
-        BatchTool::PlanChange => None,
-    }
+    Some(batch_descriptor(tool).adapter)
 }
 
 fn apply_child_budget(
@@ -2121,7 +2112,7 @@ fn apply_child_budget(
     if budget.evidence_level.is_some() {
         return Err(unsupported_field("budget"));
     }
-    if !matches!(tool, BatchTool::ContextPack | BatchTool::PlanChange) {
+    if tool != BatchTool::ContextPack {
         let mut transported = budget.clone();
         // The daemon protocol cannot represent sub-10 ms request timeouts.
         // The outer batch deadline still wins the biased cancellation race.
@@ -2145,7 +2136,13 @@ fn apply_child_budget(
                 lower_numeric_argument(arguments, "token_budget", Some(u64::from(tokens)));
             }
         }
-        BatchTool::PlanChange => return Err(unsupported_field("operations")),
+        BatchTool::PlanChange => {
+            lower_numeric_argument(
+                arguments,
+                "max_steps",
+                budget.max_results.map(|limit| u64::from(limit).min(100)),
+            );
+        }
         BatchTool::CodeLocate
         | BatchTool::SymbolExplain
         | BatchTool::SymbolRelationships
@@ -2271,6 +2268,8 @@ async fn execute_agent_child<P>(
     invalid_arguments: &PublicError,
     invalid_cursor: &PublicError,
     cursor_key: CursorSigningKey,
+    pinned_identity: Option<AgentResolvedIdentity>,
+    pinned_deadline: Option<Instant>,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
@@ -2387,12 +2386,18 @@ where
             .await
         }
         BatchTool::ContextPack => {
-            execute_context_pack(
+            let identity =
+                pinned_identity.ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+            let deadline =
+                pinned_deadline.ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+            execute_context_pack_with_identity(
                 port,
                 validator,
                 arguments,
                 exposure_profile,
                 cancellation,
+                identity,
+                deadline,
                 unsupported,
                 invalid_arguments,
                 invalid_cursor,
@@ -2400,7 +2405,26 @@ where
             )
             .await
         }
-        BatchTool::PlanChange => Err(ToolExecutionError::new(unsupported.clone())),
+        BatchTool::PlanChange => {
+            let identity =
+                pinned_identity.ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+            let deadline =
+                pinned_deadline.ok_or_else(|| internal(ToolExecutionFailure::InvalidResponse))?;
+            execute_plan_change_with_identity(
+                port,
+                validator,
+                arguments,
+                exposure_profile,
+                cancellation,
+                identity,
+                deadline,
+                unsupported,
+                invalid_arguments,
+                invalid_cursor,
+                cursor_key,
+            )
+            .await
+        }
     }
 }
 
@@ -2465,6 +2489,46 @@ where
     });
     let output = ContextPackService
         .execute(adapter, input, repository, cancellation)
+        .await
+        .map_err(|error| map_context_pack_service_error(error, unsupported))?;
+    serialize_measured_read_success(output, started_at, limits)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the batch adapter carries its checked validator, pinned identity, public errors, and cursor state"
+)]
+async fn execute_context_pack_with_identity<P>(
+    port: Arc<P>,
+    validator: Arc<MaterializedToolValidator>,
+    arguments: Map<String, Value>,
+    exposure_profile: ExposureProfile,
+    cancellation: RequestCancellation,
+    identity: AgentResolvedIdentity,
+    deadline: Instant,
+    unsupported: &PublicError,
+    invalid_arguments: &PublicError,
+    invalid_cursor: &PublicError,
+    cursor_key: CursorSigningKey,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let started_at = Instant::now();
+    let input: ContextPackInput = decode_input(arguments)?;
+    let limits = BudgetLimits::server_ceiling();
+    let repository = repository_id(input.repository.clone(), unsupported)?;
+    let adapter = Arc::new(McpAgentToolPort {
+        port,
+        validator,
+        unsupported: unsupported.clone(),
+        invalid_arguments: invalid_arguments.clone(),
+        invalid_cursor: invalid_cursor.clone(),
+        exposure_profile,
+        cursor_key,
+    });
+    let output = ContextPackService
+        .execute_with_identity(adapter, input, repository, identity, cancellation, deadline)
         .await
         .map_err(|error| map_context_pack_service_error(error, unsupported))?;
     serialize_measured_read_success(output, started_at, limits)
@@ -3592,9 +3656,9 @@ fn explain_envelope_from_status<T>(
         .collect();
     let context = client::QueryContext {
         repository: status.repository_id,
-        generation: status.active_generation,
+        generation: status.resolved_generation,
         parent_generation: status.parent_generation,
-        active_generation: true,
+        active_generation: status.active_generation == status.resolved_generation,
         tier: client::AnalysisTier::TierC,
         coverage_status: client::CoverageStatus::Bounded,
         skipped_inputs: 0,
@@ -5224,6 +5288,52 @@ where
         response_profile,
         started_at,
         ResponseShaping::Public,
+        budget.limits,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the batch adapter carries its checked validator, pinned identity, public errors, and cursor state"
+)]
+async fn execute_plan_change_with_identity<P>(
+    port: Arc<P>,
+    validator: Arc<MaterializedToolValidator>,
+    arguments: Map<String, Value>,
+    exposure_profile: ExposureProfile,
+    cancellation: RequestCancellation,
+    identity: AgentResolvedIdentity,
+    deadline: Instant,
+    unsupported: &PublicError,
+    invalid_arguments: &PublicError,
+    invalid_cursor: &PublicError,
+    cursor_key: CursorSigningKey,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    P: FirstSliceClientPort,
+{
+    let started_at = Instant::now();
+    let input: PlanChangeInput = decode_input(arguments)?;
+    let budget = AnalyticalBudget::new(input.budget.as_ref())?;
+    let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
+    let adapter = Arc::new(McpAgentToolPort {
+        port,
+        validator,
+        unsupported: unsupported.clone(),
+        invalid_arguments: invalid_arguments.clone(),
+        invalid_cursor: invalid_cursor.clone(),
+        exposure_profile,
+        cursor_key,
+    });
+    let output = PlanChangeService
+        .execute_with_identity(adapter, input, identity, cancellation, deadline)
+        .await
+        .map_err(|error| map_plan_change_service_error(error, unsupported))?;
+    serialize_profiled_read_success(
+        output,
+        response_profile,
+        started_at,
+        ResponseShaping::CanonicalInternal,
         budget.limits,
     )
 }
