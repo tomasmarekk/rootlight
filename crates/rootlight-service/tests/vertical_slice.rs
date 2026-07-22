@@ -1086,7 +1086,7 @@ fn tests_select_reports_an_honest_partial_result_for_a_known_fixture() {
     assert!(!selection.data.coverage_strategy.direct_edges);
     assert!(!selection.data.coverage_strategy.transitive_signals);
     assert!(!selection.data.coverage_strategy.history_signals);
-    assert!(!selection.data.coverage_strategy.build_target_signals);
+    assert!(!selection.data.coverage_strategy.file_colocation_signals);
     // The seed scope has no related test, so it is reported as an honest gap.
     assert_eq!(selection.data.gaps.len(), 1);
     assert_eq!(selection.data.gaps[0].scope, seed.to_string());

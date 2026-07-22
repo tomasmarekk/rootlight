@@ -1296,8 +1296,8 @@ pub struct TestsSelectCoverage {
     pub transitive_signals: bool,
     /// Whether historical co-change signals were used; always false here.
     pub history_signals: bool,
-    /// Whether file co-location with a seed was used.
-    pub build_target_signals: bool,
+    /// Whether declaring-file co-location with a seed was used.
+    pub file_colocation_signals: bool,
 }
 
 /// One honest gap where a seed scope has no related test.
@@ -1575,6 +1575,7 @@ impl PlanChangeObjective {
 #[derive(Debug, Clone)]
 pub struct PlanChangePlan {
     pub(crate) objective: PlanChangeObjective,
+    pub(crate) objective_text: String,
     pub(crate) target_symbols: BTreeSet<SymbolId>,
     pub(crate) target_files: BTreeSet<FileId>,
     pub(crate) max_steps: usize,
@@ -1597,7 +1598,7 @@ impl PlanChangePlan {
 pub struct PlanChangeStepRecord {
     /// One-based step ordinal.
     pub step: u8,
-    /// Source-free action description.
+    /// Action description, including the caller-authored requested outcome.
     pub action: String,
     /// Target symbol identities for this step, in deterministic order.
     pub targets: Vec<SymbolId>,

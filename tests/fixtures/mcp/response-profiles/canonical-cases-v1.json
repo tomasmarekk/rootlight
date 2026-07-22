@@ -784,8 +784,8 @@
         },
         "data": {
           "coverage_strategy": {
-            "build_target_signals": true,
             "direct_edges": true,
+            "file_colocation_signals": true,
             "history_signals": false,
             "transitive_signals": true
           },

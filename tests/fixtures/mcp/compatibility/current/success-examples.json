@@ -813,8 +813,8 @@
         },
         "data": {
           "coverage_strategy": {
-            "build_target_signals": false,
             "direct_edges": false,
+            "file_colocation_signals": false,
             "history_signals": false,
             "transitive_signals": false
           },

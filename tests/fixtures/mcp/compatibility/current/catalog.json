@@ -15950,7 +15950,7 @@
             "budget": "per_request",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded test ranking from explicit symbol seeds",
+            "fallbackSummary": "bounded unit-test ranking from explicit symbol seeds",
             "generation": "selects_generation",
             "inputShapeHash": "6d468db8eb4ce2585faf489f3de96fa2a326af799024e8a2bd741d417ee9c846",
             "limitations": [
@@ -15995,6 +15995,41 @@
                 "field": "seeds.build_targets",
                 "status": "unsupported_stable_error",
                 "summary": "build-target seeds are not served"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "test_kinds[]",
+                "status": "unsupported_stable_error",
+                "summary": "integration-test classification is not served",
+                "value": "integration"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "test_kinds[]",
+                "status": "unsupported_stable_error",
+                "summary": "end-to-end test classification is not served",
+                "value": "e2e"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "test_kinds[]",
+                "status": "unsupported_stable_error",
+                "summary": "contract-test classification is not served",
+                "value": "contract"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "test_kinds[]",
+                "status": "unsupported_stable_error",
+                "summary": "static-check classification is not served",
+                "value": "static"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "test_kinds[]",
+                "status": "unsupported_stable_error",
+                "summary": "build-check classification is not served",
+                "value": "build"
               }
             ],
             "pagination": "explicit_truncation",
@@ -16021,7 +16056,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded test ranking from explicit symbol seeds with rationale; path, change, build-target, framework, and execution-budget inputs are unsupported.",
+        "description": "Use bounded unit-test ranking from explicit symbol seeds with direct-edge or declaring-file co-location rationale and explicit gaps; other test kinds, path, change, build-target, framework, and execution-budget inputs are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -17638,12 +17673,12 @@
               "additionalProperties": false,
               "description": "Strategy summary for test coverage signals.",
               "properties": {
-                "build_target_signals": {
-                  "description": "Whether build-target co-location was used.",
-                  "type": "boolean"
-                },
                 "direct_edges": {
                   "description": "Whether direct test edges were used.",
+                  "type": "boolean"
+                },
+                "file_colocation_signals": {
+                  "description": "Whether declaring-file co-location with a seed was used.",
                   "type": "boolean"
                 },
                 "history_signals": {
@@ -17659,7 +17694,7 @@
                 "direct_edges",
                 "transitive_signals",
                 "history_signals",
-                "build_target_signals"
+                "file_colocation_signals"
               ],
               "type": "object"
             },
@@ -24097,7 +24132,7 @@
             "budget": "per_request",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded structural comparison of two explicit retained generation identifiers",
+            "fallbackSummary": "bounded entity and signature comparison of two explicit retained generation identifiers",
             "generation": "compares_generations",
             "inputShapeHash": "ca8734f87fb7a3c7e8215c19ff295d9ba37092ab4e9288f6f5f7e993fe5c777c",
             "limitations": [
@@ -24140,6 +24175,48 @@
               },
               {
                 "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "change_kinds[]",
+                "status": "unsupported_stable_error",
+                "summary": "relation delta comparison is not served",
+                "value": "relations"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "change_kinds[]",
+                "status": "unsupported_stable_error",
+                "summary": "architecture delta comparison is not served",
+                "value": "architecture"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "change_kinds[]",
+                "status": "unsupported_stable_error",
+                "summary": "ownership delta comparison is not served",
+                "value": "ownership"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "change_kinds[]",
+                "status": "unsupported_stable_error",
+                "summary": "test delta comparison is not served",
+                "value": "tests"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "change_kinds[]",
+                "status": "unsupported_stable_error",
+                "summary": "route delta comparison is not served",
+                "value": "routes"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
+                "field": "change_kinds[]",
+                "status": "unsupported_stable_error",
+                "summary": "data-schema delta comparison is not served",
+                "value": "data"
+              },
+              {
+                "errorCode": "UNSUPPORTED_CAPABILITY",
                 "field": "profile",
                 "status": "unsupported_stable_error",
                 "summary": "the current output has no optional evidence representation",
@@ -24174,7 +24251,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded structural comparison of two explicit retained generation identifiers; Git revision selectors are unsupported.",
+        "description": "Use bounded entity and signature comparison of two explicit retained generation identifiers; relation, architecture, ownership, test, route, data, and Git revision comparisons are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -26214,7 +26291,7 @@
             "budget": "per_request",
             "contractVersion": "1.0",
             "explainSupported": true,
-            "fallbackSummary": "bounded change planning from an explicit objective and targets",
+            "fallbackSummary": "bounded change planning from a caller-authored objective and explicit targets",
             "generation": "selects_generation",
             "inputShapeHash": "6f2e2f974582a6025e15233d36ce798742089e8bb055c726b63c3258a27ef411",
             "limitations": [
@@ -26266,7 +26343,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use bounded change planning from an explicit objective and targets under caller-reduced resource ceilings; change-context resolution and user constraints are unsupported.",
+        "description": "Use bounded change planning from a caller-authored objective and explicit targets under caller-reduced resource ceilings; change-context resolution and user constraints are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },

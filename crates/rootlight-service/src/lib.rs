@@ -2851,6 +2851,7 @@ impl FirstSliceService {
         self.plan_change_with_budget(
             generation,
             objective,
+            objective.as_str().to_owned(),
             target_symbols,
             target_files,
             max_steps,
@@ -2873,6 +2874,7 @@ impl FirstSliceService {
         &self,
         generation: GenerationId,
         objective: PlanChangeObjective,
+        objective_text: String,
         target_symbols: BTreeSet<SymbolId>,
         target_files: BTreeSet<FileId>,
         max_steps: usize,
@@ -2887,6 +2889,7 @@ impl FirstSliceService {
         let plan = service
             .plan_plan_change(
                 objective,
+                objective_text,
                 target_symbols,
                 target_files,
                 max_steps,

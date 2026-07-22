@@ -6210,7 +6210,7 @@ async fn tests_select_maps_ranked_tests_strategy_and_gaps() {
                 direct_edges: true,
                 transitive_signals: false,
                 history_signals: false,
-                build_target_signals: true,
+                file_colocation_signals: true,
             },
             gaps: vec![ClientTestGap {
                 scope: "scope-1".to_owned(),
@@ -6252,7 +6252,7 @@ async fn tests_select_maps_ranked_tests_strategy_and_gaps() {
     assert!(output.data.coverage_strategy.direct_edges);
     assert!(!output.data.coverage_strategy.transitive_signals);
     assert!(!output.data.coverage_strategy.history_signals);
-    assert!(output.data.coverage_strategy.build_target_signals);
+    assert!(output.data.coverage_strategy.file_colocation_signals);
     assert_eq!(output.data.gaps.len(), 1);
     assert_eq!(output.data.gaps[0].scope, "scope-1");
     assert_eq!(output.data.gaps[0].reason.as_str(), "no_related_test");
@@ -6280,6 +6280,28 @@ async fn tests_select_rejects_unsupported_frameworks() {
     )
     .await
     .expect_err("unsupported frameworks are rejected before the port");
+    let public = error
+        .public_error()
+        .expect("unsupported option is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn tests_select_rejects_unobserved_test_kinds() {
+    let harness = Harness::new(FakeOutcome::TestsSelect(Err(ClientPortError::Executor)));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::TestsSelect,
+        json!({
+            "repository": {"repository_id": repository()},
+            "seeds": {"symbols": [symbol()]},
+            "test_kinds": ["integration"]
+        }),
+    )
+    .await
+    .expect_err("unobserved test kinds are rejected before the port");
     let public = error
         .public_error()
         .expect("unsupported option is a checked public error");
@@ -6651,6 +6673,69 @@ async fn history_compare_rejects_a_git_revision_selector() {
     assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
     assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn history_compare_rejects_unobserved_change_kinds() {
+    let harness = Harness::new(FakeOutcome::HistoryCompare(Err(ClientPortError::Executor)));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::HistoryCompare,
+        json!({
+            "repository": {"repository_id": repository()},
+            "base": parent_generation(),
+            "head": generation(),
+            "change_kinds": ["relations"]
+        }),
+    )
+    .await
+    .expect_err("unobserved change kinds are rejected before the port");
+    let public = error
+        .public_error()
+        .expect("unsupported option is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn history_compare_rejects_mismatched_matched_states() {
+    let response = HistoryComparePortResponse::new(
+        ClientHistoryCompare {
+            context: context(1, 0),
+            matched_states: ClientHistoryMatchedStates {
+                base_generation: generation(),
+                head_generation: generation(),
+                coverage: "bounded".to_owned(),
+            },
+            changes: Vec::new(),
+            architecture_delta: ClientHistoryArchitectureDelta {
+                new_cross_service_edges: 0,
+                removed_cross_service_edges: 0,
+                new_boundaries: 0,
+                removed_boundaries: 0,
+            },
+            breaking_candidates: Vec::new(),
+            lineage: Vec::new(),
+            execution_completeness: complete_execution(),
+        },
+        metadata("history-compare-mismatch"),
+    );
+    let harness = Harness::new(FakeOutcome::HistoryCompare(Ok(response)));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::HistoryCompare,
+        json!({
+            "repository": {"repository_id": repository()},
+            "base": parent_generation(),
+            "head": generation()
+        }),
+    )
+    .await
+    .expect_err("mismatched matched states are rejected");
+    assert_eq!(error.failure(), Some(ToolExecutionFailure::InvalidResponse));
+    assert!(error.public_error().is_none());
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

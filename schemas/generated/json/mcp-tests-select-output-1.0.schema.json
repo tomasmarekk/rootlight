@@ -1190,12 +1190,12 @@
       "description": "Strategy summary for test coverage signals.",
       "type": "object",
       "properties": {
-        "build_target_signals": {
-          "description": "Whether build-target co-location was used.",
-          "type": "boolean"
-        },
         "direct_edges": {
           "description": "Whether direct test edges were used.",
+          "type": "boolean"
+        },
+        "file_colocation_signals": {
+          "description": "Whether declaring-file co-location with a seed was used.",
           "type": "boolean"
         },
         "history_signals": {
@@ -1212,7 +1212,7 @@
         "direct_edges",
         "transitive_signals",
         "history_signals",
-        "build_target_signals"
+        "file_colocation_signals"
       ]
     },
     "TestGap": {

@@ -1727,8 +1727,8 @@
         },
         "data": {
           "coverage_strategy": {
-            "build_target_signals": true,
             "direct_edges": true,
+            "file_colocation_signals": true,
             "history_signals": false,
             "transitive_signals": true
           },
@@ -1761,8 +1761,8 @@
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 233,
-          "json_bytes": 932,
+          "estimated_tokens": 234,
+          "json_bytes": 935,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-tests-select-1",
@@ -1788,8 +1788,8 @@
         },
         "data": {
           "coverage_strategy": {
-            "build_target_signals": true,
             "direct_edges": true,
+            "file_colocation_signals": true,
             "history_signals": false,
             "transitive_signals": true
           },
@@ -1828,8 +1828,8 @@
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 268,
-          "json_bytes": 1072,
+          "estimated_tokens": 269,
+          "json_bytes": 1075,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-tests-select-1",
@@ -1855,8 +1855,8 @@
         },
         "data": {
           "coverage_strategy": {
-            "build_target_signals": true,
             "direct_edges": true,
+            "file_colocation_signals": true,
             "history_signals": false,
             "transitive_signals": true
           },
@@ -1897,8 +1897,8 @@
         "usage": {
           "cache_status": "miss",
           "edges": 0,
-          "estimated_tokens": 274,
-          "json_bytes": 1094,
+          "estimated_tokens": 275,
+          "json_bytes": 1097,
           "rows": 1,
           "source_bytes": 0,
           "trace_id": "trace-tests-select-1",

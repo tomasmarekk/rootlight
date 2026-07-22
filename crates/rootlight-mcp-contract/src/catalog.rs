@@ -164,7 +164,7 @@ impl McpTool {
                 "Use bounded explicit symbol-or-path change mapping to dependents, risks, and optional tests; working-tree and revision-range resolution are unsupported."
             }
             Self::TestsSelect => {
-                "Use bounded test ranking from explicit symbol seeds with rationale; path, change, build-target, framework, and execution-budget inputs are unsupported."
+                "Use bounded unit-test ranking from explicit symbol seeds with direct-edge or declaring-file co-location rationale and explicit gaps; other test kinds, path, change, build-target, framework, and execution-budget inputs are unsupported."
             }
             Self::ArchitectureOverview => {
                 "Use a bounded file-granularity architecture map with optional hotspots; module, package, service, data, ownership, community, and build views are unsupported."
@@ -176,10 +176,10 @@ impl McpTool {
                 "Return bounded dead-code candidates with entry-point and blind-spot caveats under caller-reduced resource ceilings; custom scope is unsupported."
             }
             Self::HistoryCompare => {
-                "Use bounded structural comparison of two explicit retained generation identifiers; Git revision selectors are unsupported."
+                "Use bounded entity and signature comparison of two explicit retained generation identifiers; relation, architecture, ownership, test, route, data, and Git revision comparisons are unsupported."
             }
             Self::PlanChange => {
-                "Use bounded change planning from an explicit objective and targets under caller-reduced resource ceilings; change-context resolution and user constraints are unsupported."
+                "Use bounded change planning from a caller-authored objective and explicit targets under caller-reduced resource ceilings; change-context resolution and user constraints are unsupported."
             }
             Self::ContextPack => {
                 "Use bounded profiled evidence assembly with authenticated continuation, generation-pinned references signatures and source snippets under a token budget; selectable response profiles and source policies control representation, while path, route, change, located-result, and plan seeds are unsupported."

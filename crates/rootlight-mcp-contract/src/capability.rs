@@ -796,6 +796,31 @@ const TESTS_SELECT_RULES: &[CapabilityRule] = &[
     unsupported("seeds.paths", "path seeds are not served"),
     unsupported("seeds.change", "change seeds are not served"),
     unsupported("seeds.build_targets", "build-target seeds are not served"),
+    unsupported_value(
+        "test_kinds[]",
+        "integration",
+        "integration-test classification is not served",
+    ),
+    unsupported_value(
+        "test_kinds[]",
+        "e2e",
+        "end-to-end test classification is not served",
+    ),
+    unsupported_value(
+        "test_kinds[]",
+        "contract",
+        "contract-test classification is not served",
+    ),
+    unsupported_value(
+        "test_kinds[]",
+        "static",
+        "static-check classification is not served",
+    ),
+    unsupported_value(
+        "test_kinds[]",
+        "build",
+        "build-check classification is not served",
+    ),
 ];
 
 const ARCHITECTURE_OVERVIEW_RULES: &[CapabilityRule] = &[
@@ -904,6 +929,36 @@ const HISTORY_COMPARE_RULES: &[CapabilityRule] = &[
     unsupported("base.git", "git revision resolution is not served"),
     unsupported("head.git", "git revision resolution is not served"),
     unsupported_value(
+        "change_kinds[]",
+        "relations",
+        "relation delta comparison is not served",
+    ),
+    unsupported_value(
+        "change_kinds[]",
+        "architecture",
+        "architecture delta comparison is not served",
+    ),
+    unsupported_value(
+        "change_kinds[]",
+        "ownership",
+        "ownership delta comparison is not served",
+    ),
+    unsupported_value(
+        "change_kinds[]",
+        "tests",
+        "test delta comparison is not served",
+    ),
+    unsupported_value(
+        "change_kinds[]",
+        "routes",
+        "route delta comparison is not served",
+    ),
+    unsupported_value(
+        "change_kinds[]",
+        "data",
+        "data-schema delta comparison is not served",
+    ),
+    unsupported_value(
         "profile",
         "evidence",
         "the current output has no optional evidence representation",
@@ -919,7 +974,10 @@ const PLAN_CHANGE_RULES: &[CapabilityRule] = &[
     accepted_fallback("repository"),
     accepted_fallback("generation"),
     accepted_fallback("objective"),
-    accepted_fallback("objective_text"),
+    implemented(
+        "objective_text",
+        "is preserved as a caller-authored outcome to validate in the first plan step",
+    ),
     accepted_fallback("targets"),
     accepted_fallback("max_steps"),
     implemented(
@@ -1446,16 +1504,18 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
         }
         McpTool::FlowTrace => "bounded symbol relation path tracing",
         McpTool::ChangeImpact => "bounded explicit symbol-or-path change mapping",
-        McpTool::TestsSelect => "bounded test ranking from explicit symbol seeds",
+        McpTool::TestsSelect => "bounded unit-test ranking from explicit symbol seeds",
         McpTool::ArchitectureOverview => {
             "bounded file-granularity architecture map with optional hotspots"
         }
         McpTool::ArchitectureCycles => "bounded cycle detection in a selected relation projection",
         McpTool::CodeDead => "bounded dead-code candidates with entry-point and blind-spot caveats",
         McpTool::HistoryCompare => {
-            "bounded structural comparison of two explicit retained generation identifiers"
+            "bounded entity and signature comparison of two explicit retained generation identifiers"
         }
-        McpTool::PlanChange => "bounded change planning from an explicit objective and targets",
+        McpTool::PlanChange => {
+            "bounded change planning from a caller-authored objective and explicit targets"
+        }
         McpTool::ContextPack => {
             "bounded profiled evidence assembly with authenticated continuation, generation-pinned references signatures and source snippets under a token budget"
         }

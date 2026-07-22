@@ -1069,7 +1069,7 @@ mod tests {
                 direct_edges: true,
                 transitive_signals: true,
                 history_signals: false,
-                build_target_signals: true,
+                file_colocation_signals: true,
             },
             gaps: vec![TestGap {
                 scope: "platform-specific-cancellation".to_owned(),

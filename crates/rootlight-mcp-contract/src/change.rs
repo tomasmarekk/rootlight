@@ -483,8 +483,8 @@ pub struct TestCoverageStrategy {
     pub transitive_signals: bool,
     /// Whether historical co-change signals were used.
     pub history_signals: bool,
-    /// Whether build-target co-location was used.
-    pub build_target_signals: bool,
+    /// Whether declaring-file co-location with a seed was used.
+    pub file_colocation_signals: bool,
 }
 
 /// One gap in test coverage.

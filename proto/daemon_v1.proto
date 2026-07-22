@@ -1017,7 +1017,7 @@ message FirstSliceTestCoverageStrategy {
   bool direct_edges = 1;
   bool transitive_signals = 2;
   bool history_signals = 3;
-  bool build_target_signals = 4;
+  bool file_colocation_signals = 4;
 }
 
 // One honest gap where a seed scope has no related test.

@@ -240,9 +240,9 @@
       "tool": "tests.select",
       "profile": "compact",
       "framing": "compact_json_output_object",
-      "serialized_bytes": 932,
-      "o200k_tokens": 265,
-      "sha256": "b5ec2a15ffafd1805c9b836ec24baedede837425f3139db4381c84091383b74d",
+      "serialized_bytes": 935,
+      "o200k_tokens": 266,
+      "sha256": "39b2d46ee88dabc49eeaace90dd2379498ec484432aa569e69c44ae802447ff3",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -251,9 +251,9 @@
       "tool": "tests.select",
       "profile": "standard",
       "framing": "compact_json_output_object",
-      "serialized_bytes": 1072,
-      "o200k_tokens": 302,
-      "sha256": "a87359c890b4d42a0818e999dc659f7622dfdf62607d4e3f6aca221fe22228f1",
+      "serialized_bytes": 1075,
+      "o200k_tokens": 303,
+      "sha256": "b11f41582880527792cff1e329b94907882dd671012a4f49b5c705bb6c26aeff",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -262,9 +262,9 @@
       "tool": "tests.select",
       "profile": "evidence",
       "framing": "compact_json_output_object",
-      "serialized_bytes": 1094,
-      "o200k_tokens": 310,
-      "sha256": "b8a950efe53f1b95b2c47ff630871fa449a67b0640279ae33fdfcfa868bd3cd5",
+      "serialized_bytes": 1097,
+      "o200k_tokens": 311,
+      "sha256": "4a4919bc7cdc1fc490e1feedcc630105be2902e2a97c380f9cf3f69e2a9c002d",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -501,6 +501,6 @@
       "hard_budget_ceiling_unchanged": true
     }
   ],
-  "total_serialized_bytes": 84752,
-  "total_o200k_tokens": 26355
+  "total_serialized_bytes": 84761,
+  "total_o200k_tokens": 26358
 }

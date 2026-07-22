@@ -2080,7 +2080,7 @@ fn tests_select(
             direct_edges: strategy.direct_edges,
             transitive_signals: strategy.transitive_signals,
             history_signals: strategy.history_signals,
-            build_target_signals: strategy.build_target_signals,
+            file_colocation_signals: strategy.file_colocation_signals,
         }),
         gaps,
         completeness: Some(completeness),
@@ -2234,6 +2234,7 @@ fn plan_change(
         .plan_change_with_budget(
             generation.generation,
             objective,
+            request.objective_text,
             target_symbols,
             target_files,
             max_steps,

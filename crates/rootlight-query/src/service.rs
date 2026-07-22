@@ -1494,6 +1494,7 @@ where
     pub fn plan_plan_change(
         &self,
         objective: PlanChangeObjective,
+        objective_text: String,
         target_symbols: BTreeSet<SymbolId>,
         target_files: BTreeSet<FileId>,
         max_steps: usize,
@@ -1513,6 +1514,11 @@ where
             });
         }
         if max_steps == 0 || max_steps > 100 {
+            return Err(QueryError::PlanRejected {
+                resource: QueryResource::Results,
+            });
+        }
+        if objective_text.is_empty() || objective_text.chars().count() > 4_096 {
             return Err(QueryError::PlanRejected {
                 resource: QueryResource::Results,
             });
@@ -1550,6 +1556,7 @@ where
         };
         Ok(PlanChangePlan {
             objective,
+            objective_text,
             target_symbols,
             target_files,
             max_steps,
@@ -4179,7 +4186,7 @@ fn build_tests_select(
             direct_edges: any_direct,
             transitive_signals: any_transitive,
             history_signals: false,
-            build_target_signals: any_colocated,
+            file_colocation_signals: any_colocated,
         },
         gaps,
     })
@@ -4901,6 +4908,7 @@ fn build_plan_change(
 
     let (plan_steps, steps_truncated) = build_plan_change_steps(
         plan.objective,
+        &plan.objective_text,
         &resolved_targets,
         &closure,
         &test_symbols,
@@ -4954,7 +4962,7 @@ fn build_plan_change_tests(
                 direct_edges: false,
                 transitive_signals: false,
                 history_signals: false,
-                build_target_signals: false,
+                file_colocation_signals: false,
             },
             gaps: Vec::new(),
         });
@@ -5034,11 +5042,13 @@ fn plan_change_impact_summary(
 /// Modification objectives emit inspect, modify, update-dependents, and
 /// run-tests steps plus a public-surface confirmation when public surface is
 /// touched; explanation and review objectives emit read-only inspect, trace or
-/// assess, and report steps. Every action, risk, and verification hint is
-/// source-free, and the sequence is capped at `max_steps`; because each step
-/// only depends on earlier ordinals, truncation keeps every dependency valid.
+/// assess, and report steps. The first action identifies the caller-authored
+/// requested outcome as something to validate; risks and verification hints
+/// remain source-free. The sequence is capped at `max_steps`, and every step
+/// only depends on earlier ordinals so truncation keeps dependencies valid.
 fn build_plan_change_steps(
     objective: PlanChangeObjective,
+    objective_text: &str,
     resolved_targets: &BTreeSet<SymbolId>,
     closure: &[ImpactEntryRecord],
     test_symbols: &[SymbolId],
@@ -5063,11 +5073,15 @@ fn build_plan_change_steps(
         .collect();
 
     let mut steps: Vec<PlanChangeStepRecord> = Vec::new();
+    let requested_outcome =
+        |action: &str| format!("{action} Validate the caller-requested outcome: {objective_text}");
     match objective {
         PlanChangeObjective::Explanation => {
             steps.push(plan_step(
                 1,
-                "Inspect the target symbols and the relations that define their behavior.",
+                &requested_outcome(
+                    "Inspect the target symbols and the relations that define their behavior.",
+                ),
                 target_symbols.clone(),
                 Vec::new(),
                 &[],
@@ -5093,7 +5107,7 @@ fn build_plan_change_steps(
         PlanChangeObjective::Review => {
             steps.push(plan_step(
                 1,
-                "Inspect the target symbols and their current implementation.",
+                &requested_outcome("Inspect the target symbols and their current implementation."),
                 target_symbols.clone(),
                 Vec::new(),
                 &[],
@@ -5139,7 +5153,7 @@ fn build_plan_change_steps(
             };
             steps.push(plan_step(
                 1,
-                inspect_action,
+                &requested_outcome(inspect_action),
                 target_symbols.clone(),
                 Vec::new(),
                 &[],
@@ -8164,7 +8178,7 @@ mod tests {
         );
         // Both signals are reported used; history is never served in this slice.
         assert!(selection.coverage_strategy.direct_edges);
-        assert!(selection.coverage_strategy.build_target_signals);
+        assert!(selection.coverage_strategy.file_colocation_signals);
         assert!(!selection.coverage_strategy.transitive_signals);
         assert!(!selection.coverage_strategy.history_signals);
         // The seed is covered, so no gap is reported.
@@ -8198,7 +8212,7 @@ mod tests {
         assert_eq!(selection.tests[0].command_hint, None);
         assert!(!selection.coverage_strategy.direct_edges);
         assert!(selection.coverage_strategy.transitive_signals);
-        assert!(!selection.coverage_strategy.build_target_signals);
+        assert!(!selection.coverage_strategy.file_colocation_signals);
         assert!(selection.gaps.is_empty());
     }
 
@@ -8589,6 +8603,7 @@ mod tests {
     ) -> PlanChangePlan {
         PlanChangePlan {
             objective,
+            objective_text: "change the selected targets".to_owned(),
             target_symbols,
             target_files,
             max_steps,
@@ -8655,12 +8670,13 @@ mod tests {
         add_calls(&mut document, 110, 12, 11, 900);
         add_calls(&mut document, 111, 13, 12, 800);
 
-        let plan = plan_change_plan(
+        let mut plan = plan_change_plan(
             PlanChangeObjective::BugFix,
             BTreeSet::from([symbol(11)]),
             BTreeSet::new(),
             6,
         );
+        plan.objective_text = "prevent duplicate publication".to_owned();
         let analysis = run_plan_change(&document, &plan);
 
         // A modification objective emits inspect, modify, update-dependents, and
@@ -8675,6 +8691,11 @@ mod tests {
         // The inspect step targets the resolved symbol.
         assert_eq!(analysis.plan[0].targets, vec![symbol(11)]);
         assert!(analysis.plan[0].depends_on.is_empty());
+        assert!(
+            analysis.plan[0]
+                .action
+                .contains("prevent duplicate publication")
+        );
         // The modify step depends on inspect.
         assert_eq!(analysis.plan[1].depends_on, vec![1]);
         assert_eq!(analysis.plan[1].targets, vec![symbol(11)]);

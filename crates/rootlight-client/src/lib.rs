@@ -1713,8 +1713,8 @@ pub struct TestsSelectCoverageStrategy {
     pub transitive_signals: bool,
     /// Whether historical co-change signals were used.
     pub history_signals: bool,
-    /// Whether file co-location with a seed was used.
-    pub build_target_signals: bool,
+    /// Whether declaring-file co-location with a seed was used.
+    pub file_colocation_signals: bool,
 }
 
 /// One honest gap where a seed scope has no related test.
@@ -7978,7 +7978,7 @@ fn parse_tests_select(
             direct_edges: strategy.direct_edges,
             transitive_signals: strategy.transitive_signals,
             history_signals: strategy.history_signals,
-            build_target_signals: strategy.build_target_signals,
+            file_colocation_signals: strategy.file_colocation_signals,
         },
         gaps,
         execution_completeness,
@@ -8196,7 +8196,7 @@ fn build_plan_change_request(
     if objective.is_empty() || objective.len() > 32 {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
-    if objective_text.is_empty() || objective_text.len() > 4_096 {
+    if objective_text.is_empty() || objective_text.chars().count() > 4_096 {
         return Err(ClientError::InvalidFirstSliceRequest);
     }
     if target_symbols.is_empty() && target_files.is_empty() {

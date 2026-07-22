@@ -5153,7 +5153,7 @@ where
             direct_edges: false,
             transitive_signals: false,
             history_signals: false,
-            build_target_signals: false,
+            file_colocation_signals: false,
         },
         gaps: Vec::new(),
         explanation: Some(explanation),
@@ -5218,6 +5218,9 @@ fn normalize_tests_select(
     let mut test_kinds = Vec::new();
     if let Some(requested) = input.test_kinds {
         for kind in requested {
+            if kind != TestKind::Unit {
+                return Err(ToolExecutionError::new(unsupported.clone()));
+            }
             test_kinds.push(test_kind_label(kind)?);
         }
     }
@@ -5274,7 +5277,7 @@ fn map_tests_select(
             direct_edges: strategy.direct_edges,
             transitive_signals: strategy.transitive_signals,
             history_signals: strategy.history_signals,
-            build_target_signals: strategy.build_target_signals,
+            file_colocation_signals: strategy.file_colocation_signals,
         },
         gaps,
         explanation: None,
@@ -5824,9 +5827,16 @@ fn normalize_history_compare(
     let RevisionSelector::Generation(head) = input.head else {
         return Err(ToolExecutionError::new(unsupported.clone()));
     };
-    let change_kinds = input
-        .change_kinds
-        .unwrap_or_default()
+    let requested_change_kinds = input.change_kinds.unwrap_or_default();
+    if requested_change_kinds.iter().any(|kind| {
+        !matches!(
+            kind,
+            CompareChangeKind::Entities | CompareChangeKind::Signatures
+        )
+    }) {
+        return Err(ToolExecutionError::new(unsupported.clone()));
+    }
+    let change_kinds = requested_change_kinds
         .iter()
         .map(|kind| compare_change_kind_label(*kind).to_owned())
         .collect();
@@ -5863,6 +5873,9 @@ fn map_history_compare(
         client::GenerationSelector::Generation(request.head),
     )?;
     let states = response.result.matched_states;
+    if states.base_generation != request.base || states.head_generation != request.head {
+        return Err(internal(ToolExecutionFailure::InvalidResponse));
+    }
     let delta = response.result.architecture_delta;
     let mut changes = Vec::new();
     changes

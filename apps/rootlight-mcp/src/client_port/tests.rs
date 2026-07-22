@@ -660,7 +660,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                     direct_edges: false,
                     transitive_signals: false,
                     history_signals: false,
-                    build_target_signals: false,
+                    file_colocation_signals: false,
                 },
                 gaps: Vec::new(),
                 execution_completeness: complete_execution(),

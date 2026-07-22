@@ -1938,7 +1938,7 @@ pub struct FirstSliceTestCoverageStrategy {
     pub history_signals: bool,
     #[prost(bool, tag = "4")]
     #[allow(missing_docs)]
-    pub build_target_signals: bool,
+    pub file_colocation_signals: bool,
 }
 /// One honest gap where a seed scope has no related test.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
