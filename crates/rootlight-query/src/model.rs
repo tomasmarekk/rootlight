@@ -105,6 +105,54 @@ impl QueryBudget {
         self
     }
 
+    /// Returns the admitted row ceiling.
+    #[must_use]
+    pub const fn max_rows(self) -> u64 {
+        self.max_rows
+    }
+
+    /// Returns the admitted traversed-edge ceiling.
+    #[must_use]
+    pub const fn max_edges(self) -> u64 {
+        self.max_edges
+    }
+
+    /// Returns the admitted result ceiling.
+    #[must_use]
+    pub const fn max_results(self) -> u64 {
+        self.max_results
+    }
+
+    /// Returns the admitted raw source-byte ceiling.
+    #[must_use]
+    pub const fn max_source_bytes(self) -> u64 {
+        self.max_source_bytes
+    }
+
+    /// Returns the admitted exact JSON-byte ceiling.
+    #[must_use]
+    pub const fn max_json_bytes(self) -> u64 {
+        self.max_json_bytes
+    }
+
+    /// Returns the admitted conservative token ceiling.
+    #[must_use]
+    pub const fn max_tokens(self) -> u64 {
+        self.max_tokens
+    }
+
+    /// Returns the admitted owned-memory ceiling.
+    #[must_use]
+    pub const fn max_memory_bytes(self) -> u64 {
+        self.max_memory_bytes
+    }
+
+    /// Returns the admitted cooperative duration ceiling.
+    #[must_use]
+    pub const fn max_duration(self) -> Duration {
+        self.max_duration
+    }
+
     pub(crate) fn validate(self) -> Result<(), QueryError> {
         for (resource, value, maximum) in [
             (QueryResource::Rows, self.max_rows, HARD_MAX_QUERY_ROWS),

@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use catalog::{
@@ -1085,6 +1085,283 @@ impl SourceSnapshotRetention {
     }
 }
 
+/// Complete lower-layer limits for one first-slice analytical request.
+///
+/// The daemon constructs this policy only after intersecting its own ceilings
+/// with any authenticated transport reduction. Keeping query, lexical-search,
+/// and source-read limits together prevents a caller reduction from reaching
+/// one engine while another engine silently recreates broader defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstSliceBudget {
+    query: QueryBudget,
+    search: SearchBudget,
+    source: SourceBudget,
+}
+
+impl FirstSliceBudget {
+    /// Creates the bounded interactive service policy.
+    #[must_use]
+    pub fn new() -> Self {
+        let query = QueryBudget::new();
+        let mut search = SearchBudget::default();
+        if let Ok(query_max_results) = usize::try_from(query.max_results()) {
+            // The service historically admitted direct locate caps up to the
+            // query ceiling, while the search crate's standalone default is lower.
+            search.max_results = query_max_results;
+        }
+        Self {
+            query,
+            search,
+            source: SourceBudget::new(),
+        }
+    }
+
+    /// Returns the query-engine policy.
+    #[must_use]
+    pub const fn query(self) -> QueryBudget {
+        self.query
+    }
+
+    /// Returns the lexical-search policy.
+    #[must_use]
+    pub const fn search(self) -> SearchBudget {
+        self.search
+    }
+
+    /// Returns the source-read policy.
+    #[must_use]
+    pub const fn source(self) -> SourceBudget {
+        self.source
+    }
+
+    /// Reduces the logical-row ceiling.
+    #[must_use]
+    pub const fn reduce_max_rows(mut self, maximum: u64) -> Self {
+        self.query = self
+            .query
+            .with_max_rows(if self.query.max_rows() < maximum {
+                self.query.max_rows()
+            } else {
+                maximum
+            });
+        self
+    }
+
+    /// Reduces every result-bearing lower-layer policy.
+    #[must_use]
+    pub fn reduce_max_results(mut self, maximum: u64) -> Self {
+        self.query = self
+            .query
+            .with_max_results(self.query.max_results().min(maximum));
+        if let Ok(maximum) = usize::try_from(maximum) {
+            self.search.max_results = self.search.max_results.min(maximum);
+        }
+        self
+    }
+
+    /// Reduces the traversed-edge ceiling.
+    #[must_use]
+    pub const fn reduce_max_edges(mut self, maximum: u64) -> Self {
+        self.query = self
+            .query
+            .with_max_edges(if self.query.max_edges() < maximum {
+                self.query.max_edges()
+            } else {
+                maximum
+            });
+        self
+    }
+
+    /// Reduces the raw source-byte ceiling in both relevant engines.
+    #[must_use]
+    pub fn reduce_max_source_bytes(mut self, maximum: u64) -> Self {
+        self.query = self
+            .query
+            .with_max_source_bytes(self.query.max_source_bytes().min(maximum));
+        if let Ok(maximum) = usize::try_from(maximum) {
+            self.source.max_source_bytes = self.source.max_source_bytes.min(maximum);
+        }
+        self
+    }
+
+    /// Reduces the conservative token ceiling.
+    #[must_use]
+    pub const fn reduce_max_tokens(mut self, maximum: u64) -> Self {
+        self.query = self
+            .query
+            .with_max_tokens(if self.query.max_tokens() < maximum {
+                self.query.max_tokens()
+            } else {
+                maximum
+            });
+        self
+    }
+
+    /// Reduces the exact lower query-response JSON ceiling.
+    #[must_use]
+    pub const fn reduce_max_json_bytes(mut self, maximum: u64) -> Self {
+        self.query = self
+            .query
+            .with_max_json_bytes(if self.query.max_json_bytes() < maximum {
+                self.query.max_json_bytes()
+            } else {
+                maximum
+            });
+        self
+    }
+
+    /// Reduces owned response memory in both relevant engines.
+    #[must_use]
+    pub fn reduce_max_memory_bytes(mut self, maximum: u64) -> Self {
+        self.query = self
+            .query
+            .with_max_memory_bytes(self.query.max_memory_bytes().min(maximum));
+        if let Ok(maximum) = usize::try_from(maximum) {
+            self.source.max_response_memory_bytes =
+                self.source.max_response_memory_bytes.min(maximum);
+        }
+        self
+    }
+
+    /// Reduces the cooperative duration in every lower-layer engine.
+    #[must_use]
+    pub fn reduce_max_duration(mut self, maximum: Duration) -> Self {
+        self.query = self
+            .query
+            .with_max_duration(self.query.max_duration().min(maximum));
+        self.search.max_duration = self.search.max_duration.min(maximum);
+        self.source.max_duration = self.source.max_duration.min(maximum);
+        self
+    }
+
+    /// Reduces the lexical query-text ceiling.
+    #[must_use]
+    pub const fn reduce_search_max_query_bytes(mut self, maximum: usize) -> Self {
+        self.search.max_query_bytes = if self.search.max_query_bytes < maximum {
+            self.search.max_query_bytes
+        } else {
+            maximum
+        };
+        self
+    }
+
+    /// Reduces the lexical candidate ceiling.
+    #[must_use]
+    pub const fn reduce_search_max_candidates(mut self, maximum: usize) -> Self {
+        self.search.max_candidates = if self.search.max_candidates < maximum {
+            self.search.max_candidates
+        } else {
+            maximum
+        };
+        self
+    }
+
+    /// Reduces the lexical term ceiling.
+    #[must_use]
+    pub const fn reduce_search_max_terms(mut self, maximum: usize) -> Self {
+        self.search.max_terms = if self.search.max_terms < maximum {
+            self.search.max_terms
+        } else {
+            maximum
+        };
+        self
+    }
+
+    /// Reduces the expanded lexical-term ceiling.
+    #[must_use]
+    pub const fn reduce_search_max_expanded_terms(mut self, maximum: usize) -> Self {
+        self.search.max_expanded_terms = if self.search.max_expanded_terms < maximum {
+            self.search.max_expanded_terms
+        } else {
+            maximum
+        };
+        self
+    }
+
+    /// Reduces the examined lexical-term ceiling.
+    #[must_use]
+    pub const fn reduce_search_max_examined_terms(mut self, maximum: usize) -> Self {
+        self.search.max_examined_terms = if self.search.max_examined_terms < maximum {
+            self.search.max_examined_terms
+        } else {
+            maximum
+        };
+        self
+    }
+
+    /// Reduces the lexical posting ceiling.
+    #[must_use]
+    pub const fn reduce_search_max_postings(mut self, maximum: u64) -> Self {
+        self.search.max_postings = if self.search.max_postings < maximum {
+            self.search.max_postings
+        } else {
+            maximum
+        };
+        self
+    }
+
+    /// Reduces the returned lexical-text ceiling.
+    #[must_use]
+    pub const fn reduce_search_max_returned_text_bytes(mut self, maximum: usize) -> Self {
+        self.search.max_returned_text_bytes = if self.search.max_returned_text_bytes < maximum {
+            self.search.max_returned_text_bytes
+        } else {
+            maximum
+        };
+        self
+    }
+
+    /// Reduces the source-selector ceiling.
+    #[must_use]
+    pub const fn reduce_source_max_selectors(mut self, maximum: usize) -> Self {
+        self.source.max_selectors = if self.source.max_selectors < maximum {
+            self.source.max_selectors
+        } else {
+            maximum
+        };
+        self
+    }
+
+    /// Reduces the source context-line ceiling.
+    #[must_use]
+    pub const fn reduce_source_max_context_lines(mut self, maximum: u16) -> Self {
+        self.source.max_context_lines = if self.source.max_context_lines < maximum {
+            self.source.max_context_lines
+        } else {
+            maximum
+        };
+        self
+    }
+
+    /// Reduces the copied source-metadata ceiling.
+    #[must_use]
+    pub const fn reduce_source_max_metadata_bytes(mut self, maximum: usize) -> Self {
+        self.source.max_metadata_bytes = if self.source.max_metadata_bytes < maximum {
+            self.source.max_metadata_bytes
+        } else {
+            maximum
+        };
+        self
+    }
+
+    /// Reduces the source snapshot-read ceiling.
+    #[must_use]
+    pub const fn reduce_source_max_snapshot_bytes(mut self, maximum: u64) -> Self {
+        self.source.max_snapshot_bytes = if self.source.max_snapshot_bytes < maximum {
+            self.source.max_snapshot_bytes
+        } else {
+            maximum
+        };
+        self
+    }
+}
+
+impl Default for FirstSliceBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Transport-independent owner of bounded ephemeral fixture generations.
 ///
 /// The service retains at most the caller-selected hard-bounded generation
@@ -1908,21 +2185,56 @@ impl FirstSliceService {
         page_offset: usize,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<CodeLocateResult>, FirstSliceError> {
+        self.code_locate_with_budget(
+            generation,
+            query,
+            mode,
+            maximum_results,
+            page_offset,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes a generation-pinned `code.locate` query under a reduced policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the explicit policy accompanies one bounded locate request"
+    )]
+    pub fn code_locate_with_budget(
+        &self,
+        generation: GenerationId,
+        query: String,
+        mode: LocateMode,
+        maximum_results: usize,
+        page_offset: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<CodeLocateResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
             .query(generation)
             .map_err(|_| FirstSliceError::Query)?;
-        let mut search_budget = SearchBudget::default();
-        search_budget.max_results = search_budget.max_results.max(maximum_results);
+        let query_budget = budget.query();
+        let search_budget = budget.search();
+        let mut effective_maximum_results = maximum_results.min(search_budget.max_results);
+        if let Ok(query_maximum_results) = usize::try_from(query_budget.max_results()) {
+            effective_maximum_results = effective_maximum_results.min(query_maximum_results);
+        }
         let plan = service
             .plan_code_locate(
                 query,
                 mode,
-                maximum_results,
+                effective_maximum_results,
                 page_offset,
                 search_budget,
-                QueryBudget::new(),
+                query_budget,
             )
             .map_err(|error| map_query_error(error, cancellation))?;
         service
@@ -1942,13 +2254,34 @@ impl FirstSliceService {
         symbol: SymbolId,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<SymbolExplainResult>, FirstSliceError> {
+        self.symbol_explain_with_budget(
+            generation,
+            symbol,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes a generation-pinned `symbol.explain` query under a reduced policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, symbol, invalid
+    /// plan, or bounded execution failure.
+    pub fn symbol_explain_with_budget(
+        &self,
+        generation: GenerationId,
+        symbol: SymbolId,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<SymbolExplainResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
             .query(generation)
             .map_err(|_| FirstSliceError::Query)?;
         let plan = service
-            .plan_symbol_explain(symbol, QueryBudget::new())
+            .plan_symbol_explain(symbol, budget.query())
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_symbol_explain(&plan, cancellation)
@@ -1981,6 +2314,41 @@ impl FirstSliceService {
         page_offset: usize,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<SymbolRelationshipsResult>, FirstSliceError> {
+        self.symbol_relationships_with_budget(
+            generation,
+            seeds,
+            families,
+            direction,
+            min_confidence,
+            max_results,
+            page_offset,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes `symbol.relationships` under a reduced lower-layer policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the explicit policy accompanies the bounded relationships dimensions"
+    )]
+    pub fn symbol_relationships_with_budget(
+        &self,
+        generation: GenerationId,
+        seeds: BTreeSet<SymbolId>,
+        families: Vec<RelationFamily>,
+        direction: Option<RelationDirection>,
+        min_confidence: u16,
+        max_results: usize,
+        page_offset: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<SymbolRelationshipsResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -1994,7 +2362,7 @@ impl FirstSliceService {
                 min_confidence,
                 max_results,
                 page_offset,
-                QueryBudget::new(),
+                budget.query(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
         service
@@ -2029,6 +2397,43 @@ impl FirstSliceService {
         max_paths: usize,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<FlowTraceResult>, FirstSliceError> {
+        self.flow_trace_with_budget(
+            generation,
+            from,
+            to,
+            families,
+            direction,
+            min_confidence,
+            max_depth,
+            max_paths,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes `flow.trace` under a reduced lower-layer policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the explicit policy accompanies the bounded flow dimensions"
+    )]
+    pub fn flow_trace_with_budget(
+        &self,
+        generation: GenerationId,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        families: Vec<RelationFamily>,
+        direction: Option<RelationDirection>,
+        min_confidence: u16,
+        max_depth: u8,
+        max_paths: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<FlowTraceResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -2043,7 +2448,7 @@ impl FirstSliceService {
                 min_confidence,
                 max_depth,
                 max_paths,
-                QueryBudget::new(),
+                budget.query(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
         service
@@ -2071,6 +2476,37 @@ impl FirstSliceService {
         include_self_cycles: bool,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<ArchitectureCyclesResult>, FirstSliceError> {
+        self.architecture_cycles_with_budget(
+            generation,
+            families,
+            min_size,
+            max_cycles,
+            include_self_cycles,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes `architecture.cycles` under a reduced lower-layer policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the explicit policy accompanies the bounded cycle dimensions"
+    )]
+    pub fn architecture_cycles_with_budget(
+        &self,
+        generation: GenerationId,
+        families: Vec<RelationFamily>,
+        min_size: u8,
+        max_cycles: usize,
+        include_self_cycles: bool,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<ArchitectureCyclesResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -2083,7 +2519,7 @@ impl FirstSliceService {
                 min_size,
                 max_cycles,
                 include_self_cycles,
-                QueryBudget::new(),
+                budget.query(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
         service
@@ -2116,6 +2552,39 @@ impl FirstSliceService {
         max_candidates: usize,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<CodeDeadResult>, FirstSliceError> {
+        self.code_dead_with_budget(
+            generation,
+            entry_point_policy,
+            include_exported,
+            include_tests,
+            min_confidence,
+            max_candidates,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes `code.dead` under a reduced lower-layer policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the explicit policy accompanies the bounded dead-code dimensions"
+    )]
+    pub fn code_dead_with_budget(
+        &self,
+        generation: GenerationId,
+        entry_point_policy: CodeDeadEntryPointPolicy,
+        include_exported: bool,
+        include_tests: bool,
+        min_confidence: u16,
+        max_candidates: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<CodeDeadResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -2128,7 +2597,7 @@ impl FirstSliceService {
                 include_tests,
                 min_confidence,
                 max_candidates,
-                QueryBudget::new(),
+                budget.query(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
         service
@@ -2156,6 +2625,37 @@ impl FirstSliceService {
         include_edges: bool,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<ArchitectureOverviewResult>, FirstSliceError> {
+        self.architecture_overview_with_budget(
+            generation,
+            views,
+            min_confidence,
+            max_components,
+            include_edges,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes `architecture.overview` under a reduced lower-layer policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the explicit policy accompanies the bounded overview dimensions"
+    )]
+    pub fn architecture_overview_with_budget(
+        &self,
+        generation: GenerationId,
+        views: Vec<ArchitectureOverviewView>,
+        min_confidence: u16,
+        max_components: usize,
+        include_edges: bool,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<ArchitectureOverviewResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -2167,7 +2667,7 @@ impl FirstSliceService {
                 min_confidence,
                 max_components,
                 include_edges,
-                QueryBudget::new(),
+                budget.query(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
         service
@@ -2195,6 +2695,37 @@ impl FirstSliceService {
         include_commands: bool,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<TestsSelectResult>, FirstSliceError> {
+        self.tests_select_with_budget(
+            generation,
+            seeds,
+            test_kinds,
+            max_tests,
+            include_commands,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes `tests.select` under a reduced lower-layer policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the explicit policy accompanies the bounded test-selection dimensions"
+    )]
+    pub fn tests_select_with_budget(
+        &self,
+        generation: GenerationId,
+        seeds: BTreeSet<SymbolId>,
+        test_kinds: Vec<TestsSelectKind>,
+        max_tests: usize,
+        include_commands: bool,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<TestsSelectResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -2206,7 +2737,7 @@ impl FirstSliceService {
                 test_kinds,
                 max_tests,
                 include_commands,
-                QueryBudget::new(),
+                budget.query(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
         service
@@ -2240,6 +2771,41 @@ impl FirstSliceService {
         max_dependents: usize,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<ChangeImpactResult>, FirstSliceError> {
+        self.change_impact_with_budget(
+            generation,
+            changed_symbols,
+            changed_paths,
+            max_depth,
+            min_confidence,
+            include_tests,
+            max_dependents,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes `change.impact` under a reduced lower-layer policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the explicit policy accompanies the bounded impact dimensions"
+    )]
+    pub fn change_impact_with_budget(
+        &self,
+        generation: GenerationId,
+        changed_symbols: BTreeSet<SymbolId>,
+        changed_paths: Vec<String>,
+        max_depth: u8,
+        min_confidence: u16,
+        include_tests: bool,
+        max_dependents: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<ChangeImpactResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -2253,7 +2819,7 @@ impl FirstSliceService {
                 min_confidence,
                 include_tests,
                 max_dependents,
-                QueryBudget::new(),
+                budget.query(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
         service
@@ -2281,6 +2847,37 @@ impl FirstSliceService {
         max_steps: usize,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<PlanChangeResult>, FirstSliceError> {
+        self.plan_change_with_budget(
+            generation,
+            objective,
+            target_symbols,
+            target_files,
+            max_steps,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes `plan.change` under a reduced lower-layer policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the explicit policy accompanies the bounded change-plan dimensions"
+    )]
+    pub fn plan_change_with_budget(
+        &self,
+        generation: GenerationId,
+        objective: PlanChangeObjective,
+        target_symbols: BTreeSet<SymbolId>,
+        target_files: BTreeSet<FileId>,
+        max_steps: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<PlanChangeResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -2292,7 +2889,7 @@ impl FirstSliceService {
                 target_symbols,
                 target_files,
                 max_steps,
-                QueryBudget::new(),
+                budget.query(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
         service
@@ -2321,6 +2918,31 @@ impl FirstSliceService {
         max_results: usize,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<HistoryCompareResult>, FirstSliceError> {
+        self.history_compare_with_budget(
+            base,
+            head,
+            change_kinds,
+            max_results,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes `history.compare` under a reduced lower-layer policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    pub fn history_compare_with_budget(
+        &self,
+        base: GenerationId,
+        head: GenerationId,
+        change_kinds: BTreeSet<HistoryChangeKind>,
+        max_results: usize,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<HistoryCompareResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -2332,7 +2954,7 @@ impl FirstSliceService {
             .map_err(|_| FirstSliceError::Query)?
             .document();
         let plan = service
-            .plan_history_compare(base, change_kinds, max_results, QueryBudget::new())
+            .plan_history_compare(base, change_kinds, max_results, budget.query())
             .map_err(|error| map_query_error(error, cancellation))?;
         service
             .execute_history_compare(&plan, base_document, cancellation)
@@ -2367,6 +2989,43 @@ impl FirstSliceService {
         cost_limit: Option<u64>,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<AdvancedQueryResult>, FirstSliceError> {
+        self.advanced_query_with_budget(
+            generation,
+            ast,
+            explain,
+            max_results,
+            page_offset,
+            max_depth,
+            max_traversal,
+            cost_limit,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes `query.advanced` under a reduced lower-layer policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, invalid plan, or
+    /// bounded execution failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the explicit policy accompanies the bounded advanced-query dimensions"
+    )]
+    pub fn advanced_query_with_budget(
+        &self,
+        generation: GenerationId,
+        ast: AdvancedAstNode,
+        explain: bool,
+        max_results: usize,
+        page_offset: usize,
+        max_depth: usize,
+        max_traversal: usize,
+        cost_limit: Option<u64>,
+        budget: FirstSliceBudget,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<AdvancedQueryResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
         let service = self
             .generations
@@ -2381,7 +3040,7 @@ impl FirstSliceService {
                 max_depth,
                 max_traversal,
                 cost_limit,
-                QueryBudget::new(),
+                budget.query(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
         service
@@ -2399,6 +3058,27 @@ impl FirstSliceService {
         &self,
         generation: GenerationId,
         references: Vec<SourceRef>,
+        cancellation: &Cancellation,
+    ) -> Result<QueryResponse<SourceReadQueryResult>, FirstSliceError> {
+        self.source_read_with_budget(
+            generation,
+            references,
+            FirstSliceBudget::default(),
+            cancellation,
+        )
+    }
+
+    /// Executes `source.read` under a reduced lower-layer policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirstSliceError`] for an unknown generation, stale source,
+    /// invalid plan, or bounded execution failure.
+    pub fn source_read_with_budget(
+        &self,
+        generation: GenerationId,
+        references: Vec<SourceRef>,
+        budget: FirstSliceBudget,
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<SourceReadQueryResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
@@ -2420,8 +3100,8 @@ impl FirstSliceService {
             .plan_source_read(
                 references,
                 SourceReadOptions::new(),
-                SourceBudget::new(),
-                QueryBudget::new(),
+                budget.source(),
+                budget.query(),
             )
             .map_err(|error| map_query_error(error, cancellation))?;
         service
@@ -4207,6 +4887,203 @@ mod tests {
             checked_combined_length(usize::MAX, 1, usize::MAX),
             Err(FirstSliceError::Limits)
         );
+    }
+
+    #[test]
+    fn first_slice_budget_reductions_are_monotonic_for_every_lower_layer() {
+        let reduced = FirstSliceBudget::default()
+            .reduce_max_rows(20_000)
+            .reduce_max_edges(9_000)
+            .reduce_max_results(40)
+            .reduce_max_source_bytes(8_000)
+            .reduce_max_json_bytes(32_000)
+            .reduce_max_tokens(16_000)
+            .reduce_max_memory_bytes(64_000)
+            .reduce_max_duration(Duration::from_millis(500))
+            .reduce_search_max_query_bytes(128)
+            .reduce_search_max_candidates(2_000)
+            .reduce_search_max_terms(8)
+            .reduce_search_max_expanded_terms(256)
+            .reduce_search_max_examined_terms(1_024)
+            .reduce_search_max_postings(20_000)
+            .reduce_search_max_returned_text_bytes(32_000)
+            .reduce_source_max_selectors(8)
+            .reduce_source_max_context_lines(4)
+            .reduce_source_max_metadata_bytes(32_000)
+            .reduce_source_max_snapshot_bytes(1_000_000);
+        let query = reduced.query();
+        let search = reduced.search();
+        let source = reduced.source();
+
+        assert_eq!(query.max_rows(), 20_000);
+        assert_eq!(query.max_edges(), 9_000);
+        assert_eq!(query.max_results(), 40);
+        assert_eq!(query.max_source_bytes(), 8_000);
+        assert_eq!(query.max_json_bytes(), 32_000);
+        assert_eq!(query.max_tokens(), 16_000);
+        assert_eq!(query.max_memory_bytes(), 64_000);
+        assert_eq!(query.max_duration(), Duration::from_millis(500));
+        assert_eq!(search.max_results, 40);
+        assert_eq!(search.max_query_bytes, 128);
+        assert_eq!(search.max_candidates, 2_000);
+        assert_eq!(search.max_terms, 8);
+        assert_eq!(search.max_expanded_terms, 256);
+        assert_eq!(search.max_examined_terms, 1_024);
+        assert_eq!(search.max_postings, 20_000);
+        assert_eq!(search.max_returned_text_bytes, 32_000);
+        assert_eq!(search.max_duration, Duration::from_millis(500));
+        assert_eq!(source.max_selectors, 8);
+        assert_eq!(source.max_context_lines, 4);
+        assert_eq!(source.max_source_bytes, 8_000);
+        assert_eq!(source.max_metadata_bytes, 32_000);
+        assert_eq!(source.max_response_memory_bytes, 64_000);
+        assert_eq!(source.max_snapshot_bytes, 1_000_000);
+        assert_eq!(source.max_duration, Duration::from_millis(500));
+
+        let attempted_raise = reduced
+            .reduce_max_rows(u64::MAX)
+            .reduce_max_edges(u64::MAX)
+            .reduce_max_results(u64::MAX)
+            .reduce_max_source_bytes(u64::MAX)
+            .reduce_max_json_bytes(u64::MAX)
+            .reduce_max_tokens(u64::MAX)
+            .reduce_max_memory_bytes(u64::MAX)
+            .reduce_max_duration(Duration::MAX)
+            .reduce_search_max_query_bytes(usize::MAX)
+            .reduce_search_max_candidates(usize::MAX)
+            .reduce_search_max_terms(usize::MAX)
+            .reduce_search_max_expanded_terms(usize::MAX)
+            .reduce_search_max_examined_terms(usize::MAX)
+            .reduce_search_max_postings(u64::MAX)
+            .reduce_search_max_returned_text_bytes(usize::MAX)
+            .reduce_source_max_selectors(usize::MAX)
+            .reduce_source_max_context_lines(u16::MAX)
+            .reduce_source_max_metadata_bytes(usize::MAX)
+            .reduce_source_max_snapshot_bytes(u64::MAX);
+        assert_eq!(attempted_raise, reduced);
+    }
+
+    #[test]
+    fn reduced_policy_reaches_query_search_and_source_plans() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn item_one() -> u32 { 1 }\npub fn item_two() -> u32 { 2 }\n",
+        )
+        .expect("budget fixture writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("budget fixture indexes");
+
+        let first = service
+            .code_locate_with_budget(
+                receipt.generation,
+                "item".to_owned(),
+                LocateMode::Prefix,
+                10,
+                0,
+                FirstSliceBudget::default()
+                    .reduce_max_rows(10_001)
+                    .reduce_max_results(1),
+                &cancellation,
+            )
+            .expect("reduced query policy admits its exact conservative plan");
+        assert_eq!(first.plan.estimate.rows, 10_001);
+        assert_eq!(first.plan.estimate.results, 1);
+        assert_eq!(first.data.hits.len(), 1);
+        assert!(first.data.execution.is_truncated());
+
+        assert!(matches!(
+            service.code_locate_with_budget(
+                receipt.generation,
+                "item_one".to_owned(),
+                LocateMode::Exact,
+                1,
+                0,
+                FirstSliceBudget::default().reduce_search_max_query_bytes(4),
+                &cancellation,
+            ),
+            Err(FirstSliceError::Query)
+        ));
+
+        let second = service
+            .code_locate(
+                receipt.generation,
+                "item_two".to_owned(),
+                LocateMode::Exact,
+                1,
+                0,
+                &cancellation,
+            )
+            .expect("second symbol locates");
+        let references = vec![
+            first.data.hits[0]
+                .source
+                .clone()
+                .expect("first symbol has source evidence"),
+            second.data.hits[0]
+                .source
+                .clone()
+                .expect("second symbol has source evidence"),
+        ];
+        assert!(matches!(
+            service.source_read_with_budget(
+                receipt.generation,
+                references,
+                FirstSliceBudget::default().reduce_source_max_selectors(1),
+                &cancellation,
+            ),
+            Err(FirstSliceError::Query)
+        ));
+    }
+
+    #[test]
+    fn default_wrapper_matches_explicit_default_budget() {
+        let fixture = TempDir::new().expect("fixture root exists");
+        fs::create_dir(fixture.path().join("src")).expect("fixture source directory exists");
+        fs::write(
+            fixture.path().join("src/lib.rs"),
+            "pub fn answer() -> u32 { 42 }\n",
+        )
+        .expect("default-policy fixture writes");
+        let cancellation = deadline();
+        let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+        let receipt = service
+            .index_rust_fixture(fixture.path(), &cancellation)
+            .expect("default-policy fixture indexes");
+
+        let wrapped = service
+            .code_locate(
+                receipt.generation,
+                "answer".to_owned(),
+                LocateMode::Exact,
+                128,
+                0,
+                &cancellation,
+            )
+            .expect("compatibility wrapper succeeds");
+        let explicit = service
+            .code_locate_with_budget(
+                receipt.generation,
+                "answer".to_owned(),
+                LocateMode::Exact,
+                128,
+                0,
+                FirstSliceBudget::default(),
+                &cancellation,
+            )
+            .expect("explicit default policy succeeds");
+
+        assert_eq!(wrapped.plan, explicit.plan);
+        assert_eq!(wrapped.data, explicit.data);
+        assert_eq!(wrapped.usage.rows, explicit.usage.rows);
+        assert_eq!(wrapped.usage.edges, explicit.usage.edges);
+        assert_eq!(wrapped.usage.results, explicit.usage.results);
+        assert_eq!(wrapped.usage.source_bytes, explicit.usage.source_bytes);
+        assert_eq!(wrapped.usage.memory_bytes, explicit.usage.memory_bytes);
     }
 
     #[test]
