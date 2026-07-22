@@ -7,16 +7,44 @@
 //! state, so the same golden plan holds across empty, partial, stale, fresh,
 //! small, large, and unsupported capability states.
 
+use rootlight_agent::advanced::{AdvancedQueryPlan, QueryOperator};
 use rootlight_agent::explain::{
-    architecture_cycles_plan, architecture_overview_plan, change_impact_plan, code_dead_plan,
-    code_locate_plan, context_pack_plan, finalize_plan, flow_trace_plan, history_compare_plan,
-    plan_change_plan, query_batch_plan, repo_list_plan, repo_status_plan, source_read_plan,
-    symbol_explain_plan, symbol_relationships_plan, tests_select_plan,
+    RepoListPlanContext, architecture_cycles_plan, architecture_overview_plan, change_impact_plan,
+    code_dead_plan, code_locate_plan, context_pack_plan, finalize_plan, flow_trace_plan,
+    history_compare_plan, plan_change_plan, query_advanced_plan, query_batch_plan, repo_list_plan,
+    repo_status_plan, source_read_plan, symbol_explain_plan, symbol_relationships_plan,
+    tests_select_plan,
 };
-use rootlight_mcp_contract::context::{PLANNER_VERSION, PlanExplanation};
+use rootlight_mcp_contract::{
+    context::PLANNER_VERSION, repository::RepositoryState, vertical::ResponseProfile,
+};
 
 /// A pinned generation used to make golden fingerprints reproducible.
 const PINNED_GENERATION: &str = "gen-golden-000000000000000000000000";
+
+fn catalog_context() -> RepoListPlanContext {
+    RepoListPlanContext::new(
+        25,
+        true,
+        [RepositoryState::Ready, RepositoryState::Degraded],
+        ResponseProfile::Compact,
+    )
+    .expect("golden catalog context is bounded")
+}
+
+fn advanced_plan() -> AdvancedQueryPlan {
+    AdvancedQueryPlan::validate(
+        &[
+            QueryOperator::Scan,
+            QueryOperator::Filter,
+            QueryOperator::Limit,
+        ],
+        20,
+        100_000,
+        3,
+    )
+    .expect("golden advanced query is bounded")
+}
 
 #[test]
 fn golden_code_locate_lexical_and_exact() {
@@ -147,10 +175,28 @@ fn golden_query_batch() {
 
 #[test]
 fn golden_repo_list() {
-    let plan = repo_list_plan();
-    assert_eq!(plan.operators, vec!["repository_listing".to_owned()]);
-    assert!(plan.applied_limits.is_empty());
-    assert_eq!(plan.estimated_cost, 8);
+    let plan = repo_list_plan(&catalog_context());
+    assert_eq!(
+        plan.operators,
+        vec![
+            "catalog_snapshot",
+            "catalog_query_filter",
+            "catalog_state_filter",
+            "catalog_sort",
+            "page_window",
+        ]
+    );
+    assert_eq!(
+        plan.applied_limits,
+        vec![
+            "max_results: 25",
+            "normalized_query: present",
+            "states: ready,degraded",
+            "response_profile: compact",
+            "sort_version: 1",
+        ]
+    );
+    assert_eq!(plan.estimated_cost, 33);
 }
 
 #[test]
@@ -166,14 +212,7 @@ fn golden_context_pack() {
 
 #[test]
 fn golden_query_advanced() {
-    let plan = PlanExplanation::new(
-        222,
-        vec!["Scan".to_owned(), "Filter".to_owned(), "Limit".to_owned()],
-        vec![
-            "max_results: 20".to_owned(),
-            "max_traversal: 100000".to_owned(),
-        ],
-    );
+    let plan = query_advanced_plan(&advanced_plan());
     assert_eq!(
         plan.operators,
         vec!["Scan".to_owned(), "Filter".to_owned(), "Limit".to_owned()]
@@ -181,11 +220,12 @@ fn golden_query_advanced() {
     assert_eq!(
         plan.applied_limits,
         vec![
-            "max_results: 20".to_owned(),
-            "max_traversal: 100000".to_owned()
+            "rows<=20".to_owned(),
+            "depth<=3".to_owned(),
+            "traversal<=100000".to_owned(),
         ]
     );
-    assert_eq!(plan.estimated_cost, 222);
+    assert_eq!(plan.estimated_cost, 111);
     assert_eq!(plan.planner_version, PLANNER_VERSION);
 }
 
@@ -209,15 +249,8 @@ fn golden_fingerprints_are_stable_for_a_pinned_generation() {
         repo_status_plan(),
         context_pack_plan(3, 1000),
         query_batch_plan(2),
-        repo_list_plan(),
-        PlanExplanation::new(
-            222,
-            vec!["Scan".to_owned(), "Filter".to_owned(), "Limit".to_owned()],
-            vec![
-                "max_results: 20".to_owned(),
-                "max_traversal: 100000".to_owned(),
-            ],
-        ),
+        repo_list_plan(&catalog_context()),
+        query_advanced_plan(&advanced_plan()),
     ];
     for plan in plans {
         let first = finalize_plan(plan.clone(), PINNED_GENERATION);

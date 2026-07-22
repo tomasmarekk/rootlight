@@ -5,7 +5,13 @@
 //! before spending work. Plan construction is deterministic for a normalized
 //! request and never reads repository source.
 
-use rootlight_mcp_contract::context::{PLANNER_VERSION, PlanExplanation};
+use rootlight_mcp_contract::{
+    context::{PLANNER_VERSION, PlanExplanation},
+    repository::RepositoryState,
+    vertical::ResponseProfile,
+};
+
+use crate::advanced::AdvancedQueryPlan;
 
 /// Estimated cost units per planned match for `code.locate`.
 const LOCATE_COST_PER_RESULT: u64 = 8;
@@ -55,8 +61,100 @@ const CONTEXT_COST_PER_SEED: u64 = 30;
 /// Estimated cost units per planned batched operation for `query.batch`.
 const BATCH_COST_PER_OPERATION: u64 = 100;
 
-/// Fixed estimated cost units for the metadata-only `repo.list` plan.
+/// Base estimated cost units for the metadata-only `repo.list` plan.
 const REPO_LIST_COST: u64 = 8;
+
+/// Maximum number of catalog entries one `repo.list` page may return.
+pub const REPO_LIST_MAX_PAGE_SIZE: u16 = 200;
+
+/// Version of the canonical catalog ordering encoded in list plans.
+pub const REPO_LIST_SORT_VERSION: u8 = 1;
+
+/// Normalized, bounded planning context for a `repo.list` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoListPlanContext {
+    effective_page_size: u16,
+    normalized_query_present: bool,
+    canonical_states: Vec<RepositoryState>,
+    response_profile: ResponseProfile,
+    sort_version: u8,
+}
+
+impl RepoListPlanContext {
+    /// Creates a canonical planning context for a compact catalog page.
+    ///
+    /// Repository states are sorted and deduplicated so semantically identical
+    /// filters produce the same plan and fingerprint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoListPlanError`] when the effective page size is outside
+    /// the hard range or the requested profile is not supported by `repo.list`.
+    pub fn new(
+        effective_page_size: u16,
+        normalized_query_present: bool,
+        states: impl IntoIterator<Item = RepositoryState>,
+        response_profile: ResponseProfile,
+    ) -> Result<Self, RepoListPlanError> {
+        if !(1..=REPO_LIST_MAX_PAGE_SIZE).contains(&effective_page_size) {
+            return Err(RepoListPlanError::InvalidPageSize);
+        }
+        if response_profile != ResponseProfile::Compact {
+            return Err(RepoListPlanError::UnsupportedProfile);
+        }
+        let mut canonical_states: Vec<_> = states.into_iter().collect();
+        canonical_states.sort_unstable();
+        canonical_states.dedup();
+        Ok(Self {
+            effective_page_size,
+            normalized_query_present,
+            canonical_states,
+            response_profile,
+            sort_version: REPO_LIST_SORT_VERSION,
+        })
+    }
+
+    /// Returns the effective page limit after request and server bounds.
+    #[must_use]
+    pub const fn effective_page_size(&self) -> u16 {
+        self.effective_page_size
+    }
+
+    /// Reports whether a non-empty normalized query filter is present.
+    #[must_use]
+    pub const fn normalized_query_present(&self) -> bool {
+        self.normalized_query_present
+    }
+
+    /// Returns the sorted, deduplicated lifecycle-state filter.
+    #[must_use]
+    pub fn canonical_states(&self) -> &[RepositoryState] {
+        &self.canonical_states
+    }
+
+    /// Returns the response profile bound into the plan.
+    #[must_use]
+    pub const fn response_profile(&self) -> ResponseProfile {
+        self.response_profile
+    }
+
+    /// Returns the canonical catalog ordering version.
+    #[must_use]
+    pub const fn sort_version(&self) -> u8 {
+        self.sort_version
+    }
+}
+
+/// Invalid bounded context for a `repo.list` plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RepoListPlanError {
+    /// The effective page size is zero or exceeds the hard catalog ceiling.
+    #[error("repo.list page size must be between 1 and 200")]
+    InvalidPageSize,
+    /// The requested response profile is not implemented for `repo.list`.
+    #[error("repo.list supports only the compact response profile")]
+    UnsupportedProfile,
+}
 
 /// Builds the source-free `code.locate` plan for explain mode.
 ///
@@ -330,17 +428,66 @@ pub fn query_batch_plan(operation_count: usize) -> PlanExplanation {
 
 /// Builds the source-free `repo.list` plan for explain mode.
 ///
-/// `repo.list` reads only the registered-repository catalog, so the plan is a
-/// fixed bounded listing with no source retrieval.
+/// The plan binds every normalized filter and effective server limit that can
+/// change catalog membership, ordering, or pagination.
 #[must_use]
-pub fn repo_list_plan() -> PlanExplanation {
+pub fn repo_list_plan(context: &RepoListPlanContext) -> PlanExplanation {
+    let mut operators = vec!["catalog_snapshot".to_owned()];
+    if context.normalized_query_present {
+        operators.push("catalog_query_filter".to_owned());
+    }
+    if !context.canonical_states.is_empty() {
+        operators.push("catalog_state_filter".to_owned());
+    }
+    operators.extend(["catalog_sort".to_owned(), "page_window".to_owned()]);
+
+    let states = if context.canonical_states.is_empty() {
+        "all".to_owned()
+    } else {
+        context
+            .canonical_states
+            .iter()
+            .map(|state| state.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     PlanExplanation {
-        estimated_cost: REPO_LIST_COST,
-        operators: vec!["repository_listing".to_owned()],
-        applied_limits: Vec::new(),
+        estimated_cost: REPO_LIST_COST.saturating_add(u64::from(context.effective_page_size)),
+        operators,
+        applied_limits: vec![
+            format!("max_results: {}", context.effective_page_size),
+            format!(
+                "normalized_query: {}",
+                if context.normalized_query_present {
+                    "present"
+                } else {
+                    "absent"
+                }
+            ),
+            format!("states: {states}"),
+            "response_profile: compact".to_owned(),
+            format!("sort_version: {}", context.sort_version),
+        ],
         planner_version: PLANNER_VERSION,
         fingerprint: String::new(),
     }
+}
+
+/// Builds the source-free `query.advanced` explanation from its validated plan.
+#[must_use]
+pub fn query_advanced_plan(plan: &AdvancedQueryPlan) -> PlanExplanation {
+    PlanExplanation::new(
+        plan.estimated_cost,
+        plan.operators
+            .iter()
+            .map(|operator| operator.as_str().to_owned())
+            .collect(),
+        vec![
+            format!("rows<={}", plan.max_rows),
+            format!("depth<={}", plan.depth),
+            format!("traversal<={}", plan.max_traversal),
+        ],
+    )
 }
 
 /// Binds a stable physical-plan fingerprint to a plan for a pinned generation.
@@ -398,13 +545,18 @@ fn hash_length_prefixed(hasher: &mut blake3::Hasher, value: &[u8]) {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use rootlight_mcp_contract::context::PLANNER_VERSION;
+    use rootlight_mcp_contract::{
+        context::PLANNER_VERSION, repository::RepositoryState, vertical::ResponseProfile,
+    };
 
-    use super::{PlanExplanation, code_locate_plan, finalize_plan, physical_plan_fingerprint};
+    use super::{
+        PlanExplanation, RepoListPlanContext, RepoListPlanError, code_locate_plan, finalize_plan,
+        physical_plan_fingerprint,
+    };
 
     fn bounded_plan() -> impl Strategy<Value = PlanExplanation> {
         (
-            any::<u64>(),
+            0_u64..=10_000_000,
             proptest::collection::vec("[a-z][a-z0-9_]{0,15}", 0..=6),
             proptest::collection::vec("[a-z][a-z0-9_: ]{0,23}", 0..=6),
         )
@@ -633,10 +785,145 @@ mod tests {
     #[test]
     fn repo_list_plan_is_deterministic_and_bounded() {
         use super::repo_list_plan;
-        assert_eq!(repo_list_plan(), repo_list_plan());
-        let plan = repo_list_plan();
-        assert_eq!(plan.operators, vec!["repository_listing".to_owned()]);
-        assert!(plan.applied_limits.is_empty());
+        let context = RepoListPlanContext::new(
+            25,
+            true,
+            [
+                RepositoryState::Ready,
+                RepositoryState::Degraded,
+                RepositoryState::Ready,
+            ],
+            ResponseProfile::Compact,
+        )
+        .expect("bounded catalog context is valid");
+        assert_eq!(repo_list_plan(&context), repo_list_plan(&context));
+        let plan = repo_list_plan(&context);
+        assert_eq!(
+            plan.operators,
+            vec![
+                "catalog_snapshot".to_owned(),
+                "catalog_query_filter".to_owned(),
+                "catalog_state_filter".to_owned(),
+                "catalog_sort".to_owned(),
+                "page_window".to_owned(),
+            ]
+        );
+        assert_eq!(
+            plan.applied_limits,
+            vec![
+                "max_results: 25".to_owned(),
+                "normalized_query: present".to_owned(),
+                "states: ready,degraded".to_owned(),
+                "response_profile: compact".to_owned(),
+                "sort_version: 1".to_owned(),
+            ]
+        );
+        assert_eq!(plan.estimated_cost, 33);
+    }
+
+    #[test]
+    fn repo_list_context_rejects_unbounded_pages_and_profiles() {
+        for page_size in [0, 201] {
+            assert_eq!(
+                RepoListPlanContext::new(page_size, false, [], ResponseProfile::Compact),
+                Err(RepoListPlanError::InvalidPageSize)
+            );
+        }
+        for profile in [ResponseProfile::Standard, ResponseProfile::Evidence] {
+            assert_eq!(
+                RepoListPlanContext::new(20, false, [], profile),
+                Err(RepoListPlanError::UnsupportedProfile)
+            );
+        }
+    }
+
+    #[test]
+    fn repo_list_context_canonicalizes_state_filters() {
+        let context = RepoListPlanContext::new(
+            20,
+            false,
+            [
+                RepositoryState::Ready,
+                RepositoryState::Corrupt,
+                RepositoryState::Ready,
+                RepositoryState::Indexing,
+            ],
+            ResponseProfile::Compact,
+        )
+        .expect("bounded catalog context is valid");
+
+        assert_eq!(
+            context.canonical_states(),
+            &[
+                RepositoryState::Ready,
+                RepositoryState::Indexing,
+                RepositoryState::Corrupt,
+            ]
+        );
+        assert_eq!(context.effective_page_size(), 20);
+        assert!(!context.normalized_query_present());
+        assert_eq!(context.response_profile(), ResponseProfile::Compact);
+        assert_eq!(context.sort_version(), 1);
+    }
+
+    #[test]
+    fn repo_list_plan_fingerprint_binds_normalized_context() {
+        use super::repo_list_plan;
+        let base = RepoListPlanContext::new(
+            20,
+            false,
+            [RepositoryState::Ready],
+            ResponseProfile::Compact,
+        )
+        .expect("bounded catalog context is valid");
+        let page = RepoListPlanContext::new(
+            21,
+            false,
+            [RepositoryState::Ready],
+            ResponseProfile::Compact,
+        )
+        .expect("bounded catalog context is valid");
+        let query =
+            RepoListPlanContext::new(20, true, [RepositoryState::Ready], ResponseProfile::Compact)
+                .expect("bounded catalog context is valid");
+        let states = RepoListPlanContext::new(
+            20,
+            false,
+            [RepositoryState::Degraded],
+            ResponseProfile::Compact,
+        )
+        .expect("bounded catalog context is valid");
+        let fingerprint =
+            |context| physical_plan_fingerprint(&repo_list_plan(context), "catalog-snapshot");
+
+        assert_ne!(fingerprint(&base), fingerprint(&page));
+        assert_ne!(fingerprint(&base), fingerprint(&query));
+        assert_ne!(fingerprint(&base), fingerprint(&states));
+    }
+
+    #[test]
+    fn query_advanced_explanation_uses_the_validated_plan() {
+        use crate::advanced::{AdvancedQueryPlan, QueryOperator};
+
+        let validated = AdvancedQueryPlan::validate(
+            &[
+                QueryOperator::Scan,
+                QueryOperator::Filter,
+                QueryOperator::Limit,
+            ],
+            20,
+            100_000,
+            3,
+        )
+        .expect("advanced query is bounded");
+        let plan = super::query_advanced_plan(&validated);
+
+        assert_eq!(plan.estimated_cost, validated.estimated_cost);
+        assert_eq!(plan.operators, vec!["Scan", "Filter", "Limit"]);
+        assert_eq!(
+            plan.applied_limits,
+            vec!["rows<=20", "depth<=3", "traversal<=100000"]
+        );
     }
 
     proptest! {
