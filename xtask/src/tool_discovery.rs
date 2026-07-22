@@ -108,6 +108,7 @@ pub(crate) fn emit(options: &Options) -> Result<(), DiscoveryError> {
             changed_fields: [
                 "description",
                 "_meta.rootlight/capabilities.fallbackSummary",
+                "_meta.rootlight/capabilities.limitations",
                 "annotations.idempotentHint for repo.index",
             ],
             unchanged_contracts: [
@@ -162,16 +163,30 @@ fn baseline_payload(profile: ExposureProfile) -> Result<Value, DiscoveryError> {
                 .ok_or(DiscoveryError::InvalidPayload)?
                 .insert("idempotentHint".to_owned(), Value::Bool(true));
         }
-        object
+        let capability = object
             .get_mut("_meta")
             .and_then(Value::as_object_mut)
             .and_then(|metadata| metadata.get_mut(DISCOVERY_METADATA_KEY))
             .and_then(Value::as_object_mut)
-            .ok_or(DiscoveryError::InvalidPayload)?
-            .insert(
-                "fallbackSummary".to_owned(),
-                Value::String(baseline_fallback_summary(tool).to_owned()),
-            );
+            .ok_or(DiscoveryError::InvalidPayload)?;
+        capability.insert(
+            "fallbackSummary".to_owned(),
+            Value::String(baseline_fallback_summary(tool).to_owned()),
+        );
+        let limitations = capability
+            .get_mut("limitations")
+            .and_then(Value::as_array_mut)
+            .ok_or(DiscoveryError::InvalidPayload)?;
+        // Baseline payloads predate these field dispositions; retain the old
+        // bytes so discovery evidence compares the historical and current views.
+        limitations.retain(|limitation| {
+            let field = limitation.get("field").and_then(Value::as_str);
+            !matches!(
+                (tool, field),
+                (McpTool::RepoStatus, Some("generation"))
+                    | (McpTool::ArchitectureCycles, Some("projection.level"))
+            )
+        });
     }
     Ok(payload)
 }
@@ -336,7 +351,7 @@ struct ToolDisposition {
 #[derive(Serialize)]
 struct CompatibilityImpact {
     breaking: bool,
-    changed_fields: [&'static str; 3],
+    changed_fields: [&'static str; 4],
     unchanged_contracts: [&'static str; 4],
 }
 
