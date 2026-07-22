@@ -47,62 +47,10 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
 
     let repository = || json!({"repository_id": index.repository_id});
     let generation = || Value::String(index.generation_id.clone());
-    let calls = [
-        (
-            "symbol.relationships",
-            json!({
-                "repository": repository(),
-                "generation": generation(),
-                "symbol_ids": [symbol_id],
-                "relations": ["calls"],
-                "direction": "outbound",
-                "max_results": 1
-            }),
-        ),
-        (
-            "flow.trace",
-            json!({
-                "repository": repository(),
-                "generation": generation(),
-                "from": {"symbol_id": symbol_id},
-                "relations": ["calls"],
-                "direction": "outbound",
-                "max_depth": 1,
-                "max_paths": 1
-            }),
-        ),
-        (
-            "architecture.overview",
-            json!({
-                "repository": repository(),
-                "generation": generation(),
-                "views": ["hotspots"],
-                "max_components": 1,
-                "include_edges": true
-            }),
-        ),
-        (
-            "architecture.cycles",
-            json!({
-                "repository": repository(),
-                "generation": generation(),
-                "projection": {"relations": ["calls"], "level": "symbol"},
-                "max_cycles": 1
-            }),
-        ),
-        (
-            "code.dead",
-            json!({
-                "repository": repository(),
-                "generation": generation(),
-                "entry_point_policy": "standard",
-                "max_candidates": 1
-            }),
-        ),
-    ];
-
     let mut outputs = Map::new();
-    for (index_number, (tool, arguments)) in calls.into_iter().enumerate() {
+    for (index_number, (tool, arguments)) in
+        graph_tool_calls(&index, &symbol_id).into_iter().enumerate()
+    {
         let response = mcp.call(&format!("graph-{index_number}"), tool, arguments);
         assert_success(&response, tool);
         let output = response["result"]["structuredContent"].clone();
@@ -243,8 +191,168 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
             .contains("do not prove runtime liveness")
     );
 
+    assert_profile_matrix(&mut mcp, &index, &symbol_id, &outputs);
+    assert_hard_token_budget_taxonomy(&mut mcp, &index, &symbol_id);
+    assert_truncated_negative_analyses_are_caveated(&mut mcp, &index, &symbol_id);
+
     mcp.finish();
     daemon.finish();
+}
+
+fn graph_tool_calls(index: &IndexReceipt, symbol_id: &str) -> [(&'static str, Value); 5] {
+    let repository = || json!({"repository_id": index.repository_id});
+    let generation = || Value::String(index.generation_id.clone());
+    [
+        (
+            "symbol.relationships",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "symbol_ids": [symbol_id],
+                "relations": ["calls"],
+                "direction": "outbound",
+                "max_results": 1
+            }),
+        ),
+        (
+            "flow.trace",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "from": {"symbol_id": symbol_id},
+                "relations": ["calls"],
+                "direction": "outbound",
+                "max_depth": 1,
+                "max_paths": 1
+            }),
+        ),
+        (
+            "architecture.overview",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "views": ["hotspots"],
+                "max_components": 1,
+                "include_edges": true
+            }),
+        ),
+        (
+            "architecture.cycles",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "projection": {"relations": ["calls"], "level": "symbol"},
+                "max_cycles": 1
+            }),
+        ),
+        (
+            "code.dead",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "entry_point_policy": "standard",
+                "max_candidates": 1
+            }),
+        ),
+    ]
+}
+
+fn assert_profile_matrix(
+    mcp: &mut McpProcess,
+    index: &IndexReceipt,
+    symbol_id: &str,
+    compact_outputs: &Map<String, Value>,
+) {
+    for profile in ["compact", "standard", "evidence"] {
+        for (tool_index, (tool, mut arguments)) in
+            graph_tool_calls(index, symbol_id).into_iter().enumerate()
+        {
+            arguments["response_profile"] = json!(profile);
+            let response = mcp.call(
+                &format!("graph-profile-{profile}-{tool_index}"),
+                tool,
+                arguments,
+            );
+            assert_success(&response, tool);
+            let output = &response["result"]["structuredContent"];
+            assert_common_read_contract(tool, output, index);
+            assert_exact_json_usage(tool, output);
+            for field in [
+                "repository",
+                "generation",
+                "coverage",
+                "completeness",
+                "truncated",
+                "next_cursor",
+                "trust",
+            ] {
+                assert_eq!(
+                    output[field], compact_outputs[tool][field],
+                    "{tool} changed invariant field {field} under the {profile} profile"
+                );
+            }
+        }
+    }
+}
+
+fn assert_hard_token_budget_taxonomy(mcp: &mut McpProcess, index: &IndexReceipt, symbol_id: &str) {
+    for (tool_index, (tool, mut arguments)) in
+        graph_tool_calls(index, symbol_id).into_iter().enumerate()
+    {
+        arguments["response_profile"] = json!("evidence");
+        arguments["budget"] = json!({"max_tokens": 100});
+        let response = mcp.call(&format!("graph-token-budget-{tool_index}"), tool, arguments);
+        assert_public_error(&response, "BUDGET_EXCEEDED");
+    }
+}
+
+fn assert_truncated_negative_analyses_are_caveated(
+    mcp: &mut McpProcess,
+    index: &IndexReceipt,
+    symbol_id: &str,
+) {
+    for (tool, data_field) in [
+        ("architecture.cycles", "cycles"),
+        ("code.dead", "candidates"),
+    ] {
+        let (_, mut arguments) = graph_tool_calls(index, symbol_id)
+            .into_iter()
+            .find(|(candidate, _)| *candidate == tool)
+            .expect("the graph matrix contains every bounded negative analysis");
+        arguments["budget"] = json!({"max_traversal_facts": 1});
+        let response = mcp.call(&format!("graph-{tool}-small-traversal"), tool, arguments);
+        assert_success(&response, tool);
+        let output = &response["result"]["structuredContent"];
+        assert_common_read_contract(tool, output, index);
+        assert!(output["data"][data_field].is_array());
+        if tool == "architecture.cycles" {
+            assert_eq!(output["data"][data_field], json!([]));
+        } else {
+            assert_eq!(output["data"]["entry_points"]["complete"], false);
+            assert!(
+                !output["data"]["blind_spots"]
+                    .as_array()
+                    .expect("truncated dead-code result retains blind spots")
+                    .is_empty()
+            );
+        }
+        assert_eq!(output["truncated"], true);
+        assert_eq!(output["completeness"]["state"], "truncated");
+        assert_eq!(output["completeness"]["continuation"], "unavailable");
+        assert!(
+            output["completeness"]["limiting_resources"]
+                .as_array()
+                .expect("truncated graph result names limiting resources")
+                .iter()
+                .any(|resource| resource["kind"] == "edges")
+        );
+        assert!(
+            !output["completeness"]["guidance"]
+                .as_array()
+                .expect("truncated graph result provides guidance")
+                .is_empty()
+        );
+    }
 }
 
 fn assert_unsupported_inputs_are_rejected_without_a_daemon(state_dir: &Path, runtime_dir: &Path) {
@@ -284,6 +392,22 @@ fn assert_unsupported_inputs_are_rejected_without_a_daemon(state_dir: &Path, run
             json!({
                 "repository": {"repository_id": repository_id},
                 "entry_point_policy": "library"
+            }),
+        ),
+        (
+            "unsupported-overview-view",
+            "architecture.overview",
+            json!({
+                "repository": {"repository_id": repository_id},
+                "views": ["services"]
+            }),
+        ),
+        (
+            "unsupported-budget-evidence",
+            "architecture.overview",
+            json!({
+                "repository": {"repository_id": repository_id},
+                "budget": {"evidence_level": "full"}
             }),
         ),
     ] {
@@ -451,6 +575,15 @@ fn assert_common_read_contract(tool: &str, output: &Value, index: &IndexReceipt)
         output["truncated"],
         output["completeness"]["state"] == "truncated",
         "{tool} disagrees about truncation"
+    );
+}
+
+fn assert_exact_json_usage(tool: &str, output: &Value) {
+    let serialized = serde_json::to_vec(output).expect("structured graph output serializes");
+    assert_eq!(
+        output["usage"]["json_bytes"].as_u64(),
+        u64::try_from(serialized.len()).ok(),
+        "{tool} did not report its exact serialized byte count"
     );
 }
 
