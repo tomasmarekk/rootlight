@@ -17,7 +17,7 @@ use rootlight_mcp_contract::{
         CompletenessState, ContinuationAvailability, LimitingResourceKind, ResultCompleteness,
     },
     context::PlanExplanation,
-    vertical::{ReadEnvelope, RequiredNullable, ResponseWarning, UsageSummary},
+    vertical::{ReadEnvelope, RequiredNullable, ResponseBudget, ResponseWarning, UsageSummary},
 };
 
 use crate::{
@@ -39,6 +39,7 @@ pub struct PlanChangeRequest {
     target_symbols: Vec<SymbolId>,
     target_files: Vec<FileId>,
     max_steps: Option<u8>,
+    budget: Option<ResponseBudget>,
     explain_only: bool,
 }
 
@@ -91,6 +92,12 @@ impl PlanChangeRequest {
         self.max_steps
     }
 
+    /// Returns optional caller reductions for the shared execution budget.
+    #[must_use]
+    pub const fn budget(&self) -> Option<&ResponseBudget> {
+        self.budget.as_ref()
+    }
+
     /// Reports whether the request asks for planning metadata without retrieval.
     #[must_use]
     pub const fn explain_only(&self) -> bool {
@@ -128,13 +135,12 @@ pub enum PlanChangeError {
 /// # Errors
 ///
 /// Returns [`PlanChangeError`] when the request requires alias resolution,
-/// unsupported context or budget behavior, or contains no symbol or file
-/// target.
+/// unsupported context behavior or contains no symbol or file target.
 pub fn normalize_plan_change(input: PlanChangeInput) -> Result<PlanChangeRequest, PlanChangeError> {
     let RepositorySelector::ById(repository) = input.repository else {
         return Err(PlanChangeError::UnsupportedRepository);
     };
-    if input.change_context.is_some() || input.constraints.is_some() || input.budget.is_some() {
+    if input.change_context.is_some() || input.constraints.is_some() {
         return Err(PlanChangeError::UnsupportedOption);
     }
 
@@ -160,6 +166,7 @@ pub fn normalize_plan_change(input: PlanChangeInput) -> Result<PlanChangeRequest
         target_symbols,
         target_files,
         max_steps: input.max_steps,
+        budget: input.budget,
         explain_only: input.explain == Some(true),
     })
 }
@@ -316,8 +323,8 @@ impl PlanChangeService {
             });
         }
 
-        let budget = rootlight_mcp_contract::vertical::ResponseBudget {
-            max_results: request.max_steps().map(u16::from),
+        let mut budget = request.budget().cloned().unwrap_or(ResponseBudget {
+            max_results: None,
             max_tokens: None,
             max_source_bytes: None,
             max_traversal_facts: None,
@@ -325,7 +332,13 @@ impl PlanChangeService {
             max_paths: None,
             timeout_ms: None,
             evidence_level: None,
-        };
+        });
+        budget.max_results = request
+            .max_steps()
+            .map(u16::from)
+            .into_iter()
+            .chain(budget.max_results)
+            .min();
         let output = port
             .plan_change(
                 request.clone(),

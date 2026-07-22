@@ -30,8 +30,8 @@ use rootlight_mcp_contract::{
     },
     vertical::{
         CacheStatus, CoverageSummary, Freshness, GenerationSelector, GenerationSummary,
-        ReadEnvelope, RepositoryIdSelector, RequiredNullable, ResolvedRepository, ResponseBudget,
-        ResponseProfile, UsageSummary,
+        ProvenanceLevel, ReadEnvelope, RepositoryIdSelector, RequiredNullable, ResolvedRepository,
+        ResponseBudget, ResponseProfile, UsageSummary,
     },
 };
 
@@ -366,6 +366,46 @@ async fn plan_call_receives_cancellation_deadline_and_result_budget() {
     let encoded = serde_json::to_value(output).expect("change-plan envelope serializes");
     serde_json::from_value::<ReadEnvelope<PlanChangeData>>(encoded)
         .expect("change-plan envelope retains its public schema");
+}
+
+#[tokio::test]
+async fn accepted_budget_is_preserved_and_max_steps_only_reduces_results() {
+    for (requested_results, max_steps, effective_results) in
+        [(2, 4, 2), (8, 4, 4), (1_000, 100, 100)]
+    {
+        let requested_budget = ResponseBudget {
+            max_results: Some(requested_results),
+            max_tokens: Some(321),
+            max_source_bytes: Some(654),
+            max_traversal_facts: Some(987),
+            max_depth: Some(3),
+            max_paths: Some(5),
+            timeout_ms: Some(900),
+            evidence_level: Some(ProvenanceLevel::Compact),
+        };
+        let mut request = input(generation(2));
+        request.max_steps = Some(max_steps);
+        request.budget = Some(requested_budget.clone());
+        let port = Arc::new(FakePort::new(None, Some(Ok(plan_output(generation(2))))));
+
+        PlanChangeService
+            .execute(
+                Arc::clone(&port),
+                request,
+                TestCancellation(false),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("change-plan request succeeds");
+
+        let calls = port.plan_calls.lock().expect("plan call lock is available");
+        assert_eq!(calls.len(), 1);
+        let mut expected_budget = requested_budget;
+        expected_budget.max_results = Some(effective_results);
+        assert_eq!(calls[0].budget, expected_budget);
+        assert!(u16::from(max_steps) >= effective_results);
+        assert!(requested_results >= effective_results);
+    }
 }
 
 #[tokio::test]
