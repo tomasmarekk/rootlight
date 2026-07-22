@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rootlight_bench::{TokenInputKind, TokenMeasurement, WorkflowTokenAccounting};
 use rootlight_client::{Client, ConnectPolicy, OperationState as ClientOperationState};
 use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource};
 use rootlight_ids::OperationId;
@@ -24,6 +25,8 @@ use rootlight_runtime::{RuntimeError, RuntimePaths};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+
+use crate::token_accounting::{O200kTokenizer, OfflineTokenizer, TokenAccountingError};
 
 const EVIDENCE_SCHEMA_VERSION: &str = "1.0";
 const EXPECTED_TOOLS: [&str; 19] = [
@@ -3385,6 +3388,7 @@ struct HostileRootEvidence {
 
 struct TranscriptWriter {
     writer: BufWriter<File>,
+    tokenizer: O200kTokenizer,
     sequence: u64,
     total_messages: u64,
     total_tool_calls: u64,
@@ -3399,6 +3403,7 @@ impl TranscriptWriter {
         })?;
         Ok(Self {
             writer: BufWriter::new(file),
+            tokenizer: O200kTokenizer::new()?,
             sequence: 0,
             total_messages: 0,
             total_tool_calls: 0,
@@ -3446,6 +3451,35 @@ impl TranscriptWriter {
             })?;
         let response_bytes = response.map_or(0, |(bytes, _)| bytes.len());
         let response_json = response.map(|(_, value)| value.clone());
+        let canonical_response = response_json
+            .as_ref()
+            .map_or_else(|| Ok(Vec::new()), serde_json::to_vec)
+            .map_err(|source| VerticalError::Json {
+                action: "serialize canonical response for token accounting",
+                source,
+            })?;
+        let source_input = source_tokenizer_input(response_json.as_ref())?;
+        let workflow_token_accounting = WorkflowTokenAccounting::new(
+            Some(self.tokenizer.benchmark_identity()),
+            measured_token_input(
+                &self.tokenizer,
+                TokenInputKind::Request,
+                request_text.as_bytes(),
+                "redacted_canonical_json_without_line_delimiter",
+            )?,
+            measured_token_input(
+                &self.tokenizer,
+                TokenInputKind::Response,
+                &canonical_response,
+                "canonical_compact_json_or_empty_absent_response",
+            )?,
+            measured_token_input(
+                &self.tokenizer,
+                TokenInputKind::Source,
+                source_input.as_bytes(),
+                "source_read_chunk_content_in_response_order_without_delimiter",
+            )?,
+        )?;
         let elapsed_us = elapsed_micros(elapsed);
         let entry = TranscriptEntry {
             schema_version: EVIDENCE_SCHEMA_VERSION,
@@ -3459,6 +3493,7 @@ impl TranscriptWriter {
             response_bytes,
             request_estimated_tokens: estimated_tokens(request.len()),
             response_estimated_tokens: estimated_tokens(response_bytes),
+            workflow_token_accounting: workflow_token_accounting.clone(),
             elapsed_us,
         };
         serde_json::to_writer(&mut self.writer, &entry).map_err(|source| VerticalError::Json {
@@ -3481,6 +3516,7 @@ impl TranscriptWriter {
             response_bytes,
             request_estimated_tokens: estimated_tokens(request.len()),
             response_estimated_tokens: estimated_tokens(response_bytes),
+            workflow_token_accounting,
             elapsed_us,
         });
         Ok(())
@@ -3528,6 +3564,7 @@ struct TranscriptEntry {
     response_bytes: usize,
     request_estimated_tokens: u64,
     response_estimated_tokens: u64,
+    workflow_token_accounting: WorkflowTokenAccounting,
     elapsed_us: u64,
 }
 
@@ -3544,7 +3581,56 @@ struct ExchangeMeasurement {
     response_bytes: usize,
     request_estimated_tokens: u64,
     response_estimated_tokens: u64,
+    workflow_token_accounting: WorkflowTokenAccounting,
     elapsed_us: u64,
+}
+
+fn measured_token_input(
+    tokenizer: &impl OfflineTokenizer,
+    kind: TokenInputKind,
+    input: &[u8],
+    framing: &'static str,
+) -> Result<TokenMeasurement, VerticalError> {
+    let text = std::str::from_utf8(input).map_err(|source| VerticalError::Utf8 {
+        action: "decode workflow tokenizer input",
+        source,
+    })?;
+    Ok(TokenMeasurement::from_input(
+        kind,
+        input,
+        estimated_tokens(input.len()),
+        Some(tokenizer.count(text)?),
+        "none_exact_utf8",
+        framing,
+    ))
+}
+
+fn source_tokenizer_input(response: Option<&Value>) -> Result<String, VerticalError> {
+    let Some(chunks) = response
+        .and_then(|response| response.pointer("/result/structuredContent/data/chunks"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(String::new());
+    };
+    let total_bytes = chunks.iter().try_fold(0usize, |total, chunk| {
+        let Some(content) = chunk.get("content").and_then(Value::as_str) else {
+            return Ok::<_, VerticalError>(total);
+        };
+        total
+            .checked_add(content.len())
+            .ok_or(VerticalError::MemoryUnavailable)
+    })?;
+    let mut source = String::new();
+    source
+        .try_reserve_exact(total_bytes)
+        .map_err(|_| VerticalError::MemoryUnavailable)?;
+    for content in chunks
+        .iter()
+        .filter_map(|chunk| chunk.get("content").and_then(Value::as_str))
+    {
+        source.push_str(content);
+    }
+    Ok(source)
 }
 
 #[derive(Debug)]
@@ -4090,6 +4176,10 @@ pub(crate) enum VerticalError {
     Runtime(#[source] RuntimeError),
     #[error("MCP vertical client failed")]
     Client(#[from] rootlight_client::ClientError),
+    #[error("MCP vertical token accounting failed")]
+    TokenAccounting(#[from] TokenAccountingError),
+    #[error("MCP vertical workflow token evidence failed")]
+    WorkflowTokenAccounting(#[from] rootlight_bench::TokenAccountingError),
     #[error("read-only durable operation journal probe failed")]
     OperationJournal(#[from] rootlight_operations::OperationError),
     #[error("{action}")]
@@ -4163,6 +4253,7 @@ impl VerticalError {
             }
             Self::RandomUnavailable => "random_unavailable",
             Self::Runtime(_) | Self::Client(_) => "daemon_transport",
+            Self::TokenAccounting(_) | Self::WorkflowTokenAccounting(_) => "token_accounting",
             Self::OperationJournal(_) => "operation_journal_probe",
             Self::Io { .. } => "io",
             Self::Json { .. } | Self::Utf8 { .. } | Self::OwnedUtf8 { .. } => "encoding",
@@ -4191,7 +4282,7 @@ mod tests {
         canonicalize_known_identities, diagnostic_code_is_present, estimated_tokens,
         modify_fixture_to_v2, nearest_rank, normalize_read_response, observe_rust_coverage,
         prepare_cancellation_repository, redact_request_for_evidence,
-        shrink_cancellation_repository,
+        shrink_cancellation_repository, source_tokenizer_input,
     };
     use serde_json::json;
 
@@ -4387,6 +4478,41 @@ mod tests {
                     }
                 }
             })
+        );
+    }
+
+    #[test]
+    fn source_accounting_uses_ordered_structured_chunks_once() {
+        let response = json!({
+            "result": {
+                "structuredContent": {
+                    "data": {
+                        "chunks": [
+                            {"content": "alpha"},
+                            {"path": "missing-content.rs"},
+                            {"content": "βeta"}
+                        ]
+                    }
+                },
+                "content": [{
+                    "type": "text",
+                    "text": "compatibility mirror deliberately ignored"
+                }]
+            }
+        });
+
+        assert_eq!(
+            source_tokenizer_input(Some(&response)).expect("source input extracts"),
+            "alphaβeta"
+        );
+        assert_eq!(
+            source_tokenizer_input(Some(&json!({"result": {}})))
+                .expect("response without chunks is valid"),
+            ""
+        );
+        assert_eq!(
+            source_tokenizer_input(None).expect("absent response is valid"),
+            ""
         );
     }
 

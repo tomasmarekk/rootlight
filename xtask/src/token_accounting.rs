@@ -7,6 +7,7 @@ use std::fs::{self, File};
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
+use rootlight_bench::ActualTokenizerIdentity;
 use rootlight_mcp_contract::accounting::{estimate_tokens, tool_list_payload};
 use rootlight_mcp_contract::catalog::ExposureProfile;
 use serde::{Deserialize, Serialize};
@@ -175,6 +176,20 @@ impl O200kTokenizer {
         let inner =
             tiktoken_rs::o200k_base().map_err(TokenAccountingError::TokenizerInitialization)?;
         Ok(Self { inner })
+    }
+
+    /// Returns the provider-neutral identity used by shared benchmark
+    /// evidence.
+    pub(crate) fn benchmark_identity(&self) -> ActualTokenizerIdentity {
+        ActualTokenizerIdentity {
+            provider: TOKENIZER_PROVIDER.to_owned(),
+            model: TOKENIZER_MODEL.to_owned(),
+            tokenizer: TOKENIZER_NAME.to_owned(),
+            implementation: TOKENIZER_IMPLEMENTATION.to_owned(),
+            implementation_version: Some(TOKENIZER_IMPLEMENTATION_VERSION.to_owned()),
+            implementation_sha256: Some(TOKENIZER_IMPLEMENTATION_PACKAGE_SHA256.to_owned()),
+            asset_sha256: Some(TOKENIZER_ASSET_SHA256.to_owned()),
+        }
     }
 }
 
