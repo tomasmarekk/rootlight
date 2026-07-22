@@ -7,16 +7,18 @@ use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 
 use jsonschema::Validator;
 use rootlight_mcp_contract::{
-    CodeLocateInput, CodeLocateOutput, DetailKey, ErrorCode, ErrorResponse, ExposureProfile,
-    GenerationSelector, McpTool, NextAction, OperationStatusInput, OperationStatusOutput,
-    PublicError, RepoIndexInput, RepoIndexOutput, RepositorySelector, SchemaVersion,
-    SourceReadInput, SourceReadOutput, SymbolExplainInput, SymbolExplainOutput, ToolResponse,
-    TrustClassification, VerticalTool,
+    CodeLocateInput, CodeLocateOutput, ContinuationCursor, DetailKey, ErrorCode, ErrorResponse,
+    ExposureProfile, GenerationSelector, McpTool, NextAction, OperationStatusInput,
+    OperationStatusOutput, PublicError, RepoIndexInput, RepoIndexOutput, RepositorySelector,
+    SchemaVersion, SourceReadInput, SourceReadOutput, SymbolExplainInput, SymbolExplainOutput,
+    ToolResponse, TrustClassification, VerticalTool,
     capability::{DISCOVERY_METADATA_KEY, discovery_metadata},
     context::{
         BatchOperation, ContextPackInput, QueryAdvancedInput, QueryAstNode, QueryBatchInput,
     },
     error_definition,
+    pagination::AuthenticatedCursor,
+    repository::RepoListInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -338,9 +340,11 @@ where
         let typed_input = match decode_typed_input(contract.tool, &arguments_value) {
             Ok(input) => input,
             Err(()) => {
+                let error = classify_typed_decode_error(contract.tool, &arguments_value)
+                    .unwrap_or(invalid_arguments);
                 return cancel_or(
                     &cancellation,
-                    tool_error(contract, invalid_arguments)
+                    tool_error(contract, error)
                         .unwrap_or_else(|_| internal_tool_error("tool error validation failed")),
                 );
             }
@@ -589,6 +593,7 @@ fn parse_object_schema(
 
 enum TypedInput {
     Other,
+    RepoList(RepoListInput),
     SourceRead(SourceReadInput),
     ContextPack(ContextPackInput),
     QueryAdvanced(QueryAdvancedInput),
@@ -602,8 +607,10 @@ fn decode_typed_input(tool: VerticalTool, input: &Value) -> Result<TypedInput, (
         VerticalTool::RepoIndex => RepoIndexInput::deserialize(input)
             .map(|_| TypedInput::Other)
             .map_err(|_| ()),
+        VerticalTool::RepoList => RepoListInput::deserialize(input)
+            .map(TypedInput::RepoList)
+            .map_err(|_| ()),
         VerticalTool::RepoStatus
-        | VerticalTool::RepoList
         | VerticalTool::SymbolRelationships
         | VerticalTool::FlowTrace
         | VerticalTool::ChangeImpact
@@ -649,6 +656,10 @@ fn typed_input_invariants_are_valid(
     profile: ExposureProfile,
 ) -> bool {
     match (tool, input) {
+        (VerticalTool::RepoList, TypedInput::RepoList(input)) => input
+            .cursor
+            .as_ref()
+            .is_none_or(|cursor| AuthenticatedCursor::from_wire(cursor.as_str()).is_ok()),
         (VerticalTool::ContextPack, TypedInput::ContextPack(input)) => {
             context_pack_invariants_are_valid(input)
         }
@@ -663,6 +674,9 @@ fn typed_input_invariants_are_valid(
 }
 
 fn classify_schema_error(tool: VerticalTool, input: &Value) -> Option<PublicError> {
+    if repo_list_cursor_is_invalid(tool, input) {
+        return Some(invalid_cursor_error());
+    }
     if tool == VerticalTool::QueryAdvanced
         && input
             .get("query")
@@ -671,6 +685,30 @@ fn classify_schema_error(tool: VerticalTool, input: &Value) -> Option<PublicErro
         return Some(domain_error(ErrorCode::OperatorForbidden, "query"));
     }
     None
+}
+
+fn classify_typed_decode_error(tool: VerticalTool, input: &Value) -> Option<PublicError> {
+    repo_list_cursor_is_invalid(tool, input).then(invalid_cursor_error)
+}
+
+fn repo_list_cursor_is_invalid(tool: VerticalTool, input: &Value) -> bool {
+    if tool != VerticalTool::RepoList {
+        return false;
+    }
+    let Some(cursor) = input.get("cursor") else {
+        return false;
+    };
+    cursor
+        .as_str()
+        .is_none_or(|cursor| ContinuationCursor::parse(cursor).is_err())
+}
+
+fn invalid_cursor_error() -> PublicError {
+    let definition = error_definition(ErrorCode::InvalidCursor);
+    PublicError::builder(ErrorCode::InvalidCursor, definition.message)
+        .next_action(NextAction::RestartEnumeration)
+        .build()
+        .expect("normative cursor error satisfies public bounds")
 }
 
 fn query_contains_forbidden_operator(value: &Value) -> bool {
@@ -704,6 +742,7 @@ fn classify_typed_invariant_error(
     profile: ExposureProfile,
 ) -> Option<PublicError> {
     match (tool, input) {
+        (VerticalTool::RepoList, TypedInput::RepoList(_)) => Some(invalid_cursor_error()),
         (VerticalTool::QueryAdvanced, TypedInput::QueryAdvanced(input)) => {
             advanced_invariant_error(input)
         }
@@ -1561,6 +1600,64 @@ mod tests {
         assert_eq!(result["structuredContent"]["schema_version"], "1.0");
         serde_json::from_value::<RepoIndexOutput>(result["structuredContent"].clone())
             .expect("invalid input uses the advertised checked error envelope");
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn repo_list_cursor_boundary_failures_restart_enumeration_without_execution() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let invalid_cursors = [
+            String::new(),
+            "A".repeat(4_097),
+            "\u{1f4a1}".repeat(1_025),
+            "c2.A".to_owned(),
+        ];
+
+        for cursor in invalid_cursors {
+            let response = router
+                .handle(
+                    request(
+                        "tools/call",
+                        json!({"name": "repo.list", "arguments": {"cursor": cursor}}),
+                    ),
+                    cancellation(),
+                )
+                .await;
+            let result = success(response);
+            assert_eq!(result["isError"], true);
+            assert_eq!(
+                result["structuredContent"]["error"]["code"],
+                "INVALID_CURSOR"
+            );
+            assert_eq!(
+                result["structuredContent"]["error"]["next_actions"],
+                json!([{"action": "restart_enumeration"}])
+            );
+        }
+
+        assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn repo_list_non_cursor_schema_failures_remain_invalid_arguments() {
+        let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Developer)
+            .expect("registry compiles");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({"name": "repo.list", "arguments": {"max_results": 0}}),
+                ),
+                cancellation(),
+            )
+            .await;
+        let result = success(response);
+
+        assert_eq!(
+            result["structuredContent"]["error"]["code"],
+            "INVALID_ARGUMENT"
+        );
         assert_eq!(router.executor.calls.load(Ordering::Relaxed), 0);
     }
 
