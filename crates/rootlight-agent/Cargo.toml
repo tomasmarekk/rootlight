@@ -11,6 +11,7 @@ publish = false
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 rootlight-mcp-contract = { path = "../rootlight-mcp-contract" }
+rootlight-query = { path = "../rootlight-query" }
 thiserror.workspace = true
 blake3.workspace = true
 serde_json.workspace = true
