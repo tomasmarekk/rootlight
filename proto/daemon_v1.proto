@@ -593,15 +593,18 @@ message RepositoryCoverageEntry {
   uint64 indexed_files = 5;
 }
 
-// Reports one repository's active generation, freshness, and coverage.
+// Reports one repository's resolved and active generation status.
 message RepositoryStatusResponse {
   rootlight.common.v1.RepositoryId repository = 1;
   rootlight.common.v1.GenerationId active_generation = 2;
+  // Parent, freshness, and coverage describe the resolved generation.
   optional rootlight.common.v1.GenerationId parent_generation = 3;
   string structural_freshness = 4;
   string semantic_freshness = 5;
   string state = 6;
   repeated RepositoryCoverageEntry coverage = 7;
+  rootlight.common.v1.GenerationId resolved_generation = 8;
+  optional rootlight.common.v1.GenerationId active_parent_generation = 9;
 }
 
 // Requests bounded typed relation neighborhoods for stable symbols.

@@ -391,21 +391,16 @@ const REPO_INDEX_RULES: &[CapabilityRule] = &[
 
 const REPO_STATUS_RULES: &[CapabilityRule] = &[
     accepted_fallback("repository"),
+    implemented(
+        "generation",
+        "selects the active or one retained exact repository generation",
+    ),
     accepted_fallback("include_operations"),
     accepted_fallback("response_profile"),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
         "only stable repository identifiers are served",
-    ),
-    unsupported(
-        "generation",
-        "explicit historical generation selection is not served by repository status",
-    ),
-    implemented_value(
-        "generation",
-        "active",
-        "returns status for the active repository generation",
     ),
     unsupported(
         "coverage_detail",
@@ -1233,7 +1228,7 @@ const fn pagination_semantics(tool: McpTool) -> PaginationSemantics {
 const fn generation_semantics(tool: McpTool) -> GenerationSemantics {
     match tool {
         McpTool::RepoIndex => GenerationSemantics::CreatesGeneration,
-        McpTool::RepoStatus => GenerationSemantics::ActiveGenerationFallback,
+        McpTool::RepoStatus => GenerationSemantics::SelectsGeneration,
         McpTool::RepoList | McpTool::OperationStatus => GenerationSemantics::None,
         McpTool::HistoryCompare => GenerationSemantics::ComparesGenerations,
         McpTool::QueryBatch => GenerationSemantics::BatchInherited,
@@ -1418,10 +1413,7 @@ mod tests {
             );
         }
         let status = CAPABILITIES[McpTool::RepoStatus as usize];
-        assert_eq!(
-            status.generation,
-            GenerationSemantics::ActiveGenerationFallback
-        );
+        assert_eq!(status.generation, GenerationSemantics::SelectsGeneration);
     }
 
     #[test]
@@ -1440,14 +1432,8 @@ mod tests {
         let repo_status = CAPABILITIES[McpTool::RepoStatus as usize];
         let explicit_generation =
             repo_status.disposition("generation", Some("gen1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
-        assert_eq!(
-            explicit_generation.status,
-            CapabilityStatus::UnsupportedStableError
-        );
-        assert_eq!(
-            explicit_generation.error_code,
-            Some(ErrorCode::UnsupportedCapability)
-        );
+        assert_eq!(explicit_generation.status, CapabilityStatus::Implemented);
+        assert_eq!(explicit_generation.error_code, None);
         assert_eq!(
             repo_status.disposition("generation", Some("active")).status,
             CapabilityStatus::Implemented

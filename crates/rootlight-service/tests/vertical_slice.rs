@@ -606,10 +606,12 @@ fn repository_list_and_status_report_the_active_generation() {
     assert_eq!(entry.structural_freshness, "current");
 
     let status = service
-        .repository_status(indexed.repository)
+        .repository_status(indexed.repository, None)
         .expect("known repository reports status");
     assert_eq!(status.repository, indexed.repository);
+    assert_eq!(status.resolved_generation, indexed.generation);
     assert_eq!(status.active_generation, indexed.generation);
+    assert_eq!(status.active_parent_generation, None);
     assert_eq!(status.state, "ready");
     assert_eq!(status.structural_freshness, "current");
     assert_eq!(status.coverage.len(), 1);
@@ -647,8 +649,49 @@ fn repository_list_and_status_report_the_active_generation() {
 
     let unknown = RepositoryId::from_bytes([250; 16]);
     assert!(matches!(
-        service.repository_status(unknown),
+        service.repository_status(unknown, None),
         Err(FirstSliceError::RepositoryNotFound)
+    ));
+}
+
+#[test]
+fn repository_status_keeps_exact_resolution_when_active_advances() {
+    let repository_fixture = fixture(BEFORE);
+    let other_fixture = fixture(OTHER);
+    let cancellation = deadline();
+    let mut service = FirstSliceService::new(4).expect("first-slice service initializes");
+
+    let first = service
+        .index_rust_fixture(repository_fixture.path(), &cancellation)
+        .expect("first generation indexes");
+    fs::write(repository_fixture.path().join("src/lib.rs"), AFTER)
+        .expect("successor source writes");
+    let second = service
+        .index_rust_fixture(repository_fixture.path(), &cancellation)
+        .expect("successor generation indexes");
+
+    let exact = service
+        .repository_status(first.repository, Some(first.generation))
+        .expect("retained exact generation reports status");
+    assert_eq!(exact.resolved_generation, first.generation);
+    assert_eq!(exact.active_generation, second.generation);
+    assert_eq!(exact.parent_generation, None);
+    assert_eq!(exact.active_parent_generation, Some(first.generation));
+    assert_eq!(exact.structural_freshness, "superseded");
+    assert_eq!(exact.semantic_freshness, "superseded");
+
+    let missing = GenerationId::from_bytes([0x7f; 20]);
+    assert!(matches!(
+        service.repository_status(first.repository, Some(missing)),
+        Err(FirstSliceError::GenerationNotFound)
+    ));
+
+    let other = service
+        .index_rust_fixture(other_fixture.path(), &cancellation)
+        .expect("other repository generation indexes");
+    assert!(matches!(
+        service.repository_status(first.repository, Some(other.generation)),
+        Err(FirstSliceError::GenerationMismatch)
     ));
 }
 

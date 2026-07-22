@@ -1104,7 +1104,7 @@ pub struct RepositoryCoverageEntry {
     #[allow(missing_docs)]
     pub indexed_files: u64,
 }
-/// Reports one repository's active generation, freshness, and coverage.
+/// Reports one repository's resolved and active generation status.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RepositoryStatusResponse {
     #[prost(message, optional, tag = "1")]
@@ -1115,6 +1115,7 @@ pub struct RepositoryStatusResponse {
     pub active_generation: ::core::option::Option<
         super::super::common::v1::GenerationId,
     >,
+    /// Parent, freshness, and coverage describe the resolved generation.
     #[prost(message, optional, tag = "3")]
     #[allow(missing_docs)]
     pub parent_generation: ::core::option::Option<
@@ -1132,6 +1133,16 @@ pub struct RepositoryStatusResponse {
     #[prost(message, repeated, tag = "7")]
     #[allow(missing_docs)]
     pub coverage: ::prost::alloc::vec::Vec<RepositoryCoverageEntry>,
+    #[prost(message, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub resolved_generation: ::core::option::Option<
+        super::super::common::v1::GenerationId,
+    >,
+    #[prost(message, optional, tag = "9")]
+    #[allow(missing_docs)]
+    pub active_parent_generation: ::core::option::Option<
+        super::super::common::v1::GenerationId,
+    >,
 }
 /// Requests bounded typed relation neighborhoods for stable symbols.
 #[derive(Clone, PartialEq, ::prost::Message)]

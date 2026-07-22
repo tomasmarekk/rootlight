@@ -2262,12 +2262,10 @@ fn repository_status(
     request: daemon::RepositoryStatusRequest,
 ) -> Result<daemon::RepositoryStatusResponse, PublicError> {
     let repository = parse_repository(request.repository.as_ref())?;
-    // The status reports the repository's active generation. The generation
-    // selector is validated at the protocol boundary; the active generation is
-    // returned regardless of the selector.
+    let selected = parse_generation_selector(request.generation.as_ref())?;
     let status = service
-        .repository_status(repository)
-        .map_err(service_error)?;
+        .repository_status(repository, selected)
+        .map_err(|error| repository_status_error(error, repository, selected))?;
     let coverage = status
         .coverage
         .into_iter()
@@ -2287,6 +2285,8 @@ fn repository_status(
         semantic_freshness: status.semantic_freshness,
         state: status.state,
         coverage,
+        resolved_generation: Some(generation_to_wire(status.resolved_generation)),
+        active_parent_generation: status.active_parent_generation.map(generation_to_wire),
     })
 }
 
@@ -2756,6 +2756,26 @@ fn service_error(error: FirstSliceError) -> PublicError {
         .unwrap_or_else(|_| unreachable!("closed first-slice errors are statically bounded"))
 }
 
+fn repository_status_error(
+    error: FirstSliceError,
+    repository: RepositoryId,
+    selected: Option<GenerationId>,
+) -> PublicError {
+    let FirstSliceError::GenerationNotFound = error else {
+        return service_error(error);
+    };
+    let mut builder =
+        PublicError::builder(ErrorCode::StaleGeneration, "generation is not retained")
+            .repository(repository)
+            .next_action(NextAction::RestartEnumeration);
+    if let Some(generation) = selected {
+        builder = builder.generation(generation);
+    }
+    builder
+        .build()
+        .unwrap_or_else(|_| unreachable!("repository status errors are statically bounded"))
+}
+
 fn operation_error(error: &OperationError, operation: Option<OperationId>) -> PublicError {
     let (code, message, retryable) = match error {
         OperationError::NotFound => (ErrorCode::NotFound, "operation was not found", false),
@@ -2973,6 +2993,64 @@ mod tests {
                 .expect("catalog fixture indexes");
         }
         (service, root)
+    }
+
+    fn status_request(
+        repository: RepositoryId,
+        generation: Option<GenerationId>,
+    ) -> daemon::RepositoryStatusRequest {
+        let selector = generation.map_or(
+            daemon::generation_selector::Selector::Active(true),
+            |generation| {
+                daemon::generation_selector::Selector::Generation(generation_to_wire(generation))
+            },
+        );
+        daemon::RepositoryStatusRequest {
+            repository: Some(repository_to_wire(repository)),
+            generation: Some(daemon::GenerationSelector {
+                selector: Some(selector),
+            }),
+        }
+    }
+
+    #[test]
+    fn repository_status_returns_exact_and_actionable_generation_results() {
+        let (service, _root) = indexed_catalog(&["alpha", "beta"]);
+        let repositories = service.list_repositories();
+        let alpha = &repositories[0];
+        let beta = &repositories[1];
+
+        let exact = repository_status(
+            &service,
+            status_request(alpha.repository, Some(alpha.active_generation)),
+        )
+        .expect("retained exact generation reports status");
+        assert_eq!(
+            parse_generation(exact.resolved_generation.as_ref()).expect("resolved generation maps"),
+            alpha.active_generation
+        );
+        assert_eq!(
+            parse_generation(exact.active_generation.as_ref()).expect("active generation maps"),
+            alpha.active_generation
+        );
+
+        let wrong_repository = repository_status(
+            &service,
+            status_request(alpha.repository, Some(beta.active_generation)),
+        )
+        .expect_err("another repository generation is rejected");
+        assert_eq!(wrong_repository.code(), ErrorCode::Conflict);
+
+        let missing_generation = GenerationId::from_bytes([0x7f; 20]);
+        let missing = repository_status(
+            &service,
+            status_request(alpha.repository, Some(missing_generation)),
+        )
+        .expect_err("missing exact generation is rejected");
+        assert_eq!(missing.code(), ErrorCode::StaleGeneration);
+        assert_eq!(missing.repository(), Some(alpha.repository));
+        assert_eq!(missing.generation(), Some(missing_generation));
+        assert_eq!(missing.next_actions(), &[NextAction::RestartEnumeration]);
     }
 
     #[test]
