@@ -72,15 +72,14 @@ use rootlight_mcp_contract::{
     vertical::{
         ActiveGeneration, AnalysisTier, CacheStatus, CodeLocateData, CodeLocateInput,
         ContinuationCursor, CoverageSummary, DetailHandle, Diagnostic, EntityKind, Freshness,
-        GenerationSummary, IndexMode, IndexPlanScope, IndexPlanSummary, IndexScope,
-        LanguageCoverage, LocateReason, LocatedItem, OperationAction, OperationDetail,
-        OperationProgress, OperationResources, OperationState, OperationStatusData,
-        OperationStatusInput, OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary,
-        QueryInterpretation, ReadEnvelope, RepoIndexData, RepoIndexSuccess, RequiredNullable,
-        ResolvedRepository, ResponseBudget, ResponseProfile, ResponseWarning, SearchMode,
-        SourceChunk, SourceElision, SourceEncoding, SourceEncodingRequest, SourceReadData,
-        SourceReadSelector, StaleSourceReference, SymbolExplainData, SymbolExplanation,
-        UsageSummary,
+        GenerationSummary, IndexMode, IndexPlanScope, IndexPlanSummary, LanguageCoverage,
+        LocateReason, LocatedItem, OperationAction, OperationDetail, OperationProgress,
+        OperationResources, OperationState, OperationStatusData, OperationStatusInput,
+        OperationStatusSuccess, ProvenanceLevel, ProvenanceSummary, QueryInterpretation,
+        ReadEnvelope, RepoIndexData, RepoIndexSuccess, RequiredNullable, ResolvedRepository,
+        ResponseBudget, ResponseProfile, ResponseWarning, SearchMode, SourceChunk, SourceElision,
+        SourceEncoding, SourceEncodingRequest, SourceReadData, SourceReadSelector,
+        StaleSourceReference, SymbolExplainData, SymbolExplanation, UsageSummary,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -101,7 +100,6 @@ use crate::{
 
 const DEFAULT_LOCATE_RESULTS: u16 = 20;
 const DEFAULT_ADVANCED_RESULTS: u16 = 100;
-const CURRENT_SOURCE_CONTEXT_LINES: u8 = 2;
 const INVALID_ARGUMENT_MESSAGE: &str = error_definition(ErrorCode::InvalidArgument).message;
 const UNSUPPORTED_MESSAGE: &str = error_definition(ErrorCode::UnsupportedCapability).message;
 const BATCH_OPERATION_FAILED_MESSAGE: &str = "batch operation failed";
@@ -4889,7 +4887,7 @@ fn normalize_repository_index(
     invalid_arguments: &PublicError,
 ) -> Result<RepositoryIndexPortRequest, ToolExecutionError> {
     if input.repository_id.is_some()
-        || !matches!(input.scope, None | Some(IndexScope::Repository(_)))
+        || input.scope.is_some()
         || matches!(input.mode, Some(IndexMode::Deep | IndexMode::Rebuild))
         || input
             .requested_tiers
@@ -4977,14 +4975,9 @@ fn normalize_source_read(
     invalid_arguments: &PublicError,
 ) -> Result<SourceReadPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    if !matches!(
-        (input.context_lines_before, input.context_lines_after),
-        (None, None)
-            | (
-                Some(CURRENT_SOURCE_CONTEXT_LINES),
-                Some(CURRENT_SOURCE_CONTEXT_LINES)
-            )
-    ) || input.merge_overlaps == Some(true)
+    if input.context_lines_before.is_some()
+        || input.context_lines_after.is_some()
+        || input.merge_overlaps == Some(true)
         || input.max_source_bytes.is_some()
         || input.include_line_numbers == Some(false)
         || matches!(input.encoding, Some(SourceEncodingRequest::BytesBase64))

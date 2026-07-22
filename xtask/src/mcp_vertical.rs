@@ -1168,8 +1168,6 @@ fn query_snapshot(
             "repository": {"repository_id": repository},
             "generation": expected_generation,
             "references": [{"source_ref": source_ref}],
-            "context_lines_before": 2,
-            "context_lines_after": 2,
             "include_line_numbers": true,
             "encoding": "utf8_lossless_when_valid",
             "response_profile": "compact"
@@ -1282,8 +1280,6 @@ fn exercise_nested_ignore_policy(
             "repository": {"repository_id": repository},
             "generation": generation,
             "references": [{"source_ref": source_ref}],
-            "context_lines_before": 2,
-            "context_lines_after": 2,
             "include_line_numbers": true,
             "encoding": "utf8_lossless_when_valid",
             "response_profile": "compact"

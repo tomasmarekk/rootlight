@@ -183,8 +183,18 @@ fn baseline_payload(profile: ExposureProfile) -> Result<Value, DiscoveryError> {
             let field = limitation.get("field").and_then(Value::as_str);
             !matches!(
                 (tool, field),
-                (McpTool::RepoStatus, Some("generation"))
+                (McpTool::RepoIndex, Some("scope"))
+                    | (McpTool::RepoStatus, Some("generation"))
                     | (McpTool::ArchitectureCycles, Some("projection.level"))
+                    | (
+                        McpTool::SourceRead,
+                        Some(
+                            "context_lines_before"
+                                | "context_lines_after"
+                                | "references[].symbol_id"
+                                | "references[].file_id"
+                        )
+                    )
             )
         });
     }

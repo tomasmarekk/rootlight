@@ -931,7 +931,6 @@ async fn maps_repository_index_without_replacing_stable_identities() {
             json!({
                 "root": "C:/fixture",
                 "mode": "structural",
-                "scope": {"repository": "whole"},
                 "detached": true
             }),
         )
@@ -1736,6 +1735,38 @@ async fn query_batch_rejects_static_child_capabilities_before_identity_resolutio
         0,
         "static rejection must not cross the client port"
     );
+}
+
+#[tokio::test]
+async fn query_batch_rejects_source_context_fields_before_identity_resolution() {
+    for field in ["context_lines_before", "context_lines_after"] {
+        let harness = batch_harness();
+        let error = execute(
+            &harness.executor,
+            VerticalTool::QueryBatch,
+            json!({
+                "repository": {"repository_id": repository()},
+                "operations": [{
+                    "id": "read",
+                    "tool": "source.read",
+                    "arguments": {(field): 2}
+                }]
+            }),
+        )
+        .await
+        .expect_err("explicit source context is rejected before identity resolution");
+        assert_capability_rejection(
+            &error,
+            ErrorCode::UnsupportedCapability,
+            &format!("operations.0.arguments.{field}"),
+            "unsupported_field",
+        );
+        assert_eq!(
+            harness.call_count.load(Ordering::Relaxed),
+            0,
+            "static capability rejection must not cross the client port"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3787,8 +3818,6 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
                 "repository": {"repository_id": repository()},
                 "generation": generation(),
                 "references": [{"source_ref": input_ref}],
-                "context_lines_before": 2,
-                "context_lines_after": 2,
                 "merge_overlaps": false,
                 "include_line_numbers": true,
                 "encoding": "utf8_lossless_when_valid",
@@ -3821,6 +3850,154 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
         panic!("expected source read request");
     };
     assert_eq!(request.references, [requested]);
+}
+
+#[tokio::test]
+async fn source_read_rejects_explicit_context_fields_before_the_port() {
+    let harness = Harness::new(FakeOutcome::SourceRead(Err(ClientPortError::Executor)));
+    let call_count = Arc::clone(&harness.call_count);
+    let router = ToolRouter::new(
+        harness.executor,
+        rootlight_mcp_contract::ExposureProfile::Developer,
+    )
+    .expect("router compiles");
+
+    for field in ["context_lines_before", "context_lines_after"] {
+        let mut arguments = json!({
+            "repository": {"repository_id": repository()},
+            "references": [{"source_ref": wire_source_reference(5, 10, 2, 2)}]
+        });
+        arguments
+            .as_object_mut()
+            .expect("fixture arguments are an object")
+            .insert(field.to_owned(), json!(2));
+        let response = router
+            .handle(
+                operating_request(json!({
+                    "name": "source.read",
+                    "arguments": arguments
+                })),
+                cancellation(),
+            )
+            .await;
+        let HandlerResponse::Success(result) = response else {
+            panic!("capability rejection is an MCP tool result");
+        };
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["structuredContent"]["error"]["code"],
+            "UNSUPPORTED_CAPABILITY"
+        );
+        assert_eq!(
+            result["structuredContent"]["error"]["details"]["field_path"]["value"],
+            field
+        );
+        assert_eq!(
+            result["structuredContent"]["error"]["details"]["capability_reason"]["value"],
+            "unsupported_field"
+        );
+    }
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        0,
+        "capability rejection must happen before source retrieval"
+    );
+}
+
+#[tokio::test]
+async fn repository_index_rejects_explicit_scope_before_the_port() {
+    let harness = Harness::new(FakeOutcome::RepositoryIndex(Err(ClientPortError::Executor)));
+    let call_count = Arc::clone(&harness.call_count);
+    let router = ToolRouter::new(
+        harness.executor,
+        rootlight_mcp_contract::ExposureProfile::Developer,
+    )
+    .expect("router compiles");
+    let response = router
+        .handle(
+            operating_request(json!({
+                "name": "repo.index",
+                "arguments": {
+                    "root": "C:/fixture",
+                    "scope": {"repository": "whole"}
+                }
+            })),
+            cancellation(),
+        )
+        .await;
+    let HandlerResponse::Success(result) = response else {
+        panic!("capability rejection is an MCP tool result");
+    };
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        result["structuredContent"]["error"]["code"],
+        "UNSUPPORTED_CAPABILITY"
+    );
+    assert_eq!(
+        result["structuredContent"]["error"]["details"]["field_path"]["value"],
+        "scope.repository"
+    );
+    assert_eq!(
+        result["structuredContent"]["error"]["details"]["capability_reason"]["value"],
+        "unsupported_field"
+    );
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        0,
+        "capability rejection must happen before indexing"
+    );
+}
+
+#[tokio::test]
+async fn source_read_rejects_non_reference_selectors_before_the_port() {
+    let harness = Harness::new(FakeOutcome::SourceRead(Err(ClientPortError::Executor)));
+    let call_count = Arc::clone(&harness.call_count);
+    let router = ToolRouter::new(
+        harness.executor,
+        rootlight_mcp_contract::ExposureProfile::Developer,
+    )
+    .expect("router compiles");
+    for (selector, field_path) in [
+        (json!({"symbol_id": symbol()}), "references.0.symbol_id"),
+        (
+            json!({"file_id": file(), "start_byte": 0, "end_byte": 1}),
+            "references.0.file_id",
+        ),
+    ] {
+        let response = router
+            .handle(
+                operating_request(json!({
+                    "name": "source.read",
+                    "arguments": {
+                        "repository": {"repository_id": repository()},
+                        "references": [selector]
+                    }
+                })),
+                cancellation(),
+            )
+            .await;
+        let HandlerResponse::Success(result) = response else {
+            panic!("capability rejection is an MCP tool result");
+        };
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["structuredContent"]["error"]["code"],
+            "UNSUPPORTED_CAPABILITY"
+        );
+        assert_eq!(
+            result["structuredContent"]["error"]["details"]["field_path"]["value"],
+            field_path
+        );
+        assert_eq!(
+            result["structuredContent"]["error"]["details"]["capability_reason"]["value"],
+            "unsupported_field"
+        );
+    }
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        0,
+        "capability rejection must happen before source retrieval"
+    );
 }
 
 #[tokio::test]
@@ -3867,6 +4044,10 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::RepoIndex,
             json!({"root": "C:/fixture", "scope": {"paths": ["src"]}}),
+        ),
+        (
+            VerticalTool::RepoIndex,
+            json!({"root": "C:/fixture", "scope": {"repository": "whole"}}),
         ),
         (
             VerticalTool::RepoIndex,
@@ -4011,6 +4192,10 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::SourceRead,
             json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source.clone()}], "context_lines_before": 2}),
+        ),
+        (
+            VerticalTool::SourceRead,
+            json!({"repository": {"repository_id": repository()}, "references": [{"source_ref": source.clone()}], "context_lines_after": 2}),
         ),
         (
             VerticalTool::SourceRead,
