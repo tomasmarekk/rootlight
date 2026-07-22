@@ -19,12 +19,13 @@ use serde::Serialize;
 use crate::model::{
     AdvancedAggregateFunction, AdvancedAstNode, AdvancedColumnSchema, AdvancedColumnType,
     AdvancedCompleteness, AdvancedEntityKind, AdvancedPlanExplanation, AdvancedPredicate,
-    AdvancedQueryPlan, AdvancedQueryResult, AdvancedSortKey, AdvancedValue, ArchitectureComponent,
-    ArchitectureConnection, ArchitectureCyclesPlan, ArchitectureCyclesProjection,
-    ArchitectureCyclesResult, ArchitectureHotspot, ArchitectureOverviewDerivedView,
-    ArchitectureOverviewPlan, ArchitectureOverviewResult, ArchitectureOverviewView,
-    BreakingCandidateRecord, ChangeImpactClassification, ChangeImpactPlan, ChangeImpactResult,
-    ChangeImpactRiskLevel, ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadBlindSpot,
+    AdvancedQueryPlan, AdvancedQueryResult, AdvancedRelationKind, AdvancedSortKey,
+    AdvancedTraverseDirection, AdvancedValue, ArchitectureComponent, ArchitectureConnection,
+    ArchitectureCyclesPlan, ArchitectureCyclesProjection, ArchitectureCyclesResult,
+    ArchitectureHotspot, ArchitectureOverviewDerivedView, ArchitectureOverviewPlan,
+    ArchitectureOverviewResult, ArchitectureOverviewView, BreakingCandidateRecord,
+    ChangeImpactClassification, ChangeImpactPlan, ChangeImpactResult, ChangeImpactRiskLevel,
+    ChangeImpactRiskSummary, ChangeImpactTestCandidate, CodeDeadBlindSpot,
     CodeDeadEntryPointPolicy, CodeDeadEntryPointSummary, CodeDeadPlan, CodeDeadResult,
     CodeDeadSuppressionRule, CodeLocatePlan, CodeLocateResult, CycleBreak, CycleComponent,
     CyclePath, DeadCodeCandidate, DeadCodeClassification, ExecutionCompleteness, FlowTraceEdge,
@@ -2186,7 +2187,9 @@ fn advanced_ast_supported(node: &AdvancedAstNode) -> bool {
             advanced_ast_supported(left) && advanced_ast_supported(right)
         }
         AdvancedAstNode::Aggregate { input, .. } => advanced_ast_supported(input),
-        AdvancedAstNode::Traverse { .. } => false,
+        AdvancedAstNode::Traverse {
+            seed, seed_from, ..
+        } => seed.is_some() && seed_from.is_none(),
     }
 }
 
@@ -2414,9 +2417,34 @@ fn eval_advanced_node(
                 advanced_aggregate_rows(input, group_by, aggregations, control, tracker)?;
             Ok((aggregated, truncated))
         }
-        AdvancedAstNode::Traverse { .. } => Err(QueryError::PlanRejected {
-            resource: QueryResource::Results,
-        }),
+        AdvancedAstNode::Traverse {
+            seed,
+            seed_from,
+            relation,
+            direction,
+            max_depth,
+        } => {
+            let Some(seed) = *seed else {
+                return Err(QueryError::PlanRejected {
+                    resource: QueryResource::Results,
+                });
+            };
+            if seed_from.is_some() {
+                return Err(QueryError::PlanRejected {
+                    resource: QueryResource::Results,
+                });
+            }
+            let traversed = advanced_traverse_rows(
+                document,
+                seed,
+                *relation,
+                *direction,
+                max_depth.unwrap_or(1),
+                control,
+                tracker,
+            )?;
+            Ok((traversed, false))
+        }
     }
 }
 
@@ -2518,6 +2546,113 @@ fn advanced_project_rows(set: AdvancedRowSet, columns: &[String]) -> AdvancedRow
     AdvancedRowSet {
         columns: schema,
         rows,
+    }
+}
+
+fn advanced_traverse_rows(
+    document: &NormalizedIrDocument,
+    seed: SymbolId,
+    relation: AdvancedRelationKind,
+    direction: AdvancedTraverseDirection,
+    max_depth: u8,
+    control: &QueryControl<'_>,
+    tracker: &mut UsageTracker,
+) -> Result<AdvancedRowSet, QueryError> {
+    let (predicate, invert_relation) = advanced_relation_projection(relation);
+    let mut adjacency: BTreeMap<SymbolId, Vec<SymbolId>> = BTreeMap::new();
+    for fact in &document.relations {
+        control.check()?;
+        tracker.add_edges(1)?;
+        if fact.predicate != predicate {
+            continue;
+        }
+        let (RelationEndpoint::Entity(subject), RelationEndpoint::Entity(object)) =
+            (fact.subject, fact.object)
+        else {
+            continue;
+        };
+        let (source, target) = if invert_relation {
+            (object, subject)
+        } else {
+            (subject, object)
+        };
+        match direction {
+            AdvancedTraverseDirection::Outbound => {
+                adjacency.entry(source).or_default().push(target);
+            }
+            AdvancedTraverseDirection::Inbound => {
+                adjacency.entry(target).or_default().push(source);
+            }
+            AdvancedTraverseDirection::Both => {
+                adjacency.entry(source).or_default().push(target);
+                adjacency.entry(target).or_default().push(source);
+            }
+        }
+    }
+    for targets in adjacency.values_mut() {
+        targets.sort_unstable();
+        targets.dedup();
+    }
+
+    let mut frontier = BTreeSet::from([seed]);
+    let mut visited = frontier.clone();
+    let mut emitted = BTreeSet::new();
+    let mut rows = Vec::new();
+    for _ in 0..max_depth.min(5) {
+        let mut next = BTreeSet::new();
+        for source in frontier {
+            let Some(targets) = adjacency.get(&source) else {
+                continue;
+            };
+            for target in targets {
+                control.check()?;
+                tracker.add_edges(1)?;
+                if emitted.insert((source, *target)) {
+                    let mut row = BTreeMap::new();
+                    row.insert("source".to_owned(), AdvancedValue::Symbol(source));
+                    row.insert("target".to_owned(), AdvancedValue::Symbol(*target));
+                    row.insert(
+                        "relation".to_owned(),
+                        AdvancedValue::Text(relation.as_str().to_owned()),
+                    );
+                    try_push(&mut rows, row)?;
+                }
+                if visited.insert(*target) {
+                    next.insert(*target);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    Ok(AdvancedRowSet {
+        columns: advanced_derive_columns(&AdvancedAstNode::Traverse {
+            seed: Some(seed),
+            seed_from: None,
+            relation,
+            direction,
+            max_depth: Some(max_depth),
+        }),
+        rows,
+    })
+}
+
+const fn advanced_relation_projection(relation: AdvancedRelationKind) -> (RelationPredicate, bool) {
+    match relation {
+        AdvancedRelationKind::Calls => (RelationPredicate::Calls, false),
+        AdvancedRelationKind::CalledBy => (RelationPredicate::Calls, true),
+        AdvancedRelationKind::Imports => (RelationPredicate::Imports, false),
+        AdvancedRelationKind::ImportedBy => (RelationPredicate::Imports, true),
+        AdvancedRelationKind::Tests => (RelationPredicate::Tests, false),
+        AdvancedRelationKind::TestedBy => (RelationPredicate::Tests, true),
+        AdvancedRelationKind::Contains => (RelationPredicate::Contains, false),
+        AdvancedRelationKind::ContainedBy => (RelationPredicate::Contains, true),
+        AdvancedRelationKind::Implements => (RelationPredicate::Implements, false),
+        AdvancedRelationKind::ImplementedBy => (RelationPredicate::Implements, true),
+        AdvancedRelationKind::References => (RelationPredicate::RefersTo, false),
+        AdvancedRelationKind::ReferencedBy => (RelationPredicate::RefersTo, true),
     }
 }
 
@@ -8943,11 +9078,44 @@ mod tests {
     }
 
     #[test]
-    fn advanced_unsupported_traverse_returns_honest_unsupported() {
-        let document = advanced_document();
+    fn advanced_traverse_follows_bounded_edges_in_stable_order() {
+        let mut document = advanced_document();
+        add_calls(&mut document, 1, 11, 13, 900);
+        add_calls(&mut document, 2, 13, 12, 900);
         let ast = AdvancedAstNode::Traverse {
             seed: Some(symbol(11)),
             seed_from: None,
+            relation: AdvancedRelationKind::Calls,
+            direction: AdvancedTraverseDirection::Outbound,
+            max_depth: Some(2),
+        };
+        let plan = advanced_plan(ast, false, 100);
+        let built = run_advanced(&document, &plan);
+
+        assert_eq!(built.completeness, AdvancedCompleteness::Complete);
+        assert!(built.execution.is_complete());
+        assert_eq!(built.rows.len(), 2);
+        assert_eq!(
+            built.rows[0]["source"],
+            serde_json::Value::String(symbol(11).to_string())
+        );
+        assert_eq!(
+            built.rows[0]["target"],
+            serde_json::Value::String(symbol(13).to_string())
+        );
+        assert_eq!(
+            built.rows[1]["target"],
+            serde_json::Value::String(symbol(12).to_string())
+        );
+        assert_eq!(built.rows[0]["relation"], serde_json::json!("calls"));
+    }
+
+    #[test]
+    fn advanced_seed_from_traverse_remains_honestly_unsupported() {
+        let document = advanced_document();
+        let ast = AdvancedAstNode::Traverse {
+            seed: None,
+            seed_from: Some("id".to_owned()),
             relation: AdvancedRelationKind::Calls,
             direction: AdvancedTraverseDirection::Outbound,
             max_depth: Some(1),
@@ -8961,8 +9129,6 @@ mod tests {
             built.execution.limiting_resources(),
             &[QueryResource::Capability]
         );
-        assert!(built.rows.is_empty());
-        assert!(!built.columns.is_empty());
     }
 
     #[test]
