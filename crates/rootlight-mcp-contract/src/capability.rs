@@ -8,6 +8,7 @@
 
 use crate::ErrorCode;
 use crate::catalog::{ExposureProfile, McpTool};
+use crate::vertical::ResponseProfile;
 use serde::Serialize;
 
 /// Namespaced MCP `_meta` key carrying Rootlight capability discovery.
@@ -164,6 +165,54 @@ impl BudgetSemantics {
     }
 }
 
+/// Public input field used to select a response representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseProfileField {
+    /// Canonical response-profile field spelling.
+    ResponseProfile,
+    /// Legacy field spelling retained by change-domain contracts.
+    Profile,
+}
+
+impl ResponseProfileField {
+    /// Returns the exact field name accepted by the tool's current wire contract.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ResponseProfile => "response_profile",
+            Self::Profile => "profile",
+        }
+    }
+}
+
+/// Response representations truthfully available for one public tool.
+///
+/// Fixed tools have no profile selector. Selectable tools advertise the exact
+/// current wire field, omission default, and closed set of accepted values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "mode",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ResponseProfileSupport {
+    /// The tool always returns one fixed representation.
+    Fixed {
+        /// Representation applied to every successful response.
+        representation: ResponseProfile,
+    },
+    /// The caller may select from a closed set of representations.
+    Selectable {
+        /// Exact input field accepted by the current contract version.
+        wire_field: ResponseProfileField,
+        /// Closed set of accepted response profiles.
+        supported: &'static [ResponseProfile],
+        /// Profile applied when the selector is omitted.
+        default: ResponseProfile,
+    },
+}
+
 /// Safe machine-readable capability metadata exposed through MCP discovery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,6 +225,8 @@ pub struct DiscoveryCapabilityMetadata {
     pub status: &'static str,
     /// Profiles in which the tool may be discovered.
     pub profiles: Vec<&'static str>,
+    /// Response representations available independently of exposure profiles.
+    pub response_profiles: ResponseProfileSupport,
     /// Whether the tool may be nested in a public batch.
     pub batch_eligible: bool,
     /// Whether bounded explain mode is served.
@@ -256,6 +307,8 @@ pub struct ToolCapability {
     pub input_shape_hash: &'static str,
     /// Profiles that expose this tool, in ascending privilege order.
     pub profiles: &'static [ExposureProfile],
+    /// Response representations accepted by the current public contract.
+    pub response_profiles: ResponseProfileSupport,
     /// Whether the tool may appear inside a public `query.batch`.
     pub batch_eligible: bool,
     /// Whether the tool exposes a source-free explain plan.
@@ -333,6 +386,12 @@ const SCOUT_PROFILES: &[ExposureProfile] = &[
 const ANALYSIS_PROFILES: &[ExposureProfile] =
     &[ExposureProfile::Analysis, ExposureProfile::Developer];
 const DEVELOPER_PROFILES: &[ExposureProfile] = &[ExposureProfile::Developer];
+const COMPACT_RESPONSE_PROFILES: &[ResponseProfile] = &[ResponseProfile::Compact];
+const ANALYTICAL_RESPONSE_PROFILES: &[ResponseProfile] = &[
+    ResponseProfile::Compact,
+    ResponseProfile::Standard,
+    ResponseProfile::Evidence,
+];
 
 const fn unsupported(path: &'static str, summary: &'static str) -> CapabilityRule {
     CapabilityRule {
@@ -532,7 +591,10 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
     accepted_fallback("search_modes"),
     accepted_fallback("max_results"),
     accepted_fallback("budget"),
-    accepted_fallback("response_profile"),
+    implemented(
+        "response_profile",
+        "selects compact, standard, or bounded evidence representation",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
     implemented("cursor", "uses an authenticated request-bound continuation"),
     unsupported(
@@ -576,16 +638,6 @@ const CODE_LOCATE_RULES: &[CapabilityRule] = &[
         "structural",
         "structural search is not served",
     ),
-    unsupported_value(
-        "response_profile",
-        "evidence",
-        "only compact response projection is served",
-    ),
-    unsupported_value(
-        "response_profile",
-        "standard",
-        "only compact response projection is served",
-    ),
 ];
 
 const SYMBOL_EXPLAIN_RULES: &[CapabilityRule] = &[
@@ -593,7 +645,10 @@ const SYMBOL_EXPLAIN_RULES: &[CapabilityRule] = &[
     accepted_fallback("generation"),
     accepted_fallback("symbol_ids"),
     accepted_fallback("include_provenance"),
-    accepted_fallback("response_profile"),
+    implemented(
+        "response_profile",
+        "selects compact, standard, or bounded evidence representation",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -614,16 +669,6 @@ const SYMBOL_EXPLAIN_RULES: &[CapabilityRule] = &[
         "full",
         "full provenance projection is not served",
     ),
-    unsupported_value(
-        "response_profile",
-        "evidence",
-        "only compact response projection is served",
-    ),
-    unsupported_value(
-        "response_profile",
-        "standard",
-        "only compact response projection is served",
-    ),
 ];
 
 const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
@@ -635,7 +680,10 @@ const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
     accepted_fallback("min_confidence"),
     accepted_fallback("include_candidates"),
     accepted_fallback("max_results"),
-    accepted_fallback("response_profile"),
+    implemented(
+        "response_profile",
+        "selects compact, standard, or bounded evidence representation",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
     implemented("cursor", "uses an authenticated request-bound continuation"),
     unsupported(
@@ -649,16 +697,6 @@ const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
         "ambiguous candidate projection is not served",
     ),
     unsupported("budget", "custom response budgets are not served"),
-    unsupported_value(
-        "response_profile",
-        "evidence",
-        "only compact response projection is served",
-    ),
-    unsupported_value(
-        "response_profile",
-        "standard",
-        "only compact response projection is served",
-    ),
 ];
 
 const FLOW_TRACE_RULES: &[CapabilityRule] = &[
@@ -672,7 +710,10 @@ const FLOW_TRACE_RULES: &[CapabilityRule] = &[
     accepted_fallback("max_paths"),
     accepted_fallback("min_confidence"),
     accepted_fallback("cross_repository"),
-    accepted_fallback("response_profile"),
+    implemented(
+        "response_profile",
+        "selects compact, standard, or bounded evidence representation",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -697,16 +738,6 @@ const FLOW_TRACE_RULES: &[CapabilityRule] = &[
     unsupported("to.route_id", "route endpoints are not served"),
     unsupported("to.service_id", "service endpoints are not served"),
     unsupported("to.database_object_id", "database endpoints are not served"),
-    unsupported_value(
-        "response_profile",
-        "evidence",
-        "only compact response projection is served",
-    ),
-    unsupported_value(
-        "response_profile",
-        "standard",
-        "only compact response projection is served",
-    ),
 ];
 
 const CHANGE_IMPACT_RULES: &[CapabilityRule] = &[
@@ -718,7 +749,10 @@ const CHANGE_IMPACT_RULES: &[CapabilityRule] = &[
     accepted_fallback("include_tests"),
     accepted_fallback("include_history"),
     accepted_fallback("min_confidence"),
-    accepted_fallback("profile"),
+    implemented(
+        "profile",
+        "selects compact, standard, or bounded evidence representation",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -744,16 +778,6 @@ const CHANGE_IMPACT_RULES: &[CapabilityRule] = &[
         "conservative",
         "conservative relation expansion is not served",
     ),
-    unsupported_value(
-        "profile",
-        "evidence",
-        "only compact response projection is served",
-    ),
-    unsupported_value(
-        "profile",
-        "standard",
-        "only compact response projection is served",
-    ),
 ];
 
 const TESTS_SELECT_RULES: &[CapabilityRule] = &[
@@ -763,7 +787,10 @@ const TESTS_SELECT_RULES: &[CapabilityRule] = &[
     accepted_fallback("test_kinds"),
     accepted_fallback("max_tests"),
     accepted_fallback("include_commands"),
-    accepted_fallback("profile"),
+    implemented(
+        "profile",
+        "selects compact, standard, or bounded evidence representation",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -775,16 +802,6 @@ const TESTS_SELECT_RULES: &[CapabilityRule] = &[
     unsupported("seeds.paths", "path seeds are not served"),
     unsupported("seeds.change", "change seeds are not served"),
     unsupported("seeds.build_targets", "build-target seeds are not served"),
-    unsupported_value(
-        "profile",
-        "evidence",
-        "only compact response projection is served",
-    ),
-    unsupported_value(
-        "profile",
-        "standard",
-        "only compact response projection is served",
-    ),
 ];
 
 const ARCHITECTURE_OVERVIEW_RULES: &[CapabilityRule] = &[
@@ -794,7 +811,10 @@ const ARCHITECTURE_OVERVIEW_RULES: &[CapabilityRule] = &[
     accepted_fallback("max_components"),
     accepted_fallback("include_edges"),
     accepted_fallback("min_confidence"),
-    accepted_fallback("response_profile"),
+    implemented(
+        "response_profile",
+        "selects compact, standard, or bounded evidence representation",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -810,16 +830,6 @@ const ARCHITECTURE_OVERVIEW_RULES: &[CapabilityRule] = &[
     unsupported_value("views[]", "ownership", "ownership view is not served"),
     unsupported_value("views[]", "packages", "package view is not served"),
     unsupported_value("views[]", "services", "service view is not served"),
-    unsupported_value(
-        "response_profile",
-        "evidence",
-        "only compact response projection is served",
-    ),
-    unsupported_value(
-        "response_profile",
-        "standard",
-        "only compact response projection is served",
-    ),
 ];
 
 const ARCHITECTURE_CYCLES_RULES: &[CapabilityRule] = &[
@@ -829,7 +839,10 @@ const ARCHITECTURE_CYCLES_RULES: &[CapabilityRule] = &[
     accepted_fallback("min_size"),
     accepted_fallback("max_cycles"),
     accepted_fallback("include_self_cycles"),
-    accepted_fallback("response_profile"),
+    implemented(
+        "response_profile",
+        "selects compact, standard, or bounded evidence representation",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -847,16 +860,6 @@ const ARCHITECTURE_CYCLES_RULES: &[CapabilityRule] = &[
     ),
     unsupported("rank_by", "cycle ranking strategy is not served"),
     unsupported("budget", "custom response budgets are not served"),
-    unsupported_value(
-        "response_profile",
-        "evidence",
-        "only compact response projection is served",
-    ),
-    unsupported_value(
-        "response_profile",
-        "standard",
-        "only compact response projection is served",
-    ),
 ];
 
 const CODE_DEAD_RULES: &[CapabilityRule] = &[
@@ -867,7 +870,10 @@ const CODE_DEAD_RULES: &[CapabilityRule] = &[
     accepted_fallback("include_tests"),
     accepted_fallback("min_confidence"),
     accepted_fallback("max_candidates"),
-    accepted_fallback("response_profile"),
+    implemented(
+        "response_profile",
+        "selects compact, standard, or bounded evidence representation",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -875,16 +881,6 @@ const CODE_DEAD_RULES: &[CapabilityRule] = &[
     ),
     unsupported("scope", "structural scope filtering is not served"),
     unsupported("budget", "custom response budgets are not served"),
-    unsupported_value(
-        "response_profile",
-        "evidence",
-        "only compact response projection is served",
-    ),
-    unsupported_value(
-        "response_profile",
-        "standard",
-        "only compact response projection is served",
-    ),
 ];
 
 const HISTORY_COMPARE_RULES: &[CapabilityRule] = &[
@@ -912,12 +908,12 @@ const HISTORY_COMPARE_RULES: &[CapabilityRule] = &[
     unsupported_value(
         "profile",
         "evidence",
-        "only compact response projection is served",
+        "the current output has no optional evidence representation",
     ),
     unsupported_value(
         "profile",
         "standard",
-        "only compact response projection is served",
+        "the current output has no optional standard representation",
     ),
 ];
 
@@ -928,7 +924,10 @@ const PLAN_CHANGE_RULES: &[CapabilityRule] = &[
     accepted_fallback("objective_text"),
     accepted_fallback("targets"),
     accepted_fallback("max_steps"),
-    accepted_fallback("profile"),
+    implemented(
+        "profile",
+        "selects compact, standard, or bounded evidence representation",
+    ),
     implemented("explain", "returns a deterministic source-free plan"),
     unsupported(
         "repository.alias",
@@ -937,16 +936,6 @@ const PLAN_CHANGE_RULES: &[CapabilityRule] = &[
     unsupported("change_context", "change-context resolution is not served"),
     unsupported("constraints", "user constraint evaluation is not served"),
     unsupported("budget", "custom response budgets are not served"),
-    unsupported_value(
-        "profile",
-        "evidence",
-        "only compact response projection is served",
-    ),
-    unsupported_value(
-        "profile",
-        "standard",
-        "only compact response projection is served",
-    ),
 ];
 
 const CONTEXT_PACK_RULES: &[CapabilityRule] = &[
@@ -1168,6 +1157,7 @@ pub fn discovery_metadata(tool: McpTool) -> DiscoveryCapabilityMetadata {
             .iter()
             .map(|profile| profile.name())
             .collect(),
+        response_profiles: capability.response_profiles,
         batch_eligible: capability.batch_eligible,
         explain_supported: capability.explain_supported,
         pagination: capability.pagination.name(),
@@ -1213,6 +1203,7 @@ const fn tool_capability(tool: McpTool) -> ToolCapability {
         contract_version: tool.contract_version(),
         input_shape_hash: input_shape_hash(tool),
         profiles: tool_profiles(tool),
+        response_profiles: response_profile_support(tool),
         batch_eligible: is_batch_eligible(tool),
         explain_supported: !matches!(tool, McpTool::RepoIndex | McpTool::OperationStatus),
         handler_path: Some(handler_path(tool)),
@@ -1274,6 +1265,47 @@ const fn tool_profiles(tool: McpTool) -> &'static [ExposureProfile] {
         | McpTool::ArchitectureCycles
         | McpTool::CodeDead => ANALYSIS_PROFILES,
         _ => DEVELOPER_PROFILES,
+    }
+}
+
+const fn response_profile_support(tool: McpTool) -> ResponseProfileSupport {
+    match tool {
+        McpTool::RepoIndex
+        | McpTool::OperationStatus
+        | McpTool::ContextPack
+        | McpTool::QueryAdvanced => ResponseProfileSupport::Fixed {
+            representation: ResponseProfile::Compact,
+        },
+        McpTool::RepoStatus | McpTool::RepoList | McpTool::SourceRead | McpTool::QueryBatch => {
+            ResponseProfileSupport::Selectable {
+                wire_field: ResponseProfileField::ResponseProfile,
+                supported: COMPACT_RESPONSE_PROFILES,
+                default: ResponseProfile::Compact,
+            }
+        }
+        McpTool::HistoryCompare => ResponseProfileSupport::Selectable {
+            wire_field: ResponseProfileField::Profile,
+            supported: COMPACT_RESPONSE_PROFILES,
+            default: ResponseProfile::Compact,
+        },
+        McpTool::ChangeImpact | McpTool::TestsSelect | McpTool::PlanChange => {
+            ResponseProfileSupport::Selectable {
+                wire_field: ResponseProfileField::Profile,
+                supported: ANALYTICAL_RESPONSE_PROFILES,
+                default: ResponseProfile::Compact,
+            }
+        }
+        McpTool::CodeLocate
+        | McpTool::SymbolExplain
+        | McpTool::SymbolRelationships
+        | McpTool::FlowTrace
+        | McpTool::ArchitectureOverview
+        | McpTool::ArchitectureCycles
+        | McpTool::CodeDead => ResponseProfileSupport::Selectable {
+            wire_field: ResponseProfileField::ResponseProfile,
+            supported: ANALYTICAL_RESPONSE_PROFILES,
+            default: ResponseProfile::Compact,
+        },
     }
 }
 
@@ -1405,7 +1437,7 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
         McpTool::OperationStatus => "bounded operation read and cancel",
         McpTool::CodeLocate => "bounded exact-identifier and lexical matching",
         McpTool::SymbolExplain => {
-            "bounded compact semantic evidence for explicit stable symbol identifiers"
+            "bounded profiled semantic evidence for explicit stable symbol identifiers"
         }
         McpTool::SymbolRelationships => {
             "bounded typed relationships around explicit stable symbol identifiers"
@@ -1445,10 +1477,11 @@ const fn tool_as_u8(tool: McpTool) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BATCH_ELIGIBLE, CAPABILITIES, CapabilityStatus, GenerationSemantics, McpTool,
-        PaginationSemantics, is_batch_eligible,
+        ANALYTICAL_RESPONSE_PROFILES, BATCH_ELIGIBLE, CAPABILITIES, COMPACT_RESPONSE_PROFILES,
+        CapabilityStatus, GenerationSemantics, McpTool, PaginationSemantics,
+        ResponseProfileSupport, is_batch_eligible,
     };
-    use crate::ErrorCode;
+    use crate::{ErrorCode, vertical::ResponseProfile};
 
     #[test]
     fn registry_covers_exactly_the_catalog_in_order() {
@@ -1467,6 +1500,262 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.tool != McpTool::RepoList)
                 .all(|entry| entry.contract_version == crate::MCP_SCHEMA_VERSION)
+        );
+    }
+
+    #[test]
+    fn response_profile_registry_covers_the_exact_public_matrix() {
+        use super::ResponseProfileField::{
+            Profile, ResponseProfile as CanonicalResponseProfileField,
+        };
+        use ResponseProfile::{Compact, Evidence, Standard};
+        use ResponseProfileSupport::{Fixed, Selectable};
+
+        let expected = [
+            (
+                McpTool::RepoIndex,
+                Fixed {
+                    representation: Compact,
+                },
+            ),
+            (
+                McpTool::RepoStatus,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: COMPACT_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::RepoList,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: COMPACT_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::OperationStatus,
+                Fixed {
+                    representation: Compact,
+                },
+            ),
+            (
+                McpTool::CodeLocate,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::SymbolExplain,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::SymbolRelationships,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::FlowTrace,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::ChangeImpact,
+                Selectable {
+                    wire_field: Profile,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::TestsSelect,
+                Selectable {
+                    wire_field: Profile,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::ArchitectureOverview,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::ArchitectureCycles,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::CodeDead,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::HistoryCompare,
+                Selectable {
+                    wire_field: Profile,
+                    supported: COMPACT_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::PlanChange,
+                Selectable {
+                    wire_field: Profile,
+                    supported: ANALYTICAL_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::ContextPack,
+                Fixed {
+                    representation: Compact,
+                },
+            ),
+            (
+                McpTool::SourceRead,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: COMPACT_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+            (
+                McpTool::QueryAdvanced,
+                Fixed {
+                    representation: Compact,
+                },
+            ),
+            (
+                McpTool::QueryBatch,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: COMPACT_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
+        ];
+
+        assert_eq!(expected.len(), McpTool::ALL.len());
+        for ((tool, expected_support), entry) in expected.into_iter().zip(&CAPABILITIES) {
+            assert_eq!(entry.tool, tool);
+            assert_eq!(
+                entry.response_profiles,
+                expected_support,
+                "{} response-profile descriptor drifted",
+                tool.name()
+            );
+
+            match entry.response_profiles {
+                Fixed { .. } => {
+                    assert!(
+                        entry.rules.iter().all(|rule| {
+                            rule.path != CanonicalResponseProfileField.name()
+                                && rule.path != Profile.name()
+                        }),
+                        "{} is fixed but declares a profile selector",
+                        tool.name()
+                    );
+                }
+                Selectable {
+                    wire_field,
+                    supported,
+                    default,
+                } => {
+                    assert!(!supported.is_empty());
+                    assert!(supported.contains(&default));
+                    for profile in [Compact, Standard, Evidence] {
+                        let value = match profile {
+                            Compact => "compact",
+                            Standard => "standard",
+                            Evidence => "evidence",
+                        };
+                        let disposition = entry.disposition(wire_field.name(), Some(value));
+                        if supported.contains(&profile) {
+                            assert!(
+                                matches!(
+                                    disposition.status,
+                                    CapabilityStatus::Implemented
+                                        | CapabilityStatus::FallbackLimited
+                                ),
+                                "{} advertises unsupported profile {value}",
+                                tool.name()
+                            );
+                        } else {
+                            assert_eq!(
+                                disposition.status,
+                                CapabilityStatus::UnsupportedStableError,
+                                "{} must reject unadvertised profile {value}",
+                                tool.name()
+                            );
+                            assert_eq!(
+                                disposition.error_code,
+                                Some(ErrorCode::UnsupportedCapability)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn discovery_distinguishes_exposure_and_response_profiles() {
+        let fixed = serde_json::to_value(super::discovery_metadata(McpTool::RepoIndex))
+            .expect("fixed capability metadata serializes");
+        assert_eq!(fixed["profiles"], serde_json::json!(["developer"]));
+        assert_eq!(
+            fixed["responseProfiles"],
+            serde_json::json!({
+                "mode": "fixed",
+                "representation": "compact"
+            })
+        );
+
+        let selectable = serde_json::to_value(super::discovery_metadata(McpTool::ChangeImpact))
+            .expect("selectable capability metadata serializes");
+        assert_eq!(
+            selectable["responseProfiles"],
+            serde_json::json!({
+                "mode": "selectable",
+                "wireField": "profile",
+                "supported": ["compact", "standard", "evidence"],
+                "default": "compact"
+            })
+        );
+
+        let batch = serde_json::to_value(super::discovery_metadata(McpTool::QueryBatch))
+            .expect("batch capability metadata serializes");
+        assert_eq!(
+            batch["responseProfiles"],
+            serde_json::json!({
+                "mode": "selectable",
+                "wireField": "response_profile",
+                "supported": ["compact"],
+                "default": "compact"
+            })
         );
     }
 
@@ -1650,6 +1939,7 @@ mod tests {
                     .map(|profile| profile.name())
                     .collect::<Vec<_>>()
             );
+            assert_eq!(metadata.response_profiles, entry.response_profiles);
             assert_eq!(metadata.batch_eligible, entry.batch_eligible);
             assert_eq!(metadata.explain_supported, entry.explain_supported);
             assert_eq!(metadata.batch_shared_budget, entry.batch_shared_budget);

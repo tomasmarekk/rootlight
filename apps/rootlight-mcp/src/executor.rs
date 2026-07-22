@@ -1530,7 +1530,14 @@ where
                     .await
                 }
                 VerticalTool::ChangeImpact => {
-                    execute_change_impact(port, arguments, cancellation, &unsupported).await
+                    execute_change_impact(
+                        port,
+                        arguments,
+                        ResponseShaping::Public,
+                        cancellation,
+                        &unsupported,
+                    )
+                    .await
                 }
                 VerticalTool::PlanChange => {
                     execute_plan_change(
@@ -1565,7 +1572,10 @@ where
                     execute_symbol_relationships(
                         port,
                         arguments,
-                        exposure_profile,
+                        CursorPresentation {
+                            shaping: ResponseShaping::Public,
+                            exposure_profile,
+                        },
                         cancellation,
                         &unsupported,
                         &invalid_cursor,
@@ -1574,19 +1584,54 @@ where
                     .await
                 }
                 VerticalTool::FlowTrace => {
-                    execute_flow_trace(port, arguments, cancellation, &unsupported).await
+                    execute_flow_trace(
+                        port,
+                        arguments,
+                        ResponseShaping::Public,
+                        cancellation,
+                        &unsupported,
+                    )
+                    .await
                 }
                 VerticalTool::ArchitectureCycles => {
-                    execute_architecture_cycles(port, arguments, cancellation, &unsupported).await
+                    execute_architecture_cycles(
+                        port,
+                        arguments,
+                        ResponseShaping::Public,
+                        cancellation,
+                        &unsupported,
+                    )
+                    .await
                 }
                 VerticalTool::CodeDead => {
-                    execute_code_dead(port, arguments, cancellation, &unsupported).await
+                    execute_code_dead(
+                        port,
+                        arguments,
+                        ResponseShaping::Public,
+                        cancellation,
+                        &unsupported,
+                    )
+                    .await
                 }
                 VerticalTool::ArchitectureOverview => {
-                    execute_architecture_overview(port, arguments, cancellation, &unsupported).await
+                    execute_architecture_overview(
+                        port,
+                        arguments,
+                        ResponseShaping::Public,
+                        cancellation,
+                        &unsupported,
+                    )
+                    .await
                 }
                 VerticalTool::TestsSelect => {
-                    execute_tests_select(port, arguments, cancellation, &unsupported).await
+                    execute_tests_select(
+                        port,
+                        arguments,
+                        ResponseShaping::Public,
+                        cancellation,
+                        &unsupported,
+                    )
+                    .await
                 }
                 VerticalTool::ContextPack => {
                     execute_context_pack(
@@ -1623,7 +1668,10 @@ where
                     execute_code_locate(
                         port,
                         arguments,
-                        exposure_profile,
+                        CursorPresentation {
+                            shaping: ResponseShaping::Public,
+                            exposure_profile,
+                        },
                         cancellation,
                         &unsupported,
                         &invalid_cursor,
@@ -1632,7 +1680,14 @@ where
                     .await
                 }
                 VerticalTool::SymbolExplain => {
-                    execute_symbol_explain(port, arguments, cancellation, &unsupported).await
+                    execute_symbol_explain(
+                        port,
+                        arguments,
+                        ResponseShaping::Public,
+                        cancellation,
+                        &unsupported,
+                    )
+                    .await
                 }
                 VerticalTool::SourceRead => {
                     execute_source_read(
@@ -2185,7 +2240,10 @@ where
             execute_code_locate(
                 port,
                 arguments,
-                exposure_profile,
+                CursorPresentation {
+                    shaping: ResponseShaping::CanonicalInternal,
+                    exposure_profile,
+                },
                 cancellation,
                 unsupported,
                 invalid_cursor,
@@ -2194,7 +2252,14 @@ where
             .await
         }
         BatchTool::SymbolExplain => {
-            execute_symbol_explain(port, arguments, cancellation, unsupported).await
+            execute_symbol_explain(
+                port,
+                arguments,
+                ResponseShaping::CanonicalInternal,
+                cancellation,
+                unsupported,
+            )
+            .await
         }
         BatchTool::SourceRead => {
             execute_source_read(
@@ -2210,7 +2275,10 @@ where
             execute_symbol_relationships(
                 port,
                 arguments,
-                exposure_profile,
+                CursorPresentation {
+                    shaping: ResponseShaping::CanonicalInternal,
+                    exposure_profile,
+                },
                 cancellation,
                 unsupported,
                 invalid_cursor,
@@ -2219,21 +2287,65 @@ where
             .await
         }
         BatchTool::FlowTrace => {
-            execute_flow_trace(port, arguments, cancellation, unsupported).await
+            execute_flow_trace(
+                port,
+                arguments,
+                ResponseShaping::CanonicalInternal,
+                cancellation,
+                unsupported,
+            )
+            .await
         }
         BatchTool::ChangeImpact => {
-            execute_change_impact(port, arguments, cancellation, unsupported).await
+            execute_change_impact(
+                port,
+                arguments,
+                ResponseShaping::CanonicalInternal,
+                cancellation,
+                unsupported,
+            )
+            .await
         }
         BatchTool::TestsSelect => {
-            execute_tests_select(port, arguments, cancellation, unsupported).await
+            execute_tests_select(
+                port,
+                arguments,
+                ResponseShaping::CanonicalInternal,
+                cancellation,
+                unsupported,
+            )
+            .await
         }
         BatchTool::ArchitectureOverview => {
-            execute_architecture_overview(port, arguments, cancellation, unsupported).await
+            execute_architecture_overview(
+                port,
+                arguments,
+                ResponseShaping::CanonicalInternal,
+                cancellation,
+                unsupported,
+            )
+            .await
         }
         BatchTool::ArchitectureCycles => {
-            execute_architecture_cycles(port, arguments, cancellation, unsupported).await
+            execute_architecture_cycles(
+                port,
+                arguments,
+                ResponseShaping::CanonicalInternal,
+                cancellation,
+                unsupported,
+            )
+            .await
         }
-        BatchTool::CodeDead => execute_code_dead(port, arguments, cancellation, unsupported).await,
+        BatchTool::CodeDead => {
+            execute_code_dead(
+                port,
+                arguments,
+                ResponseShaping::CanonicalInternal,
+                cancellation,
+                unsupported,
+            )
+            .await
+        }
         BatchTool::ContextPack => {
             execute_context_pack(
                 port,
@@ -2761,6 +2873,7 @@ fn repository_cursor_context(
     repository: RepositoryId,
     generation: GenerationId,
     exposure_profile: ExposureProfile,
+    response_profile: ResponseProfile,
     page_size: u16,
     query_fingerprint: [u8; 32],
     plan_fingerprint: [u8; 32],
@@ -2773,7 +2886,7 @@ fn repository_cursor_context(
         tool_major_version: 1,
         query_fingerprint,
         plan_fingerprint,
-        response_profile: ResponseProfile::Compact,
+        response_profile,
         exposure_profile,
         snapshot_id: repository_snapshot_id(repository, generation),
         page_size,
@@ -2785,6 +2898,7 @@ fn code_locate_cursor_context(
     request: &CodeLocatePortRequest,
     generation: GenerationId,
     exposure_profile: ExposureProfile,
+    response_profile: ResponseProfile,
     key_id: u64,
 ) -> CursorContext {
     let mut request_hasher = blake3::Hasher::new();
@@ -2801,6 +2915,7 @@ fn code_locate_cursor_context(
         request.repository,
         generation,
         exposure_profile,
+        response_profile,
         u16::try_from(request.maximum_results).expect("public locate page size is at most 200"),
         query_fingerprint,
         domain_hash(b"rootlight.code-locate.plan.v1", &plan_material),
@@ -2822,6 +2937,7 @@ fn symbol_relationships_cursor_context(
     request: &SymbolRelationshipsPortRequest,
     generation: GenerationId,
     exposure_profile: ExposureProfile,
+    response_profile: ResponseProfile,
     key_id: u64,
 ) -> CursorContext {
     let mut request_hasher = blake3::Hasher::new();
@@ -2845,6 +2961,7 @@ fn symbol_relationships_cursor_context(
         request.repository,
         generation,
         exposure_profile,
+        response_profile,
         request.max_results.unwrap_or(50),
         query_fingerprint,
         domain_hash(b"rootlight.symbol-relationships.plan.v1", &plan_material),
@@ -2879,6 +2996,7 @@ fn query_advanced_cursor_context(
         request.repository,
         generation,
         exposure_profile,
+        ResponseProfile::Compact,
         request.max_results.unwrap_or(DEFAULT_ADVANCED_RESULTS),
         query_fingerprint,
         domain_hash(b"rootlight.query-advanced.plan.v1", &plan_material),
@@ -3276,7 +3394,7 @@ where
 async fn execute_code_locate<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
-    exposure_profile: ExposureProfile,
+    presentation: CursorPresentation,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
     invalid_cursor: &PublicError,
@@ -3285,8 +3403,10 @@ async fn execute_code_locate<P>(
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: CodeLocateInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
+    let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     if explain_only && input.cursor.is_some() {
         return Err(ToolExecutionError::new(invalid_cursor.clone()));
     }
@@ -3298,14 +3418,20 @@ where
         let context = code_locate_cursor_context(
             &request,
             parsed.generation(),
-            exposure_profile,
+            presentation.exposure_profile,
+            response_profile,
             cursor_key.key_id,
         );
         validate_repository_cursor(&parsed, &context, invalid_cursor, cursor_key)?;
     }
     if explain_only {
         let output = explain_code_locate(port, request, cancellation).await?;
-        return serialize_success(output);
+        return serialize_profiled_read_success(
+            output,
+            response_profile,
+            started_at,
+            presentation.shaping,
+        );
     }
     let expected = request.clone();
     let future = port.code_locate(request, cancellation.clone());
@@ -3313,11 +3439,17 @@ where
     let generation = response.result.context.generation;
     let next_cursor = create_page_cursor(
         response.result.next_page_offset,
-        code_locate_cursor_context(&expected, generation, exposure_profile, cursor_key.key_id),
+        code_locate_cursor_context(
+            &expected,
+            generation,
+            presentation.exposure_profile,
+            response_profile,
+            cursor_key.key_id,
+        ),
         cursor_key,
     )?;
     let output = map_code_locate(response, &expected, next_cursor)?;
-    serialize_success(output)
+    serialize_profiled_read_success(output, response_profile, started_at, presentation.shaping)
 }
 
 /// Builds the source-free `code.locate` plan without executing retrieval.
@@ -3548,30 +3680,33 @@ where
 async fn execute_symbol_explain<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
+    shaping: ResponseShaping,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: SymbolExplainInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
+    let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_symbol_explain(input, unsupported)?;
     if explain_only {
         let output = explain_symbol_explain(port, request, cancellation).await?;
-        return serialize_success(output);
+        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
     let future = port.symbol_explain(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_symbol_explain(response, &expected)?;
-    serialize_success(output)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping)
 }
 
 async fn execute_symbol_relationships<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
-    exposure_profile: ExposureProfile,
+    presentation: CursorPresentation,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
     invalid_cursor: &PublicError,
@@ -3580,8 +3715,10 @@ async fn execute_symbol_relationships<P>(
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: SymbolRelationshipsInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
+    let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     if explain_only && input.cursor.is_some() {
         return Err(ToolExecutionError::new(invalid_cursor.clone()));
     }
@@ -3593,14 +3730,20 @@ where
         let context = symbol_relationships_cursor_context(
             &request,
             parsed.generation(),
-            exposure_profile,
+            presentation.exposure_profile,
+            response_profile,
             cursor_key.key_id,
         );
         validate_repository_cursor(&parsed, &context, invalid_cursor, cursor_key)?;
     }
     if explain_only {
         let output = explain_symbol_relationships(port, request, cancellation).await?;
-        return serialize_success(output);
+        return serialize_profiled_read_success(
+            output,
+            response_profile,
+            started_at,
+            presentation.shaping,
+        );
     }
     let expected = request.clone();
     let future = port.symbol_relationships(request, cancellation.clone());
@@ -3611,13 +3754,14 @@ where
         symbol_relationships_cursor_context(
             &expected,
             generation,
-            exposure_profile,
+            presentation.exposure_profile,
+            response_profile,
             cursor_key.key_id,
         ),
         cursor_key,
     )?;
     let output = map_symbol_relationships(response, &expected, next_cursor)?;
-    serialize_success(output)
+    serialize_profiled_read_success(output, response_profile, started_at, presentation.shaping)
 }
 
 fn normalize_symbol_relationships(
@@ -3627,11 +3771,7 @@ fn normalize_symbol_relationships(
     let repository = repository_id(input.repository, unsupported)?;
     // Structural scope, ambiguous candidates, and custom budgets are not
     // served by this slice.
-    if input.scope.is_some()
-        || input.include_candidates == Some(true)
-        || input.budget.is_some()
-        || !is_compact_profile(input.response_profile)
-    {
+    if input.scope.is_some() || input.include_candidates == Some(true) || input.budget.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let mut relations = Vec::new();
@@ -3826,14 +3966,17 @@ where
 async fn execute_flow_trace<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
+    shaping: ResponseShaping,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: FlowTraceInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
+    let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let trace_relations = input.relations.clone();
     let trace_min_confidence = input.min_confidence;
     let request = normalize_flow_trace(input, unsupported)?;
@@ -3846,13 +3989,13 @@ where
             cancellation,
         )
         .await?;
-        return serialize_success(output);
+        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
     let future = port.flow_trace(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_flow_trace(response, &expected)?;
-    serialize_success(output)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping)
 }
 
 fn normalize_flow_trace(
@@ -3860,12 +4003,9 @@ fn normalize_flow_trace(
     unsupported: &PublicError,
 ) -> Result<FlowTracePortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Cross-repository traversal, explicit path policies, custom budgets, and
-    // non-compact profiles are not served by this slice.
-    if input.cross_repository == Some(true)
-        || input.path_policy.is_some()
-        || input.budget.is_some()
-        || !is_compact_profile(input.response_profile)
+    // Cross-repository traversal, explicit path policies, and custom budgets
+    // are not served by this slice.
+    if input.cross_repository == Some(true) || input.path_policy.is_some() || input.budget.is_some()
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
@@ -4011,24 +4151,27 @@ where
 async fn execute_architecture_cycles<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
+    shaping: ResponseShaping,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: ArchitectureCyclesInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
+    let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_architecture_cycles(input, unsupported)?;
     if explain_only {
         let output = explain_architecture_cycles(port, request, cancellation).await?;
-        return serialize_success(output);
+        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
     let future = port.architecture_cycles(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_architecture_cycles(response, &expected)?;
-    serialize_success(output)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping)
 }
 
 fn normalize_architecture_cycles(
@@ -4036,14 +4179,10 @@ fn normalize_architecture_cycles(
     unsupported: &PublicError,
 ) -> Result<ArchitectureCyclesPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Structural scope, ranking strategies, custom budgets, and non-compact
-    // profiles are not served by this slice. The projection level is accepted
-    // as a descriptive label; detection runs at symbol granularity.
-    if input.scope.is_some()
-        || input.rank_by.is_some()
-        || input.budget.is_some()
-        || !is_compact_profile(input.response_profile)
-    {
+    // Structural scope, ranking strategies, and custom budgets are not served
+    // by this slice. The projection level is accepted as a descriptive label;
+    // detection runs at symbol granularity.
+    if input.scope.is_some() || input.rank_by.is_some() || input.budget.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let mut relations = Vec::new();
@@ -4192,24 +4331,27 @@ where
 async fn execute_code_dead<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
+    shaping: ResponseShaping,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: CodeDeadInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
+    let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_code_dead(input, unsupported)?;
     if explain_only {
         let output = explain_code_dead(port, request, cancellation).await?;
-        return serialize_success(output);
+        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
     let future = port.code_dead(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_code_dead(response, &expected)?;
-    serialize_success(output)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping)
 }
 
 fn normalize_code_dead(
@@ -4217,12 +4359,8 @@ fn normalize_code_dead(
     unsupported: &PublicError,
 ) -> Result<CodeDeadPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Structural scope, custom budgets, and non-compact profiles are not served
-    // by this slice.
-    if input.scope.is_some()
-        || input.budget.is_some()
-        || !is_compact_profile(input.response_profile)
-    {
+    // Structural scope and custom budgets are not served by this slice.
+    if input.scope.is_some() || input.budget.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let entry_point_policy = match input.entry_point_policy {
@@ -4370,24 +4508,27 @@ where
 async fn execute_architecture_overview<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
+    shaping: ResponseShaping,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: ArchitectureOverviewInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
+    let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_architecture_overview(input, unsupported)?;
     if explain_only {
         let output = explain_architecture_overview(port, request, cancellation).await?;
-        return serialize_success(output);
+        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
     let future = port.architecture_overview(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_architecture_overview(response, &expected)?;
-    serialize_success(output)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping)
 }
 
 fn normalize_architecture_overview(
@@ -4395,14 +4536,10 @@ fn normalize_architecture_overview(
     unsupported: &PublicError,
 ) -> Result<ArchitectureOverviewPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Structural scope, explicit detail levels, custom budgets, and non-compact
-    // profiles are not served by this slice. The base file-granularity model is
-    // always returned; only the hotspot derived view is honored.
-    if input.scope.is_some()
-        || input.detail.is_some()
-        || input.budget.is_some()
-        || !is_compact_profile(input.response_profile)
-    {
+    // Structural scope, explicit detail levels, and custom budgets are not
+    // served by this slice. The base file-granularity model is always returned;
+    // only the hotspot derived view is honored.
+    if input.scope.is_some() || input.detail.is_some() || input.budget.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let mut views = Vec::new();
@@ -4556,24 +4693,27 @@ where
 async fn execute_tests_select<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
+    shaping: ResponseShaping,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: TestsSelectInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
+    let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_tests_select(input, unsupported)?;
     if explain_only {
         let output = explain_tests_select(port, request, cancellation).await?;
-        return serialize_success(output);
+        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
     let future = port.tests_select(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_tests_select(response, &expected)?;
-    serialize_success(output)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping)
 }
 
 fn normalize_tests_select(
@@ -4581,13 +4721,9 @@ fn normalize_tests_select(
     unsupported: &PublicError,
 ) -> Result<TestsSelectPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Custom budgets, execution budgets, framework filters, and non-compact
-    // profiles are not served by this slice.
-    if input.budget.is_some()
-        || input.execution_budget.is_some()
-        || input.frameworks.is_some()
-        || !is_compact_profile(input.profile)
-    {
+    // Custom budgets, execution budgets, and framework filters are not served
+    // by this slice.
+    if input.budget.is_some() || input.execution_budget.is_some() || input.frameworks.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     // Only explicit symbol seeds are served; path, change, and build-target
@@ -4736,24 +4872,27 @@ where
 async fn execute_change_impact<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
+    shaping: ResponseShaping,
     cancellation: RequestCancellation,
     unsupported: &PublicError,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: ChangeImpactInput = decode_input(arguments)?;
     let explain_only = input.explain == Some(true);
+    let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
     let request = normalize_change_impact(input, unsupported)?;
     if explain_only {
         let output = explain_change_impact(port, request, cancellation).await?;
-        return serialize_success(output);
+        return serialize_profiled_read_success(output, response_profile, started_at, shaping);
     }
     let expected = request.clone();
     let future = port.change_impact(request, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_change_impact(response, &expected)?;
-    serialize_success(output)
+    serialize_profiled_read_success(output, response_profile, started_at, shaping)
 }
 
 fn normalize_change_impact(
@@ -4761,9 +4900,8 @@ fn normalize_change_impact(
     unsupported: &PublicError,
 ) -> Result<ChangeImpactPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Scope bounding, custom budgets, and non-compact profiles are not served by
-    // this slice.
-    if input.scope.is_some() || input.budget.is_some() || !is_compact_profile(input.profile) {
+    // Scope bounding and custom budgets are not served by this slice.
+    if input.scope.is_some() || input.budget.is_some() {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     // Working-tree and revision-range changes require a git diff this slice does
@@ -4928,8 +5066,10 @@ async fn execute_plan_change<P>(
 where
     P: FirstSliceClientPort,
 {
+    let started_at = Instant::now();
     let input: PlanChangeInput = decode_input(arguments)?;
-    let deadline = Instant::now()
+    let response_profile = input.profile.unwrap_or(ResponseProfile::Compact);
+    let deadline = started_at
         .checked_add(Duration::from_millis(30_000))
         .ok_or_else(|| internal(ToolExecutionFailure::Executor))?;
     let adapter = Arc::new(McpAgentToolPort {
@@ -4945,7 +5085,12 @@ where
         .execute(adapter, input, cancellation, deadline)
         .await
         .map_err(|error| map_plan_change_service_error(error, unsupported))?;
-    serialize_success(output)
+    serialize_profiled_read_success(
+        output,
+        response_profile,
+        started_at,
+        ResponseShaping::Public,
+    )
 }
 
 fn map_plan_change_service_error(
@@ -5129,8 +5274,8 @@ fn normalize_history_compare(
     unsupported: &PublicError,
 ) -> Result<HistoryComparePortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Scope bounding, unchanged-context inclusion, custom budgets, and
-    // non-compact profiles are not served by this slice.
+    // Scope bounding, unchanged-context inclusion, custom budgets, and expanded
+    // profiles are not served by this slice.
     if input.scope.is_some()
         || input.include_unchanged_context == Some(true)
         || input.budget.is_some()
@@ -5591,7 +5736,6 @@ fn normalize_code_locate(
         || input.languages.is_some()
         || input.related_to.is_some()
         || input.min_confidence.is_some()
-        || !is_compact_profile(input.response_profile)
         || budget_has_unsupported_locate_limits(input.budget.as_ref())
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
@@ -5622,7 +5766,6 @@ fn normalize_symbol_explain(
         || input.relation_sample_limit.is_some()
         || input.source_preview_lines.is_some()
         || input.budget.is_some()
-        || !is_compact_profile(input.response_profile)
         || matches!(input.include_provenance, Some(ProvenanceLevel::Full))
     {
         return Err(ToolExecutionError::new(unsupported.clone()));
@@ -6571,6 +6714,36 @@ where
     T: Serialize,
 {
     serialize_measured_success(output, started_at, |output| &mut output.usage)
+}
+
+fn serialize_profiled_read_success<T>(
+    mut output: ReadEnvelope<T>,
+    profile: ResponseProfile,
+    started_at: Instant,
+    shaping: ResponseShaping,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    T: Serialize + rootlight_agent::response_profile::ProfileShape,
+{
+    match shaping {
+        ResponseShaping::Public => {
+            rootlight_agent::response_profile::shape_read_envelope(&mut output, profile);
+            serialize_measured_read_success(output, started_at)
+        }
+        ResponseShaping::CanonicalInternal => serialize_success(output),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseShaping {
+    Public,
+    CanonicalInternal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CursorPresentation {
+    shaping: ResponseShaping,
+    exposure_profile: ExposureProfile,
 }
 
 fn serialize_measured_success<T, F>(

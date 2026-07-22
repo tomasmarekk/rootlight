@@ -707,6 +707,15 @@ fn decode<T: DeserializeOwned>(output: Map<String, Value>) -> T {
     serde_json::from_value(Value::Object(output)).expect("mapped output satisfies its wire type")
 }
 
+fn normalize_measured_usage(output: &mut Map<String, Value>) {
+    let Some(Value::Object(usage)) = output.get_mut("usage") else {
+        return;
+    };
+    for field in ["wall_time_ms", "json_bytes", "estimated_tokens"] {
+        usage.insert(field.to_owned(), Value::from(0));
+    }
+}
+
 fn repository() -> RepositoryId {
     RepositoryId::from_bytes([1; 16])
 }
@@ -1186,16 +1195,30 @@ fn pagination_cursor_context(
         VerticalTool::CodeLocate => {
             let input: CodeLocateInput =
                 decode_input(arguments).expect("code locate fixture decodes");
+            let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
             let request =
                 normalize_code_locate(input, &unsupported).expect("code locate fixture normalizes");
-            code_locate_cursor_context(&request, generation(), exposure_profile, key_id)
+            code_locate_cursor_context(
+                &request,
+                generation(),
+                exposure_profile,
+                response_profile,
+                key_id,
+            )
         }
         VerticalTool::SymbolRelationships => {
             let input: SymbolRelationshipsInput =
                 decode_input(arguments).expect("relationships fixture decodes");
+            let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
             let request = normalize_symbol_relationships(input, &unsupported)
                 .expect("relationships fixture normalizes");
-            symbol_relationships_cursor_context(&request, generation(), exposure_profile, key_id)
+            symbol_relationships_cursor_context(
+                &request,
+                generation(),
+                exposure_profile,
+                response_profile,
+                key_id,
+            )
         }
         VerticalTool::QueryAdvanced => {
             let input: QueryAdvancedInput =
@@ -1326,7 +1349,7 @@ async fn repository_read_cursors_bind_every_cross_tool_execution_dimension() {
             ),
             _ => unreachable!("tool set is closed above"),
         };
-        let cases = [
+        let mut cases = vec![
             (
                 "exposure profile",
                 with_argument(base.clone(), "cursor", json!(valid_cursor.clone())),
@@ -1367,10 +1390,24 @@ async fn repository_read_cursors_bind_every_cross_tool_execution_dimension() {
             ),
             (
                 "stale physical plan",
-                with_argument(base, "cursor", json!(stale_plan_cursor)),
+                with_argument(base.clone(), "cursor", json!(stale_plan_cursor)),
                 ExposureProfile::Developer,
             ),
         ];
+        if matches!(
+            tool,
+            VerticalTool::CodeLocate | VerticalTool::SymbolRelationships
+        ) {
+            cases.push((
+                "response profile",
+                with_argument(
+                    with_argument(base, "response_profile", json!("standard")),
+                    "cursor",
+                    json!(valid_cursor),
+                ),
+                ExposureProfile::Developer,
+            ));
+        }
 
         for (dimension, arguments, exposure_profile) in cases {
             let harness = Harness::with_cursor_key(pagination_failure(tool), KEY_MATERIAL);
@@ -2100,16 +2137,18 @@ async fn maps_code_locate_with_trust_generation_and_deterministic_output() {
         "budget": {"max_results": 5},
         "response_profile": "compact"
     });
-    let first = execute(
+    let mut first = execute(
         &harness.executor,
         VerticalTool::CodeLocate,
         arguments.clone(),
     )
     .await
     .expect("first locate maps");
-    let second = execute(&harness.executor, VerticalTool::CodeLocate, arguments)
+    let mut second = execute(&harness.executor, VerticalTool::CodeLocate, arguments)
         .await
         .expect("second locate maps");
+    normalize_measured_usage(&mut first);
+    normalize_measured_usage(&mut second);
     assert_eq!(first, second);
 
     let output: CodeLocateOutput = decode(first);
@@ -2129,7 +2168,7 @@ async fn maps_code_locate_with_trust_generation_and_deterministic_output() {
         TrustClassification::UntrustedRepositoryData
     );
     assert_eq!(output.trust, TrustClassification::UntrustedRepositoryData);
-    assert_eq!(output.usage.wall_time_ms, 2);
+    assert_eq!(output.usage.wall_time_ms, 0);
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 2);
     let calls = harness
         .calls
@@ -2916,6 +2955,53 @@ async fn query_batch_rejects_unproven_restricted_bindings_before_dependencies() 
         0,
         "dependency and identity calls must not start"
     );
+}
+
+#[tokio::test]
+async fn query_batch_rejects_legacy_child_profile_overrides_before_identity_resolution() {
+    for (tool, arguments) in [
+        (
+            "change.impact",
+            json!({
+                "change": {"symbol_ids": [symbol()]},
+                "profile": "standard"
+            }),
+        ),
+        (
+            "tests.select",
+            json!({
+                "seeds": {"symbols": [symbol()]},
+                "profile": "evidence"
+            }),
+        ),
+    ] {
+        let harness = batch_harness();
+        let error = execute(
+            &harness.executor,
+            VerticalTool::QueryBatch,
+            json!({
+                "repository": {"repository_id": repository()},
+                "operations": [{
+                    "id": "profile_override",
+                    "tool": tool,
+                    "arguments": arguments
+                }]
+            }),
+        )
+        .await
+        .expect_err("a child response-profile override rejects the batch");
+
+        assert_eq!(
+            error.public_error().map(PublicError::code),
+            Some(ErrorCode::InvalidArgument),
+            "{tool} returned the wrong child-profile error"
+        );
+        assert_eq!(
+            harness.call_count.load(Ordering::Relaxed),
+            0,
+            "{tool} resolved batch identity before rejecting its child profile"
+        );
+    }
 }
 
 #[tokio::test]
@@ -4697,13 +4783,7 @@ async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
     assert_eq!(candidate.symbol_id, missing_symbol());
     assert_eq!(candidate.classification, DeadClassification::ProvenDead);
     assert_eq!(candidate.confidence, 1_000);
-    assert_eq!(
-        candidate.why,
-        vec![
-            "no_incoming_references".to_owned(),
-            "unreachable_from_entry_points".to_owned()
-        ]
-    );
+    assert_eq!(candidate.why, vec!["no_incoming_references".to_owned()]);
     assert_eq!(
         candidate.suppressions_checked,
         vec!["entry_point".to_owned()]
@@ -4918,14 +4998,11 @@ async fn tests_select_maps_ranked_tests_strategy_and_gaps() {
     let test = &output.data.tests[0];
     assert_eq!(test.test_id, "test-1");
     assert_eq!(test.kind, TestKind::Unit);
-    assert_eq!(test.path.as_deref(), Some("src/a.rs"));
+    assert_eq!(test.path, None);
     assert_eq!(test.score, 970);
-    assert_eq!(
-        test.why,
-        vec!["direct_test_edge".to_owned(), "via:calls".to_owned()]
-    );
+    assert_eq!(test.why, vec!["direct_test_edge".to_owned()]);
     assert_eq!(test.estimated_cost_ms, None);
-    assert_eq!(test.command_hint.as_deref(), Some("test:unit"));
+    assert_eq!(test.command_hint, None);
     assert!(output.data.coverage_strategy.direct_edges);
     assert!(!output.data.coverage_strategy.transitive_signals);
     assert!(!output.data.coverage_strategy.history_signals);
@@ -5028,7 +5105,7 @@ async fn change_impact_maps_resolved_changes_impact_groups_and_risk() {
     assert_eq!(change.symbol_id, RequiredNullable(Some(symbol())));
     assert_eq!(change.file_id, RequiredNullable(Some(file())));
     assert_eq!(change.classification, ChangeClassification::Body);
-    assert_eq!(change.kind, Some(IrEntityKind::Function));
+    assert_eq!(change.kind, None);
     assert_eq!(output.data.impacted.len(), 1);
     let group = &output.data.impacted[0];
     assert_eq!(group.source_index, 0);
@@ -6017,10 +6094,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
             json!({"repository": {"repository_id": repository()}, "query": "x", "budget": {"evidence_level": "compact"}}),
         ),
         (
-            VerticalTool::CodeLocate,
-            json!({"repository": {"repository_id": repository()}, "query": "x", "response_profile": "standard"}),
-        ),
-        (
             VerticalTool::SymbolExplain,
             json!({"repository": {"alias": "fixture"}, "symbol_ids": [symbol()]}),
         ),
@@ -6043,10 +6116,6 @@ async fn rejects_every_currently_unsupported_valid_option_before_the_port() {
         (
             VerticalTool::SymbolExplain,
             json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()], "budget": {}}),
-        ),
-        (
-            VerticalTool::SymbolExplain,
-            json!({"repository": {"repository_id": repository()}, "symbol_ids": [symbol()], "response_profile": "evidence"}),
         ),
         (
             VerticalTool::SourceRead,
@@ -9170,10 +9239,8 @@ async fn accepted_effect_defaults_match_omitted_values() {
             )
         });
         let mut omitted = omitted;
-        if matches!(case.tool, VerticalTool::RepoList | VerticalTool::RepoStatus) {
-            explicit.remove("usage");
-            omitted.remove("usage");
-        }
+        normalize_measured_usage(&mut explicit);
+        normalize_measured_usage(&mut omitted);
         assert_eq!(
             explicit,
             omitted,
@@ -9323,6 +9390,72 @@ async fn every_explain_oracle_returns_a_plan_without_a_subtool_call() {
             "{} explain invoked a subtool",
             tool.name()
         );
+    }
+}
+
+#[tokio::test]
+async fn expanded_response_profiles_execute_with_exact_public_accounting() {
+    let expanded_tools = [
+        VerticalTool::CodeLocate,
+        VerticalTool::SymbolExplain,
+        VerticalTool::SymbolRelationships,
+        VerticalTool::FlowTrace,
+        VerticalTool::ChangeImpact,
+        VerticalTool::TestsSelect,
+        VerticalTool::ArchitectureOverview,
+        VerticalTool::ArchitectureCycles,
+        VerticalTool::CodeDead,
+        VerticalTool::PlanChange,
+    ];
+
+    for (tool, arguments) in accepted_explain_cases()
+        .into_iter()
+        .filter(|(tool, _)| expanded_tools.contains(tool))
+    {
+        for profile in ["standard", "evidence"] {
+            let Value::Object(mut arguments) = arguments.clone() else {
+                panic!("accepted explain arguments are objects");
+            };
+            let field = if matches!(
+                tool,
+                VerticalTool::ChangeImpact | VerticalTool::TestsSelect | VerticalTool::PlanChange
+            ) {
+                "profile"
+            } else {
+                "response_profile"
+            };
+            arguments.insert(field.to_owned(), json!(profile));
+
+            let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(
+                repository_status_response(),
+            )));
+            let output = execute(&harness.executor, tool, Value::Object(arguments))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{} {profile} profile failed: {error:?}", tool.name())
+                });
+            let serialized = serde_json::to_vec(&Value::Object(output.clone()))
+                .expect("profiled response serializes");
+
+            assert_eq!(
+                output["usage"]["json_bytes"],
+                u64::try_from(serialized.len()).expect("test response size fits u64"),
+                "{} {profile} byte accounting drifted",
+                tool.name()
+            );
+            assert_eq!(
+                output["usage"]["estimated_tokens"],
+                rootlight_mcp_contract::accounting::estimate_tokens(serialized.len()),
+                "{} {profile} token accounting drifted",
+                tool.name()
+            );
+            assert_eq!(
+                harness.call_count.load(Ordering::Relaxed),
+                1,
+                "{} {profile} explain performed more than its metadata lookup",
+                tool.name()
+            );
+        }
     }
 }
 

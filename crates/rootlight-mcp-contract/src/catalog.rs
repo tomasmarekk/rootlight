@@ -149,13 +149,13 @@ impl McpTool {
                 "Read or request cancellation of one known long-running Rootlight operation."
             }
             Self::CodeLocate => {
-                "Use bounded exact-identifier and lexical matching in one selected generation; path, structural, semantic, documentation, and continuation modes are unsupported."
+                "Use bounded exact-identifier and lexical matching in one selected generation with authenticated continuation; path, structural, semantic, and documentation modes are unsupported."
             }
             Self::SymbolExplain => {
-                "Return bounded compact semantic evidence for explicit stable symbol identifiers; custom sections and full provenance are unsupported."
+                "Return bounded profiled semantic evidence for explicit stable symbol identifiers; custom sections and full provenance are unsupported."
             }
             Self::SymbolRelationships => {
-                "Return bounded typed relationships around explicit stable symbol identifiers; custom scope, candidate projection, and continuation are unsupported."
+                "Return bounded typed relationships around explicit stable symbol identifiers with authenticated continuation; custom scope and candidate projection are unsupported."
             }
             Self::FlowTrace => {
                 "Use bounded symbol relation path tracing; route, service, database, and cross-repository endpoints are unsupported."
@@ -170,16 +170,16 @@ impl McpTool {
                 "Use a bounded file-granularity architecture map with optional hotspots; module, package, service, data, ownership, community, and build views are unsupported."
             }
             Self::ArchitectureCycles => {
-                "Use bounded cycle detection in a selected relation projection; custom scope, ranking, budgets, and expanded profiles are unsupported."
+                "Use bounded cycle detection in a selected relation projection; custom scope, ranking, and budgets are unsupported."
             }
             Self::CodeDead => {
-                "Return bounded dead-code candidates with entry-point and blind-spot caveats; custom scope, budgets, and expanded profiles are unsupported."
+                "Return bounded dead-code candidates with entry-point and blind-spot caveats; custom scope and budgets are unsupported."
             }
             Self::HistoryCompare => {
                 "Use bounded structural comparison of two explicit retained generation identifiers; Git revision selectors are unsupported."
             }
             Self::PlanChange => {
-                "Use bounded change planning from an explicit objective and targets; change-context resolution, user constraints, budgets, and expanded profiles are unsupported."
+                "Use bounded change planning from an explicit objective and targets; change-context resolution, user constraints, and budgets are unsupported."
             }
             Self::ContextPack => {
                 "Use bounded evidence assembly from explicit symbol or file identifiers under a token budget; path, route, change, located-result, and plan seeds are unsupported."
