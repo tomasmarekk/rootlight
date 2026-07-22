@@ -2679,14 +2679,49 @@ impl Client {
         maximum_results: u32,
         page_offset: u64,
     ) -> Result<CodeLocate, ClientError> {
-        match self.request(build_code_locate_request(
+        self.code_locate_with_options(
             repository,
             generation,
             query,
             mode,
             maximum_results,
             page_offset,
-        )?)? {
+            RequestOptions::new(),
+        )
+    }
+
+    /// Executes one bounded generation-pinned lexical lookup with explicit
+    /// transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query or budget bounds, unavailable
+    /// protocol support, transport failure, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded lookup or transport dimension"
+    )]
+    pub fn code_locate_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query: &str,
+        mode: LocateMode,
+        maximum_results: u32,
+        page_offset: u64,
+        options: RequestOptions,
+    ) -> Result<CodeLocate, ClientError> {
+        match self.request_with_options(
+            build_code_locate_request(
+                repository,
+                generation,
+                query,
+                mode,
+                maximum_results,
+                page_offset,
+            )?,
+            options,
+        )? {
             daemon::response_envelope::Response::CodeLocate(response) => parse_code_locate(
                 response,
                 repository,
@@ -2725,8 +2760,47 @@ impl Client {
         page_offset: u64,
         timeout: RequestTimeout,
     ) -> Result<CodeLocate, ClientError> {
+        self.code_locate_async_with_options(
+            repository,
+            generation,
+            query,
+            mode,
+            maximum_results,
+            page_offset,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously executes one bounded lexical lookup with explicit
+    /// transport options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query or budget bounds, unavailable
+    /// protocol support, transport failure, timeout, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded asynchronous lookup or transport dimension"
+    )]
+    pub async fn code_locate_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        query: &str,
+        mode: LocateMode,
+        maximum_results: u32,
+        page_offset: u64,
+        options: RequestOptions,
+    ) -> Result<CodeLocate, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_code_locate_request(
                     repository,
                     generation,
@@ -2735,7 +2809,7 @@ impl Client {
                     maximum_results,
                     page_offset,
                 )?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -2762,9 +2836,26 @@ impl Client {
         generation: GenerationSelector,
         symbols: &[SymbolId],
     ) -> Result<SymbolExplain, ClientError> {
-        match self.request(build_symbol_explain_request(
-            repository, generation, symbols,
-        )?)? {
+        self.symbol_explain_with_options(repository, generation, symbols, RequestOptions::new())
+    }
+
+    /// Explains a bounded set of symbols with explicit transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid symbol or budget bounds, unavailable
+    /// protocol support, transport failure, or a malformed response.
+    pub fn symbol_explain_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        symbols: &[SymbolId],
+        options: RequestOptions,
+    ) -> Result<SymbolExplain, ClientError> {
+        match self.request_with_options(
+            build_symbol_explain_request(repository, generation, symbols)?,
+            options,
+        )? {
             daemon::response_envelope::Response::SymbolExplain(response) => {
                 parse_symbol_explain(response, repository, generation, symbols)
             }
@@ -2792,10 +2883,38 @@ impl Client {
         symbols: &[SymbolId],
         timeout: RequestTimeout,
     ) -> Result<SymbolExplain, ClientError> {
+        self.symbol_explain_async_with_options(
+            repository,
+            generation,
+            symbols,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously explains symbols with explicit transport options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid symbol or budget bounds, unavailable
+    /// protocol support, transport failure, timeout, or a malformed response.
+    pub async fn symbol_explain_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        symbols: &[SymbolId],
+        options: RequestOptions,
+    ) -> Result<SymbolExplain, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_symbol_explain_request(repository, generation, symbols)?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -2818,9 +2937,26 @@ impl Client {
         generation: GenerationSelector,
         references: &[SourceReference],
     ) -> Result<SourceRead, ClientError> {
-        match self.request(build_source_read_request(
-            repository, generation, references,
-        )?)? {
+        self.source_read_with_options(repository, generation, references, RequestOptions::new())
+    }
+
+    /// Reads immutable source selections with explicit transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid reference or budget bounds,
+    /// unavailable protocol support, transport failure, or a malformed response.
+    pub fn source_read_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        references: &[SourceReference],
+        options: RequestOptions,
+    ) -> Result<SourceRead, ClientError> {
+        match self.request_with_options(
+            build_source_read_request(repository, generation, references)?,
+            options,
+        )? {
             daemon::response_envelope::Response::SourceRead(response) => {
                 parse_source_read(response, repository, generation, references)
             }
@@ -2848,10 +2984,40 @@ impl Client {
         references: &[SourceReference],
         timeout: RequestTimeout,
     ) -> Result<SourceRead, ClientError> {
+        self.source_read_async_with_options(
+            repository,
+            generation,
+            references,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously reads immutable source selections with explicit transport
+    /// options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid reference or budget bounds,
+    /// unavailable protocol support, transport failure, timeout, or a malformed
+    /// response.
+    pub async fn source_read_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        references: &[SourceReference],
+        options: RequestOptions,
+    ) -> Result<SourceRead, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_source_read_request(repository, generation, references)?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -3075,7 +3241,7 @@ impl Client {
         max_results: Option<u16>,
         page_offset: u64,
     ) -> Result<SymbolRelationships, ClientError> {
-        match self.request(build_symbol_relationships_request(
+        self.symbol_relationships_with_options(
             repository,
             generation,
             seeds,
@@ -3084,7 +3250,45 @@ impl Client {
             min_confidence,
             max_results,
             page_offset,
-        )?)? {
+            RequestOptions::new(),
+        )
+    }
+
+    /// Expands bounded relation neighborhoods with explicit transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query or budget bounds, unavailable
+    /// protocol support, transport failure, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded relationships query or transport dimension"
+    )]
+    pub fn symbol_relationships_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: &[SymbolId],
+        relations: &[String],
+        direction: Option<&str>,
+        min_confidence: Option<u16>,
+        max_results: Option<u16>,
+        page_offset: u64,
+        options: RequestOptions,
+    ) -> Result<SymbolRelationships, ClientError> {
+        match self.request_with_options(
+            build_symbol_relationships_request(
+                repository,
+                generation,
+                seeds,
+                relations,
+                direction,
+                min_confidence,
+                max_results,
+                page_offset,
+            )?,
+            options,
+        )? {
             daemon::response_envelope::Response::SymbolRelationships(response) => {
                 parse_symbol_relationships(
                     response,
@@ -3129,8 +3333,51 @@ impl Client {
         page_offset: u64,
         timeout: RequestTimeout,
     ) -> Result<SymbolRelationships, ClientError> {
+        self.symbol_relationships_async_with_options(
+            repository,
+            generation,
+            seeds,
+            relations,
+            direction,
+            min_confidence,
+            max_results,
+            page_offset,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously expands relation neighborhoods with explicit transport
+    /// options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query or budget bounds, unavailable
+    /// protocol support, transport failure, timeout, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded relationships query or transport dimension"
+    )]
+    pub async fn symbol_relationships_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: &[SymbolId],
+        relations: &[String],
+        direction: Option<&str>,
+        min_confidence: Option<u16>,
+        max_results: Option<u16>,
+        page_offset: u64,
+        options: RequestOptions,
+    ) -> Result<SymbolRelationships, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_symbol_relationships_request(
                     repository,
                     generation,
@@ -3141,7 +3388,7 @@ impl Client {
                     max_results,
                     page_offset,
                 )?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -3187,7 +3434,7 @@ impl Client {
         max_paths: Option<u16>,
         min_confidence: Option<u16>,
     ) -> Result<FlowTrace, ClientError> {
-        match self.request(build_flow_trace_request(
+        self.flow_trace_with_options(
             repository,
             generation,
             from,
@@ -3197,7 +3444,47 @@ impl Client {
             max_depth,
             max_paths,
             min_confidence,
-        )?)? {
+            RequestOptions::new(),
+        )
+    }
+
+    /// Traces bounded directed paths with explicit transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid trace or budget bounds, unavailable
+    /// protocol support, transport failure, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded flow trace or transport dimension"
+    )]
+    pub fn flow_trace_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        relations: &[String],
+        direction: Option<&str>,
+        max_depth: Option<u8>,
+        max_paths: Option<u16>,
+        min_confidence: Option<u16>,
+        options: RequestOptions,
+    ) -> Result<FlowTrace, ClientError> {
+        match self.request_with_options(
+            build_flow_trace_request(
+                repository,
+                generation,
+                from,
+                to,
+                relations,
+                direction,
+                max_depth,
+                max_paths,
+                min_confidence,
+            )?,
+            options,
+        )? {
             daemon::response_envelope::Response::FlowTrace(response) => {
                 parse_flow_trace(response, repository, generation, from, to)
             }
@@ -3236,8 +3523,52 @@ impl Client {
         min_confidence: Option<u16>,
         timeout: RequestTimeout,
     ) -> Result<FlowTrace, ClientError> {
+        self.flow_trace_async_with_options(
+            repository,
+            generation,
+            from,
+            to,
+            relations,
+            direction,
+            max_depth,
+            max_paths,
+            min_confidence,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously traces bounded paths with explicit transport options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid trace or budget bounds, unavailable
+    /// protocol support, transport failure, timeout, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded flow trace or transport dimension"
+    )]
+    pub async fn flow_trace_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        from: SymbolId,
+        to: Option<SymbolId>,
+        relations: &[String],
+        direction: Option<&str>,
+        max_depth: Option<u8>,
+        max_paths: Option<u16>,
+        min_confidence: Option<u16>,
+        options: RequestOptions,
+    ) -> Result<FlowTrace, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_flow_trace_request(
                     repository,
                     generation,
@@ -3249,7 +3580,7 @@ impl Client {
                     max_paths,
                     min_confidence,
                 )?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -3276,14 +3607,48 @@ impl Client {
         max_cycles: Option<u16>,
         include_self_cycles: Option<bool>,
     ) -> Result<ArchitectureCycles, ClientError> {
-        match self.request(build_architecture_cycles_request(
+        self.architecture_cycles_with_options(
             repository,
             generation,
             relations,
             min_size,
             max_cycles,
             include_self_cycles,
-        )?)? {
+            RequestOptions::new(),
+        )
+    }
+
+    /// Detects architecture cycles with explicit transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid cycle or budget bounds, unavailable
+    /// protocol support, transport failure, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded architecture cycles or transport dimension"
+    )]
+    pub fn architecture_cycles_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        relations: &[String],
+        min_size: Option<u8>,
+        max_cycles: Option<u16>,
+        include_self_cycles: Option<bool>,
+        options: RequestOptions,
+    ) -> Result<ArchitectureCycles, ClientError> {
+        match self.request_with_options(
+            build_architecture_cycles_request(
+                repository,
+                generation,
+                relations,
+                min_size,
+                max_cycles,
+                include_self_cycles,
+            )?,
+            options,
+        )? {
             daemon::response_envelope::Response::ArchitectureCycles(response) => {
                 parse_architecture_cycles(response, repository, generation, relations)
             }
@@ -3319,8 +3684,47 @@ impl Client {
         include_self_cycles: Option<bool>,
         timeout: RequestTimeout,
     ) -> Result<ArchitectureCycles, ClientError> {
+        self.architecture_cycles_async_with_options(
+            repository,
+            generation,
+            relations,
+            min_size,
+            max_cycles,
+            include_self_cycles,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously detects architecture cycles with explicit transport
+    /// options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid cycle or budget bounds, unavailable
+    /// protocol support, transport failure, timeout, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded architecture cycles or transport dimension"
+    )]
+    pub async fn architecture_cycles_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        relations: &[String],
+        min_size: Option<u8>,
+        max_cycles: Option<u16>,
+        include_self_cycles: Option<bool>,
+        options: RequestOptions,
+    ) -> Result<ArchitectureCycles, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_architecture_cycles_request(
                     repository,
                     generation,
@@ -3329,7 +3733,7 @@ impl Client {
                     max_cycles,
                     include_self_cycles,
                 )?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -3361,7 +3765,7 @@ impl Client {
         min_confidence: Option<u16>,
         max_candidates: Option<u16>,
     ) -> Result<CodeDead, ClientError> {
-        match self.request(build_code_dead_request(
+        self.code_dead_with_options(
             repository,
             generation,
             entry_point_policy,
@@ -3369,7 +3773,43 @@ impl Client {
             include_tests,
             min_confidence,
             max_candidates,
-        )?)? {
+            RequestOptions::new(),
+        )
+    }
+
+    /// Detects dead-code candidates with explicit transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query or budget bounds, unavailable
+    /// protocol support, transport failure, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded code dead or transport dimension"
+    )]
+    pub fn code_dead_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        entry_point_policy: Option<&str>,
+        include_exported: Option<bool>,
+        include_tests: Option<bool>,
+        min_confidence: Option<u16>,
+        max_candidates: Option<u16>,
+        options: RequestOptions,
+    ) -> Result<CodeDead, ClientError> {
+        match self.request_with_options(
+            build_code_dead_request(
+                repository,
+                generation,
+                entry_point_policy,
+                include_exported,
+                include_tests,
+                min_confidence,
+                max_candidates,
+            )?,
+            options,
+        )? {
             daemon::response_envelope::Response::CodeDead(response) => {
                 parse_code_dead(response, repository, generation)
             }
@@ -3406,8 +3846,49 @@ impl Client {
         max_candidates: Option<u16>,
         timeout: RequestTimeout,
     ) -> Result<CodeDead, ClientError> {
+        self.code_dead_async_with_options(
+            repository,
+            generation,
+            entry_point_policy,
+            include_exported,
+            include_tests,
+            min_confidence,
+            max_candidates,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously detects dead-code candidates with explicit transport
+    /// options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query or budget bounds, unavailable
+    /// protocol support, transport failure, timeout, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded code dead or transport dimension"
+    )]
+    pub async fn code_dead_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        entry_point_policy: Option<&str>,
+        include_exported: Option<bool>,
+        include_tests: Option<bool>,
+        min_confidence: Option<u16>,
+        max_candidates: Option<u16>,
+        options: RequestOptions,
+    ) -> Result<CodeDead, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_code_dead_request(
                     repository,
                     generation,
@@ -3417,7 +3898,7 @@ impl Client {
                     min_confidence,
                     max_candidates,
                 )?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -3445,14 +3926,48 @@ impl Client {
         include_edges: Option<bool>,
         min_confidence: Option<u16>,
     ) -> Result<ArchitectureOverview, ClientError> {
-        match self.request(build_architecture_overview_request(
+        self.architecture_overview_with_options(
             repository,
             generation,
             views,
             max_components,
             include_edges,
             min_confidence,
-        )?)? {
+            RequestOptions::new(),
+        )
+    }
+
+    /// Aggregates an architecture overview with explicit transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query or budget bounds, unavailable
+    /// protocol support, transport failure, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded architecture overview or transport dimension"
+    )]
+    pub fn architecture_overview_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        views: &[String],
+        max_components: Option<u16>,
+        include_edges: Option<bool>,
+        min_confidence: Option<u16>,
+        options: RequestOptions,
+    ) -> Result<ArchitectureOverview, ClientError> {
+        match self.request_with_options(
+            build_architecture_overview_request(
+                repository,
+                generation,
+                views,
+                max_components,
+                include_edges,
+                min_confidence,
+            )?,
+            options,
+        )? {
             daemon::response_envelope::Response::ArchitectureOverview(response) => {
                 parse_architecture_overview(response, repository, generation)
             }
@@ -3489,8 +4004,47 @@ impl Client {
         min_confidence: Option<u16>,
         timeout: RequestTimeout,
     ) -> Result<ArchitectureOverview, ClientError> {
+        self.architecture_overview_async_with_options(
+            repository,
+            generation,
+            views,
+            max_components,
+            include_edges,
+            min_confidence,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously aggregates an architecture overview with explicit
+    /// transport options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query or budget bounds, unavailable
+    /// protocol support, transport failure, timeout, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded architecture overview or transport dimension"
+    )]
+    pub async fn architecture_overview_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        views: &[String],
+        max_components: Option<u16>,
+        include_edges: Option<bool>,
+        min_confidence: Option<u16>,
+        options: RequestOptions,
+    ) -> Result<ArchitectureOverview, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_architecture_overview_request(
                     repository,
                     generation,
@@ -3499,7 +4053,7 @@ impl Client {
                     include_edges,
                     min_confidence,
                 )?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -3526,14 +4080,48 @@ impl Client {
         max_tests: Option<u16>,
         include_commands: Option<bool>,
     ) -> Result<TestsSelect, ClientError> {
-        match self.request(build_tests_select_request(
+        self.tests_select_with_options(
             repository,
             generation,
             seeds,
             test_kinds,
             max_tests,
             include_commands,
-        )?)? {
+            RequestOptions::new(),
+        )
+    }
+
+    /// Selects relevant tests with explicit transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query or budget bounds, unavailable
+    /// protocol support, transport failure, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded tests select or transport dimension"
+    )]
+    pub fn tests_select_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: &[SymbolId],
+        test_kinds: &[String],
+        max_tests: Option<u16>,
+        include_commands: Option<bool>,
+        options: RequestOptions,
+    ) -> Result<TestsSelect, ClientError> {
+        match self.request_with_options(
+            build_tests_select_request(
+                repository,
+                generation,
+                seeds,
+                test_kinds,
+                max_tests,
+                include_commands,
+            )?,
+            options,
+        )? {
             daemon::response_envelope::Response::TestsSelect(response) => {
                 parse_tests_select(response, repository, generation)
             }
@@ -3570,8 +4158,46 @@ impl Client {
         include_commands: Option<bool>,
         timeout: RequestTimeout,
     ) -> Result<TestsSelect, ClientError> {
+        self.tests_select_async_with_options(
+            repository,
+            generation,
+            seeds,
+            test_kinds,
+            max_tests,
+            include_commands,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously selects relevant tests with explicit transport options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid query or budget bounds, unavailable
+    /// protocol support, transport failure, timeout, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded tests select or transport dimension"
+    )]
+    pub async fn tests_select_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        seeds: &[SymbolId],
+        test_kinds: &[String],
+        max_tests: Option<u16>,
+        include_commands: Option<bool>,
+        options: RequestOptions,
+    ) -> Result<TestsSelect, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_tests_select_request(
                     repository,
                     generation,
@@ -3580,7 +4206,7 @@ impl Client {
                     max_tests,
                     include_commands,
                 )?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -3615,7 +4241,7 @@ impl Client {
         include_tests: Option<bool>,
         max_dependents: Option<u16>,
     ) -> Result<ChangeImpact, ClientError> {
-        match self.request(build_change_impact_request(
+        self.change_impact_with_options(
             repository,
             generation,
             changed_symbols,
@@ -3624,7 +4250,45 @@ impl Client {
             min_confidence,
             include_tests,
             max_dependents,
-        )?)? {
+            RequestOptions::new(),
+        )
+    }
+
+    /// Maps bounded change impact with explicit transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid change or budget bounds, unavailable
+    /// protocol support, transport failure, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded change impact or transport dimension"
+    )]
+    pub fn change_impact_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        changed_symbols: &[SymbolId],
+        changed_paths: &[String],
+        max_depth: Option<u8>,
+        min_confidence: Option<u16>,
+        include_tests: Option<bool>,
+        max_dependents: Option<u16>,
+        options: RequestOptions,
+    ) -> Result<ChangeImpact, ClientError> {
+        match self.request_with_options(
+            build_change_impact_request(
+                repository,
+                generation,
+                changed_symbols,
+                changed_paths,
+                max_depth,
+                min_confidence,
+                include_tests,
+                max_dependents,
+            )?,
+            options,
+        )? {
             daemon::response_envelope::Response::ChangeImpact(response) => {
                 parse_change_impact(response, repository, generation)
             }
@@ -3664,8 +4328,51 @@ impl Client {
         max_dependents: Option<u16>,
         timeout: RequestTimeout,
     ) -> Result<ChangeImpact, ClientError> {
+        self.change_impact_async_with_options(
+            repository,
+            generation,
+            changed_symbols,
+            changed_paths,
+            max_depth,
+            min_confidence,
+            include_tests,
+            max_dependents,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously maps bounded change impact with explicit transport
+    /// options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid change or budget bounds, unavailable
+    /// protocol support, transport failure, timeout, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded change impact or transport dimension"
+    )]
+    pub async fn change_impact_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        changed_symbols: &[SymbolId],
+        changed_paths: &[String],
+        max_depth: Option<u8>,
+        min_confidence: Option<u16>,
+        include_tests: Option<bool>,
+        max_dependents: Option<u16>,
+        options: RequestOptions,
+    ) -> Result<ChangeImpact, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_change_impact_request(
                     repository,
                     generation,
@@ -3676,7 +4383,7 @@ impl Client {
                     include_tests,
                     max_dependents,
                 )?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -3710,7 +4417,7 @@ impl Client {
         target_files: &[FileId],
         max_steps: Option<u8>,
     ) -> Result<PlanChange, ClientError> {
-        match self.request(build_plan_change_request(
+        self.plan_change_with_options(
             repository,
             generation,
             objective,
@@ -3718,7 +4425,43 @@ impl Client {
             target_symbols,
             target_files,
             max_steps,
-        )?)? {
+            RequestOptions::new(),
+        )
+    }
+
+    /// Builds a bounded change plan with explicit transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid plan or budget bounds, unavailable
+    /// protocol support, transport failure, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded plan change or transport dimension"
+    )]
+    pub fn plan_change_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        objective: &str,
+        objective_text: &str,
+        target_symbols: &[SymbolId],
+        target_files: &[FileId],
+        max_steps: Option<u8>,
+        options: RequestOptions,
+    ) -> Result<PlanChange, ClientError> {
+        match self.request_with_options(
+            build_plan_change_request(
+                repository,
+                generation,
+                objective,
+                objective_text,
+                target_symbols,
+                target_files,
+                max_steps,
+            )?,
+            options,
+        )? {
             daemon::response_envelope::Response::PlanChange(response) => {
                 parse_plan_change(response, repository, generation)
             }
@@ -3757,8 +4500,49 @@ impl Client {
         max_steps: Option<u8>,
         timeout: RequestTimeout,
     ) -> Result<PlanChange, ClientError> {
+        self.plan_change_async_with_options(
+            repository,
+            generation,
+            objective,
+            objective_text,
+            target_symbols,
+            target_files,
+            max_steps,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously builds a bounded change plan with explicit transport
+    /// options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid plan or budget bounds, unavailable
+    /// protocol support, transport failure, timeout, or a malformed response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded plan change or transport dimension"
+    )]
+    pub async fn plan_change_async_with_options(
+        &self,
+        repository: RepositoryId,
+        generation: GenerationSelector,
+        objective: &str,
+        objective_text: &str,
+        target_symbols: &[SymbolId],
+        target_files: &[FileId],
+        max_steps: Option<u8>,
+        options: RequestOptions,
+    ) -> Result<PlanChange, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_plan_change_request(
                     repository,
                     generation,
@@ -3768,7 +4552,7 @@ impl Client {
                     target_files,
                     max_steps,
                 )?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -3794,13 +4578,35 @@ impl Client {
         change_kinds: &[&str],
         max_results: Option<u16>,
     ) -> Result<HistoryCompare, ClientError> {
-        match self.request(build_history_compare_request(
+        self.history_compare_with_options(
             repository,
             base,
             head,
             change_kinds,
             max_results,
-        )?)? {
+            RequestOptions::new(),
+        )
+    }
+
+    /// Compares generations with explicit transport options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid comparison or budget bounds,
+    /// unavailable protocol support, transport failure, or a malformed response.
+    pub fn history_compare_with_options(
+        &self,
+        repository: RepositoryId,
+        base: GenerationId,
+        head: GenerationId,
+        change_kinds: &[&str],
+        max_results: Option<u16>,
+        options: RequestOptions,
+    ) -> Result<HistoryCompare, ClientError> {
+        match self.request_with_options(
+            build_history_compare_request(repository, base, head, change_kinds, max_results)?,
+            options,
+        )? {
             daemon::response_envelope::Response::HistoryCompare(response) => {
                 parse_history_compare(response, repository, head)
             }
@@ -3832,10 +4638,43 @@ impl Client {
         max_results: Option<u16>,
         timeout: RequestTimeout,
     ) -> Result<HistoryCompare, ClientError> {
+        self.history_compare_async_with_options(
+            repository,
+            base,
+            head,
+            change_kinds,
+            max_results,
+            RequestOptions::new().with_timeout(timeout),
+        )
+        .await
+    }
+
+    /// Asynchronously compares generations with explicit transport options.
+    ///
+    /// Dropping the returned future closes its one-request stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics if polled without Tokio's time or I/O drivers enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] for invalid comparison or budget bounds,
+    /// unavailable protocol support, transport failure, timeout, or a malformed
+    /// response.
+    pub async fn history_compare_async_with_options(
+        &self,
+        repository: RepositoryId,
+        base: GenerationId,
+        head: GenerationId,
+        change_kinds: &[&str],
+        max_results: Option<u16>,
+        options: RequestOptions,
+    ) -> Result<HistoryCompare, ClientError> {
         match self
-            .request_async(
+            .request_async_with_options(
                 build_history_compare_request(repository, base, head, change_kinds, max_results)?,
-                timeout,
+                options,
             )
             .await?
         {
@@ -9523,6 +10362,86 @@ mod tests {
             requests[4].request.as_ref(),
             Some(daemon::request_envelope::Request::SourceRead(request))
                 if request.references == vec![wire_source(&source)]
+        ));
+    }
+
+    #[tokio::test]
+    async fn analytical_request_options_transport_budget_and_preserve_legacy_absence() {
+        let (_temporary, endpoint) = async_test_endpoint("analytical-request-options");
+        let listener = AsyncLocalListener::bind(endpoint.clone()).expect("listener binds");
+        let instance_nonce = [12; 16];
+        let client = Client::new(endpoint, instance_nonce, [13; 16]);
+        let timeout =
+            RequestTimeout::new(Duration::from_secs(5)).expect("request timeout validates");
+        let budget =
+            EffectiveBudget::new(valid_effective_budget_limits()).expect("budget validates");
+        let options = RequestOptions::new()
+            .with_timeout(timeout)
+            .with_effective_budget(budget);
+        let symbol = SymbolId::from_bytes([5; 20]);
+        let source = test_source(4, 0, 3);
+
+        let server = tokio::spawn(serve_async_responses(
+            listener,
+            instance_nonce,
+            vec![
+                daemon::response_envelope::Response::CodeLocate(wire_code_locate(symbol, &source)),
+                daemon::response_envelope::Response::SourceRead(wire_source_read(&source)),
+                daemon::response_envelope::Response::SymbolExplain(wire_symbol_explain(
+                    symbol, &source,
+                )),
+            ],
+        ));
+
+        client
+            .code_locate_async_with_options(
+                test_repository(),
+                GenerationSelector::Active,
+                "answer",
+                LocateMode::Exact,
+                1,
+                0,
+                options,
+            )
+            .await
+            .expect("code locate with options succeeds");
+        client
+            .source_read_async_with_options(
+                test_repository(),
+                GenerationSelector::Active,
+                std::slice::from_ref(&source),
+                options,
+            )
+            .await
+            .expect("source read with options succeeds");
+        client
+            .symbol_explain_async(
+                test_repository(),
+                GenerationSelector::Active,
+                &[symbol],
+                timeout,
+            )
+            .await
+            .expect("legacy symbol explain succeeds");
+
+        let requests = server.await.expect("server task joins");
+        let expected = effective_budget_to_wire(Some(budget), timeout.duration())
+            .expect("budget encodes")
+            .expect("budget is present");
+        assert_eq!(requests[0].effective_budget.as_ref(), Some(&expected));
+        assert_eq!(requests[1].effective_budget.as_ref(), Some(&expected));
+        assert_eq!(requests[2].effective_budget, None);
+        assert!(matches!(
+            requests[0].request.as_ref(),
+            Some(daemon::request_envelope::Request::CodeLocate(_))
+        ));
+        assert!(matches!(
+            requests[1].request.as_ref(),
+            Some(daemon::request_envelope::Request::SourceRead(_))
+        ));
+        assert!(matches!(
+            requests[2].request.as_ref(),
+            Some(daemon::request_envelope::Request::SymbolExplain(_))
         ));
     }
 
