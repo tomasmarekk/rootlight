@@ -96,6 +96,7 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
             "answer".to_owned(),
             LocateMode::Exact,
             8,
+            0,
             &cancellation,
         )
         .expect("locate query succeeds");
@@ -164,6 +165,7 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
             "answer".to_owned(),
             LocateMode::Exact,
             8,
+            0,
             &cancellation,
         )
         .expect("old generation remains queryable");
@@ -175,6 +177,7 @@ fn fixture_flows_through_oracle_search_queries_and_prior_generation() {
             "answer".to_owned(),
             LocateMode::Exact,
             8,
+            0,
             &cancellation,
         )
         .expect("active generation remains queryable");
@@ -307,6 +310,7 @@ fn cancellation_stays_typed_across_index_and_query_boundaries() {
             "answer".to_owned(),
             LocateMode::Exact,
             1,
+            0,
             &cancelled_query,
         ),
         Err(FirstSliceError::Cancelled(
@@ -368,6 +372,7 @@ fn prepared_generation_is_not_queryable_before_publication() {
             "answer".to_owned(),
             LocateMode::Exact,
             1,
+            0,
             &cancellation,
         ),
         Err(FirstSliceError::Query)
@@ -431,6 +436,7 @@ fn rust_repository_indexes_only_extension_sources_and_preserves_lineage() {
             "answer".to_owned(),
             LocateMode::Exact,
             8,
+            0,
             &cancellation,
         )
         .expect("answer locate succeeds");
@@ -452,6 +458,7 @@ fn rust_repository_indexes_only_extension_sources_and_preserves_lineage() {
             "kept_after_negation".to_owned(),
             LocateMode::Exact,
             8,
+            0,
             &cancellation,
         )
         .expect("nested kept source locate succeeds");
@@ -469,6 +476,7 @@ fn rust_repository_indexes_only_extension_sources_and_preserves_lineage() {
                 sentinel.to_owned(),
                 LocateMode::Exact,
                 8,
+                0,
                 &cancellation,
             )
             .expect("non-source sentinel locate succeeds");
@@ -496,6 +504,7 @@ fn rust_repository_indexes_only_extension_sources_and_preserves_lineage() {
             "answer".to_owned(),
             LocateMode::Exact,
             8,
+            0,
             &cancellation,
         )
         .expect("active answer locate succeeds");
@@ -717,6 +726,7 @@ fn symbol_relationships_reports_honest_results_for_a_known_symbol() {
             "caller".to_owned(),
             LocateMode::Exact,
             8,
+            0,
             &cancellation,
         )
         .expect("locate caller")
@@ -742,6 +752,7 @@ fn symbol_relationships_reports_honest_results_for_a_known_symbol() {
             Some(RelationDirection::Both),
             0,
             100,
+            0,
             &cancellation,
         )
         .expect("symbol relationships query succeeds");
@@ -782,6 +793,7 @@ fn flow_trace_reports_an_honest_empty_trace_for_a_known_symbol() {
             "caller".to_owned(),
             LocateMode::Exact,
             8,
+            0,
             &cancellation,
         )
         .expect("locate caller")
@@ -1048,6 +1060,7 @@ fn tests_select_reports_an_honest_partial_result_for_a_known_fixture() {
             "caller".to_owned(),
             LocateMode::Exact,
             8,
+            0,
             &cancellation,
         )
         .expect("locate query succeeds");
@@ -1109,6 +1122,7 @@ fn change_impact_reports_an_honest_result_for_a_known_fixture() {
             "callee".to_owned(),
             LocateMode::Exact,
             8,
+            0,
             &cancellation,
         )
         .expect("locate query succeeds");
@@ -1207,6 +1221,7 @@ fn plan_change_reports_an_honest_result_for_a_known_fixture() {
             "callee".to_owned(),
             LocateMode::Exact,
             8,
+            0,
             &cancellation,
         )
         .expect("locate query succeeds");
@@ -1303,6 +1318,7 @@ fn history_compare_reports_an_honest_empty_comparison_for_base_equal_to_head() {
             "callee".to_owned(),
             LocateMode::Exact,
             8,
+            0,
             &cancellation,
         )
         .expect("locate query succeeds");
@@ -1411,6 +1427,7 @@ fn advanced_query_serves_a_scan_and_reports_unsupported_honestly() {
             scan,
             false,
             100,
+            0,
             ADVANCED_DEFAULT_MAX_DEPTH,
             ADVANCED_MAX_TRAVERSAL,
             None,
@@ -1443,6 +1460,7 @@ fn advanced_query_serves_a_scan_and_reports_unsupported_honestly() {
             aggregate,
             false,
             100,
+            0,
             ADVANCED_DEFAULT_MAX_DEPTH,
             ADVANCED_MAX_TRAVERSAL,
             None,

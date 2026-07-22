@@ -79,6 +79,7 @@ where
         query: String,
         mode: LocateMode,
         max_results: usize,
+        page_offset: usize,
         mut search_budget: SearchBudget,
         budget: QueryBudget,
     ) -> Result<CodeLocatePlan, QueryError> {
@@ -96,6 +97,7 @@ where
             query,
             mode: search_mode(mode),
             max_results,
+            page_offset,
         };
         validate_search_request(&request, search_budget)?;
         let mandatory_rows = checked_add(
@@ -138,6 +140,7 @@ where
             query: request.query,
             mode,
             max_results,
+            page_offset,
             search_budget,
             budget,
             explanation,
@@ -163,13 +166,20 @@ where
             query: plan.query.clone(),
             mode: search_mode(plan.mode),
             max_results: plan.max_results,
+            page_offset: plan.page_offset,
         };
         let outcome = self
             .search
             .search_with_stats(&request, plan.search_budget, cancellation)?;
         control.check()?;
+        let returned_end = checked_add(
+            checked_usize_to_u64(plan.page_offset)?,
+            checked_usize_to_u64(outcome.hits.len())?,
+            QueryResource::Results,
+            u64::MAX,
+        )?;
         if outcome.hits.len() > plan.max_results
-            || outcome.matched_candidates < checked_usize_to_u64(outcome.hits.len())?
+            || outcome.matched_candidates < returned_end
             || outcome.matched_candidates > checked_usize_to_u64(plan.search_budget.max_candidates)?
             || outcome.materialized_text_bytes
                 > checked_usize_to_u64(plan.search_budget.max_returned_text_bytes)?
@@ -182,9 +192,7 @@ where
         let mut tracker = UsageTracker::new(plan.budget);
         tracker.add_rows(outcome.matched_candidates)?;
         let mut limiting_resources = Vec::new();
-        if matched_candidates > checked_usize_to_u64(outcome.hits.len())? {
-            record_limit(&mut limiting_resources, QueryResource::Results)?;
-        }
+        let has_more_matches = matched_candidates > returned_end;
         let mut located = Vec::new();
         try_reserve(&mut located, outcome.hits.len())?;
         let mut symbols = BTreeSet::new();
@@ -238,7 +246,7 @@ where
             });
         }
 
-        let coverage = collect_coverage_partial(
+        let (coverage, coverage_truncated) = collect_coverage_partial(
             self.generation.document(),
             &symbols,
             &files,
@@ -246,6 +254,10 @@ where
             &control,
             &mut limiting_resources,
         )?;
+        let next_page_offset = (has_more_matches && !coverage_truncated).then_some(returned_end);
+        if next_page_offset.is_some() {
+            record_limit(&mut limiting_resources, QueryResource::Results)?;
+        }
         let data = CodeLocateResult {
             generation: self.generation.metadata().generation(),
             hits: located,
@@ -253,6 +265,7 @@ where
             coverage,
             truncated: !limiting_resources.is_empty(),
             limiting_resources,
+            next_page_offset,
         };
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
     }
@@ -430,6 +443,7 @@ where
                 &control,
                 &mut limiting_resources,
             )?
+            .0
         };
         let data = SymbolExplainResult {
             generation: self.generation.metadata().generation(),
@@ -453,6 +467,10 @@ where
     /// relation-family sets, an out-of-range confidence threshold or result
     /// bound, arithmetic overflow, or a conservative estimate that cannot be
     /// admitted.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one bounded relationships query dimension"
+    )]
     pub fn plan_symbol_relationships(
         &self,
         seeds: BTreeSet<SymbolId>,
@@ -460,6 +478,7 @@ where
         direction: Option<RelationDirection>,
         min_confidence: u16,
         max_results: usize,
+        page_offset: usize,
         budget: QueryBudget,
     ) -> Result<SymbolRelationshipsPlan, QueryError> {
         budget.validate()?;
@@ -515,6 +534,7 @@ where
             direction,
             min_confidence,
             max_results,
+            page_offset,
             budget,
             explanation,
         })
@@ -544,13 +564,18 @@ where
         let document = self.generation.document();
         let mut tracker = UsageTracker::new(plan.budget);
         let mut limiting_resources = Vec::new();
-        let max_results_bound = checked_usize_to_u64(plan.max_results)?;
+        let page_start = checked_usize_to_u64(plan.page_offset)?;
+        let page_end = checked_add(
+            page_start,
+            checked_usize_to_u64(plan.max_results)?,
+            QueryResource::Results,
+            u64::MAX,
+        )?;
 
         let mut groups: BTreeMap<(SymbolId, RelationFamily, RelationDirection), RelationshipGroup> =
             BTreeMap::new();
-        let mut returned_edges: u64 = 0;
         let mut total_edges: u64 = 0;
-        let mut truncated = false;
+        let mut scan_truncated = false;
 
         'scan: for family in &plan.families {
             let predicates = family.predicates();
@@ -564,12 +589,12 @@ where
                 control.check()?;
                 if !tracker.can_add(QueryResource::Rows, 1) {
                     record_limit(&mut limiting_resources, QueryResource::Rows)?;
-                    truncated = true;
+                    scan_truncated = true;
                     break 'scan;
                 }
                 if !tracker.can_add(QueryResource::Edges, 1) {
                     record_limit(&mut limiting_resources, QueryResource::Edges)?;
-                    truncated = true;
+                    scan_truncated = true;
                     break 'scan;
                 }
                 tracker.add_rows(1)?;
@@ -594,30 +619,18 @@ where
                         total_count: 0,
                     });
                     group.total_count = group.total_count.saturating_add(1);
-                    if returned_edges >= max_results_bound {
-                        record_limit(&mut limiting_resources, QueryResource::Results)?;
-                        truncated = true;
-                        break 'scan;
-                    }
-                    if !tracker.can_add(QueryResource::Results, 1) {
-                        record_limit(&mut limiting_resources, QueryResource::Results)?;
-                        truncated = true;
-                        break 'scan;
-                    }
                     let bytes = serialized_size(relation, u64::MAX, &control)?;
                     if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
                         record_limit(&mut limiting_resources, QueryResource::MemoryBytes)?;
-                        truncated = true;
+                        scan_truncated = true;
                         break 'scan;
                     }
-                    tracker.add_results(1)?;
                     tracker.add_memory(bytes)?;
                     group.items.push(RelationshipEdgeTarget {
                         symbol: target,
                         confidence,
                         source_refs: relation.evidence.source.iter().cloned().collect(),
                     });
-                    returned_edges = returned_edges.saturating_add(1);
                 }
             }
         }
@@ -630,14 +643,35 @@ where
                     .then_with(|| right.confidence.cmp(&left.confidence))
             });
         }
+        let mut ordinal = 0_u64;
+        let mut returned_edges = 0_u64;
+        for group in &mut groups {
+            let mut page_items = Vec::new();
+            for item in group.items.drain(..) {
+                if ordinal >= page_start && ordinal < page_end {
+                    tracker.add_results(1)?;
+                    page_items.push(item);
+                    returned_edges = returned_edges.saturating_add(1);
+                }
+                ordinal = ordinal.saturating_add(1);
+            }
+            group.items = page_items;
+        }
+        groups.retain(|group| !group.items.is_empty());
+        let next_page_offset = (!scan_truncated && total_edges > page_end).then_some(page_end);
+        if next_page_offset.is_some() {
+            record_limit(&mut limiting_resources, QueryResource::Results)?;
+        }
+        let truncated = scan_truncated || next_page_offset.is_some();
         let data = SymbolRelationshipsResult {
             generation: self.generation.metadata().generation(),
             groups,
             returned_edges: u32::try_from(returned_edges).unwrap_or(u32::MAX),
             total_edges: u32::try_from(total_edges).unwrap_or(u32::MAX),
-            exact: !truncated,
+            exact: !scan_truncated,
             truncated,
             limiting_resources,
+            next_page_offset,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
@@ -1691,6 +1725,7 @@ where
         ast: AdvancedAstNode,
         explain: bool,
         max_results: usize,
+        page_offset: usize,
         max_depth: usize,
         max_traversal: usize,
         cost_limit: Option<u64>,
@@ -1742,6 +1777,7 @@ where
             ast,
             operators,
             max_rows: max_results,
+            page_offset,
             max_traversal,
             depth,
             estimated_cost,
@@ -1792,6 +1828,7 @@ where
             plan: plan.explain.then_some(built.plan),
             completeness: built.completeness,
             limiting_resources,
+            next_page_offset: built.next_page_offset,
             trust: RepositoryDataTrust::UntrustedRepositoryData,
         };
         finish_response(plan.explanation.clone(), data, tracker, started, &control)
@@ -1977,6 +2014,7 @@ struct AdvancedBuild {
     rows: Vec<serde_json::Value>,
     plan: AdvancedPlanExplanation,
     completeness: AdvancedCompleteness,
+    next_page_offset: Option<u64>,
 }
 
 /// A typed row set materialized during advanced query execution.
@@ -2027,6 +2065,7 @@ fn build_advanced_query(
             rows: Vec::new(),
             plan: explanation,
             completeness,
+            next_page_offset: None,
         });
     }
 
@@ -2036,6 +2075,7 @@ fn build_advanced_query(
             rows: Vec::new(),
             plan: explanation,
             completeness: AdvancedCompleteness::Unsupported,
+            next_page_offset: None,
         });
     }
 
@@ -2045,29 +2085,35 @@ fn build_advanced_query(
         file_paths.insert(file.id, file.path.clone());
     }
 
-    let (mut set, mut truncated) =
+    let (mut set, truncated) =
         eval_advanced_node(document, &plan.ast, &file_paths, control, tracker)?;
 
-    // Apply the top-level result cap admitted by the plan.
-    if set.rows.len() > plan.max_rows {
-        set.rows.truncate(plan.max_rows);
-        truncated = true;
-    }
+    let page_start = plan.page_offset.min(set.rows.len());
+    let page_end = page_start.saturating_add(plan.max_rows).min(set.rows.len());
+    let next_page_offset = if !truncated && page_end < set.rows.len() {
+        Some(checked_usize_to_u64(page_end)?)
+    } else {
+        None
+    };
+    let page_rows: Vec<BTreeMap<String, AdvancedValue>> =
+        set.rows.drain(page_start..page_end).collect();
 
     let mut rows: Vec<serde_json::Value> = Vec::new();
-    try_reserve(&mut rows, set.rows.len())?;
-    for row in &set.rows {
+    try_reserve(&mut rows, page_rows.len())?;
+    for row in &page_rows {
         control.check()?;
         tracker.add_results(1)?;
         tracker.add_memory(checked_usize_to_u64(mem::size_of::<serde_json::Value>())?)?;
         rows.push(advanced_row_to_json(&set.columns, row));
     }
 
-    if truncated {
+    if truncated || next_page_offset.is_some() {
         note_advanced_limit(limiting_resources, QueryResource::Rows);
     }
     let completeness = if truncated {
         AdvancedCompleteness::Truncated
+    } else if next_page_offset.is_some() {
+        AdvancedCompleteness::Paged
     } else {
         AdvancedCompleteness::Complete
     };
@@ -2077,6 +2123,7 @@ fn build_advanced_query(
         rows,
         plan: explanation,
         completeness,
+        next_page_offset,
     })
 }
 
@@ -2271,11 +2318,10 @@ fn eval_advanced_node(
             let (mut set, truncated) =
                 eval_advanced_node(document, input, file_paths, control, tracker)?;
             let cap = usize::from(*max_rows);
-            let limited = set.rows.len() > cap;
-            if limited {
+            if set.rows.len() > cap {
                 set.rows.truncate(cap);
             }
-            Ok((set, truncated || limited))
+            Ok((set, truncated))
         }
         AdvancedAstNode::Join { .. }
         | AdvancedAstNode::Aggregate { .. }
@@ -5779,12 +5825,14 @@ fn collect_coverage_partial(
     tracker: &mut UsageTracker,
     control: &QueryControl<'_>,
     limiting_resources: &mut Vec<QueryResource>,
-) -> Result<Vec<CoverageRecord>, QueryError> {
+) -> Result<(Vec<CoverageRecord>, bool), QueryError> {
     let mut coverage = Vec::new();
+    let mut truncated = false;
     for record in &document.coverage_records {
         control.check()?;
         if !tracker.can_add(QueryResource::Rows, 1) {
             record_limit(limiting_resources, QueryResource::Rows)?;
+            truncated = true;
             break;
         }
         tracker.add_rows(1)?;
@@ -5796,11 +5844,13 @@ fn collect_coverage_partial(
         if relevant {
             if !tracker.can_add(QueryResource::Results, 1) {
                 record_limit(limiting_resources, QueryResource::Results)?;
+                truncated = true;
                 break;
             }
             let bytes = serialized_size(record, u64::MAX, control)?;
             if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
                 record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+                truncated = true;
                 break;
             }
             tracker.add_results(1)?;
@@ -5808,7 +5858,7 @@ fn collect_coverage_partial(
             try_push(&mut coverage, record.clone())?;
         }
     }
-    Ok(coverage)
+    Ok((coverage, truncated))
 }
 
 fn record_limit(
@@ -8238,6 +8288,7 @@ mod tests {
             ast,
             operators,
             max_rows,
+            page_offset: 0,
             max_traversal: ADVANCED_MAX_TRAVERSAL,
             depth,
             estimated_cost,
@@ -8415,14 +8466,53 @@ mod tests {
     }
 
     #[test]
-    fn advanced_limit_truncates_and_marks_truncated() {
+    fn advanced_result_cap_emits_a_page_continuation() {
         let document = advanced_document();
-        // Two functions exist; a top-level cap of one row truncates the result.
         let plan = advanced_plan(scan_functions(), false, 1);
         let built = run_advanced(&document, &plan);
 
-        assert_eq!(built.completeness, AdvancedCompleteness::Truncated);
+        assert_eq!(built.completeness, AdvancedCompleteness::Paged);
         assert_eq!(built.rows.len(), 1);
+        assert_eq!(built.next_page_offset, Some(1));
+    }
+
+    #[test]
+    fn advanced_pages_concatenate_without_duplicates_or_omissions() {
+        let document = advanced_document();
+        let baseline = run_advanced(
+            &document,
+            &advanced_plan(scan_functions(), false, ADVANCED_MAX_RESULTS),
+        );
+        let mut observed = Vec::new();
+        let mut offset = 0_usize;
+
+        loop {
+            let mut plan = advanced_plan(scan_functions(), false, 1);
+            plan.page_offset = offset;
+            let page = run_advanced(&document, &plan);
+            observed.extend(page.rows);
+            match page.next_page_offset {
+                Some(next) => {
+                    assert_eq!(page.completeness, AdvancedCompleteness::Paged);
+                    offset = usize::try_from(next).expect("test offset fits");
+                }
+                None => {
+                    assert_eq!(page.completeness, AdvancedCompleteness::Complete);
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(observed, baseline.rows);
+        let identities: std::collections::BTreeSet<_> = observed
+            .iter()
+            .map(|row| row["id"].as_str().expect("id is text"))
+            .collect();
+        assert_eq!(
+            identities.len(),
+            observed.len(),
+            "pages contain no duplicates"
+        );
     }
 
     #[test]

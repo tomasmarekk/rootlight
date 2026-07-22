@@ -98,6 +98,8 @@ pub struct SearchRequest {
     pub mode: SearchMode,
     /// Maximum hits returned after deterministic ordering.
     pub max_results: usize,
+    /// Number of deterministically ordered hits preceding this page.
+    pub page_offset: usize,
 }
 
 /// Resource limits for one query.

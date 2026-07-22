@@ -1044,6 +1044,7 @@ fn code_locate(
             request.query,
             mode,
             usize::try_from(request.maximum_results).map_err(|_| invalid_argument())?,
+            usize::try_from(request.page_offset).map_err(|_| invalid_argument())?,
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -1075,6 +1076,7 @@ fn code_locate(
         hits,
         matched_candidates: response.data.matched_candidates,
         truncated: response.data.truncated,
+        next_page_offset: response.data.next_page_offset,
     })
 }
 
@@ -1187,6 +1189,7 @@ fn symbol_relationships(
             direction,
             min_confidence,
             max_results,
+            usize::try_from(request.page_offset).map_err(|_| invalid_argument())?,
             &context.cancellation,
         )
         .map_err(service_error)?;
@@ -1220,6 +1223,7 @@ fn symbol_relationships(
         total_edges: u64::from(response.data.total_edges),
         exact: response.data.exact,
         truncated: response.data.truncated,
+        next_page_offset: response.data.next_page_offset,
     })
 }
 
@@ -1996,6 +2000,7 @@ fn advanced_query(
             ast,
             explain,
             max_results,
+            usize::try_from(request.page_offset).map_err(|_| invalid_argument())?,
             max_depth,
             ADVANCED_MAX_TRAVERSAL,
             request.cost_limit,
@@ -2032,6 +2037,7 @@ fn advanced_query(
         rows,
         plan,
         completeness,
+        next_page_offset: data.next_page_offset,
     })
 }
 
@@ -3635,6 +3641,7 @@ mod tests {
                 query: "answer".to_owned(),
                 mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
                 maximum_results: 8,
+                page_offset: 0,
             }),
         );
         let FirstSliceIpcResponse::CodeLocate(locate) = locate else {
@@ -3758,6 +3765,7 @@ mod tests {
                 query: "answer".to_owned(),
                 mode: daemon::FirstSliceLocateMode::FirstSliceLocateExact as i32,
                 maximum_results: 8,
+                page_offset: 0,
             }),
         );
         let FirstSliceIpcResponse::CodeLocate(locate) = locate else {

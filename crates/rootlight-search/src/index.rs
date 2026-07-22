@@ -370,9 +370,14 @@ impl LexicalIndex {
             u64::try_from(hits.len()).map_err(|_| SearchError::CandidateBudgetExceeded)?;
         let materialized_text_bytes = u64::try_from(materialized_text_bytes)
             .map_err(|_| SearchError::ReturnedTextBudgetExceeded)?;
-        hits.truncate(request.max_results);
+        let hits = hits
+            .into_iter()
+            .skip(request.page_offset)
+            .take(request.max_results)
+            .map(|ranked| ranked.hit)
+            .collect();
         Ok(SearchOutcome {
-            hits: hits.into_iter().map(|ranked| ranked.hit).collect(),
+            hits,
             matched_candidates,
             materialized_text_bytes,
         })
@@ -1927,6 +1932,7 @@ mod tests {
                     query: query.to_owned(),
                     mode,
                     max_results: 10,
+                    page_offset: 0,
                 },
                 SearchBudget::default(),
                 &Cancellation::new(),
@@ -1989,6 +1995,7 @@ mod tests {
                     query: "query".to_owned(),
                     mode: SearchMode::Prefix,
                     max_results: 1,
+                    page_offset: 0,
                 },
                 SearchBudget::default(),
                 &Cancellation::new(),
@@ -2020,6 +2027,7 @@ mod tests {
                         query: pattern.to_owned(),
                         mode: SearchMode::SafeRegex,
                         max_results: 10,
+                        page_offset: 0,
                     },
                     SearchBudget::default(),
                     &Cancellation::new(),
@@ -2036,6 +2044,7 @@ mod tests {
                         query: pattern.to_owned(),
                         mode: SearchMode::Glob,
                         max_results: 10,
+                        page_offset: 0,
                     },
                     SearchBudget::default(),
                     &Cancellation::new(),
@@ -2511,6 +2520,7 @@ mod tests {
                     query: "item".to_owned(),
                     mode: SearchMode::Exact,
                     max_results: 1,
+                    page_offset: 0,
                 },
                 SearchBudget::default(),
                 &cancellation,
@@ -2525,6 +2535,7 @@ mod tests {
                     query: "item".to_owned(),
                     mode: SearchMode::Exact,
                     max_results: 1,
+                    page_offset: 0,
                 },
                 SearchBudget::default(),
                 &expired,
@@ -2586,6 +2597,7 @@ mod tests {
             query: "same item".to_owned(),
             mode: SearchMode::Text,
             max_results: 2,
+            page_offset: 0,
         };
         assert_eq!(
             index.search(
@@ -2636,6 +2648,61 @@ mod tests {
     }
 
     #[test]
+    fn pages_concatenate_to_the_deterministic_baseline() {
+        let (_directory, _manifest, index) = build(vec![
+            document(1, "same_item", "src/a.rs"),
+            document(2, "same_item", "src/b.rs"),
+            document(3, "same_item", "src/c.rs"),
+            document(4, "same_item", "src/d.rs"),
+            document(5, "same_item", "src/e.rs"),
+        ]);
+        let cancellation = Cancellation::new();
+        let baseline = index
+            .search_with_stats(
+                &SearchRequest {
+                    query: "same_item".to_owned(),
+                    mode: SearchMode::Exact,
+                    max_results: 10,
+                    page_offset: 0,
+                },
+                SearchBudget::default(),
+                &cancellation,
+            )
+            .expect("baseline search succeeds");
+        assert_eq!(baseline.matched_candidates, 5);
+        let expected: Vec<_> = baseline.hits.iter().map(|hit| hit.symbol_id).collect();
+
+        let mut observed = Vec::new();
+        for page_offset in [0, 2, 4] {
+            let page = index
+                .search_with_stats(
+                    &SearchRequest {
+                        query: "same_item".to_owned(),
+                        mode: SearchMode::Exact,
+                        max_results: 2,
+                        page_offset,
+                    },
+                    SearchBudget::default(),
+                    &cancellation,
+                )
+                .expect("page search succeeds");
+            assert_eq!(page.matched_candidates, 5);
+            observed.extend(page.hits.into_iter().map(|hit| hit.symbol_id));
+        }
+
+        assert_eq!(observed, expected);
+        assert_eq!(
+            observed
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            observed.len(),
+            "pages contain no duplicate symbols"
+        );
+    }
+
+    #[test]
     fn expansion_posting_and_time_budgets_fail_before_unbounded_work() {
         let (_directory, _manifest, index) = build(vec![
             document(1, "alpha_one", "src/a.rs"),
@@ -2646,6 +2713,7 @@ mod tests {
             query: "alpha".to_owned(),
             mode: SearchMode::Prefix,
             max_results: 2,
+            page_offset: 0,
         };
         assert_eq!(
             index.search(
@@ -2663,6 +2731,7 @@ mod tests {
             query: "alpha_one".to_owned(),
             mode: SearchMode::Exact,
             max_results: 1,
+            page_offset: 0,
         };
         assert_eq!(
             index.search(
@@ -2698,6 +2767,7 @@ mod tests {
                     query: "ab.z".to_owned(),
                     mode: SearchMode::SafeRegex,
                     max_results: 1,
+                    page_offset: 0,
                 },
                 SearchBudget {
                     max_examined_terms: 2,
@@ -2720,6 +2790,7 @@ mod tests {
             query: "ab.z".to_owned(),
             mode: SearchMode::SafeRegex,
             max_results: 1,
+            page_offset: 0,
         };
 
         assert_eq!(
@@ -2772,6 +2843,7 @@ mod tests {
                     query: " ".to_owned(),
                     mode: SearchMode::Text,
                     max_results: 1,
+                    page_offset: 0,
                 },
                 SearchBudget::default(),
                 &Cancellation::new(),
@@ -2784,6 +2856,7 @@ mod tests {
                     query: "item\nother".to_owned(),
                     mode: SearchMode::Text,
                     max_results: 1,
+                    page_offset: 0,
                 },
                 SearchBudget::default(),
                 &Cancellation::new(),
@@ -2798,6 +2871,7 @@ mod tests {
                     query: "one two three".to_owned(),
                     mode: SearchMode::Text,
                     max_results: 1,
+                    page_offset: 0,
                 },
                 SearchBudget {
                     max_terms: 2,

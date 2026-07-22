@@ -20,7 +20,7 @@ use rootlight_client::{
 };
 use rootlight_ids::{ContentHash, FileId, GenerationId, OperationId, RepositoryId, SymbolId};
 use rootlight_mcp_contract::{
-    ErrorCode, PublicError, ToolResponse, VerticalTool,
+    ErrorCode, ExposureProfile, PublicError, ToolResponse, VerticalTool,
     vertical::{
         CodeLocateOutput, OperationStatusOutput, RepoIndexOutput, SourceReadOutput,
         SymbolExplainOutput,
@@ -60,6 +60,7 @@ enum Call {
         query: String,
         mode: LocateMode,
         maximum_results: u32,
+        page_offset: u64,
         timeout: RequestTimeout,
     },
     SymbolExplain {
@@ -91,6 +92,7 @@ enum Call {
         direction: Option<String>,
         min_confidence: Option<u16>,
         max_results: Option<u16>,
+        page_offset: u64,
         timeout: RequestTimeout,
     },
     FlowTrace {
@@ -179,6 +181,7 @@ enum Call {
         max_results: Option<u16>,
         max_depth: Option<u8>,
         cost_limit: Option<u64>,
+        page_offset: u64,
         timeout: RequestTimeout,
     },
 }
@@ -277,6 +280,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         query: String,
         mode: LocateMode,
         maximum_results: u32,
+        page_offset: u64,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<CodeLocate> {
         self.record(Call::CodeLocate {
@@ -285,6 +289,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             query,
             mode,
             maximum_results,
+            page_offset,
             timeout,
         });
         Box::pin(async move {
@@ -293,6 +298,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 hits: Vec::new(),
                 matched_candidates: 0,
                 truncated: false,
+                next_page_offset: None,
             })
         })
     }
@@ -431,6 +437,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         direction: Option<String>,
         min_confidence: Option<u16>,
         max_results: Option<u16>,
+        page_offset: u64,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<SymbolRelationships> {
         self.record(Call::SymbolRelationships {
@@ -441,6 +448,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             direction,
             min_confidence,
             max_results,
+            page_offset,
             timeout,
         });
         Box::pin(async move {
@@ -451,6 +459,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 total_edges: 0,
                 exact: true,
                 truncated: false,
+                next_page_offset: None,
             })
         })
     }
@@ -760,6 +769,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
         max_results: Option<u16>,
         max_depth: Option<u8>,
         cost_limit: Option<u64>,
+        page_offset: u64,
         timeout: RequestTimeout,
     ) -> AsyncClientFuture<AdvancedQuery> {
         self.record(Call::QueryAdvanced {
@@ -770,6 +780,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
             max_results,
             max_depth,
             cost_limit,
+            page_offset,
             timeout,
         });
         Box::pin(async move {
@@ -782,6 +793,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 rows: Vec::new(),
                 plan: None,
                 completeness: "complete".to_owned(),
+                next_page_offset: None,
             })
         })
     }
@@ -998,7 +1010,12 @@ async fn unavailable_port_returns_transport_for_every_tool() {
         FirstSliceToolExecutor::new(UnavailableFirstSliceClientPort).expect("executor initializes");
     for (tool, arguments) in valid_inputs() {
         let error = executor
-            .execute(tool, object(arguments), cancellation())
+            .execute(
+                tool,
+                object(arguments),
+                ExposureProfile::Developer,
+                cancellation(),
+            )
             .await
             .expect_err("unavailable port rejects every call");
         assert_eq!(error.failure(), Some(ToolExecutionFailure::Transport));
@@ -1050,7 +1067,12 @@ async fn execute<T: DeserializeOwned>(
     arguments: Value,
 ) -> T {
     let output = executor
-        .execute(tool, object(arguments), cancellation())
+        .execute(
+            tool,
+            object(arguments),
+            ExposureProfile::Developer,
+            cancellation(),
+        )
         .await
         .expect("native adapter maps response");
     serde_json::from_value(Value::Object(output)).expect("mapped output decodes")

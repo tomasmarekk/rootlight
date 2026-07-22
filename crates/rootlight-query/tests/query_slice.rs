@@ -41,7 +41,7 @@ impl LexicalSearch for FakeSearch {
 
     fn search_with_stats(
         &self,
-        _request: &SearchRequest,
+        request: &SearchRequest,
         _budget: SearchBudget,
         cancellation: &Cancellation,
     ) -> Result<SearchOutcome, SearchError> {
@@ -61,7 +61,13 @@ impl LexicalSearch for FakeSearch {
             })
         });
         Ok(SearchOutcome {
-            hits: self.hits.clone(),
+            hits: self
+                .hits
+                .iter()
+                .skip(request.page_offset)
+                .take(request.max_results)
+                .cloned()
+                .collect(),
             matched_candidates: u64::try_from(self.hits.len())
                 .map_err(|_| SearchError::CandidateBudgetExceeded)?,
             materialized_text_bytes: materialized_text_bytes
@@ -272,6 +278,7 @@ fn locate_and_explain_use_deterministic_typed_plans() {
             search.hits[0].identifier.clone(),
             LocateMode::Exact,
             10,
+            0,
             SearchBudget::default(),
             QueryBudget::new(),
         )
@@ -322,6 +329,7 @@ fn execution_enforces_cancellation_and_exact_output_bounds() {
             "fixture".to_owned(),
             LocateMode::Text,
             1,
+            0,
             SearchBudget::default(),
             QueryBudget::new(),
         )
@@ -339,6 +347,7 @@ fn execution_enforces_cancellation_and_exact_output_bounds() {
             "fixture".to_owned(),
             LocateMode::Text,
             1,
+            0,
             SearchBudget::default(),
             QueryBudget::new(),
         )
@@ -359,6 +368,7 @@ fn execution_enforces_cancellation_and_exact_output_bounds() {
             "fixture".to_owned(),
             LocateMode::Text,
             1,
+            0,
             SearchBudget::default(),
             QueryBudget::new().with_max_json_bytes(1),
         )
@@ -379,6 +389,7 @@ fn execution_enforces_cancellation_and_exact_output_bounds() {
             "fixture".to_owned(),
             LocateMode::Text,
             1,
+            0,
             SearchBudget::default(),
             QueryBudget::new(),
         )
@@ -404,6 +415,7 @@ fn locate_planning_enforces_configured_and_hard_query_byte_boundaries() {
             configured_edge,
             LocateMode::Exact,
             1,
+            0,
             SearchBudget::default(),
             QueryBudget::new(),
         )
@@ -413,6 +425,7 @@ fn locate_planning_enforces_configured_and_hard_query_byte_boundaries() {
             configured_overflow,
             LocateMode::Exact,
             1,
+            0,
             SearchBudget::default(),
             QueryBudget::new(),
         ),
@@ -434,6 +447,7 @@ fn locate_planning_enforces_configured_and_hard_query_byte_boundaries() {
             hard_edge,
             LocateMode::Exact,
             1,
+            0,
             hard_budget,
             QueryBudget::new(),
         )
@@ -443,6 +457,7 @@ fn locate_planning_enforces_configured_and_hard_query_byte_boundaries() {
             hard_overflow,
             LocateMode::Exact,
             1,
+            0,
             hard_budget,
             QueryBudget::new(),
         ),
@@ -464,6 +479,7 @@ fn bounded_queries_mark_deterministic_partial_results() {
             search.hits[0].identifier.clone(),
             LocateMode::Exact,
             1,
+            0,
             SearchBudget::default(),
             QueryBudget::new(),
         )
@@ -498,6 +514,38 @@ fn bounded_queries_mark_deterministic_partial_results() {
 }
 
 #[test]
+fn code_locate_hard_coverage_limit_suppresses_page_continuation() {
+    let snapshot = fixture_snapshot();
+    assert!(
+        !snapshot.document().coverage_records.is_empty(),
+        "fixture must exercise coverage scanning"
+    );
+    let search = fixture_search(&snapshot);
+    let truncated_search = TruncatedSearch(search.clone());
+    let service = QueryService::new(&snapshot, &truncated_search).expect("generation inputs agree");
+    let plan = service
+        .plan_code_locate(
+            search.hits[0].identifier.clone(),
+            LocateMode::Exact,
+            1,
+            0,
+            SearchBudget {
+                max_candidates: 2,
+                ..SearchBudget::default()
+            },
+            QueryBudget::new().with_max_rows(3),
+        )
+        .expect("the search page itself fits the row budget");
+    let response = service
+        .execute_code_locate(&plan, &Cancellation::new())
+        .expect("hard coverage truncation returns an honest partial result");
+
+    assert!(response.data.truncated);
+    assert_eq!(response.data.next_page_offset, None);
+    assert_eq!(response.data.limiting_resources, vec![QueryResource::Rows]);
+}
+
+#[test]
 fn plans_and_execution_enforce_all_query_resource_families() {
     let snapshot = fixture_snapshot();
     let search = fixture_search(&snapshot);
@@ -509,6 +557,7 @@ fn plans_and_execution_enforce_all_query_resource_families() {
             "fixture".to_owned(),
             LocateMode::Text,
             1,
+            0,
             SearchBudget::default(),
             QueryBudget::new().with_max_rows(0),
         ),
@@ -554,6 +603,7 @@ fn plans_and_execution_enforce_all_query_resource_families() {
             "fixture".to_owned(),
             LocateMode::Text,
             1,
+            0,
             SearchBudget::default(),
             QueryBudget::new().with_max_rows(1),
         ),
@@ -593,6 +643,7 @@ fn plans_and_execution_enforce_all_query_resource_families() {
             "fixture".to_owned(),
             LocateMode::Text,
             1,
+            0,
             SearchBudget::default(),
             QueryBudget::new().with_max_tokens(1),
         )
@@ -610,6 +661,7 @@ fn plans_and_execution_enforce_all_query_resource_families() {
             "fixture".to_owned(),
             LocateMode::Text,
             1,
+            0,
             SearchBudget::default(),
             QueryBudget::new().with_max_duration(Duration::from_nanos(1)),
         )
@@ -803,6 +855,7 @@ fn retained_old_generation_remains_addressable_after_activation() {
             "absent".to_owned(),
             LocateMode::Exact,
             1,
+            0,
             SearchBudget::default(),
             QueryBudget::new(),
         )

@@ -6,7 +6,7 @@
 
 use rootlight_ids::{GenerationId, RepositoryId};
 
-use crate::{McpTool, vertical::ResponseProfile};
+use crate::{ExposureProfile, McpTool, vertical::ResponseProfile};
 
 /// Maximum serialized cursor bytes accepted on the wire.
 pub const MAX_CURSOR_BYTES: usize = 4_096;
@@ -75,6 +75,8 @@ pub struct CursorContext {
     pub plan_fingerprint: [u8; 32],
     /// Response profile the cursor was issued under.
     pub response_profile: ResponseProfile,
+    /// Active discovery profile that authorized the issuing tool.
+    pub exposure_profile: ExposureProfile,
     /// Repository or catalog snapshot identity the cursor is bound to.
     pub snapshot_id: [u8; 32],
     /// Requested page size at cursor creation time.
@@ -172,6 +174,7 @@ impl AuthenticatedCursor {
             || self.context.query_fingerprint != expected.query_fingerprint
             || self.context.plan_fingerprint != expected.plan_fingerprint
             || self.context.response_profile != expected.response_profile
+            || self.context.exposure_profile != expected.exposure_profile
             || self.context.snapshot_id != expected.snapshot_id
             || self.context.page_size != expected.page_size
         {
@@ -210,6 +213,12 @@ impl AuthenticatedCursor {
         self.context.snapshot_id
     }
 
+    /// Returns the immutable generation bound into this cursor.
+    #[must_use]
+    pub const fn generation(&self) -> GenerationId {
+        self.context.generation
+    }
+
     /// Returns the issue timestamp in Unix milliseconds.
     #[must_use]
     pub const fn issued_at_ms(&self) -> u64 {
@@ -228,7 +237,7 @@ impl AuthenticatedCursor {
     #[must_use]
     pub fn to_wire(&self) -> String {
         let payload = self.serialize_payload();
-        format!("c2.{}", base64url_encode(&payload))
+        format!("c3.{}", base64url_encode(&payload))
     }
 
     /// Parses a cursor from its opaque wire string.
@@ -241,12 +250,12 @@ impl AuthenticatedCursor {
         if wire.len() > MAX_CURSOR_BYTES {
             return Err(CursorError::TooLong);
         }
-        // The legacy c1 envelope predates the bound plan, snapshot, key, and
-        // expiry fields and is never reinterpreted under c2 semantics.
-        if wire.starts_with("c1.") {
+        // Older envelopes omit context fields that are mandatory today and
+        // are never reinterpreted under newer semantics.
+        if wire.starts_with("c1.") || wire.starts_with("c2.") {
             return Err(CursorError::UnsupportedVersion);
         }
-        let encoded = wire.strip_prefix("c2.").ok_or(CursorError::Malformed)?;
+        let encoded = wire.strip_prefix("c3.").ok_or(CursorError::Malformed)?;
         let payload = base64url_decode(encoded).ok_or(CursorError::Malformed)?;
         Self::deserialize_payload(&payload)
     }
@@ -261,6 +270,7 @@ impl AuthenticatedCursor {
         payload.extend_from_slice(&self.context.query_fingerprint);
         payload.extend_from_slice(&self.context.plan_fingerprint);
         payload.push(response_profile_tag(self.context.response_profile));
+        payload.push(exposure_profile_tag(self.context.exposure_profile));
         payload.extend_from_slice(&self.context.snapshot_id);
         payload.extend_from_slice(&self.context.page_size.to_le_bytes());
         payload.extend_from_slice(&self.context.key_id.to_le_bytes());
@@ -276,10 +286,11 @@ impl AuthenticatedCursor {
 
     fn deserialize_payload(payload: &[u8]) -> Result<Self, CursorError> {
         // repository(16) + generation(20) + tool-name null(1) + tool major(2)
-        // + query fingerprint(32) + plan fingerprint(32) + profile(1)
+        // + query fingerprint(32) + plan fingerprint(32) + response profile(1)
+        // + exposure profile(1)
         // + snapshot(32) + page size(2) + key id(8) + issued(8) + expiry(8)
         // + sort-key length(2) + tag(32).
-        const MIN_LEN: usize = 16 + 20 + 1 + 2 + 32 + 32 + 1 + 32 + 2 + 8 + 8 + 8 + 2 + 32;
+        const MIN_LEN: usize = 16 + 20 + 1 + 2 + 32 + 32 + 1 + 1 + 32 + 2 + 8 + 8 + 8 + 2 + 32;
         if payload.len() < MIN_LEN {
             return Err(CursorError::Malformed);
         }
@@ -332,6 +343,10 @@ impl AuthenticatedCursor {
 
         let response_profile =
             response_profile_from_tag(*payload.get(offset).ok_or(CursorError::Malformed)?)?;
+        offset += 1;
+
+        let exposure_profile =
+            exposure_profile_from_tag(*payload.get(offset).ok_or(CursorError::Malformed)?)?;
         offset += 1;
 
         let snapshot_id: [u8; 32] = payload
@@ -424,6 +439,7 @@ impl AuthenticatedCursor {
                 query_fingerprint,
                 plan_fingerprint,
                 response_profile,
+                exposure_profile,
                 snapshot_id,
                 page_size,
                 key_id,
@@ -463,6 +479,23 @@ fn response_profile_from_tag(tag: u8) -> Result<ResponseProfile, CursorError> {
     }
 }
 
+const fn exposure_profile_tag(profile: ExposureProfile) -> u8 {
+    match profile {
+        ExposureProfile::Scout => 0,
+        ExposureProfile::Analysis => 1,
+        ExposureProfile::Developer => 2,
+    }
+}
+
+fn exposure_profile_from_tag(tag: u8) -> Result<ExposureProfile, CursorError> {
+    match tag {
+        0 => Ok(ExposureProfile::Scout),
+        1 => Ok(ExposureProfile::Analysis),
+        2 => Ok(ExposureProfile::Developer),
+        _ => Err(CursorError::Malformed),
+    }
+}
+
 /// Compares two integrity tags in constant time so a mismatch does not leak the
 /// first differing byte through a timing side channel.
 fn constant_time_tag_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
@@ -490,6 +523,7 @@ fn compute_tag(
     hasher.update(&context.query_fingerprint);
     hasher.update(&context.plan_fingerprint);
     hasher.update(&[response_profile_tag(context.response_profile)]);
+    hasher.update(&[exposure_profile_tag(context.exposure_profile)]);
     hasher.update(&context.snapshot_id);
     hasher.update(&context.page_size.to_le_bytes());
     hasher.update(&context.key_id.to_le_bytes());
@@ -569,7 +603,7 @@ fn base64url_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{AuthenticatedCursor, CursorContext, CursorError};
-    use crate::{McpTool, vertical::ResponseProfile};
+    use crate::{ExposureProfile, McpTool, vertical::ResponseProfile};
     use proptest::prelude::*;
     use rootlight_ids::{GenerationId, RepositoryId};
 
@@ -582,6 +616,7 @@ mod tests {
             query_fingerprint: [3; 32],
             plan_fingerprint: [4; 32],
             response_profile: ResponseProfile::Compact,
+            exposure_profile: ExposureProfile::Developer,
             snapshot_id: [5; 32],
             page_size: 20,
             key_id: 7,
@@ -604,7 +639,7 @@ mod tests {
         let context = test_context();
         let cursor = create_cursor(context.clone(), vec![1, 2, 3], 1_000_000, &key);
         let wire = cursor.to_wire();
-        assert!(wire.starts_with("c2."));
+        assert!(wire.starts_with("c3."));
         assert!(wire.len() <= super::MAX_CURSOR_BYTES);
 
         let decoded = AuthenticatedCursor::from_wire(&wire).expect("wire decodes");
@@ -712,11 +747,11 @@ mod tests {
             Err(CursorError::Malformed)
         );
         assert_eq!(
-            AuthenticatedCursor::from_wire("c2."),
+            AuthenticatedCursor::from_wire("c3."),
             Err(CursorError::Malformed)
         );
         assert_eq!(
-            AuthenticatedCursor::from_wire("c2.A"),
+            AuthenticatedCursor::from_wire("c3.A"),
             Err(CursorError::Malformed)
         );
     }
@@ -771,14 +806,14 @@ mod tests {
         let context = test_context();
         let cursor = create_cursor(context, vec![1, 2, 3], 1_000_000, &key);
         let wire = cursor.to_wire();
-        let body = wire.strip_prefix("c2.").expect("version prefix present");
+        let body = wire.strip_prefix("c3.").expect("version prefix present");
 
         // Append one raw byte after the authenticated tag and re-encode. The
         // canonical envelope must be rejected even though the tag itself is
         // intact, because trailing bytes are not covered by the parse.
         let mut payload = super::base64url_decode(body).expect("valid payload decodes");
         payload.push(0xFF);
-        let tampered = format!("c2.{}", super::base64url_encode(&payload));
+        let tampered = format!("c3.{}", super::base64url_encode(&payload));
 
         assert_eq!(
             AuthenticatedCursor::from_wire(&tampered),
@@ -874,6 +909,9 @@ mod tests {
         mutations.push(m);
         let mut m = test_context();
         m.response_profile = ResponseProfile::Standard;
+        mutations.push(m);
+        let mut m = test_context();
+        m.exposure_profile = ExposureProfile::Analysis;
         mutations.push(m);
         let mut m = test_context();
         m.snapshot_id = [9; 32];
