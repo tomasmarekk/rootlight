@@ -11,7 +11,7 @@ use rootlight_mcp_contract::{
     context::BatchTool,
     vertical::{
         CoverageSummary, GenerationSelector, GenerationSummary, ReadEnvelope, ResolvedRepository,
-        ResponseBudget, ResponseWarning,
+        ResponseBudget, ResponseProfile, ResponseWarning, UsageSummary,
     },
 };
 use serde_json::{Map, Value};
@@ -161,6 +161,7 @@ pub struct AgentCallContext<C> {
     cancellation: C,
     budget: ResponseBudget,
     local_budget: Option<ResponseBudget>,
+    response_profile: ResponseProfile,
     pinned_identity: Option<AgentResolvedIdentity>,
     deadline: Option<Instant>,
     local_deadline: bool,
@@ -177,6 +178,7 @@ where
             cancellation,
             budget,
             local_budget: None,
+            response_profile: ResponseProfile::Compact,
             pinned_identity: None,
             deadline,
             local_deadline: false,
@@ -188,6 +190,13 @@ where
     #[must_use]
     pub fn with_local_budget(mut self, local_budget: Option<ResponseBudget>) -> Self {
         self.local_budget = local_budget;
+        self
+    }
+
+    /// Attaches the aggregate representation selected for this child.
+    #[must_use]
+    pub const fn with_response_profile(mut self, response_profile: ResponseProfile) -> Self {
+        self.response_profile = response_profile;
         self
     }
 
@@ -230,6 +239,12 @@ where
         self.local_budget.as_ref()
     }
 
+    /// Returns the aggregate representation selected for this child.
+    #[must_use]
+    pub const fn response_profile(&self) -> ResponseProfile {
+        self.response_profile
+    }
+
     /// Returns the immutable repository and generation selected for the batch.
     #[must_use]
     pub const fn pinned_identity(&self) -> Option<&AgentResolvedIdentity> {
@@ -265,6 +280,33 @@ pub enum AgentPortError {
     InvalidResponse,
     /// The underlying client or transport failed.
     Unavailable,
+    /// A child failure accompanied by authoritative work already consumed.
+    Measured {
+        /// Original terminal failure.
+        error: Box<Self>,
+        /// Resources consumed before the failure became terminal.
+        usage: UsageSummary,
+    },
+}
+
+impl AgentPortError {
+    /// Attaches measured work to a terminal child failure.
+    #[must_use]
+    pub fn with_usage(self, usage: UsageSummary) -> Self {
+        Self::Measured {
+            error: Box::new(self),
+            usage,
+        }
+    }
+
+    /// Separates a terminal failure from any measured work receipt.
+    #[must_use]
+    pub fn into_parts(self) -> (Self, Option<UsageSummary>) {
+        match self {
+            Self::Measured { error, usage } => (*error, Some(usage)),
+            error => (error, None),
+        }
+    }
 }
 
 /// Client-free async boundary through which agent orchestration invokes tools.

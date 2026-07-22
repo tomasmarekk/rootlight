@@ -18,8 +18,8 @@ use rootlight_mcp_contract::{
     ExposureProfile, McpTool, PublicError, SchemaVersion, TrustClassification,
     batch::{
         BatchBindingCardinality, BatchBindingPathSegment, BatchBindingSourceSlot,
-        BatchBindingTargetSlot, BatchBindingValueType, BatchBudgetDimension, BatchToolDescriptor,
-        batch_descriptor,
+        BatchBindingTargetSlot, BatchBindingValueType, BatchBudgetDimension,
+        BatchResponseProfilePolicy, BatchToolDescriptor, batch_descriptor,
     },
     completeness::{
         CompletenessState, ContinuationAvailability, ContinuationGuidance, LimitingResource,
@@ -38,8 +38,8 @@ use serde_json::{Map, Value};
 
 use crate::{
     policy::{
-        BudgetAllocation, BudgetCharge, BudgetLedger, BudgetLimits, CancellationSignal,
-        ExecutionPolicyError, is_compact_profile,
+        BudgetAllocation, BudgetCharge, BudgetLedger, BudgetLimits, BudgetResource,
+        CancellationSignal, ExecutionPolicyError,
     },
     port::{
         AgentCallContext, AgentIdentityRequest, AgentPortError, AgentResolutionContext,
@@ -55,6 +55,10 @@ pub const MAX_BATCH_DEPTH: usize = 8;
 
 /// Maximum dependencies one operation may declare.
 pub const MAX_DEPS_PER_OPERATION: usize = 8;
+
+/// Fixed-point counters can grow by only a few digits after the skeleton is
+/// measured; this bound also covers the untagged success wrapper.
+const PUBLICATION_COUNTER_TOLERANCE_BYTES: u64 = 128;
 
 /// The closed allowlist of tools permitted inside a public batch.
 ///
@@ -296,9 +300,7 @@ impl StaticBatchPlan {
         input: QueryBatchInput,
         exposure_profile: ExposureProfile,
     ) -> Result<Self, BatchOrchestrationError> {
-        if !is_compact_profile(input.response_profile) {
-            return Err(BatchOrchestrationError::UnsupportedProfile);
-        }
+        let response_profile = input.response_profile.unwrap_or(ResponseProfile::Compact);
         if input.operations.iter().any(|operation| {
             operation.arguments.keys().any(|key| {
                 matches!(
@@ -356,6 +358,9 @@ impl StaticBatchPlan {
         let mut required_tokens = 0_u64;
         for (index, operation) in input.operations.iter().enumerate() {
             let descriptor = batch_descriptor(operation.tool);
+            if !batch_profile_is_supported(descriptor.response_profiles, response_profile) {
+                return Err(BatchOrchestrationError::UnsupportedProfile);
+            }
             validate_local_budget(descriptor, operation.local_budget.as_ref())?;
             let effective_budget =
                 effective_static_budget(&parent_budget, operation.local_budget.as_ref());
@@ -413,7 +418,7 @@ impl StaticBatchPlan {
                 .failure_policy
                 .unwrap_or(FailurePolicy::ContinueIndependent),
             parent_budget,
-            response_profile: input.response_profile.unwrap_or(ResponseProfile::Compact),
+            response_profile,
             explain: input.explain.unwrap_or(false),
         })
     }
@@ -440,6 +445,12 @@ impl StaticBatchPlan {
     #[must_use]
     pub const fn parent_budget(&self) -> &ResponseBudget {
         &self.parent_budget
+    }
+
+    /// Returns the representation inherited by every selectable child.
+    #[must_use]
+    pub const fn response_profile(&self) -> ResponseProfile {
+        self.response_profile
     }
 
     /// Returns whether the caller requested source-free explain mode.
@@ -680,6 +691,25 @@ fn validate_local_budget(
         }
     }
     Ok(())
+}
+
+const fn batch_profile_is_supported(
+    policy: BatchResponseProfilePolicy,
+    requested: ResponseProfile,
+) -> bool {
+    match policy {
+        BatchResponseProfilePolicy::Fixed(fixed) => fixed as u8 == requested as u8,
+        BatchResponseProfilePolicy::Selectable { supported, .. } => {
+            let mut index = 0;
+            while index < supported.len() {
+                if supported[index] as u8 == requested as u8 {
+                    return true;
+                }
+                index += 1;
+            }
+            false
+        }
+    }
 }
 
 fn effective_static_budget(
@@ -1113,6 +1143,8 @@ pub fn dependency_failed(dependencies: &[usize], results: &[Option<BatchOperatio
                 BatchOperationStatus::Error
                     | BatchOperationStatus::SkippedDependency
                     | BatchOperationStatus::NotRunFailFast
+                    | BatchOperationStatus::NotRunBudget
+                    | BatchOperationStatus::Cancelled
             )
         )
     })
@@ -1254,6 +1286,14 @@ fn planned_error_result(
     operation: &PlannedBatchOperation,
     error: &PublicError,
 ) -> BatchOperationResult {
+    planned_error_result_with_usage(operation, error, None)
+}
+
+fn planned_error_result_with_usage(
+    operation: &PlannedBatchOperation,
+    error: &PublicError,
+    usage: Option<UsageSummary>,
+) -> BatchOperationResult {
     BatchOperationResult {
         id: operation.id.clone(),
         tool: operation.tool,
@@ -1262,7 +1302,7 @@ fn planned_error_result(
         error: Some(error.clone()),
         truncated: false,
         next_cursor: RequiredNullable(None),
-        usage: None,
+        usage,
         warnings: Vec::new(),
     }
 }
@@ -1305,6 +1345,13 @@ pub fn aggregate_status(results: &[BatchOperationResult]) -> BatchStatus {
 /// Aggregates child usage without double-counting parallel wall-clock time.
 #[must_use]
 pub fn aggregate_usage(envelopes: &[Option<ReadEnvelope<Value>>]) -> UsageSummary {
+    aggregate_usage_with_receipts(envelopes, &[])
+}
+
+fn aggregate_usage_with_receipts(
+    envelopes: &[Option<ReadEnvelope<Value>>],
+    receipts: &[Option<UsageSummary>],
+) -> UsageSummary {
     let mut usage = UsageSummary {
         rows: 0,
         edges: 0,
@@ -1316,23 +1363,29 @@ pub fn aggregate_usage(envelopes: &[Option<ReadEnvelope<Value>>]) -> UsageSummar
         trace_id: "batch".to_owned(),
     };
     for envelope in envelopes.iter().flatten() {
-        usage.rows = usage.rows.saturating_add(envelope.usage.rows);
-        usage.edges = usage.edges.saturating_add(envelope.usage.edges);
-        usage.source_bytes = usage
-            .source_bytes
-            .saturating_add(envelope.usage.source_bytes);
-        usage.json_bytes = usage.json_bytes.saturating_add(envelope.usage.json_bytes);
-        usage.estimated_tokens = usage
-            .estimated_tokens
-            .saturating_add(envelope.usage.estimated_tokens);
-        usage.wall_time_ms = usage.wall_time_ms.max(envelope.usage.wall_time_ms);
+        merge_usage(&mut usage, &envelope.usage);
+    }
+    for receipt in receipts.iter().flatten() {
+        merge_usage(&mut usage, receipt);
     }
     usage
 }
 
+fn merge_usage(aggregate: &mut UsageSummary, usage: &UsageSummary) {
+    aggregate.rows = aggregate.rows.saturating_add(usage.rows);
+    aggregate.edges = aggregate.edges.saturating_add(usage.edges);
+    aggregate.source_bytes = aggregate.source_bytes.saturating_add(usage.source_bytes);
+    aggregate.json_bytes = aggregate.json_bytes.saturating_add(usage.json_bytes);
+    aggregate.estimated_tokens = aggregate
+        .estimated_tokens
+        .saturating_add(usage.estimated_tokens);
+    aggregate.wall_time_ms = aggregate.wall_time_ms.max(usage.wall_time_ms);
+}
+
 fn aggregate_completeness(
     envelopes: &[Option<ReadEnvelope<Value>>],
-    aggregate_truncated: bool,
+    results: &[BatchOperationResult],
+    limiting_resource: Option<LimitingResourceKind>,
 ) -> Result<ResultCompleteness, BatchOrchestrationError> {
     let mut state = CompletenessState::Complete;
     let mut resources = Vec::new();
@@ -1353,9 +1406,30 @@ fn aggregate_completeness(
             resources.push(LimitingResource::kind(LimitingResourceKind::Results));
         }
     }
-    if aggregate_truncated && state == CompletenessState::Complete {
-        state = CompletenessState::Truncated;
-        resources.push(LimitingResource::kind(LimitingResourceKind::Results));
+    let has_budget_nonexecution = results
+        .iter()
+        .any(|result| result.status == BatchOperationStatus::NotRunBudget);
+    let has_cancellation = results
+        .iter()
+        .any(|result| result.status == BatchOperationStatus::Cancelled);
+    let has_policy_nonexecution = results.iter().any(|result| {
+        matches!(
+            result.status,
+            BatchOperationStatus::SkippedDependency | BatchOperationStatus::NotRunFailFast
+        )
+    });
+    if results.iter().any(|result| result.truncated) || has_budget_nonexecution {
+        state = state.max(CompletenessState::Truncated);
+        resources.push(LimitingResource::kind(
+            limiting_resource.unwrap_or(LimitingResourceKind::Results),
+        ));
+        guidance.push(ContinuationGuidance::IncreaseBudgetWithinLimit);
+    }
+    if has_cancellation {
+        state = CompletenessState::Indeterminate;
+        resources.push(LimitingResource::kind(LimitingResourceKind::Cancellation));
+    } else if has_policy_nonexecution {
+        state = state.max(CompletenessState::Indeterminate);
     }
     if state == CompletenessState::Complete {
         return Ok(ResultCompleteness::complete());
@@ -1372,6 +1446,105 @@ fn aggregate_completeness(
         guidance,
     )
     .map_err(|_| BatchOrchestrationError::InvalidResponse)
+}
+
+fn fill_unresolved_slots(
+    operations: &[PlannedBatchOperation],
+    results: &mut [Option<BatchOperationResult>],
+    status: BatchOperationStatus,
+) {
+    for operation in operations {
+        if results[operation.request_index].is_none() {
+            results[operation.request_index] = Some(planned_terminal_result(operation, status));
+        }
+    }
+}
+
+fn finalize_result_slots(
+    operations: &[PlannedBatchOperation],
+    results: Vec<Option<BatchOperationResult>>,
+) -> Result<Vec<BatchOperationResult>, BatchOrchestrationError> {
+    if operations.len() != results.len() {
+        return Err(BatchOrchestrationError::Internal);
+    }
+    operations
+        .iter()
+        .zip(results)
+        .map(|(operation, result)| {
+            let result = result.ok_or(BatchOrchestrationError::Internal)?;
+            if result.id != operation.id || result.tool != operation.tool {
+                return Err(BatchOrchestrationError::Internal);
+            }
+            Ok(result)
+        })
+        .collect()
+}
+
+fn minimum_publication_charge(
+    plan: &StaticBatchPlan,
+    identity: &AgentResolvedIdentity,
+    error: &PublicError,
+) -> Result<BudgetCharge, BatchOrchestrationError> {
+    let operation_results = plan
+        .operations
+        .iter()
+        .map(|operation| planned_error_result(operation, error))
+        .collect::<Vec<_>>();
+    let envelope = ReadEnvelope {
+        schema_version: SchemaVersion::V1_0,
+        repository: identity.repository.clone(),
+        generation: identity.generation.clone(),
+        coverage: identity.coverage.clone(),
+        data: QueryBatchData {
+            batch_status: BatchStatus::Error,
+            generation_id: identity.generation.generation_id,
+            operation_results,
+            explanation: None,
+        },
+        truncated: true,
+        completeness: ResultCompleteness::new(
+            CompletenessState::Truncated,
+            vec![LimitingResource::kind(
+                LimitingResourceKind::EstimatedTokens,
+            )],
+            ContinuationAvailability::Unavailable,
+            vec![
+                ContinuationGuidance::SplitRequest,
+                ContinuationGuidance::IncreaseBudgetWithinLimit,
+            ],
+        )
+        .map_err(|_| BatchOrchestrationError::Internal)?,
+        next_cursor: RequiredNullable(None),
+        usage: empty_batch_usage(),
+        warnings: identity.warnings.clone(),
+        trust: TrustClassification::UntrustedRepositoryData,
+    };
+    let bytes = serde_json::to_vec(&envelope)
+        .map_err(|_| BatchOrchestrationError::Internal)?
+        .len();
+    let bytes = u64::try_from(bytes)
+        .map_err(|_| BatchOrchestrationError::Internal)?
+        .saturating_add(PUBLICATION_COUNTER_TOLERANCE_BYTES);
+    let publication_len = usize::try_from(bytes).map_err(|_| BatchOrchestrationError::Internal)?;
+    let estimated_tokens = rootlight_mcp_contract::accounting::estimate_tokens(publication_len);
+    Ok(BudgetCharge {
+        tokens: estimated_tokens,
+        json_bytes: bytes,
+        ..BudgetCharge::default()
+    })
+}
+
+fn empty_batch_usage() -> UsageSummary {
+    UsageSummary {
+        rows: 0,
+        edges: 0,
+        source_bytes: 0,
+        json_bytes: 0,
+        estimated_tokens: 0,
+        wall_time_ms: 0,
+        cache_status: CacheStatus::Miss,
+        trace_id: "batch".to_owned(),
+    }
 }
 
 struct BindingResolver<'a> {
@@ -1915,18 +2088,50 @@ impl BatchService {
         }
 
         let mut parent_ledger = BudgetLedger::new(Some(parent_budget.clone()));
+        parent_ledger
+            .charge(minimum_publication_charge(
+                &plan,
+                &identity,
+                &errors.operation_failed,
+            )?)
+            .map_err(map_policy_error)?;
         let fail_fast = matches!(plan.failure_policy, FailurePolicy::FailFast);
         let count = plan.operations.len();
         let mut results: Vec<Option<BatchOperationResult>> = vec![None; count];
         let mut binding_envelopes: Vec<Option<ReadEnvelope<Value>>> = vec![None; count];
         let mut observed_envelopes: Vec<Option<ReadEnvelope<Value>>> = vec![None; count];
+        let mut failure_receipts: Vec<Option<UsageSummary>> = vec![None; count];
+        let mut aggregate_limiting_resource = None;
         let mut stop_scheduling = false;
 
         for index in &plan.execution_order {
             let index = *index;
-            checkpoint(&cancellation)?;
-            check_deadline(Some(parent_deadline))?;
+            if cancellation.is_cancelled() {
+                fill_unresolved_slots(
+                    &plan.operations,
+                    &mut results,
+                    BatchOperationStatus::Cancelled,
+                );
+                aggregate_limiting_resource = Some(LimitingResourceKind::Cancellation);
+                break;
+            }
+            if Instant::now() >= parent_deadline {
+                fill_unresolved_slots(
+                    &plan.operations,
+                    &mut results,
+                    BatchOperationStatus::NotRunBudget,
+                );
+                aggregate_limiting_resource = Some(LimitingResourceKind::Deadline);
+                break;
+            }
             let operation = &plan.operations[index];
+            if aggregate_limiting_resource.is_some() {
+                results[index] = Some(planned_terminal_result(
+                    operation,
+                    BatchOperationStatus::NotRunBudget,
+                ));
+                continue;
+            }
             if dependency_failed(&operation.dependencies, &results) {
                 results[index] = Some(planned_terminal_result(
                     operation,
@@ -1991,25 +2196,32 @@ impl BatchService {
             ) {
                 Ok(remaining) => remaining,
                 Err(BatchOrchestrationError::BudgetExceeded) => {
-                    results[index] = Some(planned_error_result(operation, &errors.budget_exceeded));
-                    stop_scheduling |= fail_fast;
-                    continue;
+                    fill_unresolved_slots(
+                        &plan.operations,
+                        &mut results,
+                        BatchOperationStatus::NotRunBudget,
+                    );
+                    aggregate_limiting_resource = Some(LimitingResourceKind::EstimatedTokens);
+                    break;
                 }
                 Err(error) => return Err(error),
             };
             let tool_limits =
                 BudgetLimits::server_ceiling().constrained_by_response_budget(Some(&remaining));
-            let mut allocation = match parent_ledger
-                .allocate_child(tool_limits, operation.local_budget.as_ref())
-            {
-                Ok(allocation) => allocation,
-                Err(ExecutionPolicyError::BudgetExceeded { .. }) => {
-                    results[index] = Some(planned_error_result(operation, &errors.budget_exceeded));
-                    stop_scheduling |= fail_fast;
-                    continue;
-                }
-                Err(error) => return Err(map_policy_error(error)),
-            };
+            let mut allocation =
+                match parent_ledger.allocate_child(tool_limits, operation.local_budget.as_ref()) {
+                    Ok(allocation) => allocation,
+                    Err(ExecutionPolicyError::BudgetExceeded { resource }) => {
+                        fill_unresolved_slots(
+                            &plan.operations,
+                            &mut results,
+                            BatchOperationStatus::NotRunBudget,
+                        );
+                        aggregate_limiting_resource = Some(limiting_resource_kind(resource));
+                        break;
+                    }
+                    Err(error) => return Err(map_policy_error(error)),
+                };
             let child_budget = response_budget_from_limits(
                 allocation.limits(),
                 minimum_evidence(
@@ -2034,15 +2246,15 @@ impl BatchService {
                 Some(effective_deadline.at),
             )
             .with_local_budget(operation.local_budget.clone())
+            .with_response_profile(plan.response_profile)
             .with_pinned_identity(identity.clone())
             .with_local_deadline(effective_deadline.source == DeadlineSource::Local);
             let request = AgentToolRequest::new(operation.tool, resolved.arguments)
                 .with_materialized_binding_paths(resolved.materialized_binding_paths);
 
-            match port.execute(request, context).await {
+            let response = port.execute(request, context).await;
+            match response {
                 Ok(envelope) => {
-                    checkpoint(&cancellation)?;
-                    check_deadline(Some(parent_deadline))?;
                     validate_child_identity(&envelope, &identity)?;
 
                     let charge = charge_for(operation.tool, &envelope)?;
@@ -2059,37 +2271,96 @@ impl BatchService {
                     results[index] = Some(planned_success_result(operation, &envelope));
                     binding_envelopes[index] = Some(envelope);
                 }
-                Err(AgentPortError::Public(error)) => {
-                    results[index] = Some(planned_error_result(operation, &error));
-                    stop_scheduling |= fail_fast;
-                }
-                Err(AgentPortError::Cancelled) => {
-                    return Err(BatchOrchestrationError::Cancelled);
-                }
-                Err(AgentPortError::DeadlineExceeded) => {
-                    return Err(BatchOrchestrationError::DeadlineExceeded);
-                }
-                Err(AgentPortError::LocalDeadlineExceeded) => {
-                    results[index] = Some(planned_error_result(operation, &errors.budget_exceeded));
-                    stop_scheduling |= fail_fast;
-                }
-                Err(AgentPortError::InvalidResponse) => {
-                    return Err(BatchOrchestrationError::InvalidResponse);
-                }
-                Err(AgentPortError::Unavailable) => {
-                    results[index] =
-                        Some(planned_error_result(operation, &errors.operation_failed));
-                    stop_scheduling |= fail_fast;
+                Err(error) => {
+                    let (error, measured) = error.into_parts();
+                    if let Some(usage) = measured.as_ref() {
+                        failure_receipts[index] = Some(usage.clone());
+                        let charge = charge_for_usage(usage);
+                        if allocation.ledger_mut().charge(charge).is_err() {
+                            consume_allocation(allocation)?;
+                            results[index] = Some(planned_error_result_with_usage(
+                                operation,
+                                &errors.budget_exceeded,
+                                measured,
+                            ));
+                            aggregate_limiting_resource =
+                                Some(LimitingResourceKind::EstimatedTokens);
+                            stop_scheduling |= fail_fast;
+                            continue;
+                        }
+                        allocation.commit().map_err(map_policy_error)?;
+                    }
+                    match error {
+                        AgentPortError::Public(error) => {
+                            results[index] =
+                                Some(planned_error_result_with_usage(operation, &error, measured));
+                            stop_scheduling |= fail_fast;
+                        }
+                        AgentPortError::Cancelled => {
+                            let mut result =
+                                planned_terminal_result(operation, BatchOperationStatus::Cancelled);
+                            result.usage = measured;
+                            results[index] = Some(result);
+                            fill_unresolved_slots(
+                                &plan.operations,
+                                &mut results,
+                                BatchOperationStatus::Cancelled,
+                            );
+                            aggregate_limiting_resource = Some(LimitingResourceKind::Cancellation);
+                            break;
+                        }
+                        AgentPortError::DeadlineExceeded => {
+                            results[index] = Some(planned_error_result_with_usage(
+                                operation,
+                                &errors.budget_exceeded,
+                                measured,
+                            ));
+                            fill_unresolved_slots(
+                                &plan.operations,
+                                &mut results,
+                                BatchOperationStatus::NotRunBudget,
+                            );
+                            aggregate_limiting_resource = Some(LimitingResourceKind::Deadline);
+                            break;
+                        }
+                        AgentPortError::LocalDeadlineExceeded => {
+                            results[index] = Some(planned_error_result_with_usage(
+                                operation,
+                                &errors.budget_exceeded,
+                                measured,
+                            ));
+                            stop_scheduling |= fail_fast;
+                        }
+                        AgentPortError::InvalidResponse => {
+                            return Err(BatchOrchestrationError::InvalidResponse);
+                        }
+                        AgentPortError::Unavailable => {
+                            results[index] = Some(planned_error_result_with_usage(
+                                operation,
+                                &errors.operation_failed,
+                                measured,
+                            ));
+                            stop_scheduling |= fail_fast;
+                        }
+                        AgentPortError::Measured { .. } => {
+                            return Err(BatchOrchestrationError::InvalidResponse);
+                        }
+                    }
                 }
             }
         }
 
-        checkpoint(&cancellation)?;
-        check_deadline(Some(parent_deadline))?;
-        let operation_results: Vec<BatchOperationResult> = results.into_iter().flatten().collect();
-        let truncated = operation_results.iter().any(|result| result.truncated);
-        let completeness = aggregate_completeness(&observed_envelopes, truncated)?;
-        let usage = aggregate_usage(&observed_envelopes);
+        let operation_results = finalize_result_slots(&plan.operations, results)?;
+        let truncated = operation_results
+            .iter()
+            .any(|result| result.truncated || result.status == BatchOperationStatus::NotRunBudget);
+        let completeness = aggregate_completeness(
+            &observed_envelopes,
+            &operation_results,
+            aggregate_limiting_resource,
+        )?;
+        let usage = aggregate_usage_with_receipts(&observed_envelopes, &failure_receipts);
+        let warnings = aggregate_warnings(&identity.warnings, &operation_results);
         let data = QueryBatchData {
             batch_status: aggregate_status(&operation_results),
             generation_id: identity.generation.generation_id,
@@ -2106,10 +2377,26 @@ impl BatchService {
             completeness,
             next_cursor: RequiredNullable(None),
             usage,
-            warnings: identity.warnings,
+            warnings,
             trust: TrustClassification::UntrustedRepositoryData,
         })
     }
+}
+
+fn aggregate_warnings(
+    identity: &[rootlight_mcp_contract::vertical::ResponseWarning],
+    results: &[BatchOperationResult],
+) -> Vec<rootlight_mcp_contract::vertical::ResponseWarning> {
+    let mut warnings = identity.to_vec();
+    for warning in results.iter().flat_map(|result| &result.warnings) {
+        if warnings.len() == 32 {
+            break;
+        }
+        if !warnings.contains(warning) {
+            warnings.push(warning.clone());
+        }
+    }
+    warnings
 }
 
 fn admitted_parent_budget(requested: Option<&ResponseBudget>) -> ResponseBudget {
@@ -2183,6 +2470,7 @@ where
         Err(AgentPortError::LocalDeadlineExceeded) => Err(BatchOrchestrationError::InvalidResponse),
         Err(AgentPortError::InvalidResponse) => Err(BatchOrchestrationError::InvalidResponse),
         Err(AgentPortError::Unavailable) => Err(BatchOrchestrationError::Internal),
+        Err(AgentPortError::Measured { .. }) => Err(BatchOrchestrationError::InvalidResponse),
     }
 }
 
@@ -2351,14 +2639,6 @@ where
     }
 }
 
-fn check_deadline(deadline: Option<Instant>) -> Result<(), BatchOrchestrationError> {
-    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-        Err(BatchOrchestrationError::DeadlineExceeded)
-    } else {
-        Ok(())
-    }
-}
-
 fn charge_for(
     tool: BatchTool,
     envelope: &ReadEnvelope<Value>,
@@ -2381,6 +2661,35 @@ fn charge_for(
     })
 }
 
+fn charge_for_usage(usage: &UsageSummary) -> BudgetCharge {
+    BudgetCharge {
+        rows: usage.rows,
+        tokens: usage.estimated_tokens,
+        source_bytes: usage.source_bytes,
+        traversal_facts: usage.edges,
+        json_bytes: usage.json_bytes,
+        time_ms: usage.wall_time_ms,
+        ..BudgetCharge::default()
+    }
+}
+
+const fn limiting_resource_kind(resource: BudgetResource) -> LimitingResourceKind {
+    match resource {
+        BudgetResource::Rows => LimitingResourceKind::Rows,
+        BudgetResource::Results => LimitingResourceKind::Results,
+        BudgetResource::Tokens | BudgetResource::ActualTokens => {
+            LimitingResourceKind::EstimatedTokens
+        }
+        BudgetResource::SourceBytes => LimitingResourceKind::SourceBytes,
+        BudgetResource::TraversalFacts => LimitingResourceKind::Edges,
+        BudgetResource::Depth => LimitingResourceKind::Depth,
+        BudgetResource::Paths => LimitingResourceKind::Paths,
+        BudgetResource::JsonBytes => LimitingResourceKind::ResponseBytes,
+        BudgetResource::MemoryBytes => LimitingResourceKind::MemoryBytes,
+        BudgetResource::Time => LimitingResourceKind::Deadline,
+    }
+}
+
 fn returned_result_count(tool: BatchTool, data: &Value) -> Result<u64, BatchOrchestrationError> {
     if tool == BatchTool::SymbolRelationships {
         return data
@@ -2400,7 +2709,7 @@ fn returned_result_count(tool: BatchTool, data: &Value) -> Result<u64, BatchOrch
         BatchTool::CodeDead => "candidates",
         BatchTool::ContextPack => "items",
         BatchTool::SourceRead => "chunks",
-        BatchTool::PlanChange => return Ok(0),
+        BatchTool::PlanChange => "steps",
     };
     Ok(data
         .get(field)

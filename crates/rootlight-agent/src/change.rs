@@ -446,6 +446,7 @@ where
 }
 
 fn map_plan_port_error(error: AgentPortError) -> PlanChangeServiceError {
+    let (error, _) = error.into_parts();
     match error {
         AgentPortError::Public(error) => PlanChangeServiceError::Public(error),
         AgentPortError::Cancelled => PlanChangeServiceError::Cancelled,
@@ -453,6 +454,7 @@ fn map_plan_port_error(error: AgentPortError) -> PlanChangeServiceError {
         AgentPortError::LocalDeadlineExceeded => PlanChangeServiceError::InvalidResponse,
         AgentPortError::InvalidResponse => PlanChangeServiceError::InvalidResponse,
         AgentPortError::Unavailable => PlanChangeServiceError::Unavailable,
+        AgentPortError::Measured { .. } => PlanChangeServiceError::InvalidResponse,
     }
 }
 

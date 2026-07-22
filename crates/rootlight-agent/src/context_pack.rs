@@ -685,6 +685,7 @@ fn supported_seed_symbols(
 }
 
 fn map_port_error(error: AgentPortError) -> ContextPackServiceError {
+    let (error, _) = error.into_parts();
     match error {
         AgentPortError::Public(error) => ContextPackServiceError::Public(error),
         AgentPortError::Cancelled => ContextPackServiceError::Cancelled,
@@ -692,6 +693,7 @@ fn map_port_error(error: AgentPortError) -> ContextPackServiceError {
         AgentPortError::LocalDeadlineExceeded => ContextPackServiceError::InvalidResponse,
         AgentPortError::InvalidResponse => ContextPackServiceError::InvalidResponse,
         AgentPortError::Unavailable => ContextPackServiceError::Unavailable,
+        AgentPortError::Measured { .. } => ContextPackServiceError::InvalidResponse,
     }
 }
 

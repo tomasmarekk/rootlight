@@ -525,6 +525,10 @@ pub enum BatchOperationStatus {
     SkippedDependency,
     /// The operation was not scheduled because fail-fast stopped the batch.
     NotRunFailFast,
+    /// The operation was not scheduled because the shared budget was exhausted.
+    NotRunBudget,
+    /// The operation was cancelled after the batch plan had been accepted.
+    Cancelled,
     /// The operation was planned in explain mode and not executed.
     NotRun,
 }

@@ -58,7 +58,7 @@ use rootlight_mcp_contract::{
     PublicErrorBuildError, PublicValue, RepoIndexInput, RepositorySelector, SafeLabel,
     SchemaVersion, SourceFreeMessage, SourceReadInput, SymbolExplainInput, ToolResponse,
     TrustClassification, VerticalTool,
-    batch::batch_descriptor,
+    batch::{BatchResponseProfilePolicy, batch_descriptor},
     completeness::{
         CompletenessState, ContinuationAvailability, ContinuationGuidance,
         LimitingResource as ContractLimitingResource,
@@ -1857,9 +1857,6 @@ where
     let input: QueryBatchInput = decode_input(arguments)?;
     let budget = AnalyticalBudget::new(input.budget.as_ref())?;
     let explain_only = input.explain == Some(true);
-    if !is_compact_profile(input.response_profile) {
-        return Err(unsupported_field("response_profile"));
-    }
     let tools: Vec<McpTool> = input
         .operations
         .iter()
@@ -1902,7 +1899,7 @@ where
         .execute_plan(adapter, plan, repository, cancellation, errors)
         .await
         .map_err(map_batch_orchestration_error)?;
-    serialize_measured_read_success(output, started_at, budget.limits)
+    serialize_measured_batch_success(output, started_at, budget.limits)
 }
 
 fn preflight_batch_capabilities(input: &QueryBatchInput) -> Result<(), ToolExecutionError> {
@@ -1954,6 +1951,7 @@ fn preflight_static_batch_inputs(
             operation.effective_budget(),
             &mut arguments,
         )?;
+        apply_child_profile(operation.tool(), plan.response_profile(), &mut arguments)?;
         validator
             .validate(operation.descriptor().adapter, &arguments, exposure_profile)
             .map_err(|error| match error {
@@ -2047,6 +2045,7 @@ where
         let validator = Arc::clone(&self.validator);
         let budget = context.budget().clone();
         let local_budget = context.local_budget().cloned();
+        let response_profile = context.response_profile();
         let pinned_identity = context.pinned_identity().cloned();
         let deadline = context.deadline();
         let local_deadline = context.has_local_deadline();
@@ -2066,11 +2065,14 @@ where
                     map_materialized_input_error(error, &binding_paths, &invalid_arguments)
                 })?;
             apply_child_budget(tool, &budget, &mut arguments).map_err(map_agent_child_error)?;
+            apply_child_profile(tool, response_profile, &mut arguments)
+                .map_err(map_agent_child_error)?;
             validator
                 .validate(vertical_tool, &arguments, exposure_profile)
                 .map_err(|error| {
                     map_materialized_input_error(error, &binding_paths, &invalid_arguments)
                 })?;
+            let child_started_at = Instant::now();
             let operation = execute_agent_child(
                 tool,
                 port,
@@ -2090,23 +2092,31 @@ where
                 tokio::select! {
                     biased;
                     _ = cancellation_wait.cancelled() => {
-                        return Err(AgentPortError::Cancelled);
+                        return Err(AgentPortError::Cancelled.with_usage(
+                            measured_failure_usage(child_started_at),
+                        ));
                     }
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                        return Err(if local_deadline {
+                        let error = if local_deadline {
                             AgentPortError::LocalDeadlineExceeded
                         } else {
                             AgentPortError::DeadlineExceeded
-                        });
+                        };
+                        return Err(error.with_usage(measured_failure_usage(child_started_at)));
                     }
                     response = operation => response,
                 }
             } else {
                 operation.await
             };
-            let response = response.map_err(map_agent_child_error)?;
+            let response = response.map_err(|error| {
+                map_agent_child_error(error).with_usage(measured_failure_usage(child_started_at))
+            })?;
             let envelope: ReadEnvelope<Value> = serde_json::from_value(Value::Object(response))
-                .map_err(|_| AgentPortError::InvalidResponse)?;
+                .map_err(|_| {
+                    AgentPortError::InvalidResponse
+                        .with_usage(measured_failure_usage(child_started_at))
+                })?;
             Ok(envelope)
         })
     }
@@ -2178,6 +2188,21 @@ fn apply_child_budget(
     }
     if tool != BatchTool::ContextPack {
         let mut transported = budget.clone();
+        if tool == BatchTool::CodeLocate {
+            let requested_max_results = arguments
+                .get("max_results")
+                .and_then(Value::as_u64)
+                .unwrap_or(20)
+                .min(200);
+            let requested_max_results = u16::try_from(requested_max_results)
+                .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+            transported.max_results = Some(
+                transported
+                    .max_results
+                    .unwrap_or(requested_max_results)
+                    .min(requested_max_results),
+            );
+        }
         // The daemon protocol cannot represent sub-10 ms request timeouts.
         // The outer batch deadline still wins the biased cancellation race.
         if transported.timeout_ms.is_some_and(|timeout| timeout < 10) {
@@ -2219,6 +2244,45 @@ fn apply_child_budget(
         | BatchTool::SourceRead => {}
     }
     Ok(())
+}
+
+fn apply_child_profile(
+    tool: BatchTool,
+    profile: ResponseProfile,
+    arguments: &mut Map<String, Value>,
+) -> Result<(), ToolExecutionError> {
+    match batch_descriptor(tool).response_profiles {
+        BatchResponseProfilePolicy::Fixed(fixed) if fixed == profile => Ok(()),
+        BatchResponseProfilePolicy::Fixed(_) => Err(unsupported_field("response_profile")),
+        BatchResponseProfilePolicy::Selectable {
+            wire_field,
+            supported,
+            ..
+        } if supported.contains(&profile) => {
+            arguments.insert(
+                wire_field.to_owned(),
+                serde_json::to_value(profile)
+                    .map_err(|_| internal(ToolExecutionFailure::Executor))?,
+            );
+            Ok(())
+        }
+        BatchResponseProfilePolicy::Selectable { .. } => Err(unsupported_field("response_profile")),
+    }
+}
+
+fn measured_failure_usage(started_at: Instant) -> UsageSummary {
+    UsageSummary {
+        rows: 0,
+        edges: 0,
+        source_bytes: 0,
+        json_bytes: 0,
+        estimated_tokens: 0,
+        wall_time_ms: u64::try_from(started_at.elapsed().as_micros())
+            .unwrap_or(u64::MAX)
+            .div_ceil(1_000),
+        cache_status: CacheStatus::Miss,
+        trace_id: "batch-child-failure".to_owned(),
+    }
 }
 
 fn validate_local_child_budget(
@@ -7023,6 +7087,79 @@ where
     T: Serialize,
 {
     serialize_measured_success(output, started_at, limits, |output| &mut output.usage)
+}
+
+fn serialize_measured_batch_success(
+    mut output: ReadEnvelope<QueryBatchData>,
+    started_at: Instant,
+    limits: BudgetLimits,
+) -> Result<Map<String, Value>, ToolExecutionError> {
+    output.usage.wall_time_ms = u64::try_from(started_at.elapsed().as_micros())
+        .unwrap_or(u64::MAX)
+        .div_ceil(1_000);
+    let mut payload_was_reduced = false;
+    for _ in 0..8 {
+        let value = serde_json::to_value(ToolResponse::Success(&output))
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        let serialized =
+            serde_json::to_vec(&value).map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        let json_bytes = u64::try_from(serialized.len())
+            .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        let estimated_tokens =
+            rootlight_mcp_contract::accounting::estimate_tokens(serialized.len());
+        if output.usage.json_bytes == json_bytes
+            && output.usage.estimated_tokens == estimated_tokens
+        {
+            let maximums = limits.maximums();
+            let representation_exceeded =
+                json_bytes > maximums.json_bytes || estimated_tokens > maximums.tokens;
+            if representation_exceeded && !payload_was_reduced {
+                reduce_batch_payload(&mut output);
+                payload_was_reduced = true;
+                continue;
+            }
+            if output.usage.rows > maximums.rows
+                || output.usage.edges > maximums.traversal_facts
+                || output.usage.source_bytes > maximums.source_bytes
+                || representation_exceeded
+                || output.usage.wall_time_ms > maximums.time_ms
+            {
+                return Err(ToolExecutionError::new(authoritative_error(
+                    MappedDomainFailure::budget_exceeded(),
+                )));
+            }
+            let Value::Object(output) = value else {
+                return Err(internal(ToolExecutionFailure::Executor));
+            };
+            return Ok(output);
+        }
+        output.usage.json_bytes = json_bytes;
+        output.usage.estimated_tokens = estimated_tokens;
+    }
+    Err(internal(ToolExecutionFailure::Executor))
+}
+
+fn reduce_batch_payload(output: &mut ReadEnvelope<QueryBatchData>) {
+    for result in &mut output.data.operation_results {
+        if result.data.is_some() {
+            result.data = Some(Value::Null);
+            result.truncated = true;
+            result.next_cursor = RequiredNullable(None);
+        }
+    }
+    output.truncated = true;
+    output.completeness = ResultCompleteness::new(
+        CompletenessState::Truncated,
+        vec![ContractLimitingResource::kind(
+            ContractLimitingResourceKind::ResponseBytes,
+        )],
+        ContinuationAvailability::Unavailable,
+        vec![
+            ContinuationGuidance::SplitRequest,
+            ContinuationGuidance::IncreaseBudgetWithinLimit,
+        ],
+    )
+    .unwrap_or_else(|_| ResultCompleteness::indeterminate());
 }
 
 fn serialize_profiled_read_success<T>(

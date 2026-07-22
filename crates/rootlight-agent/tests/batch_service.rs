@@ -31,6 +31,7 @@ use rootlight_mcp_contract::{
     },
 };
 use serde_json::{Map, Value, json};
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, Copy)]
 struct TestCancellation(bool);
@@ -45,6 +46,7 @@ impl CancellationSignal for TestCancellation {
 struct RecordedCall {
     request: AgentToolRequest,
     budget: ResponseBudget,
+    response_profile: ResponseProfile,
     pinned_generation: Option<GenerationId>,
     has_deadline: bool,
 }
@@ -75,26 +77,7 @@ impl AgentToolPort<TestCancellation> for FakePort {
         _context: AgentResolutionContext<TestCancellation>,
     ) -> AgentPortFuture<Result<AgentResolvedIdentity, AgentPortError>> {
         self.identity_calls.fetch_add(1, Ordering::Relaxed);
-        Box::pin(async {
-            Ok(AgentResolvedIdentity {
-                repository: ResolvedRepository {
-                    repository_id: repository(),
-                    display_name: "fixture".to_owned(),
-                },
-                generation: GenerationSummary {
-                    generation_id: generation(2),
-                    parent_generation: RequiredNullable(None),
-                    structural_freshness: Freshness::Current,
-                    semantic_freshness: Freshness::Current,
-                },
-                coverage: CoverageSummary {
-                    status: CoverageStatus::Bounded,
-                    languages: Vec::new(),
-                    skipped_inputs: 0,
-                },
-                warnings: Vec::new(),
-            })
-        })
+        Box::pin(async { Ok(resolved_identity()) })
     }
 
     fn execute(
@@ -108,6 +91,7 @@ impl AgentToolPort<TestCancellation> for FakePort {
             .push(RecordedCall {
                 request,
                 budget: context.budget().clone(),
+                response_profile: context.response_profile(),
                 pinned_generation: context
                     .pinned_identity()
                     .map(|identity| identity.generation.generation_id),
@@ -123,8 +107,64 @@ impl AgentToolPort<TestCancellation> for FakePort {
     }
 }
 
+#[derive(Debug, Default)]
+struct PendingFirstPort {
+    calls: AtomicUsize,
+    first_started: Arc<Notify>,
+    release_first: Arc<Notify>,
+}
+
+impl AgentToolPort<TestCancellation> for PendingFirstPort {
+    fn resolve_identity(
+        &self,
+        _request: AgentIdentityRequest,
+        _context: AgentResolutionContext<TestCancellation>,
+    ) -> AgentPortFuture<Result<AgentResolvedIdentity, AgentPortError>> {
+        Box::pin(async { Ok(resolved_identity()) })
+    }
+
+    fn execute(
+        &self,
+        _request: AgentToolRequest,
+        _context: AgentCallContext<TestCancellation>,
+    ) -> AgentPortFuture<Result<ReadEnvelope<Value>, AgentPortError>> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            self.first_started.notify_one();
+            let release = Arc::clone(&self.release_first);
+            Box::pin(async move {
+                release.notified().await;
+                Ok(response(generation(2), 10, json!({"matches": []})))
+            })
+        } else {
+            Box::pin(async { Ok(response(generation(2), 10, json!({"matches": []}))) })
+        }
+    }
+}
+
 fn repository() -> RepositoryId {
     RepositoryId::from_bytes([1; 16])
+}
+
+fn resolved_identity() -> AgentResolvedIdentity {
+    AgentResolvedIdentity {
+        repository: ResolvedRepository {
+            repository_id: repository(),
+            display_name: "fixture".to_owned(),
+        },
+        generation: GenerationSummary {
+            generation_id: generation(2),
+            parent_generation: RequiredNullable(None),
+            structural_freshness: Freshness::Current,
+            semantic_freshness: Freshness::Current,
+        },
+        coverage: CoverageSummary {
+            status: CoverageStatus::Bounded,
+            languages: Vec::new(),
+            skipped_inputs: 0,
+        },
+        warnings: Vec::new(),
+    }
 }
 
 fn generation(byte: u8) -> GenerationId {
@@ -501,14 +541,23 @@ async fn service_materializes_bindings_and_propagates_policy() {
         calls[1].request.clone().into_arguments()["symbol_ids"],
         json!([symbol(3), symbol(4)])
     );
-    assert_eq!(calls[0].budget.max_tokens, Some(1_000));
-    assert_eq!(calls[1].budget.max_tokens, Some(900));
+    let first_tokens = calls[0]
+        .budget
+        .max_tokens
+        .expect("publication reservation leaves a bounded child budget");
+    assert!(first_tokens < 1_000);
+    assert_eq!(calls[1].budget.max_tokens, Some(first_tokens - 100));
     assert!(
         calls
             .iter()
             .all(|call| call.pinned_generation == Some(generation(2)))
     );
     assert!(calls.iter().all(|call| call.has_deadline));
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.response_profile == ResponseProfile::Compact)
+    );
     assert_eq!(port.identity_calls.load(Ordering::Relaxed), 1);
     assert_eq!(
         calls[0].request.clone().into_arguments()["generation"],
@@ -846,7 +895,7 @@ async fn relationship_results_charge_returned_edges_and_propagate_the_remainder(
                 None,
             ),
         ],
-        budget(500),
+        budget(900),
     );
     request.budget.as_mut().expect("test budget").max_results = Some(5);
     let port = Arc::new(FakePort::with_responses([
@@ -1051,7 +1100,7 @@ async fn child_reservations_release_unused_capacity_and_reconcile_measured_use()
             operation("first", BatchTool::CodeLocate, Map::new(), None, None),
             operation("second", BatchTool::SourceRead, Map::new(), None, None),
         ],
-        budget(250),
+        budget(650),
     );
     let port = Arc::new(FakePort::with_responses([
         Ok(response(generation(2), 100, json!({}))),
@@ -1090,8 +1139,11 @@ async fn child_reservations_release_unused_capacity_and_reconcile_measured_use()
     );
     let calls = port.calls.lock().expect("call lock");
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].budget.max_tokens, Some(250));
-    assert_eq!(calls[1].budget.max_tokens, Some(150));
+    let first_tokens = calls[0]
+        .budget
+        .max_tokens
+        .expect("publication reservation leaves child capacity");
+    assert_eq!(calls[1].budget.max_tokens, Some(first_tokens - 100));
 }
 
 #[tokio::test]
@@ -1101,7 +1153,7 @@ async fn exhausted_parent_capacity_prevents_later_child_dispatch() {
             operation("later", BatchTool::CodeLocate, Map::new(), None, None),
             operation("overrun", BatchTool::SourceRead, Map::new(), None, None),
         ],
-        budget(100),
+        budget(500),
     );
     let port = Arc::new(FakePort::with_responses([Ok(response(
         generation(2),
@@ -1121,12 +1173,23 @@ async fn exhausted_parent_capacity_prevents_later_child_dispatch() {
         .expect("budget exhaustion remains in the ordered batch result");
 
     assert_eq!(output.data.batch_status, BatchStatus::Error);
-    assert!(
-        output.data.operation_results.iter().all(|result| result
-            .error
-            .as_ref()
-            .map(PublicError::code)
-            == Some(ErrorCode::BudgetExceeded))
+    assert_eq!(
+        output
+            .data
+            .operation_results
+            .iter()
+            .filter(|result| result.status == BatchOperationStatus::Error)
+            .count(),
+        1
+    );
+    assert_eq!(
+        output
+            .data
+            .operation_results
+            .iter()
+            .filter(|result| result.status == BatchOperationStatus::NotRunBudget)
+            .count(),
+        1
     );
     assert_eq!(port.calls.lock().expect("call lock").len(), 1);
 }
@@ -1222,6 +1285,159 @@ async fn all_child_errors_preserve_complete_per_operation_outcome() {
             .map(PublicError::code),
         Some(ErrorCode::UnsupportedCapability)
     );
+}
+
+#[tokio::test]
+async fn selectable_profile_reaches_every_child_call() {
+    let mut request = input(
+        vec![operation(
+            "find",
+            BatchTool::CodeLocate,
+            Map::new(),
+            None,
+            None,
+        )],
+        budget(1_000),
+    );
+    request.response_profile = Some(ResponseProfile::Standard);
+    let port = Arc::new(FakePort::with_responses([Ok(response(
+        generation(2),
+        10,
+        json!({"matches": []}),
+    ))]));
+
+    BatchService
+        .execute(
+            Arc::clone(&port),
+            request,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("selectable profile is admitted");
+
+    assert_eq!(
+        port.calls.lock().expect("call lock")[0].response_profile,
+        ResponseProfile::Standard
+    );
+}
+
+#[tokio::test]
+async fn measured_child_failure_reconciles_operation_and_aggregate_usage() {
+    let measured = UsageSummary {
+        rows: 7,
+        edges: 3,
+        source_bytes: 11,
+        json_bytes: 0,
+        estimated_tokens: 0,
+        wall_time_ms: 13,
+        cache_status: CacheStatus::Miss,
+        trace_id: "measured-failure".to_owned(),
+    };
+    let request = input(
+        vec![operation(
+            "find",
+            BatchTool::CodeLocate,
+            Map::new(),
+            None,
+            None,
+        )],
+        budget(1_000),
+    );
+    let port = Arc::new(FakePort::with_responses([Err(
+        AgentPortError::Unavailable.with_usage(measured.clone())
+    )]));
+
+    let output = BatchService
+        .execute(
+            port,
+            request,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("measured runtime failure remains in the batch envelope");
+
+    assert_eq!(output.data.operation_results[0].usage, Some(measured));
+    assert_eq!(output.usage.rows, 7);
+    assert_eq!(output.usage.edges, 3);
+    assert_eq!(output.usage.source_bytes, 11);
+    assert_eq!(output.usage.wall_time_ms, 13);
+}
+
+#[tokio::test]
+async fn cancellation_after_dispatch_preserves_all_request_order_slots() {
+    let request = input(
+        vec![
+            operation("first", BatchTool::CodeLocate, Map::new(), None, None),
+            operation("second", BatchTool::CodeLocate, Map::new(), None, None),
+        ],
+        budget(1_000),
+    );
+    let port = Arc::new(FakePort::with_responses([Err(AgentPortError::Cancelled
+        .with_usage(UsageSummary {
+            rows: 0,
+            edges: 0,
+            source_bytes: 0,
+            json_bytes: 0,
+            estimated_tokens: 0,
+            wall_time_ms: 1,
+            cache_status: CacheStatus::Miss,
+            trace_id: "cancelled".to_owned(),
+        }))]));
+
+    let output = BatchService
+        .execute(
+            port,
+            request,
+            repository(),
+            TestCancellation(false),
+            errors(),
+        )
+        .await
+        .expect("accepted-plan cancellation remains a structured envelope");
+
+    assert_eq!(output.data.operation_results.len(), 2);
+    assert!(
+        output
+            .data
+            .operation_results
+            .iter()
+            .all(|result| result.status == BatchOperationStatus::Cancelled)
+    );
+    assert_eq!(
+        output.completeness.state,
+        rootlight_mcp_contract::completeness::CompletenessState::Indeterminate
+    );
+}
+
+#[tokio::test]
+async fn pending_first_child_prevents_a_second_reservation_or_dispatch() {
+    let request = input(
+        vec![
+            operation("first", BatchTool::CodeLocate, Map::new(), None, None),
+            operation("second", BatchTool::CodeLocate, Map::new(), None, None),
+        ],
+        budget(1_000),
+    );
+    let port = Arc::new(PendingFirstPort::default());
+    let task = tokio::spawn(BatchService.execute(
+        Arc::clone(&port),
+        request,
+        repository(),
+        TestCancellation(false),
+        errors(),
+    ));
+
+    port.first_started.notified().await;
+    assert_eq!(port.calls.load(Ordering::SeqCst), 1);
+    port.release_first.notify_one();
+    task.await
+        .expect("batch task does not panic")
+        .expect("serialized batch completes");
+    assert_eq!(port.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

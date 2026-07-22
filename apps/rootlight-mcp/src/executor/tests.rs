@@ -896,6 +896,64 @@ fn omitted_analytical_budget_transports_the_complete_server_ceiling() {
 }
 
 #[test]
+fn batch_code_locate_budget_never_widens_the_child_result_limit() {
+    let budget = ResponseBudget {
+        max_results: Some(1_000),
+        max_tokens: Some(3_000),
+        max_source_bytes: None,
+        max_traversal_facts: None,
+        max_depth: None,
+        max_paths: None,
+        timeout_ms: Some(1_000),
+        evidence_level: None,
+    };
+    let mut default_arguments = Map::new();
+    apply_child_budget(BatchTool::CodeLocate, &budget, &mut default_arguments)
+        .expect("default locate budget is representable");
+    assert_eq!(
+        default_arguments["budget"]["max_results"],
+        json!(20),
+        "the standalone default is narrower than the shared batch ceiling"
+    );
+
+    let mut explicit_arguments = Map::from_iter([("max_results".to_owned(), json!(7))]);
+    apply_child_budget(BatchTool::CodeLocate, &budget, &mut explicit_arguments)
+        .expect("explicit locate limit is representable");
+    assert_eq!(explicit_arguments["budget"]["max_results"], json!(7));
+}
+
+#[test]
+fn batch_profile_injection_uses_the_registry_wire_field() {
+    let mut locate = Map::new();
+    apply_child_profile(
+        BatchTool::CodeLocate,
+        ResponseProfile::Standard,
+        &mut locate,
+    )
+    .expect("code.locate supports the standard representation");
+    assert_eq!(locate["response_profile"], json!("standard"));
+
+    let mut impact = Map::new();
+    apply_child_profile(
+        BatchTool::ChangeImpact,
+        ResponseProfile::Evidence,
+        &mut impact,
+    )
+    .expect("change.impact supports the evidence representation");
+    assert_eq!(impact["profile"], json!("evidence"));
+
+    assert!(
+        apply_child_profile(
+            BatchTool::SourceRead,
+            ResponseProfile::Standard,
+            &mut Map::new()
+        )
+        .is_err(),
+        "a fixed compact child cannot silently widen its representation"
+    );
+}
+
+#[test]
 fn final_serialization_enforces_exact_byte_and_conservative_token_boundaries() {
     let unsupported = PublicError::builder(ErrorCode::UnsupportedCapability, UNSUPPORTED_MESSAGE)
         .build()
@@ -3067,8 +3125,8 @@ async fn query_batch_enforces_aggregate_budget_across_the_app_boundary() {
     );
     assert_eq!(
         harness.call_count.load(Ordering::Relaxed),
-        3,
-        "identity and both measured children run before aggregate serialization enforces the cap"
+        1,
+        "identity is pinned before the minimum publish envelope rejects child dispatch"
     );
 }
 
