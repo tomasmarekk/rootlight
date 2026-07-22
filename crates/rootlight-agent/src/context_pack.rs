@@ -1207,6 +1207,8 @@ pub enum ContextPackServiceError {
     Cancelled,
     /// The bounded orchestration deadline elapsed.
     DeadlineExceeded,
+    /// A shared planning or evidence budget was exhausted.
+    BudgetExceeded,
     /// A child response violated the pinned identity or typed contract.
     InvalidResponse,
     /// A continuation is malformed, expired, or bound to another request.
@@ -1732,7 +1734,7 @@ fn map_evidence_planning_error(error: ContextEvidencePlanningError) -> ContextPa
             }
             ContextEvidenceCollectionError::Policy(ExecutionPolicyError::BudgetExceeded {
                 ..
-            }) => ContextPackServiceError::Unavailable,
+            }) => ContextPackServiceError::BudgetExceeded,
         },
         ContextEvidencePlanningError::Planning(error) => match error {
             ContextPackPlanningError::Policy(ExecutionPolicyError::Cancelled) => {
@@ -1740,7 +1742,7 @@ fn map_evidence_planning_error(error: ContextEvidencePlanningError) -> ContextPa
             }
             ContextPackPlanningError::Pack(_)
             | ContextPackPlanningError::Policy(ExecutionPolicyError::BudgetExceeded { .. }) => {
-                ContextPackServiceError::Unavailable
+                ContextPackServiceError::BudgetExceeded
             }
             ContextPackPlanningError::InvalidCompleteness => {
                 ContextPackServiceError::InvalidResponse

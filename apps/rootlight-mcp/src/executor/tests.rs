@@ -1070,6 +1070,21 @@ fn final_serialization_enforces_exact_byte_and_conservative_token_boundaries() {
     );
 }
 
+#[test]
+fn context_pack_budget_exhaustion_is_a_checked_public_error() {
+    let unsupported = PublicError::builder(ErrorCode::UnsupportedCapability, UNSUPPORTED_MESSAGE)
+        .build()
+        .expect("static unsupported error is valid");
+    let error =
+        map_context_pack_service_error(ContextPackServiceError::BudgetExceeded, &unsupported);
+
+    assert_canonical_budget_error(
+        error
+            .public_error()
+            .expect("budget exhaustion remains a checked public error"),
+    );
+}
+
 async fn execute(
     executor: &impl ToolExecutor,
     tool: VerticalTool,

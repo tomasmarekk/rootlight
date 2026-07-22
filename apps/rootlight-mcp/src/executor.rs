@@ -2797,7 +2797,7 @@ fn map_context_pack_service_error(
             ToolExecutionError::new(invalid_cursor.clone())
         }
         ContextPackServiceError::Public(error) => ToolExecutionError::new(*error),
-        ContextPackServiceError::DeadlineExceeded => {
+        ContextPackServiceError::DeadlineExceeded | ContextPackServiceError::BudgetExceeded => {
             ToolExecutionError::new(authoritative_error(MappedDomainFailure::budget_exceeded()))
         }
         ContextPackServiceError::BudgetExceeded => {
