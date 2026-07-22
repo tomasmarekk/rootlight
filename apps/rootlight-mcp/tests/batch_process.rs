@@ -169,6 +169,45 @@ fn process_preflight_rejects_non_subtools_and_profile_hidden_members() {
         );
         assert_public_error(&response, "INVALID_ARGUMENT");
     }
+    for (case, tool, arguments) in [
+        (
+            "relationships-data-flow",
+            "symbol.relationships",
+            json!({
+                "repository": {"repository_id": RepositoryId::from_bytes([3; 16])},
+                "symbol_ids": [SymbolId::from_bytes([7; 20])],
+                "relations": ["data_flow"]
+            }),
+        ),
+        (
+            "flow-called-by",
+            "flow.trace",
+            json!({
+                "repository": {"repository_id": RepositoryId::from_bytes([3; 16])},
+                "from": {"symbol_id": SymbolId::from_bytes([7; 20])},
+                "relations": ["called_by"]
+            }),
+        ),
+        (
+            "cycles-messaging",
+            "architecture.cycles",
+            json!({
+                "repository": {"repository_id": RepositoryId::from_bytes([3; 16])},
+                "projection": {"relations": ["messaging"], "level": "symbol"}
+            }),
+        ),
+        (
+            "dead-library-policy",
+            "code.dead",
+            json!({
+                "repository": {"repository_id": RepositoryId::from_bytes([3; 16])},
+                "entry_point_policy": "library"
+            }),
+        ),
+    ] {
+        let response = developer.call(case, tool, arguments);
+        assert_public_error(&response, "UNSUPPORTED_CAPABILITY");
+    }
     developer.finish();
 
     let mut scout = McpProcess::spawn(

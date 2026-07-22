@@ -2156,6 +2156,16 @@ mod tests {
             };
             let mut input = admitted_retained_input(capability, tool, &contract, schema);
             input.insert(top_name.to_owned(), top_value);
+            if capability.tool == McpTool::ArchitectureCycles
+                && top_name == "projection"
+                && rule.path != "projection.level"
+            {
+                input
+                    .get_mut("projection")
+                    .and_then(Value::as_object_mut)
+                    .expect("generated cycle projection is an object")
+                    .insert("level".to_owned(), json!("symbol"));
+            }
             if capability.tool == McpTool::RepoIndex && top_name == "repository_id" {
                 input.remove("root");
             }
@@ -2639,7 +2649,7 @@ mod tests {
             ],
             "review any new generated-rule exclusion"
         );
-        assert_eq!((declared, covered, exclusions.len()), (110, 108, 2));
+        assert_eq!((declared, covered, exclusions.len()), (144, 142, 2));
     }
 
     #[tokio::test]
@@ -3020,12 +3030,12 @@ mod tests {
                     "6de13ea1303cf268180aef0d2fad892124e6819f6c15f00faa03a80fa5be0385".to_owned(),
                 ),
                 (
-                    489_354,
-                    "2f6a701d704d05dc0fa2fdd0230d03eba1f8c78f2345b4bc754d7bd944839647".to_owned(),
+                    495_620,
+                    "20b05450c3677288e7a3e6d96caf8ef32a39f3db9c55439f3a8d38e88faffbe7".to_owned(),
                 ),
                 (
-                    659_342,
-                    "920075f729f0a66aecf29ac2ee3404af3461fcf82f3211035e5b8bb582c3c768".to_owned(),
+                    665_608,
+                    "ba49eea15393148793bdf0f2b67575fb4eb7a7813a38e90407c697711a08d6ba".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"

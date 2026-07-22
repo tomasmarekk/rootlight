@@ -1188,7 +1188,7 @@
           ],
           "candidates": [
             {
-              "classification": "probable_dead",
+              "classification": "not_observed_from_entry_points_strong_references",
               "confidence": 900,
               "source_refs": [
                 {

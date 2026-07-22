@@ -633,6 +633,7 @@ const SYMBOL_EXPLAIN_RULES: &[CapabilityRule] = &[
     accepted_fallback("repository"),
     accepted_fallback("generation"),
     accepted_fallback("symbol_ids"),
+    accepted_fallback("relations"),
     accepted_fallback("include_provenance"),
     implemented(
         "response_profile",
@@ -665,7 +666,6 @@ const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
     accepted_fallback("repository"),
     accepted_fallback("generation"),
     accepted_fallback("symbol_ids"),
-    accepted_fallback("relations"),
     accepted_fallback("direction"),
     accepted_fallback("min_confidence"),
     accepted_fallback("include_candidates"),
@@ -686,6 +686,62 @@ const SYMBOL_RELATIONSHIPS_RULES: &[CapabilityRule] = &[
         "true",
         "ambiguous candidate projection is not served",
     ),
+    implemented_value("relations[]", "calls", "serves direct call edges"),
+    implemented_value(
+        "relations[]",
+        "called_by",
+        "serves inbound direct call edges",
+    ),
+    implemented_value("relations[]", "references", "serves static reference edges"),
+    implemented_value("relations[]", "types", "serves static type edges"),
+    implemented_value(
+        "relations[]",
+        "implements",
+        "serves static implementation edges",
+    ),
+    implemented_value("relations[]", "imports", "serves static import edges"),
+    unsupported_value("relations[]", "tests", "test relations are not served"),
+    unsupported_value(
+        "relations[]",
+        "ownership",
+        "ownership relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "service_call",
+        "service-call relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "calls_route",
+        "route-call relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "messaging",
+        "messaging relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "reads_table",
+        "database-read relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "writes_table",
+        "database-write relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "build_dependency",
+        "build-dependency relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "data_flow",
+        "data-flow relations are not served",
+    ),
+    unsupported_value("relations[]", "history", "history relations are not served"),
     implemented("budget", "reduces the common hard execution budget"),
     unsupported("budget.evidence_level", "evidence projection is not served"),
 ];
@@ -730,6 +786,62 @@ const FLOW_TRACE_RULES: &[CapabilityRule] = &[
     unsupported("to.route_id", "route endpoints are not served"),
     unsupported("to.service_id", "service endpoints are not served"),
     unsupported("to.database_object_id", "database endpoints are not served"),
+    implemented_value("relations[]", "calls", "serves direct call edges"),
+    implemented_value("relations[]", "references", "serves static reference edges"),
+    implemented_value("relations[]", "types", "serves static type edges"),
+    implemented_value(
+        "relations[]",
+        "implements",
+        "serves static implementation edges",
+    ),
+    implemented_value("relations[]", "imports", "serves static import edges"),
+    unsupported_value(
+        "relations[]",
+        "called_by",
+        "use calls with inbound direction instead",
+    ),
+    unsupported_value("relations[]", "tests", "test relations are not served"),
+    unsupported_value(
+        "relations[]",
+        "ownership",
+        "ownership relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "service_call",
+        "service-call relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "calls_route",
+        "route-call relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "messaging",
+        "messaging relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "reads_table",
+        "database-read relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "writes_table",
+        "database-write relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "build_dependency",
+        "build-dependency relations are not served",
+    ),
+    unsupported_value(
+        "relations[]",
+        "data_flow",
+        "data-flow relations are not served",
+    ),
+    unsupported_value("relations[]", "history", "history relations are not served"),
 ];
 
 const CHANGE_IMPACT_RULES: &[CapabilityRule] = &[
@@ -879,6 +991,86 @@ const ARCHITECTURE_CYCLES_RULES: &[CapabilityRule] = &[
         "detects cycles between symbols",
     ),
     unsupported("rank_by", "cycle ranking strategy is not served"),
+    implemented_value(
+        "projection.relations[]",
+        "calls",
+        "serves direct call edges",
+    ),
+    implemented_value(
+        "projection.relations[]",
+        "references",
+        "serves static reference edges",
+    ),
+    implemented_value(
+        "projection.relations[]",
+        "types",
+        "serves static type edges",
+    ),
+    implemented_value(
+        "projection.relations[]",
+        "implements",
+        "serves static implementation edges",
+    ),
+    implemented_value(
+        "projection.relations[]",
+        "imports",
+        "serves static import edges",
+    ),
+    unsupported_value(
+        "projection.relations[]",
+        "called_by",
+        "cycle projection requires canonical directed edges",
+    ),
+    unsupported_value(
+        "projection.relations[]",
+        "tests",
+        "test relations are not served",
+    ),
+    unsupported_value(
+        "projection.relations[]",
+        "ownership",
+        "ownership relations are not served",
+    ),
+    unsupported_value(
+        "projection.relations[]",
+        "service_call",
+        "service-call relations are not served",
+    ),
+    unsupported_value(
+        "projection.relations[]",
+        "calls_route",
+        "route-call relations are not served",
+    ),
+    unsupported_value(
+        "projection.relations[]",
+        "messaging",
+        "messaging relations are not served",
+    ),
+    unsupported_value(
+        "projection.relations[]",
+        "reads_table",
+        "database-read relations are not served",
+    ),
+    unsupported_value(
+        "projection.relations[]",
+        "writes_table",
+        "database-write relations are not served",
+    ),
+    unsupported_value(
+        "projection.relations[]",
+        "build_dependency",
+        "build-dependency relations are not served",
+    ),
+    unsupported_value(
+        "projection.relations[]",
+        "data_flow",
+        "data-flow relations are not served",
+    ),
+    unsupported_value(
+        "projection.relations[]",
+        "history",
+        "history relations are not served",
+    ),
     implemented("budget", "reduces the common hard execution budget"),
     unsupported("budget.evidence_level", "evidence projection is not served"),
 ];
@@ -901,6 +1093,21 @@ const CODE_DEAD_RULES: &[CapabilityRule] = &[
         "only stable repository identifiers are served",
     ),
     unsupported("scope", "structural scope filtering is not served"),
+    implemented_value(
+        "entry_point_policy",
+        "standard",
+        "uses a disclosed partial mixed entry-point model",
+    ),
+    unsupported_value(
+        "entry_point_policy",
+        "library",
+        "library-specific entry-point resolution is not served",
+    ),
+    unsupported_value(
+        "entry_point_policy",
+        "application",
+        "application-specific entry-point resolution is not served",
+    ),
     implemented("budget", "reduces the common hard execution budget"),
     unsupported("budget.evidence_level", "evidence projection is not served"),
 ];
@@ -1500,16 +1707,22 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
             "bounded definitions, exact relation counts, and optional compact producer provenance"
         }
         McpTool::SymbolRelationships => {
-            "bounded typed relationships around explicit stable symbol identifiers"
+            "bounded static call, caller, reference, type, implementation, and import relationships"
         }
-        McpTool::FlowTrace => "bounded symbol relation path tracing",
+        McpTool::FlowTrace => {
+            "bounded paths over static call, reference, type, implementation, and import edges"
+        }
         McpTool::ChangeImpact => "bounded explicit symbol-or-path change mapping",
         McpTool::TestsSelect => "bounded unit-test ranking from explicit symbol seeds",
         McpTool::ArchitectureOverview => {
             "bounded file-granularity architecture map with optional hotspots"
         }
-        McpTool::ArchitectureCycles => "bounded cycle detection in a selected relation projection",
-        McpTool::CodeDead => "bounded dead-code candidates with entry-point and blind-spot caveats",
+        McpTool::ArchitectureCycles => {
+            "bounded symbol-level cycles over static call, reference, type, implementation, and import edges"
+        }
+        McpTool::CodeDead => {
+            "bounded static reachability observations from the partial standard entry-point model"
+        }
         McpTool::HistoryCompare => {
             "bounded entity and signature comparison of two explicit retained generation identifiers"
         }

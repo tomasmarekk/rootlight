@@ -5800,6 +5800,29 @@ async fn symbol_relationships_maps_groups_and_totals() {
 }
 
 #[tokio::test]
+async fn symbol_relationships_rejects_unserved_relation_before_the_port() {
+    let harness = Harness::new(FakeOutcome::SymbolRelationships(Err(
+        ClientPortError::Executor,
+    )));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::SymbolRelationships,
+        json!({
+            "repository": {"repository_id": repository()},
+            "symbol_ids": [symbol()],
+            "relations": ["data_flow"]
+        }),
+    )
+    .await
+    .expect_err("unserved relation is rejected before the port");
+    let public = error
+        .public_error()
+        .expect("unserved relation is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn flow_trace_maps_paths_frontier_and_projection() {
     let response = FlowTracePortResponse::new(
         ClientFlowTrace {
@@ -5874,6 +5897,27 @@ async fn flow_trace_maps_paths_frontier_and_projection() {
     assert_eq!(request.from(), symbol());
     assert_eq!(request.to(), None);
     assert_eq!(request.relations(), &["calls".to_owned()]);
+}
+
+#[tokio::test]
+async fn flow_trace_rejects_noncanonical_called_by_relation_before_the_port() {
+    let harness = Harness::new(FakeOutcome::FlowTrace(Err(ClientPortError::Executor)));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::FlowTrace,
+        json!({
+            "repository": {"repository_id": repository()},
+            "from": {"symbol_id": symbol()},
+            "relations": ["called_by"]
+        }),
+    )
+    .await
+    .expect_err("noncanonical relation is rejected before the port");
+    let public = error
+        .public_error()
+        .expect("noncanonical relation is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -5988,17 +6032,39 @@ async fn architecture_cycles_rejects_unsupported_ranking() {
 }
 
 #[tokio::test]
+async fn architecture_cycles_rejects_unserved_relation_before_the_port() {
+    let harness = Harness::new(FakeOutcome::ArchitectureCycles(Err(
+        ClientPortError::Executor,
+    )));
+    let error = execute(
+        &harness.executor,
+        VerticalTool::ArchitectureCycles,
+        json!({
+            "repository": {"repository_id": repository()},
+            "projection": {"relations": ["messaging"], "level": "symbol"}
+        }),
+    )
+    .await
+    .expect_err("unserved relation is rejected before the port");
+    let public = error
+        .public_error()
+        .expect("unserved relation is a checked public error");
+    assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+    assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
     let response = CodeDeadPortResponse::new(
         ClientCodeDead {
             context: context(1, 0),
             candidates: vec![ClientDeadCandidate {
                 symbol_id: missing_symbol(),
-                classification: "proven_dead".to_owned(),
+                classification: "no_observed_incoming_references".to_owned(),
                 confidence: 1_000,
                 why: vec![
                     "no_incoming_references".to_owned(),
-                    "unreachable_from_entry_points".to_owned(),
+                    "not_observed_from_partial_entry_points".to_owned(),
                 ],
                 suppressions_checked: vec!["entry_point".to_owned()],
                 source_refs: vec![source_reference(0, 10, 1, 1)],
@@ -6042,7 +6108,10 @@ async fn code_dead_maps_candidates_entry_points_and_blind_spots() {
     assert_eq!(output.data.candidates.len(), 1);
     let candidate = &output.data.candidates[0];
     assert_eq!(candidate.symbol_id, missing_symbol());
-    assert_eq!(candidate.classification, DeadClassification::ProvenDead);
+    assert_eq!(
+        candidate.classification,
+        DeadClassification::NoObservedIncomingReferences
+    );
     assert_eq!(candidate.confidence, 1_000);
     assert_eq!(candidate.why, vec!["no_incoming_references".to_owned()]);
     assert_eq!(
@@ -6087,6 +6156,28 @@ async fn code_dead_rejects_unsupported_scope() {
     assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
     assert_eq!(public.message(), UNSUPPORTED_MESSAGE);
     assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn code_dead_rejects_unserved_entry_point_policies_before_the_port() {
+    for policy in ["library", "application"] {
+        let harness = Harness::new(FakeOutcome::CodeDead(Err(ClientPortError::Executor)));
+        let error = execute(
+            &harness.executor,
+            VerticalTool::CodeDead,
+            json!({
+                "repository": {"repository_id": repository()},
+                "entry_point_policy": policy
+            }),
+        )
+        .await
+        .expect_err("unserved entry-point policy is rejected before the port");
+        let public = error
+            .public_error()
+            .expect("unserved policy is a checked public error");
+        assert_eq!(public.code(), ErrorCode::UnsupportedCapability);
+        assert_eq!(harness.call_count.load(Ordering::Relaxed), 0);
+    }
 }
 
 #[tokio::test]
@@ -9136,7 +9227,6 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         CodeDead,
         NormalizedDelta,
         [
-            "entry_point_policy",
             "generation",
             "include_exported",
             "include_tests",
@@ -9146,7 +9236,11 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         ]
     );
     group!(CodeDead, ExplainPlan, ["explain"]);
-    group!(CodeDead, DefaultEquivalent, ["response_profile"]);
+    group!(
+        CodeDead,
+        DefaultEquivalent,
+        ["entry_point_policy", "response_profile"]
+    );
     group!(CodeDead, BudgetRuntime, ["budget"]);
     group!(
         HistoryCompare,
@@ -9306,7 +9400,7 @@ fn accepted_schema_paths_have_effect_evidence() {
     let accepted_digest = blake3::hash(accepted_snapshot.as_bytes()).to_hex();
     assert_eq!(
         accepted_digest.as_str(),
-        "ff504b65b06de77ca46154ef97ef5333f1418deb2cee0c55bed545d4f55577fd",
+        "7c322af6dcb2a13c997605d14cf1b96a48cab838ffce397277e50b61b53f2e5a",
         "accepted path universe changed"
     );
     let categorized: Vec<_> = accepted
@@ -9371,8 +9465,8 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[10],
         counts[11],
     );
-    assert_eq!(counts, [131, 97, 3, 69, 27, 16, 5, 16, 10, 1, 1, 4]);
-    assert_eq!(categorized.len(), 380);
+    assert_eq!(counts, [129, 97, 3, 69, 28, 16, 5, 16, 10, 1, 1, 4]);
+    assert_eq!(categorized.len(), 379);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -9727,7 +9821,6 @@ fn normalized_delta_cases(seed: u8) -> Vec<NormalizedDeltaCase> {
             false,
         ),
         ("generation", json!(alternate_generation()), true),
-        ("entry_point_policy", json!("library"), true),
         ("include_exported", json!(true), true),
         ("include_tests", json!(true), true),
         ("min_confidence", confidence.clone(), true),
@@ -11004,7 +11097,10 @@ fn default_equivalent_cases() -> Vec<DefaultEquivalentCase> {
         (
             VerticalTool::CodeDead,
             json!({"repository": repository_selector(), "explain": true}),
-            &[("response_profile", json!("compact"))][..],
+            &[
+                ("entry_point_policy", json!("standard")),
+                ("response_profile", json!("compact")),
+            ][..],
         ),
         (
             VerticalTool::HistoryCompare,

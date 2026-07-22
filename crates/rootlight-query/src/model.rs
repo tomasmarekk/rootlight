@@ -354,7 +354,7 @@ pub enum PlanKind {
     FlowTrace,
     /// Detect bounded architecture cycles among stable symbols.
     ArchitectureCycles,
-    /// Detect bounded dead-code candidates among stable symbols.
+    /// Report bounded static reachability observations among stable symbols.
     CodeDead,
     /// Aggregate a bounded file-granularity architecture overview.
     ArchitectureOverview,
@@ -1867,12 +1867,12 @@ pub struct HistoryCompareResult {
     pub trust: RepositoryDataTrust,
 }
 
-/// Entry-point model policy for a `code.dead` reachability query.
+/// Entry-point model policy for a `code.dead` static reachability query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CodeDeadEntryPointPolicy {
-    /// Standard mixed entry-point model.
+    /// Partial mixed entry-point model.
     Standard,
     /// Library export surface as entry points.
     Library,
@@ -1903,17 +1903,17 @@ impl CodeDeadEntryPointPolicy {
     }
 }
 
-/// Reachability classification for one dead-code candidate.
+/// Classification for one bounded static reachability observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DeadCodeClassification {
-    /// Proven unreachable under the entry-point model: no incoming edges.
-    ProvenDead,
-    /// Probable dead code: unreached with confident incoming edges.
-    ProbableDead,
-    /// Suspected dead code: unreached with weak incoming edges.
-    SuspectedDead,
+    /// No incoming reference was observed in the served relation graph.
+    NoObservedIncomingReferences,
+    /// The partial entry-point scan did not reach a strongly referenced symbol.
+    NotObservedFromEntryPointsStrongReferences,
+    /// The partial entry-point scan did not reach a weakly referenced symbol.
+    NotObservedFromEntryPointsWeakReferences,
 }
 
 impl DeadCodeClassification {
@@ -1921,9 +1921,13 @@ impl DeadCodeClassification {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::ProvenDead => "proven_dead",
-            Self::ProbableDead => "probable_dead",
-            Self::SuspectedDead => "suspected_dead",
+            Self::NoObservedIncomingReferences => "no_observed_incoming_references",
+            Self::NotObservedFromEntryPointsStrongReferences => {
+                "not_observed_from_entry_points_strong_references"
+            }
+            Self::NotObservedFromEntryPointsWeakReferences => {
+                "not_observed_from_entry_points_weak_references"
+            }
         }
     }
 
@@ -1931,9 +1935,13 @@ impl DeadCodeClassification {
     #[must_use]
     pub fn from_label(value: &str) -> Option<Self> {
         match value {
-            "proven_dead" => Some(Self::ProvenDead),
-            "probable_dead" => Some(Self::ProbableDead),
-            "suspected_dead" => Some(Self::SuspectedDead),
+            "no_observed_incoming_references" => Some(Self::NoObservedIncomingReferences),
+            "not_observed_from_entry_points_strong_references" => {
+                Some(Self::NotObservedFromEntryPointsStrongReferences)
+            }
+            "not_observed_from_entry_points_weak_references" => {
+                Some(Self::NotObservedFromEntryPointsWeakReferences)
+            }
             _ => None,
         }
     }
@@ -1959,12 +1967,12 @@ impl CodeDeadPlan {
     }
 }
 
-/// One dead-code candidate detected by reachability analysis.
+/// One bounded static reachability observation requiring human review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeadCodeCandidate {
-    /// Stable symbol identity of the candidate.
+    /// Stable symbol identity of the observed symbol.
     pub symbol_id: SymbolId,
-    /// Reachability classification.
+    /// Static reachability observation; never a runtime-liveness proof.
     pub classification: DeadCodeClassification,
     /// Classification confidence from 0 through 1000.
     pub confidence: u16,
@@ -1976,7 +1984,7 @@ pub struct DeadCodeCandidate {
     pub source_refs: Vec<SourceRef>,
 }
 
-/// Summary of the entry-point model used for reachability.
+/// Summary of the partial entry-point model used for static reachability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CodeDeadEntryPointSummary {
     /// Policy used for entry-point resolution.
@@ -2010,7 +2018,7 @@ pub struct CodeDeadSuppressionRule {
 pub struct CodeDeadResult {
     /// Immutable generation that served the query.
     pub generation: GenerationId,
-    /// Ranked dead-code candidates in deterministic order.
+    /// Ranked static reachability observations in deterministic order.
     pub candidates: Vec<DeadCodeCandidate>,
     /// Entry-point model summary.
     pub entry_points: CodeDeadEntryPointSummary,

@@ -6045,13 +6045,13 @@ fn break_candidate(
     })
 }
 
-/// Relation families whose served predicates back the dead-code call/use graph.
+/// Relation families whose served predicates back the static reachability graph.
 ///
 /// The first-slice oracle records direct calls as `DispatchCandidate`
 /// occurrences rather than entity-to-entity relations, so the reachability scan
 /// also admits the `DispatchCandidate` predicate explicitly below. On a purely
 /// lexical fixture no served predicate yields an entity-to-entity edge, so the
-/// graph stays empty and `code.dead` honestly reports no proven candidates.
+/// graph stays empty and `code.dead` honestly reports no observations.
 const CODE_DEAD_FAMILIES: &[RelationFamily] = &[
     RelationFamily::Calls,
     RelationFamily::References,
@@ -6080,7 +6080,7 @@ struct DeadGraph {
     truncated: bool,
 }
 
-/// Honest result of the bounded dead-code reachability analysis.
+/// Honest result of the bounded static reachability analysis.
 struct DeadAnalysis {
     candidates: Vec<DeadCodeCandidate>,
     entry_points: CodeDeadEntryPointSummary,
@@ -6165,7 +6165,7 @@ fn build_dead_graph(
     Ok(graph)
 }
 
-/// Resolves the entry-point model and classifies every unreached graph symbol.
+/// Resolves the partial entry-point model and classifies each unobserved graph symbol.
 ///
 /// Exported and test symbols are resolved from normalized entities and served
 /// `Exports` relations under the row budget. By default those symbols are
@@ -6290,13 +6290,12 @@ fn reachability_closure(
     Ok(reached)
 }
 
-/// Classifies every graph symbol unreached from the entry points.
+/// Classifies every graph symbol not observed from the partial entry-point set.
 ///
-/// The forward closure marks every symbol reachable from the protected roots;
-/// each remaining graph symbol becomes a candidate ordered by stable identity
-/// and capped at `max_candidates`. A symbol with no incoming served edges is
-/// proven dead; an unreached symbol with incoming edges is probable or
-/// suspected dead based on its strongest incoming confidence.
+/// The forward closure marks every symbol observed from the protected roots;
+/// each remaining graph symbol becomes a review observation ordered by stable
+/// identity and capped at `max_candidates`. The classification reports only
+/// served static-edge evidence and never asserts runtime liveness.
 #[expect(
     clippy::too_many_arguments,
     reason = "the detection entry point carries its bounded budget and control state"
@@ -6335,22 +6334,22 @@ fn detect_dead_candidates(
             .copied()
             .unwrap_or(0);
         let classification = if incoming == 0 {
-            DeadCodeClassification::ProvenDead
+            DeadCodeClassification::NoObservedIncomingReferences
         } else if max_confidence >= 500 {
-            DeadCodeClassification::ProbableDead
+            DeadCodeClassification::NotObservedFromEntryPointsStrongReferences
         } else {
-            DeadCodeClassification::SuspectedDead
+            DeadCodeClassification::NotObservedFromEntryPointsWeakReferences
         };
         let confidence = match classification {
-            DeadCodeClassification::ProvenDead => 1_000,
-            DeadCodeClassification::ProbableDead => 700,
-            DeadCodeClassification::SuspectedDead => 400,
+            DeadCodeClassification::NoObservedIncomingReferences => 1_000,
+            DeadCodeClassification::NotObservedFromEntryPointsStrongReferences => 700,
+            DeadCodeClassification::NotObservedFromEntryPointsWeakReferences => 400,
         };
         let mut why = Vec::new();
         if incoming == 0 {
             why.push("no_incoming_references".to_owned());
         }
-        why.push("unreachable_from_entry_points".to_owned());
+        why.push("not_observed_from_partial_entry_points".to_owned());
         let candidate = DeadCodeCandidate {
             symbol_id: symbol,
             classification,
@@ -6478,7 +6477,7 @@ fn dead_suppression_rules(
     ]
 }
 
-/// Records one emitted dead-code candidate under the result and memory budgets.
+/// Records one emitted reachability observation under the result and memory budgets.
 fn emit_dead_candidate(
     candidates: &mut Vec<DeadCodeCandidate>,
     candidate: DeadCodeCandidate,
@@ -7438,7 +7437,7 @@ mod tests {
     use rootlight_ids::RepositoryId;
     use rootlight_ir::NormalizedIrDocument;
 
-    /// Builds a directed dead-code graph from `(subject, object, confidence)`.
+    /// Builds a directed static reachability graph from `(subject, object, confidence)`.
     fn dead_graph(edges: &[(SymbolId, SymbolId, u16)]) -> DeadGraph {
         let mut graph = DeadGraph::default();
         for &(subject, object, confidence) in edges {
@@ -7508,15 +7507,15 @@ mod tests {
             &mut limiting_resources,
             &control,
         )
-        .expect("bounded dead-code detection succeeds");
+        .expect("bounded static reachability analysis succeeds");
         let execution = authoritative_execution(&limiting_resources);
         (candidates, execution)
     }
 
     #[test]
-    fn code_dead_separates_reachable_from_unreachable_symbols() {
+    fn code_dead_separates_observed_from_unobserved_symbols() {
         let (entry, a, b, c, d) = (symbol(1), symbol(2), symbol(3), symbol(4), symbol(5));
-        // entry -> a -> b is reachable; c -> d is an unreachable island.
+        // entry -> a -> b is observed; c -> d is not observed from the partial roots.
         let graph = dead_graph(&[(entry, a, 900), (a, b, 900), (c, d, 900)]);
         let entry_points = BTreeSet::from([entry]);
         let candidates = run_dead(&graph, &entry_points, 50);
@@ -7525,41 +7524,48 @@ mod tests {
         assert_eq!(ids, vec![c, d]);
         assert_eq!(
             candidates[0].classification,
-            DeadCodeClassification::ProvenDead
+            DeadCodeClassification::NoObservedIncomingReferences
         );
         assert_eq!(
             candidates[1].classification,
-            DeadCodeClassification::ProbableDead
+            DeadCodeClassification::NotObservedFromEntryPointsStrongReferences
         );
     }
 
     #[test]
-    fn code_dead_marks_a_no_incoming_symbol_proven_dead() {
+    fn code_dead_reports_no_observed_incoming_references() {
         let (entry, a, b, c) = (symbol(1), symbol(2), symbol(3), symbol(4));
-        // entry -> a is reachable; b -> c is unreachable and b has no incoming.
+        // entry -> a is observed; b -> c is outside the partial-root closure.
         let graph = dead_graph(&[(entry, a, 900), (b, c, 900)]);
         let entry_points = BTreeSet::from([entry]);
         let candidates = run_dead(&graph, &entry_points, 50);
 
-        let proven = candidates
+        let observation = candidates
             .iter()
             .find(|candidate| candidate.symbol_id == b)
             .expect("the no-incoming symbol is reported");
-        assert_eq!(proven.classification, DeadCodeClassification::ProvenDead);
-        assert_eq!(proven.confidence, 1_000);
-        assert!(proven.why.contains(&"no_incoming_references".to_owned()));
+        assert_eq!(
+            observation.classification,
+            DeadCodeClassification::NoObservedIncomingReferences
+        );
+        assert_eq!(observation.confidence, 1_000);
         assert!(
-            proven
+            observation
                 .why
-                .contains(&"unreachable_from_entry_points".to_owned())
+                .contains(&"no_incoming_references".to_owned())
+        );
+        assert!(
+            observation
+                .why
+                .contains(&"not_observed_from_partial_entry_points".to_owned())
         );
     }
 
     #[test]
-    fn code_dead_classifies_weak_incoming_edges_as_suspected() {
+    fn code_dead_reports_unobserved_weak_incoming_references() {
         let (entry, a, b, c) = (symbol(1), symbol(2), symbol(3), symbol(4));
-        // entry -> a is reachable; b -> c is an unreachable island where c is
-        // referenced only by a weak (low-confidence) edge from dead b.
+        // entry -> a is observed; b -> c is outside the partial-root closure,
+        // and c has only a weak observed incoming edge.
         let graph = dead_graph(&[(entry, a, 900), (b, c, 100)]);
         let entry_points = BTreeSet::from([entry]);
         let candidates = run_dead(&graph, &entry_points, 50);
@@ -7570,7 +7576,7 @@ mod tests {
             .expect("the weakly referenced symbol is reported");
         assert_eq!(
             suspected.classification,
-            DeadCodeClassification::SuspectedDead
+            DeadCodeClassification::NotObservedFromEntryPointsWeakReferences
         );
         assert_eq!(suspected.confidence, 400);
     }

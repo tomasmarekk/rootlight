@@ -283,7 +283,7 @@ pub trait FirstSliceClientPort: Send + Sync + 'static {
         cancellation: RequestCancellation,
     ) -> ClientPortFuture<ArchitectureCyclesPortResponse>;
 
-    /// Detects bounded dead-code candidates over one generation.
+    /// Reports bounded static reachability observations over one generation.
     fn code_dead(
         &self,
         request: CodeDeadPortRequest,
@@ -4215,7 +4215,13 @@ fn normalize_symbol_relationships(
 ) -> Result<SymbolRelationshipsPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
     // Structural scope and ambiguous candidates are not served by this slice.
-    if input.scope.is_some() || input.include_candidates == Some(true) {
+    if input.scope.is_some()
+        || input.include_candidates == Some(true)
+        || input
+            .relations
+            .iter()
+            .any(|kind| !symbol_relationship_kind_is_supported(*kind))
+    {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let mut relations = Vec::new();
@@ -4352,6 +4358,29 @@ fn relation_kind_from_label(label: &str) -> Result<RelationKind, ToolExecutionEr
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
+const fn symbol_relationship_kind_is_supported(kind: RelationKind) -> bool {
+    matches!(
+        kind,
+        RelationKind::Calls
+            | RelationKind::CalledBy
+            | RelationKind::References
+            | RelationKind::Types
+            | RelationKind::Implements
+            | RelationKind::Imports
+    )
+}
+
+const fn directed_graph_kind_is_supported(kind: RelationKind) -> bool {
+    matches!(
+        kind,
+        RelationKind::Calls
+            | RelationKind::References
+            | RelationKind::Types
+            | RelationKind::Implements
+            | RelationKind::Imports
+    )
+}
+
 fn direction_label(direction: Direction) -> Result<String, ToolExecutionError> {
     match serde_json::to_value(direction)
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?
@@ -4456,7 +4485,13 @@ fn normalize_flow_trace(
     let repository = repository_id(input.repository, unsupported)?;
     // Cross-repository traversal and explicit path policies are not served by
     // this slice.
-    if input.cross_repository == Some(true) || input.path_policy.is_some() {
+    if input.cross_repository == Some(true)
+        || input.path_policy.is_some()
+        || input
+            .relations
+            .iter()
+            .any(|kind| !directed_graph_kind_is_supported(*kind))
+    {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     // The first slice resolves only stable symbol endpoints; route, service,
@@ -4639,7 +4674,14 @@ fn normalize_architecture_cycles(
     // Structural scope and ranking strategies are not served by this slice.
     // The projection level is accepted as a descriptive label;
     // detection runs at symbol granularity.
-    if input.scope.is_some() || input.rank_by.is_some() {
+    if input.scope.is_some()
+        || input.rank_by.is_some()
+        || input
+            .projection
+            .relations
+            .iter()
+            .any(|kind| !directed_graph_kind_is_supported(*kind))
+    {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
     let mut relations = Vec::new();
@@ -4823,18 +4865,18 @@ fn normalize_code_dead(
     unsupported: &PublicError,
 ) -> Result<CodeDeadPortRequest, ToolExecutionError> {
     let repository = repository_id(input.repository, unsupported)?;
-    // Structural scope is not served by this slice.
-    if input.scope.is_some() {
+    // Structural scope and alternate entry-point models are not served by this slice.
+    if input.scope.is_some()
+        || input
+            .entry_point_policy
+            .is_some_and(|policy| policy != EntryPointPolicy::Standard)
+    {
         return Err(ToolExecutionError::new(unsupported.clone()));
     }
-    let entry_point_policy = match input.entry_point_policy {
-        Some(policy) => Some(entry_point_policy_label(policy)?),
-        None => None,
-    };
     Ok(CodeDeadPortRequest {
         repository,
         generation: client_generation(input.generation),
-        entry_point_policy,
+        entry_point_policy: None,
         include_exported: input.include_exported,
         include_tests: input.include_tests,
         min_confidence: input.min_confidence,
@@ -4916,15 +4958,6 @@ fn map_code_dead(
         response.result.execution_completeness,
         None,
     )
-}
-
-fn entry_point_policy_label(policy: EntryPointPolicy) -> Result<String, ToolExecutionError> {
-    match serde_json::to_value(policy)
-        .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))?
-    {
-        Value::String(label) => Ok(label),
-        _ => Err(internal(ToolExecutionFailure::InvalidResponse)),
-    }
 }
 
 fn entry_point_policy_from_label(label: &str) -> Result<EntryPointPolicy, ToolExecutionError> {

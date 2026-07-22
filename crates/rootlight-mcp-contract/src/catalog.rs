@@ -31,7 +31,7 @@ pub enum McpTool {
     ArchitectureOverview,
     /// Finds dependency cycles in a relation projection.
     ArchitectureCycles,
-    /// Finds dead or unreachable code candidates.
+    /// Reports bounded static reachability observations for human review.
     CodeDead,
     /// Compares two revisions or generations structurally.
     HistoryCompare,
@@ -122,7 +122,7 @@ impl McpTool {
             Self::TestsSelect => "Select tests",
             Self::ArchitectureOverview => "Architecture overview",
             Self::ArchitectureCycles => "Architecture cycles",
-            Self::CodeDead => "Dead code",
+            Self::CodeDead => "Static reachability",
             Self::HistoryCompare => "Compare history",
             Self::PlanChange => "Plan change",
             Self::ContextPack => "Context pack",
@@ -155,10 +155,10 @@ impl McpTool {
                 "Return bounded definitions, exact relation counts, and optional compact producer provenance for explicit stable symbol identifiers; absent identifiers are reported as unresolved, while custom sections, source previews, relation samples, full provenance, and continuation are unsupported."
             }
             Self::SymbolRelationships => {
-                "Return bounded typed relationships around explicit stable symbol identifiers with authenticated continuation; custom scope and candidate projection are unsupported."
+                "Return bounded static call, caller, reference, type, implementation, and import relationships around explicit stable symbol identifiers with authenticated continuation; other relation families, custom scope, and candidate projection are unsupported."
             }
             Self::FlowTrace => {
-                "Use bounded symbol relation path tracing; route, service, database, and cross-repository endpoints are unsupported."
+                "Trace bounded paths over static call, reference, type, implementation, and import edges; other relation families plus route, service, database, and cross-repository endpoints are unsupported."
             }
             Self::ChangeImpact => {
                 "Use bounded explicit symbol-or-path change mapping to dependents, risks, and optional tests; working-tree and revision-range resolution are unsupported."
@@ -170,10 +170,10 @@ impl McpTool {
                 "Use a bounded file-granularity architecture map with optional hotspots; module, package, service, data, ownership, community, and build views are unsupported."
             }
             Self::ArchitectureCycles => {
-                "Use bounded cycle detection in a selected relation projection with caller-reduced resource ceilings; custom scope and ranking are unsupported."
+                "Detect bounded symbol-level cycles over static call, reference, type, implementation, and import edges; other relation families, custom scope, and ranking are unsupported."
             }
             Self::CodeDead => {
-                "Return bounded dead-code candidates with entry-point and blind-spot caveats under caller-reduced resource ceilings; custom scope is unsupported."
+                "Return bounded static reachability observations from the partial standard entry-point model with dynamic-dispatch and coverage caveats; observations do not prove runtime liveness, and custom scope or alternate entry-point policies are unsupported."
             }
             Self::HistoryCompare => {
                 "Use bounded entity and signature comparison of two explicit retained generation identifiers; relation, architecture, ownership, test, route, data, and Git revision comparisons are unsupported."
@@ -254,7 +254,7 @@ impl McpTool {
 pub enum ExposureProfile {
     /// Minimal discovery surface for orientation and simple retrieval.
     Scout,
-    /// Adds relationship, flow, impact, test, architecture, and dead-code tools.
+    /// Adds relationship, flow, impact, test, architecture, and reachability tools.
     Analysis,
     /// Exposes all nineteen tools including administration and advanced query.
     Developer,
