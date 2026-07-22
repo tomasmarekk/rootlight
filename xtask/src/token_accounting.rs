@@ -13,24 +13,40 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tiktoken_rs::CoreBPE;
 
-const REPORT_SCHEMA: &str = "rootlight.mcp-token-accounting/1";
-const REPORT_FILE: &str = "token-accounting-v1.json";
+const REPORT_SCHEMA: &str = "rootlight.mcp-token-accounting/2";
+const REPORT_FILE: &str = "token-accounting-v2.json";
 const TOKENIZER_PROVIDER: &str = "openai";
 const TOKENIZER_MODEL: &str = "gpt-4o";
 const TOKENIZER_NAME: &str = "o200k_base";
 const TOKENIZER_IMPLEMENTATION: &str = "tiktoken-rs";
 const TOKENIZER_IMPLEMENTATION_VERSION: &str = "0.12.0";
 const TOKENIZER_IMPLEMENTATION_REVISION: &str = "32de8dc0526d67f2c266c4e5e7c6a8ec5a0ce3d7";
+const TOKENIZER_IMPLEMENTATION_REPOSITORY: &str = "https://github.com/zurawiki/tiktoken-rs";
 const TOKENIZER_IMPLEMENTATION_PACKAGE_SHA256: &str =
     "027853bbf8c7763b77c5c595f1c271c7d536ced7d6f83452911b944621e57fc2";
+const TOKENIZER_IMPLEMENTATION_LICENSE_SPDX: &str = "MIT";
+const TOKENIZER_IMPLEMENTATION_LICENSE_URL: &str = "https://raw.githubusercontent.com/zurawiki/tiktoken-rs/32de8dc0526d67f2c266c4e5e7c6a8ec5a0ce3d7/LICENSE";
+const TOKENIZER_IMPLEMENTATION_LICENSE_SHA256: &str =
+    "f7c6ddf9d84fd7b8ad5917e4074d4c05e4c1dfb752a28a0058f06bd0f5e2edcc";
 const TOKENIZER_ASSET_SHA256: &str =
     "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d";
 const TOKENIZER_ASSET_PATH: &str = "assets/o200k_base.tiktoken";
 const TOKENIZER_ASSET_FORMAT: &str = "tiktoken_bpe_ranks";
 const TOKENIZER_ASSET_DISTRIBUTION: &str = "embedded_in_crates_io_package";
-const TOKENIZER_LICENSE: &str = "MIT";
+const TOKENIZER_ASSET_ORIGIN_URL: &str =
+    "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken";
+const TOKENIZER_ASSET_SOURCE_REPOSITORY: &str = "https://github.com/openai/tiktoken";
+const TOKENIZER_ASSET_SOURCE_REVISION: &str = "08a5f3b2c987ada4fc5aa1f16c643c203fa8acaa";
+const TOKENIZER_ASSET_SOURCE_REFERENCE: &str = "https://raw.githubusercontent.com/openai/tiktoken/08a5f3b2c987ada4fc5aa1f16c643c203fa8acaa/tiktoken_ext/openai_public.py";
+const TOKENIZER_ASSET_LICENSE_SPDX: &str = "MIT";
+const TOKENIZER_ASSET_LICENSE_BASIS: &str =
+    "upstream_repository_license_without_asset_specific_notice";
+const TOKENIZER_ASSET_LICENSE_URL: &str = "https://raw.githubusercontent.com/openai/tiktoken/08a5f3b2c987ada4fc5aa1f16c643c203fa8acaa/LICENSE";
+const TOKENIZER_ASSET_LICENSE_SHA256: &str =
+    "418cb499b436128d653d79941333a5437b7be2ea9213dcc2f04d15d5d2c51d86";
 const NORMALIZATION: &str = "none_exact_utf8";
-const FRAMING: &str = "raw_compact_tools_list_json";
+const TOOLS_LIST_INPUT_KIND: &str = "mcp_tools_list_result";
+const TOOLS_LIST_FRAMING: &str = "raw_compact_json_object";
 const MAX_REPORT_BYTES: usize = 1024 * 1024;
 const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
@@ -107,7 +123,13 @@ pub(crate) fn emit(options: &Options) -> Result<(), TokenAccountingError> {
     for payload in &report.payloads {
         let profile = profile_from_name(&payload.profile)?;
         let encoded = serialize_payload(profile)?;
-        write_bytes(&options.output_dir.join(&payload.input.file), &encoded)?;
+        let file = payload
+            .measurement
+            .input
+            .file
+            .as_deref()
+            .ok_or(TokenAccountingError::MissingInputFile)?;
+        write_bytes(&options.output_dir.join(file), &encoded)?;
     }
     let mut encoded = serde_json::to_vec_pretty(&report)?;
     encoded.push(b'\n');
@@ -139,17 +161,17 @@ pub(crate) fn check(report_path: &Path) -> Result<(), TokenAccountingError> {
     Ok(())
 }
 
-trait OfflineTokenizer {
+pub(crate) trait OfflineTokenizer {
     fn identity(&self) -> TokenizerIdentity;
     fn count(&self, input: &str) -> Result<u64, TokenAccountingError>;
 }
 
-struct O200kTokenizer {
+pub(crate) struct O200kTokenizer {
     inner: CoreBPE,
 }
 
 impl O200kTokenizer {
-    fn new() -> Result<Self, TokenAccountingError> {
+    pub(crate) fn new() -> Result<Self, TokenAccountingError> {
         let inner =
             tiktoken_rs::o200k_base().map_err(TokenAccountingError::TokenizerInitialization)?;
         Ok(Self { inner })
@@ -182,14 +204,13 @@ fn build_report(
             profile: profile.name().to_owned(),
             tool_count: u64::try_from(profile.tools().len())
                 .map_err(|_| TokenAccountingError::IntegerOverflow("tool count"))?,
-            input: InputEvidence {
-                file: payload_file(profile),
-                sha256: sha256_hex(&encoded),
-                serialized_bytes: u64::try_from(encoded.len())
-                    .map_err(|_| TokenAccountingError::IntegerOverflow("serialized byte count"))?,
-            },
-            deterministic_estimated_tokens: estimate_tokens(encoded.len()),
-            actual_tokens: tokenizer.count(text)?,
+            measurement: measure_utf8_input(
+                TOOLS_LIST_INPUT_KIND,
+                Some(payload_file(profile)),
+                TOOLS_LIST_FRAMING,
+                text,
+                tokenizer,
+            )?,
         });
     }
     Ok(TokenAccountingReport {
@@ -240,12 +261,15 @@ fn validate_payloads(
             });
         }
         let expected_file = payload_file(profile);
-        if observed.input.file != expected_file || !safe_file_name(&observed.input.file) {
+        let Some(observed_file) = observed.measurement.input.file.as_deref() else {
+            return Err(TokenAccountingError::MissingInputFile);
+        };
+        if observed_file != expected_file || !safe_file_name(observed_file) {
             return Err(TokenAccountingError::UnsafePath(PathBuf::from(
-                &observed.input.file,
+                observed_file,
             )));
         }
-        let path = report_dir.join(&observed.input.file);
+        let path = report_dir.join(observed_file);
         let encoded = read_bounded(&path, MAX_PAYLOAD_BYTES)?;
         let expected = measure_payload(profile, &path, &encoded, tokenizer)?;
         if *observed != expected {
@@ -281,14 +305,37 @@ fn measure_payload(
         profile: profile.name().to_owned(),
         tool_count: u64::try_from(profile.tools().len())
             .map_err(|_| TokenAccountingError::IntegerOverflow("tool count"))?,
+        measurement: measure_utf8_input(
+            TOOLS_LIST_INPUT_KIND,
+            Some(payload_file(profile)),
+            TOOLS_LIST_FRAMING,
+            text,
+            tokenizer,
+        )?,
+    })
+}
+
+/// Measures one exact UTF-8 input under the pinned deterministic boundaries.
+pub(crate) fn measure_utf8_input(
+    input_kind: &str,
+    file: Option<String>,
+    framing: &str,
+    input: &str,
+    tokenizer: &impl OfflineTokenizer,
+) -> Result<TokenMeasurement, TokenAccountingError> {
+    let encoded = input.as_bytes();
+    Ok(TokenMeasurement {
         input: InputEvidence {
-            file: payload_file(profile),
+            input_kind: input_kind.to_owned(),
+            file,
             sha256: sha256_hex(encoded),
             serialized_bytes: u64::try_from(encoded.len())
                 .map_err(|_| TokenAccountingError::IntegerOverflow("serialized byte count"))?,
+            normalization: NORMALIZATION.to_owned(),
+            framing: framing.to_owned(),
         },
         deterministic_estimated_tokens: estimate_tokens(encoded.len()),
-        actual_tokens: tokenizer.count(text)?,
+        actual_tokens: tokenizer.count(input)?,
     })
 }
 
@@ -370,26 +417,35 @@ struct TokenAccountingReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TokenizerIdentity {
+pub(crate) struct TokenizerIdentity {
     provider: String,
     model: String,
     name: String,
     implementation: String,
     implementation_version: String,
     implementation_revision: String,
+    implementation_repository: String,
     implementation_package_sha256: String,
+    implementation_license_spdx: String,
+    implementation_license_url: String,
+    implementation_license_sha256: String,
     asset_sha256: String,
     asset_path: String,
     asset_format: String,
     asset_distribution: String,
-    license: String,
-    normalization: String,
-    framing: String,
+    asset_origin_url: String,
+    asset_source_repository: String,
+    asset_source_revision: String,
+    asset_source_reference: String,
+    asset_license_spdx: String,
+    asset_license_basis: String,
+    asset_license_url: String,
+    asset_license_sha256: String,
     offline: bool,
 }
 
 impl TokenizerIdentity {
-    fn expected() -> Self {
+    pub(crate) fn expected() -> Self {
         Self {
             provider: TOKENIZER_PROVIDER.to_owned(),
             model: TOKENIZER_MODEL.to_owned(),
@@ -397,14 +453,23 @@ impl TokenizerIdentity {
             implementation: TOKENIZER_IMPLEMENTATION.to_owned(),
             implementation_version: TOKENIZER_IMPLEMENTATION_VERSION.to_owned(),
             implementation_revision: TOKENIZER_IMPLEMENTATION_REVISION.to_owned(),
+            implementation_repository: TOKENIZER_IMPLEMENTATION_REPOSITORY.to_owned(),
             implementation_package_sha256: TOKENIZER_IMPLEMENTATION_PACKAGE_SHA256.to_owned(),
+            implementation_license_spdx: TOKENIZER_IMPLEMENTATION_LICENSE_SPDX.to_owned(),
+            implementation_license_url: TOKENIZER_IMPLEMENTATION_LICENSE_URL.to_owned(),
+            implementation_license_sha256: TOKENIZER_IMPLEMENTATION_LICENSE_SHA256.to_owned(),
             asset_sha256: TOKENIZER_ASSET_SHA256.to_owned(),
             asset_path: TOKENIZER_ASSET_PATH.to_owned(),
             asset_format: TOKENIZER_ASSET_FORMAT.to_owned(),
             asset_distribution: TOKENIZER_ASSET_DISTRIBUTION.to_owned(),
-            license: TOKENIZER_LICENSE.to_owned(),
-            normalization: NORMALIZATION.to_owned(),
-            framing: FRAMING.to_owned(),
+            asset_origin_url: TOKENIZER_ASSET_ORIGIN_URL.to_owned(),
+            asset_source_repository: TOKENIZER_ASSET_SOURCE_REPOSITORY.to_owned(),
+            asset_source_revision: TOKENIZER_ASSET_SOURCE_REVISION.to_owned(),
+            asset_source_reference: TOKENIZER_ASSET_SOURCE_REFERENCE.to_owned(),
+            asset_license_spdx: TOKENIZER_ASSET_LICENSE_SPDX.to_owned(),
+            asset_license_basis: TOKENIZER_ASSET_LICENSE_BASIS.to_owned(),
+            asset_license_url: TOKENIZER_ASSET_LICENSE_URL.to_owned(),
+            asset_license_sha256: TOKENIZER_ASSET_LICENSE_SHA256.to_owned(),
             offline: true,
         }
     }
@@ -415,17 +480,59 @@ impl TokenizerIdentity {
 struct ProfileAccounting {
     profile: String,
     tool_count: u64,
+    #[serde(flatten)]
+    measurement: TokenMeasurement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TokenMeasurement {
     input: InputEvidence,
     deterministic_estimated_tokens: u64,
     actual_tokens: u64,
 }
 
+#[cfg(test)]
+impl TokenMeasurement {
+    /// Returns the exact input-bound evidence.
+    pub(crate) const fn input(&self) -> &InputEvidence {
+        &self.input
+    }
+
+    /// Returns the provider-neutral deterministic estimate.
+    pub(crate) const fn deterministic_estimated_tokens(&self) -> u64 {
+        self.deterministic_estimated_tokens
+    }
+
+    /// Returns the count produced by the pinned tokenizer.
+    pub(crate) const fn actual_tokens(&self) -> u64 {
+        self.actual_tokens
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct InputEvidence {
-    file: String,
+pub(crate) struct InputEvidence {
+    input_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
     sha256: String,
     serialized_bytes: u64,
+    normalization: String,
+    framing: String,
+}
+
+#[cfg(test)]
+impl InputEvidence {
+    /// Returns the exact serialized UTF-8 byte length.
+    pub(crate) const fn serialized_bytes(&self) -> u64 {
+        self.serialized_bytes
+    }
+
+    /// Returns the SHA-256 digest of the exact tokenizer input.
+    pub(crate) fn sha256(&self) -> &str {
+        &self.sha256
+    }
 }
 
 /// Failure while producing or checking tokenizer accounting evidence.
@@ -440,6 +547,9 @@ pub(crate) enum TokenAccountingError {
     /// The checker was invoked without its report option.
     #[error("token-accounting-check requires --report")]
     MissingReport,
+    /// A report input that must be retained as an artifact has no local file.
+    #[error("token accounting input is missing its artifact file")]
+    MissingInputFile,
     /// An unknown or duplicate option was supplied.
     #[error("unexpected token accounting argument: {0}")]
     UnexpectedArgument(String),
@@ -545,6 +655,37 @@ mod tests {
     use super::*;
 
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+    const TOKENIZER_GOLDENS: &str =
+        include_str!("../../tests/fixtures/token-accounting/o200k-base-v1.json");
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct TokenizerGoldenFixture {
+        schema: String,
+        tokenizer: String,
+        asset_sha256: String,
+        cases: Vec<TokenizerGoldenCase>,
+        profiles: Vec<ProfileGolden>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct TokenizerGoldenCase {
+        name: String,
+        input: String,
+        utf8_bytes: u64,
+        sha256: String,
+        actual_tokens: u64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ProfileGolden {
+        profile: String,
+        serialized_bytes: u64,
+        sha256: String,
+        actual_tokens: u64,
+    }
 
     #[test]
     fn options_require_a_source_bound_output_directory() {
@@ -597,6 +738,99 @@ mod tests {
     }
 
     #[test]
+    fn pinned_tokenizer_matches_the_cross_platform_corpus() {
+        let fixture: TokenizerGoldenFixture =
+            serde_json::from_str(TOKENIZER_GOLDENS).expect("golden fixture parses");
+        assert_eq!(fixture.schema, "rootlight.tokenizer-goldens/1");
+        assert_eq!(fixture.tokenizer, TOKENIZER_NAME);
+        assert_eq!(fixture.asset_sha256, TOKENIZER_ASSET_SHA256);
+        assert_eq!(
+            fixture
+                .cases
+                .iter()
+                .map(|case| case.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "ascii",
+                "compact_json",
+                "unicode",
+                "whitespace_control",
+                "special_token_lookalikes",
+            ]
+        );
+
+        let tokenizer = O200kTokenizer::new().expect("pinned tokenizer initializes");
+        for case in fixture.cases {
+            let measurement = measure_utf8_input(
+                "tokenizer_golden",
+                None,
+                "raw_fixture_utf8",
+                &case.input,
+                &tokenizer,
+            )
+            .expect("golden input measures");
+            assert_eq!(
+                measurement.input().serialized_bytes(),
+                case.utf8_bytes,
+                "{} UTF-8 byte count drifted",
+                case.name
+            );
+            assert_eq!(
+                measurement.input().sha256(),
+                case.sha256,
+                "{} digest drifted",
+                case.name
+            );
+            assert_eq!(
+                measurement.actual_tokens(),
+                case.actual_tokens,
+                "{} actual-token count drifted",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn complete_profile_token_counts_match_retained_goldens() {
+        let fixture: TokenizerGoldenFixture =
+            serde_json::from_str(TOKENIZER_GOLDENS).expect("golden fixture parses");
+        assert_eq!(fixture.profiles.len(), ExposureProfile::ALL.len());
+        let tokenizer = O200kTokenizer::new().expect("pinned tokenizer initializes");
+
+        for (profile, golden) in ExposureProfile::ALL.into_iter().zip(fixture.profiles) {
+            assert_eq!(golden.profile, profile.name());
+            let encoded = serialize_payload(profile).expect("canonical payload serializes");
+            let text = std::str::from_utf8(&encoded).expect("canonical payload is UTF-8");
+            let measurement = measure_utf8_input(
+                TOOLS_LIST_INPUT_KIND,
+                None,
+                TOOLS_LIST_FRAMING,
+                text,
+                &tokenizer,
+            )
+            .expect("canonical profile measures");
+            assert_eq!(
+                measurement.input().serialized_bytes(),
+                golden.serialized_bytes,
+                "{} serialized byte count drifted",
+                profile.name()
+            );
+            assert_eq!(
+                measurement.input().sha256(),
+                golden.sha256,
+                "{} payload digest drifted",
+                profile.name()
+            );
+            assert_eq!(
+                measurement.actual_tokens(),
+                golden.actual_tokens,
+                "{} actual-token count drifted",
+                profile.name()
+            );
+        }
+    }
+
+    #[test]
     fn complete_profile_reports_are_monotonic_and_reproducible() {
         let tokenizer = O200kTokenizer::new().expect("pinned tokenizer initializes");
         let first = build_report(REVISION, &tokenizer).expect("first report builds");
@@ -613,17 +847,22 @@ mod tests {
         );
         for pair in first.payloads.windows(2) {
             assert!(pair[0].tool_count < pair[1].tool_count);
-            assert!(pair[0].input.serialized_bytes < pair[1].input.serialized_bytes);
             assert!(
-                pair[0].deterministic_estimated_tokens < pair[1].deterministic_estimated_tokens
+                pair[0].measurement.input().serialized_bytes()
+                    < pair[1].measurement.input().serialized_bytes()
             );
-            assert!(pair[0].actual_tokens < pair[1].actual_tokens);
+            assert!(
+                pair[0].measurement.deterministic_estimated_tokens()
+                    < pair[1].measurement.deterministic_estimated_tokens()
+            );
+            assert!(pair[0].measurement.actual_tokens() < pair[1].measurement.actual_tokens());
         }
         assert!(
             first
                 .payloads
                 .iter()
-                .any(|payload| payload.actual_tokens != payload.deterministic_estimated_tokens)
+                .any(|payload| payload.measurement.actual_tokens()
+                    != payload.measurement.deterministic_estimated_tokens())
         );
     }
 
@@ -649,7 +888,7 @@ mod tests {
         ));
 
         report.tokenizer = TokenizerIdentity::expected();
-        report.payloads[0].input.sha256 = "0".repeat(64);
+        report.payloads[0].measurement.input.sha256 = "0".repeat(64);
         write_report(&report_path, &report);
         assert!(matches!(
             check(&report_path),
@@ -686,7 +925,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory creates");
         let tokenizer = O200kTokenizer::new().expect("pinned tokenizer initializes");
         let mut report = build_report(REVISION, &tokenizer).expect("report builds");
-        report.payloads[0].input.file = "../outside.json".to_owned();
+        report.payloads[0].measurement.input.file = Some("../outside.json".to_owned());
         let report_path = directory.path().join(REPORT_FILE);
         write_report(&report_path, &report);
 

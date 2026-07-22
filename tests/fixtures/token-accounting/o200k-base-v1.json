@@ -1,0 +1,62 @@
+{
+  "schema": "rootlight.tokenizer-goldens/1",
+  "tokenizer": "o200k_base",
+  "asset_sha256": "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d",
+  "cases": [
+    {
+      "name": "ascii",
+      "input": "Rootlight bounded query",
+      "utf8_bytes": 23,
+      "sha256": "47151fa547a48276c7bd3573c8177490d20058fcbd04e68f1b3dc2c97a4954d4",
+      "actual_tokens": 4
+    },
+    {
+      "name": "compact_json",
+      "input": "{\"tool\":\"code.locate\",\"max_results\":20}",
+      "utf8_bytes": 39,
+      "sha256": "84d3a4905643bd165c5fa09bfad7f2cb54838d0c1c49402e2acea54688903d89",
+      "actual_tokens": 12
+    },
+    {
+      "name": "unicode",
+      "input": "Δ λ 東京 🚀 ✓",
+      "utf8_bytes": 21,
+      "sha256": "28d502b46f7a1c97735d4c41f8bbcbf503e7581e1e70275520d043b4430ea244",
+      "actual_tokens": 6
+    },
+    {
+      "name": "whitespace_control",
+      "input": "line1\n\tline2\r\n\u0000end",
+      "utf8_bytes": 18,
+      "sha256": "42a546353cbcc849e723eeb4b38287e86d87335ee0084f11762a00e866f0ad4e",
+      "actual_tokens": 8
+    },
+    {
+      "name": "special_token_lookalikes",
+      "input": "<|endoftext|><|im_start|>user\nhello<|im_end|>",
+      "utf8_bytes": 45,
+      "sha256": "19379df8129cc7f3a7acd885f3d9e27612e901bd4a91ab10a7fa07c3178e1a8e",
+      "actual_tokens": 21
+    }
+  ],
+  "profiles": [
+    {
+      "profile": "scout",
+      "serialized_bytes": 223183,
+      "sha256": "5c22b11746e2f13e08e9e7c0b2c51f8fdabc6d71315b5793f733898ff7aede84",
+      "actual_tokens": 48054
+    },
+    {
+      "profile": "analysis",
+      "serialized_bytes": 485915,
+      "sha256": "32c4290b70df6f6c3fd82c1c14cd653ec7feaf26a87618816ce8eca7dadc2416",
+      "actual_tokens": 104719
+    },
+    {
+      "profile": "developer",
+      "serialized_bytes": 655577,
+      "sha256": "87b29bb6db56d460f0de284347d03c619fcfc1729b30bb6eda594b62b04e9063",
+      "actual_tokens": 141539
+    }
+  ]
+}
